@@ -1440,3 +1440,125 @@ Deno.test("android manifest: the template asks for the cleartext decision", () =
     );
   }
 });
+
+// ── compile: *.server.ts is embedded, or dev works and the binary dies ──────
+//
+// A `*.server.ts` module is aio's documented escape hatch: a cell method reaches
+// it with `await import("./io.server.ts")`, which keeps it out of the browser
+// bundle by construction. The same dynamism keeps it out of `deno compile`'s
+// module graph — so the app WORKED in dev, where the dev server transpiles on
+// demand, and died in a compiled binary with "Module not found", pointing
+// nowhere near the cause. Two field reports (vidtune §3, llama.master §13), and
+// the rule was guarded by a comment telling people to hand-register each one.
+//
+// Dev == prod is load-bearing, so the convention IS the registration.
+
+Deno.test("assetIncludes: every *.server.ts is embedded without being declared", async () => {
+  const dir = await Deno.makeTempDir();
+  try {
+    await Deno.mkdir(join(dir, "src", "cell"), { recursive: true });
+    await Deno.mkdir(join(dir, "node_modules", "pkg"), { recursive: true });
+    await Deno.mkdir(join(dir, "dist"), { recursive: true });
+    await Deno.writeTextFile(
+      join(dir, "src", "io.server.ts"),
+      "export const a=1;",
+    );
+    await Deno.writeTextFile(
+      join(dir, "src", "cell", "db.server.tsx"),
+      "export const b=1;",
+    );
+    // Not server modules: the suffix is the contract, not the word "server".
+    await Deno.writeTextFile(
+      join(dir, "src", "server.ts"),
+      "export const c=1;",
+    );
+    await Deno.writeTextFile(join(dir, "src", "app.ts"), "export const d=1;");
+    // Dependencies and build output are somebody else's problem.
+    await Deno.writeTextFile(
+      join(dir, "node_modules", "pkg", "x.server.ts"),
+      "export const e=1;",
+    );
+    await Deno.writeTextFile(
+      join(dir, "dist", "y.server.ts"),
+      "export const f=1;",
+    );
+    await Deno.writeTextFile(
+      join(dir, "deno.json"),
+      JSON.stringify({ title: "x" }),
+    );
+
+    const inc = await assetIncludes(dir);
+    const files = inc.filter((a) => a !== "--include");
+    assert(
+      files.includes("src/io.server.ts"),
+      `a *.server.ts must ship without being declared — got ${
+        files.join(", ")
+      }`,
+    );
+    assert(files.includes("src/cell/db.server.tsx"), ".server.tsx too");
+    assert(
+      !files.includes("src/server.ts") && !files.includes("src/app.ts"),
+      "a plain module was embedded — the SUFFIX is the contract, and " +
+        "embedding ordinary source would bloat every binary",
+    );
+    assert(
+      !files.some((f) => f.includes("node_modules") || f.startsWith("dist/")),
+      "a dependency's or build output's server module was embedded",
+    );
+    // Shape stays `--include <rel>` pairs.
+    assertEquals(inc.filter((a) => a === "--include").length, files.length);
+  } finally {
+    await Deno.remove(dir, { recursive: true }).catch(() => {});
+  }
+});
+
+// ── the asset audit must not cry wolf on prose ─────────────────────────────
+//
+// The scan reduces every quoted `/…` in the bundle to "a URL the page might
+// fetch", and a bundle is full of strings that merely look like one. A field
+// report (newjob §6) had `placeholder="/home/you/documents/cv.pdf"` — help text
+// in a file picker — reported as an asset that would 404. A build warning that
+// cries wolf is one people learn to scroll past, and then the REAL finding (an
+// asset that works in dev and 404s in the artifact) goes unread too.
+
+Deno.test("assetUrlsIn: an OS path in prose is not an asset URL", async (t) => {
+  const { assetUrlsIn } = await import("../src/build/build-compile.ts");
+
+  await t.step("the reported false positive", () => {
+    const bundle = `h("input",{placeholder:"/home/you/documents/cv.pdf"})`;
+    assertEquals(
+      assetUrlsIn(bundle),
+      [],
+      "a filesystem example in placeholder text was reported as an asset",
+    );
+  });
+
+  await t.step("every OS root, on both platforms", () => {
+    for (
+      const p of [
+        "/home/me/a.png",
+        "/Users/me/b.svg",
+        "/root/c.jpg",
+        "/tmp/d.css",
+        "/var/log/e.txt",
+        "/etc/f.json",
+        "/opt/g.woff2",
+        "/usr/share/h.png",
+        "/Library/i.png",
+        "/Applications/j.png",
+        "/Volumes/disk/k.png",
+      ]
+    ) {
+      assertEquals(assetUrlsIn(`"${p}"`), [], `${p} was read as a URL`);
+    }
+  });
+
+  await t.step("a REAL asset URL is still found", () => {
+    // The whole point of the audit, and the thing a lazier filter would lose.
+    assertEquals(assetUrlsIn(`"/assets/logo.svg"`), ["/assets/logo.svg"]);
+    assertEquals(assetUrlsIn(`url("/img/bg.png")`), ["/img/bg.png"]);
+    // A path that merely CONTAINS a root word is still an app URL.
+    assertEquals(assetUrlsIn(`"/homepage/hero.png"`), ["/homepage/hero.png"]);
+    assertEquals(assetUrlsIn(`"/usr-guide/x.png"`), ["/usr-guide/x.png"]);
+  });
+});

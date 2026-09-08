@@ -108,7 +108,13 @@ Deno.test("denoJson: the scaffold emits the dieted task set EXACTLY", () => {
   assertStringIncludes(dj.tasks.build!, "build-all");
   assertStringIncludes(dj.tasks.compile!, "--targets=browser");
   assertEquals(dj.tasks.test, "deno test -A");
-  assertEquals(dj.tasks.check, "deno check src/");
+  // BOTH halves, the same reasoning as `lint` below. `deno check` type-checks
+  // and does not bundle, and in aio those have different answers — anything
+  // server-only imported into a cell type-checks cleanly and then fails to
+  // build (composer §1). A task called `check` that misses the failure mode the
+  // framework is known for is the defect, not the missing command.
+  assertStringIncludes(dj.tasks.check!, "deno check src/");
+  assertStringIncludes(dj.tasks.check!, "am.ts check");
   assertEquals(dj.tasks.fmt, "deno fmt");
   // BOTH linters. `aiol` knows the aio rules and NOTHING about the language, so
   // a `lint` task that ran it alone left every scaffolded app unchecked by

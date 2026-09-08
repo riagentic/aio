@@ -82,6 +82,7 @@ export {
   // already carries two notes about (useLocal, useAio).
   onGlobalKey,
   onMount,
+  onWindowEvent,
   // aio-renderer's setDevMode is the one `aio/air` exports — it turns on the
   // renderer's dev checks AND forwards to vdom's flag.
   setDevMode,

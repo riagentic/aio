@@ -22,6 +22,8 @@
 
 // ── Command imports ────────────────────────────────────────
 
+import { join } from "@std/path";
+import { homedir } from "./server/paths.ts";
 import {
   cmdInstances,
   cmdKill,
@@ -40,6 +42,7 @@ import {
   cmdDiscover,
   cmdErrors,
   cmdHealth,
+  cmdHeap,
   cmdLog,
   cmdMetrics,
   cmdOpen,
@@ -94,6 +97,8 @@ import {
   targetHome,
 } from "./am/am-utils.ts";
 import { cmdWhere } from "./am/am-cmd-where.ts";
+import { cmdFeedback } from "./am/am-cmd-feedback.ts";
+import { cmdCheck } from "./am/am-cmd-check.ts";
 import { PATH_PIN_PREFIX } from "./am/am-versions.ts";
 import { removedAmVerb, retiredSpellingLine } from "./state/removals.ts";
 import { readDenoJsonSync, readLocalPinSync } from "./server/deno-json.ts";
@@ -136,6 +141,8 @@ const COMMANDS: Record<string, CmdHandler> = {
   surface: cmdSurface,
   trigger: cmdTrigger,
   where: cmdWhere, // which execution context a file runs in, from the graph
+  feedback: cmdFeedback, // where findings about aio go — outside the version store
+  check: cmdCheck, // does the client graph BUILD? (deno check cannot answer this)
   shot: cmdShot,
   eval: cmdEval,
   sql: cmdSql,
@@ -144,6 +151,7 @@ const COMMANDS: Record<string, CmdHandler> = {
   logs: cmdLog,
   errors: cmdErrors,
   metrics: cmdMetrics,
+  heap: cmdHeap, // what the process HOLDS (am state says what it serves)
   cost: cmdCost, // what aio moves on your behalf, and where it comes from
   top: cmdTop,
   health: cmdHealth,
@@ -292,6 +300,41 @@ async function main(): Promise<void> {
   if (flags.error) {
     outError(flags.error, detectMode(flags));
     Deno.exit(1);
+  }
+  // `--instance=<name>` — a PRIVATE copy of the app, beside anyone else's.
+  //
+  // The singleton lock is on the appId and the appId picks the data home, so an
+  // agent could not run its own copy next to a human's: every `am dispatch`
+  // landed in the human's session and their clicks landed in the agent's
+  // measurements (anathomy §4). `--takeover` steals the lock; it never gave an
+  // isolated one.
+  //
+  // Not a new isolation mechanism — a NAME for the one aio already has.
+  // `single-instance-lock.ts` says it outright: "AIO_APPS_DIR relocates the
+  // apps' DATA root — the lock/socket dir scopes with it, so ONE env var
+  // isolates an instance completely." Setting it HERE, before any command
+  // resolves a lock, means the `am` process and the child it starts (which
+  // inherits the environment) land in the same private world without either
+  // one having to know about the flag.
+  //
+  // An explicit AIO_APPS_DIR wins: it is the more specific instruction, and
+  // silently relocating someone who set it by hand is the surprise this flag
+  // exists to prevent for everyone else.
+  if (flags.instance !== undefined) {
+    if (!flags.instance || /[\\/]/.test(flags.instance)) {
+      outError(
+        `--instance needs a simple name: --instance=agent1 ` +
+          `(got ${JSON.stringify(flags.instance)})`,
+        detectMode(flags),
+      );
+      Deno.exit(1);
+    }
+    if (!Deno.env.get("AIO_APPS_DIR")) {
+      Deno.env.set(
+        "AIO_APPS_DIR",
+        join(homedir(), ".aio-instances", flags.instance),
+      );
+    }
   }
   // `--home=<dir>` targets the instance running from that data home. Bound
   // here, once, before any command resolves a lock — see `targetHome`.

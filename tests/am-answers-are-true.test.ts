@@ -10,6 +10,7 @@ import {
 } from "../src/server/single-instance-lock.ts";
 import { parseGlobalFlags } from "../src/am/am-utils.ts";
 import { PASSTHROUGH, VERB_FLAGS } from "../src/am/am-flags.ts";
+import { logFlagError } from "../src/am/am-cmd-inspect.ts";
 import { envelopePayload } from "../src/am/am-cmd-state.ts";
 
 // ── A crash mid-write must not brick the app ──────────────────────────
@@ -108,11 +109,21 @@ Deno.test("VERB_FLAGS lists nothing a verb refuses, and nothing twice", () => {
       `${verb} lists a flag twice`,
     );
   }
-  // `logs` carried `--level` while `logFlagError` refused every stray `-…`:
-  // the central gate permitted a flag the verb does not take. A level is a
-  // filter word (`am logs error`), not a flag.
-  assert(
-    !(VERB_FLAGS.logs ?? []).includes("--level"),
-    "logs lists --level, which the command refuses",
-  );
+  // `logs` once carried `--level` while `logFlagError` refused every stray
+  // `-…`: the central gate permitted a flag the verb did not take, so
+  // `am logs --zzz` offered a flag that fails when used.
+  //
+  // Asked of the COMMAND, not of a remembered flag name. The original spelling
+  // asserted `!includes("--level")`, which encoded one side of a disagreement
+  // rather than the rule — and went stale the moment `--level` became real
+  // (beta1). This form cannot: whatever the table lists, the verb's own parser
+  // has to accept.
+  for (const flag of VERB_FLAGS.logs ?? []) {
+    const probe = flag.includes("=") ? flag : `${flag}=x`;
+    assertEquals(
+      logFlagError([probe]),
+      null,
+      `logs lists ${flag}, which the command refuses`,
+    );
+  }
 });

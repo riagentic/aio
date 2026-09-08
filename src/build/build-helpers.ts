@@ -83,7 +83,12 @@ export async function copyDir(src: string, dst: string): Promise<void> {
       // fails on the FOURTH platform and nowhere else reads as a macOS
       // problem. A stale link from a previous pass must not survive into this
       // one whatever the order.
-      await Deno.remove(dstPath).catch(() => {});
+      await Deno.remove(dstPath).catch(() => {
+        // aio-ok: "there was nothing to remove" is the COMMON case — the first
+        // platform pass of a build copies into an empty AppDir. The only
+        // failure that matters here is one that makes the symlink below fail,
+        // and that one is not swallowed: it throws with the path.
+      });
       await Deno.symlink(target, dstPath);
     } else {
       await Deno.copyFile(srcPath, dstPath);

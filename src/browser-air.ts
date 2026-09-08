@@ -78,6 +78,7 @@ export {
   onCleanup,
   onGlobalKey,
   onMount,
+  onWindowEvent,
   setDevMode,
   useContext,
   useContextSelector,

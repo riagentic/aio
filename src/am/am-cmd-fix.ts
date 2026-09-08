@@ -1153,28 +1153,27 @@ export async function cmdFix(
       refusal = e instanceof Error ? e.message : String(e);
     }
     if (refusal) add("app version", "manual", refusal);
-    else {
-      await repair(
+    // ADVISE, never rewrite. Both spellings are supported and documented: a
+    // three-part version is a PIN (used verbatim, every build says so), a
+    // two-part one lets aio number builds from commits. Choosing between two
+    // working conventions is the app author's call, and `am fix` used to make
+    // it for them — silently editing the app's own manifest, whose value the
+    // author's release tags and CHANGELOG already agree with. One field report
+    // reverted it by hand. `am fix` may repair what is BROKEN; a deliberate,
+    // functioning choice is not broken, and an edit the user has to undo costs
+    // more trust than the convention gains.
+    else if (pinnedBase !== null) {
+      add(
         "app version",
-        pinnedBase !== null,
-        async () => {
-          const line = /^(\s*"version"\s*:\s*)"[^"]*"/m;
-          if (!line.test(raw)) {
-            throw new Error(`no "version" line in deno.json`);
-          }
-          await Deno.writeTextFile(
-            join(dir, "deno.json"),
-            raw.replace(line, `$1${JSON.stringify(pinnedBase)}`),
-          );
-        },
-        pinnedBase !== null
-          ? `version ${
-            String(declared)
-          } is pinned by deno.json — the build number is not derived; ` +
-            `writing "${pinnedBase}" lets aio number builds from commits`
-          : "",
+        "advise",
+        `version ${String(declared)} is a PIN — used verbatim, and every ` +
+          `build reports it. That is a supported choice and nothing is ` +
+          `wrong with it. If you would rather aio number builds from ` +
+          `commits (${pinnedBase}.<commit count>), change it yourself: ` +
+          `"version": "${pinnedBase}" in deno.json ` +
+          `(docs/build/versioning.md)`,
       );
-    }
+    } else add("app version", "ok");
   }
 
   // Advisory: Deno version floor.

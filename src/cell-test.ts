@@ -110,6 +110,11 @@ export type { Patch } from "./testing/multi-client-test.ts";
 export type { HarnessBootOptions } from "./testing/boot-refusals.ts";
 /** `testUI`'s FIRST parameter — the component under test — and the
  *  element-vs-component discriminator its queries take. */
+// The addressable-name list, without provoking a miss (anathomy §5a). A free
+// function, not a `ui.names()` member: `TestUI` is frozen, so a member could
+// only ever be added as OPTIONAL and every caller would write `ui.names?.()`.
+// One spelling, no `?.`.
+export { uiNames } from "./testing/ui-test.ts";
 export type { TestableComponent, UIKind } from "./testing/ui-test.ts";
 /** The semantic UI surface: what `am surface` returns and what the harness
  *  walks — one node per component, with its elements' live text/value/checked.

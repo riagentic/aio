@@ -1375,6 +1375,18 @@ await aio.run({ perfBudget: { methods: { "models:scan": { timeout: 0 } } } });
     expect: "REPLAYS on the client",
   },
   {
+    // An interactive element with no accessible name has no semantic path, so
+    // it is absent from `am surface`, unreachable by `am trigger` and has no
+    // handle in testUI (cc §9.4). The rule is narrow on purpose — one line, an
+    // empty body, no naming attribute — and this is that shape.
+    name: "a <button> with no accessible name",
+    files: app({
+      "src/App.tsx":
+        `export default function App() {\n  return <button type="button"></button>;\n}\n`,
+    }),
+    expect: "accessible name",
+  },
+  {
     name: "own.set keyed by a constant while the resource varies by id",
     files: app({
       "src/cell.ts": `import { cell, own } from "aio";\n` +

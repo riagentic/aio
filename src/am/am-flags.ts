@@ -107,7 +107,7 @@ export const VERB_FLAGS: Readonly<Record<string, readonly string[]>> = {
   // Inspect
   clients: [],
   client: [],
-  surface: ["--full", "--component", "--path", "--depth"],
+  surface: ["--full", "--component", "--path", "--depth", "--names"],
   trigger: [],
   where: [],
   // `--pose` is NOT here: cmdShot refuses it by name with a better message,
@@ -117,13 +117,14 @@ export const VERB_FLAGS: Readonly<Record<string, readonly string[]>> = {
   sql: [],
   tables: [],
   schedules: [],
-  // `--level` was listed here and REFUSED by the command (`logFlagError`
-  // rejects every stray `-…`): the central gate permitted a flag the verb
-  // does not take, and the two tests around this table pin "every gated verb
-  // refuses --zzz" and "every verb appears in the table" — neither half can
-  // see an entry the command rejects. A level is a filter word: `am logs
-  // error`.
-  logs: [],
+  // `--level` was listed here and REFUSED by the command for a while: the
+  // central gate permitted a flag the verb did not take, and the two tests
+  // around this table pin "every gated verb refuses --zzz" and "every verb
+  // appears in the table" — neither half can see an entry the command
+  // rejects. That is resolved in the other direction as of beta1: the three
+  // structured filters are REAL now (`logFlagError` accepts them), so the
+  // table lists them and the two sides agree again.
+  logs: ["--level", "--tag", "--since"],
   errors: [],
   metrics: [],
   cost: ["--keys", "--cell", "--window"],
@@ -134,6 +135,12 @@ export const VERB_FLAGS: Readonly<Record<string, readonly string[]>> = {
   profile: ["--out"],
   pair: [],
   config: [],
+  // What the process HOLDS, as opposed to what it serves.
+  heap: [],
+  // Does the client graph BUILD? `deno check` cannot answer this.
+  check: [],
+  // Where findings about aio go — outside the version store.
+  feedback: ["--create"],
   // Meta
   add: [],
   pin: ["--latest", "--major", "--aio"],

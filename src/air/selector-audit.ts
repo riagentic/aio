@@ -58,7 +58,10 @@ export function idsInStyleSheets(doc: Document): Set<string> {
     try {
       visit((sheet as CSSStyleSheet).cssRules);
     } catch {
-      // Cross-origin: unreadable by design. Not a finding.
+      // aio-ok: a cross-origin stylesheet (a CDN font, an embedded widget)
+      // throws on `cssRules` BY DESIGN — the browser is refusing, not failing.
+      // An unreadable sheet is not evidence of anything, and reporting it, or
+      // guessing at its contents, is how a diagnostic starts lying.
     }
   }
   return out;

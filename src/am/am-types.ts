@@ -28,6 +28,19 @@ export type GlobalFlags = {
   jsonArgs?: string;
   filter?: string;
   lines?: number;
+  /** `--instance=<name>` — run and address a PRIVATE copy of the app.
+   *
+   *  The singleton lock is on the appId and the appId picks the data home, so
+   *  an agent could not run its own copy beside a human's: every dispatch
+   *  landed in the human's session and their clicks landed in the agent's
+   *  measurements (anathomy §4). `--takeover` steals the lock; it never gave
+   *  an isolated one.
+   *
+   *  Not a new isolation mechanism — a NAME for the one aio already has.
+   *  `AIO_APPS_DIR` relocates the data root and the lock/socket dir scopes
+   *  with it, so this resolves to `AIO_APPS_DIR=<root>/instances/<name>` for
+   *  the `am` process AND the child it starts. */
+  instance?: string;
   wait?: number;
   /** `--no-wait` — return as soon as the child is spawned, without waiting for
    *  it to be reachable. `am start` WAITS by default (see cmdStart). */

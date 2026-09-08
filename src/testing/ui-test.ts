@@ -2092,6 +2092,21 @@ async function _buildTestUI(
       assertBooted(cell, "fullState");
       return standaloneApp?.getState()?.[cell?.__aio?.id as string];
     },
+    names: (): string[] => {
+      const acc: string[] = [];
+      const walk = (n: UISurfaceNode) => {
+        n.elements.forEach((e) => acc.push(e.path));
+        n.children.forEach(walk);
+      };
+      try {
+        walk(currentSurface());
+      } catch {
+        // aio-ok: `currentSurface()` throws before the first mount, and "no
+        // names yet" is the honest answer to asking early — not an error worth
+        // failing a test over, and the empty array says it.
+      }
+      return acc;
+    },
     // Public settle is an observation point: drains the action queue first
     // (surfacing failures from un-awaited actions), then waits quiescence.
     settle: async () => {
@@ -2309,4 +2324,35 @@ async function _buildTestUI(
       return lazyHybrid(name);
     },
   }) as TestUI;
+}
+
+/** Every addressable name on a mounted surface, in tree order.
+ *
+ * The list existed all along and was reachable only by PROVOKING A FAILURE: a
+ * miss prints `available: …`, so "what can I address?" was answered by asking
+ * for something that is not there (anathomy §5a). A fine recovery path and a
+ * poor discovery one — and it is exactly the list you want BEFORE writing the
+ * first line, not after the first mistake. `am surface --names` is the same
+ * answer for a running app.
+ *
+ * ```ts
+ * await using ui = await testUI(App);
+ * await ui.settle();
+ * console.log(uiNames(ui)); // ["Panel:SearchInput", "Panel:SaveButton", …]
+ * ```
+ *
+ * Full `Component…:Element` paths — the form `am trigger` takes, and the only
+ * form that can say WHICH instance. A surface with nothing addressable answers
+ * `[]`; asking before the first mount answers `[]` too, because "no names yet"
+ * is the honest reply to asking early, and making discovery itself throw would
+ * be the shape this removes.
+ *
+ * A free function rather than a `ui.names()` member, and deliberately only
+ * one spelling: a caller writes `uiNames(ui)` with no `?.`, where an optional
+ * member would read `ui.names?.()` forever (the published `TestUI` is frozen,
+ * so a member could only ever be added as optional). One name for one thing.
+ */
+export function uiNames(ui: TestUI): string[] {
+  const f = (ui as unknown as { names?: () => string[] }).names;
+  return typeof f === "function" ? f.call(ui) : [];
 }

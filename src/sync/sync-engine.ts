@@ -1,6 +1,7 @@
 // src/sync/sync-engine.ts — Client-side CRDT sync orchestrator
 import { vetWirePayload } from "../state/action-encode.ts";
 import { enc } from "../protocol/envelope.ts";
+import { peerHello } from "../protocol/protocol-version.ts";
 import { randomUuid } from "../rand.ts";
 import type { HLC, SyncConfig, SyncOp, SyncStatus } from "./types.ts";
 import { STALE_OP_REASON, SYNC_DEFAULTS } from "./types.ts";
@@ -115,6 +116,110 @@ export function createSyncEngine(deps: SyncEngineDeps): SyncEngine {
   const isOwnSessionOp = (opId: string): boolean => opId.startsWith(_ownPrefix);
   const clock: HLClock = createHLC(deps.clientId);
   let online = true;
+
+  // ── outbound op pacing ─────────────────────────────────────────────────
+  //
+  // One op used to be one frame, sent the instant it was issued. That is right
+  // for a click and wrong for a THOUSAND: a demo seed, or a first sync of an
+  // existing dataset, fired a frame each into a server whose per-connection
+  // budget is 100/sec. The server dropped the excess, counted 50 drops in a
+  // row, closed the socket and denylisted the client for a minute — an
+  // anti-abuse fuse, built for hostile peers, tripped by aio's own sync
+  // engine doing exactly what it was told. The renderer then sat on pre-burst
+  // state while the server moved on, and the next dispatch went nowhere.
+  //
+  // Pacing costs nothing here because the op is ALREADY durable: it is in
+  // `deps.buffer` before it is ever sent, and reconnect re-sends from there.
+  // So the queue below holds frames, never the only copy of a write.
+  //
+  // A single op stays instant — the fast path sends inline, so nothing about
+  // ordinary use gets slower. Only a burst queues, and it drains at a rate the
+  // server told us it can take.
+  /** Fraction of the server's advertised budget to actually use. Sending AT
+   *  the ceiling races the server's own window boundary; the headroom is what
+   *  makes "paced" mean "never refused" rather than "usually". */
+  const PACE_SAFETY = 0.6;
+  /** Used when the peer advertises nothing — an older server, or a transport
+   *  with no hello. Matches the server's own default so an unaware peer is
+   *  paced as if it were a default one, never faster. */
+  const PACE_FALLBACK_PER_SEC = 100;
+  /** Drain granularity. Smaller means smoother pacing and more timer wakeups;
+   *  100ms keeps a 1000-op seed draining steadily without a wakeup per op. */
+  const PACE_TICK_MS = 100;
+
+  const _paceQueue: string[] = [];
+  let _paceTimer: ReturnType<typeof setTimeout> | undefined;
+  let _paceWindowStart = 0;
+  let _paceSentInWindow = 0;
+
+  /** Frames/sec this client allows itself: what the server advertised in its
+   *  hello (`rate`), less headroom. */
+  const paceBudget = (): number => {
+    const advertised = peerHello()?.rate;
+    const base = typeof advertised === "number" && advertised >= 1
+      ? advertised
+      : PACE_FALLBACK_PER_SEC;
+    return Math.max(1, Math.floor(base * PACE_SAFETY));
+  };
+
+  /** Room left in the current one-second window, rolling it over when due. */
+  const paceRoom = (): number => {
+    const now = Date.now();
+    if (now - _paceWindowStart >= 1000) {
+      _paceWindowStart = now;
+      _paceSentInWindow = 0;
+    }
+    return paceBudget() - _paceSentInWindow;
+  };
+
+  /** Timer is armed ONLY while frames are waiting and cleared the moment the
+   *  queue empties — a sync engine must not hold a handle open across a test's
+   *  teardown, which is what the op/resource sanitizers exist to catch. */
+  const armPaceTimer = (): void => {
+    if (_paceTimer !== undefined || _paceQueue.length === 0) return;
+    _paceTimer = setTimeout(() => {
+      _paceTimer = undefined;
+      drainPaced();
+    }, PACE_TICK_MS);
+  };
+
+  const drainPaced = (): void => {
+    if (!online) {
+      // Reconnect re-sends from the durable buffer; a queued frame here would
+      // be a duplicate of that, so the queue is dropped rather than held.
+      _paceQueue.length = 0;
+      return;
+    }
+    let room = paceRoom();
+    while (room > 0 && _paceQueue.length > 0) {
+      deps.send(_paceQueue.shift()!);
+      _paceSentInWindow++;
+      room--;
+    }
+    armPaceTimer();
+  };
+
+  /** Send an op frame, immediately when there is room and in order when there
+   *  is not. Ordering is preserved: once anything is queued, everything queues
+   *  behind it. */
+  const sendOpPaced = (msg: string): void => {
+    if (_paceQueue.length === 0 && paceRoom() > 0) {
+      _paceSentInWindow++;
+      deps.send(msg);
+      return;
+    }
+    _paceQueue.push(msg);
+    armPaceTimer();
+  };
+
+  /** Drop queued frames and disarm. Called when the connection goes away. */
+  const resetPacing = (): void => {
+    _paceQueue.length = 0;
+    if (_paceTimer !== undefined) {
+      clearTimeout(_paceTimer);
+      _paceTimer = undefined;
+    }
+  };
   const statuses = new Map<string, SyncStatus>();
 
   // Per-cell async mutex — serializes all state mutations (local, ack, remote, sync)
@@ -691,7 +796,7 @@ export function createSyncEngine(deps: SyncEngineDeps): SyncEngine {
         await rebaseCell(cell);
 
         if (online) {
-          deps.send(enc("op", { id, hlc, cell, action, payload }));
+          sendOpPaced(enc("op", { id, hlc, cell, action, payload }));
         }
       });
     },
@@ -1114,6 +1219,9 @@ export function createSyncEngine(deps: SyncEngineDeps): SyncEngine {
     setOnline(v) {
       const wasOffline = !online;
       online = v;
+      // Frames queued for a socket that is gone are duplicates of what the
+      // durable buffer will re-send; drop them with the connection.
+      if (!v) resetPacing();
       // The connection died with a catch-up outstanding: whatever it was
       // holding is safe to drop (a held ack left its op unconfirmed → re-sent;
       // a held broadcast sits above a cursor only a response advances →

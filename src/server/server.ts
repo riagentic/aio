@@ -769,7 +769,13 @@ export function createServer(config: ServerConfig): ServerHandle {
     // project's own leak round existed to remove. `_runAppCssStep` returns
     // immediately for an app that declares no step, so the common case costs
     // nothing at all.
-    _cssBootRun = _runAppCssStep(absBaseDir).then(() => {}, () => {});
+    _cssBootRun = _runAppCssStep(absBaseDir).then(() => {}, () => {
+      // aio-ok: `_runAppCssStep` runs with `throwOnFail: false` and has
+      // ALREADY logged the failure with its command and the tool's own output
+      // (server-css-step.ts). Rejecting here would only turn a reported,
+      // recoverable dev-loop failure into an unhandled rejection — the dev
+      // server stays up on purpose so the next save can fix it.
+    });
   }
 
   // ── Build TrojanDeps lazily (uses wsMgr) ──

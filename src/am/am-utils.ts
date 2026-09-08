@@ -613,6 +613,7 @@ export function parseGlobalFlags(
     "--client-index",
     "--home",
     "--timeout",
+    "--instance",
   ]);
   const expanded: string[] = [];
   for (let i = 0; i < raw.length; i++) {
@@ -681,6 +682,7 @@ export function parseGlobalFlags(
     else if (a.startsWith("--transport=")) flags.transport = a.slice(12);
     else if (a.startsWith("--app=")) flags.app = a.slice(6);
     else if (a.startsWith("--home=")) flags.home = a.slice(7);
+    else if (a.startsWith("--instance=")) flags.instance = a.slice(11);
     else if (a.startsWith("--timeout=")) {
       flags.timeout = num(a.slice(10), "--timeout", { min: 1, integer: true });
     } else if (a.startsWith("--client-index=")) {

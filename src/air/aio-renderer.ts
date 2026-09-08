@@ -68,6 +68,7 @@ export {
   onCleanup,
   onGlobalKey,
   onMount,
+  onWindowEvent,
   useId,
   useOptimistic,
   useRef,

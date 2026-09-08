@@ -57,9 +57,30 @@ const CEILING_GZ = {
    *    · the sync engine drops an op the server refuses as older than the
    *      tombstone window instead of re-sending it forever.
    *  Still nothing on the page that a user did not ask for. */
-  air: 64,
+  // Raised 64 → 68 for v1.0.0-beta1, and itemised because the policy above
+  // asks for an argument rather than a number. Measured 67; +4 KB gz over
+  // alpha77's 63, all of it CLIENT-side diagnostics that answer top-of-report
+  // findings:
+  //   · the contrast audit (~1 KB) — aio checks the accessibility of STRUCTURE
+  //     and shipped a generated colour system it never measured; a defect
+  //     reached a real user through five green gates;
+  //   · the #id-selector audit and the untracked-lifecycle-read warning
+  //     (~1 KB together) — the `#root` contract cost one app hours of believing
+  //     correct geometry code was wrong, and a read inside `afterRender`
+  //     subscribing to nothing shipped three times in one codebase;
+  //   · ~2 KB of message PROSE — the child-desync warning now names the class,
+  //     the component and the two app shapes that cause it instead of "<span>
+  //     holds the wrong node at child 0"; the console interceptor carries the
+  //     caller's location; the short-call reply explains itself.
+  //
+  // The honest cost: production never runs any of it and still downloads it.
+  // Not paid down here because dropping it needs a dev-only chunk, and a
+  // chunk-aware reader in three places is the trade `feedback/refused.md`
+  // already declined once — recorded in todo.md instead of decided in a hurry
+  // at release time.
+  air: 68,
   /** The same, plus one cell — measured 2 KB, which is what a cell costs. */
-  app: 66,
+  app: 70,
 };
 
 const RUN = Deno.env.get("AIO_BUNDLE_SIZE") === "1";

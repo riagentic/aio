@@ -84,6 +84,27 @@ is aio's whole job.
   whose accent is derived from the app's own name.
 </i></p>
 
+## 🧪 And its test, in full
+
+Components are semantic APIs, so a test needs no selectors, no DOM scraping and
+no setup — `<button>Add</button>` is `ui.AddButton`.
+
+```ts
+import { testUI } from "aio/testing";
+import { todo } from "./todo.ts";
+import App from "./App.tsx";
+
+testUI(App, "add a todo", async (ui) => {
+  ui.TitleInput.type("buy milk"); //  actions queue in order — no await
+  ui.AddButton.click();
+  await ui.expectCell(todo, (t) => t.items.length === 1); // observing awaits
+});
+```
+
+`testUI` builds the DOM, boots every cell your `App` imports, and tears the lot
+down. The same app is drivable while it runs: `am surface` prints what is on
+screen, `am trigger` acts on it.
+
 ## 📦 What you get
 
 |                |                                                                        |
@@ -95,8 +116,8 @@ is aio's whole job.
 | 🚚 **Ship**    | browser · Electron · Android · CLI · systemd service · signed updates  |
 | 🛠️ **Operate** | `am` — status, health, logs, state, dispatch, pins, installs           |
 
-A whole client — renderer, protocol, offline queue, CRDT merge — is **63 KB
-gzipped**, 55 KB brotli. `deno task bench:bundle` prints it, and
+A whole client — renderer, protocol, offline queue, CRDT merge — is **67 KB
+gzipped**, 59 KB brotli. `deno task bench:bundle` prints it, and
 `tests/bundle-size.test.ts` keeps this sentence true — both numbers.
 
 ## 🏃 Run any aio app, from its repo
@@ -113,8 +134,10 @@ Installs what is missing, builds, starts it. Nothing to read first.
 
 ## 🎯 Honestly
 
-- 🚧 **Alpha.** The surface still moves. Every release names its breaks, and
-  every app pins the version it was written against (`am pin`).
+- 🧊 **Beta — the surface is frozen.** An app that compiles and runs against
+  `v1.0.0-alpha76` compiles and runs against every later release, up to and
+  including `1.0.0`. Additions only, enforced by `deno task check:api`, not by
+  good intentions.
 - ✅ **Built for** apps where state is the product — dashboards, ops and trading
   tools, control panels, internal tools, local-first desktop and mobile.
 - ❌ **Not for** content sites, SEO, or planet-scale public APIs. It is one

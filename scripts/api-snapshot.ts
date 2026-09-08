@@ -112,7 +112,17 @@ function _withoutBody(def: unknown): unknown {
   return rest;
 }
 
+/** ANSI SGR escapes, which `deno doc --json` embeds in `repr` strings when it
+ *  believes it is writing to a terminal. Stripped from every string that
+ *  reaches a digest: `NO_COLOR` on the spawn above is the fix, and this is the
+ *  belt beside it — the failure it prevents (a snapshot that only matches in
+ *  the terminal it was generated in) is silent, cross-context, and was read as
+ *  a compat break. */
+// deno-lint-ignore no-control-regex -- ESC and the CSI range are the point
+const ANSI_RE = /\u001b\[[0-9;]*m/g;
+
 function normalize(value: unknown): unknown {
+  if (typeof value === "string") return value.replace(ANSI_RE, "");
   if (Array.isArray(value)) return value.map(normalize);
   if (value && typeof value === "object") {
     const out: Record<string, unknown> = {};
@@ -261,16 +271,45 @@ async function unionParts(t: DocDeclaration | undefined): Promise<string[]> {
 /** The object-ish members of a `tsType`, following intersections (an
  *  `A & B` config type is its parts' keys) but NOT unions — one branch of a
  *  union does not promise the other's keys, so a union stays whole-digest. */
+/** Test seam: `objectMembers` is the half that reads `deno doc`'s shape, and
+ *  the shape is the thing that was wrong twice. Exported so a test can pin it
+ *  against the real emitted JSON instead of against a whole snapshot diff. */
+export const _objectMembersForTest = (t: unknown): DocDeclaration[] =>
+  objectMembers(t as DocDeclaration | undefined);
+
 function objectMembers(tsType: DocDeclaration | undefined): DocDeclaration[] {
   if (!tsType) return [];
   if (tsType.kind === "typeLiteral") {
-    return (tsType.value?.properties as DocDeclaration[] | undefined) ?? [];
+    // PROPERTIES AND METHODS. `deno doc` puts `settle(): Promise<void>` under
+    // `methods` and `html: () => string` under `properties`, and reading only
+    // the first list meant a type alias written in method syntax produced an
+    // EMPTY member map — which `extractMembers` turns into "no members I can
+    // name", which falls back to the blunt whole-symbol verdict. So every
+    // change to such a type read as BREAKING, including adding an optional
+    // member, the one change that provably breaks nobody. `TestUI` is written
+    // that way, and so is most of the surface's object-shaped API.
+    const v = tsType.value ?? {};
+    return [
+      ...((v.properties as DocDeclaration[] | undefined) ?? []),
+      ...((v.methods as DocDeclaration[] | undefined) ?? []),
+    ];
   }
-  if (tsType.kind === "intersection") {
-    const parts = (tsType.intersection ?? tsType.types) as
-      | DocDeclaration[]
-      | undefined;
-    if (!parts) return [];
+  if (tsType.kind === "intersection" || tsType.kind === "union") {
+    // `deno doc` is uniform: every tsType is `{ kind, value }`, and for an
+    // intersection `value` IS the array of parts. The old spellings were
+    // guesses at a shape nobody had dumped — `intersection` and `types` are
+    // never present, so an intersection type read as having NO members. That
+    // is not a cosmetic miss: with no member map, `diffMembers` correctly
+    // refuses to guess and the blunt whole-symbol verdict applies, so adding
+    // an OPTIONAL member — the one change that provably breaks nobody, and
+    // which this file already has a rule for — was reported as BREAKING.
+    // `TestUI` is such a type, and so is most object-shaped public API.
+    const parts = (Array.isArray(tsType.value)
+      ? tsType.value
+      : (tsType.intersection ?? tsType.types)) as DocDeclaration[] | undefined;
+    if (!parts) {
+      return [];
+    }
     return parts.flatMap(objectMembers);
   }
   return [];
@@ -367,12 +406,23 @@ async function extractMembers(
 
 // ── Surface extraction ───────────────────────────────────────────────
 
-async function docEntry(
-  path: string,
-): Promise<{ moduleDoc?: DocDeclaration; symbols: DocSymbol[] }> {
+/** One `deno doc --json` run, as raw text. */
+async function docOnce(path: string): Promise<string> {
   const cmd = new Deno.Command(Deno.execPath(), {
     args: ["doc", "--json", path],
     cwd: ROOT.pathname,
+    // NO_COLOR, because `deno doc --json` puts ANSI ESCAPES INSIDE the JSON.
+    // A type whose `repr` interpolates comes back as
+    //   "${\u001b[38;5;12mPrefix\u001b[0m}:${\u001b[0m…K…}"
+    // and as "${Prefix}:${K}" under NO_COLOR. Measured, not assumed: it
+    // colours UNCONDITIONALLY — piped stdout, cleared environment, no TTY
+    // anywhere — and NO_COLOR is the only switch that stops it. The digest is
+    // taken over that string, so the SAME unchanged tree hashed two ways:
+    // green in a shell, red under `check:release` and red in CI, reported as
+    // BREAKING against four type aliases nobody had touched.
+    // Merged with the inherited environment (Deno.Command does not clear it
+    // unless asked), so this needs no --allow-env of its own.
+    env: { NO_COLOR: "1" },
     stdout: "piped",
     stderr: "piped",
   });
@@ -382,6 +432,49 @@ async function docEntry(
       `deno doc --json ${path} failed:\n${new TextDecoder().decode(stderr)}`,
     );
   }
+  return new TextDecoder().decode(stdout);
+}
+
+/**
+ * The doc graph for one entry — READ TWICE, and refused if the two readings
+ * disagree.
+ *
+ * VERIFY THE INSTRUMENT. This gate's whole job is to answer "did the public
+ * surface move?", and it answers by reading the surface once and comparing to a
+ * file. If the READING is unstable, a stable file plus an unstable reading is
+ * indistinguishable from a real break — and that is not hypothetical: cutting
+ * v1.0.0-beta1, `check:api` reported three type aliases and one member of
+ * `src/state/` as BREAKING inside `check:release`, reproducibly, while ~20
+ * runs in every other shape were green and four consecutive regenerations were
+ * byte-identical. Nothing in the tree had moved.
+ *
+ * Two identical readings is cheap (`deno doc` is ~1s per entry) and it converts
+ * that failure mode from "the surface broke" — the most alarming thing this
+ * gate can say, at the moment somebody is cutting a release — into a named,
+ * accurate "I could not read it reliably". A gate that cannot tell those apart
+ * is a gate whose alarm nobody can act on, which is the defect this whole
+ * release is about.
+ *
+ * Deliberately NOT a retry-until-they-agree loop: two readings that disagree
+ * mean the instrument is unreliable RIGHT NOW, and quietly taking the third
+ * answer would hide exactly the condition worth knowing about.
+ */
+async function docEntry(
+  path: string,
+): Promise<{ moduleDoc?: DocDeclaration; symbols: DocSymbol[] }> {
+  const first = await docOnce(path);
+  const second = await docOnce(path);
+  if (first !== second) {
+    throw new Error(
+      `deno doc --json ${path} returned two DIFFERENT readings of the same ` +
+        `tree (${first.length} vs ${second.length} bytes).\n` +
+        `  The surface has not moved — the instrument is unstable, and a\n` +
+        `  verdict from it would be a guess. Re-run; if it persists, the tree\n` +
+        `  is being written while the gate reads it, or deno doc is degrading\n` +
+        `  under load (see the known gap in todo.md).`,
+    );
+  }
+  const stdout = new TextEncoder().encode(first);
   const parsed = JSON.parse(new TextDecoder().decode(stdout)) as {
     nodes: Record<
       string,
@@ -771,7 +864,17 @@ export function diffSnapshots(
             add(
               `~ ${entry} › ${name} signature changed${
                 sb.alias ? ` (an alias of ${sb.alias})` : ""
-              }`,
+              }` +
+                // The DIGESTS, because "signature changed" alone is the blunt
+                // alarm this file's own header set out to remove. Without them
+                // a failure that reproduces in one context and not another —
+                // which is exactly how this line got added — leaves nothing to
+                // compare but the symbol's name.
+                ` [${sa.sig.slice(0, 8)} → ${sb.sig.slice(0, 8)}${
+                  sa.sigs || sb.sigs
+                    ? `, decls ${sa.sigs?.length ?? 1}→${sb.sigs?.length ?? 1}`
+                    : ""
+                }]`,
               !sa.experimental,
               sa.experimental,
             );
@@ -944,6 +1047,29 @@ async function main(): Promise<void> {
 
   const diff = diffSnapshots(committed, snapshot);
   if (diff.length) {
+    // The COMPUTED surface, on disk, whenever the check fails.
+    //
+    // A digest pair tells you THAT two readings differ; it cannot tell you
+    // which field moved. When a failure reproduces in one context and not
+    // another — `check:release` red, every standalone run green — the only
+    // way forward is to diff the two readings, and that needs both of them.
+    // Written beside the gate logs, never into docs/, so it can never be
+    // mistaken for the committed snapshot.
+    try {
+      await Deno.mkdir(new URL(".aio/", ROOT), { recursive: true });
+      await Deno.writeTextFile(
+        new URL(".aio/api-computed.json", ROOT),
+        JSON.stringify(snapshot, null, 2) + "\n",
+      );
+      console.error(
+        "  (the surface as READ this run: .aio/api-computed.json — diff it " +
+          "against docs/api-snapshot.json)\n",
+      );
+    } catch {
+      // aio-ok: the dump is a debugging convenience beside the verdict. A
+      // read-only or full disk must not turn a reported drift into a crash
+      // that hides which symbols drifted.
+    }
     const breaking = diff.filter((c) => c.breaking);
     const additive = diff.filter((c) => !c.breaking);
     console.error(

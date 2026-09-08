@@ -17,6 +17,8 @@
 // was not: with the login flows on, the anonymous fall-through reached
 // serveStatic — and this file — with no credential at all.
 // CSRF-protected (X-AIO header on POST), rate-limited.
+import v8 from "node:v8";
+import { measureCellState } from "../diagnostics/memory-monitor.ts";
 import { CELL_METHOD_SEP } from "../state/cell-helpers.ts";
 import { serializeReturn } from "../protocol/return-value.ts";
 import { _dispatchRefusal } from "./action-ack.ts";
@@ -206,6 +208,28 @@ export function tooLargeMessage(what: string): string {
   } MB cap — the read stops there, so NOTHING was executed. Send a smaller ` +
     `payload: the control plane carries commands, not bulk data (write the ` +
     `data through the app itself, or point it at a file it can read).`;
+}
+
+/** V8's real heap ceiling, cached.
+ *
+ *  `heapTotal` is lazily allocated, so it sits just above `heapUsed` and always
+ *  looks reassuring; the number that says how close an app is to OOM is
+ *  `heap_size_limit`. Same source the memory monitor reads
+ *  (`aio-cells-bridge.ts`), so the two cannot report different ceilings for one
+ *  process. `0` when the runtime cannot say, which the caller reports as `null`
+ *  rather than as a plausible-looking zero. */
+let _heapLimitCache: number | undefined;
+function v8HeapLimit(): number {
+  if (_heapLimitCache !== undefined) return _heapLimitCache;
+  try {
+    _heapLimitCache =
+      (v8.getHeapStatistics() as { heap_size_limit: number }).heap_size_limit;
+  } catch {
+    // aio-ok: a runtime with no V8 statistics. Everything else in the reading
+    // is still true; only the percentage is unavailable.
+    _heapLimitCache = 0;
+  }
+  return _heapLimitCache;
 }
 
 export function handleTrojan(
@@ -514,6 +538,59 @@ function handleGet(
       // Only when there IS one — an empty array in every reply is noise, and
       // its presence is the whole point.
       ...(unserializable.length ? { unserializable } : {}),
+    });
+  }
+
+  if (route === "heap") {
+    // `am heap` — what the process is HOLDING, as opposed to what it is
+    // serving. `am state` answers the second question and nothing answered the
+    // first: a field report watched a console peak at 31.8 GB and restart 16
+    // times in 24 hours with no way to ask, from outside, how much of that was
+    // heap and which cell it was in (trading-app report §9.4).
+    //
+    // The numbers are V8's own, read at the moment of asking — no sampling to
+    // start, nothing to enable. `heapLimit` is the real ceiling
+    // (`heap_size_limit`), not `heapTotal`, which is lazily allocated and
+    // therefore always near `heapUsed` and always reassuring.
+    const mem = (Deno as unknown as {
+      memoryUsage?: () => {
+        rss: number;
+        heapTotal: number;
+        heapUsed: number;
+        external: number;
+      };
+    }).memoryUsage?.();
+    if (!mem) return err("heap statistics unavailable in this runtime", 404);
+    // The REAL ceiling, from V8 itself. `heapTotal` is lazily allocated, so it
+    // sits just above `heapUsed` and always looks reassuring — the number that
+    // says how close the app is to OOM is `heap_size_limit`. Same source the
+    // memory monitor uses (aio-cells-bridge), so the two cannot disagree.
+    const limit = v8HeapLimit();
+    const cells: { name: string; bytes: number; largestField?: unknown }[] = [];
+    const st = trojan.getState();
+    if (st && typeof st === "object") {
+      for (const [name, slice] of Object.entries(st)) {
+        try {
+          cells.push(measureCellState(name, slice));
+        } catch {
+          // aio-ok: a slice that cannot be measured is reported as unknown
+          // rather than failing the whole reading — the OTHER cells are still
+          // the answer, and this route exists precisely for the moment when
+          // something is wrong.
+          cells.push({ name, bytes: -1 });
+        }
+      }
+    }
+    cells.sort((a, b) => b.bytes - a.bytes);
+    return json({
+      pid: Deno.pid,
+      rss: mem.rss,
+      heapUsed: mem.heapUsed,
+      heapTotal: mem.heapTotal,
+      heapLimit: limit || null,
+      heapPct: limit ? Math.round((mem.heapUsed / limit) * 100) : null,
+      external: mem.external,
+      cells,
     });
   }
 

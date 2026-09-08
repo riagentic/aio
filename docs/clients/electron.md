@@ -82,6 +82,11 @@ binds zero ports. The port is printed on the boot line and recorded in the lock,
 which is how `am shot` (a headless screenshot) finds it. Anything that speaks
 CDP can attach to `http://127.0.0.1:<port>/json`.
 
+A window that is hidden, minimised or fully occluded is **not composited**, so
+it paints no frames and a screenshot of it shows whatever was last on screen.
+`am shot` reports that as `"painted": false` rather than passing stale pixels
+off as a fresh capture — see [`am shot`](app-manager.md#screenshots-am-shot).
+
 ## The Content-Security-Policy warning
 
 Every Electron run — dev **and** packaged — prints this:

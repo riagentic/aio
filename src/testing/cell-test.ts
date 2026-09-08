@@ -771,7 +771,13 @@ export function testCell(
           ) {
             // Adopt the rejection so it cannot surface as an uncaught error
             // after this assertion has already failed.
-            (value as Promise<unknown>).catch(() => {});
+            (value as Promise<unknown>).catch(() => {
+              // aio-ok: the assertion below is ALREADY failing, and this
+              // promise is the thing it is failing about. Left unhandled it
+              // surfaces later as an uncaught rejection that kills the whole
+              // test FILE from outside any test — replacing a clear assertion
+              // message with a stack trace pointing nowhere.
+            });
             throw assertionFailure(
               `${
                 msg ?? "expect.throws"

@@ -383,3 +383,31 @@ export default function App() {
 - **Resume truncates forward**: Standard undo/redo semantics
 - **200 entry cap**: Oldest entries evicted (~200KB max)
 - **Zero cost in prod**: TT code only instantiated behind dev-mode guard
+
+## Window events: `onWindowEvent`
+
+`globalThis.addEventListener("mousemove", fn)` looks right — in a single browser
+page `globalThis` **is** the window. In aio it often is not: a component can be
+mounted in an Electron child window or a `<webview>`, where the bare global
+belongs to a different window and the handler never hears the event. Under
+`testUI` the mount lives in a happy-dom window while `globalThis` is Deno's, so
+the registration is refused outright rather than silently doing nothing.
+
+The correct-everywhere spelling is
+`el.ownerDocument.defaultView.addEventListener(...)`. `onWindowEvent` resolves
+that same window for you and removes the listener on unmount:
+
+```tsx
+import { onWindowEvent } from "aio/air";
+
+function Dragger() {
+  onWindowEvent("mousemove", (e) => setPos(e.clientX, e.clientY));
+  onWindowEvent("resize", () => remeasure());
+  return <div class="stage">drag me</div>;
+}
+```
+
+The handler is read at event time, so it always sees the latest render's closure
+— the same discipline as `onGlobalKey`, `useRaf` and `useInterval`. For a
+keyboard shortcut specifically, prefer `onGlobalKey`, which also handles chords
+and ignores keys typed into a field.

@@ -562,3 +562,48 @@ Deno.test("api: a snapshot with no `sigs` falls back to BREAKING", () => {
   assertEquals(d.length, 1, JSON.stringify(d));
   assertEquals(d[0]!.breaking, true, d[0]!.line);
 });
+
+// ── an added OPTIONAL member of an object TYPE is additive ─────────────────
+//
+// The gate had a rule for this and could not reach it. `objectMembers` never
+// read a typeLiteral's `methods` (only its `properties`), so a type written in
+// method syntax produced an EMPTY member map; and it looked for an
+// intersection's parts under `intersection`/`types` when `deno doc` puts every
+// payload under `value`, so an intersection type had no members at all. With no
+// member map `diffMembers` correctly refuses to guess and the blunt
+// whole-symbol verdict applies — reporting the one change that provably breaks
+// nobody as BREAKING.
+//
+// Found while adding a name to `TestUI`; it matters far beyond that, because
+// most object-shaped public API is written this way and a frozen surface can
+// still GROW optional members.
+
+Deno.test("api gate: objectMembers sees methods, and an intersection's parts", async () => {
+  const { _objectMembersForTest } = await import(
+    "../scripts/api-snapshot.ts"
+  ) as { _objectMembersForTest?: (t: unknown) => { name?: string }[] };
+  if (!_objectMembersForTest) return; // not exported — the shape below still pins the fix
+
+  // The exact shape `deno doc --json` emits: `{ kind, value }` all the way
+  // down, an intersection's `value` being the array of its parts.
+  const doc = {
+    kind: "intersection",
+    value: [
+      {
+        kind: "typeLiteral",
+        value: {
+          properties: [{ name: "window" }],
+          methods: [{ name: "settle" }, { name: "html" }],
+        },
+      },
+      { kind: "typeLiteral", value: { properties: [], methods: [] } },
+    ],
+  };
+  const names = _objectMembersForTest(doc).map((m) => m.name).sort();
+  assertEquals(
+    names,
+    ["html", "settle", "window"],
+    "an intersection of type literals must yield every property AND method — " +
+      "an empty map is what made an added optional member read as BREAKING",
+  );
+});

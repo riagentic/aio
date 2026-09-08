@@ -668,3 +668,26 @@ import { freePort } from "aio/testing";
 
 const PORT = freePort(); // verified free at call time; one per server
 ```
+
+## What can I address? (`uiNames`)
+
+The list of addressable names was reachable only by **provoking a failure** — a
+miss prints `available: …`. That is a fine recovery path and a poor discovery
+one, and it is exactly the list you want _before_ writing the first line.
+
+```ts
+import { testUI, uiNames } from "aio/testing";
+
+await using ui = await testUI(App);
+await ui.settle();
+console.log(uiNames(ui));
+// ["TodoAdd:TitleInput", "TodoAdd:AddButton", "TodoRow:DeleteButton", …]
+```
+
+Full `Component…:Element` paths — the same form `am trigger` takes, and the only
+form that can say _which_ instance. On a running app, `am surface --names` is
+the same answer.
+
+An element with no accessible name is not addressable and will not appear. That
+is the same rule the `[aio-dev] <input> has no label association` warning states
+at render time.

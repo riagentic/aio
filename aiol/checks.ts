@@ -89,8 +89,22 @@ const SITE_RULED_REMOVALS: ReadonlySet<string> = new Set([
  *  formatter and the linter are each right in isolation; "the formatter breaks
  *  your linter suppressions" is a bad joint, and this is the half aio owns.
  *  Scanning the block up (and one continuation line down) closes both. */
+/** THE suppression marker, in both accepted spellings.
+ *
+ *  There were two markers one letter apart — `aio-ok` for the repo's own
+ *  gates, `aiol-ok` for this linter — and they were placed by copying nearby
+ *  code, which is exactly how you get the wrong one. A field report (vidtune
+ *  §8.1) asked for one marker with a scope.
+ *
+ *  `aio-ok` wins on the count that matters: ~100 uses against 3. So it is now
+ *  accepted here too, and it is the one to write. `aiol-ok` keeps working
+ *  forever — a suppression that stops suppressing turns a silent, deliberate
+ *  decision into a wall of new findings, which is the worst possible way to
+ *  tidy a spelling. */
+const OK_MARKER = /\baiol?-ok\b/;
+
 export function isSuppressed(lines: string[], idx: number): boolean {
-  if (lines[idx]?.includes("aiol-ok")) return true;
+  if (OK_MARKER.test(lines[idx] ?? "")) return true;
   // Walk the contiguous comment block directly above.
   for (let i = idx - 1; i >= 0; i--) {
     const t = lines[i]?.trim() ?? "";
@@ -98,7 +112,7 @@ export function isSuppressed(lines: string[], idx: number): boolean {
     // cover unrelated code below it (tests/aiol-suppression.test.ts pins this).
     if (t === "") break;
     if (!t.startsWith("//") && !t.startsWith("*") && !t.startsWith("/*")) break;
-    if (t.includes("aiol-ok")) return true;
+    if (OK_MARKER.test(t)) return true;
   }
   // …and the line ABOVE a formatter-wrapped continuation: `const x =` on its
   // own line, with the offending expression on the next one.
@@ -110,7 +124,7 @@ export function isSuppressed(lines: string[], idx: number): boolean {
       if (!t.startsWith("//") && !t.startsWith("*") && !t.startsWith("/*")) {
         break;
       }
-      if (t.includes("aiol-ok")) return true;
+      if (OK_MARKER.test(t)) return true;
     }
   }
   return false;
@@ -900,7 +914,7 @@ export const checkPerformance: Checker = (ctx) => {
         "perf",
         `${file.relative}:${
           i + 1
-        }: setTimeout/setInterval in cell code — use schedule.after/every for observable, cancellable timers (suppress with \`// aiol-ok\` on this line or the comment line above)`,
+        }: setTimeout/setInterval in cell code — use schedule.after/every for observable, cancellable timers (suppress with \`// aio-ok\` on this line or the comment line above)`,
         { file: file.relative, line: i + 1 },
       );
       break; // once per file is enough
@@ -964,7 +978,7 @@ export const checkPerformance: Checker = (ctx) => {
               `["big", "private"] }\` on the cell, or \`cellDefaults\` in ` +
               `\`aio.run()\` for all of them. If the count is right for this ` +
               `app — a local-first single-user app usually is — say so with ` +
-              `\`// aiol-ok\`.`,
+              `\`// aio-ok\`.`,
             { file: appEntry.relative, line: lineIdx + 1 },
           );
         }
@@ -1241,6 +1255,57 @@ export const checkUI: Checker = (ctx) => {
   if (tsxFiles.length === 0) {
     pass("no TSX files (server-only / CLI)");
     return;
+  }
+
+  // ── an interactive element with NO accessible name ────────────────────
+  //
+  // aio names UI by LABEL + ROLE: `<div class="button">Submit</div>` is
+  // `SubmitButton`. An interactive element with no name gets no semantic path,
+  // so it is absent from `am surface`, unreachable by `am trigger`, and has no
+  // handle in `testUI` — a framework-specific consequence no general linter can
+  // state (cc §9.4). The runtime already warns for `<input>` at render time;
+  // this catches the ones a render never reaches, which is where the silence
+  // actually hurts.
+  //
+  // DELIBERATELY NARROW: one line, an empty body, and none of the naming
+  // attributes. A name can come from a variable, a child component or a
+  // multi-line body, and none of that is knowable from source — so anything
+  // ambiguous is left alone. A lint that cries wolf is one people learn to
+  // pass with `|| true`, and then the true positives go with it.
+  const NAMED_ATTR =
+    /\b(?:aria-label|aria-labelledby|title|t|placeholder|alt)\s*=/;
+  const EMPTY_INTERACTIVE =
+    /<(button|select|textarea)([^>]*)>\s*<\/\1>|<(input)([^>]*?)\/?>/;
+  for (const file of tsxFiles) {
+    const lines = file.content.split("\n");
+    for (let i = 0; i < lines.length; i++) {
+      const line = lines[i]!;
+      const m = EMPTY_INTERACTIVE.exec(line);
+      if (!m) continue;
+      const tag = m[1] ?? m[3]!;
+      const attrs = m[2] ?? m[4] ?? "";
+      if (NAMED_ATTR.test(attrs)) continue;
+      // An `id` on an <input> can be paired with a <label htmlFor>, which this
+      // cannot see. Treated as named — a false NEGATIVE is cheap here and a
+      // false positive is not.
+      if (tag === "input" && /\bid\s*=/.test(attrs)) continue;
+      if (isSuppressed(lines, i)) continue;
+      report(
+        "warn",
+        "ui",
+        `${file.relative}:${i + 1} — <${tag}> has no accessible name, so it ` +
+          `has no semantic path: absent from \`am surface\`, unreachable by ` +
+          `\`am trigger\`, and untestable in testUI`,
+        {
+          file: file.relative,
+          line: i + 1,
+          fix:
+            `Give it a name: text content, aria-label, or aio's \`t\` prop ` +
+            `(\`<${tag} t="save" …>\`). Suppress a deliberate one with ` +
+            `// aio-ok: <why>`,
+        },
+      );
+    }
   }
 
   // Browser import safety — check .tsx files AND cell files.
@@ -2203,7 +2268,7 @@ export const checkPatterns: Checker = (ctx) => {
               "patterns",
               `${file.relative}:${
                 i + 1
-              } — "${method}" reads ${param}.* after an await — every await is a commit point and other actions may have run while suspended; re-read deliberately or gather-then-write (docs/state/methods.md); suppress a deliberate read with \`// aiol-ok\` on this line or the comment line above`,
+              } — "${method}" reads ${param}.* after an await — every await is a commit point and other actions may have run while suspended; re-read deliberately or gather-then-write (docs/state/methods.md); suppress a deliberate read with \`// aio-ok\` on this line or the comment line above`,
               { file: file.relative, line: i + 1 },
             );
             break; // once per method
@@ -2273,7 +2338,7 @@ export const checkPatterns: Checker = (ctx) => {
             `INTERNALS: no \`aio/*\` entry exports it, so there is no public ` +
             `spelling to move to and this import can break on any upgrade. ` +
             `If you need it, say so — an entry can be added. Acknowledge a ` +
-            `deliberate one with \`// aiol-ok\`.`,
+            `deliberate one with \`// aio-ok\`.`,
           { file: file.relative, line: lineIdx + 1 },
         );
       }
@@ -5561,7 +5626,7 @@ export const checkOwnKeyIdentity: Checker = (ctx) => {
           `because replacing is the contract.\n` +
           `      fix: key by the resource's identity — ` +
           `own.set(\`${key[2]}:\${${id}}\`, …) — or, if one-at-a-time is the ` +
-          `intent, say so: // aiol-ok: one ${key[2]} at a time`,
+          `intent, say so: // aio-ok: one ${key[2]} at a time`,
         {
           file: file.relative,
           line,

@@ -85,9 +85,28 @@ export async function cmdShot(
     Deno.exit(1);
   }
   const idxRaw = args.find((a) => !a.startsWith("--"));
+  // The positional is a WINDOW INDEX, and the thing people type there is a
+  // filename — `am shot shots/home.png` reads like every other screenshot tool
+  // on earth (vidtune §8.4). It is a detectable mistake, so it gets the flag
+  // rather than "invalid window index: shots/home.png", which explains the
+  // parser and not the intent.
+  if (idxRaw !== undefined && /[/\\]|\.(?:png|jpe?g|webp)$/i.test(idxRaw)) {
+    outError(
+      `\`${idxRaw}\` looks like a file path, and the positional argument here ` +
+        `is a WINDOW INDEX (0 = the first window).`,
+      mode,
+      `am shot --out=${idxRaw}`,
+    );
+    Deno.exit(1);
+  }
   const idx = idxRaw === undefined ? 0 : Number(idxRaw);
   if (!Number.isInteger(idx) || idx < 0) {
-    outError(`invalid window index: ${idxRaw} — a non-negative integer`, mode);
+    outError(
+      `invalid window index: ${idxRaw} — a non-negative integer (0 = the ` +
+        `first window)`,
+      mode,
+      `am shot --out=<file.png>   # if you meant a destination`,
+    );
     Deno.exit(1);
   }
   const full = args.includes("--full");
@@ -126,6 +145,19 @@ export async function cmdShot(
   }
   const cdp = await cdpConnect(target.webSocketDebuggerUrl, timeout);
   try {
+    // Wait for the window to actually PAINT before capturing.
+    //
+    // `Page.captureScreenshot` hands back whatever the compositor last
+    // composited. Immediately after an `am dispatch` — the exact moment anyone
+    // takes a screenshot — the state has changed, the render is queued, and
+    // nothing has been painted yet. The old pixels came back and the command
+    // said `wrote shot.png`. A field report (anathomy §2) read that as proof
+    // the UI had not updated, which was the opposite of the truth.
+    //
+    // Two `requestAnimationFrame`s: the first runs before the next paint, the
+    // second after a frame has been committed. That is the browser's own
+    // definition of "something was painted since you asked".
+    const painted = await framePainted(cdp, timeout);
     const r = await cdp.call("Page.captureScreenshot", {
       format: "png",
       captureBeyondViewport: full,
@@ -133,14 +165,69 @@ export async function cmdShot(
     if (!r?.data) throw new Error("Page.captureScreenshot returned no data");
     const png = Uint8Array.from(atob(r.data), (c) => c.charCodeAt(0));
     await Deno.writeFile(outFile, png);
-    const result = { file: outFile, bytes: png.byteLength, url: target.url };
+    const result = {
+      file: outFile,
+      bytes: png.byteLength,
+      url: target.url,
+      painted,
+      ...(painted ? {} : {
+        warning:
+          `the window did not paint within ${timeout}ms, so these pixels may ` +
+          `predate whatever you just did — a hidden, minimised or occluded ` +
+          `window is not composited. Raise it, or raise --timeout=`,
+      }),
+    };
     out(
       mode === "pretty"
-        ? `wrote ${outFile} (${png.byteLength} bytes) — ${target.url}`
+        ? `wrote ${outFile} (${png.byteLength} bytes) — ${target.url}` +
+          (painted
+            ? ""
+            : `\n  ! STALE RISK: the window did not paint within ${timeout}ms, ` +
+              `so these pixels may predate what you just did.\n` +
+              `    A hidden, minimised or occluded window is not composited — ` +
+              `raise the window, or raise --timeout=`)
         : result,
       mode,
     );
   } finally {
     cdp.close();
+  }
+}
+
+/** Resolve once the page has committed a frame — `true` when it did, `false`
+ *  when it did not within `ms`.
+ *
+ *  Never throws and never blocks the capture: a screenshot of a window that
+ *  will not paint is still worth taking, it just cannot be vouched for. The
+ *  boolean is what the caller reports, so "I could not confirm this frame is
+ *  fresh" is said out loud instead of being indistinguishable from success. */
+async function framePainted(
+  cdp: { call: (m: string, p?: Record<string, unknown>) => Promise<unknown> },
+  ms: number,
+): Promise<boolean> {
+  const raf =
+    "new Promise(r=>requestAnimationFrame(()=>requestAnimationFrame(()=>r(true))))";
+  // The loser of the race must be disarmed. A pending `setTimeout` keeps the
+  // event loop alive, so a screenshot that painted in 3ms would still have sat
+  // there for the rest of the timeout before the CLI could exit.
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      cdp.call("Runtime.evaluate", {
+        expression: raf,
+        awaitPromise: true,
+        returnByValue: true,
+      }).then(() => true),
+      new Promise<boolean>((r) => {
+        timer = setTimeout(() => r(false), ms);
+      }),
+    ]);
+  } catch {
+    // aio-ok: a page that refuses Runtime.evaluate (navigating, crashed) still
+    // gets its screenshot; the caller reports the frame as unconfirmed, which
+    // is the honest answer and the one this function exists to give.
+    return false;
+  } finally {
+    if (timer !== undefined) clearTimeout(timer);
   }
 }

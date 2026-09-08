@@ -154,3 +154,26 @@ documented keys always validate.)
 **`deno.json` needs the magic lines.** `jsx`/`jsxImportSource`,
 `nodeModulesDir: "auto"` — `deno task doctor` checks all of them; run it first
 when anything is weird.
+
+## Silencing a lint or a gate: `// aio-ok`
+
+Both aio's own gates and the `aiol` linter accept **one** marker:
+
+```ts
+// aio-ok: a deliberate re-read — the await is a commit point and the
+// earlier draft is stale.
+const after = s.jobs.find((j) => j.id === id);
+```
+
+It counts on the flagged line, or anywhere in the contiguous comment block
+directly above it — which is where the reason naturally goes, and where
+`deno fmt` cannot move it out from under the code. A blank line ends the block,
+so a stray marker higher up cannot silently cover unrelated code.
+
+There used to be two markers one letter apart (`aio-ok` and `aiol-ok`), placed
+by copying nearby code. `aiol-ok` still works and always will — a suppression
+that stops suppressing turns a deliberate decision into a wall of new findings —
+but `aio-ok` is the one to write.
+
+Always say **why**. A bare marker is a silenced question; the reason is what
+makes it a decision.

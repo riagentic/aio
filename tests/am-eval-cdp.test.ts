@@ -18,6 +18,7 @@ import { assert, assertEquals } from "@std/assert";
 import { cdpConnect, cdpTargets } from "../src/am/am-cdp.ts";
 import { evalOutcome, wrapExpression } from "../src/am/am-cmd-eval.ts";
 import { findChromium, freePort } from "../src/testing/server-test.ts";
+import { dropTempDir, tempDir } from "../src/testing/temp-dir.ts";
 
 const CHROME = findChromium();
 const PAGE =
@@ -29,7 +30,7 @@ async function withPage(
   ) => Promise<void>,
 ): Promise<void> {
   const port = freePort();
-  const profile = await Deno.makeTempDir({ prefix: "am-eval-" });
+  const profile = await tempDir("am-eval-");
   const child = new Deno.Command(CHROME!, {
     args: [
       "--headless=new",
@@ -70,7 +71,7 @@ async function withPage(
   } finally {
     child.kill("SIGKILL");
     await child.status;
-    await Deno.remove(profile, { recursive: true }).catch(() => {});
+    await dropTempDir(profile);
   }
 }
 
