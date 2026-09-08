@@ -300,7 +300,7 @@ function extractCells(files: SourceFile[]): CellInfo[] {
         hasSelectors: info.hasSelectors,
         isWorker: info.isWorker,
         hasVersion: info.hasVersion,
-        persistFalse: info.persistFalse,
+        noPersist: info.noPersist,
         stateKeys: info.stateKeys,
         stateIsLiteral: info.stateIsLiteral,
         methodNames: info.methodNames,
@@ -323,8 +323,11 @@ function parseCellConfig(source: string): {
   isWorker: boolean;
   /** `version: N` — what makes this cell visible to the update data gate. */
   hasVersion: boolean;
-  /** `persist: false` — this cell keeps nothing on disk. */
-  persistFalse: boolean;
+  /** This cell keeps nothing on disk — `persist: false`, `persist: "none"`
+   *  (the spelling the docs and `am` both use), or `scope: "client"`, which
+   *  cannot reach the persist layer at all. Reading only the boolean reported
+   *  17 `"none"` cells and one client cell as unversioned persisters. */
+  noPersist: boolean;
   stateKeys: string[];
   stateIsLiteral: boolean;
   methodNames: string[];
@@ -344,7 +347,7 @@ function parseCellConfig(source: string): {
       hasSelectors: false,
       isWorker: false,
       hasVersion: false,
-      persistFalse: false,
+      noPersist: false,
       stateKeys: [],
       stateIsLiteral: false,
       methodNames: [],
@@ -378,7 +381,7 @@ function parseCellConfig(source: string): {
       hasSelectors: false,
       isWorker: false,
       hasVersion: false,
-      persistFalse: false,
+      noPersist: false,
       stateKeys: [],
       stateIsLiteral: false,
       methodNames: [],
@@ -407,7 +410,26 @@ function parseCellConfig(source: string): {
   const hasSelectors = /\bselectors\s*:/.test(block);
   const isWorker = /\bworker\s*:\s*true\b/.test(block);
   const hasVersion = /\bversion\s*:\s*\d+/.test(block);
-  const persistFalse = /\bpersist\s*:\s*false\b/.test(block);
+  // TWO SPELLINGS mean the same thing, and a third way to be exempt is not
+  // spelled at all. `persist: false` and `persist: "none"` are the same
+  // declaration — `"none"` is what `docs/state/cells.md` uses and what `am`
+  // prints back (`cells: dialog visible=all persist=none`) — and a
+  // `scope: "client"` cell never reaches the persist layer at all, by
+  // definition. Reading only the boolean reported 18 of one wallet's 44 cells
+  // as unversioned persisters; 17 said `"none"` and the last was client-scoped.
+  // None of them persisted anything. The cost is not the miscount: this warning
+  // is the ONLY signal for a real and expensive mistake (a persisted cell whose
+  // shape moves across a release with no version for the update gate to
+  // compare), so drowning it in false positives means the day a real one
+  // appears it looks exactly like the noise everyone has learned to skip.
+  // Named for what it MEANS, not for the spelling it used to match.
+  // No trailing `\b` after the closing quote: the next character is a comma or
+  // a newline, both non-word, so a word boundary there can never match. That is
+  // exactly how this regex would have shipped looking correct and matching
+  // nothing — the same silent-miss shape as the bug it fixes.
+  const noPersist =
+    /\bpersist\s*:\s*(?:false\b|["\'`]none["\'`])/.test(block) ||
+    /\bscope\s*:\s*["\'`]client["\'`]/.test(block);
 
   // Extract state keys from state: { key1: ..., key2: ... }
   // Use brace matching instead of [^}] to handle nested objects/arrays
@@ -491,7 +513,7 @@ function parseCellConfig(source: string): {
     hasSelectors,
     isWorker,
     hasVersion,
-    persistFalse,
+    noPersist,
     stateKeys,
     methodNames,
     actionNames,

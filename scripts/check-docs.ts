@@ -476,8 +476,14 @@ async function checkHarnessMembers(): Promise<string[]> {
   );
   // `expect: { … }` — the member names inside that block.
   const expectBlock = /expect:\s*\{([\s\S]*?)\n  \};/.exec(src)?.[1] ?? "";
+  // `name?:` counts. The public surface is frozen, so a member ADDED to a
+  // published type has to be optional (a required one breaks anyone
+  // constructing the type by hand), and reading only `name:` made this check
+  // report every such addition as "does not exist" — a gate that hard-codes one
+  // spelling of a two-spelling thing, which is the same defect it exists to
+  // catch in the docs.
   const known = new Set(
-    [...expectBlock.matchAll(/^\s{4}(\w+)\s*:/gm)].map((m) => m[1]!),
+    [...expectBlock.matchAll(/^\s{4}(\w+)\??\s*:/gm)].map((m) => m[1]!),
   );
   if (known.size === 0) {
     return [

@@ -12,11 +12,13 @@ import {
 } from "./context.ts";
 import { RESERVED_KEYS } from "../src/state/cell-types.ts";
 import {
+  AIO_ENTRY_PATHS,
   AIO_LIBRARY_ENTRIES,
   isServerOnlyFile,
   SERVER_ONLY_AIO_SYMBOLS,
 } from "../src/entries.ts";
 import { removalMessage, removalOf, REMOVALS } from "../src/state/removals.ts";
+import { isRefusableCredential } from "../src/state/secret-names.ts";
 import {
   linkSatisfiesPin,
   pinDisagreementHint,
@@ -58,10 +60,60 @@ const SITE_RULED_REMOVALS: ReadonlySet<string> = new Set([
  *
  *  A blank line between the comment and the code breaks the association, so an
  *  unrelated `aiol-ok` further up can't silently cover code below it. */
+/** True when the line at `idx` carries `// aiol-ok`, or when any line of the
+ *  contiguous comment block directly above it does.
+ *
+ *  A BLOCK, not one line, and both halves of the reason are field reports.
+ *
+ *  Half one — an explanation is a comment too. The natural way to acknowledge a
+ *  deliberate re-read is to say why:
+ *
+ *      // aiol-ok — a deliberate re-read: the row is looked up again because
+ *      // the await is a commit point and the earlier draft is stale.
+ *      const after = s.jobs.find(…);
+ *
+ *  Reading only the immediately-previous line, that was still flagged: the
+ *  marker had to sit on the LAST comment line, which nothing says and which is
+ *  found by trial. The reverse — an explanation ABOVE the marker — worked. Two
+ *  spellings of one intent, one of them silently ineffective.
+ *
+ *  Half two — `deno fmt` moves the code out from under the marker. A long
+ *  declaration gets wrapped:
+ *
+ *      // aiol-ok
+ *      const ANSI =
+ *        /…/g;                     ← the violation is now reported HERE
+ *
+ *  so the suppression looks correct in the source and applies to nothing, and
+ *  the author gets the original finding PLUS a dead-suppression complaint. The
+ *  formatter and the linter are each right in isolation; "the formatter breaks
+ *  your linter suppressions" is a bad joint, and this is the half aio owns.
+ *  Scanning the block up (and one continuation line down) closes both. */
 export function isSuppressed(lines: string[], idx: number): boolean {
   if (lines[idx]?.includes("aiol-ok")) return true;
-  const prev = lines[idx - 1]?.trim() ?? "";
-  return prev.startsWith("//") && prev.includes("aiol-ok");
+  // Walk the contiguous comment block directly above.
+  for (let i = idx - 1; i >= 0; i--) {
+    const t = lines[i]?.trim() ?? "";
+    // A blank line ENDS the block: a stray marker higher up must not silently
+    // cover unrelated code below it (tests/aiol-suppression.test.ts pins this).
+    if (t === "") break;
+    if (!t.startsWith("//") && !t.startsWith("*") && !t.startsWith("/*")) break;
+    if (t.includes("aiol-ok")) return true;
+  }
+  // …and the line ABOVE a formatter-wrapped continuation: `const x =` on its
+  // own line, with the offending expression on the next one.
+  const above = lines[idx - 1]?.trim() ?? "";
+  if (/[=(,[]$/.test(above)) {
+    for (let i = idx - 2; i >= 0; i--) {
+      const t = lines[i]?.trim() ?? "";
+      if (t === "") break;
+      if (!t.startsWith("//") && !t.startsWith("*") && !t.startsWith("/*")) {
+        break;
+      }
+      if (t.includes("aiol-ok")) return true;
+    }
+  }
+  return false;
 }
 
 export const checkConfig: Checker = (ctx) => {
@@ -863,24 +915,62 @@ export const checkPerformance: Checker = (ctx) => {
   //. Collection size is not knowable statically —
   // docs/db/ covers when to reach for SQLite.
 
-  // Check for missing cell-level ui filters
+  // Cell-level visibility filters.
+  //
+  // This hint was reported as unactionable noise by FOUR separate field
+  // reports — "it appeared on every lint run and I never found the two-line way
+  // to satisfy it", "a hint that cannot be discharged becomes noise", "this
+  // will now print forever, which is exactly how a clean gate becomes noise".
+  // They were right, and the cause was worse than tone: it probed for `ui:`,
+  // which is not a cell config key. The key is `visible:` (`VALID_CELL_KEYS` in
+  // src/state/cell-create.ts — `cell()` THROWS on `ui:`). So an app that had
+  // done the work, correctly, kept being told to do it, and the only spelling
+  // that could clear the hint was one the runtime refuses. A check that cannot
+  // be satisfied is not a nudge, it is a permanent accusation.
+  //
+  // Three changes: probe the real key; NAME the cells so the reader has a lead
+  // rather than a total; and carry a line, so `// aiol-ok` has somewhere to
+  // attach for the app that has counted its keys and is content with them
+  // (a single-user local-first app with 28 keys is correct, and the linter has
+  // no way to know that).
   if (appEntry && cells.length > 0) {
-    const hasUiConfig = cells.some((c) =>
-      c.file.content.includes("ui:") || c.file.content.includes("ui :")
+    const configured = (c: typeof cells[number]) =>
+      /\bvisible\s*:/.test(codeText(c.file.content));
+    const hasVisible = cells.some(configured);
+    const hasCellDefaults = /\bcellDefaults\s*:/.test(
+      codeText(appEntry.content),
     );
-    const hasCellDefaults = appEntry.content.includes("cellDefaults");
-    if (!hasUiConfig && !hasCellDefaults) {
+    if (!hasVisible && !hasCellDefaults) {
       const totalKeys = cells.reduce((n, f) => n + f.stateKeys.length, 0);
       if (totalKeys > 10) {
-        report(
-          "hint",
-          "perf",
-          `${totalKeys} state keys across ${cells.length} cells — consider cell-level ui filters or cellDefaults to control what's sent to browser`,
-          { file: appEntry.relative },
+        // The line the reader would edit: where the app composes its cells.
+        const runLine = appEntry.lines.findIndex((l) =>
+          /\baio\.run\s*\(|\bcellDefaults\s*:/.test(l)
         );
+        const lineIdx = runLine >= 0 ? runLine : 0;
+        if (!isSuppressed(appEntry.lines, lineIdx)) {
+          const biggest = [...cells]
+            .sort((a, b) => b.stateKeys.length - a.stateKeys.length)
+            .slice(0, 3)
+            .map((c) => `${c.name} (${c.stateKeys.length})`)
+            .join(", ");
+          report(
+            "hint",
+            "perf",
+            `${appEntry.relative}:${lineIdx + 1} — ${totalKeys} state keys ` +
+              `across ${cells.length} cells and no \`visible:\` filter on any ` +
+              `of them, so every key is broadcast to every connected client on ` +
+              `every commit. Widest: ${biggest}. fix: \`visible: { exclude: ` +
+              `["big", "private"] }\` on the cell, or \`cellDefaults\` in ` +
+              `\`aio.run()\` for all of them. If the count is right for this ` +
+              `app — a local-first single-user app usually is — say so with ` +
+              `\`// aiol-ok\`.`,
+            { file: appEntry.relative, line: lineIdx + 1 },
+          );
+        }
       }
     } else {
-      pass("cell-level ui visibility configured");
+      pass("cell-level visibility filters configured");
     }
   }
 
@@ -1060,7 +1150,7 @@ export const checkPersistence: Checker = (ctx) => {
   // the next warning people learn to scroll past. One line for all of them,
   // not one per cell — twenty lines is its own kind of silence.
   if (/\bupdates\s*:/.test(appEntry.content)) {
-    const unguarded = ctx.cells.filter((c) => !c.hasVersion && !c.persistFalse);
+    const unguarded = ctx.cells.filter((c) => !c.hasVersion && !c.noPersist);
     if (unguarded.length > 0) {
       report(
         "warn",
@@ -1824,6 +1914,34 @@ export function pollSpans(line: string): Array<[number, number]> {
   return out;
 }
 
+/** The ARGUMENT LIST of the first awaited call on this line.
+ *
+ *  Arguments are evaluated BEFORE the call, and the call is what suspends — so
+ *  `await probeInto(s, id ?? s.activeId, force)` reads `s.activeId` *before*
+ *  the await, not after it. The rule matched `await` and `s.` on one line and
+ *  reported it anyway. A field report from an app with 404 tests caught it and
+ *  called it what it is: the rule is loose where the code is inside a method
+ *  and blind where it is not, and a hint that fires on code which is correct by
+ *  the language's own evaluation order is one more reason to stop reading
+ *  hints.
+ *
+ *  Only the FIRST await on the line, deliberately: once that call has returned,
+ *  every later argument list really is post-suspension. */
+export function awaitArgSpan(line: string): Array<[number, number]> {
+  const m = /\bawait\s+[\w.$?![\]]*\s*\(/.exec(line);
+  if (!m) return [];
+  const open = m.index + m[0].length - 1;
+  let depth = 0;
+  for (let i = open; i < line.length; i++) {
+    if (line[i] === "(") depth++;
+    else if (line[i] === ")") {
+      depth--;
+      if (depth === 0) return [[open, i]];
+    }
+  }
+  return [];
+}
+
 /** True when EVERY read of `param` on this line falls inside a poll span — i.e.
  *  the line's only reads are the sanctioned re-reads. A read outside one is a
  *  genuine post-await read and must still be reported. */
@@ -2058,17 +2176,23 @@ export const checkPatterns: Checker = (ctx) => {
           // and wrong for `await until(...); s.out = s.value;` — everything
           // after the semicolon runs post-suspension like any other line.
           let minOffset = 0;
+          let justSuspended = false;
           if (!sawAwait) {
             const at = code.search(/\bawait\b/);
             if (at < 0) continue;
             sawAwait = true;
+            justSuspended = true;
             minOffset = at;
           }
           // A live-poll primitive re-reads state ON PURPOSE — that is what it
           // is for. But the exemption belongs to the CALL, not the line: on
           // `await until(() => s.ready); const v = s.value;` skipping the whole
           // line also excused the genuine read that follows it.
-          const spans = pollSpans(code);
+          // On the line where suspension BEGINS, the awaited call's own
+          // arguments were evaluated before it — see `awaitArgSpan`.
+          const spans = justSuspended
+            ? [...pollSpans(code), ...awaitArgSpan(code)]
+            : pollSpans(code);
           const nested = nestedShadowLine(codeLines, startIdx, i, param);
           if (
             readLines.has(i) && !isSuppressed(file.lines, i) &&
@@ -2091,17 +2215,68 @@ export const checkPatterns: Checker = (ctx) => {
     // Old dep/aio import paths. Anchored to a real import/export STATEMENT —
     // a lint rule (or a doc line) that merely mentions the old path inside a
     // string is not importing from it.
-    if (
-      /(?:^|\n)\s*(?:import|export)\b[^\n]*from\s*['"]\.\.\/dep\/aio\//.test(
-        file.content,
-      )
-    ) {
-      report(
-        "warn",
-        "patterns",
-        `${file.relative}: legacy import path "../dep/aio/..." — use "aio" instead`,
-        { file: file.relative, fix: "import { ... } from 'aio'" },
-      );
+    //
+    // TWO findings, not one, and PER LINE. It used to be one file-level warning
+    // saying "use \"aio\" instead" for every deep path, which had two failures a
+    // field report hit at once:
+    //
+    //   1. The advice does not always compile. The file it fired on was the
+    //      app's copy of aio's OWN browser-graph checker, importing
+    //      `graph-validator.ts` and `server-transpile.ts` — modules no `aio/*`
+    //      entry re-exports. Following the fix would have deleted the check
+    //      standing between a `Deno.stat` in a cell and a blank screen at boot.
+    //   2. It could not be suppressed. A finding with a file and no LINE gives
+    //      `// aiol-ok` nowhere to attach — verified both above and on the
+    //      import line; the warning survived both. Every other `patterns`
+    //      finding names a line and can be acknowledged.
+    //
+    // So: when the deep path IS a published entry, say which one (the advice
+    // compiles). When it is not, say the true thing — this is framework
+    // internals, outside the surface `check:api` snapshots, and it can move
+    // without notice — as a hint, because sometimes there is genuinely no
+    // other door. Both carry a line.
+    const DEEP_RE =
+      /(?:^|\n)([ \t]*(?:import|export)\b[^\n]*from\s*['"](\.\.\/)+dep\/aio\/([^'"]+)['"])/g;
+    for (const m of codeMatches(file.content, DEEP_RE)) {
+      // `(?:^|\n)` puts the match one char before the statement when it fired
+      // on a newline. Count from the STATEMENT, not the match.
+      const at = m.index! + (m[0]!.startsWith("\n") ? 1 : 0);
+      const lineIdx = file.content.slice(0, at).split("\n").length - 1;
+      if (isSuppressed(file.lines, lineIdx)) continue;
+      const rel = m[3]!;
+      // AIO_ENTRY_PATHS, not AIO_ENTRIES: the bare `aio` specifier is dropped
+      // from the latter, and `dep/aio/mod.ts` — the single most common legacy
+      // path there is — maps to exactly that one.
+      const entry = Object.entries(AIO_ENTRY_PATHS)
+        .find(([, path]) => path === rel)?.[0];
+      if (entry) {
+        report(
+          "warn",
+          "patterns",
+          `${file.relative}:${lineIdx + 1} — legacy import path ` +
+            `"dep/aio/${rel}" is the published entry \`${entry}\`. Import that ` +
+            `instead: the deep ` +
+            `path is outside the surface \`check:api\` snapshots, so it can ` +
+            `move without notice, and the entry cannot.`,
+          {
+            file: file.relative,
+            line: lineIdx + 1,
+            fix: `import { ... } from '${entry}'`,
+          },
+        );
+      } else {
+        report(
+          "hint",
+          "patterns",
+          `${file.relative}:${lineIdx + 1} — legacy import path ` +
+            `"dep/aio/${rel}" is framework ` +
+            `INTERNALS: no \`aio/*\` entry exports it, so there is no public ` +
+            `spelling to move to and this import can break on any upgrade. ` +
+            `If you need it, say so — an entry can be added. Acknowledge a ` +
+            `deliberate one with \`// aiol-ok\`.`,
+          { file: file.relative, line: lineIdx + 1 },
+        );
+      }
     }
 
     // Node.js APIs
@@ -4198,6 +4373,28 @@ export const checkSyncMethodHiddenReads: Checker = (ctx) => {
 // The reason the prohibition alone did not hold: it lives in one file, and the
 // page a reader lands on for "start work at boot" had no worked example. Both
 // halves are fixed — this is the half that refuses.
+/** True when the timer starting at `at` is assigned to a handle that an
+ *  `onCleanup` in the same file clears.
+ *
+ *  That is the property that makes a component timer bounded: the handle is
+ *  cleared when the component unmounts, so the dispatch cannot outlive its
+ *  cause. It is statically visible, which is why the rule can stop guessing.
+ *  Deliberately file-scoped rather than scope-exact — a `clearTimeout(t)` for
+ *  a handle named `t` inside an `onCleanup` is not a coincidence, and the cost
+ *  of being generous here is a missed warning, while the cost of being strict
+ *  is calling the correct pattern an error. */
+function _timerClearedInCleanup(code: string, at: number): boolean {
+  // Walk back over `const t = ` / `t = ` immediately before `setTimeout(`.
+  const before = code.slice(Math.max(0, at - 200), at);
+  const assign = /(?:\b(?:const|let|var)\s+)?(\w+)\s*=\s*$/.exec(before);
+  const handle = assign?.[1];
+  if (!handle) return false;
+  const cleared = new RegExp(
+    `onCleanup\\s*\\([\\s\\S]{0,400}?clear(?:Timeout|Interval)\\s*\\(\\s*${handle}\\s*\\)`,
+  );
+  return cleared.test(code);
+}
+
 export const checkTimerDispatch: Checker = (ctx) => {
   const { tsFiles, tsxFiles, cells, report, pass } = ctx;
   // The cell BINDINGS in this project — a call is only interesting if the
@@ -4224,21 +4421,58 @@ export const checkTimerDispatch: Checker = (ctx) => {
       if (!bindings.has(obj)) continue;
       const line = code.slice(0, m.index!).split("\n").length;
       if (isSuppressed(file.lines, line - 1)) continue;
+      // A timer whose handle is CLEARED in an `onCleanup` is not the bug this
+      // rule describes. The reasoning is "the dispatch has no cause the runtime
+      // can see" — but in a component the cause IS the mount, and the cleanup
+      // bounds the timer by the unmount, so the dispatch cannot outlive
+      // anything. A wallet's auto-dismissing overlay is the canonical shape:
+      //
+      //   onMount(() => {
+      //     const t = setTimeout(() => dialog.close(), 5_500);
+      //     onCleanup(() => clearTimeout(t));
+      //   });
+      //
+      // There is no version of that a `schedules:` entry or `onStart` can
+      // express — the delay belongs to one mounted instance, not to the app —
+      // and the suggested `aio.run({ onStart: () => dialog.close() })` would
+      // close a dialog once at boot, which is not what the code does at all. A
+      // developer following the hint literally ships a bug to satisfy the
+      // linter. Worse, that `onCleanup` is usually there BECAUSE of a real bug
+      // of exactly the kind this rule aims at (a timer returned from `onMount`,
+      // which AIR used to discard, leaving an overlay to slam shut whatever
+      // dialog the user had open 5.5 s later) — so the rule was calling the
+      // FIX an error. Two of a wallet's two aiol ERRORs were this.
+      if (_timerClearedInCleanup(code, m.index!)) continue;
       found++;
+      // Inside a component, none of the three cell-side doors is reachable, so
+      // offering them is worse than saying nothing. Name the door that is.
+      // A `.tsx` file is a component file, hooks or not — the three cell-side
+      // doors (`onInit`, `onStart`, `schedules:`) are all unreachable from
+      // one, so offering them there is worse than saying nothing.
+      const inComponent = file.name.endsWith(".tsx") ||
+        /\bon(?:Mount|Cleanup)\s*\(|\bafterRender\s*\(/.test(code);
+      const fix = inComponent
+        ? `      fix: bind the timer to the mount — ` +
+          `\`onMount(() => { const t = setTimeout(() => ${obj}.${method}(), N); ` +
+          `onCleanup(() => clearTimeout(t)); })\` — so the dispatch cannot ` +
+          `outlive the component. See docs/ui/air-lifecycle.md.`
+        : `      fix: from a cell, \`onInit(app) { app.dispatch(…) }\`; once at ` +
+          `boot, \`aio.run({ onStart: () => ${obj}.${method}() })\`; ` +
+          `repeatedly, a static \`schedules:\` entry. See ` +
+          `docs/state/lifecycle.md.`;
       report(
         "error",
         "cells",
         `${file.relative}:${line} — \`${obj}.${method}()\` is a cell method ` +
           `called from a timer. That escapes the action log, time-travel and ` +
           `cancellation: the dispatch has no cause the runtime can see.\n` +
-          `      fix: from a cell, \`onInit(app) { app.dispatch(…) }\`; once at ` +
-          `boot, \`aio.run({ onStart: () => ${obj}.${method}() })\`; ` +
-          `repeatedly, a static \`schedules:\` entry. See ` +
-          `docs/state/lifecycle.md.`,
+          fix,
         {
           file: file.relative,
           line,
-          fix: `onStart: () => ${obj}.${method}()`,
+          fix: inComponent
+            ? `onCleanup(() => clearTimeout(t))`
+            : `onStart: () => ${obj}.${method}()`,
         },
       );
     }
@@ -4464,21 +4698,21 @@ export const checkSyncReplayEffects: Checker = (ctx) => {
 // 26. A STATE FIELD NAMED LIKE A CREDENTIAL, VISIBLE TO EVERY CLIENT
 // ══════════════════════════════════════════════════════════════════════
 //
-// The static port of aio.run()'s boot refusal (src/server/aio-composition.ts,
-// HARD_SECRET_RE + guards): a top-level state key that unambiguously names a
-// credential and is broadcast to every client stops the app from BOOTING in
-// dev — after the suite went green, because tests never compose the app. A
-// field report: a display label named `namePrivateKey` refused the boot, and
-// the override (`publicFields`) took a docs search. The regexes below MUST
-// stay byte-identical to the runtime's (tests/aiol-credential-field-name
-// .test.ts pins them against the source), so the lint and the boot agree.
-const HARD_SECRET_RE =
-  /passwo?rd|passphrase|mnemonic|private[_-]?key|api[_-]?key|secret[_-]?key|access[_-]?token|auth[_-]?token/i;
-const PUBLIC_HINT_RE =
-  /(?:^|[_-])(?:pub|public|Pub|Public|PUB|PUBLIC)(?![a-z])|[a-z0-9](?:Pub|Public)(?![a-z])/;
-const NONSECRET_SUFFIX_RE =
-  /(Id|Ids|Type|Name|Count|Index|Idx|At|Ref|Kind|Length|Len|Path|Mode|Status|Flag|Enabled|Visible|Label|Order|Version|Ms|Sec|Secs|Seconds|Bytes|Kb|Mb|Gb|Hz|Pct|Percent|Ratio|Rate|Total|Avg|Min|Max|Size|Width|Height|Duration|Elapsed)$/;
-
+// NOT a port any more — the SAME function. `aio.run()`'s boot refusal and this
+// lint used to be two copies of one rule, kept in step by a test that compared
+// the regexes as TEXT. That test was the right instinct and the wrong
+// mechanism: it could only catch drift after someone wrote it, it could not see
+// a difference in how the two USED the same regex, and it made improving the
+// rule a two-file edit that a refactor silently broke — which is exactly what
+// happened the first time the substring bug was fixed. One fact, one home:
+// `src/state/secret-names.ts`.
+//
+// What the rule refuses: a top-level state key that unambiguously names a
+// credential and is broadcast to every client stops the app from BOOTING in dev
+// — after the suite went green, because tests never compose the app. A field
+// report: a display label named `namePrivateKey` refused the boot, and the
+// override (`publicFields`) took a docs search. This lint is what says so
+// before the boot does.
 export const checkCredentialFieldName: Checker = (ctx) => {
   const { tsFiles, tsxFiles, cells, report, pass } = ctx;
   let found = 0, checked = 0;
@@ -4507,8 +4741,7 @@ export const checkCredentialFieldName: Checker = (ctx) => {
       );
       const bad = info.stateKeys.filter((k) =>
         !top.has(k) && !deepHeads.has(k) && !vis.publicFields.includes(k) &&
-        HARD_SECRET_RE.test(k) && !PUBLIC_HINT_RE.test(k) &&
-        !NONSECRET_SUFFIX_RE.test(k)
+        isRefusableCredential(k)
       );
       if (bad.length === 0) continue;
       const line = code.slice(0, m.index!).split("\n").length;
@@ -4577,6 +4810,17 @@ export const checkEmptyStateCollection: Checker = (ctx) => {
         if (depth === 0) sEnd = i;
       }
     }
+    // An OUTER annotation on the whole state literal —
+    // `state: { jobs: [], nextId: 1 } as State` — types every key contextually,
+    // so `jobs` is `Job[]`, not `never[]`, and the cascade this rule exists to
+    // pre-empt cannot happen. Reported anyway, it was a rule being right for
+    // the wrong reason on code `deno check` had already cleared, and a linter
+    // that is right for the wrong reason trains you to ignore it. The
+    // per-key check below already honours a trailing `as`/`satisfies`; this is
+    // the same escape hatch one level out, which is where a field report's app
+    // had put it.
+    const afterState = lit.slice(sEnd + 1, sEnd + 40);
+    if (/^\s*(?:as|satisfies)\b/.test(afterState)) continue;
     const stateBlock = lit.slice(sIdx, sEnd);
     // `key: []` / `key: {}` / `key: new Map()` — the empty forms whose type is
     // useless. A trailing `as …` / `satisfies …` is the annotation we are

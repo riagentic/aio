@@ -258,3 +258,87 @@ Deno.test("visibility: a real secret name is still caught at every boundary", ()
     );
   }
 });
+
+// ── A word, not a substring ──────────────────────────────────────────────
+//
+// `SECRET_FIELD_RE` was an unanchored alternation, so `key` matched inside
+// `monkey`, `keyboard`, `donkey` and `whiskey`; `seed` inside `seedling`;
+// `priv` inside `privacy`. A field report on a music app had three of about
+// twenty state fields flagged as credentials, and named the real cost: "by hour
+// four I was skimming warnings instead of reading them."
+//
+// That is the failure this pins. A security warning that cries wolf is worse
+// than no warning at all, because the one that matters arrives looking exactly
+// like the ones that did not.
+Deno.test("visibility: an ordinary word that CONTAINS a secret word is not one", () => {
+  for (
+    const name of [
+      "monkey",
+      "donkey",
+      "whiskey",
+      "turkey",
+      "hockey",
+      "lowkey",
+      "keyboard",
+      "keyword",
+      "keying",
+      "seedling",
+      "seeded",
+      "privacy",
+      "passwordless",
+    ]
+  ) {
+    const c = cell(`ok_${name}`, {
+      state: { [name]: "" } as Record<string, unknown>,
+      methods: { noop(_s: unknown) {} },
+    });
+    const w = warningsFor([c]);
+    assertEquals(
+      w.filter((l) => l.includes("looks secret")).length,
+      0,
+      `"${name}" is an ordinary word — flagging it is how this warning stops ` +
+        `being read; got: ${w.join(" | ")}`,
+    );
+  }
+});
+
+Deno.test("visibility: the word at any real boundary is still caught", () => {
+  // Narrowing the match must not blind it. These are SOFT — each word is also
+  // an ordinary noun somewhere, so they warn rather than refuse.
+  for (
+    const name of ["key", "key2", "2key", "masterSeed", "walletSeed", "SECRET"]
+  ) {
+    const c = cell(`hit_${name.toLowerCase().replace(/[^a-z0-9]/g, "_")}`, {
+      state: { [name]: "" } as Record<string, unknown>,
+      methods: { noop(_s: unknown) {} },
+    });
+    const w = warningsFor([c]);
+    assert(
+      w.some((l) => l.includes("looks secret")),
+      `"${name}" must still be flagged; got: ${w.join(" | ")}`,
+    );
+  }
+});
+
+Deno.test("visibility: an unambiguous credential still REFUSES to boot", () => {
+  // The hard tier, which is a refusal rather than a warning — and therefore the
+  // one that must never fire on an ordinary name. `passwordless` above is that
+  // case: as a substring match it did not boot the app at all.
+  for (const name of ["apiKey", "api_key", "API_KEY", "userPassword"]) {
+    const c = cell(`hard_${name.toLowerCase().replace(/[^a-z0-9]/g, "_")}`, {
+      state: { [name]: "" } as Record<string, unknown>,
+      methods: { noop(_s: unknown) {} },
+    });
+    let refused = "";
+    try {
+      warningsFor([c]);
+    } catch (e) {
+      refused = e instanceof Error ? e.message : String(e);
+    }
+    assert(
+      refused.includes("SECURITY") && refused.includes(name),
+      `"${name}" is an unambiguous credential and must refuse the boot; ` +
+        `got: ${refused || "(no refusal)"}`,
+    );
+  }
+});

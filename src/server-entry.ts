@@ -91,3 +91,24 @@ export { peerHello } from "./protocol/protocol-version.ts";
  *  build stamp): call it in the entry or a cell method and put the string in
  *  cell state, the way any other server fact reaches the browser. */
 export { _appVersion as appVersion } from "./server/aio.ts";
+
+// `route()` — the request helper `src/server/route.ts` opens with 22 lines of
+// documentation and three worked examples, describing exactly what apps
+// "re-rolled every time": `:id` path params with the decoding hazard handled, a
+// method guard that lets HEAD ride with GET, cookie parse/serialize, and a JSON
+// helper. It was defined, documented, tested — and exported from no public
+// subpath, so `import { route } from "aio/server"` was TS2305 and every app
+// hand-rolled the parsing anyway. One field report converted four hand-written
+// param parsers (and their traversal guards) to it in 19 lines the moment it
+// became reachable. The types go with it: a raw handler's second argument is a
+// `RouteMatch`, and an app that cannot name that type hand-declares its shape.
+export {
+  type CookieOptions,
+  parseCookies,
+  type RawRouteHandler,
+  route,
+  type RouteContext,
+  type RouteMatch,
+  type RouteOptions,
+  serializeCookie,
+} from "./server/route.ts";

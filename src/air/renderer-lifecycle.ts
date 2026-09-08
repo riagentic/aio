@@ -32,7 +32,31 @@ function _warnOutsideRender(hook: string): void {
 /**
  * Register a callback to run after the component's first render.
  * Must be called inside a component function body during render.
+ *
+ * A returned function is the callback's CLEANUP and runs on unmount — the same
+ * contract React, Solid, Svelte and Vue all use, so the shape every developer
+ * arrives with is the shape that works. It used to be dropped: TypeScript lets
+ * a `() => void` callback return anything, so
+ *
+ *     onMount(() => { const t = setInterval(poll, 400); return () => clearInterval(t); });
+ *
+ * type-checked, looked right, and leaked the timer for the life of the process.
+ * A wallet shipped that three times in three components over months — every
+ * send dialog ever opened left another interval waking the loop 2.5×/second,
+ * each holding its component's whole closure alive — and there was no gate that
+ * could have caught it, because nothing was wrong with the code as written.
+ * `onCleanup` still works exactly as before; this is the second door, and the
+ * one people knock on first.
  */
+//
+// The SIGNATURE is unchanged, deliberately. TypeScript gives a callback declared
+// `() => void` a special rule — any return value is accepted — which is both why
+// the leak compiled and why nothing here needs to move: `return () => clear()`
+// already type-checks against this exact signature, so honouring it at runtime
+// is the whole fix. Widening the type to `() => void | (() => void)` would LOSE
+// that rule and stop `onMount(() => count++)` compiling in every app that has
+// one; an overload pair keeps it but reshapes the public signature, and the
+// surface is frozen. Runtime-only is the shape that costs nobody anything.
 export function onMount(fn: () => void): void {
   if (!_currentCollector) {
     _warnOutsideRender("onMount");

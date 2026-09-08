@@ -81,6 +81,15 @@ export function _getOrCreateCellSignal(
 ): Signal<any> {
   let sig = _cellSignals.get(name);
   if (!sig) {
+    // NOT `signal(initial, name)`. A named signal opts into a different dev
+    // diagnostic — `signal "X" update skipped (shallow-equal)` on every no-op
+    // `set` — which is a useful thing to ask for on a signal you named for that
+    // reason and pure noise on every cell in every app. Naming them here turned
+    // it on for all of them, and a test that asserts a plain component handle
+    // is silent caught it.
+    //
+    // The name is still available where it is wanted: `cellSignalName()` reads
+    // it back off THIS registry, which is the one place that actually knows it.
     sig = signal(initial);
     _cellSignals.set(name, sig);
   }
@@ -168,4 +177,19 @@ export function _resetSignals(): void {
   _connected.set(false);
   _ready.set(false);
   for (const sig of _cellSignals.values()) sig.set(undefined);
+}
+
+/** The cell a tracked signal belongs to, or null.
+ *
+ *  A reverse lookup over the cell registry rather than a name stored on the
+ *  signal, because a stored `_name` opts the signal into the noisy no-op-set
+ *  warning (see `_getOrCreateCellSignal`). Dev-only callers, and the map is one
+ *  entry per cell, so the scan is not worth an index.
+ *
+ *  Used by the untracked-read warning: "a cell/signal value was read inside
+ *  afterRender" is a puzzle; "`speech` was read inside afterRender" is an
+ *  answer. */
+export function cellSignalName(sig: unknown): string | null {
+  for (const [name, s] of _cellSignals) if (s === sig) return name;
+  return null;
 }

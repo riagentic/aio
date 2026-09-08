@@ -71,6 +71,7 @@ import { createWsManager, isPeerGone } from "./server-ws.ts";
 import { createBroadcaster } from "./server-broadcast.ts";
 import { createStaticHandler, isShellAsset } from "./server-static.ts";
 import { createFileWatcher } from "./server-watcher.ts";
+import { _runAppCssStep } from "./server-css-step.ts";
 import {
   scanServerOnlyImports,
   startGraphValidation,
@@ -741,6 +742,8 @@ export function createServer(config: ServerConfig): ServerHandle {
 
   // ── File watcher — debounced live reload (dev only) ──
   let watcher: ReturnType<typeof createFileWatcher> | null = null;
+  /** The boot run of the app's `build.css` step, awaited at shutdown. */
+  let _cssBootRun: Promise<void> | null = null;
   if (!prod) {
     watcher = createFileWatcher({
       absBaseDir,
@@ -752,8 +755,21 @@ export function createServer(config: ServerConfig): ServerHandle {
       onCellChange: config.onCellChange,
       onGraphResult: (result) => graphValidation?.setResult(result),
       prodGraph: graphValidation?.prodGraph,
+      runCss: () => _runAppCssStep(absBaseDir),
     });
     watcher.start();
+    // Once at boot too: a dev server that serves the stylesheet from the last
+    // BUILD until the first edit is the same wrong-answer shape as serving a
+    // stale one after an edit.
+    //
+    // TRACKED, not fire-and-forget. `void`-ing it left a promise (and, for an
+    // app with no step, a `Deno.readDir`) outliving whatever started the
+    // server: eight tests that only boot one reported a leaked readDir, and
+    // the sanitizers are right — work nobody owns is exactly what this
+    // project's own leak round existed to remove. `_runAppCssStep` returns
+    // immediately for an app that declares no step, so the common case costs
+    // nothing at all.
+    _cssBootRun = _runAppCssStep(absBaseDir).then(() => {}, () => {});
   }
 
   // ── Build TrojanDeps lazily (uses wsMgr) ──
@@ -1686,6 +1702,9 @@ export function createServer(config: ServerConfig): ServerHandle {
       _unsubRevoke?.();
       wsMgr.shutdown();
       if (graphValidation) await graphValidation.done.catch(() => {});
+      // The boot CSS run, if the app declared one — a subprocess and two
+      // directory reads that must not outlive the server that started them.
+      if (_cssBootRun) await _cssBootRun;
       await Promise.all([
         httpServer.shutdown(),
         trojanServer?.shutdown(),

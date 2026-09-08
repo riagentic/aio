@@ -113,6 +113,7 @@ export const VERB_FLAGS: Readonly<Record<string, readonly string[]>> = {
   // `--pose` is NOT here: cmdShot refuses it by name with a better message,
   // and this list is what "shot takes:" prints. See RECOGNISED_NOT_OFFERED.
   shot: ["--full", "--out"],
+  eval: ["--window"],
   sql: [],
   tables: [],
   schedules: [],

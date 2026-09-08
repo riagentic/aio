@@ -23,6 +23,7 @@ The public surface is exactly what the CI-enforced snapshot locks
   | `aio/server`           | the server-only values (SQLite, CLI/UDS transport) |
   | `aio/state-core`       | the cell registry / send / sync routing            |
   | `aio/db`               | database types + pure schema helpers               |
+  | `aio/log`              | the logger, as a leaf — 13 modules, not the barrel |
   | `aio/extras`           | deep detail types, `checkCells`, `parseCli`        |
   | `aio/sync`             | the CRDT sync types and engine                     |
   | `aio/testing`          | `testCell` / `testUI` / `testServer` and friends   |

@@ -76,7 +76,41 @@ export function page<K extends string>(
 
 // ── Router hooks ──────────────────────────────────────────────────
 
-/** Current route state -- reads routePath/routeSearch signals (auto-tracked by AIR). */
+/** The params a route PATTERN declares, as a type.
+ *
+ *  `"/users/:id/posts/:postId"` → `{ id: string; postId: string }`, and a
+ *  wildcard contributes `"*"`. Everything is `string` — that is what a URL
+ *  segment is — so the value this adds is the KEY set: `params.postId` exists
+ *  and `params.postld` is a compile error instead of `undefined` at runtime.
+ *
+ *  Two field reports asked for this independently, and one checked the
+ *  implementation with `deno check` including a `@ts-expect-error` case proving
+ *  `{ idd: "1" }` is rejected for `"/users/:id"`. Zero runtime. */
+export type RouteParams<S extends string> = string extends S
+  // A non-literal `string` pattern promises nothing about its keys, so it keeps
+  // the open map rather than narrowing to `{}` — narrowing there would be a
+  // confident wrong answer about a pattern nobody typed.
+  ? Record<string, string>
+  : S extends `${string}:${infer P}/${infer Rest}`
+    ? { [K in P]: string } & RouteParams<`/${Rest}`>
+  : S extends `${string}:${infer P}` ? { [K in P]: string }
+  : S extends `${string}*${string}` ? { "*": string }
+  : Record<never, string>;
+
+/** Current route state -- reads routePath/routeSearch signals (auto-tracked by AIR).
+ *
+ *  TWO OVERLOADS, and the first is the one that has always been here — so every
+ *  existing call compiles unchanged, including `useRoute<{ id: string }>(…)`
+ *  with the params spelled by hand. The second infers them from the pattern
+ *  when it is a literal, which is what a router user checks first. Overload
+ *  resolution tries them in order, so the explicit form always wins where it
+ *  was used; the inferring one is reachable only where nothing was passed. */
+export function useRoute<
+  P extends Record<string, string> = Record<string, string>,
+>(pattern?: string): RouteState<P>;
+export function useRoute<const S extends string>(
+  pattern: S,
+): RouteState<RouteParams<S>>;
 export function useRoute<
   P extends Record<string, string> = Record<string, string>,
 >(pattern?: string): RouteState<P> {

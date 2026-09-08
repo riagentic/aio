@@ -589,14 +589,18 @@ const VIOLATIONS: Case[] = [
     expect: "setTimeout/setInterval in cell code",
   },
   {
-    name: "many state keys, no ui filter",
+    name: "many state keys, no visibility filter",
     files: app({
       "src/cell.ts": cellFile(
         "counter",
         `{ state: { a: 0, b: 0, c: 0, d: 0, e: 0, f: 0, g: 0, h: 0, i: 0, j: 0, k: 0, l: 0 }, methods: { go(s: { a: number }) { s.a++; } } }`,
       ),
     }),
-    expect: "consider cell-level ui filters",
+    // Was "consider cell-level ui filters" — and `ui:` is not a cell config
+    // key (`cell()` throws on it), so the only spelling that could clear the
+    // hint was one the runtime refuses. Four field reports called the hint
+    // unactionable noise; they were right for a reason nobody had spotted.
+    expect: "no `visible:` filter on any of them",
   },
   {
     name: "console.log in app code",
@@ -910,7 +914,21 @@ await aio.run({ perfBudget: { methods: { "models:scan": { timeout: 0 } } } });
       "src/legacy.ts":
         `import { cell } from "../dep/aio/mod.ts";\nexport const c = cell;\n`,
     }),
-    expect: 'legacy import path "../dep/aio/..."',
+    expect: "is the published entry `aio`",
+  },
+  {
+    // The other half of the same rule: a deep path that NO public entry
+    // re-exports. The old single warning told this file to "use \"aio\"
+    // instead", which does not compile — the file was an app's copy of aio's
+    // own browser-graph checker, and following the advice would have deleted
+    // the check standing between a server-only import and a blank screen.
+    name: "deep import of framework internals",
+    files: app({
+      "src/deep.ts":
+        `import { validateGraph } from "../dep/aio/src/server/graph-validator.ts";\n` +
+        `export const v = validateGraph;\n`,
+    }),
+    expect: "is framework INTERNALS",
   },
   {
     name: "Node.js API",

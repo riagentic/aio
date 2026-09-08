@@ -85,6 +85,7 @@ import { cmdPin } from "./am/am-cmd-pin.ts";
 import { cmdTheme } from "./am/am-cmd-theme.ts";
 import { cmdCost } from "./am/am-cmd-cost.ts";
 import { cmdShot } from "./am/am-cmd-shot.ts";
+import { cmdEval } from "./am/am-cmd-eval.ts";
 import { cmdLab } from "./am/am-cmd-lab.ts";
 import {
   adoptRunningHome,
@@ -136,6 +137,7 @@ const COMMANDS: Record<string, CmdHandler> = {
   trigger: cmdTrigger,
   where: cmdWhere, // which execution context a file runs in, from the graph
   shot: cmdShot,
+  eval: cmdEval,
   sql: cmdSql,
   tables: cmdTables,
   schedules: cmdSchedules,

@@ -51,6 +51,7 @@
 - [AIR Setup & Server State](ui/air-setup.md) — React syntax.
 - [AIR Signals](ui/air-signals.md) — Signals are the reactive primitive.
 - [Migrating from React to AIR](ui/comparison.md) — Step-by-step migration guide for teams moving from React to AIR.
+- [Tailwind, PostCSS, Sass — a CSS toolchain](ui/css-toolchain.md) — aio runs your CSS build for you.
 - [`aio/ui` — the component kit](ui/kit.md) — A small, deliberately basic set of components for aio's core use case —
 - [React components in aio — islands](ui/react-islands.md) — aio's renderer is AIR, not React.
 - [Reactivity — what is tracked, and where](ui/reactivity-tracking.md) — A field report gave up an hour to this and asked for exactly one thing: "nowhere
@@ -200,6 +201,7 @@
 - [Upgrading from alpha74 to alpha75](upgrade/from-alpha74-to-alpha75.md) — snapshot moved by exactly one hash, the version string.
 - [Upgrading from alpha75 to alpha76](upgrade/from-alpha75-to-alpha76.md) — compatibility.
 - [Upgrading from alpha76 to alpha77](upgrade/from-alpha76-to-alpha77.md) — (docs/basics/semver-policy.md): every export, signature, flag, config key and
+- [Upgrading from alpha77 to beta1](upgrade/from-alpha77-to-beta1.md) — (docs/basics/semver-policy.md): every export, signature, flag, config key and
 - [Upgrade from v1.0.0-alpha8 to v1.0.0-alpha9](upgrade/from-alpha8-to-alpha9.md) — The internal machine state field is renamed.
 - [Upgrade from v1.0.0-alpha9 to v1.0.0-alpha10](upgrade/from-alpha9-to-alpha10.md) — Alpha10 is fully additive.
 - [Upgrade from v0.1 to v0.2](upgrade/from-v0.1-to-v0.2.md) — preserved)
@@ -223,6 +225,10 @@
 - [Cell workers (`worker: true`) — design](specs/2026-07-25-cell-workers.md) — Status: design (nothing built).
 - [One data directory, and updating a deployed app — design](specs/2026-07-26-data-dir-and-updates.md) — Status: Part 1 SHIPPED in 1.0.0-alpha38 (see
 - [Channelled app updates — design](specs/2026-08-08-app-updates.md) — Status: SHIPPED and wired — updates: "<url>" in aio.run() turns it on.
+
+## (root)
+
+- [Building an aio app without a human in the loop](AGENTS.md) — Five verbs.
 
 ## deploy
 

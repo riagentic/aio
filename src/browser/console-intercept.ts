@@ -37,6 +37,47 @@ export function _serialize(args: unknown[]): string {
   return full.length > MAX_MSG_LEN ? full.slice(0, MAX_MSG_LEN) : full;
 }
 
+/** The first frame OUTSIDE this file — where the `console.*` call was written.
+ *
+ *  Every forwarded line used to arrive attributed to the interceptor:
+ *
+ *      [gate] start, mouth led by 0ms   (aio://app/__aio/browser/console-intercept.ts:73)
+ *      [capture] camera off — captions … (aio://app/__aio/browser/console-intercept.ts:73)
+ *
+ *  Always the same location, whatever emitted it. Plain devtools, Vite, Next
+ *  and every Node logger report the CALLER's file and line; the interception is
+ *  a genuine feature — a field report calls renderer logs reaching the server
+ *  log the best thing in the framework — and it traded away the one piece of
+ *  metadata that makes a log line actionable. That report ended up prefixing
+ *  every message by hand (`[gate]`, `[capture]`, `[decode]`) to recover what
+ *  the runtime already knew and threw away.
+ *
+ *  Best-effort by construction: `Error.stack` is not standardised, so an engine
+ *  that formats it differently yields nothing and the line is exactly what it
+ *  was before. Never throws, never costs more than one Error construction. */
+function _callSite(): string | undefined {
+  try {
+    const lines = (new Error().stack ?? "").split("\n");
+    for (const raw of lines) {
+      const line = raw.trim();
+      if (!line.startsWith("at ")) continue;
+      // Skip this file's own frames — `_callSite`, `_forward`, and the console
+      // wrapper installed below all live here.
+      if (line.includes("console-intercept")) continue;
+      const m = /\(?((?:https?|file|aio):\/\/[^\s)]+)\)?$/.exec(line);
+      const at = m?.[1];
+      if (!at) continue;
+      // The tail is what a reader uses — a full `aio://app/...` URL with a
+      // query string is noise around `app.js:12:5`.
+      return at.length > 120 ? at.slice(-120) : at;
+    }
+  } catch {
+    // aio-ok: a stack we cannot parse is the ABSENCE of an improvement, not a
+    // fault — the line still carries everything it carried before.
+  }
+  return undefined;
+}
+
 function _stackFrom(e: unknown): string | undefined {
   if (e instanceof Error && typeof e.stack === "string") {
     const s = e.stack;
@@ -62,6 +103,7 @@ export function _forward(
       level,
       msg: _serialize(args),
       ts: Date.now(),
+      ...(_callSite() ? { source: _callSite() } : {}),
     };
     _send(enc("log", entry));
   } catch (e) {

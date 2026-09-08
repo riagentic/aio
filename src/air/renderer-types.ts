@@ -36,6 +36,9 @@ export interface ComponentInstance {
   /** Root state reference for per-mount pending queue isolation. */
   _root: RootState;
   /** Callbacks to run after first mount. */
+  /** A callback may RETURN a cleanup — `_flushMounts` registers it. The
+   *  declared `void` return is TypeScript's own rule: a `() => void` callback
+   *  accepts any return value, so this type is honest about the contract. */
   mountCallbacks: (() => void)[];
   /** Cleanup callbacks to run on unmount or before re-render (body-level). */
   cleanupCallbacks: (() => void)[];
@@ -111,6 +114,13 @@ export interface RootState {
 export interface AfterRenderEntry {
   fn: () => void;
   component?: string;
+  /** The registering component's RENDER-TIME dependency set, captured at
+   *  registration because the flush happens long after that frame is gone.
+   *  Dev only — it is what lets the flush tell "this callback read something
+   *  its component subscribes to" from "…something it does not", which is the
+   *  difference between an effect that re-runs and one that runs once. */
+  // deno-lint-ignore no-explicit-any
+  renderDeps?: Set<any> | null;
 }
 
 /** An instance's `onMount` callbacks, waiting for the DOM commit. */
@@ -133,6 +143,15 @@ export interface HookState {
 }
 
 export interface LifecycleCollector {
+  /** The RENDER-TIME tracking frame of the body currently executing. Read by
+   *  the dev-only untracked-read check, which compares it against what a
+   *  lifecycle callback goes on to read: a read outside this set subscribes to
+   *  nothing, so the callback runs once and never again. */
+  // deno-lint-ignore no-explicit-any
+  _renderDeps?: Set<any> | null;
+  /** A callback may RETURN a cleanup — `_flushMounts` registers it. The
+   *  declared `void` return is TypeScript's own rule: a `() => void` callback
+   *  accepts any return value, so this type is honest about the contract. */
   mountCallbacks: (() => void)[];
   cleanupCallbacks: (() => void)[];
   // deno-lint-ignore no-explicit-any

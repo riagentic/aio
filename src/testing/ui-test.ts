@@ -32,6 +32,9 @@ import {
 } from "../state/method-cancel.ts";
 import type { AioUser, AuthFeatures } from "../protocol/protocol-types.ts";
 import { _setDocument, _unmount, mount } from "../air/aio-renderer.ts";
+import { _resetContrastAudit } from "../air/contrast-audit.ts";
+import { _resetSelectorAudit } from "../air/selector-audit.ts";
+import { _resetUntrackedReadWarnings } from "../air/untracked-read.ts";
 import { getRegisteredCells } from "../state/cell-reactive.ts";
 import type { ComponentFn } from "../air/vdom-types.ts";
 import type { MountHandle, RootState } from "../air/renderer-types.ts";
@@ -1175,6 +1178,18 @@ async function _buildTestUI(
       // AFTER `_resetState()`: that call destroys the previous mount's cells,
       // and their onDestroy hooks must still find their methods bound.
       _resetAioRuntime();
+      // The renderer's own dev-audit memories. They are the same
+      // "have I already said this?" class `_resetAioRuntime` clears for the
+      // state layer — unreset, the SECOND test to trigger the same finding
+      // sees silence, so "it warns about X" passes alone and fails in a suite
+      // (or the reverse). They cannot live in `_resetAioRuntime` itself:
+      // that is `src/state/`, which may not import `src/air/` (the boundary
+      // matrix), and loosening a red gate to save a line is the wrong trade.
+      // The harness is the next-best owner, and it is the one every UI test
+      // goes through.
+      _resetContrastAudit();
+      _resetSelectorAudit();
+      _resetUntrackedReadWarnings();
     }
     standaloneApp = await standalone.aio.run({
       appId: "testui",

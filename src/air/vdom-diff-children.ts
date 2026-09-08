@@ -1,7 +1,7 @@
 // AIO VDOM child diffing — keyed and unkeyed reconciliation.
 // Accepts diffFn callback to avoid circular imports with vdom-diff.ts.
 
-import { _devWarn, _domNodeCount } from "./vdom-types.ts";
+import { _devWarn, _domNodeCount, _Null } from "./vdom-types.ts";
 import { isDevMode } from "../state/dev-flag.ts";
 import type { RenderCtx, VNode } from "./vdom-types.ts";
 import {
@@ -93,8 +93,20 @@ export function diffChildren(
   );
 
   if (isDevMode() && nextChildren.length > 1) {
-    const someKeyed = hasKeys;
-    const someUnkeyed = nextChildren.some(
+    // A `_Null` slot is not a sibling with a missing key — it is the absence of
+    // one. `{cond ? <span key="x"/> : null}` beside a keyed sibling is the most
+    // ordinary conditional JSX there is, and it warned "Mixed keyed and unkeyed
+    // children" naming `(no text)` as the offender. A field report silenced it
+    // by rendering a hidden placeholder — worse code than the warning
+    // prevented, which is the tell that the warning was wrong. Null slots carry
+    // no identity, so there is nothing for a key to say about them.
+    const real = nextChildren.filter(
+      (c) => !(typeof c === "object" && (c as VNode).tag === _Null),
+    );
+    const someKeyed = real.some(
+      (c) => typeof c === "object" && c.key !== undefined,
+    );
+    const someUnkeyed = real.some(
       (c) => typeof c === "object" && c.key === undefined,
     );
     // AIO-69: Warn when multiple element children have no keys at all — but
@@ -104,8 +116,8 @@ export function diffChildren(
     // right and no key would change it, yet the check counted them too: a
     // sidebar of four literal `<div>` panes warned on every boot of the
     // visual app manager, and the reader learned to skip the channel.
-    if (!someKeyed && someUnkeyed && nextChildren.length > 2) {
-      const vnodeChildren = nextChildren.filter(
+    if (!someKeyed && someUnkeyed && real.length > 2) {
+      const vnodeChildren = real.filter(
         (c) =>
           typeof c === "object" && typeof c.tag !== "undefined" &&
           _isFromArray(c),

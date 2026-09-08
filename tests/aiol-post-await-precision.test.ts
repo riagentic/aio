@@ -117,3 +117,49 @@ Deno.test("draftReadOffsets: meta is exempt, an ordinary field is not", () => {
   // Not a blanket $-exemption: only the four names the framework defines.
   assertEquals(draftReadOffsets("const x = s.$mine", "s").length, 1);
 });
+
+// ── Arguments are evaluated BEFORE the call that suspends ────────────────
+//
+// `await probeInto(s, id ?? s.activeId, force)` reads `s.activeId` before the
+// await, not after it — that is the language's own evaluation order, not a
+// subtlety. The rule matched `await` and `s.` on one line and reported it
+// anyway. A field report from an app with 404 green tests named the shape and
+// what it implies: the rule is loose where the code is inside a method and
+// blind where it is not, and a hint that fires on code the language guarantees
+// is correct is one more reason to stop reading hints.
+Deno.test("aiol: a read in the AWAITED call's arguments is pre-suspension", async () => {
+  const found = await hintsFor(`import { cell } from "aio";
+type S = { activeId: string; out: string };
+async function probeInto(_s: S, _id: string, _f: boolean) {}
+export const probe = cell("probe", {
+  state: { activeId: "", out: "" },
+  methods: {
+    async a(s: S, id?: string) {
+      await probeInto(s, id ?? s.activeId, true);
+    },
+  },
+});
+`);
+  assertEquals(
+    found,
+    [],
+    "the argument list runs before the call, so nothing has committed yet",
+  );
+});
+
+Deno.test("aiol: a read AFTER the awaited call is still flagged", async () => {
+  const found = await hintsFor(`import { cell } from "aio";
+type S = { activeId: string; out: string };
+async function probeInto(_s: S, _id: string, _f: boolean) {}
+export const probe = cell("probe", {
+  state: { activeId: "", out: "" },
+  methods: {
+    async b(s: S) {
+      await probeInto(s, "x", true);
+      s.out = s.activeId;
+    },
+  },
+});
+`);
+  assertEquals(found.length, 1, "this one really did cross a commit point");
+});

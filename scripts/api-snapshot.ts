@@ -48,7 +48,7 @@ const ROOT = new URL("../", import.meta.url);
  *  policy, and under the same beta freeze, as the types. */
 const CLI_ENTRY = "(cli)";
 
-type SymbolEntry = {
+export type SymbolEntry = {
   kind: string;
   /** Digest of the normalized declaration, or {@link UNPINNED} when `deno doc`
    *  describes the symbol as an opaque const and no alias target explains it. */
@@ -72,6 +72,18 @@ type SymbolEntry = {
    *  Value is `"opt:<digest>"` or `"req:<digest>"` — optionality is part of
    *  the promise, not part of the type. */
   members?: Record<string, string>;
+  /** One digest per DECLARATION, in source order — recorded only for an
+   *  overloaded symbol (a single declaration is already `sig`).
+   *
+   *  It exists for one provable rule: an overload set whose FIRST signature is
+   *  byte-identical to the previous single signature cannot break a caller.
+   *  The old signature is still there, so every call that resolved still
+   *  resolves — that is not a judgement about "probably compatible", it is the
+   *  language's overload resolution. Without this the gate held ONE digest for
+   *  the whole set, so ADDING an overload beside an untouched one and REPLACING
+   *  the only one produced the identical verdict, and adding an overload is the
+   *  main additive move a frozen surface has left. */
+  sigs?: string[];
 };
 /** One line of API drift, and whether it BREAKS a caller.
  *
@@ -93,6 +105,13 @@ export type Snapshot = {
 // ── Normalization ────────────────────────────────────────────────────
 
 /** Recursively strip machine/doc-text noise so digests are stable. */
+/** A declaration's `def` without `hasBody` — see the `sigs` comment. */
+function _withoutBody(def: unknown): unknown {
+  if (!def || typeof def !== "object") return def;
+  const { hasBody: _drop, ...rest } = def as Record<string, unknown>;
+  return rest;
+}
+
 function normalize(value: unknown): unknown {
   if (Array.isArray(value)) return value.map(normalize);
   if (value && typeof value === "object") {
@@ -316,6 +335,31 @@ async function extractMembers(
 
   for (const m of props) {
     if (typeof m?.name !== "string") continue;
+    // ONE LEVEL DOWN, for a member whose type is an inline object literal.
+    //
+    // Same reasoning as the per-member digests themselves, one level deeper:
+    // without this, a whole-declaration digest for `expect: { state, status,
+    // … }` meant that ADDING an optional assertion to it and RENAMING one
+    // produced the identical verdict — "type changed", BREAKING. That made
+    // every routine addition to a nested config or assertion object look like
+    // a break, which is precisely the noise this file's own header says the
+    // member digests exist to remove.
+    //
+    // The parent keeps a key so its PRESENCE and optionality stay tracked;
+    // its shape moves into `parent.child` entries, so an added optional child
+    // reads as additive, and a removed or reshaped one still reads as
+    // breaking. Only one level: two would start naming positions inside
+    // deeply generic types where "the part that changed" stops being a thing
+    // a reader can act on.
+    const nested = objectMembers(m.tsType as DocDeclaration | undefined);
+    if (nested.length > 0) {
+      out[m.name] = `${m.optional ? "opt" : "req"}:object`;
+      for (const nm of nested) {
+        if (typeof nm?.name !== "string") continue;
+        await put(`${m.name}.${nm.name}`, !!nm.optional, nm);
+      }
+      continue;
+    }
     await put(m.name, !!m.optional, m);
   }
   return out;
@@ -407,11 +451,34 @@ async function buildSnapshot(): Promise<{
         })))),
       );
       const members = opaque ? undefined : await extractMembers(decls);
+      // Computed with the SAME formula as `sig` on a one-element array, so a
+      // single-declaration `sig` and an overload's `sigs[0]` are comparable.
+      // Recorded for EVERY symbol, not just an overloaded one, because the
+      // rule needs both sides: the committed snapshot is the "before", and a
+      // before with no `sigs` can never be recognised as the first element of
+      // an after. One regeneration adds them everywhere and changes no `sig`.
+      //
+      // `hasBody` is stripped here and NOT from `sig`: whether a declaration
+      // carries an implementation is invisible to a caller, and it FLIPS the
+      // moment overloads are introduced — so leaving it in would make "the same
+      // signature, now with an overload beside it" hash differently from "the
+      // same signature", which is exactly the case this exists to recognise.
+      // Stripping it from `sig` too would re-hash 273 existing symbols at once,
+      // and a 273-line "BREAKING" diff is where a real change hides.
+      const sigs = opaque ? undefined : await Promise.all(
+        decls.map((d) =>
+          sha256Hex(JSON.stringify(normalize([{
+            kind: d.kind,
+            def: _withoutBody(d.def),
+          }])))
+        ),
+      );
       symbolEntries[sym.name] = {
         kind: kinds.join("+"),
         sig,
         ...(experimental ? { experimental: true as const } : {}),
         ...(members && Object.keys(members).length ? { members } : {}),
+        ...(sigs ? { sigs } : {}),
       };
       if (opaque) {
         const file = declFile(decls);
@@ -517,6 +584,26 @@ const partLabel = (p: string) => p.slice(p.indexOf("~") + 1);
  *  Returns `null` when either side has no member map — an older snapshot, a
  *  union, an overload — so the caller falls back to the blunt whole-symbol
  *  verdict rather than guessing. */
+/** True when `b` is `a` plus overloads, with `a`'s own signature(s) untouched
+ *  and still FIRST.
+ *
+ *  The one signature change that is provably additive. Overload resolution
+ *  tries declarations in order, so a call that resolved against the old
+ *  signature still resolves against it — the new ones are only reachable by
+ *  arguments the old one rejected. Order matters and is checked: an overload
+ *  inserted BEFORE the old one can capture calls that used to go elsewhere,
+ *  which is a real break wearing an additive shape. */
+export function overloadAdded(a: SymbolEntry, b: SymbolEntry): boolean {
+  // BOTH sides must carry them. A committed snapshot from before `sigs`
+  // existed cannot be read as "the first of" anything, and guessing there
+  // would let a real reshape through as an addition.
+  const before = a.sigs, after = b.sigs;
+  if (!before || !after) return false;
+  if (after.length <= before.length) return false;
+  if (a.kind !== b.kind) return false;
+  return before.every((d, i) => after[i] === d);
+}
+
 export function diffMembers(
   entry: string,
   name: string,
@@ -666,6 +753,15 @@ export function diffSnapshots(
               `describes it, so the gate can no longer see it change`,
             !sa.experimental,
             sa.experimental,
+          );
+        } else if (overloadAdded(sa, sb)) {
+          // The previous signature is still there, verbatim, as the first
+          // overload — so nothing that compiled can stop compiling.
+          add(
+            `+ ${entry} › ${name} gained ${
+              (sb.sigs?.length ?? 1) - (sa.sigs?.length ?? 1)
+            } overload(s) — the previous signature is unchanged`,
+            false,
           );
         } else {
           const detail = diffMembers(entry, name, sa, sb);

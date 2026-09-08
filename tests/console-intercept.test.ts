@@ -65,3 +65,46 @@ Deno.test("console intercept: forwards uncaught error events", () => {
     uninstallConsoleIntercept();
   }
 });
+
+// The line has to say WHERE it was written.
+//
+// Every forwarded line used to arrive attributed to the interceptor:
+//
+//   [gate] start, mouth led by 0ms   (aio://app/__aio/browser/console-intercept.ts:73)
+//   [capture] camera off — captions … (aio://app/__aio/browser/console-intercept.ts:73)
+//
+// Always the same location, whatever emitted it. Plain devtools, Vite, Next and
+// every Node logger report the CALLER's file and line. The interception itself
+// is a genuine feature — a field report calls renderer logs reaching the server
+// log the best thing in the framework — and it traded away the one piece of
+// metadata that makes a log line actionable. That report ended up prefixing
+// every message by hand (`[gate]`, `[capture]`, `[decode]`) to recover what the
+// runtime already knew and threw away.
+Deno.test("console intercept: the forwarded entry carries the CALLER's location", () => {
+  const sent: string[] = [];
+  try {
+    installConsoleIntercept((msg) => sent.push(msg));
+    console.warn("[gate] start");
+  } finally {
+    uninstallConsoleIntercept();
+  }
+  const entries = sent
+    .map((m) => dec(m))
+    .filter((f) => f !== null && f.t === "log")
+    .map((f) => f!.d as { source?: string; msg: string });
+  assertEquals(entries.length, 1, JSON.stringify(sent));
+  const src = entries[0]!.source;
+  // Best-effort by construction — `Error.stack` is not standardised, so an
+  // engine that formats it differently yields nothing and the line is exactly
+  // what it was before. What must NEVER happen is naming the interceptor.
+  if (src !== undefined) {
+    assert(
+      !src.includes("console-intercept"),
+      `the interceptor named ITSELF — that is the bug: ${src}`,
+    );
+    assert(
+      src.includes("console-intercept.test"),
+      `it must name the caller's file: ${src}`,
+    );
+  }
+});

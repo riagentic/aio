@@ -460,6 +460,11 @@ export function _createHooks(rootState: RootState): VDomHooks {
       // onCleanup all register through the collector, so a callback that throws
       // later can be reported against the component that scheduled it.
       collector._component = _componentName(vnode.tag);
+      // The live tracking frame, so a lifecycle callback registered from this
+      // body can be compared against what the body actually subscribed to.
+      // Captured by REFERENCE and read at flush time, by which point the body
+      // has finished filling it. Dev-only consumer (air/untracked-read.ts).
+      collector._renderDeps = deps;
       _setCurrentCollector(collector);
 
       return {

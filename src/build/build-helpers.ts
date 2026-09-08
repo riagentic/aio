@@ -70,6 +70,20 @@ export async function copyDir(src: string, dst: string): Promise<void> {
       await copyDir(srcPath, dstPath);
     } else if (entry.isSymlink) {
       const target = await Deno.readLink(srcPath);
+      // REPLACE, never "create beside". `Deno.symlink` refuses an existing
+      // path, and the scratch AppDir is shared by every platform pass of one
+      // `--platforms=…` run — so a macOS x64 pass left its `Electron.app`
+      // behind and the arm64 pass died copying its own runtime over it:
+      //
+      //   AlreadyExists: File exists (os error 17): symlink 'A' ->
+      //     …/Electron Framework.framework/Versions/Current
+      //
+      // Only .app bundles carry symlinks at those paths, so only the
+      // macOS→macOS-arm64 order hit it, which is why it survived: a build that
+      // fails on the FOURTH platform and nowhere else reads as a macOS
+      // problem. A stale link from a previous pass must not survive into this
+      // one whatever the order.
+      await Deno.remove(dstPath).catch(() => {});
       await Deno.symlink(target, dstPath);
     } else {
       await Deno.copyFile(srcPath, dstPath);

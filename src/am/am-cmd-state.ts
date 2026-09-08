@@ -498,6 +498,7 @@ export async function cmdDispatch(
     result?: unknown;
     resultDropped?: boolean;
     unsaved?: string | null;
+    short?: string;
   };
   // `ok: true` means APPLIED — the method ran, the commit is broadcast — and
   // says nothing about the disk: the write reaches SQLite with the next
@@ -515,11 +516,18 @@ export async function cmdDispatch(
     ? (typeof data.unsaved === "string" ? data.unsaved : null)
     : await persistRefusal(port, appId);
   const notSaved = unsaved ? `\n  ⚠ NOT SAVED — ${unsaved}` : "";
+  // The call RAN with arguments missing. The framework has always known — it
+  // warns at `methodArgs` — and has always said it into the SERVER LOG, while
+  // this command printed a clean "dispatched" to the person who made the call.
+  // An agent driving a live app never reads that log. Measured shape:
+  // `am dispatch todo:add` for `add(s, text)` wrote a row whose declared field
+  // was simply gone, under `{"ok":true}`.
+  const short = typeof data?.short === "string" ? `\n  ⚠ ${data.short}` : "";
   if (mode === "pretty") {
     const label = flags.asServer ? "dispatched (as server)" : "dispatched";
     if (data?.resultDropped) {
       out(
-        `${label} — the method returned a value JSON cannot carry${notSaved}`,
+        `${label} — the method returned a value JSON cannot carry${notSaved}${short}`,
         mode,
       );
     } else if (data && "result" in data) {
@@ -533,9 +541,9 @@ export async function cmdDispatch(
         () =>
           (typeof data.result === "object" && data.result !== null
             ? stack(style.dim(label), describe(data.result))
-            : `${style.dim(label)} ${String(data.result)}`) + notSaved,
+            : `${style.dim(label)} ${String(data.result)}`) + notSaved + short,
       );
-    } else out(label + notSaved, mode);
+    } else out(label + notSaved + short, mode);
   } else {
     // Additive: the reply object verbatim, plus `unsaved` only when there is
     // a refusal to carry — a healthy app's `am dispatch --json` is byte-for-

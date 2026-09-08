@@ -91,20 +91,82 @@ Deno.test("aiol: soft secret-ish names (bare `secret`, `token`) stay out of the 
   assertEquals(clean, []);
 });
 
-Deno.test("aiol: the lint's regexes are byte-identical to aio-composition's (one fact, one spelling)", async () => {
-  const lint = await Deno.readTextFile(
-    new URL("../aiol/checks.ts", import.meta.url),
-  );
-  const runtime = await Deno.readTextFile(
-    new URL("../src/server/aio-composition.ts", import.meta.url),
-  );
+// The rule has ONE home now, and this is what replaced the byte-comparison.
+//
+// The old test read `HARD_SECRET_RE`, `PUBLIC_HINT_RE` and
+// `NONSECRET_SUFFIX_RE` out of both `aiol/checks.ts` and
+// `src/server/aio-composition.ts` and compared the text. Right instinct, wrong
+// mechanism: it could only catch drift after someone wrote the comparison, it
+// could not see a difference in how the two USED the same regex — each
+// re-assembled the composite `isHardSecret(k) && !PUBLIC_HINT_RE.test(k) &&
+// !NONSECRET_SUFFIX_RE.test(k)` by hand — and it made improving the rule a
+// two-file edit that a refactor silently broke. Which is what happened: the
+// substring fix landed in the runtime and left the linter still refusing to
+// lint an app with a field called `passwordless`.
+//
+// So: neither file may hold a copy, both must reach the one module, and the two
+// answers are compared as BEHAVIOUR on the names that actually caused trouble.
+Deno.test("credential names: one home, and neither side keeps a copy", async () => {
   for (
-    const name of ["HARD_SECRET_RE", "PUBLIC_HINT_RE", "NONSECRET_SUFFIX_RE"]
+    const rel of ["../aiol/checks.ts", "../src/server/aio-composition.ts"]
   ) {
-    const re = new RegExp(`const ${name} =\\s*(/.*?/[a-z]*);`, "s");
-    const a = re.exec(lint)?.[1];
-    const b = re.exec(runtime)?.[1];
-    assert(a && b, `${name} must exist in both files`);
-    assertEquals(a, b, `${name} drifted between aiol and the boot refusal`);
+    const src = await Deno.readTextFile(new URL(rel, import.meta.url));
+    for (
+      const name of ["HARD_SECRET_RE", "PUBLIC_HINT_RE", "NONSECRET_SUFFIX_RE"]
+    ) {
+      assert(
+        !new RegExp(`const ${name}\\s*=`).test(src),
+        `${rel} declares its own ${name}. The rule lives in ` +
+          `src/state/secret-names.ts — a second copy is how the lint and the ` +
+          `boot refusal drifted the first time.`,
+      );
+    }
+    assert(
+      src.includes("secret-names.ts"),
+      `${rel} must reach the shared rule, not re-derive it`,
+    );
+  }
+});
+
+Deno.test("credential names: the lint and the boot agree, name by name", async () => {
+  const { isRefusableCredential } = await import(
+    "../src/state/secret-names.ts"
+  );
+  // Must REFUSE — an unambiguous credential broadcast to every client.
+  for (
+    const k of [
+      "apiKey",
+      "api_key",
+      "API_KEY",
+      "privateKey",
+      "secretKey",
+      "accessToken",
+      "authToken",
+      "userPassword",
+      "passphrase",
+      "mnemonic",
+    ]
+  ) {
+    assert(isRefusableCredential(k), `${k} must refuse the boot`);
+  }
+  // Must NOT — ordinary names that contain a credential word, plus the
+  // public-hint and metadata-suffix escapes the runtime already had.
+  for (
+    const k of [
+      "passwordless", // the one that would not boot
+      "monkey",
+      "keyboard",
+      "seedling",
+      "privacy",
+      "publicKey",
+      "pubKey",
+      "owner_public_key",
+      "apiKeyName",
+      "privateKeyId",
+      "tokenList",
+      "secretSanta",
+    ]
+  ) {
+    assert(!isRefusableCredential(k), `${k} must NOT refuse the boot`);
   }
 });

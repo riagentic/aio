@@ -75,7 +75,15 @@ export function writeClientLog(
     .slice(0, MAX_CLIENT_MSG)
     .replace(/\n/g, "\\n")
     .replace(/\r/g, "\\r");
-  const line = `[${ts}] [${lvl}] [client:${clientIndex}] ${msg}\n`;
+  // WHERE it was written, when the client could tell us. Untrusted like `msg`:
+  // clamped, newline-stripped, and only rendered when it looks like a location.
+  const rawSrc = typeof entry.source === "string" ? entry.source : "";
+  const src = rawSrc
+    .slice(0, 200)
+    .replace(/[\n\r]/g, " ")
+    .trim();
+  const where = src ? ` (${src})` : "";
+  const line = `[${ts}] [${lvl}] [client:${clientIndex}] ${msg}${where}\n`;
 
   _append(line);
 }

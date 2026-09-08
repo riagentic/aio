@@ -16,10 +16,32 @@ Deep links just work without server configuration.
 ## useRoute()
 
 ```ts
-function useRoute(pattern?: string): RouteState;
+function useRoute(pattern?: string): RouteState; // as before
+function useRoute<const S extends string>(
+  pattern: S,
+): RouteState<RouteParams<S>>;
 ```
 
 Subscribe to the current URL. Re-renders the component on navigation.
+
+**A literal pattern types its own params.** `useRoute("/users/:id")` gives
+`params.id`, and `params.idd` is a compile error rather than `undefined` at
+runtime:
+
+```tsx
+const { params } = useRoute("/users/:id/posts/:postId");
+params.postId; // string
+params.postld; // ✗ compile error — that key is not in the pattern
+```
+
+Everything is still `string` — that is what a URL segment is. What you gain is
+the KEY SET. A computed (non-literal) pattern keeps the open
+`Record<string, string>`, because a pattern nobody typed promises nothing about
+its keys.
+
+The hand-spelled form still works exactly as before —
+`useRoute<{ id: string }>("/users/:id")` — and so does every existing call: the
+previous signature is the first overload.
 
 ```tsx
 import { useRoute } from "aio/air";
@@ -41,12 +63,12 @@ function UserPage() {
 
 **RouteState:**
 
-| Field     | Type                     | Description                         |
-| --------- | ------------------------ | ----------------------------------- |
-| `path`    | `string`                 | Current `location.pathname`         |
-| `params`  | `Record<string, string>` | Named params from pattern (decoded) |
-| `search`  | `URLSearchParams`        | Current query string                |
-| `matched` | `boolean`                | Whether the pattern matched         |
+| Field     | Type              | Description                                                                                      |
+| --------- | ----------------- | ------------------------------------------------------------------------------------------------ |
+| `path`    | `string`          | Current `location.pathname`                                                                      |
+| `params`  | `RouteParams<S>`  | Named params from pattern (decoded) — `Record<string, string>` when the pattern is not a literal |
+| `search`  | `URLSearchParams` | Current query string                                                                             |
+| `matched` | `boolean`         | Whether the pattern matched                                                                      |
 
 ---
 

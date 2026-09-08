@@ -123,7 +123,62 @@ anything.
 
 The one that bites is **a read you deferred by accident**: capturing a value in
 `onMount` and storing it, or reading after an `await`. The symptom is always the
-same — state is correct, the DOM is stale, nothing warns.
+same — state is correct, the DOM is stale.
+
+**In dev, `onMount` and `afterRender` now warn** when they read something the
+render body did not, naming the value and the component:
+
+```
+[aio-dev] `speech.spokenId` was read inside afterRender in <App>, but NOT
+during its render. A component subscribes only to what its render body
+touches, so <App> will not re-render when this changes and afterRender will
+run once and never again — the feature works exactly once and then reports
+itself as "it works sometimes". Read it in the render body and close over the
+value.
+```
+
+That last sentence is why the warning exists rather than only this page. One
+codebase shipped this bug three times, in three features, by an author who had
+written the explaining comment into two of the earlier ones and read both while
+writing the third. Understanding the rule is not enough when nothing on the
+failing path mentions it.
+
+The other rows in the table still warn about nothing: an event handler and a
+`setTimeout` are _supposed_ to read untracked, so warning there would fire on
+correct code.
+
+### A cell is the right place to keep a fact, and the wrong place to test one against
+
+The corollary, and the one that reached a user. To do something exactly once —
+read a message aloud, send a notification — the obvious shape is to keep the
+marker in a cell and check against it:
+
+```tsx
+if (msg.id !== speech.spokenId) { // ✗ the marker has not moved yet
+  speak(msg.text);
+  speech.mark(msg.id); // a DISPATCH — lands on a later render
+}
+```
+
+`mark` is a dispatch, so the field does not move until a later render, and a
+streaming reply produces dozens of renders inside that window. Every one of them
+read the un-moved marker and spoke the message again. It was reported as "it
+repeats my text twice and the answer three times" — the count varying with how
+fast the tokens arrived, which is why it read as random.
+
+Keep the decision in a module-local variable, written synchronously at the
+moment it is made, and keep the cell field as the durable copy:
+
+```tsx
+let spoken = ""; // synchronous — the decision point
+if (msg.id !== spoken) {
+  spoken = msg.id;
+  speak(msg.text);
+  speech.mark(msg.id); // still persisted, for after a reload
+}
+```
+
+From a component, a cell write looks synchronous and is not.
 
 ```tsx
 // stale: `plan` is read once, after the body returned

@@ -32,6 +32,11 @@ const ACKNOWLEDGED: Record<string, string> = {
   "aio/sync":
     "the ENTRY pulls server-handler.ts; the browser reaches the sync engine " +
     "through browser-sync.ts instead, never through this specifier",
+  "aio/log":
+    "the LEAF logger, for a non-UI process that wants `log` without the " +
+    "barrel (measured: 13 modules against 260). Isomorphic and browser-safe " +
+    "— the browser reaches the same symbol through the `aio` map entry, so " +
+    "a second mapping for it would be a second spelling of one fact",
 };
 
 Deno.test("every published aio entry is browser-mapped, server-only, or named", () => {

@@ -358,19 +358,27 @@ Deno.test("report: body is capped and a hidden field never reaches the report", 
 Deno.test("PUBLIC_HINT_RE: the exemption cannot be claimed by a substring", async () => {
   // `pubsubSecretKey` used to be silently exempted from the credential gate
   // because /pub(lic)?/i matched anywhere in the name.
-  const src = await Deno.readTextFile(
-    new URL("../src/server/aio-composition.ts", import.meta.url),
+  //
+  // IMPORTED, not scraped. This read the regex out of `aio-composition.ts` by
+  // finding a line containing a literal prefix of its source, and when the rule
+  // moved to `src/state/secret-names.ts` — one home for the lint and the boot
+  // refusal — it failed with "PUBLIC_HINT_RE moved". That is a well-designed
+  // failure and it is still the wrong instrument: a test that reads code as
+  // TEXT cannot see whether the regex is still USED, or used the same way, and
+  // it breaks on every refactor that does not change behaviour.
+  const { looksSecret, PUBLIC_HINT_RE } = await import(
+    "../src/state/secret-names.ts"
   );
-  const line = src.split("\n").find((l) => l.includes("/(?:^|[_-])(?:pub|"));
-  assert(line, "PUBLIC_HINT_RE moved — re-point this test at it");
-  const re = new RegExp(line.trim().replace(/^\/|\/;$/g, ""));
   for (const k of ["pubKey", "publicKey", "owner_public_key", "PUB_KEY"]) {
-    assert(re.test(k), `${k} should still be treated as public`);
+    assert(PUBLIC_HINT_RE.test(k), `${k} should still be treated as public`);
+    assert(!looksSecret(k), `${k} must not be flagged: the hint is the point`);
   }
-  for (
-    const k of ["pubsubSecretKey", "republishedApiKey", "epubPassword"]
-  ) {
-    assert(!re.test(k), `${k} must NOT claim the public exemption`);
+  for (const k of ["pubsubSecretKey", "republishedApiKey", "epubPassword"]) {
+    assert(!PUBLIC_HINT_RE.test(k), `${k} must NOT claim the public exemption`);
+    // …and the claim that matters: the exemption not being claimed has to
+    // reach the DECISION. A hint regex that is correct and unread would pass
+    // the line above and leak the field anyway.
+    assert(looksSecret(k), `${k} must still be flagged as secret-ish`);
   }
 });
 

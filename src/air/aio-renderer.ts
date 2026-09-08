@@ -136,17 +136,23 @@ function _devA11yCheck(tag: string, props: Record<string, unknown>): void {
   // that helps nobody, and the framework's own <Modal> backdrop tripped it, so
   // the warning arrived about markup the app could not change.
   const presentational = props.role === "presentation" || props.role === "none";
+  // Elements the platform ALREADY activates from the keyboard: they are
+  // natively focusable and Enter/Space dispatches a real `click`, so the
+  // handler already runs. Asking for an `onKeyDown` here does not add
+  // accessibility, it adds a DOUBLE FIRE — a field report pointed out that on
+  // `<summary>` the suggested fix toggles the disclosure twice, i.e. the
+  // warning asks for a bug. `summary` and `label` were the two missing from
+  // this list; both forward activation to something else by spec.
+  const nativelyActivatable = tag === "button" || tag === "a" ||
+    tag === "input" || tag === "select" || tag === "textarea" ||
+    tag === "summary" || tag === "label" || tag === "option";
   if (
     props.onClick &&
     !presentational &&
     !props.onKeyDown &&
     !props.onKeyUp &&
     !props.onKeyPress &&
-    tag !== "button" &&
-    tag !== "a" &&
-    tag !== "input" &&
-    tag !== "select" &&
-    tag !== "textarea"
+    !nativelyActivatable
   ) {
     _warnA11yOnce(
       `[aio-dev] <${tag}> has onClick but no keyboard handler. Add onKeyDown for keyboard accessibility.`,
