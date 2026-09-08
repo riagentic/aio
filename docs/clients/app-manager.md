@@ -203,6 +203,18 @@ rotation story and a stolen copy is worthless.
 > thing — the failure mode (`app not running on port 8000`) otherwise reads like
 > the app is down when you are simply pointed at the other one.
 
+**Where the data is.** Three things are spelled like "where this app lives" and
+only one moves the database:
+
+|                       |                                                     |
+| --------------------- | --------------------------------------------------- |
+| `--home <dir>`        | addresses an existing instance — moves nothing      |
+| `AIO_APPS_DIR`        | moves the ROOT that homes resolve under             |
+| `aio.run({ appDir })` | moves the app's own directory, and the data with it |
+
+`am instances --json` reports `dataDir` on every row (`null` for a lock written
+before beta1), and `--long` shows a `DATA` column when it differs from `home`.
+
 ## Accounts and trust (`am auth`, `am trust`)
 
 ```sh
@@ -361,6 +373,23 @@ The default home keeps the plain `{appId}.lock`, so nothing migrates. A refusal
 duplicate, whose port and pid are your own instance's. `am --home=<dir>` (or
 `AIO_APPS_DIR=<root>`) targets the instance you mean; `am instances` shows each
 instance's `home`.
+
+**Filters.** A substring cannot ask "warnings and worse", "from this cell", or
+"since the restart":
+
+```sh
+am logs --level=warn              # warn AND above (debug < info < warn < error)
+am logs --tag=cell:todo           # exact tag
+am logs --tag=cell                # …or the whole namespace: cell:todo, cell:notes
+am logs --since=15m               # a duration (s/m/h/d) or a timestamp
+am logs --level=error --follow    # same filters live as in the tail
+```
+
+The unit is the **event**, not the line — an `ERROR` keeps its stack trace. A
+line whose header cannot be parsed passes every filter, because dropping what
+cannot be classified is how a filter hides the one line that mattered. An
+unreadable `--since` is refused, never ignored: a filter silently treated as no
+filter turns "I could not read that" into "nothing happened".
 
 ## Instance discovery
 
@@ -768,6 +797,32 @@ am surface --full                    # untruncated element text
 A filter that matches nothing exits non-zero and lists the components that ARE
 in the surface — an empty result is nearly always a typo.
 
+### Does the client graph build? (`am check`)
+
+`deno check` type-checks; it does not bundle. In aio those are different
+questions: `"aio"` resolves to `mod.ts` for the type-checker and to
+`browser-air.ts` for the browser bundle, so TypeScript checks the **union**
+while the bundle gets the **intersection**. Anything server-only imported into a
+cell type-checks cleanly and then fails to build.
+
+```sh
+am check                    # walk the client graph from the UI entry
+am check src/Other.tsx      # a different entry
+am check --json             # {entry, checked, modules, errors, warnings}
+```
+
+Exits non-zero on anything that would stop the bundle, naming file, line and the
+fix. Warnings never fail it — a gate that cries wolf is one people learn to pass
+with `|| true`.
+
+Scaffolded apps run it as part of `deno task check`, so the task's name is true
+and CI catches the same thing dev boot does. `am fix` adds it to an existing
+app.
+
+If it prints **`NOTHING CHECKED`**, it found no UI entry: correct for a
+`server-only` app, and otherwise a sign the entry is elsewhere — pass it, or set
+`entry` in deno.json, rather than leaving a green task that looked at nothing.
+
 ### Which context does a file run in? (`am where`)
 
 ```sh
@@ -830,6 +885,21 @@ instance, as everywhere in `am`.
 `--pose=<json>` is **not** supported: the app decides its own camera. Expose a
 cell method that sets the view, drive it with `am dispatch`, then `am shot`.
 
+**Freshness.** A screenshot is whatever the compositor last painted, which is
+not necessarily what you just did — dispatch, then capture, and the render may
+still be queued. `am shot` waits for the window to commit a frame before
+capturing, and reports whether it got one:
+
+```json
+{ "file": "app-1234.png", "bytes": 20481, "url": "…", "painted": true }
+```
+
+`"painted": false` (plus a `warning`, and a `! STALE RISK` line in plain output)
+means the window did not paint within `--timeout` — a hidden, minimised or
+occluded window is not composited. The file is still written, because an
+unconfirmed screenshot is worth having; it just cannot be vouched for. Raise the
+window, or raise `--timeout=`.
+
 ### Evaluate in the live window (`am eval`)
 
 `am surface` reads the UI **semantically** — components, names, text, values.
@@ -865,6 +935,48 @@ Three things it does for you, each because the raw protocol gets them wrong:
 
 Why it exists: without it, every agent driving an aio app writes the same
 fifteen lines of CDP client. Three field reports did, independently.
+
+## A private copy: `--instance=<name>`
+
+The singleton lock is on the appId, and the appId picks the data home — so two
+copies of one app are one app. An agent driving `am dispatch` and a human
+clicking in the same window were sharing a session: the agent's actions landed
+in the human's app, and the human's clicks landed in the agent's measurements.
+`--takeover` steals the lock; it does not give you your own.
+
+```sh
+am --instance=agent1 start          # its own lock, data home, socket and logs
+am --instance=agent1 dispatch todo:add --args='["x"]'
+am --instance=agent1 stop
+```
+
+Every `am` command takes it, and it must be passed each time — it selects which
+world you are talking to. The app started under it inherits the same scoping, so
+nothing in the app needs to know.
+
+It is not a new isolation mechanism: it resolves to
+`AIO_APPS_DIR=~/.aio-instances/<name>`, which aio already scopes the data root
+**and** the lock/socket directory by. An explicit `AIO_APPS_DIR` wins — it is
+the more specific instruction.
+
+## Reporting findings about aio (`am feedback`)
+
+Notes about aio itself — a bug, a rough edge, a suggestion — go in a file that
+belongs to **you**, not to a framework version:
+
+```sh
+am feedback                      # the directory, and what is already in it
+am feedback my-app               # the file my-app's findings belong in
+am feedback my-app --create      # …and start it from a template
+```
+
+The location is outside the version store (`$AIO_FEEDBACK_DIR` overrides it, and
+`XDG_DATA_HOME` is respected), so `am pin latest` and pruning an old version
+cannot delete it.
+
+Do **not** write findings into `dep/aio/feedback/`. That path is inside the
+pinned version's directory: it is absent from a release worktree entirely, and
+the next `am pin` orphans anything written there.
 
 ## Manual VM labs (`am lab`)
 

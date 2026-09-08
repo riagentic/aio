@@ -171,6 +171,67 @@ export function onGlobalKey(
   });
 }
 
+/**
+ * Listen for an event on the window this component is actually mounted in,
+ * for as long as it is mounted.
+ *
+ * The obvious spelling — `globalThis.addEventListener("mousemove", fn)` —
+ * looks right because in a single browser page `globalThis` IS the window. In
+ * aio it frequently is not: a component can be mounted in an Electron child
+ * window or a `<webview>`, where the bare global belongs to a DIFFERENT window
+ * and the handler never hears the event; and under `testUI` the mount lives in
+ * a happy-dom window while `globalThis` is Deno's, which is why registering
+ * there fails the test rather than quietly doing nothing.
+ *
+ * The correct-everywhere form is `el.ownerDocument.defaultView.addEventListener`
+ * — which is why a field report found every component in its repo carrying a
+ * `document.defaultView ?? globalThis` incantation, with the one place someone
+ * forgot it invisible. This resolves the same window for you, and removes the
+ * listener on unmount.
+ *
+ * ```tsx
+ * onWindowEvent("mousemove", (e) => setPos(e.clientX, e.clientY));
+ * onWindowEvent("resize", () => remeasure());
+ * ```
+ *
+ * The handler is read at event time, so it always sees the latest render's
+ * closure — the same ref discipline as `onGlobalKey`, `useRaf` and
+ * `useInterval`, and for the same reason: a listener registered once inside
+ * `onMount` would otherwise fire forever with render 1's variables.
+ *
+ * Call it during render, like every other hook.
+ */
+export function onWindowEvent<K extends keyof WindowEventMap>(
+  type: K,
+  fn: (e: WindowEventMap[K]) => void,
+  options?: AddEventListenerOptions,
+): void;
+export function onWindowEvent(
+  type: string,
+  fn: (e: Event) => void,
+  options?: AddEventListenerOptions,
+): void;
+export function onWindowEvent(
+  type: string,
+  fn: (e: Event) => void,
+  options?: AddEventListenerOptions,
+): void {
+  const fnRef = useRef(fn);
+  fnRef.current = fn;
+  onMount(() => {
+    // The component's OWN window — the same resolution `onGlobalKey` uses for
+    // its document. Falls back to the ambient one only when there is no
+    // mounted root to ask (SSR, a detached render).
+    const doc = _activeRoot?.root?.ownerDocument ??
+      (globalThis as { document?: Document }).document;
+    const win = (doc as { defaultView?: EventTarget } | undefined)
+      ?.defaultView ?? (globalThis as unknown as EventTarget);
+    const handler = (e: Event) => fnRef.current(e);
+    win.addEventListener(type, handler, options);
+    onCleanup(() => win.removeEventListener(type, handler, options));
+  });
+}
+
 // ── useRef ────────────────────────────────────────────────────────────
 
 /**

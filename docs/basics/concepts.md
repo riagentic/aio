@@ -237,3 +237,10 @@ are fire-and-forget.
 **AIO7** Sync methods (reducers) MUST NOT contain side effects -- only state
 mutations and fire-and-forget dispatches. No fetch, file I/O, or timers in sync
 methods -- use async methods (or returned schedule/own effects) for those.
+
+## Writing state many times a second
+
+If your state changes at a high cadence — a stream, a progress bar, a cursor, a
+tick — read [Real-time and high-frequency state](../state/real-time.md)
+**before** designing it. It decides the shape of the app, and one field report
+had its whole architecture decided by that page after finding it by accident.

@@ -55,7 +55,7 @@ Consequences one app hit repeatedly (all real, all silent):
 - **The gather-then-merge dance is folklore.** The documented workaround is
   "capture what you need before the first `await`, then merge fetched data into
   the _latest_ `s.*` after it" — enforced by an aiol hint and littered with
-  `// aiol-ok` markers.
+  `// aio-ok` markers.
 - **Interleaving corrupts derived writes.** `s.total = s.items.length * price`
   computed after an `await` can be based on an `items` another action changed.
 
@@ -67,7 +67,7 @@ Consequences one app hit repeatedly (all real, all silent):
    never interleaved with other actions mid-flight.
 3. Provide **`s.$commit()`** for the rare deliberate mid-method publish.
 4. **Kill the read-after-await class**: the aiol `reads s.* after an await` hint
-   and every `// aiol-ok: commit-point` marker become unnecessary for
+   and every `// aio-ok: commit-point` marker become unnecessary for
    transactional cells.
 
 ## 3. Non-goals / constraints

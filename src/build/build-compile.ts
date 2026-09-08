@@ -327,6 +327,14 @@ export function dbWorkerInclude(): string[] {
   );
 }
 
+/** aio's server-only module convention: `x.server.ts` / `x.server.tsx`.
+ *  ONE spelling of the rule for the compile include — the graph validator and
+ *  `aiol` recognise the same suffix, and a second spelling here is how the two
+ *  drift. */
+export function isServerModule(name: string): boolean {
+  return name.endsWith(".server.ts") || name.endsWith(".server.tsx");
+}
+
 // Dirs never scanned for app assets (deps / build output / VCS / vendored fw).
 const ASSET_SKIP_DIRS = new Set([
   "node_modules",
@@ -347,6 +355,21 @@ const ASSET_URL_EXT =
  *  `url(/fonts/y.woff2)`, a fetch of a literal path. String-literal scan, not a
  *  parser: the bundle is minified JS plus CSS, and the only thing that matters
  *  is which paths it names. */
+/** Absolute paths that are FILESYSTEM examples, not URLs an app serves.
+ *
+ *  The scan below reduces every quoted `/…` in the bundle to "a URL the page
+ *  might fetch", and a bundle is full of strings that merely look like one. A
+ *  field report (newjob §6) had `placeholder="/home/you/documents/cv.pdf"` —
+ *  help text in a file picker — reported as an asset that would 404.
+ *
+ *  These prefixes are the roots of an operating system, not of a web server.
+ *  No aio app routes `/home` or `/Users`, and a build warning that cries wolf
+ *  is one people learn to scroll past — which costs more than the warning was
+ *  ever worth, because the REAL finding (an asset that works in dev and 404s in
+ *  the artifact) is the one that then goes unread. */
+const FS_ROOT_RE =
+  /^\/(?:home|Users|root|tmp|var|etc|opt|usr|proc|sys|dev|mnt|media|Library|Applications|System|Volumes)\//;
+
 export function assetUrlsIn(bundle: string): string[] {
   const out = new Set<string>();
   // Quoted string literals and css url(…) — both reduce to "a / path".
@@ -358,6 +381,7 @@ export function assetUrlsIn(bundle: string): string[] {
     const p = m[1]!;
     if (p.startsWith("//")) continue; // protocol-relative URL, not a path
     if (p.startsWith("/__aio/")) continue; // the framework's own routes
+    if (FS_ROOT_RE.test(p)) continue; // an OS path in prose, not a URL
     if (!ASSET_URL_EXT.test(p)) continue;
     out.add(p);
   }
@@ -423,7 +447,8 @@ export function unservableAssetRefs(opts: {
  *  unless explicitly embedded. WITHOUT this a WASM app compiles fine but shows
  *  "wasm not available" at runtime (the #1 report). Covers:
  *   1. every `.wasm` in the project (zero-config — WASM is a first-class case);
- *   2. any extra paths the app declares in deno.json `compile.include`
+ *   2. every `*.server.ts` / `*.server.tsx` (zero-config — see below);
+ *   3. any extra paths the app declares in deno.json `compile.include`
  *      (files or dirs, relative to the project root — for data files, models…).
  *  Returns flat `["--include", "&lt;relpath&gt;", …]` args (deduped, root-relative). */
 export async function assetIncludes(root: string): Promise<string[]> {
@@ -451,6 +476,32 @@ export async function assetIncludes(root: string): Promise<string[]> {
         if (ASSET_SKIP_DIRS.has(e.name) || e.name.startsWith(".")) continue;
         await walk(join(dir, e.name), depth + 1);
       } else if (e.isFile && e.name.endsWith(".wasm")) {
+        add(relative(root, join(dir, e.name)));
+      } else if (isServerModule(e.name)) {
+        // A `*.server.ts` module is aio's documented escape hatch: a cell
+        // method reaches it with `await import(…)`, which keeps it out of the
+        // browser bundle by construction. Whether `deno compile` can follow
+        // that import depends on the SPECIFIER, and the difference is invisible
+        // in dev, where the dev server transpiles on demand and every shape
+        // works. MEASURED on Deno 2.9, running the binary from a foreign cwd
+        // with the sources deleted (they otherwise fall through to disk and
+        // every shape appears to pass):
+        //
+        //   await import("./io.server.ts")        analysable  → embedded
+        //   await import(`./${name}.server.ts`)   analysable  → embedded
+        //   const s = new URL(…).href; import(s)  OPAQUE      → NOT embedded,
+        //                                         and the binary dies with a
+        //                                         module error at the call.
+        //
+        // The opaque form is what a registry or a plugin loader writes, and it
+        // is the shape two field reports hit. The answer was a comment telling
+        // people to hand-register each module in app.ts — a rule enforced by
+        // nothing, whose violation is invisible until a user runs the binary.
+        //
+        // Dev == prod is load-bearing, so this is discovered rather than
+        // declared: the naming convention IS the registration. Same treatment
+        // `.wasm` gets above, for the same reason, and the cost of including a
+        // module the graph already had is a duplicate the VFS de-dupes.
         add(relative(root, join(dir, e.name)));
       }
     }

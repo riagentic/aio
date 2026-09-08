@@ -122,6 +122,8 @@ Process (singleton — one instance per app identity):
 
 State:
   state [path] [--wait=N]  State query (dot-path, [*] wildcard, {pick})
+  state <path> --watch    A line per CHANGE, not per poll — the loop you were
+                          about to write with \`until\`. --wait=N sets the interval
   state --ui [user]       Server-side UI-state projection (was \`am ui\`; for
                           live client UI use: surface)
   expect <path> <op> [v]  ASSERT / TEST / verify state (eq/ne/gt/lt/contains/exists…);\n                          e2e; --wait=N — the check to reach for instead of\n                          piping \`am state\` through a parser
@@ -204,6 +206,18 @@ Inspect:
   where <file>            Which execution context this file runs in, and WHY —
                           the import chain from the UI entry, from the same
                           module graph the dev server walks
+  check                   Does the client graph BUILD? \`deno check\` type-checks
+                          but does not bundle, and in aio those differ: a
+                          server-only import into a cell type-checks and then
+                          fails to build. Scaffolded into \`deno task check\`
+  --instance=<name>       (global) run and address a PRIVATE copy: its own
+                          lock, data home and logs, beside anyone else's.
+                          An agent and a human stop sharing one session
+  feedback [app]          Where THIS app's findings about aio go — a stable
+                          path outside the version store, so \`am pin\` and
+                          pruning an old version cannot delete them. Report,
+                          file a bug, log a rough edge, suggest an improvement.
+                          --create starts the file from a template
   sql <query>             Execute read-only SQL
   sql --tables            List SQLite tables
   tables                  The same list under its own name (= sql --tables)
@@ -218,6 +232,9 @@ Inspect:
   cost --keys             …every key, not just the top three
   cost --cell=X           …one cell
   cost --window=5m        …over a different window (default 60s)
+  heap                    What the process HOLDS: heap vs the V8 ceiling, RSS,
+                          and serialized cell-state sizes. \`am state\` says what
+                          it SERVES; this says what it is holding on to
   top [secs]              Live runtime view (per-cell state sizes); --json = one shot
   health                  HTTP health check
   doctor                  running instances vs dep/aio on disk (fix: am restart)

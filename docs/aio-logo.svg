@@ -8,14 +8,21 @@
     </linearGradient>
   </defs>
 
-  <!-- mark: three layers (state · persistence · ui) converging into one node -->
+  <!-- mark: three layers (state · persistence · ui) converging into one node.
+       Geometry is load-bearing, not taste — this mark has to survive 16px, where
+       it is a browser tab, an Electron window and an Android launcher icon:
+         · round caps add half the stroke (4.5) past the path's own end, so the
+           middle bar reaches 76.5 and the node starts at 90 — a 13.5 gap. They
+           used to overlap by 7.5 and fused into one blob when shrunk.
+         · optical bounds are 28.5 → 116, centred on the tile's 72. The bars are
+           the wedge: the middle one reaches furthest, toward the node. -->
   <rect x="16" y="24" width="112" height="112" rx="26" fill="url(#g)" />
   <g stroke="#ffffff" stroke-width="9" stroke-linecap="round" fill="none">
-    <path d="M42 60 H78" />
-    <path d="M42 80 H90" />
-    <path d="M42 100 H78" />
+    <path d="M33 60 H64" />
+    <path d="M33 80 H72" />
+    <path d="M33 100 H64" />
   </g>
-  <circle cx="100" cy="80" r="13" fill="#ffffff" />
+  <circle cx="103" cy="80" r="13" fill="#ffffff" />
 
   <!-- wordmark -->
   <text x="156" y="92"

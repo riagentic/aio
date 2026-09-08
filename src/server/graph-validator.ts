@@ -34,6 +34,13 @@ export type ErrorCategory =
    *  module scope, or a bundle whose top level throws. Blocking — the build
    *  refuses the same finding with the same words. */
   | "bundle-refused"
+  /** A `new Worker(new URL("./x.ts", import.meta.url))` in a client-reachable
+   *  module. The Worker constructor takes a URL at RUNTIME, so the module it
+   *  names is invisible to every static graph — aio's, esbuild's, the dev
+   *  watcher's. Not blocking (the worker does run), but the file is outside
+   *  everything that keeps a build product fresh, and a stale build product is
+   *  indistinguishable from working code. */
+  | "unmanaged-worker"
   | "unknown";
 
 /** A single validation error with actionable fix instruction */
@@ -295,6 +302,45 @@ export function checkPlatformSafety(code: string, file: string): GraphError[] {
       });
     }
   }
+  // (1b) A Worker whose module the static graph cannot see.
+  //
+  // `new Worker(new URL("./transcribe.ts", import.meta.url))` is the only way
+  // to start one, and the argument is a URL evaluated at RUNTIME. Nothing that
+  // reads imports can follow it: not this walk, not esbuild, not the dev
+  // watcher. A field report lost an afternoon to the consequence — edits to
+  // the worker did nothing at all, no error and no warning, while the app
+  // booted, ran and transcribed using the PREVIOUS version of the code.
+  //
+  // A build product silently going stale is indistinguishable from working
+  // code, which is the failure mode this framework refuses everywhere else. So
+  // it is named, once, at the site — a warning rather than a block, because
+  // the worker genuinely does run.
+  const WORKER_RE =
+    /new\s+Worker\s*\(\s*(?:new\s+URL\s*\(\s*)?['"]([^'"]+)['"]/g;
+  while ((m = WORKER_RE.exec(code)) !== null) {
+    const spec = m[1]!;
+    // A remote or absolute URL is not a build product of this app, so there is
+    // nothing here to go stale.
+    if (/^(?:https?:|blob:|data:)/.test(spec)) continue;
+    const lineNum = code.slice(0, m.index).split("\n").length;
+    errors.push({
+      file,
+      line: lineNum,
+      category: "unmanaged-worker",
+      message:
+        `"${spec}" is started as a Worker, and no static graph can see it`,
+      fix:
+        `The Worker constructor resolves its URL at runtime, so ${spec} is ` +
+        `outside the module graph aio walks, the one esbuild bundles and the ` +
+        `one the dev watcher reloads. Editing it may appear to do NOTHING: ` +
+        `the app keeps running the previous build of that file. Until aio ` +
+        `bundles workers for you, treat it as a separate build product — ` +
+        `restart the app after editing it, add its directory to the dev ` +
+        `watch list, and for a compiled binary list it in \`compile.include\` ` +
+        `so it ships. See docs/build/imports.md.`,
+    });
+  }
+
   // (2) Server-only SYMBOLS from the isomorphic "aio"/"aio/db" entry (createDB,
   //     connectCli, …). Omitted from the browser build → guaranteed link
   //     failure → blocking. `[^;]*?` keeps the match inside one statement.
