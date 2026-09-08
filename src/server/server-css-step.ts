@@ -29,9 +29,19 @@ async function cssStamps(dir: string): Promise<Map<string, string>> {
       try {
         const st = await Deno.stat(p);
         out.set(p, `${st.mtime?.getTime() ?? 0}:${st.size}`);
-      } catch { /* raced with a writer — treat as unknown */ }
+      } catch {
+        // aio-ok: this stat RACES the CSS tool that is writing these very
+        // files. A miss means "I could not stamp this one", which the caller
+        // already handles — an unstamped file simply counts as changed, so the
+        // watcher errs toward running the step again rather than skipping it.
+      }
     }
-  } catch { /* no such dir */ }
+  } catch {
+    // aio-ok: the app dir not being readable means there are no stylesheets to
+    // stamp, which is the same answer as an empty one. The step itself reports
+    // its own failures loudly (`runCssBuild`); this is only the before/after
+    // snapshot that tells the watcher what the step wrote.
+  }
   return out;
 }
 

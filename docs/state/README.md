@@ -24,3 +24,10 @@ Start here. Covers what every app needs.
 - [Composition](composition.md) — cross-cell communication
 - [Scheduling](scheduling.md) — timers, intervals, cron
 - [Cell Visibility](cell-visibility.md) — per-cell ui/persist filters
+
+## Writing state many times a second
+
+If your state changes at a high cadence — a stream, a progress bar, a cursor, a
+tick — read [Real-time and high-frequency state](real-time.md) **before**
+designing it. It decides the shape of the app, and one field report had its
+whole architecture decided by that page after finding it by accident.

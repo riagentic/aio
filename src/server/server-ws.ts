@@ -829,8 +829,17 @@ export function createWsManager(deps: WsDeps): WsManager {
         }
       }
       // A3: version handshake — server speaks first, before any state.
+      // `rate` rides along so the client can PACE itself: the inbound budget
+      // used to be a number only this side knew, and the only way to learn it
+      // was to cross it and be disconnected. Spread rather than passed to
+      // protoHello(), whose signature is public and frozen.
       try {
-        socket.send(enc("proto", protoHello(VERSION, deps.appVersion)));
+        socket.send(
+          enc("proto", {
+            ...protoHello(VERSION, deps.appVersion),
+            rate: wsRateLimit,
+          }),
+        );
       } catch { /* socket closing during onopen (AIO-155) */ }
       try {
         const uiState = deps.getUIState(meta.user);

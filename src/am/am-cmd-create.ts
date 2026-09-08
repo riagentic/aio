@@ -302,7 +302,17 @@ export function standardTasks(
     publish: `deno run -A ${fw.am} publish`,
     ship: `deno run -A ${fw.ship}`,
     test: "deno test -A",
-    check: "deno check src/",
+    // BOTH halves, in one task — the same reasoning as `lint` below.
+    // `deno check` type-checks; it does not bundle, and in aio those have
+    // different answers: `"aio"` resolves to mod.ts for the type-checker and
+    // browser-air.ts for the browser bundle, so TypeScript checks the UNION
+    // while the bundle gets the INTERSECTION. Anything server-only imported
+    // into a cell type-checks cleanly and then fails to build. A field report
+    // called that the only defect in its whole write-up — not because the
+    // failure is obscure (dev boot names file, line, column and fix) but
+    // because it arrives AFTER the tool the author trusts, and the one CI
+    // runs, has said the code is fine. A task called `check` has to be true.
+    check: `deno check src/ && deno run -A ${fw.am} check`,
     fmt: "deno fmt",
     // BOTH linters, in one task. `aiol` knows the aio rules and NOTHING about
     // the language: a scaffolded app whose `lint` ran aiol alone was never

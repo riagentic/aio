@@ -184,6 +184,7 @@ h("ul", null, items.map((i) => h("li", { key: i.id }, i.name)));
 | `onMount`            | `onMount(fn): void`                       | After first render             |
 | `onCleanup`          | `onCleanup(fn): void`                     | Before re-render & on unmount  |
 | `afterRender`        | `afterRender(fn): void`                   | After DOM commit               |
+| `onWindowEvent`      | `onWindowEvent(type, fn, opts?): void`    | Window listener, auto-cleanup  |
 | `useRef`             | `useRef<T>(init): { current: T }`         | Persistent mutable ref         |
 | `useId`              | `useId(): string`                         | SSR-safe unique ID             |
 | `useOptimistic`      | `useOptimistic<T,A>(state, fn): [T, add]` | Optimistic UI overlay          |

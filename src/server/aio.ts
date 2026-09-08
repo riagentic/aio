@@ -1471,6 +1471,10 @@ async function _runPhases<S, A, E>(
       // because a browser app has no window to shoot. Same rule as the
       // electron-only refusal below.
       client: cli.client ?? defaultClientFor(config.client),
+      // Where the DATA is, which is not the same question as `home` — see
+      // LockData.dataDir. `am instances` prints it so "why is my data not
+      // where I think it is" stops being answered by reading source.
+      dataDir: appDirs(appId, config.appDir).data,
     },
   );
   bootUndo.push("lock", () => appLock?.release());

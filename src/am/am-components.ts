@@ -173,8 +173,12 @@ export function componentsRoot(): string {
  *  `single` is the ordinary repo AND the explicitly-named case: `--app` and
  *  `--port` name one instance, so they win over any component list — a flag
  *  that says "this one" must never be widened into "all of them". */
+import { instances } from "../server/single-instance-lock.ts";
+
 export type ProcessPlan =
-  | { kind: "single" }
+  /** One app. `appId` is set only when the user NAMED a running instance
+   *  positionally (`am restart my-app`) — the caller treats it as `--app`. */
+  | { kind: "single"; appId?: string }
   | { kind: "one"; component: Component; components: Component[] }
   | { kind: "all"; components: Component[] }
   | { kind: "error"; message: string };
@@ -202,9 +206,31 @@ export function processPlan(
     }
     return { kind: "single" };
   }
+  // A positional that names a RUNNING INSTANCE is an instance target, not a
+  // component miss. `am instances` prints app ids and is exactly where you go
+  // to find the name, so `am restart <appId>` — typed straight from that list
+  // — was refused with "this project declares no components, so it names
+  // nothing" (vidtune §5). The refusal was true about components and useless
+  // about the thing the user was holding.
+  //
+  // Checked BEFORE the component lookup only when there is no component by
+  // that label, further down: a declared component keeps priority, because in
+  // a repo that declares one the label is that component's name by definition.
+  const liveApp = (name: string): boolean => {
+    try {
+      return instances().some((i) => i.appId === name);
+    } catch {
+      // aio-ok: no lock directory yet, or it is unreadable. That is "no running
+      // instance", which is exactly the answer the caller needs; a throw here
+      // would turn a lookup into a failure.
+      return false;
+    }
+  };
+
   const components = projectComponents(root);
   if (components.length === 0) {
     if (label) {
+      if (liveApp(label)) return { kind: "single", appId: label };
       return {
         kind: "error",
         message: `this project declares no components, so "${label}" names ` +
@@ -212,7 +238,9 @@ export function processPlan(
           `{ "<label>": { "entry": … } } } — several entries in one repo. ` +
           `Without them there is one app here, and \`am ${
             args[0] === label ? "start" : "…"
-          }\` already means it.`,
+          }\` already means it.\n` +
+          `If "${label}" is a RUNNING app id, it is not running now — ` +
+          `\`am instances\` lists what is.`,
       };
     }
     return { kind: "single" };
@@ -222,6 +250,7 @@ export function processPlan(
   if (label) {
     const c = componentByLabel(components, label);
     if (!c) {
+      if (liveApp(label)) return { kind: "single", appId: label };
       return {
         kind: "error",
         message: `no component "${label}" in this project — declared: ${

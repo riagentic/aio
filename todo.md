@@ -32,56 +32,110 @@ primitives it already knows — it will not browse. Two of the four withdrawn
 complaints cost their authors nothing but embarrassment; the third cost four
 hand-rolled parsers and a bug class they defended against by hand.
 
-#### 1 · Discoverability (vidtune §7, cc §8.0/§9.7, watcher §7, composer §10.1, anathomy §8)
+#### 1 · Discoverability (vidtune §7, cc §8.0/§9.7, watcher §7, composer §10.1, anathomy §8) — ALL DONE 2026-09-08
 
-- `am help` should carry INTENT words, not just names: `expect` needs "assert"
-  and "test"; `record` needs "generate test". An agent matches intent.
-- One `docs/AGENTS.md` (or `am help --agents`), five lines: verify with
-  `expect`, debug with `timeline`, repro with `replay`, screenshot with `shot`,
-  drive with `dispatch`. _"Five lines would have changed how I worked all
-  session."_
-- A tip line in the `am status` footer pointing at `am help` /
-  `am surface
-  --path=`. One report dumped the entire 32 kB semantic surface
-  into its context five or six times before discovering `--path=`.
-- **`aio/ui` is missing from `docs/basics/api-reference.md`**, the page that
-  promises "all exports". Its "Focused imports" block lists `aio/server`,
-  `aio/testing`, `aio/air` — not the kit. One report hand-rolled `Switch`,
-  `Progress`, `EmptyState`, `Card`, `Row`/`Stack`, `Select`, `Field` and
-  `Button` plus ~889 lines of CSS, with the kit one import away the whole time.
-  _"The highest-leverage item in the whole report, and it is documentation
-  only."_ Link it from `theme.md`, where the styling decision gets made, and
-  render one kit component in the scaffold.
-- A task-shaped doc index beside the domain-shaped one ("I want to…"). 180 flat
-  files; two reports navigated by `grep` and named `CLAUDE.md` as the only door.
-- `docs/state/real-time.md` decided one app's whole architecture and was found
-  by accident, four levels down.
+The round's meta-finding: _"aio's features are consistently better than aio's
+discoverability."_ An agent greps `am help` for its own word, does not find it,
+and composes primitives it already knows — it will not browse. All six are done.
+
+- ~~`am help` should carry INTENT words, not just names~~ — the help lines lead
+  with ASSERT / TEST / verify for `expect` and GENERATE A TEST for `record`, so
+  a grep for the intent finds the verb.
+- ~~One `docs/AGENTS.md`, five lines~~ — written: five verbs, an "I want to…"
+  table, and the loop that works, with the `--cdp` prerequisite named once.
+- ~~A tip line in the `am status` footer~~ — every running app's status now ends
+  with `am surface --path=App` · `am expect <path> eq <v>` · `am help` ·
+  docs/AGENTS.md. Pretty mode only: `--json` is parsed by scripts, and prose in
+  a data channel is noise. `am status` is the command everyone runs first and
+  runs often, which makes it the one place a pointer is actually read.
+- ~~`aio/ui` is missing from `docs/basics/api-reference.md`~~ — listed under
+  Focused imports with the kit's own section. One report hand-rolled eight
+  components and ~889 lines of CSS with the kit one import away.
+- ~~A task-shaped doc index beside the domain-shaped one~~ — `docs/content.md`
+  now opens with an "I want to…" table, curated in the GENERATOR (one home, so
+  it cannot drift) and every target checked by `check:docs`, so a renamed page
+  breaks the gate instead of rotting.
+- ~~`docs/state/real-time.md` was found by accident, four levels down~~ — linked
+  from `basics/concepts.md` and `state/README.md`, the two pages where the
+  cadence decision is actually made.
 
 #### 2 · `am`, the surface every report calls the best thing in the box
 
-- **`am restart` drops the argv the app was started with** (composer §5, risoto
-  §22.4). Started with `--cdp --port=8140`, restarted, got `port: 0` and no CDP
-  — and the downstream error was excellent while the cause was silent. The lock
-  already records the CDP port; record the argv beside it. Failing that, say
-  `"dropped": ["--cdp", "--port=8140"]` in the result.
-- **`am dispatch` has two argument shapes and the wrong one fails deep inside
-  the app** (vidtune §4). A bare top-level array is passed as argument ONE, so
-  the app throws `v.startsWith is not a function` about a value the author never
-  knowingly passed. The CLI knows the arity and knows what it is about to send.
+- ~~**`am restart` drops the argv the app was started with**~~ (composer §5,
+  risoto §22.4) — **DONE 2026-09-08.** Replay was all-or-nothing: ANY flag on
+  the restart command line skipped the recorded launch entirely, so
+  `am restart --force` — where `--force` steers the RESTART and says nothing
+  about how the app boots — threw away `--cdp --port=8140`. Merging is per FLAG
+  now: an explicit `--port=9000` overrides the recorded one and everything else
+  is replayed, `am`'s own flags (`--force`, `--json`, `--wait`, …) are
+  transparent to replay, and both the replayed and the OVERRIDDEN flags are
+  reported — silently replacing a recorded flag is the same silence in the other
+  direction. `mergeLaunchFlags` is pure and pinned by six cases.
+- ~~**`am dispatch` has two argument shapes and the wrong one fails deep inside
+  the app**~~ (vidtune §4) — **DONE 2026-09-08.** Both readings are legal —
+  `--args` is the argument LIST, so `--args='["a","b"]'` passes two arguments
+  and a method taking one array wants `--args='[["a","b"]]'` — so the CLI cannot
+  refuse either. What it can do is stop the app's own message
+  (`v.startsWith is not a function`, about a value the author never knowingly
+  passed) from being the only thing said: a FAILED `--args` dispatch now carries
+  one extra line offering the other reading, with the exact command line to
+  type. Only on failure, only with `--args`, never on an empty list — a hint
+  that fires every time buries the message it sits under.
 - **`am surface` has no geometry** (anathomy §10.2). A rect per element behind
   `--rects` turns "the app looks fine" into "the Stage is 6 886 px tall".
-- `am surface --names` / `ui.names()` — the available-name list is excellent and
-  reachable only by provoking a failure (anathomy §5a).
-- `am logs --tag= --level= --since=` (watcher §6, §8.8; composer §9.8). Two
-  reports re-grepped the same throwaway Python out of one JSON blob dozens of
-  times. `am logs --follow` too.
-- `am state --watch <path>` — both reports polled in `until` loops all session
-  (watcher §6).
-- **`am start --instance=<name>`** (anathomy §4). The singleton lock is on the
-  appId and the appId picks the data home, so an agent cannot run a private copy
-  beside a human's: every `am dispatch` landed in the human's session and their
-  clicks landed in the agent's measurements. `--takeover` steals the lock; it
-  does not give an isolated one.
+- ~~`am surface --names` / `ui.names()`~~ (anathomy §5a) — **DONE 2026-09-08.**
+  `am surface --names` on a running app, `uiNames(ui)` in a test: full
+  `Component…:Element` paths, the form `am trigger` takes. A test pins that the
+  list AGREES with what a miss reports as `available:`, because two producers of
+  one fact is how they come to disagree. Shipped as a free function, not a
+  `ui.names()` member: `TestUI` is frozen, so a member could only be added as
+  OPTIONAL and every caller would write `ui.names?.()` forever. One spelling, no
+  `?.`.
+
+- ~~**Gate defect found while doing the above**~~ — **DONE 2026-09-08.**
+  `api-snapshot.ts` reported an added OPTIONAL member of a public type as
+  BREAKING — the one change that provably breaks nobody, and which the file
+  already has a rule for. Two causes, both in `objectMembers`: a typeLiteral's
+  `methods` were never read (only `properties`, so a type written in method
+  syntax had an empty member map), and an intersection's parts were looked for
+  under `intersection`/`types` when `deno doc` puts every payload under `value`
+  — so an intersection type read as having no members at all. With no member map
+  `diffMembers` correctly refuses to guess and the blunt whole-symbol verdict
+  applies. Dumped the real doc JSON rather than guessing the shape again;
+  `TestUI` now carries a 17-member map, and the classifier is verified BOTH
+  ways: adding an optional member reports `additive`, removing one still reports
+  `BREAKING`. This mattered well beyond one item — §6 is largely optional config
+  members on public types, and every one of them would have looked like a compat
+  break.
+- ~~`am logs --tag= --level= --since=` (+ `--follow`)~~ (watcher §6, §8.8;
+  composer §9.8) — **DONE 2026-09-08.** `--level=warn` means warn AND above,
+  `--tag=cell` matches the NAMESPACE (so `cell:todo` and `cell:notes`, never
+  `checkpoint`), `--since=` takes a duration or a timestamp. The unit is the
+  EVENT, so an `ERROR` keeps its stack. `--follow` applies the same filters as
+  the tail it continues — filtering differently there would answer one question
+  two ways. An unparseable header passes every filter (dropping what cannot be
+  classified is how a filter hides the line that mattered), and an unreadable
+  `--since` is REFUSED, never ignored.
+- ~~`am state --watch <path>`~~ (watcher §6) — **DONE 2026-09-08.** A line per
+  CHANGE, not per poll. `--wait=N` already re-read and re-printed every N
+  seconds, which is a poll loop with nicer syntax — and both reports wrote
+  `until` loops around `am state` anyway. Compared by VALUE (the state arrives
+  freshly parsed each poll, so identity comparison would mean "changed" ==
+  "polled"); the first reading prints too, because a change with no baseline is
+  unreadable. `--wait=N` now sets the interval for both modes. Fixed while
+  there: the path was `args[0]`, so `am state --watch todo.items` looked up a
+  key called "--watch".
+- ~~**`am start --instance=<name>`**~~ (anathomy §4) — **DONE 2026-09-08.** A
+  private copy beside anyone else's: its own lock, data home, socket and logs.
+  An agent's `am dispatch` used to land in the human's session and their clicks
+  in the agent's measurements; `--takeover` steals the lock, it never gave an
+  isolated one. NOT a new mechanism — `single-instance-lock.ts` already says
+  "AIO_APPS_DIR relocates the apps' DATA root — the lock/socket dir scopes with
+  it, so ONE env var isolates an instance completely." This is a name for that,
+  bound before any command resolves a lock, so `am` and the child it starts land
+  in the same private world without either knowing about the flag. An explicit
+  `AIO_APPS_DIR` wins (the more specific instruction), and a path-shaped name is
+  refused rather than turned into a directory.
 - `am shot --selector` (vidtune §11.7); `am shot` should say "restart with
   --cdp" rather than failing, or the boot line should say screenshots need it
   (newjob §6).
@@ -89,30 +143,52 @@ hand-rolled parsers and a bug class they defended against by hand.
   aio already has all three hard parts — headless capture, deterministic state
   via `am snapshot load`, and `am dispatch` to reach any state. This is the last
   10%, and it is a differentiator rather than catch-up.
-- `am shot` must detect the stale-surface case rather than returning success
-  with old pixels (anathomy §2) — a frame counter or a `Page.screencastFrame`
-  handshake. Plus the caveat in `docs/clients/electron.md`.
-- `am instances` should print the DATA path beside each row (risoto §20): three
-  things mean "where this app lives" (`--home`, `AIO_APPS_DIR`, `appDir`) and
-  only the third moves the data. `AIO_APPS_DIR` _appears_ to work.
-- `am restart <appId>` refuses an app id that is also not a component name
-  (vidtune §5) — `am instances` is exactly where you go to find that name.
-- `am heap <app>` (quant §9.4). A console peaked at 31.8 GB and restarted 16
-  times in 24 h; `am state` answers "what is it serving", nothing answers "what
-  is it holding", and on Electron the interesting heap is a grandchild process.
+- ~~`am shot` must detect the stale-surface case rather than returning success
+  with old pixels~~ (anathomy §2) — **DONE 2026-09-08.** It now waits for the
+  window to COMMIT a frame (a double `requestAnimationFrame`, the browser's own
+  definition of "something was painted since you asked") before capturing, and
+  reports `painted: true|false`. An unconfirmed frame still writes the file — it
+  is worth having — but carries a warning and a `! STALE RISK` line naming the
+  cause (a hidden, minimised or occluded window is not composited) and the two
+  remedies. The caveat is in `docs/clients/electron.md` and the `am shot` docs.
+  Mutation-checked: hard-code `painted = true` and the test fails.
+- ~~`am instances` should print the DATA path beside each row~~ (risoto §20) —
+  **DONE 2026-09-08.** The lock now records `dataDir`; `--json` reports it on
+  every row (`null` for a lock written before beta1 — a field that appears
+  conditionally is one a script has to guess about), and `--long` shows a `DATA`
+  column when it DIFFERS from `home`, since a column repeating the obvious is
+  noise. The three spellings are tabulated in the docs, because the trap is that
+  `AIO_APPS_DIR` _appears_ to work: it moves the lock and the discovery files,
+  so `am` follows the app, while an `appDir` set in code leaves the database
+  where it was.
+- ~~`am restart <appId>` refuses an app id that is also not a component name~~
+  (vidtune §5) — **DONE 2026-09-08.** The positional was read ONLY as a
+  component label, so an id typed straight out of `am instances` was refused
+  with "this project declares no components, so it names nothing" — true about
+  components and useless about the thing the user was holding. A positional
+  naming a RUNNING instance now resolves to `--app`, at every `processPlan` call
+  site (start, stop, restart, watch): a plan that resolves while the command
+  acts on the wrong app would be worse than the refusal it replaced. A DECLARED
+  component still wins, because in a repo that declares one the label is that
+  component's name by definition — otherwise what a command means would depend
+  on what happens to be running. The refusal, when it stands, now points at
+  `am instances`.
+- ~~`am heap <app>`~~ (quant §9.4) — **DONE 2026-09-08.** `am state` says what
+  an app SERVES; nothing said what it HOLDS. A new trojan route reports heapUsed
+  against the real V8 ceiling (`heap_size_limit`, not the lazily allocated
+  `heapTotal`, which always sits just above heapUsed and always looks
+  reassuring), RSS, external, and per-cell serialized size sorted biggest first.
+  The percentage is `null` when the runtime cannot say — a hard-coded 0 reads as
+  "plenty of room". The output states that cell state is serialized SIZE, not
+  retained heap, so "my cells are small, so the leak is aio's" has to be
+  reasoned to rather than assumed.
 - `am add server <name>` scaffolding the module AND its line in `app.ts`
   (vidtune §12.6).
 - `am preview <Component> --props=` (vidtune §12.5).
-- `am migrations` — a way to SEE the version chain (newjob §8.9).
-
-#### 3 · The renderer story is behind the server story (watcher §10)
-
-The sharpest architectural observation in the round: _"The server gets
-`own.set`, `worker: true`, scheduling, transactional methods, time travel. The
-renderer — which in a desktop app is where the camera, the audio graph, the
-Workers and the GPU actually live — gets `onMount` / `onCleanup` and module
-scope. Every lifecycle bug in this project lives in that gap."_
-
+- ~~`am migrations` — a way to SEE the version chain~~ (newjob §8.9) — **ALREADY
+  DONE**, verified 2026-09-08: `am migrations` reports declared vs stored
+  versions per cell, what the last boot's migration pass did, and any
+  unaccounted shape drift. Listed in `am help`. The report predates it.
 - **`useResource({ key, open, close })`** (watcher §2, §8.5). Keyed
   replace-on-change with a cancellation signal — `own.set` with a token, on the
   client. The reporting app hand-rolled it and every one of its lifecycle bugs
@@ -141,13 +217,16 @@ scope. Every lifecycle bug in this project lives in that gap."_
 
 #### 4 · Build products that go stale in silence
 
-- **A browser `Worker` entry is not in the renderer build graph** (watcher §1).
-  Edits to it did nothing at all, with no error and no warning — the app booted,
-  ran and transcribed using the previous version of the code. The ask is not
-  "bundle my worker": it is that _a build product silently going stale is
-  indistinguishable from working code_. A `workers:` list, or recognising
-  `new Worker(new URL("./x.ts", import.meta.url))`, or at minimum a boot-time
-  staleness warning.
+- ~~**A browser `Worker` entry is not in the renderer build graph**~~ (watcher
+  §1) — **PARTLY DONE 2026-09-08: the silence is closed.** The graph validator
+  now reports `new Worker(new URL("./x.ts", import.meta.url))` in a
+  client-reachable module as `unmanaged-worker` — a warning, not a block, since
+  the worker genuinely runs — and the fix text names the CONSEQUENCE ("editing
+  it may appear to do NOTHING: the app keeps running the previous build") plus
+  the three things to do about it. A remote/blob URL is not reported: nothing
+  local goes stale, and a warning nobody can act on is how a real one gets
+  ignored. Still open, and now merely a feature rather than a trap: bundling app
+  workers for real (a `workers:` list, or following the constructor).
 - **Hot reload does not cover server-side dynamic imports** (composer §6). A fix
   to a `*.server.ts` module reached from a cell method by `await import()` did
   not take; the author verified state twice, concluded the fix was wrong, and
@@ -155,11 +234,16 @@ scope. Every lifecycle bug in this project lives in that gap."_
   reload, server modules need a restart") would have closed it; naming the
   changed file on the reload event is better, since `am where` already computes
   the answer.
-- **`*.server.ts` modules must be hand-registered in `app.ts`** (vidtune §3,
-  llama.master §13). Works in dev, breaks only in a compiled build, and the
-  symptom points nowhere near the missing line. It is guarded by a COMMENT
-  today. Glob them, or have `aiol` error on a module dynamically imported
-  somewhere and statically imported nowhere.
+- ~~**`*.server.ts` modules must be hand-registered in `app.ts`**~~ (vidtune §3,
+  llama.master §13) — **DONE 2026-09-08.** Every `*.server.ts` / `*.server.tsx`
+  is now auto-embedded by `assetIncludes`, the same zero-config walk `.wasm`
+  already got: the naming convention IS the registration. MEASURED first,
+  because the reported shape did not reproduce as stated — on Deno 2.9, running
+  from a foreign cwd with sources deleted, a literal `import("./io.server.ts")`
+  and a template ``import(`./${n}.server.ts`)`` are both analysed and embedded;
+  only an OPAQUE specifier (a variable, what a registry or plugin loader writes)
+  is missed, and that binary dies at the call. That is the shape the reports
+  hit, and the rule that guarded it was a comment enforced by nothing.
 - **Dev does not watch `dep/aio`** when it is a symlink into a working tree
   (quant §9.6).
 
@@ -220,13 +304,15 @@ scope. Every lifecycle bug in this project lives in that gap."_
   real runtime" is safe — `bootCells` spawns the real child. Cassettes wrap a
   function you can reach, not a `.server.ts` a cell imports dynamically.
   `bootCells([session], { stub: { "./claude.server.ts": … } })`.
-- **`testUI`'s window is not `globalThis`** (risoto §19.2). A listener attached
-  to the bare global is inert under the harness, so a drag test dispatching on
-  `document.defaultView` could never have reached a component listening on
-  `globalThis` — and the test passed. Every component now carries the
-  `document.defaultView ?? globalThis` incantation, and forgetting it is
-  invisible. Make the mounted window the global for the test, or warn on the
-  mismatch the way `getBoundingClientRect` already does.
+- ~~**`testUI`'s window is not `globalThis`**~~ (risoto §19.2) — **DONE
+  2026-09-08.** The false green was already closed (testUI THROWS on a
+  bare-global DOM listener); what remained was the ceremony. `onWindowEvent` now
+  resolves the component's OWN window — correct in a browser, in an Electron
+  child window, in a `<webview>` and under the harness — and removes the
+  listener on unmount. Making the bare global work was considered and refused:
+  aio mounts into more than one window, so `globalThis` is genuinely the wrong
+  target, and a harness that accepted it would be lying. See
+  `feedback/refused.md`.
 - **Geometry in tests** (risoto §19.1, §22.2; anathomy §10.1). happy-dom
   measures everything 0×0, which hid two security-relevant defects in a wallet
   behind 1546 passing tests: a dApp origin running off the edge of the approval
@@ -323,17 +409,18 @@ Cross-referencing every numbered section against the routing docs turned up
 thirteen findings that had been read and not written down (see the audit note in
 `feedback/resolved.md`). One was a real bug and is fixed; these are the rest.
 
-- **A green `deno check` precedes a failing bundle** (composer §1 — the ONLY
-  thing that report calls a defect). `"aio"` resolves to `mod.ts` for the
-  type-checker and `browser-air.ts` for the browser bundle: TypeScript checks
-  the union, the bundle gets the intersection, so anything server-only imported
-  into a cell type-checks and then fails to build. The graph validator catches
-  it at dev boot and names file, line, column and fix — a good failure, arriving
-  after the tool a user trusts said the code was fine, and `deno task check` is
-  the one CI runs. Worse, it pushed the author to a stringly-typed workaround:
-  `cancelOn: { compose: [self("cancel")] }` became `["studio:cancel"]`, which no
-  rename follows. `am where` already walks both graphs — have it list the
-  imports in a file the browser bundle cannot resolve.
+- ~~**A green `deno check` precedes a failing bundle**~~ (composer §1 — the ONLY
+  thing that report calls a defect) — **DONE 2026-09-08.** The fix is not a
+  better error; the error was already good (dev boot names file, line, column
+  and fix). It is that `deno task check` stops being green. `am check` walks the
+  client graph and exits non-zero on anything that would stop the bundle, and
+  the scaffolded `check` task now runs BOTH halves — the same treatment `lint`
+  already gets, where one task runs `deno lint` AND `aiol` because a task's name
+  has to be true. `am fix` adds it to an existing app. Finding no UI entry
+  prints `NOTHING CHECKED` on stderr in every mode, including `--json`:
+  reproducing this command's own bug one layer up would be a poor joke. Still
+  open, and now cosmetic: typing `deps` from the literal so the source-text
+  heuristic can go.
 - **Selector deps discriminate on SOURCE TEXT** (composer §4). `deps` is typed
   `any[]`, so the documented tuple form cannot be typed as a tuple; widening to
   an array then trips `secondParamIsTuple(fn)`, which reads the function's text
@@ -351,11 +438,11 @@ thirteen findings that had been read and not written down (see the audit note in
   acknowledgement. Either fix alone closes it; firing only on `timeout: 0` (the
   shape that means "forever", and the copied-from-examples case the rule's own
   comment names) is the better one.
-- **`am fix` rewrites the app's version at `fixed` severity** (llama.master §3).
-  `"0.7.0"` → `"0.7"` is an opt-in build-numbering convention, not a defect —
-  the note itself is phrased as a benefit — and the app's own release commits
-  and tags are `v0.7.0`. It was reverted by hand. Should be `advise`, beside the
-  task-vocabulary one, which is a bigger change and is correctly `advise`.
+- ~~**`am fix` rewrites the app's version at `fixed` severity**~~ (llama.master
+  §3) — **DONE 2026-09-08.** Now `advise`, and the advice names the alternative
+  and how to take it. The guard does a REAL `am fix` and asserts `deno.json` is
+  unchanged, because an outcome string that says "advise" while the writer still
+  runs is the same bug with a new label.
 - **`am fix --migrate-tasks` would delete a working task by name** (llama.master
   §4). `dev:browser` is in the app's CLAUDE.md, its README and everyone's muscle
   memory. The capability half is fixed — `targetsFromLegacyTasks` now persists
@@ -363,15 +450,16 @@ thirteen findings that had been read and not written down (see the audit note in
   one irreversible thing `am fix` does, and the neighbouring check gets this
   right ("kept, review manually"). Should be `advise` with the replacement
   spelled out.
-- **A version pin makes `.katana/_aio.md`'s own instruction unreachable**
-  (llama.master §5). It says findings go to `dep/aio/feedback/[app].md`, four
-  times. Under a path pin that works; under a version pin `dep/aio` is a
-  provisioned worktree with no `feedback/` at all. Excluding `feedback/` from a
-  release is right — the instruction and the layout just disagree, exactly when
-  an app does the recommended thing. Ship an empty `feedback/` with a README
-  naming the upstream path, or have the kata say "the framework checkout, if you
-  have one — `am pin` prints where `dep/aio` points". Related: `feedback/` lives
-  inside the versioned directory, so an upgrade deletes it (quant §7).
+- ~~**A version pin makes `.katana/_aio.md`'s own instruction unreachable**~~
+  (llama.master §5, quant §7) — **DONE 2026-09-08.** Both halves were the same
+  defect: the instruction named `dep/aio/feedback/`, which is absent from a
+  release worktree AND inside the version store, so an app that pinned had
+  nowhere to write and an app that upgraded lost what it had written.
+  `am
+  feedback` is now the one decider for the path — outside the version
+  store, `$AIO_FEEDBACK_DIR`/`XDG_DATA_HOME` aware, with `--create` from a
+  template — and the kata names the command instead of a path that drifts. The
+  guard that matters asserts the location is not under `versionsDir()`.
 - **Adding a state key gives no migration signal either way** (llama.master
   §10). A new field is safe — a stored blob without it deep-merges — but the
   author had to reason that out. The tool has both shapes: it could say
@@ -399,19 +487,51 @@ thirteen findings that had been read and not written down (see the audit note in
   taking the renderer's knowledge as a parameter and only the GL calls stay
   untestable. One page in `docs/testing/`.
 
-#### 11 · Smaller, each named once
+#### 11 · The dev audits ship to production (raised at beta1, not paid down)
+
+beta1 raised the page ceiling 63 → 67 KB gz, and about half of that is
+**dev-only diagnostics that production downloads and never runs** — the contrast
+audit, the `#id`-selector audit, the untracked-lifecycle-read check, and the
+message prose that makes the child-desync warning actionable. Every one of them
+answers a top-of-report finding, so the trade was taken deliberately and
+itemised in `tests/bundle-size.test.ts`. It is still a trade.
+
+Paying it down means a dev-only chunk: `await import()` the audits from the one
+dev-guarded call site in `renderer-flush`, so esbuild emits them separately and
+a production page never fetches them. The cost is a chunk-aware reader in three
+places (the prod static route, the dist sweep, the Electron AppDir copy) — which
+is exactly the trade `feedback/refused.md` declined once for the sync engine.
+The difference worth weighing: this chunk is fetched by NOBODY in production,
+where the sync engine's was fetched by everybody who used sync.
+
+Not decided in a hurry at release time. Decide it with a measurement of the
+three-reader cost, not an argument.
+
+#### 12 · Smaller, each named once
 
 - `aio-ok` vs `aiol-ok` — one letter apart, two different checkers, placed by
   copying nearby code (vidtune §8.1). One marker with a scope.
-- An `aiol` rule for accessible names: an interactive element without one has no
-  test handle and `am trigger` cannot reach it — a framework-specific
-  consequence no general linter can state (cc §9.4).
+- ~~An `aiol` rule for accessible names~~ (cc §9.4) — **DONE 2026-09-08.** An
+  interactive element with no name gets no semantic path: absent from
+  `am surface`, unreachable by `am trigger`, no handle in `testUI`. The runtime
+  already warns for `<input>` at render time; this catches the ones a render
+  never reaches. DELIBERATELY NARROW — one line, empty body, no naming attribute
+  — because a name can come from a variable, a child component or a multi-line
+  body, none of which is knowable from source. Ten cases pin the SILENCE as hard
+  as the finding: text content, five naming attributes, an `id` that may pair
+  with `<label htmlFor>`, a multi-line body, and `aio-ok`.
 - The bundle auditor false-positives on path-shaped strings — a
   `placeholder="/home/you/documents/cv.pdf"` was reported as a 404 (newjob §6).
 - `am trigger … press "Enter"` refused on a visible, focusable `<input>` (newjob
   §6).
-- `am stop` could not find a demonstrably running app; `--port=N` worked (newjob
-  §6).
+- ~~`am stop` could not find a demonstrably running app; `--port=N` worked~~
+  (newjob §6) — **DONE 2026-09-08.** Two halves. `am stop <appId>` now works at
+  all (see the positional fix above — an id from `am instances` used to be read
+  only as a component label). And the "not running" refusal now NAMES what is
+  running: one instance gets `did you mean --app=<id>?`, several are listed. It
+  already pointed at `am instances`, and a pointer costs a round trip at the
+  exact moment someone is staring at "not running" for an app they can see in
+  their own browser.
 - `am surface` prints ~8 kB as one unwrapped JSON line by default (vidtune
   §8.2).
 - `am shot /path/to/file.png` — a positional ending in `.png` is a detectable
@@ -465,6 +585,38 @@ The work: close the watcher on `app.close()` (or make the harness own it), make
 `_teardownPartialMount`/`unmount()` await the window close, then add
 `--sanitize-ops --sanitize-resources` to `test`, `test:core` and
 `check:coverage` and delete the warning branch in `scripts/check-sanitizers.ts`.
+
+## Resolved: `check:api` was red inside `check:release`, green in a shell
+
+**Found while cutting v1.0.0-beta1; fixed the same day.** Kept because the shape
+of the mistake is more instructive than the bug.
+
+**Cause.** `deno doc --json` writes ANSI colour escapes INTO the JSON it emits.
+A type whose `repr` interpolates comes back as
+`"${\u001b[38;5;12mPrefix\u001b[0m}:${…}"` and as `"${Prefix}:${K}"` under
+`NO_COLOR`. The digest is taken over that string, so the same unchanged tree
+hashed two ways — and the release harness sets `NO_COLOR`, which is why exactly
+one context disagreed with the ~20 that agreed. The four symbols named
+(`Catalog`, `CellFieldFilter`, `CellVisibility`, `SelfAction.type`) were simply
+the only public types whose `repr` contains an interpolation. Nothing on the
+surface had moved.
+
+**Fix.** `docOnce()` spawns `deno doc` with `NO_COLOR=1` so the reading is
+canonical wherever it runs, and `normalize()` strips SGR escapes from every
+string before it reaches a digest. Snapshot re-baselined: 4 digests, 0
+structural changes, verified symbol-by-symbol. Pinned by
+`tests/api-snapshot-colour-independent.test.ts`, which asserts the hazard is
+real on this Deno _and_ that the gate is immune to it — mutation-checked three
+ways.
+
+**The lesson, twice over.** The gate had a false BREAKING that pointed at
+innocent types, and the honest reaction to a break you cannot explain is to
+distrust the gate rather than regenerate the snapshot to quiet it — regenerating
+is precisely the motion that would launder a real break. And the first probe
+written to test the colour theory searched raw stdout for an ESC _byte_, found
+none, and briefly "disproved" a diagnosis that was correct: the escape is
+JSON-_escaped_ as six characters. Verify the instrument before believing what it
+says about the subject.
 
 ## The gate to beta (user rule, 2026-07-19)
 

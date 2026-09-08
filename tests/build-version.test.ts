@@ -581,11 +581,19 @@ Deno.test("build-version: shipApp refuses a nogit/dirty version by name; --allow
   }
 });
 
-// ── am fix offers the rewrite of a pinned version ───────────────────────────
+// ── am fix ADVISES on a pinned version; it must never rewrite one ───────────
+//
+// It used to. A three-part `"version"` is a supported PIN — used verbatim, and
+// every build reports it — so plain `am fix`, with no flag, was silently
+// editing a working, deliberate choice in the app's own manifest, one the
+// author's release tags already agreed with. A field report reverted it by
+// hand. The outcome assertions below are the report; `runFix` is the part that
+// matters, because a note that says "advise" while the writer still runs is
+// exactly the bug wearing a new label.
 
-Deno.test("build-version: `am fix` offers to rewrite a pinned three-part version to major.minor", async () => {
+Deno.test("build-version: `am fix` advises on a pinned three-part version and leaves it alone", async () => {
   const REPO = join(import.meta.dirname!, "..");
-  const report = async (version: string) => {
+  const report = async (version: string, dryRun = true) => {
     const dir = await Deno.makeTempDir({ prefix: "aio-fix-version-" });
     try {
       await Deno.mkdir(join(dir, "src"), { recursive: true });
@@ -607,7 +615,7 @@ Deno.test("build-version: `am fix` offers to rewrite a pinned three-part version
           "-A",
           join(REPO, "src", "am.ts"),
           "fix",
-          "--dry-run",
+          ...(dryRun ? ["--dry-run"] : ["--no-download"]),
           "--json",
         ],
         cwd: dir,
@@ -618,15 +626,36 @@ Deno.test("build-version: `am fix` offers to rewrite a pinned three-part version
       const r = JSON.parse(new TextDecoder().decode(out.stdout)) as {
         results: { name: string; outcome: string; note?: string }[];
       };
-      return r.results.find((x) => x.name === "app version");
+      const after =
+        (JSON.parse(await Deno.readTextFile(join(dir, "deno.json"))) as {
+          version?: string;
+        }).version;
+      return {
+        ...r.results.find((x) => x.name === "app version"),
+        after,
+      } as { name?: string; outcome?: string; note?: string; after?: string };
     } finally {
       await Deno.remove(dir, { recursive: true }).catch(() => {});
     }
   };
   const pinned = await report("1.0.0");
-  assertEquals(pinned?.outcome, "would-fix");
-  assertStringIncludes(pinned?.note ?? "", "pinned by deno.json");
+  assertEquals(pinned?.outcome, "advise");
+  assertStringIncludes(pinned?.note ?? "", "is a PIN");
+  // The advice has to name the alternative and how to take it, or it is just a
+  // complaint the reader cannot act on.
   assertStringIncludes(pinned?.note ?? "", '"1.0"');
+  assertStringIncludes(pinned?.note ?? "", "versioning.md");
+
+  // The load-bearing assertion: a REAL run (not --dry-run) must not touch it.
+  const real = await report("1.0.0", false);
+  assertEquals(real?.outcome, "advise");
+  assertEquals(
+    real?.after,
+    "1.0.0",
+    "`am fix` rewrote the app's pinned version — it may repair what is BROKEN, " +
+      "and a supported, deliberate, working choice is not broken",
+  );
+
   assertEquals((await report("1.0"))?.outcome, "ok");
   const bad = await report("v1.0-rc1");
   assertEquals(bad?.outcome, "manual");

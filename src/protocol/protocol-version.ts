@@ -70,6 +70,22 @@ export type ProtoHello = {
    *  `app` for the CLI and not for a window — by construction, not by
    *  oversight. Additive within protocol v3: a peer without it omits it. */
   app?: string;
+  /** The SERVER's per-connection inbound frame budget, messages/sec
+   *  (`wsLimits.messagesPerSec`). Advertised so a client can PACE itself
+   *  instead of discovering the ceiling by being disconnected at it.
+   *
+   *  It existed as a number only the server knew: a client that had a
+   *  thousand ops to push — a demo seed, a first sync of an existing dataset —
+   *  fired a frame each, tripped an anti-abuse fuse built for hostile peers,
+   *  and was closed AND denylisted for a minute. The renderer sat on
+   *  pre-burst state while the server moved on, and the next dispatch went
+   *  nowhere. A budget the sender cannot see is a budget it can only find by
+   *  crossing.
+   *
+   *  Advisory, never negotiated: a peer that omits it gets the conservative
+   *  default, and the server still enforces its own limit regardless of what
+   *  any client does with this. Additive within protocol v3. */
+  rate?: number;
 };
 
 /** This build's announcement. Pass the build's aio version when known (the
@@ -123,11 +139,19 @@ export function parseProtoHello(input: unknown): ProtoHello | null {
       const app = typeof p.app === "string" && p.app.length <= 64
         ? p.app
         : undefined;
+      // Bounded like `ver`: untrusted peer input that becomes a timer
+      // interval. A zero, a negative, a NaN or an absurd value must not be
+      // able to stall a client's own sending or spin it.
+      const rate = typeof p.rate === "number" && Number.isFinite(p.rate) &&
+          p.rate >= 1 && p.rate <= 1_000_000
+        ? Math.floor(p.rate)
+        : undefined;
       return {
         v: p.v,
         min: p.min,
         ...(ver ? { ver } : {}),
         ...(app ? { app } : {}),
+        ...(rate ? { rate } : {}),
       };
     }
     return null;

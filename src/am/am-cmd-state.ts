@@ -182,6 +182,15 @@ function parseScalar(raw: string): unknown {
 
 // ── State ───────────────────────────────────────────────────
 
+/** The state PATH among `am state`'s arguments — the first positional.
+ *
+ *  `am state --watch todo.items` and `am state todo.items --watch` mean the
+ *  same thing. Reading `args[0]` blindly made the flag itself the path, so the
+ *  command went looking for a state key called "--watch". */
+export function _pathOfArgs(args: readonly string[]): string | undefined {
+  return args.find((a) => !a.startsWith("-"));
+}
+
 export async function cmdState(
   args: string[],
   flags: GlobalFlags,
@@ -194,7 +203,7 @@ export async function cmdState(
   const port = resolvePort(flags.port, appId, {
     explicit: flags.app !== undefined,
   });
-  const path = args[0];
+  const path = _pathOfArgs(args);
 
   const fetchAndResolve = async (
     silent = false,
@@ -219,17 +228,28 @@ export async function cmdState(
     return { ok: true, data: r.value };
   };
 
-  // Single shot (no --wait)
-  if (flags.wait === undefined) {
+  // `--watch`: a line per CHANGE, not a line per poll.
+  //
+  // `--wait=N` already re-read the value every N seconds and printed it every
+  // time — which is a poll loop with nicer syntax, and both reports that asked
+  // for this wrote `until` loops around `am state` anyway, all session (watcher
+  // §6). What they wanted was to be told when something HAPPENED. A change is
+  // rare and a tick is not, so printing per tick buries the one line that
+  // matters under hundreds that do not.
+  const watch = args.includes("--watch");
+
+  // Single shot (no --wait, no --watch)
+  if (flags.wait === undefined && !watch) {
     const r = await fetchAndResolve();
     if (!r.ok) Deno.exit(1);
     out(r.data, mode);
     return;
   }
 
-  // Watch mode: --wait=N polls every N seconds (bare --wait defaults to 2s)
+  // --wait=N sets the poll interval for both modes (bare --wait defaults to 2s)
   const interval = (flags.wait || 2) * 1000;
   let lastOk = true;
+  let lastSeen: string | undefined;
   while (true) {
     const r = await fetchAndResolve(!lastOk); // suppress repeated errors
     if (!r.ok) {
@@ -238,7 +258,21 @@ export async function cmdState(
       continue;
     }
     lastOk = true;
-    out(r.data, mode);
+    if (watch) {
+      // Compared by VALUE, not by identity: the state arrives freshly parsed
+      // every poll, so every object would differ by reference and "changed"
+      // would mean "polled".
+      const now = JSON.stringify(r.data ?? null);
+      if (now !== lastSeen) {
+        // The FIRST reading prints too — an agent that starts watching needs
+        // to know where it is starting from, or the first real change is
+        // unreadable for want of a baseline.
+        lastSeen = now;
+        out(r.data, mode);
+      }
+    } else {
+      out(r.data, mode);
+    }
     await new Promise((r) => setTimeout(r, interval));
   }
 }
@@ -380,6 +414,34 @@ export function parseArgsFlag(
   return { ok: true, args: parsed };
 }
 
+/** The one line worth adding when a dispatch that used `--args` fails.
+ *
+ *  `--args` is the argument LIST: `--args='["a","b"]'` passes two arguments,
+ *  and a method taking a single array wants `--args='[["a","b"]]'`. Both are
+ *  legal, so this is never a refusal — the CLI cannot know which was meant. It
+ *  is offered only when the app has ALREADY refused the call, where the reader
+ *  is looking for a reason and the app's own message (about a value its author
+ *  never knowingly passed) does not point at the command line.
+ *
+ *  Silent when `--args` was not used, and when the list is empty: there is no
+ *  other reading of nothing. */
+export function argsShapeHint(
+  jsonArgs: string | undefined,
+  action: unknown,
+): string | undefined {
+  if (jsonArgs === undefined) return undefined;
+  const sent =
+    ((action as { payload?: { args?: unknown[] } } | null)?.payload?.args) ??
+      [];
+  if (!Array.isArray(sent) || sent.length === 0) return undefined;
+  const one = JSON.stringify(sent);
+  const n = sent.length;
+  return `--args is the ARGUMENT LIST: this sent ${n} argument${
+    n === 1 ? "" : "s"
+  }. ` +
+    `If the method takes a SINGLE array, wrap it — --args='[${one}]'`;
+}
+
 export async function cmdDispatch(
   args: string[],
   flags: GlobalFlags,
@@ -491,7 +553,15 @@ export async function cmdDispatch(
   const route = flags.asServer ? "dispatch?as=server" : "dispatch";
   const result = await trojanPost(port, route, action, appId);
   if (!result.ok) {
-    outError(result.error, mode);
+    // A method that threw on the arguments it was handed gets ONE extra line,
+    // and only then. `--args` is the ARGUMENT LIST, so `--args='["a","b"]'`
+    // passes two arguments — and the thing people mean is usually one array.
+    // The app then throws about a value its author never knowingly passed
+    // (`v.startsWith is not a function`, vidtune §4), and nothing in that
+    // message points back at the command line. The CLI cannot tell which
+    // reading was meant — both are legal — but it knows it just sent N
+    // arguments, and it can say the other reading exists.
+    outError(result.error, mode, argsShapeHint(flags.jsonArgs, action));
     Deno.exit(1);
   }
   const data = result.data as {

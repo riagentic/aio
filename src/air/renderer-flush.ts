@@ -174,7 +174,13 @@ export function _flushAfterRender(root: RootState): void {
       const doc = (el as unknown as { ownerDocument?: Document }).ownerDocument;
       if (doc) auditIdSelectors(doc, (el as { id?: string }).id || "root");
     } catch {
-      // A dev nicety must never be able to break a render.
+      // aio-ok: a dev-only OBSERVATION must never be able to break a render.
+      // These two audits read the committed DOM through APIs a hostile or
+      // unusual document can make throw (a getter that raises, a detached
+      // node, a cross-origin sheet); the correct outcome is that the page
+      // renders and the diagnostic is missing, never the reverse. Nothing is
+      // hidden — every finding they DO make is reported at the point it is
+      // made, and neither can affect what the user sees.
     }
   }
 }

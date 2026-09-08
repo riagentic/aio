@@ -54,6 +54,19 @@ export type LockData = {
    *  `--cdp`, which for a browser app either is refused or records a port
    *  nothing will ever listen on. Absent on locks written before alpha76. */
   client?: string;
+  /** Where this instance's DATA actually is: the resolved app directory that
+   *  holds `state.db`, `auth.db`, the journal and the rest.
+   *
+   *  Three things are spelled like "where this app lives" and only one moves
+   *  the data: `--home` addresses an existing instance, `AIO_APPS_DIR` moves
+   *  the ROOT that homes are resolved under, and `appDir` moves the app's own
+   *  directory. `AIO_APPS_DIR` therefore *appears* to work — the lock and the
+   *  discovery files move, so `am` follows the app — while an `appDir` set in
+   *  code keeps the database exactly where it was (risoto §20). `home` was in
+   *  the lock and this was not, so nothing could show the difference.
+   *
+   *  Absent on locks written before beta1, where `home` is the best answer. */
+  dataDir?: string;
   /** A kernel stamp that changes when a pid is REUSED — see
    *  {@linkcode processStartToken}.
    *
@@ -75,6 +88,9 @@ export type LockMeta = {
   aioVersion?: string;
   cdpPort?: number;
   client?: string;
+  /** The directory the app's DATA actually lives in — see {@linkcode LockData}
+   *  `dataDir`. */
+  dataDir?: string;
 };
 
 /** Instance info returned by instances() — lock data + liveness */
@@ -798,6 +814,7 @@ export class AppLock {
       ...(meta.aioVersion !== undefined ? { aioVersion: meta.aioVersion } : {}),
       ...(meta.cdpPort !== undefined ? { cdpPort: meta.cdpPort } : {}),
       ...(meta.client !== undefined ? { client: meta.client } : {}),
+      ...(meta.dataDir !== undefined ? { dataDir: meta.dataDir } : {}),
     });
 
     for (let i = 0; i < maxRetries; i++) {

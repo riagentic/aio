@@ -11,7 +11,11 @@ import { noCdpMessage, shotOutPath } from "../src/am/am-cmd-shot.ts";
 const PNG_B64 =
   "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==";
 
-function fakeCdp(port: number, pageUrl: string) {
+/** `paints` decides whether the fake page answers `Runtime.evaluate` — which
+ *  is how `am shot` asks "has a frame been committed since I asked?". A window
+ *  that is hidden, minimised or occluded is not composited and never answers, and
+ *  that is the case the command must not report as a clean success. */
+function fakeCdp(port: number, pageUrl: string, paints = true) {
   const ac = new AbortController();
   const server = Deno.serve(
     { port, hostname: "127.0.0.1", signal: ac.signal, onListen() {} },
@@ -45,6 +49,17 @@ function fakeCdp(port: number, pageUrl: string) {
           m.method === "Page.captureScreenshot" && m.params.format === "png"
         ) {
           socket.send(JSON.stringify({ id: m.id, result: { data: PNG_B64 } }));
+        } else if (m.method === "Runtime.evaluate") {
+          // A painting window resolves the double-rAF; a non-painting one
+          // simply never replies, exactly as a hidden window behaves.
+          if (paints) {
+            socket.send(
+              JSON.stringify({
+                id: m.id,
+                result: { result: { type: "boolean", value: true } },
+              }),
+            );
+          }
         } else {
           socket.send(
             JSON.stringify({
@@ -256,4 +271,151 @@ Deno.test("noCdpMessage: an electron app still gets the --cdp remedy; an old loc
   const old = noCdpMessage("app");
   assertStringIncludes(old, "Restart with the flag");
   assertStringIncludes(old, "no window to shoot at all");
+});
+
+// ── a screenshot must not be stale pixels reported as success ───────────────
+//
+// `Page.captureScreenshot` returns whatever the compositor last composited.
+// Immediately after an `am dispatch` — the exact moment anyone takes a
+// screenshot — the state has changed, the render is queued, and nothing has
+// been painted yet. The old pixels came back and the command said
+// `wrote shot.png`. A field report (anathomy §2) read that as proof the UI had
+// not updated, which was the opposite of the truth.
+//
+// The command now waits for a committed frame, and when it cannot get one it
+// SAYS SO rather than letting "wrote a file" stand in for "this is what the
+// window looks like".
+
+Deno.test("am shot: a window that will not paint is reported, not passed off as fresh", async () => {
+  const appsDir = await Deno.makeTempDir({ prefix: "am-shot-stale-" });
+  const prev = Deno.env.get("AIO_APPS_DIR");
+  Deno.env.set("AIO_APPS_DIR", appsDir);
+  const env = { AIO_APPS_DIR: appsDir };
+  const appPort = freePort();
+
+  // A window that DOES paint: the frame is confirmed, and nothing is hedged.
+  const okPort = freePort();
+  const painting = fakeCdp(okPort, `http://localhost:${appPort}/`, true);
+  try {
+    writeLock({
+      appId: "shot-paints",
+      pid: Deno.pid,
+      port: appPort,
+      startedAt: Date.now(),
+      status: "started",
+      cwd: Deno.cwd(),
+      cdpPort: okPort,
+    });
+    const r = await am(
+      ["shot", "--app=shot-paints", `--out=${appsDir}/ok.png`, "--json"],
+      env,
+    );
+    const j = amJson(r, "am shot (painting window)");
+    assertEquals(j.painted, true, "a painting window must confirm its frame");
+    assertEquals(
+      j.warning,
+      undefined,
+      "a confirmed frame must not carry a stale-risk warning",
+    );
+    assert((await Deno.stat(`${appsDir}/ok.png`)).size > 0);
+  } finally {
+    painting.close();
+    await painting.finished;
+  }
+
+  // A window that never paints — hidden, minimised, occluded. The screenshot is
+  // still taken (it is still worth having), but the answer is qualified.
+  const deadPort = freePort();
+  const silent = fakeCdp(deadPort, `http://localhost:${appPort}/`, false);
+  try {
+    writeLock({
+      appId: "shot-hidden",
+      pid: Deno.pid,
+      port: appPort,
+      startedAt: Date.now(),
+      status: "started",
+      cwd: Deno.cwd(),
+      cdpPort: deadPort,
+    });
+    const r = await am(
+      [
+        "shot",
+        "--app=shot-hidden",
+        `--out=${appsDir}/hidden.png`,
+        "--timeout=600",
+        "--json",
+      ],
+      env,
+    );
+    const j = amJson(r, "am shot (non-painting window)");
+    assertEquals(
+      j.painted,
+      false,
+      "a window that never painted was reported as a confirmed frame — this " +
+        "is the lying instrument the fix exists to remove",
+    );
+    assertStringIncludes(String(j.warning), "may predate");
+    assert(
+      (await Deno.stat(`${appsDir}/hidden.png`)).size > 0,
+      "the screenshot must still be taken — an unconfirmed frame is worth " +
+        "having, it just cannot be vouched for",
+    );
+  } finally {
+    silent.close();
+    await silent.finished;
+    if (prev === undefined) Deno.env.delete("AIO_APPS_DIR");
+    else Deno.env.set("AIO_APPS_DIR", prev);
+    await Deno.remove(appsDir, { recursive: true }).catch(() => {});
+  }
+});
+
+// ── the positional is a window index, and people type a filename there ──────
+//
+// `am shot shots/home.png` reads like every other screenshot tool on earth
+// (vidtune §8.4). It got "invalid window index: shots/home.png" — a message
+// that explains the parser and not the intent. The mistake is detectable, so
+// it gets the flag.
+
+Deno.test("am shot: a path-shaped positional is answered with --out=", async () => {
+  const appsDir = await Deno.makeTempDir({ prefix: "am-shot-pos-" });
+  const prev = Deno.env.get("AIO_APPS_DIR");
+  Deno.env.set("AIO_APPS_DIR", appsDir);
+  const env = { AIO_APPS_DIR: appsDir };
+  const cdp = freePort();
+  const appPort = freePort();
+  const fake = fakeCdp(cdp, `http://localhost:${appPort}/`);
+  try {
+    writeLock({
+      appId: "shot-pos",
+      pid: Deno.pid,
+      port: appPort,
+      startedAt: Date.now(),
+      status: "started",
+      cwd: Deno.cwd(),
+      cdpPort: cdp,
+    });
+    for (const bad of ["shots/home.png", "home.png", "/tmp/x.jpeg"]) {
+      const r = await am(["shot", "--app=shot-pos", bad], env);
+      assertEquals(r.code, 1, `"${bad}" was not refused`);
+      const all = r.out + r.err;
+      assertStringIncludes(all, "WINDOW INDEX");
+      assertStringIncludes(
+        all,
+        `--out=${bad}`,
+        "the refusal must hand back the command they meant to type",
+      );
+    }
+    // A real index still works — the guard must not eat the feature.
+    const ok = await am(
+      ["shot", "--app=shot-pos", "0", `--out=${appsDir}/w0.png`, "--json"],
+      env,
+    );
+    assertEquals(ok.code, 0, ok.out + ok.err);
+  } finally {
+    fake.close();
+    await fake.finished;
+    if (prev === undefined) Deno.env.delete("AIO_APPS_DIR");
+    else Deno.env.set("AIO_APPS_DIR", prev);
+    await Deno.remove(appsDir, { recursive: true }).catch(() => {});
+  }
 });

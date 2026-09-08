@@ -39,7 +39,7 @@ const ws = cell("ws", {
 `setTimeout(() => cell.other(), 0)`** — it escapes the action log, time-travel
 and cancellation. But "scan the disk once at boot" is a real need, and without a
 worked example the prohibited shape is the one people reach for. A field report
-shipped it in **five** `onInit`s, each with an `aiol-ok` comment explaining why
+shipped it in **five** `onInit`s, each with an `aio-ok` comment explaining why
 it was necessary. It was not. Three answers, by when the work should happen:
 
 ```ts

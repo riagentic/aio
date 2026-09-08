@@ -442,6 +442,12 @@ export async function cmdStart(
       outError(plan.message, mode);
       Deno.exit(1);
     }
+    // A positional that named a RUNNING instance resolves to `--app` — see
+    // processPlan. Without this the plan is right and the command still acts
+    // on the wrong app, which is worse than the refusal it replaced.
+    if (plan.kind === "single" && plan.appId) {
+      flags = { ...flags, app: plan.appId };
+    }
     if (plan.kind === "one" || plan.kind === "all") {
       const list = plan.kind === "one" ? [plan.component] : plan.components;
       for (const c of list) {
@@ -879,10 +885,33 @@ export const waitedAt = (
  *  message was true in both while explaining neither. */
 export function noLockMessage(appId: string): string {
   const apps = Deno.env.get("AIO_APPS_DIR");
+  // What IS running, said HERE. The message already pointed at `am instances`,
+  // and a pointer costs a round trip at the exact moment someone is looking at
+  // "not running" for an app they can see in their own browser (newjob §6:
+  // `am stop` missed a demonstrably running app while `--port=N` worked). The
+  // id is almost always right there — a different cwd resolves a different
+  // appId, and the running one is the answer.
+  let live = "";
+  try {
+    const running = instances().filter((i) => i.alive);
+    if (running.length === 1 && running[0]!.appId !== appId) {
+      live = `\n  RUNNING RIGHT NOW: "${running[0]!.appId}" (pid ${
+        running[0]!.pid
+      }) — did you mean \`--app=${running[0]!.appId}\`?`;
+    } else if (running.length > 1) {
+      live = `\n  running right now: ${
+        running.map((i) => i.appId).join(", ")
+      } — target one with --app=<id>`;
+    }
+  } catch {
+    // aio-ok: an unreadable lock dir is already the subject of this message;
+    // the paths above are the answer and a throw here would replace a good
+    // diagnosis with a worse one.
+  }
   return `app not running: no lock file for "${appId}"\n` +
     `  searched: ${lockDir()}\n` +
     `  AIO_APPS_DIR=${apps ?? "unset"} (it scopes the lock dir — am and the ` +
-    `app must share the same value)\n` +
+    `app must share the same value)${live}\n` +
     `  see what IS running: am instances — or target the app by id ` +
     `(--app=<id>) or by port (--port=N, am reads the id from that port)`;
 }
@@ -1235,6 +1264,8 @@ export async function cmdStop(
     }
     if (plan.kind === "one") {
       flags = { ...flags, app: plan.component.appId };
+    } else if (plan.kind === "single" && plan.appId) {
+      flags = { ...flags, app: plan.appId };
     } else if (plan.kind === "all") {
       stopAll = true;
     }
@@ -1369,6 +1400,13 @@ async function restartAll(
     outError(plan.message, mode);
     Deno.exit(1);
   }
+  // A positional that named a RUNNING instance resolves to `--app` — see
+  // processPlan. `am instances` prints app ids, and typing one back was
+  // refused with a message about components.
+  if (plan.kind === "single" && plan.appId) {
+    flags = { ...flags, app: plan.appId };
+    args = args.filter((a) => a !== plan.appId);
+  }
   if (plan.kind === "one" || plan.kind === "all") {
     const list = plan.kind === "one" ? [plan.component] : plan.components;
     const lost: string[] = [];
@@ -1394,6 +1432,52 @@ async function restartAll(
 /** One app's restart: stop it, taking the durability verdict the way `am
  *  stop` does, wait for the port, start it again. Returns the verdict; it
  *  never exits on it (see {@linkcode restartAll}). */
+/** `am`'s OWN flags — the ones that steer the restart rather than the app.
+ *
+ *  `--force` decides whether to take over another checkout; `--json` picks an
+ *  output format. Neither says anything about how the app should boot, and
+ *  neither should suppress the replay of flags that do. */
+const AM_ONLY_FLAGS = new Set([
+  "--force",
+  "--json",
+  "--quiet",
+  "--wait",
+  "--all",
+  "--long",
+  "--timeout",
+  "--app",
+]);
+
+/** The flag NAME, so `--port=8140` and `--port` are the same flag. */
+const flagName = (a: string): string => a.split("=", 1)[0]!;
+
+/** Merge a recorded launch with the flags typed on THIS restart.
+ *
+ *  Replay used to be all-or-nothing: any flag on the command line skipped the
+ *  recorded launch entirely. So `am restart --force` — where `--force` means
+ *  "yes, take over that other checkout" and nothing about how to boot — threw
+ *  away the `--cdp --port=8140` the app was started with, and the app came back
+ *  with `port: 0` and no debugging port (composer §5, risoto §22.4). The
+ *  downstream error was excellent; the cause was silent.
+ *
+ *  Per FLAG, not all-or-nothing: an explicit `--port=9000` overrides a recorded
+ *  one, and everything else recorded is replayed. Pure, so the rule is testable
+ *  without launching anything. */
+export function mergeLaunchFlags(
+  recorded: readonly string[],
+  typed: readonly string[],
+): { launch: string[]; replayed: string[]; overridden: string[] } {
+  const appTyped = typed.filter((a) => !AM_ONLY_FLAGS.has(flagName(a)));
+  const typedNames = new Set(appTyped.map(flagName));
+  const replayed = recorded.filter((a) => !typedNames.has(flagName(a)));
+  const overridden = recorded
+    .filter((a) => typedNames.has(flagName(a)))
+    .map(flagName);
+  // Recorded first, then what was typed: a later occurrence wins in every CLI
+  // parser aio ships, so an override that survived the filter still lands last.
+  return { launch: [...replayed, ...appTyped], replayed, overridden };
+}
+
 async function restartApp(
   args: string[],
   flags: GlobalFlags,
@@ -1461,16 +1545,26 @@ async function restartApp(
   const explicit = args.filter((a) => a.startsWith("--"));
   const recorded = readLaunchInfo(appId);
   let launchArgs = args;
-  if (explicit.length === 0) {
-    if (recorded && recorded.flags.length > 0) {
-      launchArgs = recorded.flags;
+  if (recorded && recorded.flags.length > 0) {
+    const merged = mergeLaunchFlags(recorded.flags, explicit);
+    launchArgs = [...args.filter((a) => !a.startsWith("--")), ...merged.launch];
+    if (merged.replayed.length > 0) {
       out(
         mode === "pretty"
-          ? `restart: replaying original flags — ${recorded.flags.join(" ")}`
-          : { restart: "replay", flags: recorded.flags },
+          ? `restart: replaying original flags — ${merged.replayed.join(" ")}` +
+            (merged.overridden.length
+              ? ` (overridden here: ${merged.overridden.join(" ")})`
+              : "")
+          : {
+            restart: "replay",
+            flags: merged.replayed,
+            overridden: merged.overridden,
+          },
         mode,
       );
-    } else if (!recorded && running) {
+    }
+  } else if (explicit.length === 0) {
+    if (!recorded && running) {
       // Started outside am (e.g. `deno task dev`) → we never captured its
       // flags. A NOTE, on the same channel as the replay note above it — not
       // `{error}`: nothing has failed, and this used to print an error
@@ -1636,6 +1730,21 @@ export async function cmdWatch(
   }
 }
 
+/** The one-line pointer a running app's status carries.
+ *
+ *  Three field reports finished an entire build and only then discovered
+ *  `am expect`, `am surface --path=` and `am timeline`; one dumped the whole
+ *  32 kB semantic surface into its context five or six times before finding
+ *  `--path=`. They named the cause themselves: an agent greps `am help` for
+ *  its own word, does not find it, and composes primitives it already knows —
+ *  it will not browse. `am status` is the command everyone runs FIRST and
+ *  runs OFTEN, which makes it the one place a pointer is actually read.
+ *
+ *  Pretty mode only: `--json` is parsed by scripts, and prose in a data
+ *  channel is noise. */
+const STATUS_TIP = `  next: \`am surface --path=App\` (the UI by name) · ` +
+  `\`am expect <path> eq <v>\` (assert state) · \`am help\` · docs/AGENTS.md`;
+
 export async function cmdStatus(
   _args: string[],
   flags: GlobalFlags,
@@ -1652,6 +1761,8 @@ export async function cmdStatus(
     }
     if (plan.kind === "one") {
       flags = { ...flags, app: plan.component.appId };
+    } else if (plan.kind === "single" && plan.appId) {
+      flags = { ...flags, app: plan.appId };
     } else if (plan.kind === "all") {
       const rows = plan.components.map((c) => {
         const pf = liveLock(c.appId);
@@ -1803,7 +1914,7 @@ export async function cmdStatus(
         out(
           `${appId}: started (pid ${pf.pid}, port ${port}, uptime ${
             formatUptime(m.uptime)
-          }, ${m.connections} connections${uds})${bad}`,
+          }, ${m.connections} connections${uds})${bad}\n${STATUS_TIP}`,
           mode,
         );
       } else {
@@ -1820,7 +1931,10 @@ export async function cmdStatus(
     } else {
       if (mode === "pretty") {
         const uds = pf.socketPath ? `, transport uds (${pf.socketPath})` : "";
-        out(`${appId}: started (pid ${pf.pid}, port ${port}${uds})`, mode);
+        out(
+          `${appId}: started (pid ${pf.pid}, port ${port}${uds})\n${STATUS_TIP}`,
+          mode,
+        );
       } else {
         out({
           appId,
@@ -1887,8 +2001,20 @@ export function cmdInstances(_args: string[], flags: GlobalFlags): void {
       // Shown only when SOMETHING has one — a column of dashes for the common
       // case is noise, and the reader who needs it always has one.
       ...(anyCdp ? { CDP: inst.cdpPort ? String(inst.cdpPort) : "" } : {}),
+      // DATA before HOME: three things are spelled like "where this app
+      // lives" and only `appDir` moves the database (risoto §20). `home` was
+      // the only one shown, so an app whose `appDir` pointed elsewhere looked
+      // like it lived where its data did not. Shown only when it differs from
+      // the default under `home` — a column repeating the obvious is noise.
       ...(long
-        ? { SOCKET: inst.socketPath ?? "", HOME: inst.home, CWD: inst.cwd }
+        ? {
+          SOCKET: inst.socketPath ?? "",
+          ...(inst.dataDir && !inst.dataDir.startsWith(inst.home ?? "\u0000")
+            ? { DATA: inst.dataDir }
+            : {}),
+          HOME: inst.home,
+          CWD: inst.cwd,
+        }
         : {}),
     }));
     const mismatched = all.filter((i) => instanceAioMismatch(i.aioVersion));
@@ -1938,6 +2064,12 @@ export function cmdInstances(_args: string[], flags: GlobalFlags): void {
         aio: inst.aioVersion ?? null,
         aioMismatch: instanceAioMismatch(inst.aioVersion),
         home: inst.home,
+        // Where the DATA is. `home` and `dataDir` are the SAME question only
+        // when the app did not set `appDir`; three spellings mean "where this
+        // app lives" and only that one moves the database (risoto §20). Always
+        // present in --json (null when the lock predates it) — a field that
+        // appears conditionally is a field a script has to guess about.
+        dataDir: inst.dataDir ?? null,
         cwd: inst.cwd,
       })),
       mode,

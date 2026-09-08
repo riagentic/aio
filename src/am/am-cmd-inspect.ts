@@ -297,10 +297,84 @@ export function groupLogEvents(lines: readonly string[]): string[][] {
   return events;
 }
 
+/** Log levels, weakest first — `--level=warn` means "warn AND above", the
+ *  meaning every other log tool has. */
+const LOG_LEVELS = ["debug", "info", "warn", "error"] as const;
+
+/** Parse `--since=` — a duration (`15m`, `2h`, `30s`, `1d`) or an absolute
+ *  timestamp the runtime can parse. Returns epoch ms, or null when the value
+ *  is not a time at all (which the caller REFUSES rather than ignoring: a
+ *  filter silently treated as "no filter" reads as "nothing happened"). */
+export function parseSince(raw: string, now = Date.now()): number | null {
+  const rel = /^(\d+)\s*([smhd])$/.exec(raw.trim());
+  if (rel) {
+    const n = Number(rel[1]);
+    const unit = { s: 1e3, m: 6e4, h: 3.6e6, d: 8.64e7 }[rel[2]!]!;
+    return now - n * unit;
+  }
+  const t = Date.parse(raw);
+  return Number.isFinite(t) ? t : null;
+}
+
+/** The `{ts, level, tag}` an aio log event opens with, or null for a line that
+ *  is not an event start (a stack frame, a raw write). */
+export function logEventHead(
+  first: string,
+): { ts: number | null; level: string; tag: string } | null {
+  // deno-lint-ignore no-control-regex
+  const plain = first.replace(/\x1b\[[0-9;]*m/g, "");
+  const m =
+    /^(\d{4}-\d\d-\d\d[ T][\d:.]+(?:[+-]\d\d:?\d\d|Z)?)\s+([A-Z]+)\s+(\S+)/
+      .exec(plain);
+  if (!m) return null;
+  const t = Date.parse(m[1]!.replace(" ", "T"));
+  return {
+    ts: Number.isFinite(t) ? t : null,
+    level: m[2]!.toLowerCase(),
+    tag: m[3]!,
+  };
+}
+
+/** Does this EVENT (its lines) pass the structured filters?
+ *
+ *  Two field reports re-grepped the same throwaway Python out of one JSON blob
+ *  dozens of times because `am logs` could only match a substring (watcher §6,
+ *  §8.8; composer §9.8). A substring cannot express "warnings and worse", and
+ *  it cannot express "since the restart" at all.
+ *
+ *  An event whose first line is not a recognised header (a raw write, a
+ *  pre-format line) passes every filter: dropping what we cannot classify is
+ *  how a filter comes to hide the one line that mattered. */
+export function logEventMatches(
+  event: readonly string[],
+  f: { level?: string; tag?: string; sinceMs?: number },
+): boolean {
+  const head = logEventHead(event[0] ?? "");
+  if (!head) return true;
+  if (f.level) {
+    const want = LOG_LEVELS.indexOf(f.level as typeof LOG_LEVELS[number]);
+    const got = LOG_LEVELS.indexOf(head.level as typeof LOG_LEVELS[number]);
+    // An unknown level on either side is not filtered out — see above.
+    if (want >= 0 && got >= 0 && got < want) return false;
+  }
+  if (f.tag) {
+    // Exact, or a namespace prefix: `--tag=cell` keeps `cell:notes`, and does
+    // NOT keep `cellophane`.
+    if (head.tag !== f.tag && !head.tag.startsWith(f.tag + ":")) return false;
+  }
+  if (f.sinceMs !== undefined && head.ts !== null && head.ts < f.sinceMs) {
+    return false;
+  }
+  return true;
+}
+
 /** Flags `am log` / `am logs` accept — the refusal names them. */
 export const LOG_FLAGS = [
   "--client",
   "--filter=X",
+  "--level=warn",
+  "--tag=cell:todo",
+  "--since=15m",
   "--lines=N",
   "--follow/-f",
   "--json",
@@ -313,12 +387,92 @@ export function logFlagError(args: readonly string[]): string | null {
   // `--client=<kind>` is the runtime spelling parseGlobalFlags forwards on
   // purpose (logPathFor reads it as "the client's log").
   const stray = args.filter((a) =>
-    a.startsWith("-") && a !== "-" && !a.startsWith("--client=")
+    a.startsWith("-") && a !== "-" && !a.startsWith("--client=") &&
+    !a.startsWith("--level=") && !a.startsWith("--tag=") &&
+    !a.startsWith("--since=")
   );
   if (stray.length === 0) return null;
   return `am logs: unknown flag ${stray.join(", ")} — accepted: ${
     LOG_FLAGS.join(" ")
   }. A level is a filter word: \`am logs error\`.`;
+}
+
+/** `am heap` — what the process is HOLDING, as opposed to what it is serving.
+ *
+ *  `am state` answers the second question. Nothing answered the first: a field
+ *  report watched a console peak at 31.8 GB and restart 16 times in 24 hours
+ *  with no way to ask, from outside, how much of that was heap and which cell
+ *  it was in (quant §9.4). */
+export async function cmdHeap(
+  _args: string[],
+  flags: GlobalFlags,
+): Promise<void> {
+  const mode = detectMode(flags);
+  const appId = resolveAmAppId(flags.app);
+  const port = resolvePort(flags.port, appId, {
+    explicit: flags.app !== undefined,
+  });
+  const r = await trojanGet(port, "heap", appId);
+  if (!r.ok) {
+    outError(r.error, mode);
+    Deno.exit(1);
+  }
+  const h = r.data as {
+    pid: number;
+    rss: number;
+    heapUsed: number;
+    heapTotal: number;
+    heapLimit: number | null;
+    heapPct: number | null;
+    external: number;
+    cells: {
+      name: string;
+      bytes: number;
+      largestField?: { key: string; entries?: number };
+    }[];
+  };
+  if (mode !== "pretty") {
+    out(h, mode);
+    return;
+  }
+  const mb = (n: number) => `${(n / 1e6).toFixed(1)} MB`;
+  const lines = [
+    `pid ${h.pid}`,
+    `heap    ${mb(h.heapUsed)}${
+      h.heapLimit ? ` of ${mb(h.heapLimit)} (${h.heapPct}%)` : ""
+    }`,
+    // RSS is what the machine feels; heap is what V8 can be blamed for. A
+    // report that gives only one of them cannot tell a leak from a big buffer.
+    `rss     ${mb(h.rss)}   external ${mb(h.external)}`,
+    "",
+    "cell state (serialized):",
+  ];
+  if (h.cells.length === 0) lines.push("  (no cells)");
+  for (const c of h.cells.slice(0, 12)) {
+    const big = c.largestField
+      ? `   largest: ${c.largestField.key}${
+        c.largestField.entries !== undefined
+          ? ` (${c.largestField.entries})`
+          : ""
+      }`
+      : "";
+    lines.push(
+      `  ${c.name.padEnd(16)} ${
+        c.bytes < 0 ? "unserializable" : mb(c.bytes).padStart(9)
+      }${big}`,
+    );
+  }
+  if (h.cells.length > 12) lines.push(`  … ${h.cells.length - 12} more`);
+  // Cell state is a SUBSET of the heap, never the whole of it. Saying so stops
+  // the obvious wrong conclusion — "my cells are small, so the leak is aio's"
+  // — which is sometimes right and needs to be reasoned to, not assumed.
+  lines.push(
+    "",
+    "cell state is serialized SIZE, not retained heap: closures, caches, " +
+      "buffers\nand anything a method holds are in the heap above and not in " +
+      "this list.",
+  );
+  out(lines.join("\n"), mode);
 }
 
 export async function cmdLog(
@@ -343,9 +497,46 @@ export async function cmdLog(
     outError(stray, mode);
     Deno.exit(1);
   }
-  const filter = args[0] ?? flags.filter;
+  const filter = args.find((a) => !a.startsWith("-")) ?? flags.filter;
   const n = flags.lines ?? 50;
   const follow = flags.follow ?? false;
+
+  // Structured filters, so "warnings and worse, from this cell, since the
+  // restart" stops being a hand-written parser. A substring filter cannot
+  // express any of the three, and two field reports wrote the same throwaway
+  // Python dozens of times for want of them.
+  const valOf = (name: string): string | undefined =>
+    args.find((a) => a.startsWith(`--${name}=`))?.slice(name.length + 3);
+  const level = valOf("level")?.toLowerCase();
+  const tag = valOf("tag");
+  const sinceRaw = valOf("since");
+  let sinceMs: number | undefined;
+  if (sinceRaw !== undefined) {
+    const parsed = parseSince(sinceRaw);
+    if (parsed === null) {
+      // REFUSED, never ignored: a filter silently treated as "no filter" turns
+      // "I could not read that" into "nothing happened", which is the reading
+      // that costs an afternoon.
+      outError(
+        `--since=${sinceRaw} is not a time — use a duration (15m, 2h, 30s, ` +
+          `1d) or a timestamp (2026-09-08T10:00)`,
+        mode,
+      );
+      Deno.exit(1);
+    }
+    sinceMs = parsed;
+  }
+  if (
+    level !== undefined && !["debug", "info", "warn", "error"].includes(level)
+  ) {
+    outError(
+      `--level=${level} is not a level — debug, info, warn or error ` +
+        `(a level means that level AND above)`,
+      mode,
+    );
+    Deno.exit(1);
+  }
+  const structured = { level, tag, sinceMs };
 
   // Print current tail
   let offset = 0;
@@ -362,6 +553,7 @@ export async function cmdLog(
       const lc = filter.toLowerCase();
       events = events.filter((e) => e.join("\n").toLowerCase().includes(lc));
     }
+    events = events.filter((e) => logEventMatches(e, structured));
     const tail = events.slice(-n).flat();
     if (mode === "json") {
       // deno-lint-ignore no-control-regex
@@ -371,6 +563,9 @@ export async function cmdLog(
         total: events.length,
         shown: Math.min(events.length, n),
         filter: filter ?? null,
+        level: level ?? null,
+        tag: tag ?? null,
+        since: sinceRaw ?? null,
         lines: clean,
       }, mode);
     } else console.log(tail.join("\n"));
@@ -422,11 +617,22 @@ export async function cmdLog(
           if (newline === -1) continue;
           const toWrite = buf.slice(0, newline + 1);
           buf = buf.slice(newline + 1);
-          const filtered = filter
-            ? toWrite.split("\n").filter((l) =>
-              l.toLowerCase().includes(filter.toLowerCase())
-            ).join("\n") + "\n"
-            : toWrite;
+          // The SAME filters as the tail above, on the same unit (events, not
+          // lines). A `--follow` that filtered differently from the tail it
+          // continues would answer one question two ways — and `--level` and
+          // `--tag` would simply be ignored live, which is the silent-drop
+          // shape this whole command has been fighting.
+          //
+          // `since` is deliberately dropped here: every line arriving now is
+          // newer than any past cutoff, and re-applying it would only mis-drop
+          // an event whose header we could not parse.
+          let evs = groupLogEvents(toWrite.split("\n"));
+          if (filter) {
+            const lc = filter.toLowerCase();
+            evs = evs.filter((e) => e.join("\n").toLowerCase().includes(lc));
+          }
+          evs = evs.filter((e) => logEventMatches(e, { level, tag }));
+          const filtered = evs.flat().join("\n") + "\n";
           if (filtered.trim()) await Deno.stdout.write(enc.encode(filtered));
         }
       } finally {
@@ -1046,6 +1252,38 @@ export async function cmdSurface(
       mode,
     );
     Deno.exit(1);
+  }
+  // `--names`: just the addressable paths, one per line.
+  //
+  // The list existed and was reachable only by PROVOKING A FAILURE — a miss
+  // prints `available: …`, so "what can I address?" was answered by asking for
+  // something that is not there (anathomy §5a). A fine recovery path and a poor
+  // discovery one, and the same list is what an agent needs BEFORE it writes
+  // the first `am trigger`. `ui.names()` is the same answer in a test.
+  if (args.includes("--names")) {
+    const names: string[] = [];
+    const walk = (n: unknown) => {
+      const node = n as {
+        elements?: { path?: string }[];
+        children?: unknown[];
+      };
+      for (const e of node.elements ?? []) if (e.path) names.push(e.path);
+      for (const c of node.children ?? []) walk(c);
+    };
+    for (const r of Array.isArray(scoped) ? scoped : [scoped]) walk(r);
+    if (mode === "json") {
+      out({ names }, mode);
+      return;
+    }
+    out(
+      names.length
+        ? names.join("\n") +
+          `\n\ntrigger with: am trigger "<one of the above>" <action> [text]`
+        : "(no addressable elements — an element needs an accessible name; " +
+          "see the [aio-dev] label warnings in the app's log)",
+      mode,
+    );
+    return;
   }
   if (mode === "json") {
     out(scoped, mode);

@@ -810,3 +810,61 @@ Deno.test("validateGraph: a missing mapping in an EAGER module still blocks", as
     await dropTempDir(dir);
   }
 });
+
+// ── an unmanaged Worker: a build product that silently goes stale ───────────
+//
+// `new Worker(new URL("./x.ts", import.meta.url))` resolves its URL at RUNTIME,
+// so no static graph can follow it — not this walk, not esbuild, not the dev
+// watcher. A field report lost an afternoon to the consequence: edits to the
+// worker did nothing at all, with no error and no warning, while the app booted,
+// ran and transcribed using the PREVIOUS version of the code. A build product
+// silently going stale is indistinguishable from working code.
+
+Deno.test("validateGraph: a client-reachable Worker is named, and never blocks", async () => {
+  const dir = await tempDir("aio-graph-worker-");
+  try {
+    await Deno.writeTextFile(
+      dir + "/App.tsx",
+      `const w = new Worker(new URL("./transcribe.ts", import.meta.url), { type: "module" });\n` +
+        `export default function App() { return null; }`,
+    );
+    await Deno.writeTextFile(dir + "/transcribe.ts", `export const x = 1;`);
+    const result = await validateGraph(dir + "/App.tsx", {}, mockTranspile);
+    assertEquals(
+      result.valid,
+      true,
+      "a Worker must not block the app — it genuinely runs",
+    );
+    const e = result.errors.find((e) => e.category === "unmanaged-worker");
+    assert(e, "the Worker went unreported — this is the silence being fixed");
+    assertStringIncludes(e!.message, "transcribe.ts");
+    // The fix has to name the CONSEQUENCE, not just the fact. "Editing it does
+    // nothing" is the sentence that would have saved the afternoon.
+    assertStringIncludes(e!.fix, "NOTHING");
+    assertStringIncludes(e!.fix, "compile.include");
+  } finally {
+    await dropTempDir(dir);
+  }
+});
+
+Deno.test("validateGraph: a remote Worker URL is not a stale build product", async () => {
+  const dir = await tempDir("aio-graph-worker-remote-");
+  try {
+    // Nothing local goes stale here, so a warning would be noise — and a
+    // warning nobody can act on is how a real one gets ignored.
+    await Deno.writeTextFile(
+      dir + "/App.tsx",
+      `const a = new Worker("https://cdn.example.com/w.js", { type: "module" });\n` +
+        `const b = new Worker(new URL("blob:x"));\n` +
+        `export default function App() { return null; }`,
+    );
+    const result = await validateGraph(dir + "/App.tsx", {}, mockTranspile);
+    assertEquals(
+      result.errors.filter((e) => e.category === "unmanaged-worker").length,
+      0,
+      "a remote or blob Worker URL was reported as a stale local build product",
+    );
+  } finally {
+    await dropTempDir(dir);
+  }
+});
