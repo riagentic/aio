@@ -1049,9 +1049,14 @@ type SurfaceNode = {
     value?: string;
     checked?: boolean;
     disabled?: boolean;
+    rect?: { x: number; y: number; w: number; h: number };
   }[];
   children: SurfaceNode[];
 };
+
+/** What the client measured, when `--rects` was asked for. `laidOut` is the
+ *  number that decides whether the answer means anything. */
+type SurfaceMeasured = { measurable: number; laidOut: number };
 
 function renderSurface(node: SurfaceNode, indent = ""): string {
   const keyStr = node.key !== undefined ? ` [key=${node.key}]` : "";
@@ -1062,6 +1067,11 @@ function renderSurface(node: SurfaceNode, indent = ""): string {
     if (el.value !== undefined) bits.push(`value=${JSON.stringify(el.value)}`);
     if (el.checked !== undefined) bits.push(el.checked ? "☑" : "☐");
     if (el.disabled) bits.push("disabled");
+    // Geometry last: it is the widest field and the one being scanned down a
+    // column, so a ragged left edge would make it unreadable.
+    if (el.rect) {
+      bits.push(`${el.rect.w}x${el.rect.h} @${el.rect.x},${el.rect.y}`);
+    }
     out += `${indent}  • ${el.name}  <${el.tag}> [${el.events.join(", ")}]${
       bits.length ? "  " + bits.join("  ") : ""
     }\n`;
@@ -1070,6 +1080,46 @@ function renderSurface(node: SurfaceNode, indent = ""): string {
     out += renderSurface(child, indent + "  ");
   }
   return out;
+}
+
+/** Say what an all-zero measurement means, and refuse to let it read as data.
+ *
+ *  Every `getBoundingClientRect()` answers, everywhere — happy-dom, an SSR
+ *  shim, a WebView whose window has no size yet. What it answers with no layout
+ *  engine behind it is `0,0 0x0`, for every element, which is indistinguishable
+ *  from a real measurement of a collapsed UI. That is the most plausible-looking
+ *  wrong answer this command can produce, and it would be produced exactly when
+ *  someone is hunting a layout bug. So it exits 1 and names both readings.
+ *  @internal */
+export function rectsVerdict(
+  measured: { measurable: number; laidOut: number } | undefined,
+): { note?: string; ok: boolean } {
+  if (!measured || measured.measurable === 0) {
+    return {
+      ok: true,
+      note:
+        "note: --rects measured nothing — no element on this surface carried " +
+        "a live DOM reference (a server-side render, or an empty surface)",
+    };
+  }
+  if (measured.laidOut > 0) return { ok: true };
+  return {
+    ok: false,
+    note: `--rects: all ${measured.measurable} elements measured 0x0. Either ` +
+      `this client has no layout (a headless/SSR render, or a window with no ` +
+      `size yet), or the UI really has collapsed. Both are worth knowing and ` +
+      `this command cannot tell them apart — check the window is open and ` +
+      `painted, then re-run.`,
+  };
+}
+
+/** Print the verdict and exit 1 if the measurement cannot be trusted. */
+function reportRects(
+  measured: { measurable: number; laidOut: number } | undefined,
+): void {
+  const v = rectsVerdict(measured);
+  if (v.note) console.error(v.note);
+  if (!v.ok) Deno.exit(1);
 }
 
 /** `am surface [clientIdx]` — print the client's semantic UI surface: every
@@ -1173,7 +1223,15 @@ export async function cmdSurface(
   // `--full` lifts the text cap: element/component text is capped so a surface
   // stays scannable, and a cut is now marked with "…" — but a generated command
   // line has to be readable in full.
-  const q = args.includes("--full") ? "?full=1" : "";
+  // `--rects` attaches layout geometry per element — "the app looks fine"
+  // becomes "the Stage is 6886 px tall". Only a real client can answer it; the
+  // server-side render refuses rather than reporting 0x0 for everything.
+  const wantRects = args.includes("--rects");
+  const qs = [
+    ...(args.includes("--full") ? ["full=1"] : []),
+    ...(wantRects ? ["rects=1"] : []),
+  ];
+  const q = qs.length ? `?${qs.join("&")}` : "";
   // Scope the tree client-side: one page in a real app serialised to a 32 KB
   // single-line blob, and reading one component out of it meant piping into
   // Python — the same "am made me write a script" shape as the --json one
@@ -1235,7 +1293,19 @@ export async function cmdSurface(
     outError(result.error, mode);
     Deno.exit(1);
   }
-  const scoped = scopeSurface(result.data, {
+  // With `--rects` the client replies with an OBJECT — the roots plus what it
+  // was actually able to measure. Everything downstream wants the roots.
+  let measured: SurfaceMeasured | undefined;
+  let payload: unknown = result.data;
+  if (
+    wantRects && payload && typeof payload === "object" &&
+    !Array.isArray(payload) && "roots" in payload
+  ) {
+    const env = payload as { roots: unknown; measured?: SurfaceMeasured };
+    measured = env.measured;
+    payload = env.roots;
+  }
+  const scoped = scopeSurface(payload, {
     component: wantComponent,
     path: wantPath,
     depth: maxDepth,
@@ -1247,7 +1317,7 @@ export async function cmdSurface(
       `no match for ${
         wantComponent ? `--component=${wantComponent}` : `--path=${wantPath}`
       } — components in this surface: ${
-        componentNames(result.data).join(", ") || "(none)"
+        componentNames(payload).join(", ") || "(none)"
       }`,
       mode,
     );
@@ -1286,7 +1356,11 @@ export async function cmdSurface(
     return;
   }
   if (mode === "json") {
-    out(scoped, mode);
+    // A script asking for geometry gets the counts in the same document. The
+    // roots stay the top level for every other invocation, so nothing that
+    // parses `am surface --json` today has to change.
+    out(wantRects ? { roots: scoped, measured } : scoped, mode);
+    if (wantRects) reportRects(measured);
     return;
   }
   const roots = scoped;
@@ -1308,6 +1382,7 @@ export async function cmdSurface(
       // number copied from here is stale the moment the page reloads.
       : `trigger with: am trigger "<Component…:Element>" <action> [text]`,
   );
+  if (wantRects) reportRects(measured);
 }
 
 /** Parse a chord like `"ctrl+shift+Enter"` (or a bare `"ctrl+alt"`) into the

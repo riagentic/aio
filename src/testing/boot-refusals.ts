@@ -61,6 +61,26 @@ export function _refuseUnsafeCells(
 /** The app-level composition options a harness has to honour to boot the
  *  cells the way `aio.run({ cellDefaults, localFirst })` does. */
 export type HarnessBootOptions = {
+  /** Stand in for a module a cell imports through `serverImport(…)`.
+   *
+   *  For a cell that owns an OS PROCESS there was no safe rung (cc §8.6,
+   *  §9.3): `testCell` never reaches the spawn, and `bootCells` spawns the
+   *  REAL child, so "random actions against a real runtime" means a real
+   *  subprocess per action. Cassettes wrap a function you can reach; they
+   *  cannot wrap `await import("./claude.server.ts")` inside a method.
+   *
+   *  ```ts
+   *  await bootCells([session], {
+   *    stub: { "./claude.server.ts": { run: () => "canned" } },
+   *  })
+   *  ```
+   *
+   *  Keyed by the specifier AS WRITTEN in the cell, so a test stubs the string
+   *  it can see rather than a `file:///…` it would have to compute. Only
+   *  imports that go through `serverImport` are stubbable — nothing can
+   *  intercept a raw `await import(…)` in Deno, and pretending otherwise would
+   *  be a stub that silently did not apply. */
+  stub?: Record<string, unknown>;
   cellDefaults?: CellDefaults;
   localFirst?: boolean;
   /** The app's `aio.run({ perfBudget })`.

@@ -14,6 +14,7 @@ import { diagSubscribe } from "./diagnostic-bus.ts";
 import { isRedactedAction, noRedaction, REDACTED } from "./redact.ts";
 import { actionOrigin } from "./action-kind.ts";
 import type { Redactor } from "./redact.ts";
+import { isDiagnosticsOptOut } from "./diagnostics-optout.ts";
 
 /** Lifecycle hooks returned by initDiagnostics for the runtime to call */
 export type DiagnosticsHooks = {
@@ -229,7 +230,18 @@ export function initDiagnostics(
     next: Record<string, unknown>,
     action: { type: string; payload?: unknown },
   ): void {
-    if (diffEnabled && prev !== next) {
+    // `cell({ diagnostics: false })` — this cell's actions stay out of every
+    // sink that puts them ON DISK: the state-diff debug log, the action
+    // journal, and the checkpoint's recentActions.
+    //
+    // WHAT IT DOES NOT TOUCH, on purpose. The durability journal
+    // (`journal: true`) is not a diagnostic — it is how committed actions are
+    // replayed, and dropping a cell from it would be silent data loss dressed
+    // as a privacy feature. Nor does it touch persistence: a cell that must
+    // keep its STATE off disk says `persist: "none"`, and making one key mean
+    // both is exactly the conflation this key exists to end.
+    const quiet = isDiagnosticsOptOut(action.type);
+    if (diffEnabled && prev !== next && !quiet) {
       observe("state-diff", () => {
         const diffs = computeDiffs(prev, next);
         for (const d of diffs) {
@@ -256,7 +268,7 @@ export function initDiagnostics(
         }
       });
     }
-    if (actionLog) {
+    if (actionLog && !quiet) {
       observe("action-log", () => {
         // The write-set of a redacted method carries the same secret as its
         // arguments, under a DIFFERENT type — the ORIGIN decides too, exactly
@@ -270,7 +282,7 @@ export function initDiagnostics(
       });
     }
     lastState = next;
-    recentActions.push(action.type);
+    if (!quiet) recentActions.push(action.type);
     if (recentActions.length > MAX_RECENT) recentActions.shift();
     if (cpWriter && prev !== next) {
       observe("checkpoint", () => {

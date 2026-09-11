@@ -1,5 +1,6 @@
 import { assert, assertEquals, assertExists } from "@std/assert";
 import { Window } from "happy-dom";
+import { closeWindow } from "../src/testing/close-window.ts";
 import {
   createTT,
   markError,
@@ -457,7 +458,7 @@ function setupDOM(): {
     cleanup: async () => {
       // deno-lint-ignore no-explicit-any
       delete (globalThis as any).document;
-      await win.happyDOM.close();
+      await closeWindow(win);
     },
   };
 }

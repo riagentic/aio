@@ -33,6 +33,8 @@
 // inert.
 
 /** The owning app's identity. `""` = unknown, matches every app. */
+import { bumpPending } from "../protocol/pending-calls.ts";
+
 export type AppScope = string;
 
 /** True when two scopes name the same app — or either does not know. */
@@ -166,8 +168,19 @@ export function trackCall(
     _inflight.add(entry);
   }
   entry.set.add(controller);
+  // `cell.$pending("m")` — the count aio was already keeping and not showing
+  // (llama.master §14, cc §9.5). A COUNT, never a flag: a boolean is wrong the
+  // moment two readings overlap, which is the bug that report shipped.
+  bumpPending(`${cellPrefix}:${method}`, 1);
+  let released = false;
+  const release = () => {
+    if (released) return; // an untrack called twice must not double-decrement
+    released = true;
+    bumpPending(`${cellPrefix}:${method}`, -1);
+  };
   const mine = entry;
   return () => {
+    release();
     mine.set.delete(controller);
     // Identity check: notifyMethodCancel DELETES the entry, so a later call
     // installs a NEW one under the same key. Without `_inflight.has(mine)`,

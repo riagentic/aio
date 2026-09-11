@@ -51,6 +51,8 @@
 // …which is a claim a reviewer can check, unlike a ledger entry nobody reads.
 
 /** Rules, in the order they are reported. */
+import { justified as okMarker } from "../src/diagnostics/ok-marker.ts";
+
 export type Rule =
   | "empty-loop"
   | "nonempty-string"
@@ -114,12 +116,27 @@ function _regexStart(src: string, i: number): boolean {
       .includes(word);
 }
 
-export function mask(src: string): string {
+/** Blank what is not code, keeping every offset.
+ *
+ *  `keepStrings` blanks ONLY comments: string, template and regex literals are
+ *  still skipped over — so a `//` inside one is never mistaken for a comment —
+ *  but their contents survive. A scanner that reads a MODULE SPECIFIER needs
+ *  that: `new Worker(new URL("./db-worker.ts", import.meta.url))` keeps the
+ *  path it is looking for, while the same line written out in a doc comment
+ *  stops being mistaken for code. */
+export function mask(
+  src: string,
+  opts: { keepStrings?: boolean } = {},
+): string {
+  const keep = opts.keepStrings === true;
   const out = src.split("");
   let i = 0;
   const n = src.length;
   const blank = (from: number, to: number) => {
     for (let k = from; k < to && k < n; k++) if (out[k] !== "\n") out[k] = " ";
+  };
+  const blankLiteral = (from: number, to: number) => {
+    if (!keep) blank(from, to);
   };
   while (i < n) {
     const c = src[i]!;
@@ -157,7 +174,7 @@ export function mask(src: string): string {
         else if (ch === "/") break;
         k++;
       }
-      blank(i + 1, k);
+      blankLiteral(i + 1, k);
       i = Math.min(k + 1, n);
     } else if (c === '"' || c === "'" || c === "`") {
       let k = i + 1;
@@ -166,7 +183,7 @@ export function mask(src: string): string {
         else if (src[k] === c) break;
         else k++;
       }
-      blank(i + 1, k);
+      blankLiteral(i + 1, k);
       i = Math.min(k + 1, n);
     } else i++;
   }
@@ -189,9 +206,9 @@ function matchAt(masked: string, open: number): number {
 const lineOf = (src: string, idx: number): number =>
   src.slice(0, idx).split("\n").length;
 
-/** The acknowledgement marker, spelled the way the rest of the repo spells
- *  it (`scripts/check-silent-catch.ts`, `src/server/graph-validator.ts`). */
-const JUSTIFIED = /\baio-ok\b\s*[:\-—]\s*\S/;
+/** One marker, both spellings, honoured only when it is addressed to
+ *  this gate or to nobody in particular. See scripts/ok-marker.ts. */
+const JUSTIFIED = { test: (line: string) => okMarker(line, "vacuous") };
 
 /** True when the offending line, or the line above it, carries `aio-ok: …`. */
 function justified(src: string, idx: number): boolean {

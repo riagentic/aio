@@ -8,6 +8,7 @@
 import { assertEquals } from "@std/assert";
 import { signal } from "../src/state/signal.ts";
 import { Window } from "happy-dom";
+import { closeWindow } from "../src/testing/close-window.ts";
 import { h } from "../src/air/vdom.ts";
 import { _setDocument, _unmount, mount } from "../src/air/aio-renderer.ts";
 import { onMount, useRef } from "../src/air/renderer-lifecycle.ts";
@@ -17,7 +18,7 @@ function createDOM() {
   const doc = win.document as unknown as Document;
   const root = doc.createElement("div");
   doc.body.appendChild(root);
-  return { document: doc, root, cleanup: () => win.happyDOM.close() };
+  return { document: doc, root, cleanup: () => closeWindow(win) };
 }
 
 Deno.test({

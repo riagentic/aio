@@ -21,6 +21,7 @@ import {
 } from "../src/air/aio-renderer.ts";
 import { isDevMode, isDevModeExplicit } from "../src/state/dev-flag.ts";
 import { Window } from "happy-dom";
+import { closeWindow } from "../src/testing/close-window.ts";
 
 // Arm `__aioDev` exactly as the dev server's served shell and every test
 // harness (`_armTestStrict`) do. A bare renderer unit test does not go through
@@ -49,7 +50,7 @@ async function warningsDuring(
     _setDocument(undefined);
     // The window this probe opened is its own to close — happy-dom keeps
     // timers behind an open window, and the sanitizer names every one.
-    await win.happyDOM.close();
+    await closeWindow(win);
   }
   return seen;
 }
@@ -137,6 +138,6 @@ Deno.test("dev warnings: data-component is opt-in, not ambient", async () => {
   } finally {
     setDevMode("auto");
     _setDocument(undefined);
-    await win.happyDOM.close();
+    await closeWindow(win);
   }
 });

@@ -5,6 +5,7 @@
 import type { DiagEvent } from "./types.ts";
 import { DIAG_THROTTLE_MS, formatDiagEvent } from "./diag-formatter.ts";
 import { log } from "../diagnostics/logger-api.ts";
+import { recordBudgetBreach } from "../state/budgets.ts";
 
 /** Above this many live throttle keys, sweep the expired ones (they are
  *  keyed per client, so the set grows with connections, not with code). */
@@ -140,6 +141,9 @@ export function createPressureMonitor(
     }
 
     if (bytes >= payloadThreshold) {
+      // A declared `budgets.payload` is a commitment, so it is recorded for
+      // `/health` as well as logged. No-op when the threshold is aio's own.
+      recordBudgetBreach("payload", bytes, `client ${clientId}`);
       const kb = (bytes / 1024).toFixed(0);
       emit({
         kind: "pressure",
@@ -194,6 +198,7 @@ export function createPressureMonitor(
     const rate = _broadcastCount;
     _broadcastCount = 0;
     if (rate >= rateThreshold) {
+      recordBudgetBreach("broadcastRate", rate);
       _peakRate = Math.max(_peakRate, rate);
       if (_overSince === 0) {
         _overSince = Date.now();

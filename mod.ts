@@ -191,7 +191,27 @@ export type {
 } from "./src/state/cell-impl.ts";
 /** Draft annotation for cancellation-aware async methods —
  *  `async place(s: State & Partial<MethodDraftMeta>) { … s.$signal … }` */
+/** `serverImport("./x.server.ts", import.meta.url)` — a dynamic import a TEST
+ *  can stand in for (`bootCells(cells, { stub })`). Unstubbed it is exactly
+ *  the `await import(…)` it replaces, with the specifier resolved against the
+ *  caller; nothing can intercept a raw dynamic import in Deno, which is why
+ *  the seam has to be a function the app calls on purpose. */
+/** `aio.run({ budgets })` — declared size/rate limits in human units. */
+export type { Budgets, ResolvedBudgets } from "./src/state/budgets.ts";
+/** `cell({ args })` — per-method argument rules (a Standard Schema or a
+ *  predicate), and `cell({ concurrency })`'s three answers. */
+export type { ArgSchemas, ArgSpec } from "./src/state/arg-schema.ts";
+export type { ConcurrencyMode } from "./src/state/method-policy.ts";
+export { serverImport } from "./src/state/server-import.ts";
 export type { MethodDraftMeta } from "./src/state/cell-impl.ts";
+/** `s.$call.sibling(args)` — one cell method calling another on the SAME
+ *  draft, in the same commit, with no second dispatch.
+ *
+ *  `async run(s: State & MethodDraftCalls) { s.$call.bench("cold") }`. Served
+ *  at runtime on every draft, sync and async; this type is how a method SAYS
+ *  so to the type-checker. Pass the cell's method map — `MethodDraftCalls<
+ *  typeof methods>` — for precise argument and return types. */
+export type { MethodCalls, MethodDraftCalls } from "./src/state/cell-impl.ts";
 /** The draft members served on EVERY method invocation (alpha52) — intersect
  *  it when you annotate `s` yourself and call `s.$do(...)`:
  *  `tick(s: State & MethodDraftServed) { s.$do(…) }`. An unannotated `s`

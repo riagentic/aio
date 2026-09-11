@@ -78,8 +78,15 @@ so \`am build\` and \`deno task build\` can never differ):
                           "client") alone; \`am compile cli\` = build --targets=cli
   dev [flags]             = deno task dev — in the FOREGROUND (your terminal,
                           your Ctrl-C); flags pass through (--client=electron
-                          --expose --port=N). \`am start\` is the supervised
-                          background form: lock, health wait, am stop/status
+                          --expose --port=N --cdp --watch=false). \`am start\` is
+                          the supervised background form: lock, health wait,
+                          am stop/status — and the one an AGENT wants, because
+                          a foreground app dies with the shell that launched it
+  dev --cdp[=PORT]        DEVTOOLS / INSPECT / DEBUG the Electron window: opens
+                          Chrome DevTools Protocol, which is what \`am shot\`
+                          and \`am eval\` drive. No launcher shim needed
+  dev --watch=false       NO WATCH / disable live reload for this run; narrow
+                          it instead with \`watch: ["src/ui"]\` in aio.run()
 
 Release:
   publish [--key=K]       Build, sign and lay out the channel directory an
@@ -194,6 +201,7 @@ Inspect:
   surface --component=X   only that component (every instance), with its subtree
   surface --path=A/B      only that subtree, by path prefix
   surface --depth=N       cap the tree depth (0 = the component alone)
+  surface --rects         MEASURE the layout — x/y/w/h per element, so "it looks fine" becomes "the Stage is 6886px tall". Needs a real client; a server render refuses rather than report 0x0
   trigger <idx> <path> <action> [text]  Drive the live UI (click/type/setValue/press/keyDown/keyUp/hover/focus/blur/scroll) — same engine as testUI; path "window" drives an onGlobalKey binding
                           type APPENDS to the field, setValue REPLACES it (as in testUI)
   shot [n] [--out=F.png] [--full]  PNG of the live Electron window via CDP — the app
@@ -213,6 +221,8 @@ Inspect:
   --instance=<name>       (global) run and address a PRIVATE copy: its own
                           lock, data home and logs, beside anyone else's.
                           An agent and a human stop sharing one session
+  testgen [entry] [--out=F]  GENERATE A TYPED TEST CLIENT from what the app actually renders — ui.App.SaveButton.click() autocompletes and a renamed button breaks tests at COMPILE time, instead of a string key whose typo is a runtime undefined. Re-run after a UI change (default out: tests/ui.gen.ts)
+  migrate [--from=X]      MIGRATE / UPGRADE: which retired spellings THIS app still uses, with the fix and the guide for each. --from narrows to what was removed AFTER that release (default: the app's own pin). Exits 1 when anything is found, so it works in CI
   feedback [app]          Where THIS app's findings about aio go — a stable
                           path outside the version store, so \`am pin\` and
                           pruning an old version cannot delete them. Report,

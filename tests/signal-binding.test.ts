@@ -1,10 +1,11 @@
 import { assertEquals } from "@std/assert";
 import { Window } from "happy-dom";
+import { closeWindow } from "../src/testing/close-window.ts";
 import { h } from "../src/air/vdom.ts";
 import { _setDocument, mount } from "../src/air/aio-renderer.ts";
 import { signal } from "../src/state/signal.ts";
 
-// happy-dom timers drained via win.happyDOM.close() — sanitizers re-enabled
+// happy-dom timers drained via closeWindow(win) — sanitizers re-enabled
 
 function setup() {
   const win = new Window({ url: "https://localhost" });
@@ -12,7 +13,7 @@ function setup() {
   _setDocument(doc);
   const root = doc.createElement("div");
   doc.body.appendChild(root);
-  return { win, doc, root, cleanup: () => win.happyDOM.close() };
+  return { win, doc, root, cleanup: () => closeWindow(win) };
 }
 
 Deno.test({

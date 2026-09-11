@@ -13,6 +13,7 @@
 // without a default.
 import { assert, assertEquals } from "@std/assert";
 import { Window } from "happy-dom";
+import { closeWindow } from "../src/testing/close-window.ts";
 import { h } from "../src/air/vdom.ts";
 import { _setDocument, _unmount, mount } from "../src/air/aio-renderer.ts";
 import { lazy, Suspense } from "../src/air/vdom.ts";
@@ -23,7 +24,7 @@ function setup() {
   const root = doc.createElement("div");
   doc.body.appendChild(root);
   _setDocument(doc);
-  return { root, cleanup: () => win.happyDOM.close() };
+  return { root, cleanup: () => closeWindow(win) };
 }
 
 const settle = () => new Promise((r) => setTimeout(r, 30));

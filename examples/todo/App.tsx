@@ -47,6 +47,7 @@ export default function App(): JSX.Element {
               checked={t.done}
               onChange={() =>
                 todo.toggle(t.id)}
+              aria-label={"Toggle " + t.text}
             />
             <span
               style={{

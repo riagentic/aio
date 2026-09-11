@@ -442,9 +442,24 @@ function handleGet(
     // `?full=1` lifts the surface's text cap — `am surface --full`, for reading
     // a long generated string the scannable default would cut.
     const full = req ? new URL(req.url).searchParams.has("full") : false;
+    // `?rects=1` attaches layout geometry — `am surface --rects`.
+    const rects = req ? new URL(req.url).searchParams.has("rects") : false;
     if (route === "surface/server") {
       if (!deps.renderServerSurface) {
         return err("server-side surface unavailable (no UI entry)", 404);
+      }
+      // REFUSED, not answered with zeroes. A server-side render has no layout
+      // engine: every getBoundingClientRect() there answers 0,0 0x0, and a
+      // grid of zeroes reads as a real measurement of a collapsed UI — the
+      // exact bug someone reaching for --rects is hunting. The refusal names
+      // the one thing that can answer.
+      if (rects) {
+        return err(
+          "a server-side render has no layout, so --rects would report 0x0 " +
+            "for every element. Open the app (am open) and re-run: --rects " +
+            "needs a real client.",
+          409,
+        );
       }
       return deps.renderServerSurface(full).then((r) =>
         r.ok ? json(r.roots) : err(r.error, 500)
@@ -454,10 +469,10 @@ function handleGet(
     if (!Number.isInteger(idx) || idx < 0) {
       return err("invalid client index", 400);
     }
-    return sendToClient(
-      idx,
-      enc("ui-surface", full ? { full: true } : undefined),
-    );
+    const d = full || rects
+      ? { ...(full ? { full: true } : {}), ...(rects ? { rects: true } : {}) }
+      : undefined;
+    return sendToClient(idx, enc("ui-surface", d));
   }
 
   if (route === "history") {

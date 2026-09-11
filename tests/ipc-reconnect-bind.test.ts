@@ -8,6 +8,7 @@
 import { _teardownNow } from "../src/browser/protocol-subscription.ts";
 import { assert, assertEquals } from "@std/assert";
 import { Window } from "happy-dom";
+import { closeWindow } from "../src/testing/close-window.ts";
 
 type Fn = (line?: string) => void;
 
@@ -66,6 +67,6 @@ Deno.test("air transport: IPC handlers bind once across reconnects", async () =>
     else g.window = prevWindow;
     if (prevLocation === undefined) delete g.location;
     else g.location = prevLocation;
-    await win.happyDOM.close();
+    await closeWindow(win);
   }
 });

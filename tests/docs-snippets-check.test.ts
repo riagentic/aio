@@ -167,7 +167,18 @@ function autoImportLine(code: string, index: Map<string, string>): string {
 
 /** Snippets whose imports can't resolve without node_modules — react/vue
  * island samples. Checking them would need a real npm install; skipped. */
-const UNRESOLVABLE_OK = new Set(["react", "vue", "react-dom/client"]);
+// Third-party packages a DOC may legitimately show without aio depending on
+// one. `zod` joins react/vue for the same reason they are here: `args:` takes a
+// STANDARD SCHEMA, and the whole point of that choice is that the example is
+// the reader's own validator — showing it with a hand-rolled `~standard`
+// object would teach the wrong thing to avoid a gate.
+const UNRESOLVABLE_OK = new Set([
+  "react",
+  "vue",
+  "react-dom/client",
+  "zod",
+  "valibot",
+]);
 
 type Snippet = {
   doc: string; // repo-relative doc path

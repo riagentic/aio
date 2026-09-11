@@ -4,7 +4,6 @@
 // form) updated. These tests pin the fixed behavior across every shape in the
 // report's repro matrix.
 import { assertEquals } from "@std/assert";
-import { Window } from "happy-dom";
 import { Fragment, h } from "../src/air/vdom.ts";
 import { testUI } from "../src/testing/ui-test.ts";
 import { cell } from "../mod.ts";
@@ -24,11 +23,6 @@ function Warn() {
   return h(Fragment, null, flag.n === 0 && h("div", null, "WARN"));
 }
 
-function doc() {
-  // deno-lint-ignore no-explicit-any
-  return new Window().document as any;
-}
-
 Deno.test("conditional element binding under <div> re-reconciles (control)", async () => {
   const App = () =>
     h(
@@ -37,7 +31,7 @@ Deno.test("conditional element binding under <div> re-reconciles (control)", asy
       flag.n === 0 && h("div", null, "WARN"),
       h("span", null, String(flag.n)),
     );
-  const ui = await testUI(App, { document: doc() });
+  const ui = await testUI(App);
   await ui.settle();
   assertEquals(ui.html().includes("WARN"), true);
   flag.inc();
@@ -58,7 +52,7 @@ Deno.test("conditional element binding as direct <form> child re-reconciles", as
       flag.n === 0 && h("div", null, "WARN"),
       h("span", null, String(flag.n)),
     );
-  const ui = await testUI(App, { document: doc() });
+  const ui = await testUI(App);
   await ui.settle();
   assertEquals(ui.html().includes("WARN"), true);
   flag.inc();
@@ -79,7 +73,7 @@ Deno.test("conditional element binding as direct <form> child re-reconciles", as
 Deno.test("fragment-root component as direct <form> child re-reconciles", async () => {
   const App = () =>
     h("form", null, h(Warn, null), h("span", null, String(flag.n)));
-  const ui = await testUI(App, { document: doc() });
+  const ui = await testUI(App);
   await ui.settle();
   assertEquals(ui.html().includes("WARN"), true);
   flag.inc();
@@ -94,7 +88,7 @@ Deno.test("fragment-root component as direct <form> child re-reconciles", async 
 
 Deno.test("conditional flips back on (false → true) inside <form>", async () => {
   const App = () => h("form", null, flag.n === 1 && h("div", null, "SHOW"));
-  const ui = await testUI(App, { document: doc() });
+  const ui = await testUI(App);
   await ui.settle();
   assertEquals(ui.html().includes("SHOW"), false);
   flag.inc();

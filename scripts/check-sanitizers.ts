@@ -10,12 +10,15 @@
 //
 // Usage: deno run --allow-read scripts/check-sanitizers.ts
 import { fromFileUrl, join } from "@std/path";
+import { justified as okMarker } from "../src/diagnostics/ok-marker.ts";
 
 const ROOT = fromFileUrl(new URL("../", import.meta.url));
 /** Unjustified opt-outs at the time this gate was written. Ratchet DOWN. */
 export const CEILING = 0;
 const OPT_OUT = /sanitize(?:Ops|Resources|Exit)\s*:\s*false/;
-const JUSTIFIED = /aio-ok:/;
+/** One marker, both spellings, honoured only when it is addressed to
+ *  this gate or to nobody in particular. See scripts/ok-marker.ts. */
+const JUSTIFIED = { test: (line: string) => okMarker(line, "sanitizers") };
 
 export async function scan(
   dir = join(ROOT, "tests"),

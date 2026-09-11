@@ -21,6 +21,7 @@ import { assert, assertEquals } from "@std/assert";
 import { cell } from "aio";
 import { testUI } from "aio/testing";
 import { Window } from "happy-dom";
+import { closeWindow } from "../src/testing/close-window.ts";
 import { h, renderToString } from "../src/air/vdom.ts";
 import {
   _setDocument,
@@ -128,6 +129,6 @@ Deno.test("SSR and hydration agree about an absent component's position", async 
     _unmount(hy);
     host.remove();
   } finally {
-    await win.happyDOM.close();
+    await closeWindow(win);
   }
 });

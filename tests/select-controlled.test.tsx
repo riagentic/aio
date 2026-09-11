@@ -14,6 +14,7 @@
 // below can fail.
 import { assert, assertEquals } from "@std/assert";
 import { Window } from "happy-dom";
+import { closeWindow } from "../src/testing/close-window.ts";
 import { cell } from "../mod.ts";
 import { testUI } from "../src/testing/ui-test.ts";
 import { _diff, _render, h, renderToString } from "../src/air/vdom.ts";
@@ -90,7 +91,7 @@ function env() {
     doc,
     ctx: { doc },
     host: doc.createElement("main"),
-    cleanup: () => win.happyDOM.close(),
+    cleanup: () => closeWindow(win),
   };
 }
 

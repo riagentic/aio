@@ -20,13 +20,14 @@ import { h } from "../src/air/vdom.ts";
 import { _setDocument, _unmount, mount } from "../src/air/aio-renderer.ts";
 import { _setFlushBudget } from "../src/air/renderer-flush.ts";
 import { Window } from "happy-dom";
+import { closeWindow } from "../src/testing/close-window.ts";
 
 function dom() {
   const win = new Window({ url: "https://localhost" });
   const doc = win.document as unknown as Document;
   const root = doc.createElement("div");
   doc.body.appendChild(root);
-  return { doc, root, cleanup: () => win.happyDOM.close() };
+  return { doc, root, cleanup: () => closeWindow(win) };
 }
 const tick = () => new Promise<void>((r) => setTimeout(r, 0));
 

@@ -28,6 +28,13 @@ import { current, type Draft, isDraft } from "immer";
 import { type AioError, createAioError } from "../diagnostics/error.ts";
 import { log } from "../diagnostics/logger-api.ts";
 import { refuseRetired, removalOf, removalsAreFatal } from "./removals-core.ts";
+import { buildCallTable, withUnknownCallRefusal } from "./cell-call.ts";
+import { type ArgSpec, validateMethodArgs } from "./arg-schema.ts";
+import {
+  beginPolicyCall,
+  type ConcurrencyMode,
+  setQueueTail,
+} from "./method-policy.ts";
 
 // ── The effect channel: s.$do (alpha52) ────────────────────────────────
 
@@ -329,6 +336,11 @@ export function buildMethodsReducer(
   // Foreign action type → SYNC method that reacts to it (listensTo object
   // form, D1). Runs with the FOREIGN action's payload as the single arg.
   foreignHandlers: Map<string, string> | undefined,
+  // `args:` — per-method argument rules. Checked HERE because `methodArgs` is
+  // the one place both method kinds pass through, which is what makes the
+  // guard identical for a sync method, an async one, `am dispatch`, a form and
+  // a hand-written action alike.
+  argSchemas?: Record<string, readonly ArgSpec[]>,
 ): CellReduceFn {
   // AIO-427: the ONE classifier for what a sync method's return means. Both
   // entry points — an own method action and a `listensTo` reaction to a foreign
@@ -430,7 +442,10 @@ export function buildMethodsReducer(
     if (raw === undefined || raw === null) return [];
     if (Array.isArray(raw)) {
       _warnShortCall(cell, key, methods[key], raw.length);
-      return raw;
+      // Validated and COERCED before the method sees them. A schema returns
+      // the parsed value and that value is what runs — which is the dozen
+      // hand-written coercions the reports counted (cc §9.6, vidtune §12.7).
+      return validateMethodArgs(cell, key, argSchemas?.[key], raw);
     }
     throw new Error(
       `[${cell}:${key}] action payload.args must be an ARRAY of positional ` +
@@ -470,8 +485,17 @@ export function buildMethodsReducer(
     // the cell) hands a non-object draft through — a Proxy target must be an
     // object, and the method's own error (not a proxy TypeError) is the
     // informative one.
-    const wrapped = s !== null && typeof s === "object"
-      ? withDraftDo(s, doFn)
+    // `s.$call.sibling(...)` — the sibling's body on THIS draft, in THIS
+    // commit. Deferred: the table binds to the wrapper, and the wrapper needs
+    // the table.
+    let wrapped: unknown;
+    const callTable = withUnknownCallRefusal(
+      prefix,
+      key,
+      buildCallTable(prefix, key, methods, () => wrapped, true),
+    );
+    wrapped = s !== null && typeof s === "object"
+      ? withDraftDo(s, doFn, callTable)
       : s;
     let result: unknown = fn(
       wrapped as Parameters<SyncMethod<Record<string, unknown>>>[0],
@@ -665,6 +689,38 @@ export function buildMethodsExecutor(
         );
         return;
       }
+
+      // `concurrency:` / `ttl:` — what happens when this method is called
+      // again while it is still running (llama.master §15). Decided BEFORE any
+      // controller, tracking or proxy exists, because two of the three answers
+      // are "do not run".
+      const policyMode = (config as {
+        concurrency?: Record<string, ConcurrencyMode>;
+      } | undefined)?.concurrency?.[_method];
+      const policyTtl = (config as {
+        ttl?: Record<string, number>;
+      } | undefined)?.ttl?.[_method];
+      const decision = beginPolicyCall(
+        prefix,
+        _method,
+        _args,
+        policyMode,
+        policyTtl,
+      );
+      if (decision.kind === "adopt") {
+        // A `first` dedup or a `ttl` hit. The caller ADOPTS the other call's
+        // outcome — resolving it with `undefined` instead is the first-wins
+        // bug the report shipped.
+        decision.outcome.then((o) =>
+          resolveCall(
+            _callId,
+            o.value,
+            o.error === undefined ? undefined : o.error as Error,
+          )
+        );
+        return;
+      }
+      const settlePolicy = decision.settle;
 
       // Transactional methods: reads see a STABLE snapshot captured
       // at entry (an `await` never changes them), and writes buffer + commit
@@ -913,6 +969,14 @@ export function buildMethodsExecutor(
             undefined,
             doDispatch,
           );
+        // `s.$call.sibling(...)` — same draft, same commit, no second
+        // dispatch. Bound lazily for the same reason as the sync side.
+        let proxyRef: unknown;
+        const callTable = withUnknownCallRefusal(
+          prefix,
+          _method,
+          buildCallTable(prefix, _method, methods, () => proxyRef, false),
+        );
         const proxy = createLiveProxy(
           name,
           prefix,
@@ -927,7 +991,9 @@ export function buildMethodsExecutor(
           watch,
           transactional ? liveView : undefined,
           doDispatch,
+          callTable,
         );
+        proxyRef = proxy;
         return (method as AsyncMethod<Record<string, unknown>>)(
           proxy as Parameters<AsyncMethod<Record<string, unknown>>>[0],
           ..._args,
@@ -972,6 +1038,7 @@ export function buildMethodsExecutor(
               // No effects either: scheduling follow-up work is the one thing
               // a cancelled call must not do. Resolving `undefined` matches
               // the cancellation path the docs tell methods to take.
+              settlePolicy({ value: undefined });
               resolveCall(_callId, undefined);
               return;
             }
@@ -993,6 +1060,7 @@ export function buildMethodsExecutor(
             if (transactional && controller.signal.aborted) {
               batcher.discard();
               await batcher.settled(); // same reason as the branch above
+              settlePolicy({ value: undefined });
               resolveCall(_callId, undefined);
               return;
             }
@@ -1057,13 +1125,11 @@ export function buildMethodsExecutor(
               (app as Record<string, unknown>)._isDisabled &&
               ((app as Record<string, unknown>)._isDisabled as () => boolean)()
             ) {
-              resolveCall(
-                _callId,
-                undefined,
-                new Error(
-                  `[${name}] cell disabled while ${_method}() was running`,
-                ),
+              const disabledErr = new Error(
+                `[${name}] cell disabled while ${_method}() was running`,
               );
+              settlePolicy({ error: disabledErr });
+              resolveCall(_callId, undefined, disabledErr);
             } else {
               // An effect return is a SCHEDULING instruction, not a value —
               // documented as resolving `undefined`, which is what the sync
@@ -1077,10 +1143,11 @@ export function buildMethodsExecutor(
               // Proxy is refused by structuredClone at the transport seam, so
               // the return crosses to the caller as plain data. Values with no
               // proxy inside are returned by reference and cost nothing.
-              resolveCall(
-                _callId,
-                retEffects.length > 0 ? undefined : materializeValue(value),
-              );
+              const settled = retEffects.length > 0
+                ? undefined
+                : materializeValue(value);
+              settlePolicy({ value: settled });
+              resolveCall(_callId, settled);
             }
           })
           .catch((e: Error) => {
@@ -1090,6 +1157,7 @@ export function buildMethodsExecutor(
             // Same instant, the failing way out: the call is over, so the
             // view is sealed before its caller hears about it.
             batcher.close();
+            settlePolicy({ error: e });
             resolveCall(_callId, undefined, e);
             const _onError = (app as Record<string, unknown>)._onError as
               | ((err: AioError) => void)
@@ -1137,6 +1205,13 @@ export function buildMethodsExecutor(
       if (transactional && serialize) {
         serializeTail = serializeTail.then(runOnce, runOnce);
         trackPending(serializeTail, prefix, appScope);
+      } else if (decision.kind === "queue") {
+        // `concurrency: "queue"` — one at a time, per METHOD. Reuses the same
+        // chaining the transactional serialize mutex uses, because it is the
+        // same operation and a second implementation could only drift from it.
+        const next = decision.after.then(runOnce, runOnce);
+        setQueueTail(prefix, _method, next);
+        trackPending(next, prefix, appScope);
       } else {
         trackPending(runOnce(), prefix, appScope);
       }

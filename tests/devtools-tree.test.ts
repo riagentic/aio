@@ -13,6 +13,7 @@
 // own render count, which changes the tree, which publishes again.
 import { assert, assertEquals } from "@std/assert";
 import { Window } from "happy-dom";
+import { closeWindow } from "../src/testing/close-window.ts";
 import { h } from "../src/air/vdom.ts";
 import { _setDocument, _unmount, mount } from "../src/air/aio-renderer.ts";
 import { connectAioDevTools } from "../src/diagnostics/devtools.ts";
@@ -23,7 +24,7 @@ function env() {
   const win = new Window({ url: "https://localhost" });
   const doc = win.document as unknown as Document;
   _setDocument(doc);
-  return { win, doc, cleanup: () => win.happyDOM.close() };
+  return { win, doc, cleanup: () => closeWindow(win) };
 }
 
 const names = (nodes: ComponentTreeNode[]): string[] =>

@@ -1,5 +1,12 @@
 [
   {
+    "target": "soak",
+    "env": "72h",
+    "commit": "1eecfca48",
+    "date": "2026-09-10",
+    "detail": "4320min, slope 0.000 MB/min"
+  },
+  {
     "target": "windows",
     "env": "wine",
     "commit": "2983410a8",

@@ -13,6 +13,7 @@
 import { _resetSubs } from "../src/state/state-subs.ts";
 import { assertEquals } from "@std/assert";
 import { Window } from "happy-dom";
+import { closeWindow } from "../src/testing/close-window.ts";
 import { cell } from "aio";
 import { h } from "../src/air/vdom.ts";
 import { _setDocument, _unmount, mount } from "../src/air/aio-renderer.ts";
@@ -37,7 +38,7 @@ function setup() {
   return {
     root,
     cleanup: async () => {
-      await win.happyDOM.close();
+      await closeWindow(win);
       _resetCellRegistry();
       _resetSignals();
       _resetSubs(); // the reactive reads armed the subscription sync

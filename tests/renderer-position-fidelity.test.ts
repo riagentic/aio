@@ -15,6 +15,7 @@
 // regression names itself instead of arriving as a fuzz seed.
 import { assert, assertEquals } from "@std/assert";
 import { Window } from "happy-dom";
+import { closeWindow } from "../src/testing/close-window.ts";
 import { signal } from "../src/state/signal.ts";
 import {
   ErrorBoundary,
@@ -39,7 +40,7 @@ function env() {
   const doc = win.document as unknown as Document;
   const host = doc.createElement("main");
   doc.body.appendChild(host);
-  return { doc, ctx: { doc }, host, cleanup: () => win.happyDOM.close() };
+  return { doc, ctx: { doc }, host, cleanup: () => closeWindow(win) };
 }
 
 // ── position, not content ────────────────────────────────────────────────

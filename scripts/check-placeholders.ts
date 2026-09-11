@@ -17,6 +17,7 @@
 //
 // Usage: deno run --allow-read scripts/check-placeholders.ts
 import { fromFileUrl, join, relative } from "@std/path";
+import { justified as okMarker } from "../src/diagnostics/ok-marker.ts";
 
 const ROOT = fromFileUrl(new URL("../", import.meta.url));
 const SKIP_DIRS = new Set([
@@ -27,7 +28,9 @@ const SKIP_DIRS = new Set([
   "coverage",
 ]);
 const PLACEHOLDER = /\$\{\s*[A-Za-z_$][\w$]*[\w$.?![\]()]*\s*\}/;
-const JUSTIFIED = /aio-ok:/;
+/** One marker, both spellings, honoured only when it is addressed to
+ *  this gate or to nobody in particular. See scripts/ok-marker.ts. */
+const JUSTIFIED = { test: (line: string) => okMarker(line, "placeholders") };
 
 export type Hit = { file: string; line: number; text: string };
 

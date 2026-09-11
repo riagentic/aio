@@ -28,6 +28,12 @@ export const AIO_ENTRY_PATHS: Readonly<Record<string, string>> = {
   "aio/ui": "src/ui/mod.ts",
   "aio/jsx-runtime": "src/jsx-runtime.ts",
   "aio/server": "src/server-entry.ts",
+  // The two MARKER modules. `import "aio/server-only"` says "this file never
+  // reaches the browser"; `aio/client-only` says the mirror. Both are three
+  // lines and a constant — they exist to be READ by the graph audit and by
+  // `aiol`, and the server-only one throws if it is ever evaluated in a page.
+  "aio/server-only": "src/server-only.ts",
+  "aio/client-only": "src/client-only.ts",
   "aio/state-core": "src/state-core.ts",
   "aio/db": "src/db/mod.ts",
   // A LEAF: the logger, reachable without the barrel. Measured on a live
@@ -174,4 +180,28 @@ export const SERVER_FILE_RE: RegExp = /\.server\.[cm]?[jt]sx?(?:[?#].*)?$/;
 /** True when `path` names a server-only module by the file convention. */
 export function isServerOnlyFile(path: string): boolean {
   return SERVER_FILE_RE.test(path);
+}
+
+/** The `aio/server-only` marker, however the import map spells it.
+ *
+ *  A bare specifier (`aio/server-only`), the resolved file, and a relative
+ *  path into a checked-out framework all mean the same declaration — and an
+ *  app that pins aio by path is the common case in this repo's own tests, so
+ *  matching only the bare form would make the marker work for JSR users and
+ *  silently not for anyone developing against a checkout. */
+export const SERVER_ONLY_MARKER_RE: RegExp =
+  /(^|[/"'])aio\/server-only$|(^|\/)src\/server-only\.ts(?:[?#].*)?$/;
+
+/** The `aio/client-only` marker. See {@linkcode SERVER_ONLY_MARKER_RE}. */
+export const CLIENT_ONLY_MARKER_RE: RegExp =
+  /(^|[/"'])aio\/client-only$|(^|\/)src\/client-only\.ts(?:[?#].*)?$/;
+
+/** Does this specifier or resolved path name the server-only marker? */
+export function isServerOnlyMarker(spec: string): boolean {
+  return SERVER_ONLY_MARKER_RE.test(spec);
+}
+
+/** Does this specifier or resolved path name the client-only marker? */
+export function isClientOnlyMarker(spec: string): boolean {
+  return CLIENT_ONLY_MARKER_RE.test(spec);
 }

@@ -1,12 +1,13 @@
 import { assertEquals } from "@std/assert";
 import { Window } from "happy-dom";
+import { closeWindow } from "../src/testing/close-window.ts";
 import { signal } from "../src/state/signal.ts";
 import { h } from "../src/air/vdom.ts";
 import { _setDocument, _unmount, mount } from "../src/air/aio-renderer.ts";
 import { Transition } from "../src/air/transition-component.ts";
 import { fade } from "../src/air/transition.ts";
 
-// happy-dom timers drained via win.happyDOM.close() — sanitizers re-enabled
+// happy-dom timers drained via closeWindow(win) — sanitizers re-enabled
 
 function createDOM() {
   const win = new Window({ url: "https://localhost" });
@@ -34,7 +35,7 @@ Deno.test({
     // Wait for enter animation timer to complete before unmount
     await new Promise((r) => setTimeout(r, 350));
     _unmount(handle);
-    await win.happyDOM.close();
+    await closeWindow(win);
   },
 });
 
@@ -48,7 +49,7 @@ Deno.test({
     // AIO-107: null children produce invisible comment placeholders for positional stability
     assertEquals(root.innerHTML, "<!---->");
     _unmount(handle);
-    await win.happyDOM.close();
+    await closeWindow(win);
   },
 });
 
@@ -79,7 +80,7 @@ Deno.test({
     assertEquals(root.querySelector("#box"), null);
 
     _unmount(handle);
-    await win.happyDOM.close();
+    await closeWindow(win);
   },
 });
 
@@ -98,7 +99,7 @@ Deno.test({
     // Wait for enter animation timer to complete before unmount
     await new Promise((r) => setTimeout(r, 350));
     _unmount(handle);
-    await win.happyDOM.close();
+    await closeWindow(win);
   },
 });
 
@@ -125,7 +126,7 @@ Deno.test({
     // Wait for enter animation timer to complete before unmount
     await new Promise((r) => setTimeout(r, 350));
     _unmount(handle);
-    await win.happyDOM.close();
+    await closeWindow(win);
   },
 });
 
@@ -162,6 +163,6 @@ Deno.test({
     assertEquals(styles(), 0, `leaked ${styles()} <style> nodes in <head>`);
 
     _unmount(handle);
-    await win.happyDOM.close();
+    await closeWindow(win);
   },
 });

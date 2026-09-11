@@ -105,6 +105,9 @@ export interface ServerConfig {
   /** Dev only: an edited file declares a cell — cells can't hot-reload, so
    *  aio.ts restarts the process. Absent ⇒ the watcher just warns. */
   onCellChange?: (path: string) => void;
+  /** `aio.run({ watch })` — false turns live reload off, an array narrows the
+   *  watched paths. See AioConfig.watch. */
+  watch?: false | string[];
   // Vitals — latency monitoring & backpressure
   vitalsSystem?: VitalsSystem;
   /** Cost meter (`am cost`) — see src/vitals/cost-meter.ts. */

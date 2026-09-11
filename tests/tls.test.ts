@@ -1,11 +1,15 @@
 import { tempDir } from "../src/testing/temp-dir.ts";
+import { pinnedTest } from "../src/testing/env-pin.ts";
 
 // The aio root is MACHINE-wide, so a test that does not relocate it writes
 // trust material into the developer's real home and then asserts against
 // whatever their machine already had. `AIO_APPS_DIR` moves the whole data
 // root, root CA included.
 const _TLS_SANDBOX = await tempDir("aio-tls-test-");
-Deno.env.set("AIO_APPS_DIR", _TLS_SANDBOX);
+// Pinned PER TEST, not at module scope: `deno test` shares one process, so a
+// module-level set leaked this sandbox into every file that ran after this
+// one (see src/testing/env-pin.ts for the measurement).
+const test = pinnedTest({ AIO_APPS_DIR: _TLS_SANDBOX });
 import {
   assert,
   assertEquals,
@@ -29,7 +33,7 @@ async function withTempDir(fn: (dir: string) => Promise<void>): Promise<void> {
   }
 }
 
-Deno.test("generates cert when none exists", async () => {
+test("generates cert when none exists", async () => {
   await withTempDir(async (dir) => {
     const result = await loadOrCreateCert(dir);
     assertEquals(typeof result.cert, "string");
@@ -39,7 +43,7 @@ Deno.test("generates cert when none exists", async () => {
   });
 });
 
-Deno.test("returns existing cert on second call (no regeneration)", async () => {
+test("returns existing cert on second call (no regeneration)", async () => {
   await withTempDir(async (dir) => {
     const first = await loadOrCreateCert(dir);
     const second = await loadOrCreateCert(dir);
@@ -50,7 +54,7 @@ Deno.test("returns existing cert on second call (no regeneration)", async () => 
   });
 });
 
-Deno.test("custom cert/key paths reads those files instead", async () => {
+test("custom cert/key paths reads those files instead", async () => {
   await withTempDir(async (dir) => {
     const certFile = `${dir}/custom-cert.pem`;
     const keyFile = `${dir}/custom-key.pem`;
@@ -65,7 +69,7 @@ Deno.test("custom cert/key paths reads those files instead", async () => {
   });
 });
 
-Deno.test("generated cert is valid PEM format", async () => {
+test("generated cert is valid PEM format", async () => {
   await withTempDir(async (dir) => {
     const result = await loadOrCreateCert(dir);
     assertEquals(result.cert.startsWith(PEM_CERT_PREFIX), true);
@@ -76,7 +80,7 @@ Deno.test("generated cert is valid PEM format", async () => {
   });
 });
 
-Deno.test("generated key is valid PEM format", async () => {
+test("generated key is valid PEM format", async () => {
   await withTempDir(async (dir) => {
     const result = await loadOrCreateCert(dir);
     assertEquals(result.key.startsWith(PEM_KEY_PREFIX), true);
@@ -84,7 +88,7 @@ Deno.test("generated key is valid PEM format", async () => {
   });
 });
 
-Deno.test("certPath and keyPath point to real files", async () => {
+test("certPath and keyPath point to real files", async () => {
   await withTempDir(async (dir) => {
     const result = await loadOrCreateCert(dir);
     const certStat = await Deno.stat(result.certPath);
@@ -94,7 +98,7 @@ Deno.test("certPath and keyPath point to real files", async () => {
   });
 });
 
-Deno.test("selfSigned is true for generated, false for custom", async () => {
+test("selfSigned is true for generated, false for custom", async () => {
   await withTempDir(async (dir) => {
     const generated = await loadOrCreateCert(dir);
     assertEquals(generated.selfSigned, true);
@@ -108,7 +112,7 @@ Deno.test("selfSigned is true for generated, false for custom", async () => {
   });
 });
 
-Deno.test("missing custom cert file throws", async () => {
+test("missing custom cert file throws", async () => {
   await withTempDir(async (dir) => {
     await assertRejects(
       () =>
@@ -141,7 +145,7 @@ async function certText(path: string): Promise<string> {
   return new TextDecoder().decode(r.stdout);
 }
 
-Deno.test("certCommonName: per-app, sanitized, with a fallback", () => {
+test("certCommonName: per-app, sanitized, with a fallback", () => {
   assertEquals(certCommonName("notes"), "aio-notes");
   assertEquals(certCommonName(), DEFAULT_CERT_CN);
   assertEquals(certCommonName(""), DEFAULT_CERT_CN);
@@ -150,7 +154,7 @@ Deno.test("certCommonName: per-app, sanitized, with a fallback", () => {
   assertNotEquals(certCommonName("app-a"), certCommonName("app-b"));
 });
 
-Deno.test("generated cert carries the appId in its subject, CA:FALSE, and SANs", async () => {
+test("generated cert carries the appId in its subject, CA:FALSE, and SANs", async () => {
   await withTempDir(async (dir) => {
     const appId = "notes-probe";
     const { certPath } = await loadOrCreateCert(
@@ -198,7 +202,7 @@ Deno.test("generated cert carries the appId in its subject, CA:FALSE, and SANs",
 //
 // What must still hold is that the two apps remain TELLABLE APART, and that
 // they really do hang off the same root rather than quietly minting their own.
-Deno.test("two apps share ONE issuer and stay distinguishable", async () => {
+test("two apps share ONE issuer and stay distinguishable", async () => {
   await withTempDir(async (a) => {
     await withTempDir(async (b) => {
       const one = await loadOrCreateCert(a, undefined, undefined, "app-one");
@@ -220,7 +224,7 @@ Deno.test("two apps share ONE issuer and stay distinguishable", async () => {
   });
 });
 
-Deno.test("compat: a cert already on disk is reused VERBATIM, old DN and all", async () => {
+test("compat: a cert already on disk is reused VERBATIM, old DN and all", async () => {
   await withTempDir(async (dir) => {
     // Simulate a pre-upgrade cert: generated under the legacy shared name.
     const legacy = await loadOrCreateCert(dir);

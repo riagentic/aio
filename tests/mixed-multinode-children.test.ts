@@ -21,6 +21,7 @@ import {
 } from "../src/air/vdom.ts";
 import { _setDocument, _unmount, mount } from "../src/air/aio-renderer.ts";
 import { Window } from "happy-dom";
+import { closeWindow } from "../src/testing/close-window.ts";
 
 function dom() {
   const win = new Window({ url: "https://localhost" });
@@ -29,7 +30,7 @@ function dom() {
   doc.body.appendChild(root);
   const portalHost = doc.createElement("div");
   doc.body.appendChild(portalHost);
-  return { doc, root, portalHost, cleanup: () => win.happyDOM.close() };
+  return { doc, root, portalHost, cleanup: () => closeWindow(win) };
 }
 const tick = () => new Promise<void>((r) => setTimeout(r, 0));
 const Two = () => h(Fragment, null, h("span", null, "P"), h("span", null, "Q"));

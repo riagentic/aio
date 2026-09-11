@@ -99,6 +99,8 @@ import {
 import { cmdWhere } from "./am/am-cmd-where.ts";
 import { cmdFeedback } from "./am/am-cmd-feedback.ts";
 import { cmdCheck } from "./am/am-cmd-check.ts";
+import { cmdMigrate } from "./am/am-cmd-migrate.ts";
+import { cmdTestgen } from "./am/am-cmd-testgen.ts";
 import { PATH_PIN_PREFIX } from "./am/am-versions.ts";
 import { removedAmVerb, retiredSpellingLine } from "./state/removals.ts";
 import { readDenoJsonSync, readLocalPinSync } from "./server/deno-json.ts";
@@ -143,6 +145,8 @@ const COMMANDS: Record<string, CmdHandler> = {
   where: cmdWhere, // which execution context a file runs in, from the graph
   feedback: cmdFeedback, // where findings about aio go — outside the version store
   check: cmdCheck, // does the client graph BUILD? (deno check cannot answer this)
+  migrate: cmdMigrate, // which retired spellings THIS app still uses
+  testgen: cmdTestgen, // a TYPED test client from what the app renders
   shot: cmdShot,
   eval: cmdEval,
   sql: cmdSql,

@@ -4,14 +4,11 @@
 // your-writes overlay makes every write land regardless of await interleaving;
 // these lock that so it can never silently regress.
 import { assertEquals } from "@std/assert";
-import { Window } from "happy-dom";
 import { h } from "../src/air/vdom.ts";
 import { cell } from "../src/state/cell-create.ts";
 import { testUI } from "../src/testing/ui-test.ts";
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
-// deno-lint-ignore no-explicit-any
-const doc = () => new Window().document as any;
 
 Deno.test("async: writes before/between/after multiple awaits all commit", async () => {
   const c = cell("aw1", {
@@ -28,7 +25,7 @@ Deno.test("async: writes before/between/after multiple awaits all commit", async
     },
   });
   const App = () => h("div", null, `${c.snap}${c.unit}${c.alerting}`);
-  const ui = await testUI(App, { document: doc() });
+  const ui = await testUI(App);
   // deno-lint-ignore no-explicit-any
   await (c as any).operate();
   await ui.settle();
@@ -51,7 +48,7 @@ Deno.test("async: writes ONLY after the 2nd await still commit", async () => {
     },
   });
   const App = () => h("div", null, `${c.a}${c.b}`);
-  const ui = await testUI(App, { document: doc() });
+  const ui = await testUI(App);
   // deno-lint-ignore no-explicit-any
   await (c as any).operate();
   await ui.settle();
@@ -77,7 +74,7 @@ Deno.test("async: nested + read-your-writes across awaits", async () => {
     },
   });
   const App = () => h("div", null, JSON.stringify({ o: c.obj, n: c.n }));
-  const ui = await testUI(App, { document: doc() });
+  const ui = await testUI(App);
   // deno-lint-ignore no-explicit-any
   await (c as any).operate();
   await ui.settle();
@@ -109,7 +106,7 @@ Deno.test("async: concurrent methods don't drop each other's writes", async () =
     },
   });
   const App = () => h("div", null, `${c.a}/${c.b}`);
-  const ui = await testUI(App, { document: doc() });
+  const ui = await testUI(App);
   // deno-lint-ignore no-explicit-any
   await Promise.all([(c as any).setA(1), (c as any).setB(2)]);
   await ui.settle();
@@ -139,7 +136,7 @@ Deno.test("async: read-your-writes survives a no-op write + flush (stale overlay
     },
   });
   const App = () => h("div", null, `${c.count}`);
-  const ui = await testUI(App, { document: doc() });
+  const ui = await testUI(App);
   // deno-lint-ignore no-explicit-any
   await (c as any).tick();
   await ui.settle();
@@ -197,7 +194,7 @@ Deno.test("throw: a SYNC method rolls back, an ASYNC method keeps its writes; tr
     },
   });
   const App = () => h("div", null, `${c.syncNote}${c.asyncNote}${tx.note}`);
-  const ui = await testUI(App, { document: doc() });
+  const ui = await testUI(App);
 
   // deno-lint-ignore no-explicit-any
   await (c as any).refuseSync().catch(() => {});

@@ -614,13 +614,25 @@ export function parseGlobalFlags(
     "--home",
     "--timeout",
     "--instance",
+    "--from",
+    "--out",
   ]);
   const expanded: string[] = [];
+  // A value flag consumes the next token — unless that token is itself a FLAG.
+  // `am replay --from --dry` used to become `--from=--dry`: the value is
+  // nonsense, `--dry` is gone, and the command runs as if neither had been
+  // typed. Leaving the bare flag instead lets the verb say what is missing,
+  // which is the whole difference between a typo and a silent wrong run. A
+  // negative NUMBER is still a value (`--wait=-5` has its own bounds check).
+  const looksLikeFlag = (t: string | undefined) =>
+    t !== undefined && /^-[A-Za-z-]/.test(t);
   for (let i = 0; i < raw.length; i++) {
     const a = raw[i]!;
-    if (takesValue.has(a) && i + 1 < raw.length) {
+    if (takesValue.has(a) && i + 1 < raw.length && !looksLikeFlag(raw[i + 1])) {
       expanded.push(`${a}=${raw[++i]}`);
-    } else if (a === "-i" && i + 1 < raw.length) {
+    } else if (
+      a === "-i" && i + 1 < raw.length && !looksLikeFlag(raw[i + 1])
+    ) {
       // `-i N` — the short form of `--client-index=N`.
       expanded.push(`--client-index=${raw[++i]}`);
     } else expanded.push(a);

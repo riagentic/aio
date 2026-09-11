@@ -1,9 +1,10 @@
 import { assertEquals } from "@std/assert";
 import { Window } from "happy-dom";
+import { closeWindow } from "../src/testing/close-window.ts";
 import { h } from "../src/air/vdom.ts";
 import { _setDocument, mount, setDevMode } from "../src/air/aio-renderer.ts";
 
-// happy-dom timers drained via win.happyDOM.close() — sanitizers re-enabled
+// happy-dom timers drained via closeWindow(win) — sanitizers re-enabled
 
 function setup() {
   const win = new Window({ url: "https://localhost" });
@@ -18,7 +19,7 @@ function setup() {
     root,
     cleanup: () => {
       setDevMode(false);
-      return win.happyDOM.close();
+      return closeWindow(win);
     },
   };
 }

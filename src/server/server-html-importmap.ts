@@ -109,6 +109,17 @@ export function buildBrowserImportMap(
     // Its module-level `enablePatches()` runs once for the same reason —
     // src/browser/* already reaches it at exactly this URL.
     "aio/state-core": "/__aio/state-core.ts",
+    // `import "aio/client-only"` — the marker a module uses to declare that it
+    // must not run on the server. It is imported BY browser code, so the
+    // specifier has to resolve in a page or the import that declares the rule
+    // is the thing that breaks it (the `aio/ui` blank screen, again). Three
+    // lines and a constant; the generic /__aio/*.ts route serves it in dev and
+    // the bundler inlines it in prod.
+    //
+    // `aio/server-only` is deliberately NOT here: it is in SERVER_ONLY_SPECS,
+    // so a page that reaches it is told the category. Its whole purpose is to
+    // be unreachable from a browser.
+    "aio/client-only": "/__aio/client-only.ts",
   };
   for (const [name, specifier] of Object.entries(denoImports)) {
     if (!specifier.startsWith("npm:")) continue;

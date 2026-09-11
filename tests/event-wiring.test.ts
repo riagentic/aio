@@ -2,6 +2,7 @@
 // not — two questions with two answers where there should be one.
 import { assertEquals } from "@std/assert";
 import { Window } from "happy-dom";
+import { closeWindow } from "../src/testing/close-window.ts";
 import { h } from "../src/air/vdom.ts";
 import { _setDocument, _unmount, mount } from "../src/air/aio-renderer.ts";
 
@@ -52,7 +53,7 @@ Deno.test({
 
     _unmount(innerHandle);
     _unmount(outerHandle);
-    await win.happyDOM.close();
+    await closeWindow(win);
   },
 });
 
@@ -110,6 +111,6 @@ Deno.test({
     } finally {
       console.error = origError;
     }
-    await win.happyDOM.close();
+    await closeWindow(win);
   },
 });

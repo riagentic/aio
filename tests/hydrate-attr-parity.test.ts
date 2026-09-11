@@ -24,6 +24,7 @@
 // by someone happening to look at a dev console.
 import { assert, assertEquals } from "@std/assert";
 import { Window } from "happy-dom";
+import { closeWindow } from "../src/testing/close-window.ts";
 import { h, renderToString, setDevMode, type VNode } from "../src/air/vdom.ts";
 import {
   _setDocument,
@@ -36,7 +37,7 @@ function env() {
   const win = new Window({ url: "https://localhost" });
   const doc = win.document as unknown as Document;
   _setDocument(doc);
-  return { win, doc, cleanup: () => win.happyDOM.close() };
+  return { win, doc, cleanup: () => closeWindow(win) };
 }
 
 /** Run `fn` in dev mode, returning every `[aio-dev]` line it printed. */

@@ -57,6 +57,28 @@ export function detectMode(flags: GlobalFlags): OutputMode {
  *  which is what `am doctor` used to answer a person with: braces, quotes and
  *  a `"findings": []`. The two branches never share a formatter, so styling
  *  the human half can never move a byte of the machine half. */
+/** `--json`, serialized for whoever is actually reading it.
+ *
+ *  A pipe gets the compact form a parser wants. A TERMINAL gets it indented,
+ *  because a person typed `--json` and got ~8 kB on one unwrapped line
+ *  (vidtune §8.2) — `am surface --json` was unreadable without piping it
+ *  through another tool, which is the "am made me write a script" shape this
+ *  CLI keeps trying to remove.
+ *
+ *  Not a behaviour fork: both are the same JSON document and `JSON.parse`
+ *  cannot tell them apart. It is the same call colour output makes, and it is
+ *  keyed on the same fact — is there a human on the other end. */
+function jsonText(data: unknown): string {
+  let tty = false;
+  try {
+    tty = Deno.stdout.isTerminal();
+  } catch {
+    // aio-ok: no stdout to ask (a detached child, a closed pipe) — compact is
+    // the safe answer, and a throw here would take the command with it.
+  }
+  return tty ? JSON.stringify(data, null, 2) : JSON.stringify(data);
+}
+
 export function out(
   data: unknown,
   mode: OutputMode,
@@ -64,9 +86,7 @@ export function out(
 ): void {
   if (mode === "quiet") return;
   if (mode === "json") {
-    console.log(
-      JSON.stringify(typeof data === "string" ? { message: data } : data),
-    );
+    console.log(jsonText(typeof data === "string" ? { message: data } : data));
     return;
   }
   const human = typeof pretty === "function" ? pretty() : pretty;

@@ -3,7 +3,7 @@
 
 import { UI_ENTRY } from "./app-files.ts";
 import { enc } from "../protocol/envelope.ts";
-import { basename, dirname, join } from "@std/path";
+import { basename, dirname, join, resolve } from "@std/path";
 import { DENO_JSON_NAMES, parseDenoJson } from "./deno-json.ts";
 import type { GraphResult } from "./graph-validator.ts";
 import { type ProdGraphCheck, validateGraph } from "./graph-validator.ts";
@@ -22,6 +22,15 @@ const RELOAD_EXT = new Set([".ts", ".tsx", ".css", ".html", ".svg"]);
 /** Callbacks the watcher uses to interact with server internals */
 export interface WatcherDeps {
   absBaseDir: string;
+  /** `aio.run({ watch })` — `false` turns live reload OFF, an array narrows
+   *  what is watched to those paths (relative to `absBaseDir`, or absolute).
+   *
+   *  The cheap escape hatch (watcher §3): a `deno fmt` over the repo triggered
+   *  full model reloads repeatedly, because the watcher sees the whole app
+   *  directory and a reload cost that app 760 MB of GPU weights. Narrowing to
+   *  `["src/ui"]` costs one line and solves most of it; `false` is for the
+   *  process you simply do not want restarted under you. */
+  watch?: false | string[];
   uiEntry?: string; // AIO-8.1: UI entry file (default "App.tsx")
   importMapObj: Record<string, string>;
   debug: (msg: string) => void;
@@ -482,8 +491,19 @@ export function createFileWatcher(deps: WatcherDeps): FileWatcher {
   }
 
   function startWatcher(): boolean {
+    // `watch: false` — not started at all. Everything else about dev is
+    // unchanged; this is the one thing turned off, and it is turned off by
+    // never opening the watcher rather than by ignoring its events, so the
+    // process holds no file handles for a feature nobody asked for.
+    if (deps.watch === false) {
+      deps.debug("watcher: disabled by `watch: false`");
+      return false;
+    }
     try {
-      const paths = _sentinelOk ? [absBaseDir, SENTINEL] : [absBaseDir];
+      const roots = Array.isArray(deps.watch) && deps.watch.length > 0
+        ? deps.watch.map((p) => resolve(absBaseDir, p))
+        : [absBaseDir];
+      const paths = _sentinelOk ? [...roots, SENTINEL] : roots;
       fsWatcher = Deno.watchFs(paths, { recursive: true });
       startConfigWatcher();
       watcherActive = true;

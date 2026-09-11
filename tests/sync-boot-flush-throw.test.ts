@@ -13,6 +13,7 @@
 // "silently gone, along with the ones behind it".
 import { assert, assertEquals } from "@std/assert";
 import { Window } from "happy-dom";
+import { closeWindow } from "../src/testing/close-window.ts";
 import { cell } from "aio";
 import {
   _rejectAllPending,
@@ -121,7 +122,7 @@ Deno.test({
       _resetBrowserSync();
       _resetCellRegistry();
       _resetSignals();
-      await win.happyDOM.close();
+      await closeWindow(win);
     }
   },
 });

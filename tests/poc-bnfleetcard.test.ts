@@ -2,6 +2,7 @@
 // Proves the component pattern works without React — same JSX, no memo wrapper.
 import { assertEquals } from "@std/assert";
 import { Window } from "happy-dom";
+import { closeWindow } from "../src/testing/close-window.ts";
 import { computed, signal } from "../src/state/signal.ts";
 import { h } from "../src/air/vdom.ts";
 import { _setDocument, _unmount, mount } from "../src/air/aio-renderer.ts";
@@ -175,7 +176,7 @@ function setup() {
   const root = doc.createElement("div");
   doc.body.appendChild(root);
   _setDocument(doc);
-  return { root, cleanup: () => win.happyDOM.close() };
+  return { root, cleanup: () => closeWindow(win) };
 }
 
 Deno.test({

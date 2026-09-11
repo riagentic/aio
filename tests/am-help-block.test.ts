@@ -24,8 +24,23 @@ Deno.test("helpBlock: one command's entries with their continuation lines", () =
   assertStringIncludes(b, "  logs [filter]");
   assert(!b.includes("errors "), "the next entry is not part of the block");
   // Several entries for one verb (surface, surface --full, …) all belong.
+  //
+  // The RULE, not a remembered count. This read `=== 5` and went red the day a
+  // sixth `surface` line was written — a gate that fails on the change it is
+  // meant to permit teaches people to bump the number, and then it gates
+  // nothing. What has to hold is that the block is all of one verb and only
+  // that verb.
   const s = helpBlock(HELP_TEXT, "surface")!;
-  assertEquals(s.split("\n").filter((l) => /^ {2}surface/.test(l)).length, 5);
+  const entries = s.split("\n").filter((l) => /^ {2}\S/.test(l));
+  assert(
+    entries.length > 1,
+    `several surface entries belong: ${entries.length}`,
+  );
+  assertEquals(
+    entries.filter((l) => !/^ {2}surface\b/.test(l)),
+    [],
+    "an entry for another verb leaked into the surface block",
+  );
   assertEquals(helpBlock(HELP_TEXT, "nonesuch"), null);
 });
 

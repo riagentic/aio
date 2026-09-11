@@ -124,6 +124,23 @@ const ALLOWED: Record<string, string[]> = {
     // second wire vocabulary for one client, which is exactly the drift the
     // envelope's single catalog exists to prevent (`SERVES.am` records it).
     "protocol",
+    // `am testgen` writes a TYPED TEST CLIENT from the app's rendered surface
+    // (llama.master §11/§18: `ui.App["tab-settings"]` is a string key whose
+    // typo is a runtime undefined). The generator already existed in
+    // `testing/ui-testgen.ts` and the only thing missing was a way to run it
+    // without hand-writing a script — which is why an app that HAD the feature
+    // kept using string keys.
+    //
+    // Widened deliberately, and narrowly: `am` reaches the GENERATOR, a pure
+    // string function over a plain surface object. It does not reach the
+    // harness — `testUI` boots cells and mounts a renderer, and none of that
+    // belongs in the CLI. The alternative was a second copy of the generator,
+    // which is the drift this matrix exists to prevent.
+    "testing",
+    // Type-only: the shape of the surface the generator is fed. `am` already
+    // obtains that surface from the SERVER (`renderHeadlessSurface`), so this
+    // adds a type, not a renderer.
+    "air",
   ],
   // testing may boot a real server — `testServer()`/`testBrowser()`
   // (aio/testing) run in Deno test processes, never in a browser bundle, so

@@ -174,11 +174,14 @@ export function createCellFromMethods<
 
   // Field-filter keys must resolve to real state — a non-matching filter
   // silently leaks. Fail loud at creation.
+  // The FILTER half — `validateFieldFilters` checks that include/exclude name
+  // real fields, and a `transform` has no field names to check.
+  const persistFilter = normalizePersistFilter(config.persist);
   validateFieldFilters(
     name,
     config.state as Record<string, unknown>,
     visibility,
-    config.persist,
+    persistFilter,
   );
 
   // listensTo (D1): normalize both forms. Object form maps ONE OR MORE foreign
@@ -315,6 +318,74 @@ export function createCellFromMethods<
     cancelTriggers = resolved;
   }
 
+  // `concurrency: { m: "newest" }` IS `cancelOn: { m: "self" }`. Folded in
+  // here so there is genuinely ONE mechanism: compose registers triggers from
+  // this map and knows nothing about `concurrency`, so the two spellings
+  // cannot drift.
+  //
+  // Declaring BOTH for one method is refused. Two spellings of one decision is
+  // how they come to disagree, and the disagreement would be silent — the
+  // trigger registered twice is idempotent, so nothing would ever say which
+  // one the reader was looking at.
+  const conc = config.concurrency as
+    | Record<string, "first" | "newest" | "queue">
+    | undefined;
+  if (conc) {
+    for (const [mk, mode] of Object.entries(conc)) {
+      if (typeof methods[mk] !== "function") {
+        throw new Error(
+          `[cell:${name}] concurrency names "${mk}", which is not a method of ` +
+            `this cell. Methods: ${methodNames.join(", ") || "(none)"}.`,
+        );
+      }
+      if (!asyncMethods.has(mk)) {
+        throw new Error(
+          `[cell:${name}] concurrency: { ${mk}: "${mode}" } — "${mk}" is a ` +
+            `SYNC method. A sync method runs to completion inside one ` +
+            `dispatch, so a second call can never overlap the first and the ` +
+            `policy would never do anything.`,
+        );
+      }
+      if (mode !== "newest") continue;
+      if (cancelTriggers?.[mk] !== undefined) {
+        throw new Error(
+          `[cell:${name}] "${mk}" declares BOTH concurrency: "newest" and ` +
+            `cancelOn — they are the same instruction spelled twice, and the ` +
+            `pair can only ever confuse a reader about which one is in force. ` +
+            `Keep ONE: \`concurrency: { ${mk}: "newest" }\` for "newest call ` +
+            `wins", or \`cancelOn\` when other actions cancel it too.`,
+        );
+      }
+      cancelTriggers = { ...(cancelTriggers ?? {}), [mk]: "self" };
+    }
+  }
+  // `ttl` names methods too, and a typo there is silent in the other
+  // direction: a cache that never hits looks exactly like no cache.
+  const ttlCfg = config.ttl as Record<string, number> | undefined;
+  if (ttlCfg) {
+    for (const [mk, ms] of Object.entries(ttlCfg)) {
+      if (typeof methods[mk] !== "function") {
+        throw new Error(
+          `[cell:${name}] ttl names "${mk}", which is not a method of this ` +
+            `cell. Methods: ${methodNames.join(", ") || "(none)"}.`,
+        );
+      }
+      if (!asyncMethods.has(mk)) {
+        throw new Error(
+          `[cell:${name}] ttl: { ${mk}: ${ms} } — "${mk}" is a SYNC method. ` +
+            `Its result is not awaited from a cache; it simply runs.`,
+        );
+      }
+      if (!(typeof ms === "number" && Number.isFinite(ms) && ms > 0)) {
+        throw new Error(
+          `[cell:${name}] ttl: { ${mk}: ${
+            JSON.stringify(ms)
+          } } must be a positive number of milliseconds.`,
+        );
+      }
+    }
+  }
+
   // `onMigrate` with no `version >= 1` is a DEAD hook: boot skips migration
   // entirely at version 0 (the default), so the migration the developer wrote
   // would silently never run — against every persisted profile. Fail at
@@ -397,6 +468,7 @@ export function createCellFromMethods<
     asyncMethods,
     prefix,
     foreignHandlers,
+    config.args,
   );
 
   // Build executor for async methods
@@ -464,8 +536,16 @@ export function createCellFromMethods<
     // Dropping these silently disables persist/ui filters, validation and
     // migrations for methods-style cells.
     validate: config.validate,
+    argSchemas: config.args,
     access: config.access,
-    persist: normalizePersistFilter(config.persist),
+    persist: persistFilter,
+    // Split from the filter so every existing reader of `persist` keeps the
+    // shape it has always seen.
+    persistTransform: config.onPersist as
+      | ((state: Record<string, unknown>) => Record<string, unknown>)
+      | undefined,
+    // `diagnostics: false` — actions only; state stays `persist`'s business.
+    diagnostics: config.diagnostics === false ? false : undefined,
     ui: normalizeUiFilter(visibility),
     uiForUser: extractForUser(visibility),
     uiPublicFields: extractPublicFields(visibility),

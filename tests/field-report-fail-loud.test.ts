@@ -9,6 +9,7 @@
 import { assert, assertEquals, assertThrows } from "@std/assert";
 import { captureConsole } from "./console-capture.ts";
 import { Window } from "happy-dom";
+import { closeWindow } from "../src/testing/close-window.ts";
 import { cell } from "../src/state/cell-create.ts";
 import { composeCells } from "../src/state/cell-compose.ts";
 import { createDispatch } from "../src/state/dispatch.ts";
@@ -139,7 +140,7 @@ Deno.test("fail-loud: render error names the failing component", async () => {
     !err.message.includes("<NetworkPanel>"),
     "e.message is untouched — ErrorBoundary fallbacks render it to users",
   );
-  await win.happyDOM.close();
+  await closeWindow(win);
 });
 
 // ── 3. dispatch-after-close warns once per type ──────────────

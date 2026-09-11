@@ -194,6 +194,27 @@ export function targetsFromLegacyTasks(
 // Targets the retired tasks ENCODED are persisted into `build.targets` first
 // (see targetsFromLegacyTasks) — deletion must never lose a capability.
 
+/** What replaces a retired task, in the one vocabulary — so the advice is a
+ *  command someone can run, not a category.
+ *
+ *  `dev:electron` became `deno task dev --client=electron`; the whole point of
+ *  the alpha52 diet is that the flag passes through instead of the task matrix
+ *  enumerating it. Unknown shapes get the honest generic answer rather than a
+ *  guess. */
+export function legacyReplacement(name: string): string {
+  const m = /^(dev|compile):(?:remote:)?([\w-]+)$/.exec(name);
+  if (m) {
+    const target = m[2] === "service" ? "server" : m[2]!;
+    return m[1] === "dev"
+      ? `deno task dev --client=${target}`
+      : `deno task build --targets=${target}`;
+  }
+  if (name === "dev" || name === "build" || name === "compile") {
+    return `deno task ${name}`;
+  }
+  return "deno task dev (flags pass through) / deno task build";
+}
+
 /** Old task names whose `service` spelling renames to `server`. */
 const SERVICE_RENAMES: Record<string, string> = {
   "dev:service": "dev:server",
@@ -215,7 +236,15 @@ export interface MigrateTasksResult {
   tasks: Record<string, string>;
   /** old→new names of customized `*:service` tasks (value untouched). */
   renamed: [string, string][];
-  /** pristine old-scaffold tasks the new matrix covers otherwise. */
+  /** pristine old-scaffold tasks the new matrix covers otherwise.
+   *
+   *  KEPT, not removed. Deleting a task someone runs BY NAME is the one
+   *  irreversible thing `am fix` does, and "pristine" only means the COMMAND
+   *  was never edited — it says nothing about whether `dev:browser` is in the
+   *  app's README, its CLAUDE.md and everyone's fingers (llama.master §4). The
+   *  neighbouring check already gets this right for customized tasks ("kept,
+   *  review manually"), and there is no reason the two should differ. So these
+   *  are reported with the replacement spelled out and left in place. */
   deleted: string[];
   /** tasks whose pristine old value was updated to the new one. */
   rewritten: string[];
@@ -256,7 +285,11 @@ export function migrateTasks(
         res.rewritten.push(k);
       } else res.tasks[k] = v;
     } else if (pristine(k, v)) {
-      res.deleted.push(k); // the new matrix covers it via dev flags / build
+      // Superseded by the one vocabulary — and KEPT anyway. See the field on
+      // MigrateTasksResult: pristine is a fact about the command, not about
+      // whether anyone types the name.
+      res.tasks[k] = v;
+      res.deleted.push(k);
     } else if (k in SERVICE_RENAMES) {
       const nk = SERVICE_RENAMES[k]!;
       if (nk in res.tasks || nk in current) {
@@ -1000,11 +1033,9 @@ export async function cmdFix(
               derivedTargets.map((t) => `"${t}"`).join(", ")
             }] } (derived from the retired tasks — review the list)`
             : "",
-          m.deleted.length
-            ? `deleted ${m.deleted.length} old scaffold task(s): ${
-              m.deleted.join(", ")
-            }`
-            : "",
+          // NOT "deleted" — they stay. Naming them as removed while leaving
+          // them in deno.json would be the worst of both.
+          "",
           m.renamed.length
             ? `renamed: ${m.renamed.map(([o, n]) => `${o}→${n}`).join(", ")}`
             : "",
@@ -1019,6 +1050,20 @@ export async function cmdFix(
           `kept, review manually (their commands were user-edited): ${
             m.kept.join(", ")
           }`,
+        );
+      }
+      if (m.deleted.length) {
+        // Advise, never delete: "pristine" is a fact about the COMMAND, and
+        // says nothing about whether the NAME is in the app's README, its
+        // CLAUDE.md and everyone's fingers (llama.master §4). The replacement
+        // is spelled out so the advice is something to run, not a category.
+        add(
+          "superseded old-matrix tasks",
+          "advise",
+          `kept — the one vocabulary covers them, but a task you run by name ` +
+            `is not ours to remove. Delete them when you are ready: ${
+              m.deleted.map((k) => `${k} → ${legacyReplacement(k)}`).join("; ")
+            }`,
         );
       }
     } else {

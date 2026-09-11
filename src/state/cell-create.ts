@@ -37,19 +37,24 @@ const VALID_CELL_KEYS: ReadonlySet<string> = new Set([
   "selectors",
   "sync",
   "persist",
+  "diagnostics",
   "visible",
   "access",
   "scope",
   "long",
   "cancelOn",
+  "concurrency",
+  "ttl",
   "listensTo",
   "transaction",
   "validate",
+  "args",
   "version",
   "onMigrate",
   "onInit",
   "onDestroy",
   "onRestore",
+  "onPersist",
   "worker",
 ]);
 
@@ -60,6 +65,7 @@ export const _CALLABLE_CELL_KEYS = [
   "onInit",
   "onDestroy",
   "onRestore",
+  "onPersist",
   "onMigrate",
   "validate",
 ] as const;
@@ -79,15 +85,28 @@ export function persistFilterOnSyncCellMessage(
   persist: unknown,
   via?: string,
 ): string {
-  const p = persist as "none" | { include?: string[]; exclude?: string[] };
+  const p = persist as "none" | {
+    include?: string[];
+    exclude?: string[];
+    transform?: unknown;
+  };
+  // A `transform` reaches here too, and saying "include: " for one would name
+  // a filter the author never wrote — the message has to describe what is
+  // actually in their file, or it reads as being about someone else's cell.
   const fields = p === "none"
     ? 'every field (`persist: "none"`)'
     : p.exclude
     ? `exclude: ${p.exclude.join(", ")}`
-    : `include: ${(p.include ?? []).join(", ")}`;
-  return `[cell:${name}] sync: true + a persist filter (${fields}${
-    via ? `, from ${via}` : ""
-  }) is refused. ` +
+    : p.include
+    ? `include: ${p.include.join(", ")}`
+    : p.transform
+    ? "a `transform`"
+    : "a filter";
+  return `[cell:${name}] sync: true + a persist ${
+    (p !== "none" && (p as { transform?: unknown }).transform)
+      ? "transform"
+      : "filter"
+  } (${fields}${via ? `, from ${via}` : ""}) is refused. ` +
     `The op-log is the durable home of a sync cell and every op is a method ` +
     `call's payload written raw, so a persist filter cannot apply to it — ` +
     `the field would be on disk anyway. Pick one:\n` +
@@ -273,6 +292,16 @@ export function cell(name: string, config: any): any {
   // at compose time by the same rule (aio-composition `refuseFilteredSyncCells`).
   if (config.sync && config.persist !== undefined && config.persist !== "all") {
     throw new Error(persistFilterOnSyncCellMessage(name, config.persist));
+  }
+  // `onPersist` shapes what is written, which a sync cell's op-log cannot
+  // honour any more than it can honour a filter: an op IS the method call's
+  // payload, written raw, so the field is on disk whatever the hook returns.
+  // Refusing both keeps ONE rule rather than a filter that is impossible and a
+  // hook that silently is not.
+  if (config.sync && config.onPersist !== undefined) {
+    throw new Error(
+      persistFilterOnSyncCellMessage(name, { transform: config.onPersist }),
+    );
   }
 
   // AIO-5.1: client-scoped cells — browser-local state, sync methods only.

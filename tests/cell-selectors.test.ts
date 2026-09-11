@@ -1,5 +1,4 @@
 import { assertEquals } from "@std/assert";
-import { Window } from "happy-dom";
 import { h } from "../src/air/vdom.ts";
 import { cell } from "../src/state/cell-create.ts";
 import { testUI } from "../src/testing/ui-test.ts";
@@ -17,9 +16,7 @@ const edition = cell("editionrt", {
 });
 
 Deno.test("selector is bound + computes at runtime", async () => {
-  const ui = await testUI(() => h("div", null, ""), {
-    document: new Window().document as any,
-  });
+  const ui = await testUI(() => h("div", null, ""));
   assertEquals((edition as any).accountLimit(), 20); // 10 * 2
   await (edition as any).setTier(5);
   await ui.settle();

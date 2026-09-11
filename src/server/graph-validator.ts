@@ -227,6 +227,7 @@ export function resolveSpecifier(
 import { SERVER_ONLY_AIO_SYMBOLS } from "../entries.ts";
 import { codeMask, codeText } from "../diagnostics/code-mask.ts";
 import { count } from "../diagnostics/fmt.ts";
+import { justifiedFor } from "../diagnostics/ok-marker.ts";
 
 /** Detect server-only APIs in browser-bound code.
  *  AIO-427: severity is split by CERTAINTY of breakage —
@@ -256,11 +257,23 @@ export function isServerOnlySuppressed(
   lines: readonly string[],
   lineNum: number,
 ): boolean {
-  const marker = /\/\/.*\baio-ok\b\s*[:\-—]?\s*server-only/;
+  // TWO SPELLINGS, both permanent. The original is `// aio-ok: server-only`,
+  // which is what every existing suppression in the wild says and must keep
+  // meaning. `// aio-ok(server-only): why` is the repo's general scoped form
+  // (src/diagnostics/ok-marker.ts) and lands here too, so someone who learned
+  // the marker anywhere else does not have to learn a second grammar.
+  const legacy = /\/\/.*\baiol?-ok\b\s*[:\-—]?\s*server-only/;
+  // `justifiedFor`, not `justified`: the scope is REQUIRED here. The
+  // permissive form let an unscoped `// aio-ok: some other reason` silence a
+  // server-only finding, which this function's own test forbids in so many
+  // words — "a marker for one rule must not quietly cover another".
+  const hit = (line: string) =>
+    legacy.test(line) ||
+    (line.includes("//") && justifiedFor(line, "server-only"));
   const own = lines[lineNum - 1] ?? "";
-  if (marker.test(own)) return true;
+  if (hit(own)) return true;
   const above = (lines[lineNum - 2] ?? "").trim();
-  return above.startsWith("//") && marker.test(above);
+  return above.startsWith("//") && hit(above);
 }
 
 export function checkPlatformSafety(code: string, file: string): GraphError[] {

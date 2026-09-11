@@ -13,6 +13,7 @@
 
 import {
   _armTestStrict,
+  _recordCalls,
   _watchUnobservedCalls,
   type CallFailureLedger,
 } from "./test-strict.ts";
@@ -383,11 +384,25 @@ function surfaceDigest(node: UISurfaceNode, maxChars = 2000): string {
     n.children.forEach((c) => walk(c, depth + 1));
   };
   walk(node, 0);
-  const tree = names.join("\n");
+  // BOUNDED, like every other name list this harness prints. The JSON half was
+  // already capped and the TREE was not, so a wide app turned one timeout into
+  // 31 769 characters of component names (cc §9.0) — a wall nobody reads, in
+  // place of the six lines that would have said what happened. Same escape as
+  // `fail()`: one environment variable prints all of it.
+  const all = Deno.env.get("AIO_TEST_NAMES") === "all";
+  const shown = all ? names : names.slice(0, NAME_LIMIT);
+  const hidden = names.length - shown.length;
+  const tree = shown.join("\n") +
+    (hidden > 0
+      ? `\n  (${hidden} more component${hidden === 1 ? "" : "s"} — ` +
+        `AIO_TEST_NAMES=all prints the whole tree)`
+      : "");
   const full = JSON.stringify(serializeSurface(node), null, 2);
-  if (full.length <= maxChars) return `\n${tree}\n\n${full}`;
-  return `\n${tree}\n\n  (surface JSON omitted — ${full.length} chars; ` +
-    `print it with JSON.stringify(ui.surface()) if you need the detail)`;
+  if (!all && full.length > maxChars) {
+    return `\n${tree}\n\n  (surface JSON omitted — ${full.length} chars; ` +
+      `print it with JSON.stringify(ui.surface()) if you need the detail)`;
+  }
+  return `\n${tree}\n\n${full}`;
 }
 
 /** Last addressable segment of a path — `App/Stage/Row[3]:title` → `title`. */
@@ -444,6 +459,74 @@ function rankNames(target: string | undefined, names: string[]): string[] {
     .map((x) => x.n);
 }
 
+/** How many failure traces to keep. Names sort by timestamp, so the oldest
+ *  are the first `length - TRACE_KEEP`. */
+const TRACE_KEEP = 20;
+
+/** Everything a failure knows, written where a reader can open it.
+ *
+ *  "dump the AIR tree and the last N dispatches, and name the file in the
+ *  error" (trading-app report §9.5). A failing assertion prints what the surface looks like
+ *  NOW; what it can never print is how it got there, and reconstructing the
+ *  sequence from a test body is the work this removes.
+ *
+ *  SYNCHRONOUS, and never fatal. It is called from `fail()`, which throws, so
+ *  there is nothing to await it — an async write would outlive the test and be
+ *  reported by the leak sanitizers against whoever ran next. And a trace that
+ *  cannot be written must not replace the assertion's own error with a
+ *  filesystem one: the failure is the point, the trace is a convenience.
+ *
+ *  Returns the line to append, or "" when nothing was written. */
+function writeTrace(body: Record<string, unknown>): string {
+  try {
+    const dir = `${Deno.cwd()}/.aio/traces`;
+    Deno.mkdirSync(dir, { recursive: true });
+    const file = `${dir}/ui-${Date.now()}-${
+      Math.random().toString(36).slice(2, 7)
+    }.json`;
+    Deno.writeTextFileSync(file, JSON.stringify(body, null, 2));
+    // BOUNDED. A suite with a hundred failures must not leave a hundred
+    // artifacts behind, and an unbounded directory is one nobody ever cleans
+    // — it just grows until someone notices the disk. The newest are the ones
+    // anyone reads.
+    try {
+      const files = [...Deno.readDirSync(dir)]
+        .filter((e) => e.isFile && e.name.endsWith(".json"))
+        .map((e) => e.name)
+        .sort();
+      for (
+        const old of files.slice(0, Math.max(0, files.length - TRACE_KEEP))
+      ) {
+        Deno.removeSync(`${dir}/${old}`);
+      }
+    } catch {
+      // aio-ok: pruning is housekeeping — the trace just written is what the
+      // reader needs, and a failure to tidy must not cost them the name of it.
+    }
+    return `\n  trace: ${file}`;
+  } catch {
+    // aio-ok: a read-only cwd or a full disk must not turn a failed assertion
+    // into a filesystem error — the assertion is what the reader needs.
+    return "";
+  }
+}
+
+/** One trace field, or the reason it could not be read.
+ *
+ *  Per FIELD, not per trace: a surface that throws must not take the call
+ *  list with it, and the call list is usually the half that explains the
+ *  failure. */
+function traceSafe(fn: () => unknown): unknown {
+  try {
+    return fn();
+  } catch (e) {
+    return { unavailable: e instanceof Error ? e.message : String(e) };
+  }
+}
+
+/** The live trace inputs, installed per mount. `null` between mounts. */
+let _traceSource: (() => Record<string, unknown>) | null = null;
+
 function fail(msg: string, available: string[], target?: string): never {
   const all = Deno.env.get("AIO_TEST_NAMES") === "all";
   const ranked = rankNames(target, available);
@@ -455,7 +538,8 @@ function fail(msg: string, available: string[], target?: string): never {
         ? `\n  (closest ${shown.length} of ${ranked.length} shown — ` +
           `AIO_TEST_NAMES=all lists every one)`
         : "") +
-      `\n  tip: name elements explicitly with the t prop, e.g. <button t="save">`,
+      `\n  tip: name elements explicitly with the t prop, e.g. <button t="save">` +
+      (_traceSource ? writeTrace(_traceSource()) : ""),
   );
 }
 
@@ -1223,6 +1307,29 @@ async function _buildTestUI(
     }
     ledger = _watchUnobservedCalls(cells);
     partial.restore.push(() => ledger?.restore());
+    // The call ring a failure trace reads. Installed beside the ledger and
+    // torn down with it, so the two cannot disagree about which methods are
+    // wrapped.
+    const calls = _recordCalls(cells);
+    partial.restore.push(() => {
+      calls.restore();
+      _traceSource = null;
+    });
+    _traceSource = () => ({
+      when: new Date().toISOString(),
+      // How it got here — the half a failing assertion can never print.
+      calls: calls.recent(),
+      surface: traceSafe(() => serializeSurface(currentSurface())),
+      html: traceSafe(() => String(root.innerHTML)),
+      state: traceSafe(() =>
+        Object.fromEntries(
+          cells.map((c) => [
+            c.__aio.id,
+            standaloneApp?.getState()?.[c.__aio.id] ?? null,
+          ]),
+        )
+      ),
+    });
     // A throw AFTER the cells booted (the seed, the first render) must not
     // leave them booted for the next test either.
     partial.reset = () => {
@@ -2177,7 +2284,8 @@ async function _buildTestUI(
           // The predicate may be false only because the app never went quiet —
           // that is a different bug with a different fix, and saying so beats
           // sending the reader after a predicate that is fine.
-          (_gaveUp ? `\n  ${_gaveUp}` : ""),
+          (_gaveUp ? `\n  ${_gaveUp}` : "") +
+          (_traceSource ? writeTrace(_traceSource()) : ""),
       );
     },
     async waitFor(
@@ -2355,4 +2463,57 @@ async function _buildTestUI(
 export function uiNames(ui: TestUI): string[] {
   const f = (ui as unknown as { names?: () => string[] }).names;
   return typeof f === "function" ? f.call(ui) : [];
+}
+
+/**
+ * Layout geometry for every addressable element in a surface, keyed by the
+ * SAME `Component…:Element` path `am trigger` takes.
+ *
+ * happy-dom measures everything 0×0. That hid two security-relevant defects in
+ * a wallet behind 1546 passing tests — a dApp origin running off the edge of
+ * the approval card, and that dialog opening scrolled past the origin (a crypto wallet
+ * §19.1/§22.2, anathomy §10.1). A harness that answers "0×0" to "where is
+ * this?" is not merely unhelpful; it makes a layout assertion PASS.
+ *
+ * So this does not read the harness's DOM. It reads a surface that a REAL
+ * client measured — `am surface --rects`, or the trojan `surface/N?rects=1`
+ * against a browser opened with {@linkcode testBrowser}:
+ *
+ * ```ts
+ * await using srv = await testServer({ cells: [todo] });
+ * await using browser = await testBrowser(srv.url);
+ * const { roots, measured } = await srv.trojan("surface/0?rects=1");
+ * const box = uiRects(roots);
+ * assert(box["App:OriginText"]!.w <= box["App:Card"]!.w, "origin overflows the card");
+ * ```
+ *
+ * `measured.laidOut === 0` means nothing was laid out — a headless render, or
+ * a window with no size yet — and the surface route says so rather than
+ * answering with zeroes. Check it before trusting a rect, or use the value
+ * this returns, which omits an unmeasured element entirely rather than
+ * reporting it at the origin with no size.
+ */
+export function uiRects(
+  roots: unknown,
+): Record<string, { x: number; y: number; w: number; h: number }> {
+  const out: Record<string, { x: number; y: number; w: number; h: number }> =
+    {};
+  const walk = (n: unknown): void => {
+    const node = n as {
+      elements?: {
+        path?: string;
+        rect?: { x: number; y: number; w: number; h: number };
+      }[];
+      children?: unknown[];
+    };
+    for (const el of node.elements ?? []) {
+      // An UNMEASURED element is omitted, never reported as 0×0 at the
+      // origin. A missing key fails an assertion loudly; a plausible zero
+      // passes one.
+      if (el.path && el.rect) out[el.path] = el.rect;
+    }
+    for (const c of node.children ?? []) walk(c);
+  };
+  for (const r of Array.isArray(roots) ? roots : [roots]) walk(r);
+  return out;
 }

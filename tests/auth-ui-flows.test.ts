@@ -11,6 +11,7 @@
 // the auth client goes through.
 import { assert, assertEquals, assertStringIncludes } from "@std/assert";
 import { Window } from "happy-dom";
+import { closeWindow } from "../src/testing/close-window.ts";
 import { renderToString } from "../src/air/vdom-ssr.ts";
 import {
   _resetAuthUi,
@@ -62,7 +63,7 @@ function find(root: VNode, tag: string, label?: string): VNode | undefined {
  *  would — so the global is swapped for happy-dom's for the duration. */
 function formWith(
   fields: Record<string, string>,
-): { form: HTMLFormElement; restore: () => void } {
+): { form: HTMLFormElement; restore: () => Promise<void> } {
   const win = new Window();
   const doc = win.document;
   const form = doc.createElement("form");
@@ -78,8 +79,9 @@ function formWith(
   globalThis.FormData = (win as any).FormData;
   return {
     form: form as unknown as HTMLFormElement,
-    restore: () => {
+    restore: async () => {
       globalThis.FormData = realFormData;
+      await closeWindow(win);
     },
   };
 }
@@ -101,7 +103,7 @@ async function submit(
     await new Promise((r) => setTimeout(r, 0));
     await new Promise((r) => setTimeout(r, 0));
   } finally {
-    restore();
+    await restore();
   }
 }
 
@@ -179,7 +181,7 @@ Deno.test("SignIn: the reset request never reveals whether the account exists", 
   try {
     await submit(render(), { id: "nobody-at-all" });
   } finally {
-    f.restore();
+    await f.restore();
   }
   assertEquals(f.calls.length, 1);
   assertEquals(f.calls[0]!.body, { id: "nobody-at-all" });
@@ -201,14 +203,14 @@ Deno.test("SignIn: a completed reset returns to login with a notice, not a sessi
   try {
     await submit(render(), { id: "alice" });
   } finally {
-    f1.restore();
+    await f1.restore();
   }
 
   const f2 = withFetch({ "/__aio/auth/reset": { body: { ok: true } } });
   try {
     await submit(render(), { token: "tok-123", password: "new-password-9" });
   } finally {
-    f2.restore();
+    await f2.restore();
   }
   assertEquals(f2.calls[0]!.body, {
     token: "tok-123",
@@ -229,7 +231,7 @@ Deno.test("SignIn: a rejected reset token says so and keeps the form", async () 
   try {
     await submit(render(), { id: "alice" });
   } finally {
-    f1.restore();
+    await f1.restore();
   }
 
   const f2 = withFetch({
@@ -238,7 +240,7 @@ Deno.test("SignIn: a rejected reset token says so and keeps the form", async () 
   try {
     await submit(render(), { token: "wrong", password: "new-password-9" });
   } finally {
-    f2.restore();
+    await f2.restore();
   }
 
   const after = html();
@@ -261,7 +263,7 @@ Deno.test("SignIn: back-to-login clears the error it was showing", async () => {
   try {
     await submit(render(), { id: "alice" });
   } finally {
-    f.restore();
+    await f.restore();
   }
   assert(html().includes("mail_down") || html().includes("error"));
 
@@ -282,7 +284,7 @@ Deno.test("SignIn: a login needing a second factor asks for the code, not the pa
   try {
     await submit(render(), { id: "alice", password: "correct-horse-9" });
   } finally {
-    f.restore();
+    await f.restore();
   }
 
   const step = html();
@@ -307,7 +309,7 @@ Deno.test("SignIn: a wrong code burns the pending and returns to the password fo
   try {
     await submit(render(), { id: "alice", password: "correct-horse-9" });
   } finally {
-    f1.restore();
+    await f1.restore();
   }
 
   const f2 = withFetch({
@@ -316,7 +318,7 @@ Deno.test("SignIn: a wrong code burns the pending and returns to the password fo
   try {
     await submit(render(), { code: "000000" });
   } finally {
-    f2.restore();
+    await f2.restore();
   }
   assertEquals(f2.calls[0]!.body, { pending: "pend-1", code: "000000" });
 
@@ -345,7 +347,7 @@ Deno.test("SignIn: a signup that needs verification says so instead of signing i
       email: "a@example.com",
     });
   } finally {
-    f.restore();
+    await f.restore();
   }
 
   const after = html();

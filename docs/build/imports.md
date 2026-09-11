@@ -338,6 +338,44 @@ passes `--exclude` flags to `deno compile` for the big directories (electron
 ~254MB, esbuild ~11MB, react ~5MB). Symlinks are restored after compile, even on
 failure.
 
+## `aio/server-only` and `aio/client-only` — the marker in the file
+
+The `*.server.ts` convention is how aio says "this never reaches the browser",
+and it works. Its one hole is that it is a **filename**: you cannot always
+rename a file that twenty places already import, that is generated, or that is
+published under that name.
+
+The markers are the same statement, made in the file:
+
+```ts
+import "aio/server-only";
+
+export const db = new Database(Deno.env.get("DATABASE_URL")!);
+```
+
+Anything that reaches this module from the client graph is refused with the
+importing file named, exactly as a `*.server.ts` leak is — dev boot and
+`deno task build` share one decider, so they cannot disagree. The module also
+throws if it is ever evaluated in a browser: unreachable in practice (the build
+refuses the bundle first), and there for the paths a build cannot see — a
+hand-assembled bundle, a `<script>` tag, a published package someone re-bundled.
+A silent success there means a database URL anyone can read.
+
+`aio/client-only` is the mirror, and the two halves are deliberately **not**
+symmetric, because the failures are not:
+
+|                              | what goes wrong                                                | so                                  |
+| ---------------------------- | -------------------------------------------------------------- | ----------------------------------- |
+| server module in the browser | **leaks** — keys and queries in a file anyone can open         | refused at build, throws at runtime |
+| browser module on the server | **breaks** — `window is not defined`, loudly, escaping nothing | refused by `aiol`, no runtime guard |
+
+A cell that imports `aio/client-only` is an error: a cell method runs on the
+server, so that file says two opposite things about the same code. aio renders
+server-side on purpose, so `aio/client-only` never throws during SSR — a module
+that legitimately runs in both places keeps working.
+
+Neither marker costs anything to a project that does not use one.
+
 ## `aio/server` — the explicit server-only surface
 
 Server-only symbols (SQLite `createDB`/`DEFAULT_PRAGMAS`, CLI/UDS `connectCli`/

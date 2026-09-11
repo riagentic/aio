@@ -259,3 +259,64 @@ function isThenable(v: unknown): boolean {
   return !!v && (typeof v === "object" || typeof v === "function") &&
     typeof (v as { then?: unknown }).then === "function";
 }
+
+/** The last N method calls this test made, newest last — for a failure trace.
+ *
+ *  A failing UI assertion says what the surface looks like NOW. What it could
+ *  never say is how it got there, and "dump the AIR tree and the last N
+ *  dispatches" was the ask (trading-app report §9.5): the sequence is usually the answer,
+ *  and reconstructing it from a test body is exactly the work the trace exists
+ *  to remove.
+ *
+ *  Wrapped the same way the unobserved-call ledger wraps, on the same objects,
+ *  because a second interception mechanism over one set of methods is how two
+ *  of them come to disagree about what ran. */
+export function _recordCalls(
+  cells: readonly CellDef[],
+  max = 40,
+): { recent: () => string[]; restore: () => void } {
+  const ring: string[] = [];
+  const undo: (() => void)[] = [];
+  for (const def of cells) {
+    for (const key of def.__aio?.actionKeys ?? []) {
+      const holder = def as unknown as Record<string, unknown>;
+      const original = holder[key];
+      if (typeof original !== "function") continue;
+      const call = original as (...args: unknown[]) => unknown;
+      const label = `${def.__aio.id}.${key}`;
+      holder[key] = (...args: unknown[]): unknown => {
+        // Arguments are SUMMARISED, never serialized whole: a trace that
+        // inlines a 2 MB payload is one nobody opens, and a secret in a
+        // payload does not belong in a file the test leaves behind.
+        ring.push(`${label}(${args.map(summarize).join(", ")})`);
+        if (ring.length > max) ring.shift();
+        return call.apply(def, args);
+      };
+      undo.push(() => {
+        holder[key] = original;
+      });
+    }
+  }
+  return {
+    recent: () => [...ring],
+    restore: () => {
+      for (const u of undo) u();
+      undo.length = 0;
+    },
+  };
+}
+
+/** One argument, in a few characters. */
+function summarize(v: unknown): string {
+  if (v === null) return "null";
+  if (typeof v === "string") {
+    return v.length > 24
+      ? JSON.stringify(v.slice(0, 24) + "…")
+      : JSON.stringify(v);
+  }
+  if (typeof v === "number" || typeof v === "boolean") return String(v);
+  if (typeof v === "function") return "fn";
+  if (Array.isArray(v)) return `[${v.length}]`;
+  if (typeof v === "object") return `{${Object.keys(v as object).length}}`;
+  return typeof v;
+}

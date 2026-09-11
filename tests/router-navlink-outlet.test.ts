@@ -2,6 +2,7 @@
 // exercises. Rendered for real via happy-dom + the AIR renderer.
 import { assertEquals } from "@std/assert";
 import { Window } from "happy-dom";
+import { closeWindow } from "../src/testing/close-window.ts";
 import { type ComponentFn, h, type VChild } from "../src/air/vdom.ts";
 import { _setDocument, _unmount, mount } from "../src/air/aio-renderer.ts";
 import { NavLink, Outlet, Route } from "../src/browser/browser-air-router.ts";
@@ -71,7 +72,7 @@ function createDOM(): { root: HTMLElement; cleanup: () => Promise<void> } {
   _setDocument(doc);
   const root = doc.createElement("div");
   doc.body.appendChild(root);
-  return { root, cleanup: () => win.happyDOM.close() };
+  return { root, cleanup: () => closeWindow(win) };
 }
 
 function withRouterDOM(

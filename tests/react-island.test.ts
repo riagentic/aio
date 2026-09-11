@@ -2,7 +2,6 @@
 // on React. Proven with fake react / react-dom loaders (the user supplies real
 // ones in their app), so this test needs no React install.
 import { assert, assertEquals, assertStringIncludes } from "@std/assert";
-import { Window } from "happy-dom";
 import { h } from "../src/air/vdom.ts";
 import { testUI } from "../src/testing/ui-test.ts";
 import { reactIsland } from "../src/air/react-island.ts";
@@ -34,11 +33,7 @@ Deno.test("reactIsland: loads, mounts, and renders the React component's output"
     props: () => ({ label: "hi" }),
   });
 
-  const win = new Window();
-  // deno-lint-ignore no-explicit-any
-  const ui = await testUI(() => h("div", null, h(Widget, null)), {
-    document: win.document as any,
-  });
+  const ui = await testUI(() => h("div", null, h(Widget, null)));
   await tick(); // island load + mount resolve on a microtask after first render
   assertStringIncludes(ui.html(), "react:hi");
   assert(calls.includes("render"), "React root rendered");
@@ -67,11 +62,7 @@ Deno.test("reactIsland: component module can be the component itself (no default
       }),
     props: () => ({ n: 42 }),
   });
-  const win = new Window();
-  // deno-lint-ignore no-explicit-any
-  const ui = await testUI(() => h("div", null, h(Widget, null)), {
-    document: win.document as any,
-  });
+  const ui = await testUI(() => h("div", null, h(Widget, null)));
   await tick();
   assertEquals(rendered, "n=42");
   await ui.dispose();

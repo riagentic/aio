@@ -18,6 +18,12 @@ import { _resetPerfThrottle } from "../diagnostics/error.ts";
 import { _resetActionWarnings } from "./action-encode.ts";
 import { _resetSwallowedRefusals } from "./cell-compose-reduce.ts";
 import { _resetShortCallWarnings } from "./cell-methods-internals.ts";
+import { resetDiagnosticsOptOut } from "../diagnostics/diagnostics-optout.ts";
+import { resetBudgets } from "./budgets.ts";
+import { resetMethodPolicy } from "./method-policy.ts";
+import { resetPendingSignals } from "./pending.ts";
+import { resetPendingCalls } from "../protocol/pending-calls.ts";
+import { resetServerImportStubs } from "./server-import.ts";
 
 /** Reset every module-scoped piece of the cell RUNTIME — bindings, pending
  *  async calls, cancellation registry, subscriptions. Test isolation in one
@@ -36,6 +42,25 @@ import { _resetShortCallWarnings } from "./cell-methods-internals.ts";
  *  itself) calls `_resetCellRegistry()` directly. */
 export function _resetAioRuntime(): void {
   _resetCellBindings();
+  // `cell({ diagnostics: false })` is registered per boot and replaced on the
+  // next one — but a test that never boots again would otherwise leave one
+  // app's opt-outs silencing another's actions, and a diagnostic that is
+  // quiet for a reason nobody can see is the worst kind.
+  resetDiagnosticsOptOut();
+  // Declared `budgets` are per-app too: one app's 4 MB cellState limit
+  // silently applying to the next test's app is a threshold nobody can see.
+  resetBudgets();
+  // `concurrency`/`ttl` bookkeeping is process-global: one test's cached
+  // result answering the next test's call is a green test over a method
+  // that never ran.
+  resetMethodPolicy();
+  // In-flight counts and their signals: a leftover count from one test
+  // makes the next test's spinner true forever.
+  // One test's module stub silently applying to the next is a green test
+  // over a module nobody meant to fake.
+  resetServerImportStubs();
+  resetPendingCalls();
+  resetPendingSignals();
   resetPending();
   _resetCallTimeouts();
   // The degraded registry is process-global; without this a test's escalation

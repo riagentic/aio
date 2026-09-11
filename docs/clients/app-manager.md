@@ -792,10 +792,44 @@ am surface --component=CtxControls   # every instance, with its subtree
 am surface --path=App/Main           # one subtree by path prefix
 am surface --depth=1                 # top level only
 am surface --full                    # untruncated element text
+am surface --rects                   # + layout geometry per element
 ```
 
 A filter that matches nothing exits non-zero and lists the components that ARE
 in the surface — an empty result is nearly always a typo.
+
+`--rects` adds `w x h @x,y` (CSS pixels, viewport-relative) to every element, so
+"the app looks fine" becomes "the Stage is 6886 px tall". It needs a real
+client: `getBoundingClientRect()` answers everywhere, and with no layout engine
+behind it, it answers `0x0` for everything — indistinguishable from a UI that
+really has collapsed. So the server-side render refuses `--rects` outright, and
+a live client whose elements all measure `0x0` exits 1 with both readings named
+rather than printing a grid of zeroes that looks like data. Under `--json` the
+document becomes `{ roots, measured: { measurable, laidOut } }`; without
+`--rects` the top level is still the roots array, so nothing that parses
+`am surface --json` today has to change.
+
+### A typed test client (`am testgen`)
+
+```sh
+deno task am testgen                      # → tests/ui.gen.ts
+deno task am testgen --out=tests/ui.ts    # somewhere else
+deno task am testgen src/Admin.tsx        # a different entry
+```
+
+`ui.App["tab-settings"]` is a string key, and a typo in one is a runtime
+`undefined`. This writes a client typed from what the app actually **renders**,
+so `ui.App.SaveButton.click()` autocompletes and a renamed button breaks the
+test at compile time.
+
+It renders headlessly against the app's own cells, so nothing has to be running.
+Re-run it after a UI change — the types describe the render, which is the point:
+a `t=` prop inside a branch that never renders is not a locator anyone can use.
+
+No UI entry exits 1 and says so. A file written in silence for an app with no UI
+is indistinguishable from one written for an app whose components all returned
+null, and only one of those is fine. Full guide:
+[UI testing → Typed clients](../testing/ui-testing.md#typed-clients-am-testgen).
 
 ### Does the client graph build? (`am check`)
 
@@ -936,6 +970,33 @@ Three things it does for you, each because the raw protocol gets them wrong:
 Why it exists: without it, every agent driving an aio app writes the same
 fifteen lines of CDP client. Three field reports did, independently.
 
+## What this app has to change (`am migrate`)
+
+```sh
+deno task am migrate                  # since the app's own aio pin
+deno task am migrate --from=alpha76   # since a release you name
+deno task am migrate --json           # for a script or an agent
+```
+
+It SCANS rather than lists. "Everything removed since alpha76" is a changelog
+and the changelog already exists; the useful answer is the intersection with
+your code — usually far shorter, always actionable, and most often empty, which
+it says in one line.
+
+Each finding names the file and line, the retired spelling, the one-line fix,
+and the upgrade guide with the full recipe. Renames are marked `[fixable]` —
+`aiol --safe-fix` rewrites those. A hit under `tests/` is marked as a probable
+fixture rather than treated as work, the same call `am pin` makes.
+
+It exits 1 when anything is found, so it works as a CI step. `--from` narrows
+the registry to what was removed AFTER that release; omitted, it reads the app's
+own pin, because the version an app is on is a fact the tool can look up and a
+person has to remember.
+
+Detection is deliberately generous — a false positive costs a warning you can
+overrule, a miss costs an app that boots and then explodes — so it shows you the
+line and lets you judge.
+
 ## A private copy: `--instance=<name>`
 
 The singleton lock is on the appId, and the appId picks the data home — so two
@@ -1015,6 +1076,7 @@ and licensing: [VM labs](../testing/vm-labs.md).
 deno task am clients              # connected clients (type, transport)
 deno task am client 0             # request component tree from client 0 (dev mode)
 deno task am top                  # live runtime view (per-cell state sizes); --json = one shot
+deno task am heap                 # what the process HOLDS: heap, the V8 ceiling, per-cell bytes
 deno task am schedules            # active timers/cron
 deno task am metrics              # uptime, connections, schedule count
 deno task am health               # health check (exit 0 = ok)
@@ -1033,6 +1095,24 @@ deno task am add cell payments    # scaffold src/cell/payments.ts
 deno task am report               # collect a problem report (logs + versions + state shape) for an app with feedback: true
 deno task am version              # print version
 ```
+
+### How much memory is it holding? (`am heap`)
+
+`am state` says what an app is SERVING. `am heap` says what it is HOLDING:
+
+```sh
+deno task am heap          # rss, heapUsed, the V8 ceiling, % of it, per-cell bytes
+deno task am heap --json   # the same as data
+```
+
+The number that matters is `heapLimit` — V8's `heap_size_limit`, the ceiling a
+process OOMs against. `heapTotal` is lazily allocated and always sits just above
+`heapUsed`, so it always looks reassuring and never answers "how close am I?".
+When a runtime reports no V8 statistics, `heapLimit` and `heapPct` are `null`,
+never `0`: a hard-coded zero would read as plenty of room.
+
+`cells` breaks the heap down per cell, which is what turns "the process grew"
+into "this cell grew".
 
 ## Trojan — Control REST API
 

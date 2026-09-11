@@ -8,3 +8,5 @@ Running, compiling, and shipping AIO apps.
   from commits, every artifact is named with it
 - [Scaling](scaling.md) — production architecture, capacity
 - [Import Rules](imports.md) — server vs browser bundles
+- [CI](ci.md) — a working GitHub Actions workflow, and why it must call
+  `deno task check` rather than `deno check`

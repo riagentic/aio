@@ -1,9 +1,10 @@
 import { assertEquals, assertExists } from "@std/assert";
 import { Window } from "happy-dom";
+import { closeWindow } from "../src/testing/close-window.ts";
 import { ErrorBoundary, Fragment, h, type VNode } from "../src/air/vdom.ts";
 import { _diff, _render, setDevMode } from "../src/air/vdom.ts";
 
-// happy-dom timers drained via win.happyDOM.close() — sanitizers re-enabled
+// happy-dom timers drained via closeWindow(win) — sanitizers re-enabled
 
 function createDOM(): {
   document: Document;
@@ -12,7 +13,7 @@ function createDOM(): {
 } {
   const win = new Window({ url: "https://localhost" });
   const doc = win.document as unknown as Document;
-  return { document: doc, ctx: { doc }, cleanup: () => win.happyDOM.close() };
+  return { document: doc, ctx: { doc }, cleanup: () => closeWindow(win) };
 }
 
 Deno.test("h: creates element vnode", () => {

@@ -2,6 +2,7 @@
 // themeable markup and that interactive ones fire their typed callbacks.
 import { assert, assertEquals, assertStringIncludes } from "@std/assert";
 import { Window } from "happy-dom";
+import { closeWindow } from "../src/testing/close-window.ts";
 import { h } from "../src/air/vdom.ts";
 import {
   _setDocument,
@@ -303,7 +304,7 @@ Deno.test("ui: Modal opened AFTER its first render still closes on Escape", asyn
     _unmount(handle);
     host.remove();
   } finally {
-    await win.happyDOM.close();
+    await closeWindow(win);
   }
 });
 

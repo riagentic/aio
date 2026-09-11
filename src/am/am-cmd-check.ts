@@ -77,7 +77,7 @@ export async function cmdCheck(
     // who most needs to know the gate looked at nothing.
     {
       console.error(
-        `am check: NOTHING CHECKED — no UI entry at ${entry}.\n` +
+        `warning: am check: NOTHING CHECKED — no UI entry at ${entry}.\n` +
           `  A server-only app has no client graph and this is correct for it.\n` +
           `  Otherwise the entry is elsewhere: pass it (\`am check path/App.tsx\`)\n` +
           `  or declare it in deno.json \`entry\`, or this task is green for\n` +

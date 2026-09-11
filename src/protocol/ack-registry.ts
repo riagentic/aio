@@ -15,6 +15,8 @@
 // the drift this file exists to make impossible.
 
 /** One pending call: the shared promise, its settlers, and its deadline. */
+import { bumpPending } from "./pending-calls.ts";
+
 type PendingEntry = {
   promise: Promise<unknown>;
   resolve: (value?: unknown) => void;
@@ -113,6 +115,7 @@ export function createAckRegistry(
     }
     entry.timer = setTimeout(() => {
       pending.delete(cid);
+      if (entry.methodKey) bumpPending(entry.methodKey, -1);
       const what = entry.methodKey ? `'${entry.methodKey}'` : "the method";
       entry.reject(
         new Error(
@@ -153,6 +156,10 @@ export function createAckRegistry(
         written: !opts?.deferTimer,
       };
       pending.set(cid, entry);
+      // `cell.$pending("m")` — a CLIENT's own outstanding calls. The server
+      // counts its executor's; this counts the ones this browser is waiting
+      // on, which is what a spinner in that browser is actually about.
+      if (entry.methodKey) bumpPending(entry.methodKey, 1);
       if (!opts?.deferTimer) arm(cid, entry);
       return promise;
     },
@@ -169,6 +176,7 @@ export function createAckRegistry(
       const entry = pending.get(cid);
       if (!entry) return false;
       pending.delete(cid);
+      if (entry.methodKey) bumpPending(entry.methodKey, -1);
       if (entry.timer) clearTimeout(entry.timer);
       entry.resolve(value);
       return true;
@@ -177,6 +185,7 @@ export function createAckRegistry(
       const entry = pending.get(cid);
       if (!entry) return false;
       pending.delete(cid);
+      if (entry.methodKey) bumpPending(entry.methodKey, -1);
       if (entry.timer) clearTimeout(entry.timer);
       entry.reject(err);
       return true;
@@ -187,6 +196,7 @@ export function createAckRegistry(
         if (entry.timer) clearTimeout(entry.timer);
         entry.reject(err);
         pending.delete(cid);
+        if (entry.methodKey) bumpPending(entry.methodKey, -1);
       }
       return count;
     },
@@ -197,6 +207,7 @@ export function createAckRegistry(
         if (entry.timer) clearTimeout(entry.timer);
         entry.reject(err);
         pending.delete(cid);
+        if (entry.methodKey) bumpPending(entry.methodKey, -1);
         count++;
       }
       return count;
