@@ -31,6 +31,7 @@ import {
 import { cellAccessAllowed } from "./server-auth.ts";
 import type { Access } from "../state/cell-types.ts";
 import { createAioError } from "../diagnostics/error.ts";
+import { budgetReport, measureCellStates } from "../state/budgets.ts";
 
 /** The slice of `AioConfig` the transport layer reads — HOP 2 of the config
  *  bridge (`aio.run({…})` → `setupTransport`).
@@ -50,6 +51,10 @@ import { createAioError } from "../diagnostics/error.ts";
  *  mechanical passthrough. */
 export interface TransportConfig {
   transport?: "uds" | "ws" | "auto";
+  /** `aio.run({ watch })` — false turns live reload off, an array narrows the
+   *  watched paths. Carried here because this is the config object the boot
+   *  hands the HTTP server, which owns the watcher. */
+  watch?: false | string[];
   /** Bind ONE address instead of the expose-derived default — see
    *  `AioConfig.host`. */
   host?: string;
@@ -132,6 +137,8 @@ export interface ServerSetupDeps<S, A> {
    *  actually written, exactly as `noTlsSource` does. */
   certSource?: "flag" | "config";
   cliTransport?: "uds" | "ws" | "auto";
+  /** `--no-watch` / `--watch=…` — wins over `config.watch`. */
+  cliWatch?: false | string[];
   // UI
   ui: {
     width?: number;
@@ -743,6 +750,10 @@ export async function setupTransport<S, A>(
       onReload: (signal) => {
         if (udsRef.current) udsRef.current.broadcast(enc(signal));
       },
+      // `aio.run({ watch })` — false, or the paths to watch. Threaded through
+      // rather than read from a global so a second app in one process can have
+      // its own answer.
+      watch: deps.cliWatch ?? config.watch,
       // Cells run in THIS process, so an edited cell can't hot-reload — dev
       // restarts the app instead of asking the developer to.
       // Never in prod (no watcher) and never in libraryMode, where the host
@@ -793,6 +804,17 @@ export async function setupTransport<S, A>(
         // operator's monitor can be told, and until now the only thing it was
         // never told. `ok: true` is stated positively so a monitor can alert
         // on its absence as well as on `degraded`.
+        // Declared budgets are a claim the app made, so "healthy" has to
+        // account for them (trading-app report §9.3): a limit that only warns cannot fail a
+        // CI step, and the report asked for one that does. `null` when the app
+        // declared none — a green field for a promise nobody made reads as
+        // assurance.
+        // Measured HERE, not only on the broadcast path: an app with no
+        // client connected never broadcasts, and would otherwise report a
+        // budget it had never once measured. Costs nothing when none is
+        // declared.
+        measureCellStates(getState());
+        const budgets = budgetReport();
         const persistErr = deps.lastPersistError?.() ?? null;
         const persist = persistErr
           ? {
@@ -804,7 +826,8 @@ export async function setupTransport<S, A>(
           }
           : { ok: true };
         return {
-          status: dead.length > 0 || clientDead.length > 0 || persistErr
+          status: dead.length > 0 || clientDead.length > 0 || persistErr ||
+              budgets?.ok === false
             ? "degraded"
             : "healthy",
           version: VERSION,
@@ -819,6 +842,7 @@ export async function setupTransport<S, A>(
           uptime,
           ...(cellsHealth ? { cells: cellsHealth } : {}),
           persist,
+          ...(budgets ? { budgets } : {}),
           ...(dead.length > 0 ? { degraded: dead } : {}),
           ...(clientDead.length > 0 ? { clientDegraded: clientDead } : {}),
         };

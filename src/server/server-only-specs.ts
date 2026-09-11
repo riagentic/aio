@@ -37,6 +37,12 @@ export const SERVER_ONLY_SPECS: ReadonlySet<string> = new Set([
   "aio/ship", // release signing, the filesystem
   "aio/cli", // Deno.stdin/stdout, a terminal — never a page
   "aio/testing", // the test harness, which boots servers
+  // The MARKER a module imports to declare itself server-only. Listed here so
+  // a page that reaches it is told the category — "aio/server-only is
+  // server-only" is a tautology that reads as a joke, and it is still the
+  // right answer: the module's whole purpose is to be unreachable from a
+  // browser, and the build refuses the bundle before this ever runs.
+  "aio/server-only",
   // CLI entrypoints. Meant for `deno run`, not for an import at all — but a
   // browser cannot run any of them, and "this is a server entry" is the right
   // thing to say to whoever tries. Cheaper than a third category that would

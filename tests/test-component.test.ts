@@ -1,6 +1,7 @@
 // AIO-393: public testComponent + setDocument harness (symmetry with testCell).
 import { assertEquals } from "@std/assert";
 import { Window } from "happy-dom";
+import { closeWindow } from "../src/testing/close-window.ts";
 import { h } from "../src/air/vdom.ts";
 import { onMount, useRef } from "../src/air/renderer-lifecycle.ts";
 import { testComponent } from "../src/testing/test-component.ts";
@@ -13,7 +14,7 @@ Deno.test("testComponent: mounts, exposes html, unmounts", async () => {
   });
   assertEquals(t.html(), "<div>hi</div>");
   t.unmount();
-  await win.happyDOM.close();
+  await closeWindow(win);
 });
 
 Deno.test("testComponent: ref + onMount work through the public harness", async () => {
@@ -31,7 +32,7 @@ Deno.test("testComponent: ref + onMount work through the public harness", async 
   });
   assertEquals(tag, "CANVAS");
   t.unmount();
-  await win.happyDOM.close();
+  await closeWindow(win);
 });
 
 Deno.test("testComponent: throws a clear error without a document", () => {

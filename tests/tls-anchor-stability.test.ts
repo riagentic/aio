@@ -23,6 +23,7 @@ import {
   sansCover,
 } from "../src/server/tls.ts";
 import { tempDir } from "../src/testing/temp-dir.ts";
+import { pinnedTest } from "../src/testing/env-pin.ts";
 
 // The machine-wide root is MACHINE-wide, so a test that does not relocate it
 // writes trust material into the developer's real home — and would then be
@@ -31,7 +32,9 @@ import { tempDir } from "../src/testing/temp-dir.ts";
 // suite sets it, and these tests set it too so they are isolated however they
 // are run, not only under `deno task test`.
 const SANDBOX = await tempDir("aio-tls-sandbox-");
-Deno.env.set("AIO_APPS_DIR", SANDBOX);
+// Pinned PER TEST — a module-level set outlives the file and poisons every
+// file after it in the same process (src/testing/env-pin.ts).
+const test = pinnedTest({ AIO_APPS_DIR: SANDBOX });
 
 /** openssl is how certs are written here, so it is how they are read back.
  *  Without it these tests would be asserting on nothing. */
@@ -50,7 +53,7 @@ async function hasOpenssl(): Promise<boolean> {
 
 const SKIP = !(await hasOpenssl());
 
-Deno.test({
+test({
   name: "tls: the leaf covers every address this machine answers on",
   ignore: SKIP,
   fn: async () => {
@@ -75,7 +78,7 @@ Deno.test({
   },
 });
 
-Deno.test({
+test({
   name: "tls: an unchanged network reuses the cert (pins stay valid)",
   ignore: SKIP,
   fn: async () => {
@@ -95,7 +98,7 @@ Deno.test({
   },
 });
 
-Deno.test({
+test({
   name: "tls: a cert from another network is re-issued, and the anchor holds",
   ignore: SKIP,
   fn: async () => {
@@ -188,7 +191,7 @@ Deno.test({
   },
 });
 
-Deno.test({
+test({
   name: "tls: the CA private key is owner-only",
   ignore: SKIP || Deno.build.os === "windows",
   fn: async () => {
@@ -208,7 +211,7 @@ Deno.test({
   },
 });
 
-Deno.test("tls: sansCover is exact, not approximate", () => {
+test("tls: sansCover is exact, not approximate", () => {
   const want = { dns: ["localhost"], ips: ["127.0.0.1", "192.168.1.5"] };
   assert(
     sansCover({ dns: ["localhost"], ips: ["127.0.0.1", "192.168.1.5"] }, want),
@@ -228,7 +231,7 @@ Deno.test("tls: sansCover is exact, not approximate", () => {
 
 // ── The machine-wide root ───────────────────────────────────────────────────
 
-Deno.test({
+test({
   name: "tls: one root serves every app on the machine",
   ignore: SKIP,
   fn: async () => {
@@ -260,7 +263,7 @@ Deno.test({
 // incapable of speaking for the public web, and that must stay true by test,
 // not by intention: the constraints are one edit away from being dropped, and
 // nothing else in the system would notice.
-Deno.test({
+test({
   name: "tls: the root CANNOT vouch for the public internet",
   ignore: SKIP,
   fn: async () => {
@@ -371,7 +374,7 @@ Deno.test({
 // handshake that cannot complete just sits there. tests/e2e-lan-client.test.ts
 // caught it by timing out after eight minutes; this catches it in a
 // millisecond.
-Deno.test({
+test({
   name: "tls: the cert file on disk carries its own anchor",
   ignore: SKIP,
   fn: async () => {

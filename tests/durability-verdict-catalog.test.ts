@@ -164,7 +164,15 @@ const CATALOG: Row[] = [
     check: async () => {
       const src = await code("src/server/aio-server.ts");
       assertMatch(src, /const persistErr = deps\.lastPersistError\?\.\(\)/);
-      assertMatch(src, /persistErr\s*\?\s*"degraded"/);
+      // The PROPERTY — a persist error participates in the degraded verdict —
+      // not one spelling of the expression. This read
+      // `/persistErr\s*\?\s*"degraded"/` and went red the day another
+      // condition joined the same ternary (`budgets?.ok === false`), which is
+      // a gate failing on a change it exists to permit.
+      const status = src.slice(src.indexOf("status:"));
+      const decision = status.slice(0, status.indexOf('"healthy"'));
+      assertMatch(decision, /persistErr/);
+      assertMatch(decision, /"degraded"/);
       // One value, every door: the trojan flush and health read the SAME
       // getter (aio.ts wires both from `persistence.lastCycleError`).
       const aio = await code("src/server/aio.ts");

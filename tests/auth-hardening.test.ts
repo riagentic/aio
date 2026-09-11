@@ -840,7 +840,7 @@ Deno.test("ids: confusable spellings cannot become separate accounts", async () 
       (e) => assertEquals((e as Error).message, "user_exists"),
     );
     // Whitespace-only and invisible-character ids are refused outright.
-    for (const bad of ["   ", "", "a‍b", "a b", "john doe"]) {
+    for (const bad of ["   ", "", "a‍b", "a\x00b", "john doe"]) {
       await users.create(bad, "password123").then(
         () => assert(false, `"${bad}" must be refused`),
         (e) => assertEquals((e as Error).message, "invalid_id"),

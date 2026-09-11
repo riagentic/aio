@@ -13,6 +13,7 @@
 import { within as raceWithin } from "./within.ts";
 import { assert, assertEquals } from "@std/assert";
 import { Window } from "happy-dom";
+import { closeWindow } from "../src/testing/close-window.ts";
 import { cell } from "aio";
 import {
   _pendingAckCount,
@@ -97,7 +98,7 @@ async function withSyncApp(
     _resetBrowserSync();
     _resetCellRegistry();
     _resetSignals();
-    await win.happyDOM.close();
+    await closeWindow(win);
   }
 }
 
@@ -178,7 +179,7 @@ Deno.test({
       _resetBrowserSync();
       _resetCellRegistry();
       _resetSignals();
-      await win.happyDOM.close();
+      await closeWindow(win);
     }
   },
 });

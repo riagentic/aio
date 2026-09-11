@@ -714,12 +714,34 @@ export function diffMembers(
   const keys = [
     ...new Set([...Object.keys(a.members), ...Object.keys(b.members)]),
   ].sort();
+  // Member keys are DOTTED PATHS (`rect.x` under `rect`). A child of a member
+  // that is itself new did not arrive on its own, and reporting it separately
+  // produced the gate's worst possible answer: adding ONE optional property
+  // whose type is an inline object read as "4 changes a caller can feel —
+  // REQUIRED, every existing caller must change". No caller can hold the
+  // parent, so no caller can be missing the children. The same on the way out:
+  // a removed member takes its subtree with it, and listing each leaf turns
+  // one removal into a wall.
+  //
+  // `set.has(prefix)` is what makes this safe for a key like
+  // `[Symbol.asyncDispose]`: `[Symbol` is never itself a member, so it is
+  // never mistaken for a parent.
+  const addedKeys = new Set(keys.filter((k) => a.members![k] === undefined));
+  const goneKeys = new Set(keys.filter((k) => b.members![k] === undefined));
+  const underA = (key: string, set: Set<string>): boolean => {
+    const parts = key.split(".");
+    for (let i = 1; i < parts.length; i++) {
+      if (set.has(parts.slice(0, i).join("."))) return true;
+    }
+    return false;
+  };
   for (const key of keys) {
     const va = a.members[key];
     const vb = b.members[key];
     const where = `${entry} › ${name}.${key}`;
     if (va === vb) continue;
     if (va === undefined) {
+      if (underA(key, addedKeys)) continue; // came with its parent
       const { optional } = splitMember(vb!);
       out.push(
         optional ? at(false, `+ ${where} added (optional)`) : at(
@@ -730,6 +752,7 @@ export function diffMembers(
       continue;
     }
     if (vb === undefined) {
+      if (underA(key, goneKeys)) continue; // went with its parent
       out.push(at(true, `- ${where} removed`));
       continue;
     }

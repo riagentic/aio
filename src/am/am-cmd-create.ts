@@ -1390,7 +1390,12 @@ export default function App(): JSX.Element {
       <ul style={{ listStyle: "none", padding: 0, marginTop: "1rem" }}>
         {filtered.map((t) => (
           <li key={t.id} class="row" style={{ padding: "0.4rem 0" }}>
-            <input type="checkbox" checked={t.done} onChange={() => todo.toggle(t.id)} />
+            <input
+              type="checkbox"
+              checked={t.done}
+              onChange={() => todo.toggle(t.id)}
+              aria-label={"Toggle " + t.text}
+            />
             <span
               style={{ flex: 1, textDecoration: t.done ? "line-through": "none" }}
               class={t.done ? "muted": ""}

@@ -749,6 +749,8 @@ export function createServer(config: ServerConfig): ServerHandle {
       absBaseDir,
       uiEntry,
       importMapObj,
+      // `aio.run({ watch })` — false, or the paths to watch.
+      watch: config.watch,
       debug,
       broadcastWs: (msg) => broadcaster.broadcastRaw(msg),
       onReload: config.onReload,

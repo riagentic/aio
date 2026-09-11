@@ -496,7 +496,7 @@ export async function encodeResponse(
       await availableEncodings(),
     );
     if (enc) {
-      const key = `${etag} ${enc}`;
+      const key = `${etag}\x00${enc}`;
       let out = _cache.get(key);
       if (!out) {
         out = await compress(enc, bytes);

@@ -1,6 +1,7 @@
 // AIO-392: useRaf — managed requestAnimationFrame loop with auto-cleanup.
 import { assertEquals } from "@std/assert";
 import { Window } from "happy-dom";
+import { closeWindow } from "../src/testing/close-window.ts";
 import { h } from "../src/air/vdom.ts";
 import { _setDocument, _unmount, mount } from "../src/air/aio-renderer.ts";
 import { useInterval, useRaf } from "../src/air/raf.ts";
@@ -11,7 +12,7 @@ function createDOM() {
   const doc = win.document as unknown as Document;
   const root = doc.createElement("div");
   doc.body.appendChild(root);
-  return { document: doc, root, cleanup: () => win.happyDOM.close() };
+  return { document: doc, root, cleanup: () => closeWindow(win) };
 }
 
 // Controllable rAF queue

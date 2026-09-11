@@ -9,7 +9,6 @@
 //   4. In dev, mutating a declared initial throws at the site (freeze guard).
 //   5. Immer autoFreeze is on (produced state is frozen).
 import { assert, assertEquals, assertThrows } from "@std/assert";
-import { Window } from "happy-dom";
 import { produce, setAutoFreeze } from "immer";
 import { h } from "../src/air/vdom.ts";
 import { cell } from "../src/state/cell-create.ts";
@@ -20,9 +19,6 @@ import {
   freezeInitial,
 } from "../src/state/immutable.ts";
 import { _resetSignals, getCellSignal } from "../src/state/state-signals.ts";
-
-// deno-lint-ignore no-explicit-any
-const doc = () => new Window().document as any;
 
 // ── Invariant 1: testUI hermeticity ──
 
@@ -37,13 +33,13 @@ Deno.test("invariant: testUI does NOT leak cell state between mounts", async () 
   });
   const App = () => h("div", null, String(accts.list.length));
 
-  const a = await testUI(App, { document: doc() });
+  const a = await testUI(App);
   accts.add("x");
   await a.settle();
   await a.dispose();
 
   // Second mount MUST start pristine — the bug was it saw length 1.
-  const b = await testUI(App, { document: doc() });
+  const b = await testUI(App);
   await b.settle();
   assertEquals(accts.list.length, 0, "state leaked from the previous mount");
   await b.dispose();
@@ -60,7 +56,7 @@ Deno.test("invariant: three sequential mounts each start pristine", async () => 
   });
   const App = () => h("div", null, String(c.n));
   for (let i = 0; i < 3; i++) {
-    const ui = await testUI(App, { document: doc() });
+    const ui = await testUI(App);
     assertEquals(c.n, 0, `mount ${i} started dirty`);
     c.inc();
     await ui.settle();
@@ -82,7 +78,7 @@ Deno.test("invariant: mutating live state never touches the declared initial", a
   // deno-lint-ignore no-explicit-any
   const declared = (c as any).__aio.state;
   const App = () => h("div", null, String(c.items.length));
-  const ui = await testUI(App, { document: doc() });
+  const ui = await testUI(App);
   c.push(1);
   c.push(2);
   await ui.settle();

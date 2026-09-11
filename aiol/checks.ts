@@ -1,6 +1,7 @@
 // aiol — all lint checks organized by area
 
 import type { CellInfo, Checker } from "./types.ts";
+import { justifiedLoose } from "../src/diagnostics/ok-marker.ts";
 import { join, resolve } from "@std/path";
 import * as fix from "./fixes.ts";
 import {
@@ -101,7 +102,10 @@ const SITE_RULED_REMOVALS: ReadonlySet<string> = new Set([
  *  forever — a suppression that stops suppressing turns a silent, deliberate
  *  decision into a wall of new findings, which is the worst possible way to
  *  tidy a spelling. */
-const OK_MARKER = /\baiol?-ok\b/;
+/** One marker for every checker in this repo — `aio-ok` and `aiol-ok` are
+ *  the same thing, and `aio-ok(ui): why` addresses THIS gate only. See
+ *  src/diagnostics/ok-marker.ts for why there is exactly one. */
+const OK_MARKER = { test: (line: string) => justifiedLoose(line, "aiol") };
 
 export function isSuppressed(lines: string[], idx: number): boolean {
   if (OK_MARKER.test(lines[idx] ?? "")) return true;
@@ -2061,13 +2065,23 @@ function nestedShadowLine(
 
 /** The draft's framework surface — everything else on a draft is app state.
  *  Named, not pattern-matched: see `draftReadOffsets`. */
-export const DRAFT_META = ["$signal", "$live", "$commit", "$do"] as const;
+export const DRAFT_META = [
+  "$signal",
+  "$live",
+  "$commit",
+  "$do",
+  // `s.$call.sibling(…)` is a CALL into this cell, not a read of state that
+  // another action may have committed while this method was suspended. Left
+  // off this list it would be reported as the post-await hazard, on the line
+  // that is the documented way to compose inside a cell.
+  "$call",
+] as const;
 
 export function draftReadOffsets(code: string, param: string): number[] {
   const out: number[] = [];
   // `(?<![\w$.])` — `other.s.count` is not a read of `s`.
   // Draft META is framework surface, not app state another action can move
-  // under you — but the exemption is the KNOWN four, not "anything starting
+  // under you — but the exemption is the KNOWN list, not "anything starting
   // with $". A blanket `(?!\$)` also excused `s.$myField`, and while a
   // $-prefixed state key is refused at `cell()` today, an exemption whose
   // breadth is accidental outlives the rule that made it safe.
@@ -2075,7 +2089,7 @@ export function draftReadOffsets(code: string, param: string): number[] {
   for (const m of code.matchAll(startRe)) {
     const start = m.index!;
     if (DRAFT_META.some((meta) => code.startsWith(`${param}.${meta}`, start))) {
-      continue; // `s.$signal` / `s.$live` / `s.$commit` / `s.$do`
+      continue; // see DRAFT_META
     }
     const chain = memberChain(code, start + param.length);
     if (chain.mutator) continue;
@@ -4016,16 +4030,33 @@ export const checkOldWayPerfBudget: Checker = (ctx) => {
     // The KEY is inside a string, and codeText() blanks string CONTENTS — so
     // match against the raw source and use codeText only to skip comments.
     const raw = file.content;
+    const rawLines = raw.split("\n");
     for (
       const m of raw.matchAll(
-        /["'`]([\w-]+:[\w$]+)["'`]\s*:\s*\{[^}]*\btimeout\s*:/g,
+        /["'`]([\w-]+:[\w$]+)["'`]\s*:\s*\{[^}]*\btimeout\s*:\s*(\d+)/g,
       )
     ) {
       const key = m[1]!;
+      // ONLY `timeout: 0`, which is the spelling that means "forever" — the one
+      // `long:` replaces, and the one people copy out of the old example.
+      //
+      // It used to fire on every `timeout:` at all, and
+      // docs/state/methods.md says in so many words that a real NUMBER "still
+      // works and is the right tool for a specific ceiling". One app had ten of
+      // sixteen as genuine ceilings on work that is quick by nature, where
+      // `long:` would DELETE the limit — so they stayed, and so did ten
+      // permanent warnings. A linter that contradicts its own documentation is
+      // how people learn to stop reading it, and the rest of this file is
+      // load-bearing (llama.master §2).
+      if (m[2] !== "0") continue;
       const cellName = owned.get(key);
       if (!cellName) continue; // a foreign/unknown key — checkConfig owns that
       const method = key.slice(cellName.length + 1);
       const line = raw.slice(0, m.index).split("\n").length;
+      // Through the ONE suppression path, like every other rule: reporting
+      // directly left nowhere to put the acknowledgement, so a deliberate
+      // `timeout: 0` had no way to say so.
+      if (isSuppressed(rawLines, line - 1)) continue;
       report(
         "warn",
         "patterns",
@@ -5638,6 +5669,58 @@ export const checkOwnKeyIdentity: Checker = (ctx) => {
   if (checked > 0 && found === 0) pass("every own.set key names its resource");
 };
 
+// ══════════════════════════════════════════════════════════════════════
+// 30. A CELL CANNOT REACH `aio/client-only`
+// ══════════════════════════════════════════════════════════════════════
+//
+// `import "aio/client-only"` is a statement that a module must not run on the
+// server (trading-app report §9.1). A cell method runs ON the server. A cell file that
+// imports one is therefore a statement that contradicts itself, and the
+// failure it produces without this rule is a `window is not defined` during
+// SSR — a stack in the renderer, three files from the decision that caused it.
+//
+// The two markers are checked in different places on purpose, because the two
+// failures are different. A server-only module in the browser LEAKS, so the
+// build refuses the bundle and the module throws if it is ever evaluated
+// there. A client-only module on the server BREAKS — loudly, with a stack, and
+// nothing escapes — so it needs no runtime guard, only something that says so
+// earlier. This is that.
+
+export const checkClientOnlyInCell: Checker = (ctx) => {
+  const { cells, report } = ctx;
+  // Matched on the RAW line, against an IMPORT STATEMENT — not on masked code
+  // and not on the bare string. `codeText` blanks string CONTENTS, so the
+  // specifier is gone from the masked copy (the first draft of this rule
+  // silently matched nothing). And requiring `import` is what keeps a comment
+  // that MENTIONS the marker — "deliberately not aio/client-only, this runs
+  // server-side" is the common shape — from being read as one.
+  const MARKER = /^\s*import\s+(?:[^;'"]*\bfrom\s+)?["']aio\/client-only["']/;
+  for (const c of cells) {
+    const raw = c.file.content;
+    const lines = raw.split("\n");
+    const idx = lines.findIndex((l) => MARKER.test(l));
+    if (idx < 0) continue;
+    const line = idx + 1;
+    if (isSuppressed(lines, idx)) continue;
+    report(
+      "error",
+      "patterns",
+      `${c.file.relative}:${line || c.line} — cell "${c.name}" imports ` +
+        `\`aio/client-only\`, which declares that module must not run on the ` +
+        `server. A cell method runs ON the server, so this says two opposite ` +
+        `things about the same code.`,
+      {
+        file: c.file.relative,
+        line: line || c.line,
+        fix:
+          `move the browser-only work into a component (or an \`onMount\`) ` +
+          `and have the cell hold only the data it needs; if the module is ` +
+          `genuinely server-side, the marker it wants is \`aio/server-only\`.`,
+      },
+    );
+  }
+};
+
 export const ALL_CHECKS: Checker[] = [
   checkScanCoverage,
   checkConfig,
@@ -5675,4 +5758,5 @@ export const ALL_CHECKS: Checker[] = [
   checkTsxHiddenReads,
   checkTimerDispatch,
   checkOwnKeyIdentity,
+  checkClientOnlyInCell,
 ];

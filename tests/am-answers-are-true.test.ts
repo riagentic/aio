@@ -118,6 +118,7 @@ Deno.test("VERB_FLAGS lists nothing a verb refuses, and nothing twice", () => {
   // rather than the rule — and went stale the moment `--level` became real
   // (beta1). This form cannot: whatever the table lists, the verb's own parser
   // has to accept.
+  let seen = 0;
   for (const flag of VERB_FLAGS.logs ?? []) {
     const probe = flag.includes("=") ? flag : `${flag}=x`;
     assertEquals(
@@ -125,5 +126,14 @@ Deno.test("VERB_FLAGS lists nothing a verb refuses, and nothing twice", () => {
       null,
       `logs lists ${flag}, which the command refuses`,
     );
+    seen++;
   }
+  // An empty table would make every assertion above run zero times and the
+  // test pass having proven nothing — the shape this whole file is about.
+  assertEquals(
+    seen,
+    (VERB_FLAGS.logs ?? []).length,
+    "the loop did not visit every declared flag",
+  );
+  assert(seen > 0, "`logs` declares no flags — nothing was checked");
 });

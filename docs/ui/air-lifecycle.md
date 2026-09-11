@@ -398,12 +398,18 @@ The correct-everywhere spelling is
 that same window for you and removes the listener on unmount:
 
 ```tsx
-import { onWindowEvent } from "aio/air";
+import { onWindowEvent, useLocal } from "aio/air";
 
 function Dragger() {
-  onWindowEvent("mousemove", (e) => setPos(e.clientX, e.clientY));
-  onWindowEvent("resize", () => remeasure());
-  return <div class="stage">drag me</div>;
+  const [pos, setPos] = useLocal({ x: 0, y: 0 });
+  const [resizes, setResizes] = useLocal(0);
+  onWindowEvent("mousemove", (e) => setPos({ x: e.clientX, y: e.clientY }));
+  onWindowEvent("resize", () => setResizes(resizes + 1));
+  return (
+    <div class="stage">
+      {pos.x},{pos.y} · {resizes} resizes
+    </div>
+  );
 }
 ```
 

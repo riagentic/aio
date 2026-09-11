@@ -343,6 +343,48 @@ real drop — by reconnecting and re-announcing itself — and that re-announcem
 reopens the relay. A stall on an Electron whose event order nobody has measured
 yet therefore heals itself within the reconnect backoff, out loud.
 
+## Headless and VM hosts (`AIO_ELECTRON_ARGS`)
+
+Electron on a real desktop needs nothing. On a VM, a container or a box with no
+GPU it sometimes will not start at all — and the failure is a crash loop, not a
+message: one console aborted on a GPU fault every ~90 seconds until the machine
+got `LIBGL_ALWAYS_SOFTWARE=1`.
+
+Environment variables reach Electron already (the spawn inherits them). Chromium
+**switches** go in `AIO_ELECTRON_ARGS`, space separated:
+
+```sh
+# A VM or container with no GPU — the common case.
+export LIBGL_ALWAYS_SOFTWARE=1
+export AIO_ELECTRON_ARGS="--disable-gpu --disable-dev-shm-usage"
+
+# A host whose /dev/shm is tiny (most Docker images: 64 MB). Without this the
+# renderer dies with a bare "Out of memory" that names nothing.
+export AIO_ELECTRON_ARGS="--disable-dev-shm-usage"
+
+# Software rendering all the way down, when --disable-gpu is not enough.
+export LIBGL_ALWAYS_SOFTWARE=1
+export AIO_ELECTRON_ARGS="--disable-gpu --disable-software-rasterizer --use-gl=swiftshader"
+
+# A headless box with no X server at all: give it one. A switch cannot
+# substitute for a display, and Electron is not headless-capable the way
+# Puppeteer is.
+xvfb-run -a deno task dev --client=electron
+```
+
+`--no-sandbox` is **not** in these sets. aio adds it by itself, and only after
+MEASURING that the kernel restricts unprivileged user namespaces and that
+`chrome-sandbox` is not setuid-root — the two conditions under which Chromium
+aborts rather than starts. It says so in the log when it does, and
+`AIO_ELECTRON_SANDBOX=1` forces the strict behaviour back. Adding it by hand
+gives away isolation on every host, including the ones that did not need it.
+
+A token in `AIO_ELECTRON_ARGS` that is not a `--switch` is **refused and named
+in the log**, not silently dropped: "I set the flag and nothing changed" is
+precisely the failure this variable exists to end. Splitting is on whitespace,
+so a switch whose value contains a space is not expressible — every switch above
+is a bare flag or a simple `--key=value`.
+
 ## Window chrome (`ui.chrome`)
 
 How much of the window the OS draws. Three values, one line of config:

@@ -35,13 +35,14 @@
 //   deno task check:tempdirs           report (exit 1 if the budget moved)
 //   deno task check:tempdirs --list    every counted call, file:line
 import { codeText } from "../src/diagnostics/code-mask.ts";
+import { justified as okMarker } from "../src/diagnostics/ok-marker.ts";
 
 /** Unregistered temp-directory creations allowed in `tests/`.
  *
  *  Only ever edit this DOWNWARD. To lower it, convert calls to
  *  `tempDir()`/`tempDirSync()` and drop the matching `Deno.remove` from the
  *  happy path (the exit sweep is the net, `dropTempDir` the polite version). */
-const CEILING = 793;
+const CEILING = 790;
 
 const ROOT = new URL("../tests/", import.meta.url).pathname;
 
@@ -53,7 +54,9 @@ const DIRECT_CALL = /\bDeno\.makeTempDir(?:Sync)?\s*\(/g;
 /** The acknowledgement marker, matched as every other gate matches it: a bare
  *  `aio-ok` with nothing after it is not an acknowledgement, it is a mute
  *  button. */
-const JUSTIFIED = /\baio-ok\b\s*[:\-—]\s*\S/;
+/** One marker, both spellings, honoured only when it is addressed to
+ *  this gate or to nobody in particular. See scripts/ok-marker.ts. */
+const JUSTIFIED = { test: (line: string) => okMarker(line, "temp-dirs") };
 
 export type Hit = { file: string; line: number };
 

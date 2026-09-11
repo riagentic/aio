@@ -1013,6 +1013,15 @@ export async function bootCells(
   // AFTER `_resetState()`: that call destroys any previously booted cells, whose
   // onDestroy hooks must still find their methods bound.
   _resetAioRuntime();
+  // AFTER the reset, and before anything composes. `_resetAioRuntime()` clears
+  // the stub registry (one test's fake module must never answer the next
+  // test's import), so installing them earlier put them in exactly the place
+  // the boot was about to wipe — which is how the first draft of this reached
+  // the REAL module with a stub sitting in the options.
+  //
+  // Before composing, because an `onInit` that reaches for a server-only
+  // module runs during the boot and has to see the stub too.
+  setServerImportStubs(opts.stub);
   await standalone.aio.run({
     appId: "bootcells",
     // deno-lint-ignore no-explicit-any
@@ -1157,3 +1166,4 @@ export {
   testServer,
 } from "./server-test.ts";
 import { count } from "../diagnostics/fmt.ts";
+import { setServerImportStubs } from "../state/server-import.ts";

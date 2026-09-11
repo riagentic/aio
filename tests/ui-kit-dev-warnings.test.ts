@@ -21,6 +21,7 @@
 // check still speaks when the app really did leave a control unnamed.
 import { assert, assertEquals } from "@std/assert";
 import { Window } from "happy-dom";
+import { closeWindow } from "../src/testing/close-window.ts";
 import { h } from "../src/air/vdom.ts";
 import {
   _setDocument,
@@ -72,7 +73,7 @@ async function devWarnings(make: () => unknown): Promise<string[]> {
   } finally {
     setDevMode(false);
     console.warn = orig;
-    await win.happyDOM.close();
+    await closeWindow(win);
   }
   return warns;
 }
@@ -206,6 +207,6 @@ Deno.test("a clickable table row is operable from the keyboard", async () => {
     assertEquals(hits, [1, 1], "Enter and Space both activate the row");
     _unmount(handle);
   } finally {
-    await win.happyDOM.close();
+    await closeWindow(win);
   }
 });

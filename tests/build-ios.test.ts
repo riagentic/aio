@@ -56,7 +56,7 @@ Deno.test("ios: every placeholder is rendered and the plist is XML-safe", () => 
   const pbx = files["App.xcodeproj/project.pbxproj"]!;
   assertStringIncludes(pbx, 'PRODUCT_BUNDLE_IDENTIFIER = "com.example.tj"');
   assertStringIncludes(pbx, "CURRENT_PROJECT_VERSION = 10203");
-  assertEquals(plistText("abc"), "abc");
+  assertEquals(plistText("ab\x01c"), "abc");
 });
 
 Deno.test("ios: the project references only files the template ships", () => {

@@ -8,6 +8,7 @@ import type { OwnEffect } from "./own.ts";
 import type { CellEffect } from "./cell-impl.ts";
 import type { SyncConfig } from "../sync/types.ts";
 import type { AioUser as WireAioUser } from "../protocol/protocol-types.ts";
+import type { ArgSpec } from "./arg-schema.ts";
 
 /** Map of named action/effect creator functions */
 export type Creators = Record<
@@ -277,8 +278,19 @@ export type CellAio<
    *  `any` required: user provides (state: S) => ... but CellAio stores it unparameterized (contravariance). */
   // deno-lint-ignore no-explicit-any
   validate?: (state: any) => true | string;
-  /** Persistence filter — matches user-facing `persist` config key */
+  /** Persistence filter — matches user-facing `persist` config key. Always
+   *  the FILTER half: a `transform` is split off into `persistTransform`, so
+   *  every existing reader of this slot keeps its shape. */
   persist?: CellFieldFilter;
+  /** `args:` — per-method argument rules, checked on the dispatch path. */
+  argSchemas?: Record<string, readonly ArgSpec[]>;
+  /** `onPersist` — shapes the slice on its way to the store. */
+  persistTransform?: (
+    state: Record<string, unknown>,
+  ) => Record<string, unknown>;
+  /** Opt-out from the on-disk dev diagnostics — matches user-facing
+   *  `diagnostics: false`. Actions only; state is `persist`'s business. */
+  diagnostics?: false;
   /** Network access rule — matches user-facing `access` config key (AUTH-1) */
   access?: Access;
   /** Visibility filter — matches user-facing `visible` config key (alpha52;

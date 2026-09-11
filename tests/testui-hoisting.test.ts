@@ -1,5 +1,4 @@
 import { assertEquals } from "@std/assert";
-import { Window } from "happy-dom";
 import { h } from "../src/air/vdom.ts";
 import { testUI } from "../src/testing/ui-test.ts";
 
@@ -15,8 +14,7 @@ function App() {
 }
 
 Deno.test("t-handle hoists to top level regardless of nesting", async () => {
-  // deno-lint-ignore no-explicit-any
-  const ui = await testUI(App, { document: new Window().document as any });
+  const ui = await testUI(App);
   await ui.settle();
   // Previously required ui.find("...", n)[...]; now just ui["watch-pubkey"].
   await ui["watch-pubkey"].type("abc");

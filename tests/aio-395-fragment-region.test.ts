@@ -1,6 +1,7 @@
 // Repro: fragments inside .map() across re-renders — order must be stable
 import { assertEquals } from "@std/assert";
 import { Window } from "happy-dom";
+import { closeWindow } from "../src/testing/close-window.ts";
 import { Fragment, h } from "../src/air/vdom.ts";
 import { signal } from "../src/state/signal.ts";
 import { testComponent } from "../src/testing/test-component.ts";
@@ -34,5 +35,5 @@ Deno.test("fragment-in-map keeps DOM order across re-renders", async () => {
   console.log("after rerender:", t.html());
   assertEquals(order(), "L0,IL1,DL2,D");
   t.unmount();
-  await win.happyDOM.close();
+  await closeWindow(win);
 });

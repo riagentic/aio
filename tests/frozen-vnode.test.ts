@@ -1,14 +1,15 @@
 import { assertEquals } from "@std/assert";
 import { Window } from "happy-dom";
+import { closeWindow } from "../src/testing/close-window.ts";
 import { Fragment, h, type VNode } from "../src/air/vdom.ts";
 import { _diff, _render } from "../src/air/vdom.ts";
 
-// happy-dom timers drained via win.happyDOM.close() — sanitizers re-enabled
+// happy-dom timers drained via closeWindow(win) — sanitizers re-enabled
 
 function createDOM() {
   const win = new Window({ url: "https://localhost" });
   const doc = win.document as unknown as Document;
-  return { document: doc, ctx: { doc }, cleanup: () => win.happyDOM.close() };
+  return { document: doc, ctx: { doc }, cleanup: () => closeWindow(win) };
 }
 
 // A text child may be a DYNAMIC value in AIR's direct-cell-access model

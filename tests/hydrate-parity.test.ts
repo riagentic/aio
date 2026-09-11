@@ -16,6 +16,7 @@
 // test below asserts hydrate against MOUNT, never against a literal.
 import { assert, assertEquals } from "@std/assert";
 import { Window } from "happy-dom";
+import { closeWindow } from "../src/testing/close-window.ts";
 import {
   type ComponentFn,
   ErrorBoundary,
@@ -37,7 +38,7 @@ function env() {
   const win = new Window({ url: "https://localhost" });
   const doc = win.document as unknown as Document;
   _setDocument(doc);
-  return { win, doc, cleanup: () => win.happyDOM.close() };
+  return { win, doc, cleanup: () => closeWindow(win) };
 }
 
 /** What `mount()` produces, and what SSR produces — they must already agree. */

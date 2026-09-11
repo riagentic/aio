@@ -329,6 +329,12 @@ change — it's typed and stripped from the DOM.
 Names match **exactly**. There is no prefix or substring matching anywhere in
 the surface — `toggle-negative` and `negative` are two unrelated handles.
 
+> **`t` is a handle, not an attribute.** It is stripped from the DOM, so it does
+> **not** appear in `ui.html()` and no CSS selector can match it — `[t="save"]`
+> matches nothing, in a test and in the app. Address it by name (`ui.save`,
+> `am trigger "App:save"`), or reach for `data-testid` when you genuinely need
+> an attribute that survives into the markup.
+
 ### `t` on a COMPONENT names the component
 
 `t` on an element names that element; `t` on a component is an additional,
@@ -404,24 +410,21 @@ A **deep hoist** — `ui.Save` reaching an element wherever it is nested — is 
 search, and a search with two hits has no right answer, so it throws and lists
 both paths. Disambiguate with the owning instance: `ui.TodoRow2.Save`.
 
-## Typed clients: `testGen`
+## Typed clients: `am testgen`
 
-Generate a fully-typed client from what actually renders — autocomplete on every
-component and element, and a renamed button breaks tests at **compile time**:
+`ui.App["tab-settings"]` is a string key, and a typo in one is a runtime
+`undefined`. A generated client types every component and element from what
+actually **renders**, so it autocompletes and a renamed button breaks the test
+at **compile time**.
 
-```ts
-// scripts/testgen.ts — run after UI changes
-import { Window } from "happy-dom";
-import { testGen } from "aio/testing";
-import App from "../src/App.tsx";
-import { todo } from "../src/cell/todo.ts";
-
-const src = await testGen(App, {
-  document: new Window().document,
-  cells: [todo],
-});
-await Deno.writeTextFile("tests/ui.gen.ts", src);
+```sh
+deno task am testgen                      # → tests/ui.gen.ts
+deno task am testgen --out=tests/ui.ts    # somewhere else
+deno task am testgen src/Admin.tsx        # a different entry
 ```
+
+Re-run it after a UI change. It renders headlessly against the app's own cells,
+so no app has to be running.
 
 ```ts
 // in a test
@@ -436,8 +439,154 @@ const ui = await testUI(App, { document, cells: [todo] }) as TypedTestUI;
 await ui.App.SubmitButton.click(); // autocompleted, compile-checked
 ```
 
+### In a script, when you need the parts
+
+`testGen(App, opts)` renders and generates in one call, and
 `generateUITypes(surface)` is the pure core — feed it any surface, including a
-live client's `am surface --json`.
+live client's `am surface --json`:
+
+```ts
+// scripts/testgen.ts — the long way, when `am testgen` is not enough
+import { testGen } from "aio/testing";
+import App from "../src/App.tsx";
+import { todo } from "../src/cell/todo.ts";
+
+await Deno.writeTextFile(
+  "tests/ui.gen.ts",
+  await testGen(App, { cells: [todo] }),
+);
+```
+
+## Stubbing a server-only module — `serverImport`
+
+`testCell` never reaches a spawn; `bootCells` spawns the **real** child. For a
+cell that owns an OS process that leaves no safe rung — "random actions against
+a real runtime" means a real subprocess per action — and a cassette wraps a
+function you can reach, not `await import("./claude.server.ts")` inside a
+method.
+
+Nothing can intercept a raw dynamic import in Deno: there is no loader hook a
+test process can install after the fact. So the seam is a function the cell
+calls on purpose:
+
+```ts
+// in the cell
+import { cell, serverImport } from "aio";
+
+type Ask = { ask: (p: string) => Promise<string> };
+
+export const session = cell("session", {
+  state: { reply: "" },
+  methods: {
+    async run(s: { reply: string }, prompt: string) {
+      const { ask } = await serverImport<Ask>(
+        "./claude.server.ts",
+        import.meta.url,
+      );
+      s.reply = await ask(prompt);
+    },
+  },
+});
+```
+
+```ts
+// in the test
+import { bootCells } from "aio/testing";
+import { session } from "../src/cell/session.ts";
+
+using boot = await bootCells([session], {
+  stub: {
+    "./claude.server.ts": { ask: () => Promise.resolve("canned reply") },
+  },
+});
+await session.run("hello");
+```
+
+That is the whole price, and it is stated rather than hidden: unstubbed,
+`serverImport` is exactly the `await import(…)` it replaces, with the specifier
+resolved against the caller. No indirection at runtime, and the module stays out
+of the browser bundle exactly as before — the graph audit reads the specifier,
+not the spelling.
+
+Stubs are keyed by the **specifier as written**, so a test stubs the string it
+can see in the cell rather than a `file:///…` it would have to compute. A
+specifier nobody stubbed still loads for real: the map is not a whitelist, so
+installing one stub cannot silently break everything beside it.
+
+`import.meta.url` is required, not inferred — a relative specifier resolved
+against the wrong module is a "module not found" three files from the cause.
+
+## When it fails: the trace file
+
+A failing assertion prints what the surface looks like **now**. What it can
+never print is how it got there — and reconstructing the sequence from the test
+body is exactly the work you are trying to avoid at that moment.
+
+Every miss and every `waitFor` timeout names a file:
+
+```
+testUI: no "SaveButton" on <App>
+  available: SubmitButton, TitleInput, …
+  trace: /repo/.aio/traces/ui-1789112956688-k2p9x.json
+```
+
+It holds the **calls this test made**, in order, with arguments summarised; the
+serialized surface; the rendered HTML; and each cell's state.
+
+Arguments are summarised, not serialized whole — a trace that inlines a 2 MB
+payload is one nobody opens, and a secret in a payload does not belong in a file
+the test leaves behind.
+
+The directory keeps the **20 most recent** traces. A suite with a hundred
+failures must not leave a hundred artifacts, and an unbounded directory is one
+nobody ever cleans. `.aio/` is git-ignored by the scaffold.
+
+If the trace cannot be written — a read-only checkout, a full disk — the
+assertion's own error is unchanged and simply names no file. The failure is the
+point; the trace is a convenience.
+
+## Geometry: `uiRects`
+
+happy-dom measures everything **0×0**. That is not merely unhelpful — it makes a
+layout assertion PASS. One wallet had two security-relevant defects behind 1546
+passing tests: a dApp origin running off the edge of the approval card, and that
+dialog opening scrolled past the origin.
+
+So geometry does not come from the harness's DOM. It comes from a surface a
+**real client measured**, keyed by the same `Component…:Element` paths
+everything else uses:
+
+```ts
+await using srv = await testServer({ cells: [wallet] });
+await using browser = await testBrowser(srv.url);
+
+const { roots } = await srv.trojan("surface/0?rects=1");
+const box = uiRects(roots);
+
+assert(
+  box["App:OriginText"]!.w <= box["App:Card"]!.w,
+  "origin overflows the card",
+);
+assert(
+  box["App:OriginText"]!.y >= box["App:Dialog"]!.y,
+  "origin is scrolled out of view",
+);
+```
+
+An **unmeasured** element is absent from the result, never reported as `0×0` at
+the origin. A missing key fails an assertion loudly; a plausible zero passes
+one.
+
+The surface route refuses `--rects` on a server-side render for the same reason,
+and a live client whose elements all measure `0×0` exits 1 naming both readings
+(no layout yet, or the UI really has collapsed).
+
+The same data is one command away on a running app:
+
+```sh
+deno task am surface --rects          # w x h @x,y per element
+deno task am surface --rects --json   # { roots, measured: { measurable, laidOut } }
+```
 
 ## On a live app: `am surface` / `am trigger`
 

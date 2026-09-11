@@ -2,6 +2,7 @@
 // silently or with an error that named the wrong thing.
 import { assertEquals, assertStringIncludes } from "@std/assert";
 import { Window } from "happy-dom";
+import { closeWindow } from "../src/testing/close-window.ts";
 import { h } from "../src/air/vdom.ts";
 import {
   _setDocument,
@@ -56,7 +57,7 @@ Deno.test({
     }
     assertStringIncludes(msg, "returned an array of 2");
     assertStringIncludes(msg, "Wrap the list in a fragment");
-    await win.happyDOM.close();
+    await closeWindow(win);
   },
 });
 
@@ -109,7 +110,7 @@ Deno.test({
       );
     } finally {
       setDevMode(false);
-      await win.happyDOM.close();
+      await closeWindow(win);
     }
   },
 });

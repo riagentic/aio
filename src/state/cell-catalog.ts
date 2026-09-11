@@ -6,6 +6,7 @@ import { randomUuid } from "../rand.ts";
 import { dispatchTracked } from "./cell-impl.ts";
 import { settlesCalls } from "../protocol/ack-registry.ts";
 import { nameIsTaken } from "./cell-helpers.ts";
+import { pendingSignal } from "./pending.ts";
 
 /** Wrap a raw action creator with a guard for the pre-binding state. Calling a
  *  method before the runtime is booted ALWAYS throws (dev + prod) — a pre-boot
@@ -251,6 +252,24 @@ export function bindCell(
  *  getters. State keys can't collide with methods/selectors (AIO-6.1 enforces it
  *  at definition), so installing and overriding them is always safe. */
 export function installDefaultStateGetters(def: CellDef): void {
+  // `cell.$pending("scan")` — how many calls to that method are in flight in
+  // THIS runtime, reactively (llama.master §14, cc §9.5). Ten hand-rolled
+  // booleans across five cells, each set at the top and reset in a `finally`,
+  // then replicated, persisted and migrated like real domain state — which
+  // they are not. This is not state: it is never broadcast, never persisted,
+  // never migrated, and it is a COUNT, because a boolean is wrong the moment
+  // two readings overlap.
+  //
+  // Installed at CREATION rather than at bind, so one definition serves the
+  // server executor and a browser's own outstanding calls alike.
+  if (!("$pending" in def)) {
+    Object.defineProperty(def, "$pending", {
+      value: (method?: string) => pendingSignal(def.__aio.id, method),
+      enumerable: false,
+      configurable: true,
+      writable: false,
+    });
+  }
   const state = def.__aio.state as Record<string, unknown>;
   for (const key of Object.keys(state)) {
     if (key in def) continue; // defensive — a callable already owns the name

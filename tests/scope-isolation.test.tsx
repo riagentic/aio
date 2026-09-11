@@ -20,6 +20,7 @@
 // So the invariant is asserted directly, once per path, instead of reviewed.
 import { assert, assertEquals, assertStringIncludes } from "@std/assert";
 import { Window } from "happy-dom";
+import { closeWindow } from "../src/testing/close-window.ts";
 import { _openScopeDepth, signal } from "../src/state/signal.ts";
 import { ErrorBoundary, h, renderToString } from "../src/air/vdom.ts";
 import { renderToStream } from "../src/air/ssr-stream.ts";
@@ -34,7 +35,7 @@ function env() {
   const win = new Window({ url: "https://localhost" });
   const doc = win.document as unknown as Document;
   _setDocument(doc);
-  return { doc, cleanup: () => win.happyDOM.close() };
+  return { doc, cleanup: () => closeWindow(win) };
 }
 
 const clean = () => {

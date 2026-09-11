@@ -104,6 +104,9 @@ export type CliFlags = {
    *  window (loopback only). `true` = pick a free port. OPT-IN: an app that
    *  did not ask binds nothing, so "zero ports" stays literally true. */
   cdp?: number | true;
+  /** `--no-watch` / `--watch=false` / `--watch=src/ui,src/style.css` — live
+   *  reload off, or narrowed. See AioConfig.watch. */
+  watch?: false | string[];
 };
 
 // The four accepted aliases (`--kill-existing`, bare `--server-url`,
@@ -444,6 +447,24 @@ function _parseCliUncached(args: readonly string[]): CliFlags {
           nearestOf(v, ["uds", "ws", "auto"]),
         );
       }
+    } else if (arg === "--no-watch" || arg === "--watch=false") {
+      // Live reload off for THIS run. `deno fmt` over a repo triggered full
+      // reloads repeatedly, and a reload cost one app 760 MB of GPU weights
+      // (watcher §3). Both spellings, because `--no-x` and `--x=false` are
+      // each the obvious one to somebody and refusing either teaches nothing.
+      r.watch = false;
+    } else if (arg.startsWith("--watch=")) {
+      const v = arg.slice(8);
+      const paths = v.split(",").map((x) => x.trim()).filter(Boolean);
+      if (paths.length === 0) {
+        throw badValue(
+          "--watch",
+          v,
+          "`false` to turn live reload off, or a comma-separated path list " +
+            "(--watch=src/ui,src/style.css)",
+        );
+      }
+      r.watch = paths;
     } else if (arg === "--cdp") r.cdp = true;
     else if (arg.startsWith("--cdp=")) {
       const n = intArg(arg.slice(6));

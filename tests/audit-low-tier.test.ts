@@ -6,6 +6,7 @@
 // the wrong thing QUIETLY, which is the class this project treats as
 // disqualifying regardless of severity.
 import { assert, assertEquals, assertThrows } from "@std/assert";
+import { closeWindow } from "../src/testing/close-window.ts";
 
 // ── L9: useLocal().patch() on non-object state ──────────────────────────────
 //
@@ -53,7 +54,7 @@ Deno.test("L9: patch() on non-object local state throws instead of doing nothing
     for (const s of seen) assert(!s.includes("SILENT"), s);
   } finally {
     _unmount(handle);
-    await win.happyDOM.close();
+    await closeWindow(win);
   }
 });
 
@@ -291,7 +292,7 @@ Deno.test("L9: patch() still merges object state", async () => {
     assertEquals(after, { a: 1, b: 3 });
   } finally {
     _unmount(handle);
-    await win.happyDOM.close();
+    await closeWindow(win);
   }
 });
 

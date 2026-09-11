@@ -3,6 +3,7 @@
 // viewBox stay camelCase. Covers client (applyProps) and SSR (renderToString).
 import { assert, assertEquals, assertStringIncludes } from "@std/assert";
 import { Window } from "happy-dom";
+import { closeWindow } from "../src/testing/close-window.ts";
 import { h, renderToString } from "../src/air/vdom.ts";
 import { _setDocument, _unmount, mount } from "../src/air/aio-renderer.ts";
 import { signal } from "../src/state/signal.ts";
@@ -109,6 +110,6 @@ Deno.test("svg: a removed camelCase attribute really leaves the DOM", async () =
       `a diff must converge on a fresh render (had: ${before})`,
     );
   } finally {
-    await win.happyDOM.close();
+    await closeWindow(win);
   }
 });

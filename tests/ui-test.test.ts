@@ -5,6 +5,7 @@
 // stupid-proof errors.
 import { assert, assertEquals, assertThrows } from "@std/assert";
 import { Window } from "happy-dom";
+import { closeWindow } from "../src/testing/close-window.ts";
 import { h, lazy, Portal, Suspense } from "../src/air/vdom.ts";
 import type { ComponentFn } from "../src/air/vdom.ts";
 import { useLocal } from "../src/browser-air.ts";
@@ -44,7 +45,7 @@ Deno.test("testUI: div.button 'Submit' → App…SubmitButton.click()", async ()
   assertEquals(s.children[0]!.component, "Submit");
   assertEquals(s.children[0]!.elements[0]!.name, "SubmitButton");
   ui.unmount();
-  await win.happyDOM.close();
+  await closeWindow(win);
 });
 
 Deno.test("testUI: client-only typing via useLocal — no cells involved", async () => {
@@ -74,7 +75,7 @@ Deno.test("testUI: client-only typing via useLocal — no cells involved", async
   await ui.Form.TitleInput.setValue("bread");
   assertEquals(ui.Form.TitleInput.value, "bread");
   ui.unmount();
-  await win.happyDOM.close();
+  await closeWindow(win);
 });
 
 Deno.test("testUI: keyed instances + cell round-trip on the real loop", async () => {
@@ -116,7 +117,7 @@ Deno.test("testUI: keyed instances + cell round-trip on the real loop", async ()
   // the clicked row re-rendered — its button is now UndoButton
   assertEquals(ui.find("Row", 2).UndoButton.text, "Undo");
   ui.unmount();
-  await win.happyDOM.close();
+  await closeWindow(win);
 });
 
 Deno.test("testUI: unknown names fail with helpful, listing errors at use", async () => {
@@ -129,7 +130,7 @@ Deno.test("testUI: unknown names fail with helpful, listing errors at use", asyn
   assert(err.message.includes("t prop"), err.message);
   // …and at the next drain point for actions (covered by the queue tests).
   ui.unmount();
-  await win.happyDOM.close();
+  await closeWindow(win);
 });
 
 Deno.test("ui-remote: live-surface executor drives the same mounts (am path)", async () => {
@@ -156,7 +157,7 @@ Deno.test("ui-remote: live-surface executor drives the same mounts (am path)", a
   assertEquals(miss.ok, false);
   assertEquals(miss.available!.includes(path), true);
   ui.unmount();
-  await win.happyDOM.close();
+  await closeWindow(win);
 });
 
 Deno.test("testUI: t= exposes assertion targets with no handlers", async () => {
@@ -167,7 +168,7 @@ Deno.test("testUI: t= exposes assertion targets with no handlers", async () => {
   const ui = await testUI(Stat as ComponentFn, { document: win.document });
   assertEquals(ui.Stat.count.text, "42"); // no handler needed — t= is enough
   ui.unmount();
-  await win.happyDOM.close();
+  await closeWindow(win);
 });
 
 Deno.test("testUI: select / check / clear / waitFor comfort APIs", async () => {
@@ -222,7 +223,7 @@ Deno.test("testUI: select / check / clear / waitFor comfort APIs", async () => {
   await ui.Prefs.NameInput.clear();
   assertEquals(ui.Prefs.NameInput.value, "");
   ui.unmount();
-  await win.happyDOM.close();
+  await closeWindow(win);
 });
 
 Deno.test("surface is a full observation space (AI-natural: see + act in one)", async () => {
@@ -267,7 +268,7 @@ Deno.test("surface is a full observation space (AI-natural: see + act in one)", 
   const p3 = after.component === "Panel" ? after : after.children[0]!;
   assertEquals(p3.elements.find((e) => e.name === "status")!.text, "ON");
   ui.unmount();
-  await win.happyDOM.close();
+  await closeWindow(win);
 });
 
 Deno.test("testGen: generated typed client compiles and matches the surface", async () => {
@@ -292,7 +293,7 @@ Deno.test("testGen: generated typed client compiles and matches the surface", as
     // point the generated import at the real repo path so deno check works
     importFrom: new URL("../src/cell-test.ts", import.meta.url).href,
   });
-  await win.happyDOM.close();
+  await closeWindow(win);
 
   // structure: one interface per component, quoted non-identifier keys, root type
   assert(src.includes("export interface AppUI extends UIComponentHandle"));
@@ -356,7 +357,7 @@ Deno.test("testUI: scroll and dragTo fire faithful gesture sequences", async () 
   assertEquals(dndLog, ["start", "over", "drop+dt", "end"]);
 
   ui.unmount();
-  await win.happyDOM.close();
+  await closeWindow(win);
 });
 
 // ── Pins: Portal and Suspense content stay on the surface ────────────
@@ -381,7 +382,7 @@ Deno.test("ui-surface pin: elements inside a Portal are on the surface and click
   await ui.App.CloseButton.click(); // portal content is addressable like any other
   assertEquals(clicks, 1);
   ui.unmount();
-  await win.happyDOM.close();
+  await closeWindow(win);
 });
 
 Deno.test("ui-surface pin: resolved lazy content under Suspense reaches the surface", async () => {
@@ -409,7 +410,7 @@ Deno.test("ui-surface pin: resolved lazy content under Suspense reaches the surf
   await ui.Loaded.ReadyButton.click();
   assertEquals(clicks, 1);
   ui.unmount();
-  await win.happyDOM.close();
+  await closeWindow(win);
 });
 
 // ── Compact forms: zero-boilerplate wrapper, await using, auto-everything ──
@@ -540,7 +541,7 @@ Deno.test("queue: un-awaited failures surface at the next drain point", async ()
   }
   assert(threw.includes("NopeButton"), `expected listing error, got: ${threw}`);
   await ui.dispose();
-  await win.happyDOM.close();
+  await closeWindow(win);
 });
 
 // ── SPA submit default + useLocal tuple ───────────────────────────────

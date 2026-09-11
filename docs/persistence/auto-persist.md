@@ -97,6 +97,76 @@ await aio.run({
 });
 ```
 
+## Shaping what goes out — `onPersist`
+
+`persist` FILTERS (whole fields, in or out). `onPersist` SHAPES:
+
+```ts
+cell("photos", {
+  state: { thumb: null as Blob | null, key: "" },
+  onPersist: (s) => ({ key: s.key }), // 40 MB live, 200 bytes on disk
+  onRestore: (s) => {
+    s.thumb = load(s.key);
+  },
+  methods: {/* … */},
+});
+```
+
+aio let you repair what comes back and not shape what goes out. With only a
+filter, a field you need **on screen** but not **on disk** has no expression —
+the remaining move is a second mirrored cell kept in sync by hand.
+
+`onPersist` receives the slice after `persist`'s include/exclude and returns
+what is written. It and `onRestore` are a pair, read in that order:
+
+- a shape that only **drops** fields needs no partner — the cell's declared
+  initial fills them back in;
+- a shape that **reshapes** needs an `onRestore` that knows the new shape, or
+  the app cannot read its own store.
+
+It is **not** error-guarded, unlike the observe-only lifecycle hooks. It runs on
+the persist path, where "the write quietly stopped happening" is the worst
+outcome there is — the app keeps running on state that is not on disk and finds
+out at the next boot. A throw is reported as a failed write, names the cell, and
+turns `/health` degraded.
+
+Refused on a `sync: true` cell, for the same reason a `persist` filter is: an op
+**is** the method call's payload, written raw, so the field is on disk whatever
+the hook returns.
+
+## `persist` is about the STORE — `diagnostics` is about the record
+
+`persist: "none"` keeps a cell's **state** out of the state store. It does not
+keep the cell's **actions** out of `logs/actions.jsonl`, and it was reasonably
+read as if it did.
+
+They are different things and they now have different words:
+
+```ts
+cell("vault", {
+  state: { unlocked: false },
+  persist: "none", // the STATE never reaches the store
+  diagnostics: false, // the ACTIONS never reach the dev record
+  methods: {/* … */},
+});
+```
+
+`diagnostics: false` keeps this cell's actions out of every dev diagnostic that
+writes them down: `logs/actions.jsonl`, the state-diff debug log, the
+checkpoint's recent actions, and `am timeline`.
+
+It does **not** touch two things, on purpose:
+
+- **The durability journal** (`journal: true`). That is not a diagnostic — it is
+  how committed actions are replayed. Dropping a cell from it would be data loss
+  dressed as a privacy feature.
+- **Persistence.** That is `persist`'s job, and making one key mean both is the
+  conflation this key exists to end.
+
+To hide one FIELD while keeping the rest of the record, reach for
+`redactActions` instead — see
+[Redaction](../debugging/feedback.md#redaction-is-not-optional).
+
 ## Changing a cell's shape after it has shipped
 
 Your users have rows written by an older version of your app. Restore merges the

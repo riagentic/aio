@@ -1341,6 +1341,24 @@ export async function buildAll(): Promise<number> {
       `\n  ${C.dim}clients connect to server:${C.r} ${C.blue}${block.server}${C.r}`,
     );
   }
+  // What was CHECKED, not only what was produced (trading-app report §3). The client-graph
+  // audit and the module-scope evaluation run per target and refuse the
+  // artifact outright, so an artifact on the list above is already proof they
+  // passed — but that proof is only legible to someone who read the whole
+  // build. A summary that lists files and never names the checks reads as "it
+  // compiled", which is the reading the audit exists to correct.
+  const audited =
+    results.filter((r) => r.ok && !r.skipped && r.artifacts.length)
+      .length;
+  if (audited > 0) {
+    console.log(
+      `\n  ${C.dim}client graph:${C.r} audited + evaluated for ${
+        audited === 1 ? "the artifact" : `all ${audited} artifacts`
+      } ${C.dim}(a server-only leak, a module-scope Node global, or a top ` +
+        `level that throws refuses the artifact — nothing above reached disk ` +
+        `without passing)${C.r}`,
+    );
+  }
   const skipped = results.filter((r) => r.skipped).length;
   const built = results.length - failed.length - skipped;
   // `✓ 2/3 build(s)` asked the reader to do the subtraction and told them

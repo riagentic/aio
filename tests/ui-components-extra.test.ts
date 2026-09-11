@@ -1,7 +1,6 @@
 // aio/ui — Avatar, Pagination, Confirm/ConfirmButton, Toast (multi-app kit
 // primitives every content/CRUD/user app otherwise re-rolls).
 import { assert, assertEquals, assertStringIncludes } from "@std/assert";
-import { Window } from "happy-dom";
 import { h } from "../src/air/vdom.ts";
 import type { ComponentFn } from "../src/air/vdom.ts";
 import { testUI } from "../src/testing/ui-test.ts";
@@ -15,19 +14,12 @@ import {
   ToastHost,
 } from "../src/ui/mod.ts";
 
-async function mountWithWin(App: ComponentFn) {
-  const win = new Window();
-  // deno-lint-ignore no-explicit-any
-  const ui = await testUI(App, { document: win.document as any });
-  return { ui, win };
-}
-
 // ── Avatar ──
 
 Deno.test("ui/Avatar: initials + deterministic color from name", async () => {
-  await using ui =
-    (await mountWithWin(() => h(Avatar, { name: "Ada Lovelace", size: 40 })))
-      .ui;
+  await using ui = await testUI(() =>
+    h(Avatar, { name: "Ada Lovelace", size: 40 })
+  );
   const html = ui.html();
   assertStringIncludes(html, "aio-avatar");
   assertStringIncludes(html, ">AL<"); // two initials
@@ -37,10 +29,10 @@ Deno.test("ui/Avatar: initials + deterministic color from name", async () => {
 });
 
 Deno.test("ui/Avatar: same name → same color (deterministic)", async () => {
-  const one = (await mountWithWin(() => h(Avatar, { name: "root" }))).ui;
+  const one = await testUI(() => h(Avatar, { name: "root" }));
   const a = one.html().match(/hsl\([^)]+\)/)?.[0];
   await one.dispose();
-  const two = (await mountWithWin(() => h(Avatar, { name: "root" }))).ui;
+  const two = await testUI(() => h(Avatar, { name: "root" }));
   const b = two.html().match(/hsl\([^)]+\)/)?.[0];
   await two.dispose();
   assertEquals(a, b);
@@ -48,8 +40,9 @@ Deno.test("ui/Avatar: same name → same color (deterministic)", async () => {
 });
 
 Deno.test("ui/Avatar: src renders an <img> instead of initials", async () => {
-  await using ui =
-    (await mountWithWin(() => h(Avatar, { name: "Ada", src: "/a.png" }))).ui;
+  await using ui = await testUI(() =>
+    h(Avatar, { name: "Ada", src: "/a.png" })
+  );
   const html = ui.html();
   assertStringIncludes(html, "aio-avatar__img");
   assertStringIncludes(html, 'src="/a.png"');
@@ -59,7 +52,7 @@ Deno.test("ui/Avatar: src renders an <img> instead of initials", async () => {
 
 Deno.test("ui/Pagination: windows pages, marks current, clamps ends", async () => {
   const seen: number[] = [];
-  const { ui, win } = await mountWithWin(() =>
+  const ui = await testUI(() =>
     h(Pagination, {
       page: 1,
       pages: 10,
@@ -73,7 +66,7 @@ Deno.test("ui/Pagination: windows pages, marks current, clamps ends", async () =
   assertStringIncludes(html, ">5<");
   assert(!html.includes(">7<"), "page 7 is outside the window");
   // prev disabled at page 1
-  const btns = [...win.document.querySelectorAll("button.aio-page__btn")];
+  const btns = [...ui.document.querySelectorAll("button.aio-page__btn")];
   assert(
     (btns[0] as unknown as { disabled: boolean }).disabled,
     "prev disabled",
@@ -87,10 +80,10 @@ Deno.test("ui/Pagination: windows pages, marks current, clamps ends", async () =
 });
 
 Deno.test("ui/Pagination: next disabled on the last page", async () => {
-  const { ui, win } = await mountWithWin(() =>
+  const ui = await testUI(() =>
     h(Pagination, { page: 4, pages: 4, onPage: () => {} })
   );
-  const btns = [...win.document.querySelectorAll("button.aio-page__btn")];
+  const btns = [...ui.document.querySelectorAll("button.aio-page__btn")];
   const next = btns[btns.length - 1] as unknown as { disabled: boolean };
   assert(next.disabled, "next disabled on last page");
   await ui.dispose();
@@ -100,7 +93,7 @@ Deno.test("ui/Pagination: next disabled on the last page", async () => {
 
 Deno.test("ui/Confirm: renders message + buttons; fires the right callback", async () => {
   let confirmed = 0, cancelled = 0;
-  const { ui, win } = await mountWithWin(() =>
+  const ui = await testUI(() =>
     h(Confirm, {
       open: true,
       message: "Delete this?",
@@ -114,7 +107,7 @@ Deno.test("ui/Confirm: renders message + buttons; fires the right callback", asy
   assertStringIncludes(html, "Delete this?");
   assertStringIncludes(html, "aio-btn--danger"); // danger confirm button
   const buttons = [
-    ...win.document.querySelectorAll(".aio-modal__footer button"),
+    ...ui.document.querySelectorAll(".aio-modal__footer button"),
   ];
   const del = buttons.find((b) =>
     (b as unknown as { textContent: string }).textContent === "Delete"
@@ -126,16 +119,15 @@ Deno.test("ui/Confirm: renders message + buttons; fires the right callback", asy
 });
 
 Deno.test("ui/Confirm: closed → renders nothing", async () => {
-  await using ui =
-    (await mountWithWin(() =>
-      h(Confirm, { open: false, onConfirm: () => {}, onCancel: () => {} })
-    )).ui;
+  await using ui = await testUI(() =>
+    h(Confirm, { open: false, onConfirm: () => {}, onCancel: () => {} })
+  );
   assert(!ui.html().includes("aio-modal"), "nothing renders when closed");
 });
 
 Deno.test("ui/ConfirmButton: click opens confirm, confirm fires onConfirm once", async () => {
   let acted = 0;
-  const { ui, win } = await mountWithWin(() =>
+  const ui = await testUI(() =>
     h(ConfirmButton, {
       variant: "danger",
       confirm: "Really?",
@@ -145,14 +137,14 @@ Deno.test("ui/ConfirmButton: click opens confirm, confirm fires onConfirm once",
   );
   // dialog not shown yet
   assert(!ui.html().includes("aio-modal"), "confirm hidden until click");
-  const trigger = win.document.querySelector("button.aio-btn") as unknown as {
+  const trigger = ui.document.querySelector("button.aio-btn") as unknown as {
     click: () => void;
   };
   trigger.click();
   await ui.settle();
   assertStringIncludes(ui.html(), "Really?");
   const confirm = [
-    ...win.document.querySelectorAll(".aio-modal__footer button"),
+    ...ui.document.querySelectorAll(".aio-modal__footer button"),
   ]
     .find((b) =>
       (b as unknown as { textContent: string }).textContent === "Confirm"
@@ -168,7 +160,7 @@ Deno.test("ui/ConfirmButton: click opens confirm, confirm fires onConfirm once",
 
 Deno.test("ui/Toast: toast() shows in ToastHost; dismiss removes it", async () => {
   _resetToasts();
-  const { ui } = await mountWithWin(() => h(ToastHost, null));
+  const ui = await testUI(() => h(ToastHost, null));
   assert(!ui.html().includes("aio-toast--"), "empty at first");
   const dismiss = toast("Saved", { variant: "success", duration: 0 });
   await ui.settle();
@@ -183,7 +175,7 @@ Deno.test("ui/Toast: toast() shows in ToastHost; dismiss removes it", async () =
 
 Deno.test("ui/Toast: error variant gets role=alert", async () => {
   _resetToasts();
-  const { ui } = await mountWithWin(() => h(ToastHost, null));
+  const ui = await testUI(() => h(ToastHost, null));
   toast("Boom", { variant: "error", duration: 0 });
   await ui.settle();
   assertStringIncludes(ui.html(), 'role="alert"');
@@ -233,7 +225,7 @@ Deno.test("ui/Toast: every dismissal path clears its auto-dismiss timer", async 
     return (realClear as any)(id);
   };
   try {
-    const { ui } = await mountWithWin(() => h(ToastHost, null));
+    const ui = await testUI(() => h(ToastHost, null));
 
     // Checked after EACH path, never only at the end: a later path (or the
     // reset in `finally`) would otherwise clear an earlier path's leaked timer
