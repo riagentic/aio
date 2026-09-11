@@ -345,3 +345,35 @@ Deno.test({
     void _liveSpawned;
   },
 });
+
+// stdin. OFF by default — a child that reads a pipe blocks until EOF, so the
+// default pipe is closed and `cat` exits at once with nothing to say. Asked
+// for, it is a pipe the app writes and closes; and a write after the child is
+// gone is an error, not a message that quietly went nowhere.
+Deno.test({
+  name:
+    "spawn: stdin is EOF by default, a pipe on request, and a write after exit is refused",
+  ignore: !posix,
+  fn: async () => {
+    const silent: string[] = [];
+    const eof = await spawn("cat", { onLine: (l) => silent.push(l) });
+    assertEquals((await eof.status).code, 0, "cat with EOF stdin exits 0");
+    assertEquals(silent, [], "and read nothing");
+    assertEquals(eof.stdin, undefined, "no pipe unless asked for");
+
+    const lines: string[] = [];
+    const h = await spawn("cat", { stdin: true, onLine: (l) => lines.push(l) });
+    await h.stdin!.write("one\n");
+    await h.stdin!.write(new TextEncoder().encode("two\n"));
+    await h.stdin!.close();
+    await h.stdin!.close(); // idempotent
+    assertEquals((await h.status).code, 0);
+    for (let i = 0; i < 100 && lines.length < 2; i++) await sleep(10);
+    assertEquals(lines, ["one", "two"]);
+    await assertRejects(
+      () => h.stdin!.write("three\n"),
+      Error,
+      "not delivered",
+    );
+  },
+});

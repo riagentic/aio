@@ -1,6 +1,7 @@
 // Lifecycle & client launch — globals, onStart, schedules, startup logging, electron/browser
 // Extracted from aio.ts _run() to keep the orchestrator lean.
 
+import type { TrayConfig } from "./aio-types.ts";
 import { join } from "@std/path";
 import { isPipePath } from "./local-listen.ts";
 import { hasDesktopSession, openExternalBestEffort } from "./open-external.ts";
@@ -232,6 +233,7 @@ export interface LifecycleDeps<S, A> {
     chrome?: "standard" | "themed" | "none";
     theme?: UiTheme;
     layout?: boolean; // ui.layout — false drops the page-layout defaults
+    tray?: boolean | TrayConfig; // ui.tray — the Electron tray, see UiConfig
     lang?: string;
   };
   keepServer: boolean | undefined;
@@ -669,6 +671,7 @@ export function startLifecycle<S, A>(deps: LifecycleDeps<S, A>): void {
       height: cli.height ?? ui.height,
       childWindows,
       chrome: ui.chrome,
+      tray: ui.tray,
     };
     const electronUrl = token ? `${localUrl}?token=${token}` : localUrl;
     // NOT distDir — that can be the binary's embedded VFS copy, which this

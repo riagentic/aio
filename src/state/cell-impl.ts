@@ -13,6 +13,7 @@ import { cloneState, noteMaterialized } from "./immutable.ts";
 import { removalMessage, removalOf } from "./removals-core.ts";
 import type { ScheduleEffect } from "./schedule.ts";
 import type { OwnEffect } from "./own.ts";
+import type { NotifyEffect } from "./notify.ts";
 import { diagEmit } from "../diagnostics/diagnostic-bus.ts";
 import { log } from "../diagnostics/logger-api.ts";
 import { markInflight } from "./dispatch.ts";
@@ -37,12 +38,17 @@ export type CellEffect =
 /** The draft members served on EVERY method invocation, sync AND async
  *  (alpha52) — unlike the Partial meta below, `s.$do(...)` needs no `!`:
  *  sync drafts get it from the invocation wrapper, async proxies serve it at
- *  the root. */
+ *  the root.
+ *
+ *  @served — the framework builds this; an app only CALLS it, never
+ *  implements it. `check:api` reads the tag: a parameter of one of these
+ *  function-typed properties may WIDEN (every existing call still compiles,
+ *  and nothing outside the framework implements the signature). */
 export type MethodDraftServed = {
   /** Run effect(s) — the effect channel. See {@linkcode MethodDraftMeta.$do}. */
   readonly $do: (
-    effect: ScheduleEffect | OwnEffect,
-    ...more: (ScheduleEffect | OwnEffect)[]
+    effect: ScheduleEffect | OwnEffect | NotifyEffect,
+    ...more: (ScheduleEffect | OwnEffect | NotifyEffect)[]
   ) => void;
 };
 
@@ -159,7 +165,12 @@ export type MethodDraftCalls<C = any> = {
  *  permanent idiom for "a method that can be cancelled". Every previous
  *  spelling still compiles (`!`, `?.`, a bare `(s: MyState)` annotation, and
  *  an explicit `Partial<MethodDraftMeta>` one), which is what made this
- *  cheap now and impossible after beta. */
+ *  cheap now and impossible after beta.
+ *
+ *  @served — the framework builds this; an app only CALLS it, never
+ *  implements it. `check:api` reads the tag: a parameter of one of these
+ *  function-typed properties may WIDEN (every existing call still compiles,
+ *  and nothing outside the framework implements the signature). */
 export type MethodDraftMeta<S = Record<string, unknown>> = {
   readonly $signal: AbortSignal;
   /** Transactional cells: publish the buffered write-set atomically
@@ -195,8 +206,8 @@ export type MethodDraftMeta<S = Record<string, unknown>> = {
    *  alpha76 (src/state/removals.ts) — it resolved the caller with
    *  `undefined`, so the two meanings could never share one channel. */
   readonly $do: (
-    effect: ScheduleEffect | OwnEffect,
-    ...more: (ScheduleEffect | OwnEffect)[]
+    effect: ScheduleEffect | OwnEffect | NotifyEffect,
+    ...more: (ScheduleEffect | OwnEffect | NotifyEffect)[]
   ) => void;
 };
 /** Cell method — sync or async */

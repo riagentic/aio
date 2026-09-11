@@ -153,18 +153,17 @@ and composes primitives it already knows — it will not browse. All six are don
   already done: `noCdpMessage` names the client first and says what to type.
 - ~~`am shot --check` / `--update` against a committed baseline (composer
   §10.7)~~ — **DONE 2026-09-11.** aio had the three hard parts; this is the
-  comparison, and the comparison is where the traps are. It compares PIXELS,
-  not bytes (a re-encode is a different file and a gate that fails on an
-  identical screenshot gets deleted), with a per-channel tolerance defaulting
-  to 2 because antialiasing moves one or two. A MISSING baseline FAILS — the
-  one case where "nothing to compare" and "nothing changed" look the same. A
-  failure writes `<baseline>.actual.png`, and a size change is reported as a
-  size change rather than as 100% of pixels. Needed a PNG reader
-  (`src/am/png-compare.ts`, 8-bit non-interlaced, types 0/2/4/6, anything else
-  refused by name); driven by the two REAL PNGs already in the repo — one from
-  an external tool, one from aio's own encoder — plus an exact round-trip,
-  because a fixture I encode myself only proves my decoder agrees with my
-  encoder.
+  comparison, and the comparison is where the traps are. It compares PIXELS, not
+  bytes (a re-encode is a different file and a gate that fails on an identical
+  screenshot gets deleted), with a per-channel tolerance defaulting to 2 because
+  antialiasing moves one or two. A MISSING baseline FAILS — the one case where
+  "nothing to compare" and "nothing changed" look the same. A failure writes
+  `<baseline>.actual.png`, and a size change is reported as a size change rather
+  than as 100% of pixels. Needed a PNG reader (`src/am/png-compare.ts`, 8-bit
+  non-interlaced, types 0/2/4/6, anything else refused by name); driven by the
+  two REAL PNGs already in the repo — one from an external tool, one from aio's
+  own encoder — plus an exact round-trip, because a fixture I encode myself only
+  proves my decoder agrees with my encoder.
 - ~~`am shot` must detect the stale-surface case rather than returning success
   with old pixels~~ (anathomy §2) — **DONE 2026-09-08.** It now waits for the
   window to COMMIT a frame (a double `requestAnimationFrame`, the browser's own
@@ -234,37 +233,37 @@ and composes primitives it already knows — it will not browse. All six are don
   holders open once and close when the last lets go — which is also composer
   §10.4's "three components fire three identical requests, and there is no key
   to dedup on"); a STALE OPEN cannot install itself over a newer one, because
-  every open carries a generation and a late one closes what it made rather
-  than leaking it — that is the `alive(s)` guard at twenty call sites, deleted;
-  and the CLOSE is attached to the open that made it, so changing the key
-  closes before opening and two pipelines never fight over one device. `scope`
-  keeps two unrelated resources that share an id apart, a number key and a
-  string key are different resources, and a `close` that throws still releases
-  the slot — a slot nobody can release is the leak the whole module prevents.
+  every open carries a generation and a late one closes what it made rather than
+  leaking it — that is the `alive(s)` guard at twenty call sites, deleted; and
+  the CLOSE is attached to the open that made it, so changing the key closes
+  before opening and two pipelines never fight over one device. `scope` keeps
+  two unrelated resources that share an id apart, a number key and a string key
+  are different resources, and a `close` that throws still releases the slot — a
+  slot nobody can release is the leak the whole module prevents.
 - ~~**A client-side reaction** — `onChange(selector, fn)` (watcher §5, §8.4)~~ —
   **DONE 2026-09-11.** Not tied to a component, so a change from anywhere —
-  `am dispatch` included — reaches it. Three things it does that a bare
-  `effect` does not, all of which the report would have hit: only the SELECTOR
-  is tracked (so a reaction that reads state while working does not subscribe
-  to it and re-run forever), it WAITS for a change (an effect runs immediately,
-  so "when the camera id changes, reopen it" would open one on boot), and the
-  returned cleanup runs BEFORE the next change, so close-then-open is one
-  function rather than two rules that have to agree. Typed as a union of two
-  signatures rather than `=> void | Dispose`: TypeScript forgives a non-void
-  return one signature at a time, so the single-type spelling rejects
+  `am dispatch` included — reaches it. Three things it does that a bare `effect`
+  does not, all of which the report would have hit: only the SELECTOR is tracked
+  (so a reaction that reads state while working does not subscribe to it and
+  re-run forever), it WAITS for a change (an effect runs immediately, so "when
+  the camera id changes, reopen it" would open one on boot), and the returned
+  cleanup runs BEFORE the next change, so close-then-open is one function rather
+  than two rules that have to agree. Typed as a union of two signatures rather
+  than `=> void | Dispose`: TypeScript forgives a non-void return one signature
+  at a time, so the single-type spelling rejects
   `onChange(sel, v => list.push(v))`.
-- ~~**An error boundary** (wallet report §22.1)~~ — **DONE 2026-09-11.** `<ErrorBoundary>`
-  existed and `docs/ui/air-lifecycle.md` already promised it caught "initial
-  render, signal-triggered re-render, and lazy component rejection". Two of the
-  three were true: a throw in a component's OWN signal-triggered re-render kept
-  the last good output (AIO-138) and the subtree quietly stopped updating,
-  which is the wallet's blank window wearing the old screen's face. The failing
-  component now renders the boundary's FALLBACK by re-entering its own render
-  path — one renderer, not two. The failed render's signal deps are carried
-  into the fallback's subscriptions (a fallback reads no signals, so without
-  that the fallback is PERMANENT), and a fallback that itself throws degrades
-  to AIO-138 instead of looping. With no boundary above, AIO-138 is unchanged
-  and newly pinned.
+- ~~**An error boundary** (wallet report §22.1)~~ — **DONE 2026-09-11.**
+  `<ErrorBoundary>` existed and `docs/ui/air-lifecycle.md` already promised it
+  caught "initial render, signal-triggered re-render, and lazy component
+  rejection". Two of the three were true: a throw in a component's OWN
+  signal-triggered re-render kept the last good output (AIO-138) and the subtree
+  quietly stopped updating, which is the wallet's blank window wearing the old
+  screen's face. The failing component now renders the boundary's FALLBACK by
+  re-entering its own render path — one renderer, not two. The failed render's
+  signal deps are carried into the fallback's subscriptions (a fallback reads no
+  signals, so without that the fallback is PERMANENT), and a fallback that
+  itself throws degrades to AIO-138 instead of looping. With no boundary above,
+  AIO-138 is unchanged and newly pinned.
 - ~~**A dev-time error overlay** (vidtune §12.4, watcher §8.7)~~ — **DONE
   2026-09-11.** The seam had existed since alpha52 and nothing filled it:
   `_deliverDiag` calls `window._aioDiag` with a comment saying "overlay when the
@@ -316,13 +315,13 @@ and composes primitives it already knows — it will not browse. All six are don
 - ~~**Hot reload does not cover server-side dynamic imports** (composer §6)~~ —
   **DONE 2026-09-11**, by the better of the two routes the report offered: the
   warning fires on the RELOAD EVENT and names the changed file, because that is
-  the moment the question is being asked. It says why (the module registry
-  hands back the copy it already has), states the mismatch outright ("the
-  browser reloaded; this file did not" — which is the sentence that would have
-  stopped the author re-reading correct code), what to do, and `am where` for
-  any other file. Once per file per session, `.server.tsx` as well as
-  `.server.ts`, and an ordinary module says nothing — a warning that fires on
-  every save is how a real one gets ignored.
+  the moment the question is being asked. It says why (the module registry hands
+  back the copy it already has), states the mismatch outright ("the browser
+  reloaded; this file did not" — which is the sentence that would have stopped
+  the author re-reading correct code), what to do, and `am where` for any other
+  file. Once per file per session, `.server.tsx` as well as `.server.ts`, and an
+  ordinary module says nothing — a warning that fires on every save is how a
+  real one gets ignored.
 - ~~**`*.server.ts` modules must be hand-registered in `app.ts`**~~ (vidtune §3,
   llama.master §13) — **DONE 2026-09-08.** Every `*.server.ts` / `*.server.tsx`
   is now auto-embedded by `assetIncludes`, the same zero-config walk `.wasm`
@@ -343,9 +342,9 @@ and composes primitives it already knows — it will not browse. All six are don
   on a read-only cache are handles spent on nothing). The REAL path, because
   that is what the watcher's events carry. `src/` only: the checkout also holds
   `.git`, `node_modules` and a `dist/` a build rewrites constantly, and a
-  watcher over those is a reload storm. An explicit `watch: [...]` is left
-  alone — an app that narrowed the watcher because its boot reloads gigabytes
-  has said what it wants watched.
+  watcher over those is a reload storm. An explicit `watch: [...]` is left alone
+  — an app that narrowed the watcher because its boot reloads gigabytes has said
+  what it wants watched.
 
 #### 5 · Composition inside a cell
 
@@ -517,19 +516,18 @@ and composes primitives it already knows — it will not browse. All six are don
   `tests/ui.gen.ts`, loud when there is no UI entry. Needed a deliberate
   boundary widening (`am → testing` for the generator, `am → air` type-only);
   the laundering check caught the attempt to sneak it through a root entry.
-- ~~**Mount-time rehydration is racy and silent** (llama.master §11)~~ —
-  **DONE 2026-09-11.** `testUI` now settles ONCE before handing the UI over, so
-  the first observation is always of a mounted, quiesced app. A rule enforced by
-  remembering to write `await ui.settle()` is not enforced.
-  What the measurement actually showed, and why the test looks the way it does:
-  the race was masked. A synchronous `onMount` dispatch lands before the test
-  body either way, and so do 0ms, 25ms, 100ms and 200ms rehydrations — the
-  mount path already spans that long on its dynamic imports. Every test I wrote
-  on those passed BOTH ways and asserted nothing. At 400ms it discriminates:
-  red without the settle, green with it.
-  That incidental window IS the defect, restated: a guarantee that holds
-  because the harness happens to be slow enough is one any refactor can take
-  away in silence. The wait is now on purpose and bounded by `settle`'s own
+- ~~**Mount-time rehydration is racy and silent** (llama.master §11)~~ — **DONE
+  2026-09-11.** `testUI` now settles ONCE before handing the UI over, so the
+  first observation is always of a mounted, quiesced app. A rule enforced by
+  remembering to write `await ui.settle()` is not enforced. What the measurement
+  actually showed, and why the test looks the way it does: the race was masked.
+  A synchronous `onMount` dispatch lands before the test body either way, and so
+  do 0ms, 25ms, 100ms and 200ms rehydrations — the mount path already spans that
+  long on its dynamic imports. Every test I wrote on those passed BOTH ways and
+  asserted nothing. At 400ms it discriminates: red without the settle, green
+  with it. That incidental window IS the defect, restated: a guarantee that
+  holds because the harness happens to be slow enough is one any refactor can
+  take away in silence. The wait is now on purpose and bounded by `settle`'s own
   budget; non-strict, so a mount that never quiesces is reported by the first
   real observation rather than as a mount failure naming the harness.
 - ~~**A trace artifact on failure**~~ (trading-app report §9.5) — **DONE 2026-09-11.** Every
@@ -546,50 +544,50 @@ and composes primitives it already knows — it will not browse. All six are don
 
 #### 8 · Styling and the shell
 
-- ~~**`theme: "base"`** (newjob §4)~~ — **DONE 2026-09-11**, as `ui.layout:
-  false` rather than a fifth `theme` value. `UiTheme` is frozen public surface
-  and `check:api` refused the widening — and the additive shape is the better
-  design: "how much look" and "does it place my boxes" are separate questions,
-  so the switch composes with every `theme` answer (`theme:"full", layout:false`
-  = controls without layout, always; `theme:"auto", layout:false` = the same
-  until you ship CSS). Kept: canvas, dark mode, type, every form control, focus
-  rings, tables, code, `::selection`, and the three environments. Dropped: the
-  `<main>` page container with its header/footer alignment, and the six
-  classes. Sliced from the ONE stylesheet by banner, exactly as
-  `appThemeTokensCss` is, so a third variant cannot drift into a third palette
-  — and a missing banner REFUSES rather than guessing, because both wrong
-  answers are invisible. Setting it on `"tokens"`/`"none"` warns instead of
-  doing nothing.
+- ~~**`theme: "base"`** (newjob §4)~~ — **DONE 2026-09-11**, as
+  `ui.layout:
+  false` rather than a fifth `theme` value. `UiTheme` is frozen
+  public surface and `check:api` refused the widening — and the additive shape
+  is the better design: "how much look" and "does it place my boxes" are
+  separate questions, so the switch composes with every `theme` answer
+  (`theme:"full", layout:false` = controls without layout, always;
+  `theme:"auto", layout:false` = the same until you ship CSS). Kept: canvas,
+  dark mode, type, every form control, focus rings, tables, code, `::selection`,
+  and the three environments. Dropped: the `<main>` page container with its
+  header/footer alignment, and the six classes. Sliced from the ONE stylesheet
+  by banner, exactly as `appThemeTokensCss` is, so a third variant cannot drift
+  into a third palette — and a missing banner REFUSES rather than guessing,
+  because both wrong answers are invisible. Setting it on `"tokens"`/`"none"`
+  warns instead of doing nothing.
 - ~~**Scoped styles** (vidtune §12.1, composer §10.3, newjob §8.5)~~ — **DONE
   2026-09-11, both halves.** The worst UI bug of one build: a `class="track"`
   collision silently clipped every music row to one line, with no error, a
   correct DOM and a correct component tree.
   - ~~the LINT half~~ — **DONE 2026-09-11.** `checkStyles` in `aiol` reports a
     class defined in two places that disagree about the SAME PROPERTY, naming
-    both sites and both values. Narrow on purpose, because a rule people
-    silence takes its true positives with it: agreement, complementary
-    properties, a more specific selector (`.track:hover`, `.list .track`), the
-    same class inside `@media`, and custom properties are all left alone, and a
-    generated stylesheet (`/*!` — Tailwind's output) is skipped entirely.
+    both sites and both values. Narrow on purpose, because a rule people silence
+    takes its true positives with it: agreement, complementary properties, a
+    more specific selector (`.track:hover`, `.list .track`), the same class
+    inside `@media`, and custom properties are all left alone, and a generated
+    stylesheet (`/*!` — Tailwind's output) is skipped entirely.
     `topLevelClassRules` / `collidingClasses` are pure and tested on their own;
     verified end to end by planting the reported bug in a real scaffolded app
     and watching the linter name it.
   - ~~Opt-in hashed classes are the fuller answer~~ — **DONE 2026-09-11.**
-    `css\`…\`` from `aio/ui` returns a class named after a HASH of the rule, so
+    `css\`…\``from`aio/ui`returns a class named after a HASH of the rule, so
     two components cannot collide however they name things — and two writing
     the identical rule share one class rather than shipping it twice.
     Content-addressed rather than counted, because a counter depends on module
     evaluation ORDER and a server-rendered page would hydrate against names the
     client numbered differently — wrong in exactly the way nobody looks for. No
-    build step (a scoping scheme needing a bundler plugin does not work in
-    `deno task dev`, which serves modules untouched, and would be a dev/prod
+    build step (a scoping scheme needing a bundler plugin does not work in`deno
+    task
+    dev`, which serves modules untouched, and would be a dev/prod
     divergence in the part of an app people judge by looking at it), and
-    unlayered so it beats the generated theme without `!important`.
-    `&` works, including inside an at-rule; `collectCss()` is for
-    `renderToString`. My own tests caught two real parser bugs: a nested block
+    unlayered so it beats the generated theme without`!important`.`&`works, including inside an at-rule;`collectCss()`is for`renderToString`. My own tests caught two real parser bugs: a nested block
     swallowed everything after it, and leading declarations were absorbed into
-    the next block's SELECTOR (`color: red; .c:hover{…}` — which no browser
-    applies and nothing reports).
+    the next block's SELECTOR (`color:
+    red; .c:hover{…}` — which no browser applies and nothing reports).
 - ~~**A `<Browser>` component and `docs/clients/webview.md`** (newjob §2)~~ —
   **DONE 2026-09-11.** Both traps closed in the component rather than described
   in a doc: `src` is applied IMPERATIVELY and only when it changed, so the
@@ -598,50 +596,48 @@ and composes primitives it already knows — it will not browse. All six are don
   hidden holder on unmount instead of letting Electron destroy it with the
   page's scroll, forms and login. It renders a plain `<webview>`, so the whole
   Electron API stays true and reachable through `ref` — a wrapper that hid it
-  would be a second, worse API. `docs/clients/webview.md` says the `childWindows`
-  gate out loud (it was documented in exactly one place: a source comment) and
-  covers `partition` and what the guest cannot reach.
+  would be a second, worse API. `docs/clients/webview.md` says the
+  `childWindows` gate out loud (it was documented in exactly one place: a source
+  comment) and covers `partition` and what the guest cannot reach.
 - ~~**A CSP that can drop `base-uri`, and a nonce for the inline shell** (newjob
   §3, wallet report §11)~~ — **DONE 2026-09-11.** `security.cspDirectives` overrides or
   REMOVES one directive of the computed policy (`{"base-uri": false}`), which is
   the point: writing a verbatim policy to lose one directive meant re-deriving
   `frame-ancestors` from `allowedOrigins` by hand and keeping it in sync
-  forever. Ignored for a verbatim policy — two ways to say one thing with one
-  of them silent is the shape this repo refuses — and an empty result sends no
-  header rather than `""`.
-  `security.cspNonce` mints a nonce PER RESPONSE (a reused one is a replayable
-  one) and `"strict"` then sends `script-src 'self' 'nonce-…'` instead of the
-  waiver. Stamped by ONE rule applied to the finished shell rather than
-  threaded through the six places it writes a `<script>`: a missed tag is not a
-  degraded page, it is a blank one, and the test counts tags rather than
-  checking the ones I remembered. Styles deliberately keep `'unsafe-inline'` —
-  that directive also governs the `style=` ATTRIBUTE, which `style={{…}}`
-  produces on ordinary components.
+  forever. Ignored for a verbatim policy — two ways to say one thing with one of
+  them silent is the shape this repo refuses — and an empty result sends no
+  header rather than `""`. `security.cspNonce` mints a nonce PER RESPONSE (a
+  reused one is a replayable one) and `"strict"` then sends
+  `script-src 'self' 'nonce-…'` instead of the waiver. Stamped by ONE rule
+  applied to the finished shell rather than threaded through the six places it
+  writes a `<script>`: a missed tag is not a degraded page, it is a blank one,
+  and the test counts tags rather than checking the ones I remembered. Styles
+  deliberately keep `'unsafe-inline'` — that directive also governs the `style=`
+  ATTRIBUTE, which `style={{…}}` produces on ordinary components.
 - ~~**Standard Schema in `useForm`** (composer §10.6, newjob §8.7)~~ — **DONE
   2026-09-11.** `useForm(config, { schema })`, reusing the `isStandardSchema`
-  the cell `validate` hook already had, so it really did pay off twice and
-  still costs no dependency. ONE schema for the form, not one per field — that
-  is the shape apps actually hold (`z.object({…})` already exists somewhere) —
-  with issues attributed to fields by `path`, reading BOTH spellings (Zod emits
-  bare keys, Valibot emits `{ key }` wrappers; reading one would put every
-  issue from the other library on the form and look like the schema
-  half-working). An issue that names no field becomes `form.formError` rather
-  than being dropped, which is how a form refuses to submit while every field
-  looks fine. `rules` untouched and still the more specific statement. Async
-  refused by name.
-  Two shapes the freeze forced, both better: `schema` went on `FormOptions`
-  (param0 is frozen), and coercion went on a separate `parsed()` instead of
-  into `values()` — `values(): T` is inferred from each field's `initial`, so
+  the cell `validate` hook already had, so it really did pay off twice and still
+  costs no dependency. ONE schema for the form, not one per field — that is the
+  shape apps actually hold (`z.object({…})` already exists somewhere) — with
+  issues attributed to fields by `path`, reading BOTH spellings (Zod emits bare
+  keys, Valibot emits `{ key }` wrappers; reading one would put every issue from
+  the other library on the form and look like the schema half-working). An issue
+  that names no field becomes `form.formError` rather than being dropped, which
+  is how a form refuses to submit while every field looks fine. `rules`
+  untouched and still the more specific statement. Async refused by name. Two
+  shapes the freeze forced, both better: `schema` went on `FormOptions` (param0
+  is frozen), and coercion went on a separate `parsed()` instead of into
+  `values()` — `values(): T` is inferred from each field's `initial`, so
   coercing there would make the signature say `string` for a value that is a
   number. Exported `FormOptions`/`CrossFieldValidator`/`AsyncValidationRule`
   while there: `useForm`'s own option type was reachable only structurally.
-- ~~**`resource()` keys, dedup and invalidation** (composer §10.4)~~ —
-  **DONE 2026-09-11, through `useResource` rather than by keying `resource()`.**
-  A `key` option on `resource()` would have been an added optional parameter,
+- ~~**`resource()` keys, dedup and invalidation** (composer §10.4)~~ — **DONE
+  2026-09-11, through `useResource` rather than by keying `resource()`.** A
+  `key` option on `resource()` would have been an added optional parameter,
   which the freeze refuses by name — and the new door is the better answer
   anyway: `useResource({ key, open, close })` dedups by key with reference
-  counting, which is what "three components, one request" actually needs, and
-  it invalidates by changing the key. `resource()` is untouched.
+  counting, which is what "three components, one request" actually needs, and it
+  invalidates by changing the key. `resource()` is untouched.
 - ~~**More templates** (anathomy §10.6)~~ — **DONE 2026-09-11** for
   `--template=canvas` and `--template=assets`; `desktop-panels` REFUSED for now
   (see below). Each encodes the knowledge another report produced: `canvas` is
@@ -649,20 +645,18 @@ and composes primitives it already knows — it will not browse. All six are don
   test drives with no GPU, and an imperative shell with no branches left in it
   (anathomy §6) — and `assets` ships the deno.json mount AND the directory
   together, because either alone is a 404 and one of them looks like a build
-  problem (anathomy §7).
-  The per-file ternary chain became a function on the way: it held exactly two
-  templates, could not hold a third without every line growing a branch, and
-  the branches had already drifted (the UI's had a `css` case the entry's did
-  not). Found while doing it: `denoJson()` was passed a hardcoded `"counter"`,
-  so every template's tasks were the counter's — invisible because the two
-  templates that existed agreed.
-  And a gate the parse check could not give: every template is now TYPE-CHECKED
-  against the framework, in a real project with a real link. A `ref` callback
-  with the wrong parameter type shipped in the canvas template and was found by
-  scaffolding one by hand, which is not a gate. Verified red by breaking a
-  return type on purpose.
-  `desktop-panels` is not scaffolded: unlike the other two it encodes no
-  specific finding from a report, and a template nobody can describe the
+  problem (anathomy §7). The per-file ternary chain became a function on the
+  way: it held exactly two templates, could not hold a third without every line
+  growing a branch, and the branches had already drifted (the UI's had a `css`
+  case the entry's did not). Found while doing it: `denoJson()` was passed a
+  hardcoded `"counter"`, so every template's tasks were the counter's —
+  invisible because the two templates that existed agreed. And a gate the parse
+  check could not give: every template is now TYPE-CHECKED against the
+  framework, in a real project with a real link. A `ref` callback with the wrong
+  parameter type shipped in the canvas template and was found by scaffolding one
+  by hand, which is not a gate. Verified red by breaking a return type on
+  purpose. `desktop-panels` is not scaffolded: unlike the other two it encodes
+  no specific finding from a report, and a template nobody can describe the
   purpose of is a maintenance cost with no lesson in it.
 - ~~**`aio.run({ assets: { "/x": "./assets/x" } })`** (anathomy §7, §10.5)~~ —
   **DONE 2026-09-11.** The twenty lines, once. It is `serveDirs`' machinery
@@ -697,22 +691,21 @@ and composes primitives it already knows — it will not browse. All six are don
   `patch` instead of `reload`: the browser re-imports that module and
   `swapRootComponent` hands it to AIR, whose diff patches the DOM in place — so
   a `<webview>` session, a loaded model, focus and scroll are the same elements
-  afterwards.
-  THE CONDITION IS THE WHOLE DESIGN. Re-importing a module gives a fresh copy
-  and every module that imported the OLD one still holds it; nothing in the
-  client graph imports the ENTRY, so nothing can be left stale, and that is not
-  true of any other file. A hot reload that silently does not apply an edit to
-  a child is worse than a reload that always works, so anything else — two
-  changed files, a child module, a cell — is the reload it always was. Cells
+  afterwards. THE CONDITION IS THE WHOLE DESIGN. Re-importing a module gives a
+  fresh copy and every module that imported the OLD one still holds it; nothing
+  in the client graph imports the ENTRY, so nothing can be left stale, and that
+  is not true of any other file. A hot reload that silently does not apply an
+  edit to a child is worse than a reload that always works, so anything else —
+  two changed files, a child module, a cell — is the reload it always was. Cells
   are deliberately never re-imported: a component holding an unbound twin of
-  every cell is the failure that makes naive HMR "sometimes work".
-  Every failure falls back to `location.reload()`, so the worst case is
-  today's behaviour. Found a real bug in my own first version: `_rerenderRoot`
-  diffs `h(state.App)` against the old root vnode, and a different function is
-  a different component — the subtree was REPLACED and the `<video>` really was
-  a new element. Retagging the old vnode says what happened (same component,
-  new implementation), the instance is reused, and the diff runs on the
-  rendered output. Pinned by a test that asserts element IDENTITY, not markup.
+  every cell is the failure that makes naive HMR "sometimes work". Every failure
+  falls back to `location.reload()`, so the worst case is today's behaviour.
+  Found a real bug in my own first version: `_rerenderRoot` diffs `h(state.App)`
+  against the old root vnode, and a different function is a different component
+  — the subtree was REPLACED and the `<video>` really was a new element.
+  Retagging the old vnode says what happened (same component, new
+  implementation), the instance is reused, and the diff runs on the rendered
+  output. Pinned by a test that asserts element IDENTITY, not markup.
 
 - ~~**`am dev --no-watch` and a `watch:` path list**~~ (watcher §3) — **DONE
   2026-09-11.** `aio.run({ watch: false })` / `{ watch: ["src/ui"] }`, and
@@ -755,11 +748,11 @@ and composes primitives it already knows — it will not browse. All six are don
 - ~~**A bundle treemap / `--analyze`** (newjob §8.9, wallet report §22.7)~~ — **DONE
   2026-09-11.** `deno task build --analyze`: same artifact, one extra report.
   The answerable version of "a treemap" is "which twenty things are most of my
-  bundle, and is anything in here that should not be", and the number that
-  makes it honest is `bytesInOutput` — what reached the output after
-  tree-shaking — because a 400 KB dependency that shakes down to 3 KB is not a
-  400 KB problem and a report saying it is costs someone a day. Folds a
-  dependency to its PACKAGE (the unit you can act on; Deno's nested
+  bundle, and is anything in here that should not be", and the number that makes
+  it honest is `bytesInOutput` — what reached the output after tree-shaking —
+  because a 400 KB dependency that shakes down to 3 KB is not a 400 KB problem
+  and a report saying it is costs someone a day. Folds a dependency to its
+  PACKAGE (the unit you can act on; Deno's nested
   `node_modules/.deno/pkg@ver/node_modules/pkg` layout needs the LAST segment,
   or you get a row per version) and the framework per AREA. The tail is
   summarised, never dropped — rows plus "everything else" always sum to the
@@ -786,23 +779,22 @@ thirteen findings that had been read and not written down (see the audit note in
   heuristic can go.
 - ~~**Selector deps discriminate on SOURCE TEXT** (composer §4)~~ — **ADDRESSED
   2026-09-11, and the proposed fix does not work.** Typing `deps` from the
-  literal cannot replace the heuristic, because the thing being discriminated
-  is not expressible in a type: with ONE dep, `fn: (s, prices)` (retired
-  spread) and `fn: (s, deps) => deps[0]` (current, named parameter) are the
-  SAME function at runtime — one argument after the slice, no `[` to read — and
-  no signature can tell a caller's intent apart from its arity. Two or more
-  deps were never ambiguous; the arity already separates them.
-  What WAS wrong, and is fixed: the ambiguous case resolves toward the retired
-  form, so the second spelling receives the slice where it expects a tuple and
-  `deps[0]` is `undefined` — correct-looking code, wrong number, no error.
-  MEASURED and pinned. The resolution is unchanged (prod must keep degrading
-  the same way), but the refusal now names BOTH readings and the
-  one-character fix, because the author of the second one was being told they
-  had used a form they have never heard of. `refuseRetired` gained an optional
-  `detail` for exactly this shape; the unambiguous multi-dep case still gets
-  the plain registry line, pinned so the note cannot spread into messages that
-  were already right. Documented in `docs/state/cells.md` as a rule:
-  destructure the tuple.
+  literal cannot replace the heuristic, because the thing being discriminated is
+  not expressible in a type: with ONE dep, `fn: (s, prices)` (retired spread)
+  and `fn: (s, deps) => deps[0]` (current, named parameter) are the SAME
+  function at runtime — one argument after the slice, no `[` to read — and no
+  signature can tell a caller's intent apart from its arity. Two or more deps
+  were never ambiguous; the arity already separates them. What WAS wrong, and is
+  fixed: the ambiguous case resolves toward the retired form, so the second
+  spelling receives the slice where it expects a tuple and `deps[0]` is
+  `undefined` — correct-looking code, wrong number, no error. MEASURED and
+  pinned. The resolution is unchanged (prod must keep degrading the same way),
+  but the refusal now names BOTH readings and the one-character fix, because the
+  author of the second one was being told they had used a form they have never
+  heard of. `refuseRetired` gained an optional `detail` for exactly this shape;
+  the unambiguous multi-dep case still gets the plain registry line, pinned so
+  the note cannot spread into messages that were already right. Documented in
+  `docs/state/cells.md` as a rule: destructure the tuple.
 - ~~**aiol rule 23 flags the spelling its own docs call correct**~~
   (llama.master §2) — **DONE 2026-09-11.** BOTH fixes, not either: it now fires
   only on `timeout: 0` — the shape that means "forever", which is what `long:`
@@ -842,13 +834,13 @@ thirteen findings that had been read and not written down (see the audit note in
   `state shape: N new field(s), no migration needed — cfg.retries (number)` at
   info level, pointing at the "shape drift" line for the case that is NOT safe.
   A SEPARATE type and line, not a fifth `issue` on the drift union: the remedy
-  differs (there isn't one), and a reader scanning for problems must not have
-  to filter the reassurance out of the warning. A rename shows as both, once in
-  each, which is exactly what a rename is. A brand-new CELL is not a pile of
-  new fields, a wholly new subtree is one arrival rather than five, and an open
+  differs (there isn't one), and a reader scanning for problems must not have to
+  filter the reassurance out of the warning. A rename shows as both, once in
+  each, which is exactly what a rename is. A brand-new CELL is not a pile of new
+  fields, a wholly new subtree is one arrival rather than five, and an open
   record's keys stay data. Found a real bug writing the test: the cap was only
-  checked on entry to the walk, so one level with 300 new keys pushed 300 —
-  the pre-existing drift walk checks inside its loop and was fine.
+  checked on entry to the walk, so one level with 300 new keys pushed 300 — the
+  pre-existing drift walk checks inside its loop and was fine.
 - ~~**The 100-msg/sec WS budget is tripped by a legitimate burst**~~ (a crypto wallet
   §10) — **DONE**, by a third route the report did not list and which is better
   than both it did: the SERVER ADVERTISES its budget in the hello (`rate`) and
@@ -870,9 +862,9 @@ thirteen findings that had been read and not written down (see the audit note in
   at all — and the two tools that cover what is genuinely left: `am eval` for
   "did the context initialise" (a real GPU is the only place that has a true
   answer) and `am shot --check` for the drawn pixels, which landed earlier the
-  same day. Says plainly not to stub `getContext`: a test against a fake GL is
-  a test about the fake, and it goes green on exactly the changes that break
-  the real thing.
+  same day. Says plainly not to stub `getContext`: a test against a fake GL is a
+  test about the fake, and it goes green on exactly the changes that break the
+  real thing.
 
 #### 11 · The dev audits ship to production (raised at beta1, not paid down)
 

@@ -4,6 +4,7 @@ import { isScheduleEffect, type ScheduleEffect } from "./schedule.ts";
 import { trackCall, trackPending } from "./method-cancel.ts";
 import { markInflight } from "./dispatch.ts";
 import { isOwnEffect, type OwnEffect } from "./own.ts";
+import { isNotifyEffect } from "./notify.ts";
 import type { AsyncMethod, Method, Mutation, SyncMethod } from "./cell-impl.ts";
 import {
   applyMutations,
@@ -120,10 +121,12 @@ function toDoneEffect(
   hasMethod: (m: string) => boolean,
   knownMethods: () => string[],
 ): Effect {
-  if (!isScheduleEffect(v) && !isOwnEffect(v)) {
+  if (!isScheduleEffect(v) && !isOwnEffect(v) && !isNotifyEffect(v)) {
     throw new Error(
       `[${cellName}] ${methodKey}(): s.$do(...) only takes effects ` +
-        `(schedule.* / own.*) — got ${describeNonEffect(v)}. To run another ` +
+        `(schedule.* / own.* / notify()) — got ${
+          describeNonEffect(v)
+        }. To run another ` +
         `method, call it directly (or schedule it: ` +
         `s.$do(schedule.next("id", self("method")))); to hand a value to the ` +
         `caller, just \`return\` it.`,
@@ -131,6 +134,10 @@ function toDoneEffect(
   }
   // Resolve self("m") at the capture site — the only place the owning cell is
   // known — so an unknown method throws HERE, in the method's own stack.
+  // The public union names two of the three framework effects; the third
+  // rides the same channel (route-effect.ts decides) and cannot be named here
+  // without reshaping a frozen type. Nothing below applies to it.
+  if (isNotifyEffect(v)) return v as unknown as Effect;
   if (isScheduleEffect(v) && v.kind !== "cancel") {
     const action = resolveSelfAction(
       v.action,
@@ -258,7 +265,7 @@ export function classifyReturnedArray(
 ): "effects" | "value" {
   let effects = 0;
   for (const v of value) {
-    if (isScheduleEffect(v) || isOwnEffect(v)) effects++;
+    if (isScheduleEffect(v) || isOwnEffect(v) || isNotifyEffect(v)) effects++;
   }
   if (effects === 0) return "value";
   if (effects === value.length) return "effects";
@@ -402,7 +409,9 @@ export function buildMethodsReducer(
     if (result === undefined) {
       return captured.length > 0 ? captured : undefined;
     }
-    if (isScheduleEffect(result) || isOwnEffect(result)) {
+    if (
+      isScheduleEffect(result) || isOwnEffect(result) || isNotifyEffect(result)
+    ) {
       refuseReturnedEffects(prefix, key);
       return [
         ...captured,
@@ -1099,7 +1108,8 @@ export function buildMethodsExecutor(
             // classifier as the sync path (classifyReturnedArray): all
             // effects → effects, none → value, mixed → throws into the
             // .catch below, which rejects the caller.
-            const retEffects = isScheduleEffect(value) || isOwnEffect(value)
+            const retEffects = isScheduleEffect(value) || isOwnEffect(value) ||
+                isNotifyEffect(value)
               ? [value as ScheduleEffect | OwnEffect]
               : Array.isArray(value) && value.length > 0 &&
                   classifyReturnedArray(name, _method, value) === "effects"

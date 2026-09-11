@@ -2,12 +2,14 @@
 
 import {
   type AioMeta,
+  shellBridgePreload,
   tmplBounds,
   tmplBoundsTracking,
   tmplCrashGuard,
   tmplKeyboardShortcuts,
   tmplParentWatch,
   tmplRendererDiagnostics,
+  tmplTray,
   tmplWillNavigate,
   tmplWindowShape,
   toSlug,
@@ -18,11 +20,25 @@ export function electronMainScript(url: string, meta?: AioMeta): string {
   const w = meta?.width ?? 800;
   const h = meta?.height ?? 600;
   const slug = toSlug(meta?.title ?? "aio-app");
+  // The tray icon is the app's own monogram, fetched from the app itself —
+  // the WebSocket shell has no app dir to read `icon.png` from.
+  const trayIcon =
+    `(async () => { const { net, nativeImage } = require('electron'); ` +
+    `const r = await net.fetch(${
+      JSON.stringify(url.replace(/\/$/, "") + "/icon.png")
+    }); if (!r.ok) return null; ` +
+    `return nativeImage.createFromBuffer(Buffer.from(await r.arrayBuffer())); })()`;
   return `
 const { app, BrowserWindow, Menu, ipcMain } = require('electron');
 const path = require('path');
 const fs = require('fs');
 Menu.setApplicationMenu(null);
+// The shell bridge (focus, tray clicks) — the ONLY preload this window has;
+// it must not carry __aioIPC, whose presence would select the IPC transport.
+const preloadFile = path.join(app.getPath('temp'), '__aio_shell_preload_' + process.pid + '.cjs');
+fs.writeFileSync(preloadFile, ${
+    JSON.stringify(shellBridgePreload({ standalone: true }))
+  });
 app.name = ${JSON.stringify(slug)};
 ${tmplCrashGuard()}
 ${tmplParentWatch()}
@@ -32,11 +48,12 @@ ${tmplBounds()}
 
 app.on('ready', () => {
   const b = loadBounds(${w}, ${h});
-${tmplWindowShape(meta)}
+${tmplWindowShape(meta, { preload: "preloadFile" })}
   const win = new BrowserWindow(b);
   if (b.x == null) win.center();
 ${tmplBoundsTracking()}
 ${tmplRendererDiagnostics(false)}
+${tmplTray(meta, trayIcon, meta?.title)}
   win.loadURL(${JSON.stringify(url)});
   const _appOrigin = new URL(${JSON.stringify(url)}).origin;
 ${tmplWillNavigate("_appOrigin")}
@@ -56,6 +73,6 @@ ${tmplWillNavigate("_appOrigin")}
   });
 ${tmplKeyboardShortcuts()}
 });
-app.on('window-all-closed', () => process.exit(0));
+app.on('window-all-closed', () => { try { fs.unlinkSync(preloadFile); } catch {} process.exit(0); });
 `.trim();
 }

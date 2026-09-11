@@ -86,6 +86,7 @@ Deno.test("envelope: no v1 wire prefixes outside the one proto shim", async () =
     "__error", // action-type suffix, not a frame
     "__schedule", // effect objects, network-rejected
     "__own",
+    "__notify", // the third framework effect — an effect tag, not a frame
     "__set", // internal action fragments
     "__exec",
     "__flow",

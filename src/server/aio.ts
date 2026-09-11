@@ -2239,6 +2239,7 @@ async function _runPhases<S, A, E>(
     getServer: () => ({
       broadcast: (patches) => server.broadcast(patches),
       broadcastTT: () => server.broadcastTT(),
+      broadcastUi: (raw) => server.broadcastUi?.(raw) ?? 0,
     }),
     scheduleManager,
     ownManager,
@@ -3057,12 +3058,23 @@ async function _runPhases<S, A, E>(
     // respected ui.head under `deno task dev` (HTTP) ship it in the packaged
     // window but NOT in the dev Electron window — two dev surfaces, two heads
     // (WYSIDIWYSIP).
+    // EVERY key the lifecycle's `ui` type names — not a hand-picked five.
+    // The list here silently lost chrome, theme, layout and lang (and then
+    // tray) on the way to the dev Electron launch: the lifecycle read
+    // `ui.chrome` from an object that never had it, so the templated shell
+    // drew the OS frame whatever the app asked for. Measured: `const TRAY =
+    // null` in the generated main of an app that configured a tray.
     ui: {
       width: ui.width,
       height: ui.height,
       showStatus: ui.showStatus,
       viewport: ui.viewport,
       head: ui.head,
+      chrome: ui.chrome,
+      theme: ui.theme,
+      layout: ui.layout,
+      lang: ui.lang,
+      tray: ui.tray,
     },
     keepServer: config.keepServer,
     setElectronProc: (proc) => {

@@ -24,18 +24,26 @@
         },
         "AioApp": {
           "kind": "typeAlias",
-          "sig": "62565cfc8ffb2a0f",
+          "sig": "012e5ee8bbeb5fec",
           "members": {
             "typeParams": "req:edf24d7ccedf6013",
-            "dispatch": "req:d3793a05e6bf54f8",
-            "getState": "req:65f4051c0f171ef9",
-            "snapshot": "opt:8fdea858b494cc90",
-            "loadSnapshot": "opt:61f18d6aa4338e5c",
+            "dispatch": "req:fn",
+            "dispatch.param0": "req:eb8a2b596f36bf18|88f0a04744f42113~A",
+            "dispatch.return": "req:9ab53fde76403afc",
+            "getState": "req:fn",
+            "getState.return": "req:754a6da6db715096",
+            "snapshot": "opt:fn",
+            "snapshot.return": "req:2fb40568533c1a6d",
+            "loadSnapshot": "opt:fn",
+            "loadSnapshot.param0": "req:f6c2bce213147f9c|336e2b46aff6c271~string",
+            "loadSnapshot.param1": "opt:bbafc21409c1af2f|49431e2f64e62922~typeLiteral",
+            "loadSnapshot.return": "req:b5f6ae1b8a43e31d",
             "db": "opt:bdd7f9eefe453d7a",
             "blobs": "opt:1628d9da8b59399b",
             "sessions": "opt:5880bc645fc6c890",
             "auth": "opt:67ba4aba181995e9",
-            "close": "req:005d95a066313783",
+            "close": "req:fn",
+            "close.return": "req:f9848a8ce1853551",
             "mode": "opt:929ba91d3ed9af28",
             "port": "opt:f6522636230fa080",
             "cells": "opt:object",
@@ -46,7 +54,7 @@
             "cells.list": "req:bc28822da39b691e"
           },
           "sigs": [
-            "62565cfc8ffb2a0f"
+            "012e5ee8bbeb5fec"
           ]
         },
         "AioError": {
@@ -79,16 +87,17 @@
         },
         "AioMeta": {
           "kind": "typeAlias",
-          "sig": "fdb15d5f42e5d271",
+          "sig": "b374fc330106223c",
           "members": {
             "title": "opt:2fb40568533c1a6d",
             "width": "opt:f6522636230fa080",
             "height": "opt:f6522636230fa080",
             "childWindows": "opt:0ecca0fe3beba89b",
-            "chrome": "opt:0cb8e5493e58cfb7"
+            "chrome": "opt:0cb8e5493e58cfb7",
+            "tray": "opt:bb7b2f54156b6da6"
           },
           "sigs": [
-            "fdb15d5f42e5d271"
+            "b374fc330106223c"
           ]
         },
         "AioUser": {
@@ -522,7 +531,7 @@
           "kind": "function",
           "sig": "0b6a7969000ecaf1",
           "members": {
-            "param0": "req:70315651f3ed72de|c142763d8effe77e~array",
+            "param0": "req:70315651f3ed72de|60c498895af611f0~CellEntry",
             "param1": "opt:b23e40dc2716d043|18ab6917e2283081~typeLiteral",
             "return": "req:3ef5969610274a3e"
           },
@@ -999,26 +1008,34 @@
         },
         "MethodDraftMeta": {
           "kind": "typeAlias",
-          "sig": "e66598c4dfe9667e",
+          "sig": "e5f6a4c36fc87d55",
           "members": {
             "typeParams": "req:b4703fac1525d195",
             "$signal": "req:81e067736a358b70",
-            "$commit": "req:0d6a4ba97f81ee81",
+            "$commit": "req:fn",
+            "$commit.param0": "opt:be1856ed7cd18fe5|b3d9da3d9fc5eb30~number",
+            "$commit.return": "req:b5f6ae1b8a43e31d",
             "$live": "req:432f010c9f2192b5",
-            "$do": "req:5d6f1992056985b5"
+            "$do": "req:fn",
+            "$do.param0": "req:0d2f431b65d16a80|1bd45a6ee26435aa~OwnEffect+21c0196216d23f86~NotifyEffect+2cd23def62fa15a2~ScheduleEffect",
+            "$do.param1": "opt:05b4106abcd855d0|1bd45a6ee26435aa~OwnEffect+21c0196216d23f86~NotifyEffect+2cd23def62fa15a2~ScheduleEffect",
+            "$do.return": "req:b5f6ae1b8a43e31d"
           },
           "sigs": [
-            "e66598c4dfe9667e"
+            "e5f6a4c36fc87d55"
           ]
         },
         "MethodDraftServed": {
           "kind": "typeAlias",
-          "sig": "94a71464cefd5a2a",
+          "sig": "3b3848fe2e92a3b1",
           "members": {
-            "$do": "req:5d6f1992056985b5"
+            "$do": "req:fn",
+            "$do.param0": "req:0d2f431b65d16a80|1bd45a6ee26435aa~OwnEffect+21c0196216d23f86~NotifyEffect+2cd23def62fa15a2~ScheduleEffect",
+            "$do.param1": "opt:05b4106abcd855d0|1bd45a6ee26435aa~OwnEffect+21c0196216d23f86~NotifyEffect+2cd23def62fa15a2~ScheduleEffect",
+            "$do.return": "req:b5f6ae1b8a43e31d"
           },
           "sigs": [
-            "94a71464cefd5a2a"
+            "3b3848fe2e92a3b1"
           ]
         },
         "MethodsCellConfig": {
@@ -1069,6 +1086,41 @@
           },
           "sigs": [
             "3fd23a6aa59672df"
+          ]
+        },
+        "notify": {
+          "kind": "function",
+          "sig": "fa56c1163d5999f3",
+          "members": {
+            "param0": "req:e0b4577faa387cad|cc44e81cff434409~NotifyOptions",
+            "return": "req:dbe91a034a733cb7"
+          },
+          "sigs": [
+            "b9612e3a4e0d1491"
+          ]
+        },
+        "NotifyEffect": {
+          "kind": "typeAlias",
+          "sig": "d0a1494e933135d4",
+          "members": {
+            "type": "req:1929d998117f4cd0"
+          },
+          "sigs": [
+            "d0a1494e933135d4"
+          ]
+        },
+        "NotifyOptions": {
+          "kind": "typeAlias",
+          "sig": "d4e702722bcbb3d9",
+          "members": {
+            "title": "req:2fb40568533c1a6d",
+            "body": "opt:2fb40568533c1a6d",
+            "tag": "opt:2fb40568533c1a6d",
+            "silent": "opt:0ecca0fe3beba89b",
+            "route": "opt:2fb40568533c1a6d"
+          },
+          "sigs": [
+            "d4e702722bcbb3d9"
           ]
         },
         "own": {
@@ -1430,7 +1482,7 @@
           "sig": "5b3b3c046c897df3",
           "members": {
             "param0": "req:f6c2bce213147f9c|336e2b46aff6c271~string",
-            "param1": "opt:48e3f01ef4cb7248|dddb2f651bac9222~array",
+            "param1": "opt:48e3f01ef4cb7248|e2e9e83e047a6f75~unknown",
             "return": "req:e76bf68fec16bac1"
           },
           "sigs": [
@@ -1644,6 +1696,31 @@
             "b333678b345af9f1"
           ]
         },
+        "TrayConfig": {
+          "kind": "typeAlias",
+          "sig": "b97e20507ae02238",
+          "members": {
+            "tooltip": "opt:2fb40568533c1a6d",
+            "menu": "opt:3479cf41b0ea7468",
+            "closeToTray": "opt:0ecca0fe3beba89b"
+          },
+          "sigs": [
+            "b97e20507ae02238"
+          ]
+        },
+        "TrayMenuItem": {
+          "kind": "typeAlias",
+          "sig": "0e26b9a76e6a3344",
+          "members": {
+            "label": "req:2fb40568533c1a6d",
+            "method": "opt:2fb40568533c1a6d",
+            "args": "opt:22253390033b0b01",
+            "route": "opt:2fb40568533c1a6d"
+          },
+          "sigs": [
+            "0e26b9a76e6a3344"
+          ]
+        },
         "Tx": {
           "kind": "typeAlias",
           "sig": "d6d59f832bb71a3e",
@@ -1657,7 +1734,7 @@
         },
         "UiConfig": {
           "kind": "typeAlias",
-          "sig": "0541d33dad4a2b30",
+          "sig": "0d12ca1fad9d69de",
           "members": {
             "title": "opt:2fb40568533c1a6d",
             "width": "opt:f6522636230fa080",
@@ -1669,11 +1746,12 @@
             "lang": "opt:2fb40568533c1a6d",
             "dir": "opt:64280ffe426f7d01",
             "chrome": "opt:0cb8e5493e58cfb7",
+            "tray": "opt:a1dd067e4851ec20",
             "theme": "opt:b516670a54a1b089",
             "layout": "opt:0ecca0fe3beba89b"
           },
           "sigs": [
-            "0541d33dad4a2b30"
+            "0d12ca1fad9d69de"
           ]
         },
         "UiTheme": {
@@ -2208,7 +2286,7 @@
           "members": {
             "param0": "req:236d540d3526de63|0f20b831cee094ad~Suspense+336e2b46aff6c271~string+66fd5cee5e53a87a~Portal+7d86f2ada94e82f2~Fragment+82c70105398d98b6~ErrorBoundary+c557c5d52d8c8c21~ComponentFn",
             "param1": "req:492f7a09e81aaf5d|9c9b1d3e8bfba8bc~Record+e47c90b8d1952424~null",
-            "param2": "opt:30dc517bf5419b33|09a9cb12a3ad6545~array",
+            "param2": "opt:30dc517bf5419b33|45ed766c6ff7ff7c~VChild",
             "return": "req:aba403b6ecb255cd"
           },
           "sigs": [
@@ -2572,6 +2650,16 @@
           },
           "sigs": [
             "3ae59510a1c4ce46"
+          ]
+        },
+        "requestNotificationPermission": {
+          "kind": "function",
+          "sig": "2605182fee9bb048",
+          "members": {
+            "return": "req:5db0439b66aadc3c"
+          },
+          "sigs": [
+            "aea1c2220d076ed7"
           ]
         },
         "resource": {
@@ -3089,7 +3177,7 @@
           "sig": "b25926d1e9143715",
           "members": {
             "param0": "req:1e78275d5a9db1df|d3eb23cebf392d2a~fnOrConstructor",
-            "param1": "opt:a8c66f838a06c264|dddb2f651bac9222~array",
+            "param1": "opt:a8c66f838a06c264|e2e9e83e047a6f75~unknown",
             "return": "req:2c4c1ae449467cab",
             "typeParams": "req:ddf4493b60497953"
           },
@@ -3311,7 +3399,7 @@
           "sig": "d3eea642a484488d",
           "members": {
             "param0": "req:4565b02f8cbf4cea|e74101a9f8ac492f~T",
-            "param1": "opt:a8c66f838a06c264|dddb2f651bac9222~array",
+            "param1": "opt:a8c66f838a06c264|e2e9e83e047a6f75~unknown",
             "return": "req:5735b1a0dd3aa0f1",
             "typeParams": "req:ddf4493b60497953"
           },
@@ -3324,7 +3412,7 @@
           "sig": "dd19b6aa9973076f",
           "members": {
             "param0": "req:4509061b8b16ec65|3401859efeb750d0~fnOrConstructor",
-            "param1": "opt:a8c66f838a06c264|dddb2f651bac9222~array",
+            "param1": "opt:a8c66f838a06c264|e2e9e83e047a6f75~unknown",
             "return": "req:b5f6ae1b8a43e31d"
           },
           "sigs": [
@@ -3336,7 +3424,7 @@
           "sig": "bfa7fc6865d8fcc8",
           "members": {
             "param0": "req:0f93ca432633198f|8c807311cea02758~fnOrConstructor",
-            "param1": "opt:a8c66f838a06c264|dddb2f651bac9222~array",
+            "param1": "opt:a8c66f838a06c264|e2e9e83e047a6f75~unknown",
             "return": "req:4081745670bb80df",
             "typeParams": "req:ddf4493b60497953"
           },
@@ -3486,7 +3574,7 @@
           "kind": "function",
           "sig": "079e26fb85b7fe5c",
           "members": {
-            "param0": "req:87de309c2d8442f2|75ee3e08091a789c~array",
+            "param0": "req:87de309c2d8442f2|2548b7b8af74df51~typeLiteral",
             "return": "req:6e8db6dd75a3971c"
           },
           "sigs": [
@@ -5455,32 +5543,34 @@
         },
         "SpawnHandle": {
           "kind": "typeAlias",
-          "sig": "9b77e51058f14b7e",
+          "sig": "43c3423bd5afaa5b",
           "members": {
             "pid": "req:dfcf8bb3a2454f51",
             "status": "req:4549deebed0a5f66",
             "paused": "req:b0d796a0bdd3e6b1",
+            "stdin": "opt:c955e42836a520d4",
             "pause": "req:d831502f3c16c146",
             "resume": "req:d831502f3c16c146",
             "kill": "req:7494c804f367228f"
           },
           "sigs": [
-            "9b77e51058f14b7e"
+            "43c3423bd5afaa5b"
           ]
         },
         "SpawnOptions": {
           "kind": "typeAlias",
-          "sig": "02a8319c2de34e67",
+          "sig": "1877c16ef2336cfd",
           "members": {
             "args": "opt:6941c580c10685fb",
             "cwd": "opt:2fb40568533c1a6d",
             "env": "opt:09b94ba87da5c3f0",
             "onLine": "opt:bfad7666f1f93840",
             "signal": "opt:0dd466a47c7c7eec",
-            "killGraceMs": "opt:f6522636230fa080"
+            "killGraceMs": "opt:f6522636230fa080",
+            "stdin": "opt:0ecca0fe3beba89b"
           },
           "sigs": [
-            "02a8319c2de34e67"
+            "1877c16ef2336cfd"
           ]
         },
         "SpawnStatus": {
@@ -5493,6 +5583,17 @@
           },
           "sigs": [
             "809c6bc0ca3e0ca9"
+          ]
+        },
+        "SpawnStdin": {
+          "kind": "typeAlias",
+          "sig": "23dcbdf10cf87234",
+          "members": {
+            "write": "req:fef48d516d2d0507",
+            "close": "req:ea8fb37f7482dd65"
+          },
+          "sigs": [
+            "23dcbdf10cf87234"
           ]
         },
         "syncTables": {
@@ -5990,7 +6091,7 @@
           "kind": "function",
           "sig": "891a3522af9430d2",
           "members": {
-            "param0": "req:d2b933bdb66a06ee|ef30d9ad5489c3e8~array",
+            "param0": "req:d2b933bdb66a06ee|895d8bccc6155ec5~CellDef",
             "param1": "req:8f084075c4f4f9aa|",
             "return": "req:b7e32cb6dc65132d"
           },

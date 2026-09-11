@@ -228,6 +228,9 @@ export function startCellWorkerHost(cell: CellDef): Promise<never> {
       routeEffect<Msg>(effect, {
         // Resources are acquired and disposed on the thread that owns them.
         own: (e) => ownWorker.handle(e),
+        // A notification crosses to the main thread like a timer does: the
+        // clients are there.
+        notify: (e) => post({ t: "effects", list: [e as unknown as Msg] }),
         // The scheduler is a main-isolate singleton — timers stay there.
         schedule: (e) => post({ t: "effects", list: [e as unknown as Msg] }),
         app: (e) => {

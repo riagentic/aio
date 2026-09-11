@@ -125,6 +125,28 @@ bug:
 Windows has no process groups or `SIGSTOP`: `kill()` uses `taskkill /T`, and
 `pause()` / `resume()` **throw** rather than pretend.
 
+### Talking to it — `stdin: true`
+
+By default the child's stdin is closed (EOF at once), because a child that reads
+stdin when it is a pipe blocks until it gets EOF — and a pipe nobody asked for
+is a hang nobody can explain. Ask for it when the child takes input:
+
+```ts
+const repl = await spawn("python3", {
+  args: ["-i", "-q"],
+  stdin: true,
+  onLine: (l) => s.transcript.push(l),
+});
+await repl.stdin!.write("print(2 + 2)\n");
+await repl.stdin!.close(); //  EOF — the interpreter exits
+const { code } = await repl.status;
+```
+
+A string is written as UTF-8; a `Uint8Array` as it is. `write()` rejects once
+the child has exited or after `close()`, so a message into a closed pipe fails
+instead of vanishing. Forgetting `close()` leaks nothing — the child's exit
+closes the pipe — but a child that reads until EOF will wait for it.
+
 ## Letting it take as long as it takes
 
 An async method has a 30s ceiling (`effectTimeoutMs`) so a method that never

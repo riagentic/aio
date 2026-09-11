@@ -24,7 +24,6 @@ import {
 import { appDirs, installRoot } from "./server/app-dirs.ts";
 import { BUILD_VERSION_ENV } from "./server/app-version.ts";
 import { forwardedToFleet, targetForFlags, TARGETS } from "./build-all.ts";
-import { APP_ICON, APP_STYLE, BUNDLE_JS } from "./server/app-files.ts";
 import { keepInDistStaging } from "./build/dist-staging.ts";
 import { slugify } from "./server/single-instance-lock.ts";
 import { ensureEmbeddedBundle, runBundle } from "./build/build-bundle.ts";

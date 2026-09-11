@@ -159,6 +159,13 @@ export type UiConfig = {
    *  title bar hides itself when the window-control bridge is absent, so one
    *  codebase serves both without a branch. */
   chrome?: "standard" | "themed" | "none";
+  /** A system tray icon (Electron). `true` for the icon with Show / Hide /
+   *  Quit; an object for a tooltip, your own menu items (each dispatches a
+   *  `"cell:method"` or navigates to a `route`), and `closeToTray`, which
+   *  turns the window's close button into hide. The icon is the app's own —
+   *  the same monogram the window shows. Browser and Android: no tray, no
+   *  error, nothing to configure away. */
+  tray?: boolean | TrayConfig;
   /** The default look — and who owns the visual stage.
    *
    *  **Nothing paints unless you ask.** An app that never mentions `theme`
@@ -634,7 +641,11 @@ export type CellFieldFlags = Record<
   Record<string, { persisted: boolean; ui: boolean }>
 >;
 
-/** Handle returned by aio.run() — dispatch actions, read state, or shut down */
+/** Handle returned by aio.run() — dispatch actions, read state, or shut down
+ *
+ *  @served — the framework builds this handle; an app only CALLS it. A
+ *  parameter of one of its function-typed members may widen (`check:api`
+ *  reads the tag; see scripts/api-snapshot.ts). */
 export type AioApp<S = unknown, A = unknown> = {
   dispatch: (action: A) => Promise<unknown>;
   getState: () => S;
@@ -648,7 +659,9 @@ export type AioApp<S = unknown, A = unknown> = {
    *  `POST /__aio/trojan/snapshot/force`), not in this signature: surface
    *  compatibility is absolute, so a capability is added as a new door rather
    *  than by reshaping a signature an app may already hold. */
-  loadSnapshot?: (json: string) => void; // server-only (undefined in standalone)
+  /** `{ force: true }` loads a snapshot whose cell set does not match this
+   *  app — the deliberate override; without it such a file is refused. */
+  loadSnapshot?: (json: string, opts?: { force?: boolean }) => void; // server-only (undefined in standalone)
   db?: DB; // async SQLite — query/execute/transaction (undefined in standalone)
   /** Content-addressed binary store (tier ③ — docs/persistence/big-data.md).
    *  put/stream/info/url/delete/list under `appDirs(appId).files/blobs/`;
@@ -971,4 +984,27 @@ export type CellsConfig = {
   onCheckpointRestore?: (
     checkpoint: CheckpointData,
   ) => Record<string, unknown> | null;
+};
+
+/** One entry of `ui.tray.menu`. `"-"` is a separator. */
+export type TrayMenuItem =
+  | {
+    label: string;
+    /** `"cell:method"` — dispatched by the page with `args`, through the
+     *  same door as a button click. */
+    method?: string;
+    args?: unknown[];
+    /** A route to navigate to; the window is shown first. */
+    route?: string;
+  }
+  | "-";
+
+/** `ui.tray` as an object. `true` is `{}`: the icon, Show / Hide / Quit. */
+export type TrayConfig = {
+  /** Hover text. Default: the app's title. */
+  tooltip?: string;
+  /** Your items, above the built-in Show / Hide / Quit. */
+  menu?: TrayMenuItem[];
+  /** The window's close button hides it instead; the tray's Quit quits. */
+  closeToTray?: boolean;
 };
