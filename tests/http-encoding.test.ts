@@ -334,7 +334,6 @@ Deno.test("encoding: incompressible types are not recompressed", () => {
       "image/jpeg",
       "image/webp",
       "font/woff2",
-      "application/wasm",
       "application/zip",
       "video/mp4",
       "application/octet-stream",
@@ -346,6 +345,12 @@ Deno.test("encoding: incompressible types are not recompressed", () => {
     const ct of [
       "text/html; charset=utf-8",
       "text/css",
+      // WASM is a PLAIN BINARY, not a compressed container — it sat in the
+      // list above beside png/woff2/zip for a long time. Measured on two real
+      // modules: a 23 MB engine gzips to 6.3 MB (73% saved) and a 103 KB
+      // module to 48.5 KB (53%). Every WASM app aio served paid 2-4x its
+      // download for one MIME type being in the wrong group.
+      "application/wasm",
       "application/javascript",
       "application/json",
       "application/manifest+json",
@@ -539,4 +544,156 @@ Deno.test("encoding: a duplicated token takes its LOWEST weight", () => {
   // A well-formed header is unaffected — there are no duplicates in one.
   assertEquals(negotiate("gzip, deflate, br", all), "br");
   assertEquals(negotiate("br;q=0, gzip", all), "gzip");
+});
+
+Deno.test("encoding: a REAL .wasm body goes out compressed, and shrinks", async () => {
+  // The type check above says wasm is compressible; this proves the whole path
+  // actually compresses one, on bytes with a wasm module's real shape rather
+  // than on repeated text (which compresses so well it would pass no matter
+  // what the finisher did).
+  _clearEncodedCache();
+  // A hand-built module: the 8-byte header, then section-ish bytes with the
+  // structure a wasm binary has — repeated opcodes and a string table — which
+  // is exactly why the format compresses and a PNG does not.
+  const parts: number[] = [0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00];
+  const names = ["memory", "__wbindgen_malloc", "__wbg_get", "export_fn"];
+  for (let i = 0; i < 400; i++) {
+    parts.push(0x20, i & 0x7f, 0x21, 0x41, 0x6a, 0x0b); // local.get/set/i32/add/end
+    for (const ch of names[i % names.length]!) parts.push(ch.charCodeAt(0));
+  }
+  const body = new Uint8Array(parts);
+  assert(
+    body.byteLength > MIN_COMPRESS_BYTES,
+    "the body has to clear the floor or nothing would compress it",
+  );
+
+  const resp = new Response(body, {
+    headers: {
+      "Content-Type": "application/wasm",
+      "Content-Length": String(body.byteLength),
+      "Cache-Control": "no-cache",
+    },
+  });
+  const out = await encodeResponse(
+    new Request("http://localhost/pkg_bg.wasm", {
+      headers: { "Accept-Encoding": "br, gzip" },
+    }),
+    resp,
+  );
+  const encoding = out.headers.get("Content-Encoding");
+  assert(
+    encoding === "br" || encoding === "gzip",
+    `a wasm module must be compressed on the wire, got ${encoding}`,
+  );
+  const sent = (await out.arrayBuffer()).byteLength;
+  assert(
+    sent < body.byteLength,
+    `${sent} bytes for a ${body.byteLength}-byte module is not a saving`,
+  );
+  // `Vary` has to carry the negotiation or a shared cache serves the
+  // compressed body to a client that did not ask for it.
+  assertStringIncludes(out.headers.get("Vary") ?? "", "Accept-Encoding");
+});
+
+Deno.test("encoding: a client that cannot decompress still gets its wasm", async () => {
+  _clearEncodedCache();
+  const body = new Uint8Array(2000).fill(0x41);
+  const resp = new Response(body, {
+    headers: {
+      "Content-Type": "application/wasm",
+      "Content-Length": String(body.byteLength),
+    },
+  });
+  const out = await encodeResponse(
+    new Request("http://localhost/pkg_bg.wasm"),
+    resp,
+  );
+  assertEquals(out.headers.get("Content-Encoding"), null);
+  assertEquals((await out.arrayBuffer()).byteLength, body.byteLength);
+});
+
+Deno.test("encoding: a body over the buffer ceiling is STREAM-compressed, not sent raw", async () => {
+  // `MAX_BUFFER_BYTES` is a heap guard, and it was accidentally a correctness
+  // ceiling too: the larger the asset, the less the finisher helped, until at
+  // 8 MB it stopped helping at all. Measured on a real 23 MB WASM engine —
+  // 23 MB on the wire where 6.3 MB would do, on the single biggest download an
+  // app of that shape has.
+  _clearEncodedCache();
+  const chunk = new Uint8Array(64 * 1024).fill(0x61);
+  const total = MAX_BUFFER_BYTES + chunk.byteLength * 4;
+  let sentIn = 0;
+  const body = new ReadableStream<Uint8Array>({
+    pull(c) {
+      if (sentIn >= total) return c.close();
+      sentIn += chunk.byteLength;
+      c.enqueue(chunk);
+    },
+  });
+  const resp = new Response(body, {
+    headers: {
+      "Content-Type": "application/wasm",
+      "Content-Length": String(total),
+    },
+  });
+  const out = await encodeResponse(
+    new Request("http://localhost/big_bg.wasm", {
+      headers: { "Accept-Encoding": "gzip, br" },
+    }),
+    resp,
+  );
+  assertEquals(
+    out.headers.get("Content-Encoding"),
+    "gzip",
+    "CompressionStream has no brotli — gzip that streams beats brotli that " +
+      "cannot run",
+  );
+  assertEquals(
+    out.headers.get("Content-Length"),
+    null,
+    "the compressed length is unknown until the last byte — it is chunked now",
+  );
+  assertStringIncludes(out.headers.get("Vary") ?? "", "Accept-Encoding");
+  const got = (await out.arrayBuffer()).byteLength;
+  assert(got > 0 && got < total, `${got} bytes for ${total} is no saving`);
+});
+
+Deno.test("encoding: an INCOMPRESSIBLE oversized body is still untouched", async () => {
+  // The contract the ceiling was protecting, which must survive: a video, an
+  // archive or an `application/octet-stream` download keeps its
+  // `Content-Length` — that is the progress bar a person actually watches.
+  _clearEncodedCache();
+  const total = MAX_BUFFER_BYTES + 1024;
+  const resp = new Response(new Uint8Array(16).fill(1), {
+    headers: {
+      "Content-Type": "application/octet-stream",
+      "Content-Length": String(total),
+    },
+  });
+  const out = await encodeResponse(
+    new Request("http://localhost/movie.bin", {
+      headers: { "Accept-Encoding": "gzip" },
+    }),
+    resp,
+  );
+  assertEquals(out.headers.get("Content-Encoding"), null);
+  assertEquals(out.headers.get("Content-Length"), String(total));
+});
+
+Deno.test("encoding: `gzip;q=0` is a REFUSAL, even oversized", async () => {
+  // The one shape a substring match gets backwards.
+  _clearEncodedCache();
+  const total = MAX_BUFFER_BYTES + 1024;
+  const resp = new Response(new Uint8Array(16).fill(2), {
+    headers: {
+      "Content-Type": "application/wasm",
+      "Content-Length": String(total),
+    },
+  });
+  const out = await encodeResponse(
+    new Request("http://localhost/x.wasm", {
+      headers: { "Accept-Encoding": "gzip;q=0, identity" },
+    }),
+    resp,
+  );
+  assertEquals(out.headers.get("Content-Encoding"), null);
 });

@@ -540,13 +540,19 @@ Deno.test("conformance: ErrorBoundary catches a throw during UPDATE (via parent 
   await closeWindow(win);
 });
 
-Deno.test("conformance: component-LOCAL re-render throw keeps old output, siblings survive (AIO-138 pin)", async () => {
+Deno.test("conformance: component-LOCAL re-render throw reaches the ErrorBoundary, and recovers", async () => {
   const { win, doc } = harness();
-  // Pinned design: when a component's OWN signal-triggered re-render throws,
-  // the renderer keeps the previous output (renderer-rerender.ts, AIO-138) —
-  // it does NOT bubble to an ErrorBoundary above (that catches the diff path
-  // exercised in the previous test). This pin documents the fork so any
-  // future unification is a conscious change.
+  // THE CONSCIOUS UNIFICATION the AIO-138 pin invited. AIR caught a throw on
+  // mount and a throw that arrived through a parent's diff, but a throw in a
+  // component's OWN signal-triggered re-render did not reach the boundary: the
+  // subtree kept its last good output and quietly stopped updating, forever.
+  // An author who wrote `<ErrorBoundary fallback=…>` said in so many words
+  // what to show when this subtree fails; showing stale content instead is not
+  // graceful degradation, it is ignoring the instruction — and it is
+  // indistinguishable from working, which is the outcome this repo bans.
+  //
+  // AIO-138 itself is UNCHANGED and pinned by the next test: with no boundary
+  // above, the last good output is still what stays.
   const boom = signal(false);
   const n = signal(0);
   const Volatile = () => {
@@ -570,18 +576,131 @@ Deno.test("conformance: component-LOCAL re-render throw keeps old output, siblin
   boom.set(true); // only Volatile subscribes — component-local re-render
   await tick();
   assertEquals(
-    (doc as any).querySelector("#ok").textContent,
-    "ok",
-    "old output retained on local re-render throw",
+    (doc as any).querySelector("#f")?.textContent,
+    "boom-local",
+    "the author's fallback, not a subtree that silently stopped updating",
   );
+  assertEquals((doc as any).querySelector("#ok"), null);
+
   n.set(1);
   await tick();
   assertEquals(
     (doc as any).querySelector("#sib").textContent,
     "sib1",
-    "sibling keeps updating after the contained throw",
+    "sibling outside the boundary keeps updating",
+  );
+
+  // RECOVERY — the half that is easy to ship broken. A fallback normally reads
+  // no signals, so a naive implementation subscribes the component to nothing
+  // and the fallback becomes permanent: a worse stale than the one it
+  // replaced. The signal that caused the throw was read before the throw, so
+  // it is carried into the fallback render's subscriptions.
+  boom.set(false);
+  await tick();
+  assertEquals((doc as any).querySelector("#f"), null, "fallback removed");
+  assertEquals(
+    (doc as any).querySelector("#ok").textContent,
+    "ok",
+    "the component renders again — the boundary is not a one-way door",
   );
   t.unmount();
+  await closeWindow(win);
+});
+
+Deno.test("conformance: component-LOCAL re-render throw with NO boundary keeps old output (AIO-138 pin)", async () => {
+  const { win, doc } = harness();
+  // AIO-138 unchanged: with nobody above who said what to show instead, the
+  // last good output is the least-destructive answer, and the error is loud on
+  // the console and to the test harness. This is the pin that keeps the
+  // unification above scoped to apps that actually asked for a boundary.
+  const boom = signal(false);
+  const n = signal(0);
+  const Volatile = () => {
+    if (boom.value) throw new Error("boom-local-nb");
+    return h("em", { id: "ok" }, "ok");
+  };
+  // The sibling subscribes on its OWN — if `App` read `n`, `n.set` would
+  // re-render App, which re-renders Volatile through the DIFF path, and this
+  // test would be measuring that path instead of the component-local one.
+  const Sib = () => h("span", { id: "sib" }, `sib${n.value}`);
+  const App = () => h("div", { id: "r" }, h(Volatile, null), h(Sib, null));
+  const realError = console.error;
+  console.error = () => {};
+  try {
+    const t = testComponent(App, { document: doc });
+    assertEquals((doc as any).querySelector("#ok").textContent, "ok");
+    boom.set(true);
+    await tick();
+    assertEquals(
+      (doc as any).querySelector("#ok").textContent,
+      "ok",
+      "old output retained on local re-render throw",
+    );
+    n.set(1);
+    await tick();
+    assertEquals(
+      (doc as any).querySelector("#sib").textContent,
+      "sib1",
+      "sibling keeps updating after the contained throw",
+    );
+    // …and it still RECOVERS, which is what proves the retained output is a
+    // live component and not a corpse.
+    boom.set(false);
+    await tick();
+    assertEquals((doc as any).querySelector("#ok").textContent, "ok");
+    t.unmount();
+  } finally {
+    console.error = realError;
+  }
+  await closeWindow(win);
+});
+
+Deno.test("conformance: a fallback that ALSO throws degrades, it does not loop", async () => {
+  const { win, doc } = harness();
+  // The boundary's last promise: it cannot make things worse than the failure
+  // it was catching. Re-entering to render the fallback must not re-enter
+  // again when the fallback is what threw.
+  const boom = signal(false);
+  const Volatile = () => {
+    if (boom.value) throw new Error("boom-a");
+    return h("em", { id: "ok" }, "ok");
+  };
+  const App = () =>
+    h(
+      "div",
+      { id: "r" },
+      h(
+        ErrorBoundary,
+        {
+          fallback: () => {
+            throw new Error("fallback-also-throws");
+          },
+        },
+        h(Volatile, null),
+      ),
+    );
+  const realError = console.error;
+  console.error = () => {};
+  try {
+    const t = testComponent(App, { document: doc });
+    boom.set(true);
+    await tick(); // must RETURN — an unbounded re-entry hangs here forever
+    assertEquals(
+      (doc as any).querySelector("#ok").textContent,
+      "ok",
+      "falls back to the AIO-138 behaviour instead of spinning",
+    );
+    boom.set(false);
+    await tick();
+    assertEquals(
+      (doc as any).querySelector("#ok").textContent,
+      "ok",
+      "and the component is still live afterwards",
+    );
+    t.unmount();
+  } finally {
+    console.error = realError;
+  }
   await closeWindow(win);
 });
 

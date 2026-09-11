@@ -180,35 +180,74 @@ function dedupe(xs: string[]): string[] {
 export function contentSecurityPolicy(
   cfg: SecurityConfig | undefined,
   ancestors: string,
+  /** A per-response nonce for the SHELL's inline scripts. Only meaningful
+   *  under `"strict"` — see {@link SecurityConfig.cspNonce}. */
+  nonce?: string,
 ): string | null {
   const mode = cfg?.csp ?? "basic";
   if (mode === false || mode === "off") return null;
   if (typeof mode === "string" && mode !== "basic" && mode !== "strict") {
     // A literal policy the app wrote — used verbatim, because an app that
-    // hands us a policy has already decided.
+    // hands us a policy has already decided. `cspDirectives` is ignored here
+    // for the same reason: two ways to say one thing, one of them silent.
     return mode;
   }
-  const directives = [
-    `base-uri 'self'`,
-    `object-src 'none'`,
-    `frame-ancestors ${ancestors}`,
-    `form-action 'self'`,
-  ];
+  const directives = new Map<string, string>([
+    ["base-uri", `'self'`],
+    ["object-src", `'none'`],
+    ["frame-ancestors", ancestors],
+    ["form-action", `'self'`],
+  ]);
   if (mode === "strict") {
-    // `'unsafe-inline'` stays for style and script: the served shell inlines
-    // both (the theme stylesheet and the two-line module bootstrap), and an
-    // app's own components set inline styles as a matter of course. What
-    // `default-src 'self'` buys even so is the whole off-origin surface —
-    // an injected `<script src=//evil>` no longer loads.
-    directives.unshift(`default-src 'self'`);
-    directives.push(
-      `script-src 'self' 'unsafe-inline'`,
-      `style-src 'self' 'unsafe-inline'`,
-      `img-src 'self' data: blob:`,
-      `font-src 'self' data:`,
-      // A page must always be able to reach its own socket, on either scheme.
-      `connect-src 'self' ws: wss:`,
+    // `default-src 'self'` buys the whole off-origin surface — an injected
+    // `<script src=//evil>` no longer loads.
+    const ordered = new Map<string, string>([["default-src", `'self'`]]);
+    for (const [k, v] of directives) ordered.set(k, v);
+    directives.clear();
+    for (const [k, v] of ordered) directives.set(k, v);
+    // A NONCE names the shell's own inline scripts, so `'unsafe-inline'` can
+    // go and every OTHER inline script is refused. Without one it has to stay:
+    // the served shell inlines its own bootstrap, and a policy that blocks the
+    // page aio itself served is not a hardening, it is an outage.
+    directives.set(
+      "script-src",
+      nonce ? `'self' 'nonce-${nonce}'` : `'self' 'unsafe-inline'`,
     );
+    // STYLES KEEP `'unsafe-inline'`, always. The directive also governs the
+    // `style=` ATTRIBUTE, which `style={{…}}` produces on ordinary components,
+    // so noncing styles would break most apps in exchange for a directive
+    // nobody asked about.
+    directives.set("style-src", `'self' 'unsafe-inline'`);
+    directives.set("img-src", `'self' data: blob:`);
+    directives.set("font-src", `'self' data:`);
+    // A page must always be able to reach its own socket, on either scheme.
+    directives.set("connect-src", `'self' ws: wss:`);
   }
-  return directives.join("; ");
+  // The app's own overrides, LAST, so they beat everything computed above.
+  for (const [name, value] of Object.entries(cfg?.cspDirectives ?? {})) {
+    const key = name.trim().toLowerCase();
+    if (!key) continue;
+    if (value === false) directives.delete(key);
+    else if (typeof value === "string" && value.trim()) {
+      directives.set(key, value.trim());
+    }
+  }
+  if (directives.size === 0) return null;
+  return [...directives].map(([k, v]) => `${k} ${v}`).join("; ");
+}
+
+/** A fresh CSP nonce: 128 bits, base64. Per RESPONSE — a nonce reused across
+ *  responses is a nonce an attacker can read from one page and replay into
+ *  another, which is the whole reason the directive exists. */
+export function cspNonce(): string {
+  const bytes = new Uint8Array(16);
+  crypto.getRandomValues(bytes);
+  // BASE64URL, not plain base64. CSP's `base64-value` admits `-` and `_` as
+  // well as `+` and `/`, so both are valid — but `+` and `/` are
+  // regex-special, and a nonce carrying one turns every downstream
+  // `new RegExp(nonce)` into a different pattern than its author meant. That
+  // happens intermittently, on one run in a few, which is the worst way for a
+  // bug to present. `=` padding goes for the same reason.
+  return btoa(String.fromCharCode(...bytes))
+    .replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
 }

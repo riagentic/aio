@@ -16,6 +16,19 @@ export interface MountHandle {
 export type AnyDoc = any;
 
 export interface ComponentInstance {
+  /** The `<ErrorBoundary>` vnode this component mounted inside, if any — the
+   *  only moment that is knowable, since a re-render happens long after the
+   *  render stack has unwound. Used to show the boundary's fallback when a
+   *  LATER render throws. @internal */
+  _boundary?: unknown;
+  /** Set when the next render of this component must show its boundary's
+   *  fallback instead of the component. Cleared as it is consumed. @internal */
+  _fallbackError?: Error;
+  /** The dependency set of the render that threw, carried into the fallback
+   *  render so the component stays subscribed to the signal that will fix it.
+   *  @internal */
+  // deno-lint-ignore no-explicit-any
+  _fallbackDeps?: Set<any>;
   // deno-lint-ignore no-explicit-any
   deps: Set<any>;
   unsubs: (() => void)[];

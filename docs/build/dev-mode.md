@@ -197,6 +197,37 @@ automatically reload.
 **No state is lost** — state lives on the server, so reloading the browser is
 free. The UI picks up exactly where it left off.
 
+### Editing only `App.tsx` PATCHES, it does not reload
+
+Cell state surviving a reload is most of the problem, and for a long time it was
+treated as all of it. It is not: a reload also destroys an embedded
+`<webview>`'s logged-in session, a model you spent 40 seconds loading into the
+GPU, and a wallet's unlock. Three apps reported exactly those.
+
+So when the **only** changed file in a save burst is the UI entry, aio sends a
+`patch` instead: the browser re-imports that one module, hands the new component
+to AIR, and AIR's diff patches the DOM in place. Anything the browser holds
+state for — a `<video>`, a `<webview>`, focus, scroll position — is the same
+element afterwards, because it was never replaced.
+
+**The condition is narrow on purpose.** Re-importing a module gives a fresh
+copy, and every module that imported the _old_ one still holds it. Nothing in
+your client graph imports the UI entry, so re-importing it cannot leave anything
+stale — and that is not true of any other file. A hot reload that silently fails
+to apply an edit to a child module is worse than a reload that always works, so:
+
+| You changed                    | What happens                                               |
+| ------------------------------ | ---------------------------------------------------------- |
+| `src/App.tsx` alone            | patch, no reload                                           |
+| `App.tsx` **and** another file | full reload                                                |
+| any other `.ts` / `.tsx`       | full reload                                                |
+| a file that defines a cell     | server restart                                             |
+| `*.server.ts`                  | full reload + a note that this process kept the old module |
+
+Every failure falls back to a reload — a syntax error in the new module, a
+render that throws, a page with no mounted root. The worst case is exactly the
+behaviour it replaced.
+
 ### Cell edits restart the app
 
 A browser reload can't help a cell: cells run **in the server process**, so new

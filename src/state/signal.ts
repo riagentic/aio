@@ -380,8 +380,10 @@ class SignalImpl<T> implements Omit<Signal<T>, never> {
     const resolved = next;
     if (!opts?.force && Object.is(this._value, resolved)) {
       if (this._name && isDevMode()) {
+        // The logger prints the category it infers from the call site, so a
+        // hand-written `[aio]` is a second prefix beside the real one.
         log.warn(
-          `[aio] signal "${this._name}" update skipped (identical reference)`,
+          `signal "${this._name}" update skipped (identical reference)`,
         );
       }
       return;

@@ -61,10 +61,13 @@ export interface ServerConfig {
   dir?: import("./aio-types.ts").UiConfig["dir"];
   chrome?: "standard" | "themed" | "none"; // ui.chrome — desktop window frame
   theme?: UiTheme; // ui.theme — how much of the default look is emitted
+  layout?: boolean; // ui.layout — false drops the page-layout defaults
   themeName?: string; // identity the theme accent is derived from (appId)
   renderBudget?: RenderBudget; // sent to browser for RenderMeter thresholds
   /** Extra read-only DEV-server roots by URL prefix — see CellsConfig.serveDirs. */
   serveDirs?: Record<string, string>;
+  /** Read-only roots served in dev AND prod — see CellsConfig.assets. */
+  assets?: Record<string, string>;
   /** Cells the client should route through the sync engine (localFirst). */
   syncCells?: string[];
   /** Every cell THIS process booted. Sent on the `cfg` frame so a client can

@@ -31,6 +31,28 @@ const OWNERS: Record<string, [Owner, string]> = {
   // ── the one call ────────────────────────────────────────────────
   _resetAioRuntime: ["RUNTIME", "the entry point itself"],
   _resetCellBindings: ["RUNTIME", "cell→signal bindings"],
+  _resetClientSourceMap: [
+    "MANUAL",
+    "the seam a test uses to install a fake map. `_resetAioRuntime` already " +
+    "clears the REAL one (`clearClientSourceMap()`) every reset, which is " +
+    "the bleed that matters — a map from one test remapping another test's " +
+    "forwarded positions. This is the same clear under a test-only name",
+  ],
+  _resetCss: [
+    "MANUAL",
+    "scoped-CSS rules live in src/ui/, and neither src/state/ (where " +
+    "_resetAioRuntime is) nor src/testing/ may import ui — the boundary " +
+    "matrix. Loosening a red gate to save one line is the wrong trade, so the " +
+    "one test file that defines classes clears them itself. A leaked class is " +
+    "also inert: the name is a hash of the rule, so nothing can collide with it",
+  ],
+  _resetDevOverlay: [
+    "MANUAL",
+    "the overlay installs ONCE per page and is never uninstalled by the " +
+    "product — a reset exists only so the one test file that installs it can " +
+    "put the globals back. It arms nothing unless a test turns dev mode on " +
+    "and hands it a document",
+  ],
   _resetCallTimeouts: ["RUNTIME", "per-call timeout registry"],
   _resetDegraded: ["RUNTIME", "process-global degraded registry"],
   _resetBigStateWarnings: [

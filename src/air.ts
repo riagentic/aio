@@ -145,6 +145,15 @@ export type { TransitionResult } from "./air/transition.ts";
 
 // ── Async data as signals ────────────────────────────────────────────
 export { type Resource, resource } from "./browser-air.ts";
+export {
+  type Dispose,
+  onChange,
+  type OnChangeOptions,
+  type ResourceHandle,
+  type ResourceKey,
+  useResource,
+  type UseResourceConfig,
+} from "./browser-air.ts";
 
 // ── Signal utilities ─────────────────────────────────────────────────
 export { on, watch } from "./state/watch.ts";
@@ -160,8 +169,17 @@ export { isConnectionDegraded } from "./browser-air.ts";
 // ── Forms ────────────────────────────────────────────────────────────
 export { useFieldArray, useForm } from "./air/form.ts";
 export type {
+  // `useForm`'s own option and rule types. Three of them were reachable only
+  // structurally: `useForm(config, options)` takes a `FormOptions<T>` that an
+  // app could pass as a literal and could not NAME, so a handler kept in a
+  // variable had to be typed by hand or not at all. A public function whose
+  // parameter type is private is the discoverability complaint three reports
+  // made, in miniature.
+  AsyncValidationRule,
+  CrossFieldValidator,
   FieldArrayState,
   FieldState,
+  FormOptions,
   FormState,
   ValidationRule,
 } from "./air/form.ts";

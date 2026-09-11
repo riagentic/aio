@@ -144,6 +144,53 @@ function sliceTokens(css: string): string {
  *  paints. Load-bearing — {@linkcode sliceTokens} cuts here. */
 const TOKENS_END = "/* ── canvas ";
 
+/** The two regions `ui.theme: "base"` drops, as [start banner, end banner].
+ *
+ *  _"I want my own layout; I do not want to restyle `<input>`, `<textarea>`,
+ *  `<button>` and focus rings from scratch."_ (newjob §4). Between "tokens"
+ *  (nothing paints, so every control is the browser's) and "auto" (a whole
+ *  page shell) there was nothing, and the choice was 200 lines of control CSS
+ *  or fighting a layout you did not ask for.
+ *
+ *  What "base" keeps is everything that makes an ELEMENT look right — the
+ *  canvas, type, code, controls, tables, and the three environments (coarse
+ *  pointer, reduced motion, print). What it drops is everything that decides
+ *  where things GO: the `<main>` page container with its header/footer
+ *  alignment, and the six layout classes. Those are the rules that move a box
+ *  an app meant to place itself.
+ *
+ *  Banner-delimited and cut from the ONE stylesheet, exactly as `sliceTokens`
+ *  is, so a third variant can never drift into a third palette. */
+const SHELL_REGIONS: ReadonlyArray<readonly [string, string]> = [
+  ["/* ── page shell ", "/* ── type "],
+  ["/* ── the six classes worth having ", "/* ── the three environments "],
+];
+
+/** The theme with every LAYOUT default removed: controls, type and colour
+ *  stay; the page container and the six classes go. See
+ *  {@linkcode SHELL_REGIONS}. */
+export function appThemeBaseCss(name: string): string {
+  let css = appThemeCss(name);
+  // Back to front, so an earlier cut cannot move a later banner's index.
+  for (const [start, end] of [...SHELL_REGIONS].reverse()) {
+    const a = css.indexOf(start);
+    const b = css.indexOf(end, a + 1);
+    if (a === -1 || b === -1 || b < a) {
+      // Same reasoning as `sliceTokens`: falling back to the whole sheet would
+      // silently give every `"base"` app the page shell it explicitly declined,
+      // and returning less would drop rules nobody asked to lose. This is a
+      // build-time invariant of a file in this repo, so refuse loudly.
+      throw new Error(
+        `[aio] app-theme.ts: the "${start.trim()}" region is not delimited by ` +
+          `"${end.trim()}" any more, so appThemeBaseCss cannot tell the layout ` +
+          `defaults from the element ones. Restore the banners.`,
+      );
+    }
+    css = css.slice(0, a) + css.slice(b);
+  }
+  return css;
+}
+
 export function appThemeCss(name: string): string {
   const hue = appHue(name);
   const { accent, onAccent } = accentFill(hue);
@@ -234,6 +281,7 @@ body{
   }
 }
 
+/* ── page shell ────────────────────────────────────────────────── */
 /* Writing <main> is the whole opt-in for a page shell: apps that want the
    full bleed (a canvas, a map, a game) simply do not use it. */
 :where(main){

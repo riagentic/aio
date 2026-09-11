@@ -101,6 +101,7 @@ import { cmdFeedback } from "./am/am-cmd-feedback.ts";
 import { cmdCheck } from "./am/am-cmd-check.ts";
 import { cmdMigrate } from "./am/am-cmd-migrate.ts";
 import { cmdTestgen } from "./am/am-cmd-testgen.ts";
+import { cmdPreview } from "./am/am-cmd-preview.ts";
 import { PATH_PIN_PREFIX } from "./am/am-versions.ts";
 import { removedAmVerb, retiredSpellingLine } from "./state/removals.ts";
 import { readDenoJsonSync, readLocalPinSync } from "./server/deno-json.ts";
@@ -147,6 +148,7 @@ const COMMANDS: Record<string, CmdHandler> = {
   check: cmdCheck, // does the client graph BUILD? (deno check cannot answer this)
   migrate: cmdMigrate, // which retired spellings THIS app still uses
   testgen: cmdTestgen, // a TYPED test client from what the app renders
+  preview: cmdPreview, // render ONE component, with props you choose
   shot: cmdShot,
   eval: cmdEval,
   sql: cmdSql,

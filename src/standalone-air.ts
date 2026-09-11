@@ -93,6 +93,19 @@ export {
   useRef,
   useSignal,
 } from "./air/aio-renderer.ts";
+// A keyed resource you HOLD and the reaction that swaps it. Both are pure
+// signal + DOM work with no transport in them, so android is no different —
+// and an app whose camera stops being reopened on ANDROID ONLY is exactly the
+// silent-on-one-target hazard the notes above describe.
+export {
+  type Dispose,
+  onChange,
+  type OnChangeOptions,
+  type ResourceHandle,
+  type ResourceKey,
+  useResource,
+  type UseResourceConfig,
+} from "./air/use-resource.ts";
 export {
   type ComponentFn,
   ErrorBoundary,

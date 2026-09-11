@@ -118,11 +118,32 @@ async function kill(proc: Deno.ChildProcess): Promise<void> {
   await stopChild(proc, { quiet: true });
 }
 
+/** The entry an example's own deno.json declares — the SAME answer the build
+ *  and the dev server derive it from.
+ *
+ *  Hard-coded here once, and the day five examples moved to `src/` this file
+ *  kept spawning `examples/counter/app.ts` and failed with "timeout waiting
+ *  for counter page after 60000ms" — a path problem wearing a networking
+ *  problem's clothes. A test that restates a fact its subject already declares
+ *  is a second decider, and it only ever disagrees. */
+function entryOf(target: string): string {
+  try {
+    const raw = Deno.readTextFileSync(`${dir(target)}/deno.json`);
+    const declared = (JSON.parse(raw) as { entry?: unknown }).entry;
+    if (typeof declared === "string" && declared) return declared;
+  } catch {
+    // aio-ok: a target without its own deno.json takes the framework default,
+    // which is exactly what the fallback below is.
+  }
+  return "src/app.ts";
+}
+
 // Boot the example headless, dispatch counter:increment over WS, observe state.
 async function smokeServerExample(
   target: string,
-  entry = "src/app.ts",
+  entry = "",
 ): Promise<void> {
+  entry ||= entryOf(target);
   const port = freePort();
   const proc = spawnExample(target, entry, [
     "--client=server-only",
@@ -190,7 +211,7 @@ async function smokeServerExample(
 // and it must be a real default-exporting page.
 async function smokeConnectPageExample(target: string): Promise<void> {
   const port = freePort();
-  const proc = spawnExample(target, "src/app.ts", [
+  const proc = spawnExample(target, entryOf(target), [
     "--client=server-only",
     `--port=${port}`,
   ]);
@@ -255,14 +276,14 @@ for (const target of SERVER_TARGETS) {
 // Top-level app examples (entry at the dir root, not src/)
 Deno.test({
   name: "example counter: boots + counter increments over WS",
-  fn: () => smokeServerExample("counter", "app.ts"),
+  fn: () => smokeServerExample("counter"),
 });
 
 Deno.test({
   name: "example todo: boots + serves UI",
   fn: async () => {
     const port = freePort();
-    const proc = spawnExample("todo", "app.ts", [
+    const proc = spawnExample("todo", entryOf("todo"), [
       "--client=server-only",
       `--port=${port}`,
     ]);
@@ -289,7 +310,7 @@ Deno.test({
   name: "example cli-remote: client drives the cli example server via stdin",
   fn: async () => {
     const port = freePort();
-    const server = spawnExample("targets/cli", "src/app.ts", [
+    const server = spawnExample("targets/cli", entryOf("targets/cli"), [
       `--port=${port}`,
     ]);
     let client: Deno.ChildProcess | null = null;

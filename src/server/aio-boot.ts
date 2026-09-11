@@ -1409,6 +1409,15 @@ export async function bootStorage<S>(
       }
       log.warn(summary);
     }
+    // …and the SAFE direction, said out loud. Adding a field needs no
+    // migration, but silence about it is indistinguishable from silence about
+    // a problem nobody looked for — the complaint that produced this line.
+    const added = detectNewFields(
+      initialState as Record<string, unknown>,
+      persistedSnapshot,
+      { skip: new Set(report.map((r) => r.cell)) },
+    );
+    if (added.length > 0) log.info(newFieldsSummary(added));
     const declared: Record<string, number> = {};
     for (const [id, info] of cfg.cellMigrations ?? []) {
       declared[id] = info.version;
@@ -1949,6 +1958,102 @@ export type MigrationSummary = {
   report: MigrationReport;
   drift: ShapeDriftEntry[];
 };
+
+/** One field the code declares that the stored snapshot does not have — a NEW
+ *  state key. */
+export type ShapeAdditionEntry = {
+  cell: string;
+  /** Dotted path within the cell. */
+  path: string;
+  /** The declared type, so the line can say what arrived. */
+  declaredType: string;
+};
+
+/** Declared fields absent from the stored snapshot.
+ *
+ *  THE OTHER HALF OF `detectShapeDrift`, and the reason it exists: adding a
+ *  field is SAFE — a stored blob without it deep-merges and the declared value
+ *  fills the gap — but the author of one report had to reason that out from
+ *  first principles, because the tool said nothing (llama.master §10). Silence
+ *  on the safe case and a loud warning on the unsafe one are indistinguishable
+ *  from "nobody checked": both are the absence of a sentence. The detector
+ *  already walks both shapes; it simply threw this direction away.
+ *
+ *  A SEPARATE type and a separate line, not a fifth `issue` on
+ *  `ShapeDriftEntry`, because the remedy is different — there isn't one — and
+ *  because a reader scanning for problems must not have to filter the
+ *  reassurance out of the warning.
+ *
+ *  Same caps and the same rules as the drift walk: an empty declared object is
+ *  an open record (a dynamic-key map), so its keys are data rather than shape,
+ *  and nothing inside one is reported. */
+export function detectNewFields(
+  initial: Record<string, unknown>,
+  stored: Record<string, unknown>,
+  opts: { skip?: Set<string> } = {},
+): ShapeAdditionEntry[] {
+  const out: ShapeAdditionEntry[] = [];
+  const skip = opts.skip ?? new Set<string>();
+  const isPlainObj = (v: unknown): v is Record<string, unknown> =>
+    kindOf(v) === "object";
+
+  const walk = (
+    cell: string,
+    decl: unknown,
+    stor: unknown,
+    path: string,
+    depth: number,
+  ): void => {
+    if (out.length >= MAX_DRIFT || depth > DRIFT_MAX_DEPTH) return;
+    if (!isPlainObj(decl)) return;
+    // An open record declares no keys, so it has no new ones — everything in
+    // it is data.
+    if (Object.keys(decl).length === 0) return;
+    if (!isPlainObj(stor)) return;
+    for (const [k, dv] of Object.entries(decl)) {
+      // CHECKED IN THE LOOP, not only on entry. A single level with 300 new
+      // keys pushes 300 before the next call ever tests the cap, which is
+      // exactly the unbounded report the cap exists to prevent.
+      if (out.length >= MAX_DRIFT) return;
+      const p = path ? `${path}.${k}` : k;
+      if (!(k in stor)) {
+        out.push({ cell, path: p, declaredType: kindOf(dv) });
+        // Do not descend into a field that is wholly new: "cfg.retry arrived"
+        // is the fact, and listing its five sub-keys as five more arrivals is
+        // the same news five times.
+        continue;
+      }
+      walk(cell, dv, stor[k], p, depth + 1);
+    }
+  };
+
+  for (const [cellId, declState] of Object.entries(initial)) {
+    if (skip.has(cellId)) continue;
+    const storedCell = stored[cellId];
+    // A cell absent from storage entirely is a NEW CELL, not a new field. It
+    // is its own event (nothing was persisted for it yet), and reporting every
+    // one of its keys as an addition would bury a real one on the first boot
+    // after `am create`.
+    if (storedCell === undefined) continue;
+    walk(cellId, declState, storedCell, "", 0);
+  }
+  return out;
+}
+
+/** The reassuring counterpart to {@linkcode shapeDriftSummary}. */
+export function newFieldsSummary(added: ShapeAdditionEntry[]): string {
+  if (added.length === 0) return "";
+  const show = added.slice(0, 5).map((a) =>
+    `${a.cell}.${a.path} (${a.declaredType})`
+  );
+  const more = added.length > show.length
+    ? ` …and ${added.length - show.length} more`
+    : "";
+  return `state shape: ${added.length} new field(s), no migration needed — ` +
+    `${show.join(", ")}${more}. A field the stored data does not have is ` +
+    `filled from \`state:\`, so adding one is safe on its own. (Renaming or ` +
+    `removing one is not — that is the "shape drift" line.)`;
+}
 
 /** One teachable line summarizing all shape drift found at boot.
  *  Seed erasure is reported separately — same detector, different remedy. */

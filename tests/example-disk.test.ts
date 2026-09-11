@@ -8,7 +8,7 @@
 import { assert, assertEquals } from "@std/assert";
 import { join } from "@std/path";
 import { testCell } from "../src/testing/cell-test.ts";
-import { disk } from "../examples/disk/cell.ts";
+import { disk } from "../examples/disk/src/cell.ts";
 
 /** A real temp tree — the cell reads the actual filesystem, no fixture layer. */
 async function tree(): Promise<string> {
@@ -35,7 +35,7 @@ async function tree(): Promise<string> {
 // carries a budget and REPORTS hitting it, because a truncated number shown as
 // a total is exactly the quiet failure this example teaches against.
 Deno.test("example disk: a scan is bounded by entries and by time", async () => {
-  const io = await import("../examples/disk/disk.server.ts");
+  const io = await import("../examples/disk/src/disk.server.ts");
   const root = await Deno.makeTempDir({ prefix: "aio-disk-bound-" });
   try {
     for (let i = 0; i < 12; i++) await Deno.mkdir(join(root, `d${i}`));
@@ -148,7 +148,7 @@ testCell(
 // no DOM scraping (docs/testing/ui-testing.md).
 Deno.test("example disk: the UI renders a scan and drills into a folder", async () => {
   const { testUI } = await import("../src/testing/ui-test.ts");
-  const App = (await import("../examples/disk/App.tsx")).default;
+  const App = (await import("../examples/disk/src/App.tsx")).default;
   const root = await tree();
   try {
     // No explicit `{ cells }`: the cell self-registers on import, which is how

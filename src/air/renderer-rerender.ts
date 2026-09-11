@@ -15,6 +15,7 @@ import {
 } from "../state/signal.ts";
 import type { ComponentFn, VDomHooks, VNode } from "./vdom.ts";
 import { _diff } from "./vdom.ts";
+import { _profilingOn } from "./component-profile.ts";
 import {
   _isDevToolsConnected,
   _recordRender,
@@ -36,6 +37,7 @@ import {
 import { _flushPending } from "./renderer-flush.ts";
 import { _componentName } from "./hook-error.ts";
 import { count } from "../diagnostics/fmt.ts";
+import { _currentBoundary } from "./renderer-state.ts";
 
 // ── Schedule ──────────────────────────────────────────────────────────
 
@@ -136,7 +138,12 @@ export function _rerenderComponent(inst: ComponentInstance): void {
     }
   }
 
-  const _devStart = _isDevToolsConnected() ? performance.now() : 0;
+  // Timed when anything is WATCHING — a connected Redux DevTools, or a
+  // profile someone asked for. Two `performance.now()` calls per render are
+  // not free at 60fps, so an app that does neither pays nothing.
+  const _devStart = _isDevToolsConnected() || _profilingOn()
+    ? performance.now()
+    : 0;
   const vnode = inst.vnode;
   const oldRendered = inst.oldRendered;
   inst._component = _componentName(vnode.tag);
@@ -168,12 +175,25 @@ export function _rerenderComponent(inst: ComponentInstance): void {
   _setCurrentCollector(inst);
   let rendered: VNode | string | number | null;
   try {
-    rendered = (vnode.tag as ComponentFn)({
-      ...vnode.props,
-      children: vnode.children.length > 0
-        ? vnode.children
-        : (vnode.props.children ?? vnode.children),
-    });
+    const pending = inst._fallbackError as Error | undefined;
+    if (pending !== undefined) {
+      // This pass renders the enclosing boundary's fallback. The error is NOT
+      // cleared here but on SUCCESS: it is what tells the catch below that the
+      // fallback is the thing that just threw, so a throwing fallback lands on
+      // the stale-output path instead of re-entering forever.
+      rendered = _boundaryFallback(inst._boundary)!(pending) as
+        | VNode
+        | string
+        | number
+        | null;
+    } else {
+      rendered = (vnode.tag as ComponentFn)({
+        ...vnode.props,
+        children: vnode.children.length > 0
+          ? vnode.children
+          : (vnode.props.children ?? vnode.children),
+      });
+    }
   } catch (error) {
     // Error during signal-triggered re-render — keep old output (AIO-138)
     _setCurrentCollector(null);
@@ -200,6 +220,43 @@ export function _rerenderComponent(inst: ComponentInstance): void {
       error instanceof Error ? error : new Error(String(error)),
       failedName,
     );
+    // `<ErrorBoundary>` on the RE-RENDER path. Mount already unwinds to the
+    // boundary; a later throw did not, so the subtree kept its last good
+    // output and silently stopped updating — a panel that quietly stops being
+    // true, which is the failure risoto §22.1 describes from the other side.
+    //
+    // The failing component renders the boundary's FALLBACK this time, which
+    // reuses the whole existing diff path below rather than adding a second
+    // way to replace a subtree's DOM. The boundary's other children are
+    // untouched: containing the failure where it happened loses less than
+    // replacing everything beside it.
+    const fb = _boundaryFallback(inst._boundary);
+    if (fb && inst._fallbackError === undefined) {
+      // Re-enter, rendering the fallback instead of the component. Re-entry
+      // rather than a second DOM-patching path: everything below — the diff,
+      // the position bookkeeping, the subscription rebuild — is what makes a
+      // render land correctly, and a boundary that reimplemented it would be a
+      // second renderer that drifts.
+      //
+      // THE DEPS OF THE FAILED RENDER COME ALONG. A fallback typically reads
+      // no signals at all, so subscribing to only its deps would subscribe to
+      // NOTHING and the component could never be asked to render again — the
+      // fallback would be permanent, which is a worse stale than the one this
+      // replaces. The signal that made it throw is the signal that will fix
+      // it, and it is in `deps` because the render read it before throwing.
+      inst._fallbackDeps = deps;
+      inst._fallbackError = error instanceof Error
+        ? error
+        : new Error(String(error));
+      _rerenderComponent(inst);
+      return;
+    }
+    // Either there is no boundary (AIO-138: keep the last good output) or the
+    // FALLBACK is what just threw. Clearing means the next re-render attempts
+    // the component again rather than re-running a fallback already known to
+    // fail — a boundary cannot make things worse than the failure it caught.
+    inst._fallbackError = undefined;
+    _mergeFallbackDeps(inst, deps);
     _subscribeComponentDeps(inst, deps);
     inst.deps = deps;
     return;
@@ -212,6 +269,11 @@ export function _rerenderComponent(inst: ComponentInstance): void {
   _setCurrentCollector(null);
   _checkHookOrder(inst, inst.refIndex ?? 0, inst._component ?? "Component");
   _trackEnd(deps);
+  // A render that SUCCEEDED clears the pending boundary error, so the very
+  // next re-render tries the component again — that is what makes a boundary
+  // recoverable rather than a one-way door.
+  inst._fallbackError = undefined;
+  _mergeFallbackDeps(inst, deps);
   _computedCollectEnd(collected);
   _effectCollectEnd(effectCollected);
 
@@ -396,6 +458,32 @@ export function _subscribeComponentDeps(
 let _renderErrorSink: ((e: Error, component: string) => void) | null = null;
 
 /** Install (or clear, with `null`) the render-error sink. @internal */
+/** Fold the deps of a render that threw into this render's deps, once.
+ *  See the re-entry comment in the catch below. @internal */
+// deno-lint-ignore no-explicit-any
+function _mergeFallbackDeps(inst: ComponentInstance, deps: Set<any>): void {
+  const prior = inst._fallbackDeps;
+  if (!prior) return;
+  inst._fallbackDeps = undefined;
+  for (const d of prior) deps.add(d);
+}
+
+/** The fallback renderer of a boundary vnode, or null when it has none (or
+ *  the instance mounted outside any boundary). @internal */
+function _boundaryFallback(
+  boundary: unknown,
+): ((e: Error) => VNode | string | number | null) | null {
+  const props = (boundary as { props?: Record<string, unknown> } | null)?.props;
+  const fb = props?.fallback;
+  if (typeof fb === "function") {
+    return fb as (e: Error) => VNode | string | number | null;
+  }
+  // A non-function fallback is a plain node — wrap it so both spellings reach
+  // the same path, exactly as the mount branch treats them.
+  if (fb !== undefined) return () => fb as VNode;
+  return null;
+}
+
 export function _setRenderErrorSink(
   fn: ((e: Error, component: string) => void) | null,
 ): void {
@@ -515,6 +603,9 @@ export function _createHooks(rootState: RootState): VDomHooks {
           disposed: false,
           prevProps: { ...vnode.props },
           prevChildren: vnode.children,
+          // Which boundary this component lives inside — captured at MOUNT,
+          // because a re-render happens long after the stack has unwound.
+          _boundary: _currentBoundary(),
           selfTriggered: false,
           _ctx: rootState.ctx,
           _root: rootState,

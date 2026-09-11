@@ -86,6 +86,53 @@ const LoginForm = () => (
 
 ---
 
+## Your own schema (Zod, Valibot, ArkType)
+
+If the thing being edited already has a schema, use it — restating it as `rules`
+is one constraint written twice, in two languages, drifting from the moment
+either changes. Any library that implements
+[Standard Schema](https://standardschema.dev) v1 works, with no adapter and no
+dependency in aio:
+
+```tsx
+import { z } from "zod";
+
+const Signup = z.object({
+  email: z.string().email("that is not an email"),
+  age: z.coerce.number().min(18, "18 or over"),
+});
+
+const form = useForm(
+  { email: { initial: "" }, age: { initial: "" } },
+  { schema: Signup },
+);
+
+if (form.validate()) {
+  // `parsed()` is the schema's OUTPUT: `age` is a number here.
+  await api.signup(form.parsed() as z.infer<typeof Signup>);
+}
+```
+
+Three things worth knowing:
+
+- **Issues land on the field they name.** `path: ["email"]` puts the message on
+  `form.fields.email.error`, whichever spelling your library uses (Zod emits
+  bare keys, Valibot emits `{ key }` wrappers — both are read). An issue that
+  names no field — a cross-field refinement like "passwords must match" —
+  becomes `form.formError`, and makes the form invalid. It is never dropped.
+- **A field's own `rules` win.** They are the more specific statement, so a
+  field that already has an error keeps its message.
+- **`parsed()` is separate from `values()` on purpose.** `values()` returns `T`,
+  inferred from each field's `initial` — so a form whose `initial` is `""` and
+  whose schema coerces to a number would have a `values()` that says `string`
+  and holds a number. `parsed()` returns `unknown`, so the one cast sits where
+  you already know the answer. It is `null` when there is no schema or the
+  values do not parse.
+
+The schema must be **synchronous**: `validate()`, `values()` and `valid` are,
+and `valid` is read during render. An async schema throws by name rather than
+quietly not running — use a field's `asyncRules` for work that waits.
+
 ## useFieldArray()
 
 ```ts

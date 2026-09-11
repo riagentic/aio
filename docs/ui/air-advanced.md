@@ -52,6 +52,79 @@ const UserCard = () => {
 
 ---
 
+## Something you HOLD -- useResource()
+
+`resource()` fetches. `useResource()` is for something you hold open — a camera,
+a socket, a GPU pipeline, a file handle — where the **close** matters and a key
+decides which one you have:
+
+```tsx
+import { useResource } from "aio/air";
+import { settings } from "./cell.ts"; // a cell with a `cameraId`
+declare function openCamera(id: string | number, s: AbortSignal): MediaStream;
+
+const cam = useResource({
+  key: () => settings.cameraId, // reactive
+  open: (id, { signal }) => openCamera(id, signal),
+  close: (stream: MediaStream) => stream.getTracks().forEach((t) => t.stop()),
+});
+```
+
+Three guarantees, each of which is a bug in every hand-rolled version:
+
+- **One open per key, reference-counted.** Three components holding the same key
+  open it once and close it when the last one lets go — not three opens, and not
+  a close while somebody is still using it. `scope` keeps two unrelated
+  resources that happen to share an id apart.
+- **A stale open cannot win.** An `open` that resolves after the key has moved
+  on closes what it made and does not install it. No `alive(s)` guard at twenty
+  call sites, nineteen of which are right.
+- **The close is attached to the open.** Changing the key closes the old
+  resource _before_ opening the new one, so two pipelines never fight over one
+  device.
+
+`key: null` holds nothing and releases whatever it held. The handle carries
+`value`, `loading`, `error`, `key` and `dispose()`.
+
+---
+
+## Reacting to state -- onChange()
+
+The rule "when the camera id changes, reopen the camera" is not a render and not
+an event handler. Put it in neither:
+
+```ts
+import { onChange } from "aio/air";
+import { settings } from "./cell.ts";
+declare function openCamera(id: string | number): { close(): void };
+
+const stop = onChange(
+  () => settings.cameraId,
+  (id) => {
+    const cam = openCamera(id);
+    return () => cam.close(); // runs before the next change, and on stop()
+  },
+);
+```
+
+It differs from a bare `effect` in three ways that all matter:
+
+- **Only the selector is tracked.** The body runs untracked, so a reaction that
+  reads other state while working does not subscribe to it and re-run itself
+  forever. That is the loop everyone hits first.
+- **It waits for a change.** An `effect` runs immediately, so the rule above
+  written as one opens a camera on boot that nobody asked for. Pass
+  `{ immediate: true }` when you do want that.
+- **The returned cleanup is the close**, run before the next change and on
+  dispose — so "close the old, open the new" is one function instead of two
+  rules that have to agree.
+
+Because it is not tied to a component, a state change from anywhere reaches it —
+including `am dispatch`, which is exactly the case where a rule living in a JSX
+handler quietly does not run.
+
+---
+
 ## Directives -- `use` Prop
 
 ```tsx

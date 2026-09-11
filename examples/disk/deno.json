@@ -28,7 +28,7 @@
     "@std/assert": "jsr:@std/assert@1.0.19"
   },
   "tasks": {
-    "dev": "deno run -A app.ts",
+    "dev": "deno run -A src/app.ts",
     "build": "deno run -A ../../src/build-all.ts --build-spec=../../src/build.ts",
     "compile": "deno run -A ../../src/build-all.ts --build-spec=../../src/build.ts --targets=browser",
     "check": "deno check .",

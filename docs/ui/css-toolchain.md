@@ -26,6 +26,20 @@ gets out of the way, which is exactly what you want.
 
 ## Tailwind, end to end
 
+One command sets all of it up:
+
+```sh
+am create myapp --css=tailwind
+```
+
+You get `src/app.css` (the source), the `build.css` command, the `tailwindcss`
+import, `src/style.css` in `.gitignore`, and a counter component **written in
+Tailwind** — because `src/style.css` existing is exactly what makes the
+generated theme step aside, so an example written against that theme would
+render unstyled on the first `deno task dev`.
+
+The rest of this section is the same wiring by hand.
+
 Tailwind v4 needs `tailwindcss` resolvable as a node package, so the app's
 `deno.json` needs `nodeModulesDir`:
 
@@ -143,6 +157,66 @@ that question entirely — utility classes are shared on purpose. If you write
 your own classes alongside, prefix them by component (`.timeline-track`, not
 `.track`): two components that pick the same name silently share rules, and the
 symptom is a visual one no test sees.
+
+### `css` — a class name that cannot collide
+
+For a component that just needs its own styles, `aio/ui` has a scoped class:
+
+```tsx
+import { css, cx } from "aio/ui";
+
+const track = css`
+  display: flex;
+  overflow: hidden;
+  &:hover {
+    background: var(--aio-tint);
+  }
+  @media (max-width: 600px) {
+    & {
+      display: block;
+    }
+  }
+`;
+
+<div class={cx(track, playing && playingClass)}>…</div>;
+```
+
+The name is a **hash of the rule**, so:
+
+- Two components cannot collide, however they name things.
+- Two components writing the identical rule get the identical class, emitted
+  once — not two copies of the same three declarations.
+- The name is **stable** across the server and the browser and between runs, so
+  a server-rendered page hydrates against the classes it was rendered with. A
+  counter (`aio-1`, `aio-2`) would depend on module evaluation order, which is
+  not the same on both sides.
+
+`&` means this class, including inside an at-rule. No build step: it is a
+function, so it behaves identically in `deno task dev` and in a compiled binary.
+The rule is unlayered, so it beats the generated theme (which lives in
+`@layer aio`) without anyone writing `!important`.
+
+Rendering with `renderToString`? There is no document to inject into on the
+server, so put `collectCss()` in your own `<head>`.
+
+**`aiol` catches the case that actually bites**: the same class defined in two
+places, disagreeing about the same property.
+
+```
+!  src/list.css:1  styles
+   .track is defined in two places and they disagree about `overflow` —
+   src/player.css:2 says `visible`, src/list.css:1 says `hidden`. Whichever
+   the browser loads last wins, silently.
+```
+
+It is deliberately quiet about everything that is normal CSS: two rules that
+agree, two rules setting different properties, a more specific selector
+(`.track:hover`, `.list .track`), the same class inside a `@media` block, and
+custom properties, which are a namespace rather than a layout instruction. What
+is left is two authors who both wrote `.track { … }` and disagreed, which is
+never deliberate. Generated stylesheets (Tailwind's output and anything else
+starting with `/*!`) are skipped — restating a class name is what a utility
+framework does.
 
 ## See also
 

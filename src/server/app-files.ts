@@ -43,6 +43,19 @@ export const APP_ICON = "icon.png";
 /** The bundle the browser loads in prod, inside {@link DIST_DIR}. */
 export const BUNDLE_JS = "app.js";
 
+/** The client bundle's source map, as the build writes it and the server reads
+ *  it. THREE surfaces have to agree on this name or the feature is silently
+ *  half-present, which is how it first shipped: the build wrote it, the server
+ *  read it, and `build.ts`'s dist-staging clean — which keeps an ALLOWLIST and
+ *  deletes the rest before `deno compile` — removed it in between. So the
+ *  string lives here, once.
+ *
+ *  DOT-PREFIXED ON PURPOSE. `.map` is in `SHELL_EXT`, so `dist/app.js.map`
+ *  would be served: the app's entire source over an unauthenticated read.
+ *  `isProtectedPath` refuses any dot-prefixed segment at any depth, so this
+ *  name ships beside the bundle and is unreachable over HTTP. */
+export const BUNDLE_MAP = `.${BUNDLE_JS}.map`;
+
 /** Bundle STAGING — embedded into the binary wholesale and wiped by every
  *  build, which is why it is never where artifacts land (`--out=` is). */
 export const DIST_DIR = "dist";

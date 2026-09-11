@@ -22,9 +22,10 @@
 //   • a response that already carries `Content-Encoding` — untouched.
 //   • a body with no `Content-Length` — that is a stream (SSE, a blob range,
 //     a proxied response), and buffering it to compress it would break it.
-//   • a content type outside `isCompressible` — images, fonts, video, wasm
-//     and archives are already compressed; recompressing costs CPU and gains
-//     nothing.
+//   • a content type outside `isCompressible` — images, fonts, video and
+//     archives are already compressed; recompressing costs CPU and gains
+//     nothing. WASM is NOT one of those and used to be listed here — it is a
+//     plain binary that gzips 2-4x, and every WASM app paid for the mistake.
 //   • anything under `MIN_COMPRESS_BYTES` — below roughly one MTU there is no
 //     packet to save, and the framing costs bytes.
 // Everything else is byte-identical to what the handler produced; only the
@@ -59,12 +60,25 @@ export const MAX_BUFFER_MS = 100;
 
 /** Brotli quality for on-the-fly compression. Measured on the real 162 KB
  *  counter bundle: q5 → 56.1 KB in 3.4 ms, gzip → 59.1 KB in 5.8 ms, q11 →
- *  51.6 KB in 133 ms. q5 is both smaller AND faster than gzip; q11 belongs to
- *  the build, which pays it once (see `precompress` in the build). */
+ *  51.6 KB in 133 ms. q5 is both smaller AND faster than gzip; q11 would
+ *  belong to a build-time step that pays it once, which aio does not have —
+ *  said here as an absence rather than as a pointer to a `precompress` that
+ *  was never written. */
 export const BROTLI_QUALITY = 5;
 
-/** Types worth compressing: text, and the structured formats that are text.
- *  Everything else (png/jpeg/webp/woff2/wasm/zip/mp4) is already compressed. */
+/** Types worth compressing: text, the structured formats that are text, and
+ *  WASM.
+ *
+ *  WASM IS NOT AN ALREADY-COMPRESSED FORMAT, and this list said it was — it
+ *  sat beside png/jpeg/webp/woff2/zip/mp4, which are all containers with a
+ *  codec inside. A `.wasm` module is a plain binary: sections, a type table, a
+ *  function-body stream. Measured on two real modules rather than reasoned
+ *  about — a 23 MB engine gzipped to 6.3 MB (73% saved) and a 103 KB module to
+ *  48.5 KB (53% saved). Every WASM app aio served paid two to four times its
+ *  download because one MIME type was in the wrong group.
+ *
+ *  Everything still excluded (png/jpeg/webp/avif/woff2/zip/mp4) genuinely is
+ *  compressed already, and recompressing costs CPU for nothing. */
 export function isCompressible(contentType: string | null): boolean {
   if (!contentType) return false;
   const ct = contentType.split(";")[0]!.trim().toLowerCase();
@@ -75,7 +89,7 @@ export function isCompressible(contentType: string | null): boolean {
     // by the check below.
     return !ct.includes("woff");
   }
-  return /^application\/(javascript|ecmascript|json|.*\+json|xml|.*\+xml|manifest|toml|yaml|x-yaml|sql|rtf)$/
+  return /^application\/(wasm|javascript|ecmascript|json|.*\+json|xml|.*\+xml|manifest|toml|yaml|x-yaml|sql|rtf)$/
     .test(ct);
 }
 
@@ -384,6 +398,49 @@ export interface EncodeOptions {
   compress?: boolean;
 }
 
+/** Compress a body that is too large to hold, without holding it.
+ *
+ *  THE CASE THIS EXISTS FOR. `MAX_BUFFER_BYTES` is a heap guard, and it was
+ *  also, accidentally, a correctness ceiling: anything over 8 MB went out
+ *  RAW, so the larger the asset the less it was helped. Measured on a real
+ *  23 MB WASM engine: 23 MB on the wire where 6.3 MB would do — the single
+ *  biggest download an app of that shape has, and the one response the
+ *  finisher refused to touch.
+ *
+ *  `CompressionStream` compresses as the bytes go past, so nothing is
+ *  buffered and the heap guard keeps meaning what it says. GZIP ONLY: the web
+ *  API has no brotli, and a 2-4x saving that streams beats a 2.5-4x saving
+ *  that cannot run at all.
+ *
+ *  `Content-Length` goes, because the compressed length is not known until
+ *  the last byte — the response becomes chunked, which is what a chunked
+ *  response is for. That costs a download progress bar, which is why this only
+ *  ever applies to a COMPRESSIBLE type: `isCompressible` admits text, JSON,
+ *  JS, XML, fonts and WASM — app assets, where arriving sooner is the whole
+ *  point — and never `application/octet-stream`, video or an archive, which
+ *  are the things a person actually watches a progress bar for. */
+function streamCompressed(resp: Response, req: Request): Response | null {
+  const body = resp.body;
+  if (!body) return null;
+  if (typeof CompressionStream === "undefined") return null;
+  // Only gzip, and only if the client said so. `negotiate` may prefer brotli;
+  // here the question is narrower and has one answer.
+  const accept = (req.headers.get("Accept-Encoding") ?? "").toLowerCase();
+  if (!/(^|,)\s*gzip\s*(;|,|$)/.test(accept)) return null;
+  // `gzip;q=0` is a REFUSAL spelled like an acceptance — the one shape a
+  // substring match gets backwards.
+  if (/gzip\s*;\s*q=0(\.0+)?(\s|,|$)/.test(accept)) return null;
+
+  const headers = new Headers(resp.headers);
+  headers.set("Content-Encoding", "gzip");
+  headers.delete("Content-Length");
+  headers.set("Vary", mergeVary(headers.get("Vary"), "Accept-Encoding"));
+  return new Response(
+    body.pipeThrough(new CompressionStream("gzip")),
+    { status: 200, statusText: resp.statusText, headers },
+  );
+}
+
 /**
  * Add a validator and a transfer encoding to one response.
  *
@@ -421,8 +478,9 @@ export async function encodeResponse(
   // A stream is a different KIND of response, not a large one — see
   // `isStreamingType`. Never touched, at any size.
   if (isStreamingType(ct)) return resp;
-  // Nothing to gain: images, fonts, wasm, archives and video are compressed
-  // already, and re-encoding them costs CPU for bytes back.
+  // Nothing to gain: images, fonts, archives and video are compressed
+  // already, and re-encoding them costs CPU for bytes back. (WASM is not one
+  // of them — see `isCompressible`.)
   //
   // …but a 304 is CORRECTNESS, not an optimisation, and this early return sat
   // ABOVE the conditional-request block — so every incompressible response
@@ -452,16 +510,22 @@ export async function encodeResponse(
   // gate. When it IS present and large, skip without reading a byte; when it
   // is absent, `bufferUpTo` bounds the read and replays what it took.
   const declared = Number(resp.headers.get("Content-Length"));
-  if (Number.isFinite(declared) && declared > MAX_BUFFER_BYTES) return resp;
+  if (Number.isFinite(declared) && declared > MAX_BUFFER_BYTES) {
+    // Too big to BUFFER is not too big to COMPRESS — see `streamCompressed`.
+    return (opts.compress !== false && streamCompressed(resp, req)) || resp;
+  }
 
   const read = await bufferUpTo(resp.body, MAX_BUFFER_BYTES);
   if ("stream" in read) {
-    // Too big to hold. Send the original bytes, untouched and unbroken.
-    return new Response(read.stream, {
+    // Too big to hold — `bufferUpTo` replays what it already took, so the body
+    // is whole. Compress it on the way past rather than sending it raw.
+    const replayed = new Response(read.stream, {
       status: 200,
       statusText: resp.statusText,
       headers: resp.headers,
     });
+    return (opts.compress !== false && streamCompressed(replayed, req)) ||
+      replayed;
   }
   const bytes = read.bytes;
   // A handler that already knows its own tag keeps it. The prod static path

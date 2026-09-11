@@ -361,6 +361,39 @@ await aio.run({
 
 ---
 
+## Which components are re-rendering (`__aioProfile()`)
+
+The renderer already counts every re-render and can time them. This adds them
+up:
+
+```sh
+deno task am eval '__aioProfile()'
+```
+
+```
+12 component(s) mounted, 431 re-render(s) — timings OFF (call setProfiling(true), or open Redux DevTools)
+  component     renders   ms  signals
+  Row               400    -        2  (100 instances)
+  Toolbar            30    -        4
+  App                 1    -        1
+```
+
+Instances are summed **by name**, because "`<Row>` rendered 400 times" is the
+finding — the same fact split across a hundred instances answers nothing.
+
+**Call it twice.** Counts are always collected (an increment costs nothing); the
+clock is not, because two `performance.now()` calls per render are not free at
+60fps. The first call turns timings on and reports `timings OFF` rather than
+printing zeros as though every render were instant; the second call has the
+milliseconds.
+
+One report found a page root running `tuneAll` three times per render at ~14 ms
+— half of "typing is slow while the model answers" — by reading code and then
+confirming over CDP. This is that, asked directly.
+
+The table is also printed to the renderer console, so it arrives in
+`~/.<appId>/logs/client.log` beside everything else that happened around it.
+
 ## Best practices
 
 1. **Keep reduce fast** -- state updates should be instant. Heavy computation

@@ -4,7 +4,11 @@ import { UI_ENTRY } from "./app-files.ts";
 import type { CallTimeouts } from "../protocol/protocol-types.ts";
 import type { RenderBudget } from "../vitals/types.ts";
 import type { UiConfig, UiTheme } from "./aio-types.ts";
-import { appThemeCss, appThemeTokensCss } from "../build/app-theme.ts";
+import {
+  appThemeBaseCss,
+  appThemeCss,
+  appThemeTokensCss,
+} from "../build/app-theme.ts";
 
 /** `ui.chrome` — how much of the desktop window the OS draws. */
 export type UiChrome = NonNullable<UiConfig["chrome"]>;
@@ -183,6 +187,10 @@ function headContent(
    *  cell. Injected in the SHELL (not left to the `cfg` frame) for the same
    *  reason `syncCells` is: a page can boot sync before the frame arrives. */
   appId?: string,
+  /** `ui.layout` — `false` drops the theme's LAYOUT defaults (the `<main>`
+   *  page container and the six classes) from whichever visual sheet this
+   *  shell would have emitted. See `UiConfig.layout`. */
+  layout?: boolean,
 ): string {
   // THE baseline, on every target, always — before the app's stylesheet so
   // any of it can be overridden by a single rule.
@@ -227,10 +235,20 @@ function headContent(
   //   "auto"           → the full look until the app ships style.css
   //   "full"           → the full look, always
   //   "none"           → nothing at all, not even the variables
+  //
+  // …and `ui.layout: false` is the ORTHOGONAL half: whichever visual sheet
+  // would have been emitted is emitted WITHOUT its layout defaults — no
+  // `<main>` page container, none of the six classes. A separate knob rather
+  // than a fifth `theme` value, because "how much look" and "does it place my
+  // boxes" are separate questions and this one composes with each answer to
+  // the other. `"tokens"` and `"none"` emit no visual rules, so there is
+  // nothing for it to drop.
+  const visual = (name: string) =>
+    layout === false ? appThemeBaseCss(name) : appThemeCss(name);
   const themeCss = theme === "none"
     ? null
     : theme === "full" || (theme === "auto" && !hasCSS)
-    ? appThemeCss(themeName || title)
+    ? visual(themeName || title)
     : appThemeTokensCss(themeName || title);
   const themeStyle = themeCss === null ? "" : `\n  <style>${themeCss}</style>`;
   // The android half of `ui.theme`. A packaged APK's shell is written at BUILD
@@ -243,8 +261,9 @@ function headContent(
   // page starts in the state an app that never asked for a theme wants.
   const deferredTheme = deferTheme && themeCss !== null
     ? `\n  <style media="not all" data-aio-theme-deferred>${
-      appThemeCss(themeName || title)
-    }</style>`
+      // The deferred sheet must be the one the runtime would have emitted, or
+      // an APK enables a page shell the app declined at config time.
+      visual(themeName || title)}</style>`
     : "";
   const cssLink = hasCSS
     ? `\n  <link rel="stylesheet" href="${assetBase}style.css">`
@@ -330,6 +349,11 @@ export interface HtmlShellOptions {
   chrome?: UiChrome;
   /** ui.theme — how much of the default look this shell emits. */
   theme?: UiTheme;
+  /** ui.layout — `false` emits the look WITHOUT its layout defaults. */
+  layout?: boolean;
+  /** A per-response CSP nonce. Every `<script>` in the shell is stamped with
+   *  it — see {@linkcode withScriptNonce}. */
+  nonce?: string;
   /** The identity the accent hue is derived from (the appId). */
   themeName?: string;
   /** ui.lang — the document language (default: "en"). */
@@ -360,10 +384,36 @@ export function generateHTML(o: HtmlShellOptions): string {
     o.lang,
     false, // deferTheme — a server-served shell always knows its ui.theme
     o.appId,
+    o.layout,
   );
 
-  if (o.prod) return prodHTML(head, o.lang);
-  return aioDevHTML(head, o.importMap, o.uiEntry ?? UI_ENTRY, o.lang);
+  const html = o.prod
+    ? prodHTML(head, o.lang)
+    : aioDevHTML(head, o.importMap, o.uiEntry ?? UI_ENTRY, o.lang);
+  return o.nonce ? withScriptNonce(html, o.nonce) : html;
+}
+
+/** Stamp a CSP nonce on every `<script>` in a shell aio generated.
+ *
+ *  ONE RULE, APPLIED AT THE END, rather than a `nonce` threaded through the
+ *  six places the shell writes a `<script>`. Missing one of those six is not a
+ *  degraded page — under `script-src 'nonce-…'` an unnamed inline script does
+ *  not run, and the page is BLANK. A rule that cannot miss a tag is worth more
+ *  here than a tidier call graph.
+ *
+ *  `ui.head` content is stamped too, on purpose: it is the app's own markup in
+ *  the app's own document, and a policy that blocked it would make the feature
+ *  unusable for exactly the apps that turn a nonce on.
+ *
+ *  Safe against a `<script` inside an inline script's own text, because every
+ *  place that interpolates untrusted-ish content already escapes `<` to
+ *  `\u003c` (the importmap and the config frame) — the same escaping that
+ *  keeps the shell from being closed early by its own data. */
+export function withScriptNonce(html: string, nonce: string): string {
+  return html.replace(
+    /<script(?![^>]*\snonce=)/g,
+    `<script nonce="${nonce.replace(/"/g, "")}"`,
+  );
 }
 
 /** Android local (standalone WebView) shell. Delegates its `<head>` to the
@@ -387,6 +437,7 @@ export function androidLocalHTML(
     viewport?: string | false;
     head?: string;
     theme?: UiTheme;
+    layout?: boolean;
     themeName?: string;
     lang?: string;
     dir?: UiDir;
@@ -411,6 +462,8 @@ export function androidLocalHTML(
     // Only when the build could not be told: an explicit ui.theme in the build
     // (not possible today) would make the deferred copy dead weight.
     shell?.theme === undefined,
+    undefined, // appId — the android shell has no offline sync queue to scope
+    shell?.layout,
   );
   return `<!DOCTYPE html>
 ${htmlOpen(shell?.lang, shell?.dir)}

@@ -30,6 +30,7 @@ import {
   SVG_TAGS,
 } from "./vdom-types.ts";
 import type { ComponentFn, RenderCtx, VNode } from "./vdom-types.ts";
+import { _boundaryStack } from "./renderer-state.ts";
 
 const SVG_NS = "http://www.w3.org/2000/svg";
 
@@ -177,6 +178,14 @@ export function createDom(
     const fallback = vnode.props.fallback as
       | ((e: Error) => VNode | string | number | null)
       | undefined;
+    // Recorded for the RE-RENDER path. A throw at mount unwinds to the catch
+    // below; a throw on a later re-render happens long after this stack is
+    // gone, so each component mounted in here remembers the boundary it is
+    // inside (see `_currentBoundary`). Without it a component that starts
+    // throwing mid-session keeps its last good output forever — the subtree
+    // silently stops updating, which for the wallet in risoto §22.1 is a panel
+    // that quietly stops being true.
+    _boundaryStack.push(vnode);
     try {
       const frag = ctx.doc.createDocumentFragment();
       let firstDom: Node | null = null;
@@ -204,6 +213,8 @@ export function createDom(
       // boundary showing a multi-node fallback had no position at all).
       vnode._dom = (dom ? _occupied(fallbackVnode, dom) : null) ?? undefined;
       return dom;
+    } finally {
+      _boundaryStack.pop();
     }
   }
 

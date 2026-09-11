@@ -488,22 +488,25 @@ export function buildMethodsReducer(
     // `s.$call.sibling(...)` — the sibling's body on THIS draft, in THIS
     // commit. Deferred: the table binds to the wrapper, and the wrapper needs
     // the table.
-    let wrapped: unknown;
+    // A box, not a `let`: the binding is genuinely deferred (the table needs
+    // the wrapper, the wrapper needs the table), and a box says that in the
+    // type instead of leaving a variable that looks reassignable.
+    const box: { draft: unknown } = { draft: undefined };
     const callTable = withUnknownCallRefusal(
       prefix,
       key,
-      buildCallTable(prefix, key, methods, () => wrapped, true),
+      buildCallTable(prefix, key, methods, () => box.draft, true),
     );
-    wrapped = s !== null && typeof s === "object"
+    box.draft = s !== null && typeof s === "object"
       ? withDraftDo(s, doFn, callTable)
       : s;
     let result: unknown = fn(
-      wrapped as Parameters<SyncMethod<Record<string, unknown>>>[0],
+      box.draft as Parameters<SyncMethod<Record<string, unknown>>>[0],
       ...args,
     );
     // `return s` must hand back the real draft, not the wrapper (snapshotReturn
     // relies on isDraft).
-    if (result === wrapped) result = s;
+    if (result === box.draft) result = s;
     return classify(key, result, captured);
   };
   return (
@@ -971,11 +974,12 @@ export function buildMethodsExecutor(
           );
         // `s.$call.sibling(...)` — same draft, same commit, no second
         // dispatch. Bound lazily for the same reason as the sync side.
-        let proxyRef: unknown;
+        // A box for the same reason as the sync side above.
+        const ref: { proxy: unknown } = { proxy: undefined };
         const callTable = withUnknownCallRefusal(
           prefix,
           _method,
-          buildCallTable(prefix, _method, methods, () => proxyRef, false),
+          buildCallTable(prefix, _method, methods, () => ref.proxy, false),
         );
         const proxy = createLiveProxy(
           name,
@@ -993,7 +997,7 @@ export function buildMethodsExecutor(
           doDispatch,
           callTable,
         );
-        proxyRef = proxy;
+        ref.proxy = proxy;
         return (method as AsyncMethod<Record<string, unknown>>)(
           proxy as Parameters<AsyncMethod<Record<string, unknown>>>[0],
           ..._args,

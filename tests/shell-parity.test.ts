@@ -186,7 +186,7 @@ Deno.test("WYSIDIWYSIP: the build's app-dir decider is the entry's directory (de
   for (
     const [entry, wantAppDir, wantImport] of [
       ["src/app.ts", "/proj/src", "./src/App.tsx"],
-      ["app.ts", "/proj", "./App.tsx"], // flat app — examples/counter layout
+      ["app.ts", "/proj", "./App.tsx"], // a flat app — what `entry` lets one choose
       ["apps/web/main.ts", "/proj/apps/web", "./apps/web/App.tsx"],
     ] as const
   ) {
