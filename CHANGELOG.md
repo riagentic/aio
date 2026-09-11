@@ -1026,6 +1026,15 @@ real `deno doc` output in both directions (`tests/api-served-widening.test.ts`).
 It also let **`app.loadSnapshot(json, { force: true })`** onto the public handle
 — the override the operator doors already honoured.
 
+### `docs/ai.md` — aio for AI agents
+
+What to read first and in what order, the three surfaces and which one you are
+looking at, testing the way the framework tests, a window that cannot steal the
+keyboard (Xephyr `:77`, `testDisplayEnv`, a capturing `$ELECTRON_PATH`), and the
+instrument mistakes that cost the most on this codebase — a check that agrees
+with its author, a grep that matches the heartbeat, `lint | tail -1`, a `pgrep`
+that finds itself. Written for a model; true for a person.
+
 ### The alpha52 hunt file, routed
 
 A 60-finding internal read of alpha52 had sat as "report only" since 2026-08-07.

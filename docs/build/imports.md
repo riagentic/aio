@@ -243,8 +243,8 @@ field report lost a session to this):
 ### WASM is compressed on the wire
 
 A `.wasm` module is a plain binary, not an already-compressed container, and it
-gzips well — measured on two real modules, a 103 KB one goes out at 46 KB
-(brotli) and a 23 MB one at 6.4 MB (gzip). aio compresses it for you, with no
+gzips well — measured on two real modules, a 103 KB one goes out at 46 KB over
+brotli and a 23 MB one at 6.4 MB over gzip. aio compresses it for you, with no
 configuration:
 
 - Under 8 MB: brotli where the client accepts it, gzip otherwise, cached by ETag
