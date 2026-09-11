@@ -37,6 +37,7 @@ export type Kind =
   | "type" // C→S — client kind {kind:"electron"|"browser"}
   | "boot" // S→C — boot id (reload token) {id}
   | "reload" // S→C — dev: full reload
+  | "patch" // S→C — dev: re-import the UI entry and swap it in, no reload
   | "css" // S→C — dev: css-only reload
   | "ping" // C→S — UDS/IPC keepalive
   | "subs" // C→S — subscription list {subs}
@@ -79,6 +80,7 @@ export const FRAME_KINDS: readonly Kind[] = [
   "type",
   "boot",
   "reload",
+  "patch",
   "css",
   "ping",
   "subs",
@@ -205,6 +207,7 @@ export const SERVES: Record<
     "proto-err",
     "boot",
     "reload",
+    "patch",
     "css",
     "get-state",
     "diag",

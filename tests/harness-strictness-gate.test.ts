@@ -62,6 +62,9 @@ const EXEMPT: Record<string, string> = {
   uiNames:
     "reads an ALREADY-BOOTED TestUI handle and returns its element paths — " +
     "the harness that armed is the testUI that produced the handle",
+  uiRects:
+    "same shape as uiNames: it measures an ALREADY-BOOTED TestUI handle and " +
+    "returns geometry. The testUI that produced the handle did the arming",
   openCassette: "transport recording, no app code",
   totpCode: "pure code generator (HMAC over a secret) — runs no app code",
   testBrowser:

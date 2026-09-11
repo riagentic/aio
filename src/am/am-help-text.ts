@@ -11,7 +11,20 @@
 
 /** THE scaffold templates: what `am create --template=` accepts, and what the
  *  help offers. `am-cmd-create.ts` re-exports this as its own. */
-export const TEMPLATES = ["counter", "todo", "cli"] as const;
+export const TEMPLATES = [
+  "counter",
+  "todo",
+  "cli",
+  // Two more, each encoding something documentation cannot make anyone read.
+  // `canvas`: the shape that makes a WebGL/2D app testable — the decisions
+  // pulled out of the imperative shell as pure functions, which is the pattern
+  // a report found unaided after the whole 3D half of its app turned out to
+  // have no framework test. `assets`: an `assets` mount plus a real file, so
+  // the deno.json declaration and the directory exist together and the build
+  // embeds them — the half people forget is the declaration.
+  "canvas",
+  "assets",
+] as const;
 export type Template = (typeof TEMPLATES)[number];
 
 /** THE build targets: what `am create --target=` accepts, and what the help
@@ -206,11 +219,24 @@ Inspect:
                           type APPENDS to the field, setValue REPLACES it (as in testUI)
   shot [n] [--out=F.png] [--full]  PNG of the live Electron window via CDP — the app
                           must run with --cdp (or AIO_CDP=1); --json → {file,bytes,url}
+  shot --selector='<css>'  CROP the shot to one element (measured in the page,
+                          so it is right after a scroll or a transform)
+  shot --update=base.png   RECORD a visual baseline
+  shot --check=base.png    ASSERT the UI still looks like that baseline — exits 1
+                          and writes base.actual.png when it does not. Compares
+                          PIXELS, not bytes, with a tolerance (--threshold=N per
+                          channel, default 2; --max-diff=RATIO, default 0).
+                          Deterministic state: am snapshot load, then am dispatch
   eval '<js>'             Evaluate JS in the live renderer, get JSON back —
                           geometry, computed styles, a fetch from the page's own
                           origin: everything \`surface\` cannot see. Promises are
                           awaited. Needs --cdp, same as shot. --window=N picks
                           the window.
+  preview <file> [--export=Name] [--props=JSON]  RENDER one component with props
+                          you choose and print what it produces — an empty
+                          state, an error card, a long name — without driving
+                          the whole app into that state first. Same renderer as
+                          \`surface\`, same \`Component:Element\` paths
   where <file>            Which execution context this file runs in, and WHY —
                           the import chain from the UI entry, from the same
                           module graph the dev server walks
@@ -261,6 +287,9 @@ Inspect:
 
 Scaffold:
   add cell <name>         Generate src/cell/<name>.ts
+  add server <name>       SCAFFOLD A SERVER-ONLY module: src/server/<name>.server.ts
+                          (serverFns) AND the import line that registers it —
+                          a namespace nobody imports is registered nowhere
 
 Repair (a clone that does not run yet):
   fix                     Full repair: dep/aio symlink, env, electron, config,

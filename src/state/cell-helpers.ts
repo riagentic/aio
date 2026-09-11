@@ -380,6 +380,22 @@ export function scopeSelectors<S>(
     // teaches the tuple).
     const legacy = deps.length > 0 && !secondParamIsTuple(fn) &&
       fn.length >= 1 + deps.length;
+    // AMBIGUOUS, IRREDUCIBLY, for exactly one dep with an UNDESTRUCTURED
+    // second parameter. `(s, prices)` is the retired spread form and
+    // `(s, deps) => deps[0]` is the current one written with a named
+    // parameter, and at runtime they are the same function: one argument after
+    // the slice, no `[` to read. With two or more deps the arity separates
+    // them, which is why only this case needs saying.
+    //
+    // It resolves toward LEGACY — spreading the slice — so a selector written
+    // the new way with a named parameter receives the slice where it expects a
+    // tuple and `deps[0]` is `undefined`. Correct-looking code, wrong number,
+    // no error: measured, not reasoned about.
+    //
+    // The behaviour is unchanged (prod must keep degrading the same way); what
+    // changes is that the message now names BOTH readings, because the author
+    // of the second one is told they used a form they have never heard of.
+    const ambiguous = legacy && deps.length === 1;
     if (legacy) {
       // Retired in alpha76. Dev throws (scopeSelectors runs at cell creation,
       // so a test or a dev boot fails at the definition); prod logs the
@@ -392,6 +408,16 @@ export function scopeSelectors<S>(
         refuseRetired(
           removalOf("selector deps as a spread"),
           `${cellName}.${key}`,
+          ambiguous
+            ? `Read two ways, and they are the same function here: ` +
+              `\`(s, prices)\` is the retired SPREAD form, and ` +
+              `\`(s, deps) => deps[0]\` is the CURRENT form written with a ` +
+              `named parameter. With one dep nothing at runtime tells them ` +
+              `apart, so this resolves to the spread — your parameter gets ` +
+              `the slice, not a tuple, and \`deps[0]\` is undefined. ` +
+              `DESTRUCTURE it and both problems go: ` +
+              `\`fn: (s, [prices]) => …\`.`
+            : undefined,
         );
       }
     }

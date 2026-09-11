@@ -4,6 +4,7 @@
 // scattered _reset* functions (forgetting one = cross-test bleed).
 
 import { _resetCellBindings } from "./cell-reactive.ts";
+import { clearClientSourceMap } from "../diagnostics/stack-remap.ts";
 import { _resetCallTimeouts, resetPending } from "./cell-impl.ts";
 import { _resetDegraded } from "../diagnostics/degraded.ts";
 import { _resetMethodCancel } from "./method-cancel.ts";
@@ -54,6 +55,10 @@ export function _resetAioRuntime(): void {
   // result answering the next test's call is a green test over a method
   // that never ran.
   resetMethodPolicy();
+  // The client bundle's source map. A map installed by one test remaps the
+  // POSITIONS in another test's forwarded log lines — a wrong answer that
+  // looks like a right one, which is the worst shape a diagnostic can take.
+  clearClientSourceMap();
   // In-flight counts and their signals: a leftover count from one test
   // makes the next test's spinner true forever.
   // One test's module stub silently applying to the next is a green test

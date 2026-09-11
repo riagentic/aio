@@ -196,6 +196,32 @@ export type UiConfig = {
    *  the two ink tokens are contrast-solved against the GENERATED hue, so a
    *  rebrand that sets only the fill keeps the old ink. */
   theme?: UiTheme;
+
+  /** Emit the theme's LAYOUT defaults. Default `true`.
+   *
+   *  _"I want my own layout; I do not want to restyle `<input>`, `<textarea>`,
+   *  `<button>` and focus rings from scratch."_ Between `"tokens"` (nothing
+   *  paints, so every control is the browser's) and `"auto"`/`"full"` (a whole
+   *  page shell) there was nothing, and the choice was ~200 lines of control
+   *  CSS or fighting a layout you did not ask for.
+   *
+   *  `layout: false` keeps everything that makes an ELEMENT look right — the
+   *  canvas, typography, the form controls, tables, code, `::selection`, focus
+   *  rings, and the three environments (coarse pointer, reduced motion, print)
+   *  — and drops everything that decides where things GO: the `<main>` page
+   *  container with its header/footer alignment, and the six layout classes
+   *  (`.card`/`.row`/`.stack`/`.grid`/`.muted`/`.badge`).
+   *
+   *  A SEPARATE knob rather than a fifth `theme` value, because it is a
+   *  separate question — it composes with each of them:
+   *
+   *  ```jsonc
+   *  { "ui": { "theme": "full", "layout": false } }  // controls, never layout
+   *  { "ui": { "theme": "auto", "layout": false } }  // …until you ship CSS
+   *  ```
+   *
+   *  Ignored by `"tokens"` and `"none"`, which emit no visual rules to drop. */
+  layout?: boolean;
 };
 
 /** Per-client WebSocket safety limits for `--expose` deployments. All optional —
@@ -377,6 +403,33 @@ export type AioConfig<S, A, E> = {
    *  symlink escape, no dotfiles or server-only paths). A relative root is
    *  resolved against the process cwd, exactly like `baseDir`; a root that is
    *  not a directory is warned about at boot instead of 404ing in silence. */
+  /** Read-only directories this app SERVES, `"/urlPrefix" → dir`, in dev and
+   *  in production.
+   *
+   *  _"Every app with binary data writes the same twenty lines — route, MIME,
+   *  caching, range, traversal guard, `compile.include` — and one of them will
+   *  forget the guard."_ (anathomy §7). This is those twenty lines, once:
+   *
+   *  ```ts
+   *  await aio.run({ cells, assets: { "/media": "./media" } });
+   *  ```
+   *
+   *  Every guard `baseDir` has applies unchanged — traversal, symlink escape,
+   *  dotfiles, `*.server.ts` — plus the MIME table, ETag revalidation, range
+   *  requests and compression the rest of the static path already does.
+   *
+   *  DECLARE IT IN `deno.json` AND THE BUILD EMBEDS IT. `deno compile` cannot
+   *  trace a directory nobody imports, so an asset dir declared only in code
+   *  serves in dev and 404s from the binary — the "build products go stale in
+   *  silence" shape. Declared in deno.json, `assetIncludes` adds it to
+   *  `--include` with no `compile.include` entry to keep in sync.
+   *
+   *  Not {@link CellsConfig.serveDirs}: that one exists so the DEV server can
+   *  resolve a MODULE living outside `baseDir` (prod bundles follow the import
+   *  themselves), and it is dev-only on purpose. This is for DATA, which
+   *  production needs exactly as much as dev does. A prefix declared in both
+   *  resolves to this one, in both worlds. */
+  assets?: Record<string, string>;
   serveDirs?: Record<string, string>;
   client?: "electron" | "browser" | "cli" | "server-only"; // default: 'electron'
   keepServer?: boolean; // default: false — keep server running after client closes (moved from ui.keepAlive)
@@ -749,6 +802,9 @@ export type CellsConfig = {
   baseDir?: string;
   /** Extra read-only dev-server roots — see CellsConfig.serveDirs. */
   serveDirs?: Record<string, string>;
+  /** Read-only directories this app serves in dev AND prod — see
+   *  CellsConfig.assets. */
+  assets?: Record<string, string>;
   client?: "electron" | "browser" | "cli" | "server-only";
   keepServer?: boolean;
   transport?: "uds" | "ws" | "auto";
@@ -769,6 +825,14 @@ export type CellsConfig = {
   perfBudget?: PerfBudget;
   /** Declared size/rate limits — see {@link AioConfig.budgets}. */
   budgets?: Budgets;
+  /** Which paths the dev watcher restarts on — see {@link AioConfig.watch}.
+   *
+   *  Was allowlisted by the option validator and MISSING from this type, so
+   *  the documented escape hatch (`watch: ["src/ui"]`, for an app whose boot
+   *  reloads gigabytes each time) was accepted at runtime and rejected by
+   *  `deno task check` in the `cells` config form — the shape every new app
+   *  uses. Same class as `renderBudget` below, and caught by the same gate. */
+  watch?: false | string[];
   /** Client render-staleness / pending-patch thresholds — sent to the browser
    *  (page shell + `cfg` frame). Was accepted by the option validator but
    *  missing from this type AND dropped by the bridge; all three now agree. */

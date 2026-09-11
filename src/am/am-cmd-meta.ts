@@ -4,6 +4,7 @@
  */
 
 import { VERSION } from "../server/aio.ts";
+import { DEFAULT_ENTRY } from "../server/app-files.ts";
 import { HELP_TEXT } from "./am-help-text.ts";
 import type { GlobalFlags } from "./am-types.ts";
 import {
@@ -324,7 +325,7 @@ export async function cmdAdd(
   const mode = detectMode(flags);
 
   if (!kind || !name) {
-    fail("usage: am add cell <name>", mode);
+    fail("usage: am add cell <name>  |  am add server <name>", mode);
   }
   // The name becomes BOTH a path segment and an identifier in generated
   // source, and it arrived from argv completely unchecked (`am create`
@@ -367,6 +368,62 @@ export const ${symbol} = cell("${name}", {
     // other am command branches this way), so a piped `am add cell x | jq
     // -r .created` used to receive the pretty STRING, JSON-stringified.
     out(mode === "pretty" ? `created ${file}` : { created: file }, mode);
+  } else if (kind === "server") {
+    // A SERVER-ONLY module plus the line that makes it exist. The report's
+    // complaint (anathomy §10.6-adjacent) is that scaffolding the file is the
+    // easy half: a `serverFns` namespace that nothing imports is registered
+    // nowhere, so calling it from a cell fails at runtime with "unknown
+    // namespace" — and the author has a file that looks finished.
+    const dir = "src/server";
+    const file = `${dir}/${name}.server.ts`;
+    if (await exists(file)) fail(`${file} already exists`, mode);
+    const symbol = name.replace(/-([a-z0-9])/gi, (_m, c) => c.toUpperCase());
+    await Deno.mkdir(dir, { recursive: true });
+    await Deno.writeTextFile(
+      file,
+      `// Server-only functions. The \`.server.ts\` name is the convention aio
+// enforces: the dev server refuses to serve one, and the build refuses a
+// browser bundle that reached it — so anything in here (keys, queries, the
+// filesystem) stays on the server.
+//
+// Call it from a cell method: \`const rows = await ${symbol}.list()\`.
+import { serverFns } from "aio/server";
+
+export const ${symbol} = serverFns("${name}", {
+  list(): string[] {
+    return [];
+  },
+});
+`,
+    );
+    // The WIRING. A module nobody imports registers nothing, so the import is
+    // added to the server entry — and if there is none, that is SAID rather
+    // than left as a file that looks finished.
+    let entry: string | undefined;
+    for (const f of [DEFAULT_ENTRY, "src/main.ts", "app.ts"]) {
+      if (await exists(f)) {
+        entry = f;
+        break;
+      }
+    }
+    let wired: string | null = null;
+    if (entry) {
+      const src = await Deno.readTextFile(entry);
+      const line = `import "./server/${name}.server.ts";\n`;
+      if (!src.includes(`server/${name}.server.ts`)) {
+        await Deno.writeTextFile(entry, line + src);
+        wired = entry;
+      }
+    }
+    out(
+      mode === "pretty"
+        ? `created ${file}` +
+          (wired
+            ? `\nimported from ${wired} — a serverFns namespace nobody imports is registered nowhere`
+            : `\n⚠ no server entry found (src/app.ts) — import it yourself, or the namespace is registered nowhere`)
+        : { created: file, wired },
+      mode,
+    );
   } else if (kind === "page") {
     // `am new page` generated a useAio() component wired to nothing — code
     // the framework deprecated. A page is a plain component; there is nothing
@@ -379,7 +436,7 @@ export const ${symbol} = cell("${name}", {
     );
   } else {
     fail(
-      `unknown scaffold type: '${kind}' — use 'cell'`,
+      `unknown scaffold type: '${kind}' — use 'cell' or 'server'`,
       mode,
     );
   }

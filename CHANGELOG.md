@@ -1,6 +1,6 @@
 # Changelog
 
-## v1.0.0-beta1 — the reports answered (2026-09-08)
+## v1.0.0-beta1 — the reports answered (2026-09-11)
 
 > **The surface is frozen and stays frozen.** Everything in this release is a
 > fix or an addition: an app that compiles and runs against alpha76 compiles and
@@ -128,6 +128,47 @@ whose first signature is byte-identical to the previous single one cannot break
 a caller, because overload resolution tries declarations in order. `check:docs`
 could not parse an optional member, so it reported a documented one as
 nonexistent.
+
+### The rest of the round — every open item, closed
+
+The nine-report backlog is now empty. What the last pass added:
+
+**Things the docs promised and the code did not do.** `<ErrorBoundary>` said it
+caught "initial render, signal-triggered re-render, and lazy rejection" and two
+of the three were true — a throw in a component's own re-render kept the last
+good output and the subtree quietly stopped updating. `docs/debugging/errors.md`
+listed a browser error overlay in its toolkit and nothing injected one, against
+a `window._aioDiag` seam that had been waiting since alpha52. Five of six
+EXAMPLES could not build: `am create` scaffolds `src/app.ts` and they were still
+flat, so `deno task build` refused in a project that advertises `build.targets`.
+
+**Bytes and time.** WASM was listed as an already-compressed format and shipped
+raw — measured, a 23 MB module went out at 23 MB where 6.3 MB would do, and
+`MAX_BUFFER_BYTES` was accidentally a correctness ceiling so the larger the
+asset the less it was helped. Both fixed; large bodies compress as they stream.
+`--analyze` says where a bundle's bytes went, counting what reached the OUTPUT
+rather than file size. `__aioProfile()` ranks components by re-render, from
+counters the renderer already kept and nothing added up.
+
+**Errors that name your file.** A forwarded browser error said `app.js:1:22073`.
+No browser applies a source map to the string form of `Error.stack`, so the
+SERVER applies it now; the map ships dot-prefixed beside the bundle and is
+unreachable over HTTP. Editing only `App.tsx` PATCHES the page instead of
+reloading it, so a `<webview>` session, a loaded model and a wallet's unlock
+survive the save.
+
+**Asked for, and now there.** `assets` mounts a directory in dev AND prod, with
+every baseDir guard, and the build embeds it. `useForm(config, { schema })`
+takes a Zod/Valibot/ArkType schema. `useResource` holds a keyed resource with
+reference counting and refuses a stale open; `onChange` is the reaction that
+runs wherever the change came from, `am dispatch` included. `css` gives a class
+name that cannot collide. `<Browser>` embeds a page with both of its traps
+closed. `ui.layout: false` styles elements without placing boxes. CSP gained
+per-directive control and a nonce for the shell's own scripts. `am preview`
+renders one component in a state you choose; `am shot --check` compares pixels
+against a committed baseline. `--template=canvas` and `--template=assets`.
+
+**And a spawned child no longer outlives the app that started it.**
 
 > Everything below this line landed before the beta was cut, in the order it
 > landed.

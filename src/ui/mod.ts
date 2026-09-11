@@ -51,7 +51,12 @@ interface Common {
 }
 
 /** Merge the kit's class with a caller-supplied one. */
-function cx(base: string, extra?: string): string {
+/** Internal two-argument join. The PUBLIC `cx` is the variadic one in
+ *  `./css.ts` — the spelling people reach for
+ *  (`cx(track, isActive && active)`), and two functions called `cx` with
+ *  different signatures in one module is the collision this whole file is
+ *  about. */
+function joinClass(base: string, extra?: string): string {
   return extra ? `${base} ${extra}` : base;
 }
 
@@ -80,7 +85,7 @@ export function Button(props: ButtonProps): VNode {
   return h("button", {
     ...rest(props, ["variant", "size", "children", "class"]),
     type: props.type ?? "button",
-    class: cx(`aio-btn aio-btn--${variant} aio-btn--${size}`, cls),
+    class: joinClass(`aio-btn aio-btn--${variant} aio-btn--${size}`, cls),
   }, children);
 }
 
@@ -103,7 +108,7 @@ export function Input(props: InputProps): VNode {
   return h("input", {
     ...rest(props, ["invalid", "onInput", "onChange", "class"]),
     type: props.type ?? "text",
-    class: cx(`aio-input${invalid ? " aio-input--invalid" : ""}`, cls),
+    class: joinClass(`aio-input${invalid ? " aio-input--invalid" : ""}`, cls),
     onInput: onInput
       ? (e: Event) => onInput((e.target as HTMLInputElement).value, e)
       : undefined,
@@ -129,7 +134,7 @@ export function Textarea(props: TextareaProps): VNode {
   return h("textarea", {
     ...rest(props, ["invalid", "onInput", "class"]),
     rows: props.rows ?? 3,
-    class: cx(
+    class: joinClass(
       `aio-input aio-textarea${invalid ? " aio-input--invalid" : ""}`,
       cls,
     ),
@@ -168,7 +173,7 @@ export function Select(props: SelectProps): VNode {
   });
   return h("select", {
     ...rest(props, ["options", "value", "invalid", "onChange", "class"]),
-    class: cx(
+    class: joinClass(
       `aio-input aio-select${invalid ? " aio-input--invalid" : ""}`,
       cls,
     ),
@@ -208,7 +213,7 @@ export function Checkbox(props: CheckboxProps): VNode {
     // Unlabelled, the box IS the component, so the caller's `class` belongs on
     // it — it used to be swallowed (only the label row ever received it), so
     // `<Checkbox class="mine"/>` silently rendered without "mine".
-    class: label == null ? cx("aio-checkbox", cls) : "aio-checkbox",
+    class: label == null ? joinClass("aio-checkbox", cls) : "aio-checkbox",
     onChange: onChange
       ? (e: Event) => onChange((e.target as HTMLInputElement).checked, e)
       : undefined,
@@ -216,7 +221,7 @@ export function Checkbox(props: CheckboxProps): VNode {
   if (label == null) return box;
   return h(
     "label",
-    { class: cx("aio-checkbox-row", cls) },
+    { class: joinClass("aio-checkbox-row", cls) },
     box,
     h("span", null, label),
   );
@@ -290,7 +295,7 @@ export function Field(props: FieldProps): VNode {
         "children",
         "class",
       ]),
-      class: cx("aio-field", cls),
+      class: joinClass("aio-field", cls),
     },
     label != null
       ? h(
@@ -413,7 +418,7 @@ export function Table<Row extends Record<string, unknown>>(
         "onRowClick",
         "class",
       ]),
-      class: cx("aio-table", cls),
+      class: joinClass("aio-table", cls),
     },
     head,
     body,
@@ -445,7 +450,7 @@ export function Card(props: CardProps): VNode {
     "div",
     {
       ...rest(props, ["title", "footer", "children", "class"]),
-      class: cx("aio-card", cls),
+      class: joinClass("aio-card", cls),
     },
     title != null ? h("div", { class: "aio-card__title" }, title) : null,
     h("div", { class: "aio-card__body" }, children),
@@ -476,7 +481,7 @@ function layout(props: StackProps, direction: "row" | "column"): VNode {
     "div",
     {
       ...rest(props, ["gap", "align", "children", "class", "style"]),
-      class: cx("aio-stack", cls),
+      class: joinClass("aio-stack", cls),
       style: {
         display: "flex",
         flexDirection: direction,
@@ -553,7 +558,7 @@ export function Modal(props: ModalProps): VNode | null {
         "children",
         "class",
       ]),
-      class: cx("aio-modal-backdrop", cls),
+      class: joinClass("aio-modal-backdrop", cls),
       onClick: onBackdrop,
     },
     h(
@@ -581,7 +586,7 @@ export function Modal(props: ModalProps): VNode | null {
 export function Spinner(props: Common = {}): VNode {
   return h("span", {
     ...rest(props, ["class"]),
-    class: cx("aio-spinner", props.class as string | undefined),
+    class: joinClass("aio-spinner", props.class as string | undefined),
     role: "status",
     "aria-label": "Loading",
   });
@@ -645,7 +650,7 @@ export function Avatar(props: AvatarProps): VNode {
     "span",
     {
       ...common,
-      class: cx("aio-avatar", cls),
+      class: joinClass("aio-avatar", cls),
       style,
       role: "img",
       "aria-label": name,
@@ -707,7 +712,7 @@ export function Pagination(props: PaginationProps): VNode {
   }) =>
     h("button", {
       type: "button",
-      class: cx(
+      class: joinClass(
         "aio-page__btn",
         opts?.current ? "aio-page__btn--current" : undefined,
       ),
@@ -720,7 +725,7 @@ export function Pagination(props: PaginationProps): VNode {
     "nav",
     {
       ...rest(props, ["page", "pages", "onPage", "window", "class"]),
-      class: cx("aio-page", cls),
+      class: joinClass("aio-page", cls),
       "aria-label": "Pagination",
     },
     btn("‹", page - 1, { disabled: page <= 1, aria: "Previous page" }),
@@ -906,7 +911,7 @@ export function ToastHost(props: Common = {}): VNode {
     "div",
     {
       ...rest(props, ["class"]),
-      class: cx("aio-toasts", props.class as string | undefined),
+      class: joinClass("aio-toasts", props.class as string | undefined),
       role: "status",
       "aria-live": "polite",
     },
@@ -977,6 +982,12 @@ export {
 // ── Markdown ─────────────────────────────────────────────────────────
 
 export { Markdown, type MarkdownProps } from "./markdown.ts";
+// An embedded web page, with the two traps closed (a reactive `src` is a
+// navigation loop; unmounting destroys the guest's login). See ./browser.ts.
+export { Browser, type BrowserProps } from "./browser.ts";
+// Scoped styles: a class name nobody else can collide with, content-addressed
+// so it is stable across server and client. See ./css.ts.
+export { collectCss, css, cx } from "./css.ts";
 
 // ── Styles ───────────────────────────────────────────────────────────
 

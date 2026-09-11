@@ -159,6 +159,19 @@ const cellFile = (name: string, body: string) =>
 type Case = { name: string; files: Record<string, string>; expect: string };
 
 const VIOLATIONS: Case[] = [
+  // The class-name collision: `.track` in two stylesheets, disagreeing about
+  // `overflow`. The reported bug clipped every music row to one line with no
+  // error, a correct DOM and a correct component tree — the later rule simply
+  // won. Two FILES, because a collision between two authors is the case that
+  // bites; the rule finds it inside one file too.
+  {
+    name: "the same class in two stylesheets, disagreeing",
+    files: app({
+      "src/player.css": ".track {\n  display: flex;\n  overflow: visible;\n}\n",
+      "src/list.css": ".track {\n  overflow: hidden;\n  height: 1.2rem;\n}\n",
+    }),
+    expect: "defined in two places",
+  },
   // A cell that imports `aio/client-only` says two opposite things about the
   // same code: the marker declares "must not run on the server", and a cell
   // method runs on the server. Without the rule it arrives as a

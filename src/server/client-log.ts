@@ -4,6 +4,7 @@
 
 import type { ClientLogEntry } from "../air/dom-inspector-types.ts";
 import { log } from "../diagnostics/logger-api.ts";
+import { remapClientText } from "../diagnostics/stack-remap.ts";
 
 const MAX_RATE = 100; // messages per second per client
 const MAX_CLIENT_MSG = 8192; // max msg length from client
@@ -71,13 +72,23 @@ export function writeClientLog(
   const ts = new Date(rawTs).toISOString();
   const lvl = LEVEL_PAD[entry.level] ?? "DEBUG";
   // Sanitize: clamp length, replace newlines to prevent log injection
-  const msg = (typeof entry.msg === "string" ? entry.msg : String(entry.msg))
+  // REMAPPED BEFORE CLAMPING. The bundle is one minified line, so a forwarded
+  // stack is a wall of `app.js:1:22073` — and a position that names nothing is
+  // the difference between a report an agent can act on and a report it
+  // re-derives by hand. Remapping after the newline-escape would have to parse
+  // `\\n`-joined text; before it, each frame is still a frame. Identity when no
+  // map is installed.
+  const msg = remapClientText(
+    typeof entry.msg === "string" ? entry.msg : String(entry.msg),
+  )
     .slice(0, MAX_CLIENT_MSG)
     .replace(/\n/g, "\\n")
     .replace(/\r/g, "\\r");
   // WHERE it was written, when the client could tell us. Untrusted like `msg`:
   // clamped, newline-stripped, and only rendered when it looks like a location.
-  const rawSrc = typeof entry.source === "string" ? entry.source : "";
+  const rawSrc = typeof entry.source === "string"
+    ? remapClientText(entry.source)
+    : "";
   const src = rawSrc
     .slice(0, 200)
     .replace(/[\n\r]/g, " ")

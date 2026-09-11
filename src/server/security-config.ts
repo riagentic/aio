@@ -47,6 +47,43 @@ export interface SecurityConfig {
   /** `Permissions-Policy`, verbatim. No default: restricting camera, mic or
    *  geolocation by guess would break an app that uses them. */
   permissionsPolicy?: string;
+  /** Override or REMOVE individual directives of the computed policy, without
+   *  hand-writing the whole thing.
+   *
+   *  `base-uri 'self'` is in `"basic"` as one of "the directives that cannot
+   *  break a page", and for an app's OWN pages that is true. It is not true of
+   *  a page your app serves that is not about your app — an archived document,
+   *  a mirrored page, a print preview — where the original `<base href>` is
+   *  load-bearing and dropping it rewrites every relative URL in the capture
+   *  (newjob §3). Writing a verbatim policy to lose one directive means
+   *  re-deriving `frame-ancestors` from `allowedOrigins` by hand and keeping
+   *  it in sync forever, so:
+   *
+   *  ```ts
+   *  security: { cspDirectives: { "base-uri": false } }          // drop it
+   *  security: { cspDirectives: { "img-src": "'self' https:" } } // widen it
+   *  ```
+   *
+   *  A value replaces (or adds) the directive; `false` removes it. Ignored
+   *  when `csp` is a verbatim policy — an app that wrote the whole thing has
+   *  already decided. */
+  cspDirectives?: Record<string, string | false>;
+  /** Give the shell's inline scripts a per-response nonce, so a strict app can
+   *  drop `script-src 'unsafe-inline'`. Default: off.
+   *
+   *  The served shell inlines its own bootstrap, so `"strict"` had to keep
+   *  `'unsafe-inline'` for scripts and a hardened app carried that as a
+   *  documented waiver (wallet report §11). With a nonce the shell's own scripts are
+   *  named and every other inline script is refused.
+   *
+   *  STYLES ARE NOT NONCED, deliberately. `style-src 'unsafe-inline'` also
+   *  governs the `style=` ATTRIBUTE, which `style={{…}}` produces on ordinary
+   *  components — noncing styles would break every app that sets one, which is
+   *  most of them, in exchange for a directive that was not the complaint.
+   *
+   *  Only affects `"strict"`: `"basic"` sends no `script-src` at all, so there
+   *  is nothing for a nonce to tighten. */
+  cspNonce?: boolean;
   /** Compress responses (`br`/`gzip`/`deflate`, negotiated). Default: on.
    *  Only buffered, compressible, non-trivial 200s are touched — see
    *  `http-encoding.ts`. */

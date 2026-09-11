@@ -842,6 +842,45 @@ pre-alpha72 behaviour, and `csp`, `frameOptions`, `referrerPolicy`, `hsts` and
 A route that sets a header itself always wins — the default never overwrites
 what the app said.
 
+#### Changing one directive without writing the whole policy
+
+`base-uri 'self'` is in `"basic"` because it cannot break _your_ pages. It can
+break a page your app **serves** that is not about your app — an archived
+document, a mirrored page, a print preview — where the original `<base href>` is
+load-bearing. Losing one directive should not mean hand-writing the policy and
+re-deriving `frame-ancestors` from `allowedOrigins` forever:
+
+```ts
+security: {
+  cspDirectives: {
+    "base-uri": false,              // drop it
+    "img-src": "'self' https:",     // widen it
+    "worker-src": "'self' blob:",   // add one aio never sends
+  },
+}
+```
+
+A string replaces or adds the directive, `false` removes it, and the rest of the
+computed policy is untouched. Ignored when `csp` is a verbatim policy — an app
+that wrote the whole thing has already decided.
+
+#### Dropping `script-src 'unsafe-inline'`
+
+The served shell inlines its own bootstrap, so `"strict"` keeps
+`script-src 'unsafe-inline'` — a policy that blocks the page aio itself served
+is not a hardening, it is an outage. A nonce names those scripts instead, so
+every _other_ inline script is refused:
+
+```ts
+security: { csp: "strict", cspNonce: true },
+```
+
+Every `<script>` in the shell is stamped with a fresh per-response nonce,
+including anything you put in `ui.head`. Styles deliberately keep
+`'unsafe-inline'`: that directive also governs the `style=` **attribute**, which
+`style={{…}}` produces on ordinary components, so noncing styles would break
+most apps in exchange for a directive nobody asked about.
+
 ### Keeping secrets out of clients and disk
 
 A secret state field (API key, session token) needs **both** excludes — they are

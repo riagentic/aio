@@ -503,6 +503,14 @@ export function denoJson(
     },
     tasks,
   };
+  if (template === "assets") {
+    // BOTH halves, together. A mount with no directory is a 404; a directory
+    // with no mount is a 404 that looks like a build problem. The scaffold
+    // writes `media/hello.txt` beside this, and the build reads THIS key to
+    // decide what to embed in the binary — so there is nothing to keep in
+    // sync with a `compile.include` entry.
+    (obj as Record<string, unknown>).assets = { "/media": "./media" };
+  }
   if (css === "tailwind") {
     // The generated theme steps fully aside the moment `src/style.css` exists,
     // and this command's output IS that file — which is why Tailwind needs no
@@ -553,6 +561,289 @@ release-key.json
 /** Full file set for a new project — pure (path → content), no disk I/O.
  *  `source` selects the framework mode (dep/aio symlink vs JSR pins).
  *  `target` selects the default for `deno task dev` / `deno task compile`. */
+
+// ── `--template=canvas` ─────────────────────────────────────────────────────
+//
+// The 3D/2D half of an app has no framework test: under happy-dom there is no
+// WebGL context, so `testUI` cannot drive a canvas at all. A report found the
+// answer unaided (anathomy §6) and it is worth scaffolding rather than only
+// writing down: pull the DECISIONS out of the imperative shell, so "what did
+// the ray hit" and "where is everything now" are pure functions of what the
+// renderer knows, and only the drawing calls stay untestable.
+//
+// The scaffolded app is a bouncing-ball loop, which is the smallest thing that
+// has both halves: `step()` is pure and tested, `draw()` is four canvas calls
+// with no branches worth covering.
+
+const CANVAS_CELL = `import { cell } from "aio";
+
+/** One body in the world. Plain data — the renderer reads it, nothing more. */
+export type Ball = { x: number; y: number; dx: number; dy: number };
+
+export type World = { balls: Ball[]; paused: boolean; width: number; height: number };
+
+/** THE DECISION, and the whole reason this template exists: advancing the
+ *  world is a PURE FUNCTION of the world. No canvas, no context, no globals —
+ *  so \`tests/cell.test.ts\` can assert about bouncing without a GPU.
+ *
+ *  Exported on its own (not only as a method) so a test can call it directly
+ *  with a hand-built world, which is how you test the edge cases a running app
+ *  reaches once an hour. */
+export function step(w: World): Ball[] {
+  return w.balls.map((b) => {
+    let { x, y, dx, dy } = b;
+    x += dx;
+    y += dy;
+    if (x < 0 || x > w.width) dx = -dx;
+    if (y < 0 || y > w.height) dy = -dy;
+    return { x, y, dx, dy };
+  });
+}
+
+export const world = cell("world", {
+  state: {
+    width: 640,
+    height: 360,
+    paused: false,
+    balls: [
+      { x: 40, y: 40, dx: 2.5, dy: 1.7 },
+      { x: 300, y: 120, dx: -1.9, dy: 2.2 },
+      { x: 500, y: 260, dx: 1.3, dy: -2.6 },
+    ] as Ball[],
+  },
+  methods: {
+    tick(s: World) {
+      if (s.paused) return;
+      s.balls = step(s);
+    },
+    toggle(s: World) {
+      s.paused = !s.paused;
+    },
+    resize(s: World, size: { width: number; height: number }) {
+      s.width = size.width;
+      s.height = size.height;
+    },
+  },
+});
+`;
+
+const CANVAS_UI = `// UI — the imperative shell, and nothing else.
+//
+// Every decision lives in src/cell.ts as a pure function. What is left here is
+// four canvas calls with no branches, which is the part a screenshot check
+// covers (\`am shot --check\`) and a unit test never could.
+//
+// See docs/testing/canvas-and-3d.md for the whole pattern.
+import type { JSX } from "aio";
+import { onCleanup, onMount, useRaf } from "aio/air";
+import { world } from "./cell.ts";
+
+export default function App(): JSX.Element {
+  let canvas: HTMLCanvasElement | null = null;
+
+  // The loop drives the CELL, not the canvas: state lives on the server and
+  // survives a reload, so the simulation does too.
+  useRaf(() => world.tick());
+
+  onMount(() => {
+    const ctx = canvas?.getContext("2d") ?? null;
+    if (!ctx) return; // no context (a test, SSR) — nothing to draw on
+    let alive = true;
+    const draw = () => {
+      if (!alive || !canvas) return;
+      ctx.clearRect(0, 0, canvas.width, canvas.height);
+      ctx.fillStyle = "var(--aio-accent, #3b82f6)";
+      for (const b of world.balls) {
+        ctx.beginPath();
+        ctx.arc(b.x, b.y, 12, 0, Math.PI * 2);
+        ctx.fill();
+      }
+      requestAnimationFrame(draw);
+    };
+    draw();
+    onCleanup(() => {
+      alive = false;
+    });
+  });
+
+  return (
+    <main>
+      <h1>Canvas</h1>
+      <div class="card stack">
+        <canvas
+          ref={(el) => {
+            canvas = el as HTMLCanvasElement | null;
+          }}
+          width={world.width}
+          height={world.height}
+          style={{ width: "100%", background: "var(--aio-surface)" }}
+        />
+        <div class="row">
+          <button type="button" t="toggle" onClick={() => world.toggle()}>
+            {world.paused ? "Play" : "Pause"}
+          </button>
+          <span class="muted">{world.balls.length} bodies</span>
+        </div>
+      </div>
+      <p class="muted">
+        The decisions are in <code>src/cell.ts</code> and are pure, so
+        <code>tests/cell.test.ts</code> covers them with no GPU. Only the four
+        drawing calls above are untestable.
+      </p>
+    </main>
+  );
+}
+`;
+
+const CANVAS_TEST =
+  `// The half of a canvas app that CAN be tested — which is nearly all of it.
+//
+// \`step()\` is a pure function of the world, so bouncing is an ordinary
+// assertion. See docs/testing/canvas-and-3d.md.
+import { assertEquals } from "@std/assert";
+import { testCell } from "aio/testing";
+import { step, world } from "../src/cell.ts";
+
+const w = (over: Partial<Parameters<typeof step>[0]> = {}) => ({
+  width: 100,
+  height: 100,
+  paused: false,
+  balls: [],
+  ...over,
+});
+
+Deno.test("a ball moves by its velocity", () => {
+  const out = step(w({ balls: [{ x: 10, y: 10, dx: 2, dy: 3 }] }));
+  assertEquals(out[0], { x: 12, y: 13, dx: 2, dy: 3 });
+});
+
+Deno.test("a ball bounces off each wall, and keeps its speed", () => {
+  const right = step(w({ balls: [{ x: 99, y: 10, dx: 5, dy: 0 }] }));
+  assertEquals(right[0]!.dx, -5, "reversed, not zeroed");
+  const top = step(w({ balls: [{ x: 10, y: 1, dx: 0, dy: -5 }] }));
+  assertEquals(top[0]!.dy, 5);
+});
+
+testCell(world, "pausing stops the world", async (t) => {
+  t.init();
+  await t.send.toggle();
+  const before = JSON.stringify(t.getState().balls);
+  await t.send.tick();
+  assertEquals(JSON.stringify(t.getState().balls), before);
+});
+`;
+
+// ── `--template=assets` ─────────────────────────────────────────────────────
+//
+// An app that serves binary data needs TWO things that must agree: the mount
+// (\`assets\` in deno.json) and the directory. Declaring the mount and forgetting
+// the directory is a 404; creating the directory and forgetting the mount is a
+// 404 that looks like a build problem. Scaffolding both together is the point.
+
+const ASSETS_APP = `// Entry — with an \`assets\` mount.
+//
+// \`assets\` serves a directory in dev AND in production, with every guard
+// \`baseDir\` has (traversal, symlink escape, dotfiles, *.server.ts) plus the
+// MIME table, ETag revalidation, range requests and compression. Declared in
+// deno.json (see the \`assets\` key there), the BUILD embeds the directory in
+// the binary — so it is one fact rather than an \`assets\` mount and a
+// \`compile.include\` entry that have to be kept in sync.
+//
+// docs/build/imports.md has the whole story.
+import "./cell.ts";
+import { aio } from "aio";
+
+await aio.run({ ui: { theme: "auto" } });
+`;
+
+const ASSETS_UI = `// UI — reading from the \`assets\` mount.
+//
+// \`/media/…\` is served by the mount declared in deno.json. It works the same
+// in \`deno task dev\`, under \`--prod\`, and from a compiled binary, which is
+// the difference between \`assets\` and \`serveDirs\` (that one is dev-only, for
+// a MODULE a prod bundle resolves for itself).
+import type { JSX } from "aio";
+import { counter } from "./cell.ts";
+
+export default function App(): JSX.Element {
+  return (
+    <main>
+      <h1>Assets</h1>
+      <div class="card stack">
+        <p>
+          This text comes from <code>media/hello.txt</code>, served at
+          <code>/media/hello.txt</code> by the <code>assets</code> mount in
+          deno.json.
+        </p>
+        <pre class="card" id="asset-body">loading…</pre>
+        <div class="row">
+          <button
+            type="button"
+            t="load"
+            onClick={async () => {
+              const el = document.getElementById("asset-body");
+              if (!el) return;
+              const res = await fetch("/media/hello.txt");
+              el.textContent = res.ok
+                ? await res.text()
+                : \`\${res.status} — is the media/ directory there?\`;
+            }}
+          >
+            Load it
+          </button>
+          <span class="muted">count: {counter.count}</span>
+        </div>
+      </div>
+    </main>
+  );
+}
+`;
+
+/** Per-template sources.
+ *
+ *  It was a chain of `template === "todo" ? A : B` ternaries, one per file,
+ *  which held exactly two templates and could not hold a third without every
+ *  line growing another branch — and the branches had already drifted apart
+ *  (the UI's had a `css` case the entry's did not). One place to add a
+ *  template, one place to read what a template IS.
+ *
+ *  A FUNCTION, not a const table: the sources below it are `const` string
+ *  literals, so a table evaluated at module scope would read them before they
+ *  are assigned. A function body runs when it is called.
+ *
+ *  `cli` is deliberately absent — it has no UI and no separate client, so it
+ *  is a different file SET rather than different contents, and it keeps its
+ *  own early return in `scaffold`. */
+function templateSources(
+  template: Template,
+): { app: string; cell: string; ui: string; test: string } {
+  switch (template) {
+    case "todo":
+      return { app: TODO_APP, cell: TODO_CELL, ui: TODO_UI, test: TODO_TEST };
+    case "canvas":
+      return {
+        app: COUNTER_APP,
+        cell: CANVAS_CELL,
+        ui: CANVAS_UI,
+        test: CANVAS_TEST,
+      };
+    case "assets":
+      return {
+        app: ASSETS_APP,
+        cell: COUNTER_CELL,
+        ui: ASSETS_UI,
+        test: COUNTER_TEST,
+      };
+    default:
+      return {
+        app: COUNTER_APP,
+        cell: COUNTER_CELL,
+        ui: COUNTER_UI,
+        test: COUNTER_TEST,
+      };
+  }
+}
+
 export function scaffold(
   name: string,
   template: Template,
@@ -575,8 +866,9 @@ export function scaffold(
       "README.md": readme(name, template, target),
     };
   }
+  const src = templateSources(template);
   const files: Record<string, string> = {
-    "deno.json": denoJson(name, source, target, "counter", css),
+    "deno.json": denoJson(name, source, target, template, css),
     ".gitignore": css === "tailwind"
       // `src/style.css` is a BUILD PRODUCT here. Committing it means the next
       // person's first `git status` is a diff of generated CSS, and a stale one
@@ -592,12 +884,30 @@ export function scaffold(
         "src/app.css": TAILWIND_SOURCE,
       }
       : {}),
-    "src/app.ts": template === "todo" ? TODO_APP : COUNTER_APP,
-    "src/cell.ts": template === "todo" ? TODO_CELL : COUNTER_CELL,
-    "src/App.tsx": template === "todo" ? TODO_UI : COUNTER_UI,
+    "src/app.ts": src.app,
+    "src/cell.ts": src.cell,
+    // The UI has to match the STYLESHEET the project will have. See
+    // `COUNTER_UI_TAILWIND`: with `--css=tailwind` the generated theme steps
+    // aside, so the default markup's theme classes stop existing and the
+    // scaffold's first `deno task dev` renders as unstyled HTML. Only the
+    // counter has a Tailwind twin — the others do not lean on theme classes.
+    "src/App.tsx": template === "counter" && css === "tailwind"
+      ? COUNTER_UI_TAILWIND
+      : src.ui,
     // Thin CLI client — `deno run -A src/client.ts` in dev; the `cli-client`
     // fleet target compiles it (build-cli.ts's conventional --cli --remote
     // entry is src/client.ts).
+    ...(template === "assets"
+      ? {
+        // The other half of the `assets` key in deno.json. A mount pointing at
+        // a directory that is not there is a 404 the author reads as a bug in
+        // aio, so the template never ships one without the other.
+        "media/hello.txt":
+          "Served from the `assets` mount in deno.json — in dev, under --prod,\n" +
+          "and from the compiled binary, which embeds this directory because\n" +
+          "the mount is declared there.\n",
+      }
+      : {}),
     "src/client.ts": CLIENT_TS,
     // `tests/`, at the project root — ONE answer to "where do tests go".
     // Three were in circulation (this file scaffolded `src/cell.test.ts`,
@@ -605,7 +915,7 @@ export function scaffold(
     // `deno test -A tests/`); a field report picked one and noted that having
     // three was the problem. `tests/` is what the framework itself does and
     // what the quickstart already ran.
-    "tests/cell.test.ts": template === "todo" ? TODO_TEST : COUNTER_TEST,
+    "tests/cell.test.ts": src.test,
     "README.md": readme(name, template, target),
   };
   return files;
@@ -949,6 +1259,13 @@ deno task build            # build every target in deno.json build.targets → d
 deno task check            # type-check src/
 \`\`\`
 
+\`deno task dev\` runs in the FOREGROUND and dies with the terminal that started
+it. That is right for a person and wrong for an agent, whose every command is a
+fresh short-lived shell — one report lost its app about eight times in a session
+before finding the answer. \`deno task am start\` is the supervised background
+form: it takes a lock, waits for health, and \`am stop\` / \`am status\` /
+\`am logs\` address it afterwards.
+
 The app's version is \`major.minor\` in deno.json (\`"version": "0.1"\`) — the
 build number is derived from the commit count, so every artifact is named
 \`${name}-0.1.<build>…\` and reports that version (\`-dirty.<hash>\` when
@@ -1056,6 +1373,86 @@ const app = connectCli(url, { readyTimeoutMs: 10_000 });
 await app.ready;
 console.log("state:", JSON.stringify(app.state, null, 2));
 app.subscribe(() => console.log("state:", JSON.stringify(app.state)));
+`;
+
+/** The `--css=tailwind` counter UI.
+ *
+ *  A SEPARATE component, and this is why. aio's generated theme steps fully
+ *  aside the moment `src/style.css` exists — that contract is exactly what
+ *  lets Tailwind need no adapter — and `--css=tailwind` WRITES that file. So
+ *  the default markup's `card` / `stack` / `row` / `primary` / `muted` classes
+ *  stop existing, Tailwind's preflight resets the semantic HTML underneath
+ *  them, and the very first `deno task dev` after `am create --css=tailwind`
+ *  renders an unstyled page. Scaffolding a Tailwind project whose example is
+ *  written against a stylesheet it just replaced is the kind of "works, looks
+ *  broken" first impression this whole command exists to avoid.
+ *
+ *  It also earns its keep as documentation: an author who asked for Tailwind
+ *  gets a component written in Tailwind, with dark mode and focus rings
+ *  already handled the Tailwind way. */
+const COUNTER_UI_TAILWIND = `// UI — export default; the framework mounts it.
+//
+// Styled with Tailwind. \`src/app.css\` is the SOURCE (\`@import "tailwindcss"\`)
+// and \`build.css\` compiles it to \`src/style.css\` before every dev reload and
+// every build — so edit app.css, never style.css.
+//
+// Because src/style.css exists, aio's generated theme steps aside entirely and
+// this file owns every pixel. See docs/ui/css-toolchain.md.
+//
+// \`JSX.Element\` needs the type import below; \`aio\` re-exports it so this is
+// the only line to remember.
+import type { JSX } from "aio";
+import { counter } from "./cell.ts";
+
+const BTN =
+  "rounded-lg px-4 py-2 text-sm font-medium transition-colors " +
+  "focus-visible:outline-2 focus-visible:outline-offset-2 " +
+  "focus-visible:outline-sky-500";
+
+export default function App(): JSX.Element {
+  return (
+    <main class="min-h-screen bg-slate-50 text-slate-900 dark:bg-slate-950 dark:text-slate-100">
+      <div class="mx-auto flex max-w-md flex-col gap-6 px-6 py-16">
+        <h1 class="text-2xl font-semibold tracking-tight">AIO Counter</h1>
+
+        <div class="flex flex-col items-center gap-6 rounded-xl border border-slate-200 bg-white p-8 shadow-sm dark:border-slate-800 dark:bg-slate-900">
+          <div class="text-6xl font-bold tabular-nums">{counter.count}</div>
+
+          <div class="flex gap-2">
+            <button
+              type="button"
+              t="minus"
+              class={BTN + " bg-slate-200 hover:bg-slate-300 dark:bg-slate-800 dark:hover:bg-slate-700"}
+              onClick={() => counter.decrement()}
+            >
+              −
+            </button>
+            <button
+              type="button"
+              class={BTN + " text-slate-600 hover:bg-slate-200 dark:text-slate-400 dark:hover:bg-slate-800"}
+              onClick={() => counter.reset()}
+            >
+              Reset
+            </button>
+            <button
+              type="button"
+              t="plus"
+              class={BTN + " bg-sky-600 text-white hover:bg-sky-500"}
+              onClick={() => counter.increment()}
+            >
+              +
+            </button>
+          </div>
+        </div>
+
+        <p class="text-sm text-slate-500 dark:text-slate-400">
+          State lives in <code class="rounded bg-slate-200 px-1 py-0.5 font-mono text-xs dark:bg-slate-800">src/cell.ts</code>.
+          Change it and this updates.
+        </p>
+      </div>
+    </main>
+  );
+}
 `;
 
 const COUNTER_UI = `// UI — export default; the framework mounts it.

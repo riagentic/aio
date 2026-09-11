@@ -101,7 +101,7 @@ async function smokeCounterUI(
 }
 
 const COUNTER_UIS: [string, string][] = [
-  ["counter", "../examples/counter/App.tsx"],
+  ["counter", "../examples/counter/src/App.tsx"],
   ["targets/browser", "../examples/targets/browser/src/App.tsx"],
   ["targets/browser-remote", "../examples/targets/browser-remote/src/App.tsx"],
   ["targets/electron", "../examples/targets/electron/src/App.tsx"],
@@ -123,7 +123,7 @@ Deno.test({
     _reset();
     storage.clear();
     const { default: App } = await import(
-      "../examples/todo/App.tsx"
+      "../examples/todo/src/App.tsx"
     ) as CounterModule;
     ensureConnected();
     const { win, root, cleanup } = createDOM();

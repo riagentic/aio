@@ -284,8 +284,17 @@ export function retiredCellConfigKeys(
  *  because a running app that silently DROPPED its visibility filter would
  *  be a data leak dressed as a cleanup. Category (b) of the dev==prod rule:
  *  dev stricter, never a silent divergence. */
-export function refuseRetired(r: Removal, subject?: string): void {
-  const line = retiredSpellingLine(r, subject);
+export function refuseRetired(
+  r: Removal,
+  subject?: string,
+  /** An extra paragraph for a case the registry entry cannot know about —
+   *  a call site where TWO readings of the same code are possible and the
+   *  generic "you used the retired spelling" would tell the author of the
+   *  OTHER one that they used a form they have never heard of. */
+  detail?: string,
+): void {
+  const line = retiredSpellingLine(r, subject) +
+    (detail ? `\n  ${detail}` : "");
   if (removalsAreFatal()) throw new Error(line);
   log.error("removals", line);
 }

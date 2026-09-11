@@ -2373,6 +2373,23 @@ async function _buildTestUI(
     },
   };
 
+  // SETTLE ONCE, BEFORE HANDING THE UI OVER.
+  //
+  // `mount()` is synchronous, and a component that rehydrates on mount — an
+  // `onMount` that dispatches, a `resource` that fetches, a `useLocal` that
+  // restores — has that work IN FLIGHT when the test body starts. Whether the
+  // first assertion saw the before or the after came down to how many
+  // microtasks the harness happened to have spent, which is why one repo
+  // measured ~40% flake and why the answer so far was a house rule and a
+  // comment on every affected test (llama.master §11). A rule enforced by
+  // remembering is not enforced.
+  //
+  // Non-strict on purpose. A mount that never quiesces must not fail HERE,
+  // where the error would name the harness rather than the app; `_gaveUp` is
+  // recorded and the first real observation point reports it with its own
+  // context.
+  await settle(false);
+
   return new Proxy(api as AnyDoc, {
     get(target, prop: string | symbol) {
       if (typeof prop === "symbol" || prop in target) {

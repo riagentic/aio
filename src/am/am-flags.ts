@@ -141,6 +141,7 @@ export const VERB_FLAGS: Readonly<Record<string, readonly string[]>> = {
   check: [],
   migrate: ["--from"],
   testgen: ["--out", "--entry"],
+  preview: ["--export", "--props"],
   // Where findings about aio go — outside the version store.
   feedback: ["--create"],
   // Meta

@@ -343,6 +343,41 @@ real drop — by reconnecting and re-announcing itself — and that re-announcem
 reopens the relay. A stall on an Electron whose event order nobody has measured
 yet therefore heals itself within the reconnect backoff, out loud.
 
+## `<webview>` and other custom elements
+
+`<webview>` renders fine — the runtime never cared. What TypeScript refuses is
+its **attributes**: aio's intrinsic element map admits any tag name and hands
+back the standard HTML attribute set, which has no `src` or `partition`.
+
+Declare it once, and it is typed exactly the way you want:
+
+```ts
+// types/webview.d.ts
+declare module "aio/jsx-runtime" {
+  interface JsxIntrinsicElements {
+    webview: {
+      src?: string;
+      partition?: string;
+      allowpopups?: boolean;
+      preload?: string;
+    };
+  }
+}
+```
+
+```tsx
+<webview src={url} partition="persist:session" allowpopups />;
+```
+
+The same four lines work for any web component. This is TypeScript's own
+interface merging, so the declaration is yours: add exactly the attributes you
+use, and a typo in one of them is still a compile error — which a blanket
+"unknown elements take anything" would have cost you.
+
+aio does not widen the map itself. Its index type is published surface, and the
+compatibility promise has no exceptions — not even for a widening that provably
+breaks nobody, because the value of the promise is that it has none.
+
 ## Headless and VM hosts (`AIO_ELECTRON_ARGS`)
 
 Electron on a real desktop needs nothing. On a VM, a container or a box with no

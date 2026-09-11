@@ -13,6 +13,9 @@ Verifying cells and UIs work correctly.
   load-bearing invariant on purpose and requires a named test to go red;
   `check:vacuous` catches tests that pass while asserting nothing;
   `check:dead-wiring` catches exports that nothing in `src/` ever reaches
+- [Canvas and 3D](canvas-and-3d.md) — happy-dom has no WebGL, so the canvas half
+  of an app cannot run under `testUI`. The shape that makes almost all of it
+  testable anyway, and the two tools that cover what is left
 - [Linter](linter.md) — aiol static analysis, CI integration
 - [Onboarding lab](onboarding-lab.md) — `deno task lab`: the real one-liners on
   a fresh Ubuntu container, plus "does MY repo build and run on a clean

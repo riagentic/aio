@@ -259,6 +259,21 @@ boot's migration pass did, and any **shape drift** — a field still in storage
 that the current `state` no longer declares. Boot warns about drift too, so a
 rename you forgot to migrate is visible before a user reports it.
 
+Boot also says the **safe** case out loud:
+
+```
+state shape: 1 new field(s), no migration needed — cfg.retries (number).
+A field the stored data does not have is filled from `state:`, so adding one
+is safe on its own. (Renaming or removing one is not — that is the
+"shape drift" line.)
+```
+
+Adding a field really is safe — stored data without it deep-merges and the
+declared value fills the gap — but you should not have to work that out from
+first principles. Silence on the safe case and a warning on the unsafe one are
+the same thing as far as a reader is concerned: both are the absence of a
+sentence, and neither tells you the tool looked.
+
 ### When a migration fails, and when you roll back
 
 Both cases are about the same thing: your users' data outliving the build that

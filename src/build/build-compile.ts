@@ -559,6 +559,48 @@ export async function assetIncludes(root: string): Promise<string[]> {
     }
   }
 
+  // 2b) the directories the app SERVES (`assets` in deno.json). `deno compile`
+  //     cannot trace a directory nobody imports, so an asset mount declared
+  //     only in code serves perfectly in dev and 404s from the binary — the
+  //     "build products go stale in silence" shape, discovered by a user.
+  //     Declared in deno.json it is embedded with nothing to keep in sync:
+  //     ONE fact, read by the server that serves it and the build that ships
+  //     it.
+  //
+  //     Same containment rule as `compile.include`, and REFUSED the same way
+  //     rather than dropped: a silently skipped mount ships a binary without
+  //     the data it was told to carry.
+  let mounts: unknown;
+  try {
+    const cfg = (await readDenoJson(root))?.config ?? {};
+    mounts = (cfg as { assets?: unknown }).assets;
+  } catch {
+    // aio-ok: the parse failure is already reported by the compile.include
+    // read above, which runs first and says so once.
+  }
+  if (mounts && typeof mounts === "object" && !Array.isArray(mounts)) {
+    for (const [prefix, dir] of Object.entries(mounts)) {
+      if (typeof dir !== "string" || !dir.trim()) {
+        throw new Error(
+          `${NO} deno.json assets["${prefix}"] is ${JSON.stringify(dir)} — ` +
+            `every value must be a non-empty directory path relative to the ` +
+            `project root.`,
+        );
+      }
+      const entry = dir.trim();
+      const rel = relative(root, join(root, entry));
+      if (isAbsolute(entry) || rel.startsWith("..") || isAbsolute(rel)) {
+        throw new Error(
+          `${NO} deno.json assets["${prefix}"] ("${dir}") is outside the ` +
+            `project. A binary embeds paths relative to the project root, so ` +
+            `this directory could not travel with it — move it inside the ` +
+            `project and point the mount at the copy.`,
+        );
+      }
+      add(rel);
+    }
+  }
+
   // 3) the app's config itself — its IDENTITY (version, title, client). The
   //    runtime reads it relative to the entry module, so a binary knows its own
   //    version instead of falling back to "0.0.0" or, worse, adopting the

@@ -231,6 +231,7 @@ export interface LifecycleDeps<S, A> {
     head?: string;
     chrome?: "standard" | "themed" | "none";
     theme?: UiTheme;
+    layout?: boolean; // ui.layout — false drops the page-layout defaults
     lang?: string;
   };
   keepServer: boolean | undefined;
@@ -712,6 +713,7 @@ export function startLifecycle<S, A>(deps: LifecycleDeps<S, A>): void {
           head: ui.head,
           chrome: ui.chrome,
           theme: ui.theme,
+          layout: ui.layout,
           lang: ui.lang,
           themeName: appId,
         },

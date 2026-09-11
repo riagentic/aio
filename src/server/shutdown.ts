@@ -3,6 +3,7 @@
 
 import type { Log } from "../diagnostics/logger-api.ts";
 import { flushClientLog } from "./client-log.ts";
+import { _liveSpawned, killAllSpawned } from "./spawn.ts";
 import { _blockingInFlight, blocking } from "../state/blocking.ts";
 import { _setUserStopHookActive } from "../state/dispatch.ts";
 import {
@@ -522,6 +523,29 @@ export function createShutdownOrchestrator(
       tLeft,
       () => refs.ownManager.disposeAll(),
     );
+    // …and then anything `spawn()` started that nobody claimed. Every child it
+    // starts is in a process group OF ITS OWN — that is what makes `kill()`
+    // reach the whole tree, and it is also why the app's death does not reach
+    // them. An app that spawns a transcode and exits leaves it running, with
+    // nothing left that knows its pid. `own.set(...)` is the way to tie one to
+    // a cell's lifetime; this is the backstop, and it is LOUD, because a
+    // leaked process is invisible from inside the app and accumulates on a
+    // machine until something runs out.
+    await phase(log, "spawned children", tLeft, async () => {
+      const names = [..._liveSpawned().values()];
+      const killed = await killAllSpawned();
+      if (killed > 0) {
+        log.warn(
+          "spawn",
+          `killed ${killed} child process(es) still running at shutdown ` +
+            `(${
+              names.join(", ")
+            }). A child spawned with spawn() lives in its ` +
+            `own process group, so it would otherwise have outlived this app. ` +
+            `Tie it to a cell instead: s.$do(own.set("job", () => job.kill())).`,
+        );
+      }
+    });
     // `schedule.blocking`'s worker pool is part of the scheduler surface and
     // was the one piece nothing ever tore down: its idle threads outlived the
     // app in libraryMode, `testServer()` and any multi-app host. Idle-only,

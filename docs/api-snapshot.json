@@ -340,7 +340,7 @@
         },
         "CellsConfig": {
           "kind": "typeAlias",
-          "sig": "61e9e41dc02a6ca4",
+          "sig": "326291dd83527440",
           "members": {
             "appId": "opt:2fb40568533c1a6d",
             "cells": "opt:58dbae2820cab862",
@@ -368,6 +368,7 @@
             "ui": "opt:8af951072478eccf",
             "baseDir": "opt:2fb40568533c1a6d",
             "serveDirs": "opt:09b94ba87da5c3f0",
+            "assets": "opt:09b94ba87da5c3f0",
             "client": "opt:2cf33547ada6ef98",
             "keepServer": "opt:0ecca0fe3beba89b",
             "transport": "opt:0af4963515624cbb",
@@ -383,6 +384,7 @@
             "perfCheck": "opt:c9d4c47af1d95972",
             "perfBudget": "opt:26e244ebdbe0fd36",
             "budgets": "opt:45e7227680f3b8c1",
+            "watch": "opt:53469494ce2e14b4",
             "renderBudget": "opt:06ed737d9c722828",
             "effectTimeoutMs": "opt:f6522636230fa080",
             "freezeState": "opt:0ecca0fe3beba89b",
@@ -428,7 +430,7 @@
             "onCheckpointRestore": "opt:bc30aaf8d4dd00e2"
           },
           "sigs": [
-            "61e9e41dc02a6ca4"
+            "326291dd83527440"
           ]
         },
         "CellStatus": {
@@ -1388,7 +1390,7 @@
         },
         "SecurityConfig": {
           "kind": "interface",
-          "sig": "bfbd7c975d0f675e",
+          "sig": "c00be1fc70823aeb",
           "members": {
             "headers": "opt:0ecca0fe3beba89b",
             "csp": "opt:187cf0455c7e9f0d",
@@ -1396,10 +1398,12 @@
             "referrerPolicy": "opt:2fb40568533c1a6d",
             "hsts": "opt:9265728875d24c4f",
             "permissionsPolicy": "opt:2fb40568533c1a6d",
+            "cspDirectives": "opt:8ff938c9b42dd952",
+            "cspNonce": "opt:0ecca0fe3beba89b",
             "compress": "opt:0ecca0fe3beba89b"
           },
           "sigs": [
-            "bfbd7c975d0f675e"
+            "c00be1fc70823aeb"
           ]
         },
         "Selector": {
@@ -1653,7 +1657,7 @@
         },
         "UiConfig": {
           "kind": "typeAlias",
-          "sig": "e619a9f7801b6163",
+          "sig": "0541d33dad4a2b30",
           "members": {
             "title": "opt:2fb40568533c1a6d",
             "width": "opt:f6522636230fa080",
@@ -1665,10 +1669,11 @@
             "lang": "opt:2fb40568533c1a6d",
             "dir": "opt:64280ffe426f7d01",
             "chrome": "opt:0cb8e5493e58cfb7",
-            "theme": "opt:b516670a54a1b089"
+            "theme": "opt:b516670a54a1b089",
+            "layout": "opt:0ecca0fe3beba89b"
           },
           "sigs": [
-            "e619a9f7801b6163"
+            "0541d33dad4a2b30"
           ]
         },
         "UiTheme": {
@@ -1911,6 +1916,13 @@
             "ab8dee5e9b6487f0"
           ]
         },
+        "AsyncValidationRule": {
+          "kind": "typeAlias",
+          "sig": "a0e8a6c3de6fcdfa",
+          "sigs": [
+            "a0e8a6c3de6fcdfa"
+          ]
+        },
         "batch": {
           "kind": "function",
           "sig": "9cb67902b061b0ee",
@@ -2013,6 +2025,13 @@
             "9825d7155666c2bc"
           ]
         },
+        "CrossFieldValidator": {
+          "kind": "typeAlias",
+          "sig": "5d1f485e57acf5e3",
+          "sigs": [
+            "5d1f485e57acf5e3"
+          ]
+        },
         "Defer": {
           "kind": "function",
           "sig": "b57232df05676dee",
@@ -2084,6 +2103,13 @@
             "caa3438d820c60c5"
           ]
         },
+        "Dispose": {
+          "kind": "typeAlias",
+          "sig": "4a6c72f2fc6661de",
+          "sigs": [
+            "4a6c72f2fc6661de"
+          ]
+        },
         "effect": {
           "kind": "function",
           "sig": "475384653d047765",
@@ -2143,20 +2169,33 @@
             "ca03bb9a12bf81d1"
           ]
         },
+        "FormOptions": {
+          "kind": "interface",
+          "sig": "7cc64ea900731c47",
+          "members": {
+            "validators": "opt:3851fab93b17ea21",
+            "schema": "opt:0da12c337a9506b4"
+          },
+          "sigs": [
+            "7cc64ea900731c47"
+          ]
+        },
         "FormState": {
           "kind": "interface",
-          "sig": "8e3015f4e4323c35",
+          "sig": "6f0ebbb1e8203d9b",
           "members": {
             "fields": "req:7b025519cdb585c8",
             "valid": "req:b0d796a0bdd3e6b1",
+            "formError": "opt:63a571e26d7de36a",
             "dirty": "req:b0d796a0bdd3e6b1",
             "values": "req:a0a3ad5100112055",
+            "parsed": "opt:9ca1bce5cc0fcd38",
             "validate": "req:538c653b6b4690ef",
             "reset": "req:d831502f3c16c146",
             "bind": "req:bcdf56e8ea80c53a"
           },
           "sigs": [
-            "8e3015f4e4323c35"
+            "6f0ebbb1e8203d9b"
           ]
         },
         "Fragment": {
@@ -2353,6 +2392,32 @@
             "ff29b8583e708d39"
           ]
         },
+        "onChange": {
+          "kind": "function",
+          "sig": "8b59744c7781feb0",
+          "members": {
+            "param0": "req:07b6a4ba247c9486|ee2c57236d58fc70~fnOrConstructor",
+            "param1": "req:a99452927f42d612|3f1e41bc36fa7b71~parenthesized+5c830ed096c3869d~parenthesized",
+            "param2": "req:93ff355c24ed8355|",
+            "return": "req:81c79f14992ec627",
+            "typeParams": "req:ddf4493b60497953"
+          },
+          "sigs": [
+            "daee124e526db320"
+          ]
+        },
+        "OnChangeOptions": {
+          "kind": "typeAlias",
+          "sig": "291c816043a89501",
+          "members": {
+            "typeParams": "req:ddf4493b60497953",
+            "immediate": "opt:b0d796a0bdd3e6b1",
+            "equals": "opt:1e6a8b599ccebcd9"
+          },
+          "sigs": [
+            "291c816043a89501"
+          ]
+        },
         "onCleanup": {
           "kind": "function",
           "sig": "9cb67902b061b0ee",
@@ -2536,6 +2601,28 @@
           },
           "sigs": [
             "80d7d4ce1e797056"
+          ]
+        },
+        "ResourceHandle": {
+          "kind": "typeAlias",
+          "sig": "1960c423a702f969",
+          "members": {
+            "typeParams": "req:ddf4493b60497953",
+            "value": "req:197fac225db6ff4a",
+            "loading": "req:f1a4a839045ae6c2",
+            "error": "req:0b4f988d5e163e4a",
+            "key": "req:b538600a64e884fa",
+            "dispose": "req:81c79f14992ec627"
+          },
+          "sigs": [
+            "1960c423a702f969"
+          ]
+        },
+        "ResourceKey": {
+          "kind": "typeAlias",
+          "sig": "0bcd3c55a6b96384",
+          "sigs": [
+            "0bcd3c55a6b96384"
           ]
         },
         "Route": {
@@ -3032,6 +3119,32 @@
           },
           "sigs": [
             "5a98b0670cb3893a"
+          ]
+        },
+        "useResource": {
+          "kind": "function",
+          "sig": "48491bf6334cda64",
+          "members": {
+            "param0": "req:5ea2d6d8142b57ee|bc2b3871083b62fd~UseResourceConfig",
+            "return": "req:d9e02dd5fedaa01a",
+            "typeParams": "req:ddf4493b60497953"
+          },
+          "sigs": [
+            "313bd4cd3facc497"
+          ]
+        },
+        "UseResourceConfig": {
+          "kind": "typeAlias",
+          "sig": "2b1c3a133a695737",
+          "members": {
+            "typeParams": "req:ddf4493b60497953",
+            "key": "req:8ee64e6929fe5282",
+            "open": "req:5ac01e4abe9ad923",
+            "close": "opt:0fb5f9dbcd56aa32",
+            "scope": "opt:2fb40568533c1a6d"
+          },
+          "sigs": [
+            "2b1c3a133a695737"
           ]
         },
         "useRoute": {
@@ -6597,6 +6710,33 @@
             "397be6b5edce6088"
           ]
         },
+        "Browser": {
+          "kind": "function",
+          "sig": "7c6b8e784f191840",
+          "members": {
+            "param0": "req:d2066a561008d8eb|93df8bc1a1023c49~BrowserProps",
+            "return": "req:df9e68ff8b581ce9"
+          },
+          "sigs": [
+            "95d3ffbd2740b8f4"
+          ]
+        },
+        "BrowserProps": {
+          "kind": "interface",
+          "sig": "31c166435935db98",
+          "members": {
+            "src": "req:2fb40568533c1a6d",
+            "keepAlive": "opt:2fb40568533c1a6d",
+            "partition": "opt:2fb40568533c1a6d",
+            "onNavigate": "opt:db1e2795ea17ab9d",
+            "class": "opt:2fb40568533c1a6d",
+            "style": "opt:13f82d5fa6ff79be",
+            "ref": "opt:04d883de840d96cc"
+          },
+          "sigs": [
+            "31c166435935db98"
+          ]
+        },
         "Button": {
           "kind": "function",
           "sig": "55f4b81d43105eab",
@@ -6671,6 +6811,16 @@
           },
           "sigs": [
             "4c01a7276add6817"
+          ]
+        },
+        "collectCss": {
+          "kind": "function",
+          "sig": "6ef6486f1aff326f",
+          "members": {
+            "return": "req:2fb40568533c1a6d"
+          },
+          "sigs": [
+            "5f76d1167b9cb1ef"
           ]
         },
         "Column": {
@@ -6752,6 +6902,29 @@
           },
           "sigs": [
             "4080f49c3ce4dbd3"
+          ]
+        },
+        "css": {
+          "kind": "function",
+          "sig": "9d2552d6408e30a4",
+          "members": {
+            "param0": "req:1311945ca483ff60|31c470781cdd51c8~TemplateStringsArray",
+            "param1": "opt:cd9786dae8c3cb4f|145f47e17a0fcbe4~Array",
+            "return": "req:2fb40568533c1a6d"
+          },
+          "sigs": [
+            "49c65375eb0032ef"
+          ]
+        },
+        "cx": {
+          "kind": "function",
+          "sig": "37f00bcf81ef03a8",
+          "members": {
+            "param0": "opt:805de4b6ed3ff14c|95fc963a9d5cdfcd~Array",
+            "return": "req:2fb40568533c1a6d"
+          },
+          "sigs": [
+            "636f3d5b36197dcf"
           ]
         },
         "EmptyState": {
@@ -7785,6 +7958,10 @@
           "kind": "verb",
           "sig": "verb"
         },
+        "am preview": {
+          "kind": "verb",
+          "sig": "verb"
+        },
         "am profile": {
           "kind": "verb",
           "sig": "verb"
@@ -7918,6 +8095,10 @@
           "sig": "bool"
         },
         "build --allow-server-only": {
+          "kind": "flag",
+          "sig": "bool"
+        },
+        "build --analyze": {
           "kind": "flag",
           "sig": "bool"
         },

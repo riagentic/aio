@@ -29,6 +29,10 @@ export const BUILD_BOOL_FLAGS = [
   "--headless",
   "--force",
   "--release",
+  // Prints where the bundle's bytes went — per dependency, per framework area,
+  // after tree-shaking. Builds the same artifact either way; the flag adds a
+  // report, never a different output.
+  "--analyze",
   // Builds nothing: prints the TMPDIR a launcher must hand this project's
   // packaged artifact (`AppDirs.app`) and exits. Part of the vocabulary because
   // an unknown flag here is silently ignored — a launcher asking with a typo

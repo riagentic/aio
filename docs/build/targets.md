@@ -374,6 +374,7 @@ scaffolding (the AppImage `AppDir`, the generated Gradle project) lives in
 | `--compile --service --headless --remote` | Same, with `--expose --headless` (target `server`)                                                                                                   |
 | `--name=X`                                | Override binary name (default: from deno.json `"title"`)                                                                                             |
 | `--force`                                 | Skip bundle cache — always rebuild `dist/app.js`                                                                                                     |
+| `--analyze`                               | Print where the bundle's bytes went (per dependency, per framework area) — same artifact, one extra report                                           |
 | `--release`                               | Android release build (default: debug) — emits `myapp-unsigned.apk`; sign it yourself                                                                |
 | `--entry=PATH`                            | Entry point for this build (default: `deno.json` `entry` › `src/app.ts`)                                                                             |
 | `--ui=PATH`                               | UI component this build bundles, overriding the `App.tsx` convention (recorded in the bundle; dev==prod checked)                                     |
@@ -423,6 +424,29 @@ Window-title resolution is `--title` › `ui.title` › `deno.json "title"` ›
 name and window title; add `ui.title` when you want a spaced, human-readable
 window title over a slugged binary (`"a field report Master"` vs
 `a field report`).
+
+### Where the bytes went (`--analyze`)
+
+```
+$ deno task build --analyze
+bundle: 192.5 KB across 131 modules (bytes AFTER tree-shaking and minification)
+  aio/air/                    76.1 KB  39.5%  ################  (46 modules)
+  aio/browser/                31.2 KB  16.2%  ######  (19 modules)
+  aio/state/                  27.0 KB  14.0%  ######  (25 modules)
+  node_modules/immer/         10.4 KB   5.4%  ##
+  src/App.tsx                  0.6 KB   0.3%  #
+```
+
+Same artifact, one extra report. Three things it deliberately does:
+
+- **Counts what reached the OUTPUT**, not file size on disk. A 400 KB dependency
+  that tree-shakes to 3 KB is not a 400 KB problem, and a report saying it is
+  costs you a day.
+- **Folds a dependency to its package**, because that is the unit you can act on
+  — remove it, replace it, import less of it. Sixty rows of
+  `three@0.160/build/*` answer "which dependency is big" worse than one row.
+- **Summarises the tail rather than dropping it**, so the rows plus "everything
+  else" always add up to the bundle.
 
 ## browser (standalone binary)
 

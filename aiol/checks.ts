@@ -2165,7 +2165,7 @@ export const checkPatterns: Checker = (ctx) => {
     // It argued against the framework's own documented mechanism. Throwing to
     // REFUSE is the endorsed shape — `docs/state/methods.md` lists it first
     // ("the caller's `await` rejects with your message… usually what you want
-    // for a guard"), `examples/contacts/cell.ts` demonstrates it three times,
+    // for a guard"), `examples/contacts/src/cell.ts` demonstrates it three times,
     // and `resolveCall` exists to deliver that rejection to the caller. A
     // field report caught the contradiction: the linter told them not to do
     // the thing the docs and the example told them to do, and when a project's
@@ -5721,6 +5721,200 @@ export const checkClientOnlyInCell: Checker = (ctx) => {
   }
 };
 
+// ── the class-name collision ────────────────────────────────────────────────
+//
+// _"The worst UI bug of one build"_ (vidtune §12.1, composer §10.3, newjob
+// §8.5): a `class="track"` defined in two stylesheets, one clipping every music
+// row to a single line. No error, a correct DOM, a correct component tree, and
+// a correct-looking cascade — the later rule simply won, and nothing anywhere
+// said that two people had claimed the same name.
+//
+// Scoped styles are the fuller answer. This is the half that costs nothing and
+// catches the exact bug: the same class, in two places, setting the SAME
+// PROPERTY to a DIFFERENT VALUE.
+//
+// DELIBERATELY NARROW, for the reason every rule in this file is. A class
+// legitimately appears many times — a base rule and a modifier, a media query,
+// a state — and reporting that would be noise people learn to silence.
+//   • Same property, same value: agreement, not a collision.
+//   • Different properties entirely: complementary, which is how CSS is meant
+//     to be written.
+//   • A selector with more to it (`.track:hover`, `.list .track`, `.track.big`)
+//     is a DIFFERENT rule on purpose and is never compared.
+//   • Inside `@media` / `@supports` / `@container`: the same class with a
+//     different value is the entire point of a media query.
+// What is left is two authors who both wrote `.track { ... }` at the top level
+// and disagreed, which is never deliberate.
+
+/** One top-level class rule: where it is, and what it sets. */
+export type ClassRule = {
+  file: string;
+  line: number;
+  class: string;
+  decls: Map<string, string>;
+};
+
+/** Every top-level `.class { … }` rule in a stylesheet.
+ *
+ *  A deliberately small CSS reader, not a parser: it tracks brace depth so a
+ *  rule inside `@media` is skipped (depth > 0 when the selector is read), and
+ *  it only accepts a selector that is exactly one class and nothing else. A
+ *  full parser would find more and would also find more to be wrong about. */
+export function topLevelClassRules(
+  file: string,
+  css: string,
+): ClassRule[] {
+  const out: ClassRule[] = [];
+  // Comments first: a `{` inside one would throw the depth off for the rest
+  // of the file, and a depth that is wrong is a rule that silently stops
+  // looking.
+  const src = css.replace(/\/\*[\s\S]*?\*\//g, (m) => m.replace(/[^\n]/g, " "));
+  const SOLO_CLASS = /^\.(-?[_a-zA-Z][\w-]*)$/;
+  let depth = 0;
+  let i = 0;
+  let selStart = 0;
+  let line = 1;
+  const lineAt = (idx: number) => {
+    let n = 1;
+    for (let k = 0; k < idx; k++) if (src[k] === "\n") n++;
+    return n;
+  };
+  while (i < src.length) {
+    const ch = src[i]!;
+    if (ch === "\n") line++;
+    if (ch === "{") {
+      if (depth === 0) {
+        const selector = src.slice(selStart, i).trim();
+        // Every comma-separated part must be a bare class for the rule to
+        // count; `.a, .b { }` claims both names with one body.
+        const parts = selector.split(",").map((x) => x.trim()).filter(Boolean);
+        const names = parts.map((x) => SOLO_CLASS.exec(x)?.[1]).filter((
+          x,
+        ): x is string => !!x);
+        if (names.length === parts.length && names.length > 0) {
+          // The body is the next balanced block.
+          let d = 1;
+          let j = i + 1;
+          while (j < src.length && d > 0) {
+            if (src[j] === "{") d++;
+            else if (src[j] === "}") d--;
+            j++;
+          }
+          const body = src.slice(i + 1, j - 1);
+          const decls = new Map<string, string>();
+          for (const raw of body.split(";")) {
+            const c = raw.indexOf(":");
+            if (c < 0) continue;
+            const prop = raw.slice(0, c).trim().toLowerCase();
+            const val = raw.slice(c + 1).trim();
+            // Custom properties are a namespace, not a layout instruction, and
+            // redefining one is how theming works.
+            if (!prop || prop.startsWith("--") || !/^[a-z-]+$/.test(prop)) {
+              continue;
+            }
+            decls.set(prop, val.replace(/\s+/g, " "));
+          }
+          // The line of the SELECTOR, not of `selStart` — which sits right
+          // after the previous rule's `}` and would report every rule at the
+          // line the one before it ended on.
+          const lead = src.slice(selStart, i).search(/\S/);
+          const at = lineAt(selStart + (lead < 0 ? 0 : lead));
+          for (const name of names) {
+            out.push({ file, line: at, class: name, decls });
+          }
+        }
+      }
+      depth++;
+    } else if (ch === "}") {
+      depth = Math.max(0, depth - 1);
+      if (depth === 0) selStart = i + 1;
+    } else if (depth === 0 && ch === ";") {
+      // An at-rule with no block (`@import "x";`) — the next selector starts
+      // after it, not after the last `}`.
+      selStart = i + 1;
+    }
+    i++;
+  }
+  return out;
+}
+
+/** Pairs of rules that claim the same class and disagree about a property.
+ *  Pure, so the rule is testable without a project on disk. */
+export function collidingClasses(
+  rules: readonly ClassRule[],
+): Array<{ class: string; prop: string; a: ClassRule; b: ClassRule }> {
+  const byName = new Map<string, ClassRule[]>();
+  for (const r of rules) {
+    const list = byName.get(r.class);
+    if (list) list.push(r);
+    else byName.set(r.class, [r]);
+  }
+  const out: Array<
+    { class: string; prop: string; a: ClassRule; b: ClassRule }
+  > = [];
+  for (const [name, list] of byName) {
+    if (list.length < 2) continue;
+    for (let i = 0; i < list.length; i++) {
+      for (let j = i + 1; j < list.length; j++) {
+        const a = list[i]!, b = list[j]!;
+        // Two rules in the SAME file at the same line are the `.a, .b` case
+        // above seen twice; and a file may legitimately restate a class later
+        // — that is still a collision, just a local one, and the report says
+        // where both are.
+        for (const [prop, av] of a.decls) {
+          const bv = b.decls.get(prop);
+          if (bv === undefined || bv === av) continue;
+          out.push({ class: name, prop, a, b });
+          break; // one finding per pair; the first disagreement is the lead
+        }
+      }
+    }
+  }
+  return out;
+}
+
+export const checkStyles: Checker = (ctx) => {
+  const { cssFiles, report, pass } = ctx;
+  if (cssFiles.length === 0) {
+    pass("no stylesheets");
+    return;
+  }
+  const rules: ClassRule[] = [];
+  for (const f of cssFiles) {
+    // A GENERATED stylesheet is not the author's to fix, and a utility
+    // framework's output restates class names by design — running this over
+    // Tailwind's output would report thousands of "collisions" that are the
+    // tool working correctly.
+    if (/^\/\*!/.test(f.content.trimStart())) continue;
+    rules.push(...topLevelClassRules(f.relative, f.content));
+  }
+  const hits = collidingClasses(rules);
+  if (hits.length === 0) {
+    pass(`${cssFiles.length} stylesheet(s), no class-name collisions`);
+    return;
+  }
+  for (const h of hits) {
+    report(
+      "warn",
+      "styles",
+      `.${h.class} is defined in two places and they disagree about ` +
+        `\`${h.prop}\` — ${h.a.file}:${h.a.line} says ` +
+        `\`${h.a.decls.get(h.prop)}\`, ${h.b.file}:${h.b.line} says ` +
+        `\`${
+          h.b.decls.get(h.prop)
+        }\`. Whichever the browser loads last wins, ` +
+        `silently: the DOM is right, the component tree is right, and the ` +
+        `element is simply styled by somebody else's rule.`,
+      {
+        file: h.b.file,
+        line: h.b.line,
+        fix: `Rename one of them, or make the more specific one specific ` +
+          `(\`.player .${h.class}\`) so the cascade says what you mean.`,
+      },
+    );
+  }
+};
+
 export const ALL_CHECKS: Checker[] = [
   checkScanCoverage,
   checkConfig,
@@ -5759,4 +5953,5 @@ export const ALL_CHECKS: Checker[] = [
   checkTimerDispatch,
   checkOwnKeyIdentity,
   checkClientOnlyInCell,
+  checkStyles,
 ];

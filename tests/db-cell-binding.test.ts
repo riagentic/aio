@@ -23,7 +23,7 @@ import {
 } from "../src/server/aio-boot.ts";
 import type { TableDef } from "../src/server/sql.ts";
 import { freePort } from "../src/testing/server-test.ts";
-import { contacts } from "../examples/contacts/cell.ts";
+import { contacts } from "../examples/contacts/src/cell.ts";
 
 const t = (): TableDef => table({ id: pk(), v: text() });
 

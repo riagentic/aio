@@ -910,6 +910,7 @@ deno task am shot --out=before.png            # name the file
 deno task am shot --full                      # capture beyond the viewport
 deno task am shot 1                           # the second app window
 deno task am shot --json                      # {"file","bytes","url"}
+deno task am shot --selector='#chart'         # crop to one element
 ```
 
 The target is the window whose URL is the app's own (`aio://…` or its http
@@ -933,6 +934,40 @@ means the window did not paint within `--timeout` — a hidden, minimised or
 occluded window is not composited. The file is still written, because an
 unconfirmed screenshot is worth having; it just cannot be vouched for. Raise the
 window, or raise `--timeout=`.
+
+**One element (`--selector`).** Takes a CSS selector and crops to that element's
+box, measured **in the page** with `getBoundingClientRect` — so it is still
+right after a scroll, a transform or a `position: sticky`. An element that
+matches nothing, or that measures `0x0`, is an error rather than a 1×1 image:
+"captured a collapsed element" and "captured successfully" must not look the
+same. (`am surface --names` lists aio's semantic paths; this flag takes CSS.)
+
+**Visual regression (`--update` / `--check`).** aio already had the three hard
+parts — headless capture, deterministic state via `am snapshot load`, and any
+state reachable with `am dispatch`. This is the comparison:
+
+```sh
+deno task am snapshot load fixtures/cart-with-3-items.json
+deno task am shot --update=baseline/cart.png   # record, once, and commit it
+…
+deno task am shot --check=baseline/cart.png    # assert — exits 1 if it moved
+```
+
+- It compares **pixels, not bytes**. The same image re-encoded is a different
+  file, and a check that fails on a screenshot no human can tell apart is one
+  people delete.
+- There is a **tolerance**, because antialiasing and subpixel text move a
+  channel by one or two between identical captures: `--threshold=N` per channel
+  (default 2) and `--max-diff=RATIO` of pixels (default 0 — a moved button is
+  not "a few pixels").
+- A **missing baseline fails**. It is the one case where "nothing to compare"
+  and "nothing changed" look identical, and a pass there is a check that never
+  ran.
+- A failure writes `<baseline>.actual.png` beside it, because "they differ" with
+  nothing to look at is a report nobody can act on. Accept it with `--update=`.
+- A **size change is reported as a size change**, not as 100% of pixels — a
+  resized window would otherwise send you hunting a visual change that never
+  happened.
 
 ### Evaluate in the live window (`am eval`)
 
@@ -1089,12 +1124,44 @@ deno task am logs --filter=ERROR   # filter log lines
 deno task am logs --follow         # stream (like tail -f), also: -f
 deno task am logs --client         # tail client log (~/.<appId>/logs/client.log)
 deno task am errors               # last transpile error (dev mode)
+deno task am preview src/Card.tsx --export=Card --props='{"title":"Inbox"}'
 deno task am watch                # restart the app on a .ts/.tsx change under src/
 deno task am watch lib            # …watch another directory (refuses one that isn't there)
 deno task am add cell payments    # scaffold src/cell/payments.ts
+deno task am add server billing   # scaffold src/server/billing.server.ts AND its import
 deno task am report               # collect a problem report (logs + versions + state shape) for an app with feedback: true
 deno task am version              # print version
 ```
+
+### One component, in a state you choose (`am preview`)
+
+Checking a component's empty state, its error card, or how it handles a very
+long name meant driving the whole app into that state first — a dispatch, a
+fixture, sometimes a login — or writing a throwaway script with happy-dom and a
+document in it. Neither is something anyone does while iterating.
+
+```sh
+deno task am preview src/Card.tsx --export=Card --props='{"title":"Inbox"}'
+deno task am preview src/Card.tsx --export=Card --props='{"title":"Inbox","count":7}'
+```
+
+```
+Card
+  Card:title  <h2>  Inbox
+  Card:empty  <p>  Nothing here yet.
+  Card:act  <button>  Go
+```
+
+The app does not need to be running: this renders the module directly. It is the
+same renderer `am surface` uses and prints the same `Component:Element` paths
+`am trigger` takes, so what you read here is what you would address there.
+
+- `--export=Name` picks a named export; without it, the default export.
+- `--props=` is a JSON **object**. A number or an array is refused rather than
+  spread into nothing, because a component rendering with every prop `undefined`
+  looks exactly like the bug you are hunting.
+- A component that renders no named elements says so, instead of printing an
+  empty screen that could mean either thing.
 
 ### How much memory is it holding? (`am heap`)
 

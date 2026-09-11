@@ -201,6 +201,14 @@ parameterized + deps compose: `{ deps: ["prices"], fn: (s, [prices], id) => … 
 alpha76 — dev throws, prod logs and still spreads; `aiol --safe-fix` rewrites
 it.) **Cannot:** mutate, dispatch, or run async.
 
+**Destructure the tuple.** With ONE dep, `fn: (s, deps) => deps[0]` and the
+retired `fn: (s, prices) => …` are the same function at runtime — one argument
+after the slice, and nothing to tell them apart. aio reads it as the retired
+one, so a named parameter gets the _slice_ and `deps[0]` is `undefined`:
+correct-looking code, wrong number, no error. Writing `(s, [prices])` is
+unambiguous and is what the docs and `--safe-fix` both produce. Two or more deps
+are never ambiguous — the arity separates them.
+
 ### Lifecycle hooks
 
 ```ts

@@ -20,8 +20,6 @@
 // the exact failure they were written to prevent. The claims here are about the
 // MESSAGE, not about when a desync happens, so the message is what is driven.
 import { assert, assertEquals } from "@std/assert";
-import { Window } from "happy-dom";
-import { closeWindow } from "../src/testing/close-window.ts";
 import { _assertRegionAlignment } from "../src/air/vdom-diff.ts";
 import { h } from "../src/air/vdom.ts";
 import { _instanceStack } from "../src/air/renderer-state.ts";
@@ -31,14 +29,23 @@ import { setDevModeOverride } from "../src/state/dev-flag.ts";
 import { setDevMode } from "../src/air/vdom-types.ts";
 
 /** Report on a `<tag class=…>` inside `<Component>`, with a DOM that cannot
- *  align (the element is given a child region that is simply empty). */
-async function warningsFor(
+ *  align (the element is given a child region that is simply empty).
+ *
+ *  NO happy-dom WINDOW. This built one, called `createElement`, and then never
+ *  used the element — `first` is `null`, so the reporter is reached without a
+ *  document ever being touched. The unused window was not free: every
+ *  happy-dom window arms timers, and in the full suite Deno's leak sanitizer
+ *  failed all three tests here with "a timer was started before the test, but
+ *  completed during the test" — timers from OTHER files landing inside this
+ *  file's window, plus this file's own. Green alone, red in the suite, and the
+ *  message named a leak in a test that has nothing to leak. A test that
+ *  constructs a browser it does not use is not neutral; it is a place for
+ *  somebody else's noise to land. */
+function warningsFor(
   tag: string,
   cls: string,
   component: string | undefined,
-): Promise<string[]> {
-  const win = new Window({ url: "https://localhost" });
-  const doc = win.document as unknown as Document;
+): string[] {
   const out: string[] = [];
   const real = console.warn;
   console.warn = (...a: unknown[]) => out.push(String(a[0]));
@@ -49,27 +56,25 @@ async function warningsFor(
   }
   try {
     setDevModeOverride(true);
-    const el = doc.createElement(tag);
     const vnode = h(tag, { class: cls }, "text-child") as VNode;
     // `first` is null: the region has no DOM at all, so the very first child
     // "ran out of DOM nodes" — the shortest path to the reporter.
     _assertRegionAlignment(vnode, null, true);
-    void el;
   } finally {
     if (component) _instanceStack.pop();
     console.warn = real;
-    // AWAITED. `void closeWindow(win)` left the macrotask turn it schedules
-    // running past the end of the test, and the sanitizers called it what it
-    // is: "a timer was started in this test, but never completed". Passed in
-    // isolation, failed in the suite — the shape a targeted run cannot see.
-    await closeWindow(win);
+    // Back to "follow `__aioDev`". Left forced on, this file made
+    // `isDevModeExplicit()` true for every file after it — and that one is not
+    // observe-only: it stamps `data-component` into the mounted DOM, which
+    // makes hydration-parity report a divergence the test file introduced.
+    setDevModeOverride(null);
   }
   return out.filter((w) => w.includes("child reconciler desynced"));
 }
 
-Deno.test("child-desync: the warning names the class and the component", async () => {
+Deno.test("child-desync: the warning names the class and the component", () => {
   setDevMode(false); // clears the once-per-site dedup set
-  const warns = await warningsFor("span", "ptab__sub", "ProjectTab");
+  const warns = warningsFor("span", "ptab__sub", "ProjectTab");
   assertEquals(warns.length, 1, `the reporter must fire: ${warns.join("|")}`);
   assert(
     warns[0]!.includes('class="ptab__sub"'),
@@ -81,9 +86,9 @@ Deno.test("child-desync: the warning names the class and the component", async (
   );
 });
 
-Deno.test("child-desync: the message names the APP shapes, not 'an aio bug'", async () => {
+Deno.test("child-desync: the message names the APP shapes, not 'an aio bug'", () => {
   setDevMode(false); // clears the once-per-site dedup set
-  const m = (await warningsFor("span", "x", "Any"))[0]!;
+  const m = (warningsFor("span", "x", "Any"))[0]!;
   assert(m.includes("cond &&"), `the conditional-sibling shape: ${m}`);
   assert(m.includes('v === ""'), `the empty-string shape: ${m}`);
   assert(
@@ -93,13 +98,13 @@ Deno.test("child-desync: the message names the APP shapes, not 'an aio bug'", as
   );
 });
 
-Deno.test("child-desync: two different sites are two findings, not one", async () => {
+Deno.test("child-desync: two different sites are two findings, not one", () => {
   setDevMode(false); // clears the once-per-site dedup set
   // The property that turns the count into a progress bar. Keyed on the tag
   // alone, the second site was silent — so nine fixes read as zero progress.
-  const a = await warningsFor("span", "alpha", "CompA");
-  const b = await warningsFor("span", "beta", "CompB");
-  const again = await warningsFor("span", "alpha", "CompA");
+  const a = warningsFor("span", "alpha", "CompA");
+  const b = warningsFor("span", "beta", "CompB");
+  const again = warningsFor("span", "alpha", "CompA");
   assertEquals(a.length, 1, "first site reports");
   assertEquals(
     b.length,

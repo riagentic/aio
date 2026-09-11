@@ -5,7 +5,7 @@
 // tell people to: cell methods for logic, testUI for the screen.
 import { assert, assertEquals, assertRejects } from "@std/assert";
 import { testCell } from "../src/testing/cell-test.ts";
-import { contacts } from "../examples/contacts/cell.ts";
+import { contacts } from "../examples/contacts/src/cell.ts";
 
 testCell(contacts, "create → read → update → delete", async (t) => {
   t.init();
@@ -67,7 +67,7 @@ testCell(contacts, "operating on a missing row fails loud", async (t) => {
 
 Deno.test("example contacts: the UI creates, edits and deletes", async () => {
   const { testUI } = await import("../src/testing/ui-test.ts");
-  const App = (await import("../examples/contacts/App.tsx")).default;
+  const App = (await import("../examples/contacts/src/App.tsx")).default;
   await using ui = await testUI(App);
 
   assert(ui.surface().text.includes("No contacts yet"), "starts empty");

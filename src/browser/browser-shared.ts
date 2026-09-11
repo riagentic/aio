@@ -154,6 +154,51 @@ export function handleControlFrame(
     case "reload":
       location.reload();
       return true;
+    case "patch": {
+      // A `.tsx` edit used to reload the whole document. aio starts from a
+      // better position than anyone — cell state lives on the server and
+      // already survives a reload — so what is lost is usually small:
+      // `useLocal`, scroll, focus, stateful DOM. But "small" included an
+      // embedded `<webview>` with its logged-in session, 760 MB of loaded
+      // weights, and a wallet's unlock, in three different apps.
+      //
+      // The server only sends this when the UI ENTRY, and nothing else, has
+      // changed — see the watcher for why that is the one safe case. Here the
+      // job is to re-import it past the module cache and hand it to AIR, whose
+      // diff patches the DOM rather than replacing it, so everything stateful
+      // stays where it is.
+      //
+      // EVERY failure falls back to a reload. A patch that half-applied would
+      // be a page running code nobody can see, which is worse than the reload
+      // it replaced; the worst case here is exactly today's behaviour.
+      const d = f.d as { path?: string; v?: number } | undefined;
+      const path = typeof d?.path === "string" ? d.path : "";
+      if (!path) {
+        location.reload();
+        return true;
+      }
+      void (async () => {
+        try {
+          const mod = await import(
+            `${path}?v=${d?.v ?? Date.now()}`
+          ) as { default?: unknown };
+          const next = mod.default;
+          const { swapRootComponent } = await import("../air/hot-swap.ts");
+          if (
+            typeof next !== "function" ||
+            swapRootComponent(next as never) === 0
+          ) {
+            location.reload();
+          }
+        } catch {
+          // aio-ok: anything at all — a syntax error in the new module, a
+          // renderer that threw mid-swap, a page with no mounted root — is
+          // answered by the reload this replaced.
+          location.reload();
+        }
+      })();
+      return true;
+    }
     case "cfg": {
       // Runtime config handshake: a shell templated at BUILD time (electron
       // UDS, android assets) cannot embed compose-time decisions — the server

@@ -19,6 +19,8 @@ Then scaffold and run — a full app in two commands:
 
 ```sh
 am create my-app                 # counter (default) · --template=todo · --template=cli
+                                 # --template=canvas   a 2D loop, with the decisions pure and tested
+                                 # --template=assets   an `assets` mount that survives a build
 cd my-app
 deno task dev                    # prints the app's URL (pass --open to open a browser)
 ```

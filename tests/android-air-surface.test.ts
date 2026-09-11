@@ -187,6 +187,13 @@ const SERVER_ONLY: Record<string, string> = {
     "`plugins:` to resolve, and the module lives under src/server/ where a " +
     "browser entry may not reach it (tests/browser-entry-server-reach)",
   // (`testCell` moved to `aio/testing` in alpha70 — off `aio`, off this ledger.)
+  serverImport:
+    "it exists to import a `*.server.ts` module, and a standalone APK has no " +
+    "Deno runtime to run one — the android build already refuses a graph that " +
+    "reaches server-only code (--allow-server-only is the assertion that it " +
+    "does not). Absent is a compile error at the call site; present would be a " +
+    "runtime failure on one target only, which is the hazard this whole file " +
+    "enumerates",
 };
 
 /** On `aio`, missing here, and NOT deliberate — the R-14 class, enumerated so

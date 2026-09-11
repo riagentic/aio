@@ -71,6 +71,8 @@ export interface TransportConfig {
   syncIntervalMs?: number;
   /** Extra read-only DEV roots by URL prefix — see `AioConfig.serveDirs`. */
   serveDirs?: Record<string, string>;
+  /** Read-only roots served in dev AND prod — see CellsConfig.assets. */
+  assets?: Record<string, string>;
   /** Cell ids that sync (own `sync:` config, or adopted by localFirst) —
    *  handed to the browser in the page shell. */
   _syncCellIds?: string[];
@@ -149,6 +151,7 @@ export interface ServerSetupDeps<S, A> {
     head?: string; // AIO-423
     chrome?: "standard" | "themed" | "none"; // desktop window frame
     theme?: UiTheme; // how much of the default look the shell emits
+    layout?: boolean; // ui.layout — false drops the page-layout defaults
     lang?: string; // <html lang> — WCAG 3.1.1, default "en"
     /** ui.dir — `<html dir>`; mirrors the whole default UI. */
     dir?: import("./aio-types.ts").UiConfig["dir"];
@@ -697,6 +700,7 @@ export async function setupTransport<S, A>(
       baseDir,
       baseDirFallbacks,
       serveDirs: config.serveDirs,
+      assets: config.assets,
       debug: (msg: string) => log.debug(msg),
       prod,
       distDir: prod ? distDir : undefined,
@@ -719,6 +723,7 @@ export async function setupTransport<S, A>(
       headExtra: ui.head,
       chrome: ui.chrome,
       theme: ui.theme,
+      layout: ui.layout,
       lang: ui.lang,
       dir: ui.dir,
       // The accent follows the app's IDENTITY, not its window title: a title

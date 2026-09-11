@@ -11,7 +11,7 @@
 // and refuses exactly what the build refuses, with the same words.
 
 import { basename, join, relative, resolve } from "@std/path";
-import { UI_ENTRY } from "../server/app-files.ts";
+import { BUNDLE_JS, UI_ENTRY } from "../server/app-files.ts";
 import type { ShareRoot } from "../server/app-dirs.ts";
 import { matchShare } from "../server/app-dirs.ts";
 import { bundleFrameworkEntries, ESBUILD_JSX } from "./esbuild-shared.ts";
@@ -134,6 +134,12 @@ export type ClientBundleOpts = {
   frameworkBase?: URL;
   /** Present → written to disk (the build); absent → in memory (dev). */
   write?: { outfile: string; banner: string };
+  /** Emit a source map beside the bundle. Always `"external"` — esbuild's
+   *  linked mode appends a `//# sourceMappingURL=` comment, which makes every
+   *  browser that opens devtools fetch a file the server does not serve.
+   *  Nothing in the page needs the map: the SERVER applies it, when it turns a
+   *  forwarded `app.js:1:22073` back into `src/App.tsx:12:5`. */
+  sourcemap?: boolean;
 };
 
 export type ClientBundle = {
@@ -145,6 +151,12 @@ export type ClientBundle = {
   /** The bundled code (in memory in dev; read back from `outfile` when
    *  written, so the judge evaluates the bytes that ship). */
   code: string;
+  /** The source map's JSON, when one was asked for and esbuild produced it.
+   *  In memory: nothing writes it to the app's tree in dev. */
+  map?: string;
+  /** What each input contributed to the emitted bundle, in bytes after
+   *  tree-shaking and minification — see `bundle-analyze.ts`. */
+  bytesInOutput?: Record<string, number>;
   ms: number;
 };
 
@@ -183,8 +195,18 @@ export async function bundleClient(o: ClientBundleOpts): Promise<ClientBundle> {
   ];
   let result: {
     errors?: unknown[];
-    metafile?: { inputs: MetaInputs };
-    outputFiles?: Array<{ text: string }>;
+    metafile?: {
+      inputs: MetaInputs;
+      /** Per OUTPUT file, what each input contributed to it AFTER tree-shaking
+       *  and minification. The only honest size attribution — a 400 KB
+       *  dependency that shakes down to 3 KB is not a 400 KB problem, and a
+       *  report saying it is costs someone a day. */
+      outputs?: Record<
+        string,
+        { inputs?: Record<string, { bytesInOutput?: number }> }
+      >;
+    };
+    outputFiles?: Array<{ text: string; path?: string }>;
   };
   try {
     result = await o.esbuild.build({
@@ -211,9 +233,17 @@ export async function bundleClient(o: ClientBundleOpts): Promise<ClientBundle> {
       // when the app asks for one — and the counter app measured 302 KB
       // raw / 79 KB gzipped without this, 139 KB / 51 KB with.
       minify: true,
+      // See `ClientBundleOpts.sourcemap`. `"external"` needs an `outfile` even
+      // when nothing is written — esbuild refuses otherwise ("Cannot use an
+      // external source map without an output path"), so the in-memory path
+      // names one it never creates.
+      ...(o.sourcemap ? { sourcemap: "external" as const } : {}),
       ...(o.write
         ? { outfile: o.write.outfile, banner: { js: o.write.banner } }
-        : { write: false }),
+        : {
+          write: false,
+          ...(o.sourcemap ? { outfile: BUNDLE_JS } : {}),
+        }),
       ...ESBUILD_JSX,
       alias,
       plugins,
@@ -245,16 +275,40 @@ export async function bundleClient(o: ClientBundleOpts): Promise<ClientBundle> {
     // rather than the bundler's — see `explainServerOnlyImport`.
     return explainServerOnlyImport(text, where?.file, where?.line) ?? text;
   });
+  // `outputFiles` carries BOTH the map and the code when a map was asked for,
+  // and the order is esbuild's business — selecting by index gave the map as
+  // the bundle the first time this ran. Select by name.
+  const outs = result.outputFiles ?? [];
+  const jsOut = outs.find((f) => !(f.path ?? "").endsWith(".map")) ?? outs[0];
+  const mapOut = outs.find((f) => (f.path ?? "").endsWith(".map"));
   const code = o.write
     ? await Deno.readTextFile(o.write.outfile).catch(() => "")
-    : result.outputFiles?.[0]?.text ?? "";
+    : jsOut?.text ?? "";
+  const map = o.write
+    ? await Deno.readTextFile(`${o.write.outfile}.map`).catch(() => undefined)
+    : mapOut?.text;
+  // Size attribution, from the metafile the graph audit already asks for. The
+  // JS output, not the map: a map's own "inputs" would double every module.
+  const outs2 = Object.entries(result.metafile?.outputs ?? {})
+    .filter(([name]) => !name.endsWith(".map"));
+  const bytesInOutput: Record<string, number> | undefined = outs2.length > 0
+    ? Object.fromEntries(
+      outs2.flatMap(([, o2]) =>
+        Object.entries(o2.inputs ?? {}).map((
+          [input, v],
+        ) => [input, v.bytesInOutput ?? 0])
+      ),
+    )
+    : undefined;
   return {
     ok: errors.length === 0,
     errors,
     inputs: result.metafile?.inputs ?? {},
+    ...(bytesInOutput ? { bytesInOutput } : {}),
     entryKey: BUNDLE_ENTRY_KEY,
     format,
     code,
+    ...(map ? { map } : {}),
     ms: performance.now() - t0,
   };
 }

@@ -15,6 +15,7 @@ AioError format, error codes, correlation IDs, log files, and the onError hook.
 | **Cell health audit**       | Per-cell error count, status, last action                   | Runtime inspection, ops dashboards        |
 | **Client log forwarding**   | All client console output in `~/.<appId>/logs/client.log`   | Client-side errors without devtools       |
 | **Browser error overlay**   | Build Error / Runtime Error overlay with fix suggestions    | UI development                            |
+| **Dev error overlay**       | Every uncaught error and diagnostic, on the page, counted   | Watching a page that is quietly failing   |
 | **DiagReporter**            | Structured console output for freeze/stale/slow + hints     | UI freezes, stale data, slow dispatch     |
 | **Performance budgets**     | Warns when reducers/effects exceed time budgets             | Finding slow code                         |
 | **Startup linter**          | Validates cell config on `aio.run()`                        | Catching config mistakes early            |
@@ -239,6 +240,60 @@ is enabled by default.
 | `warning.log` | Warnings -- non-fatal issues                                                    | Performance tuning               |
 | `perf.log`    | Budget violations with phase breakdown                                          | Finding hot spots                |
 | `client.log`  | All console output forwarded from AIR clients                                   | Client-side debugging            |
+
+### The dev error overlay
+
+In dev, every uncaught error, unhandled rejection and framework diagnostic also
+appears **on the page** — a small button at the bottom edge that opens a list:
+
+```
+[+] aio: 3 problems
+```
+
+You need it for the failure that has no other symptom. One app's per-frame
+inference call threw on every single frame, and the only evidence anywhere was a
+counter in a panel its author happened to have written: the console and
+`client.log` both had it, and both require you to be looking somewhere other
+than the page you are looking at.
+
+- **Repeats are counted, not repeated.** That per-frame failure is one row
+  reading `x2043`, not two thousand rows.
+- **It cannot swallow the page.** Collapsed it is one button; the panel takes
+  clicks and nothing else does.
+- **Dev only.** A production page carries none of it — no element, no listener,
+  no bytes.
+- It is plain DOM on purpose, with no dependency on the renderer, so it still
+  reports when the renderer is the thing that broke.
+
+### Forwarded client errors name YOUR source
+
+`client.log` carries every `console.*` line and every uncaught error from the
+browser or Electron renderer. In a built app the page runs one minified bundle,
+so the positions in those lines are offsets into `app.js` — `app.js:1:22073`,
+which names nothing you wrote.
+
+A build writes the bundle's source map to `dist/.app.js.map` and the server
+applies it to every forwarded line before writing it, so what lands in
+`client.log` is the file and line you typed:
+
+```
+[2026-09-11T11:20:05.540Z] [ERROR] [client:1] Error: kaboom
+    at CRASH_HERE (src/App.tsx:42:11)
+```
+
+Three things worth knowing:
+
+- **The server does it, not the browser.** No browser applies a source map to
+  the string form of `Error.stack` — devtools maps frames for display only, and
+  the text a page forwards still carries generated positions. Whoever renders
+  the text has to translate it.
+- **The map is never served.** It is written dot-prefixed on purpose: aio
+  refuses any request whose path has a dot-prefixed segment, so the map ships
+  beside the bundle inside your binary and is unreachable over HTTP. A plainly
+  named `app.js.map` would be public, and a source map is your whole source.
+- **Best effort, never invention.** No map, an unusable map, or a position the
+  map does not cover leaves the line exactly as it arrived. A dev server needs
+  none of this: it serves unbundled modules, whose positions are already yours.
 
 ### Log format
 

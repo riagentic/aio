@@ -291,6 +291,16 @@ const App = () =>
 Catches errors during initial render, signal-triggered re-render, and lazy
 component rejection. Event handler errors are **not** caught (same as React).
 
+**Recovery is automatic.** The failing component stays subscribed to the signals
+its failed render read, so when one of them changes the component is rendered
+again — the boundary is not a one-way door, and you need no reset callback or
+key change.
+
+**With no boundary above it**, a component whose own re-render throws keeps its
+last good output and logs the error; everything beside it keeps updating. A
+`fallback` that itself throws degrades to that same behaviour rather than
+looping.
+
 ---
 
 ## Redux DevTools Integration

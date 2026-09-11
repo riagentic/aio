@@ -5,6 +5,8 @@
 
 import { diagEmit } from "../diagnostics/diagnostic-bus.ts";
 import { _registerSfnTransport, handleSfnResult } from "./server-fns-client.ts";
+import { installDevOverlay } from "./dev-overlay.ts";
+import { installProfileGlobal } from "../air/component-profile.ts";
 import { installConsoleIntercept } from "./console-intercept.ts";
 import { routeCommand } from "./browser-air-commands.ts";
 import {
@@ -786,3 +788,13 @@ _setTeardownFn(() => {
 (_send as unknown as Record<symbol, boolean>)[ARMS_ACK_TIMER] = true;
 _setClientSend(_send);
 installConsoleIntercept(_sendRaw);
+// …and in dev, the same problems ON THE PAGE. The console and client.log both
+// require you to be looking somewhere other than the thing you are looking at;
+// a per-frame failure was invisible for exactly that reason. Dev-only and
+// observe-only — see dev-overlay.ts.
+installDevOverlay();
+// …and `__aioProfile()`, so `am eval '__aioProfile()'` answers "what is
+// rendering most, and what is each render costing" without anyone having to
+// add up `_dtRenders` by hand. Counts are always collected; only the clock is
+// opt-in, and calling this turns it on — see air/component-profile.ts.
+installProfileGlobal();

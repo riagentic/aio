@@ -179,6 +179,37 @@ await aio.run({
 
 Then `import { parseSSE } from "/shared/sse.ts"` resolves in both worlds.
 
+### `assets` — directories your app SERVES
+
+`serveDirs` is for a **module** the dev server has to reach; production resolves
+that import at build time, so it is dev-only on purpose. **Data** is the
+opposite — a model, a font, a sample pack, a folder of images — and production
+needs it exactly as much as dev does:
+
+```jsonc
+// deno.json
+{ "assets": { "/media": "./media" } }
+```
+
+```ts
+// …or in code, if it is computed
+await aio.run({ cells, assets: { "/media": "./media" } });
+```
+
+`GET /media/song.mp3` then works in `deno task dev`, in `--prod`, and from a
+compiled binary. You get the MIME table, ETag revalidation, range requests and
+compression the rest of the static path already does — and every guard `baseDir`
+has: traversal, symlink escape, dotfiles, `*.server.ts`. An extra root is never
+a weaker root.
+
+**Declare it in `deno.json` and the build embeds it.** `deno compile` cannot
+trace a directory nobody imports, so a mount declared only in code serves in dev
+and 404s from the binary. Declared in deno.json there is nothing to keep in sync
+— no `compile.include` entry, one fact read by both the server that serves it
+and the build that ships it. A mount pointing outside the project is refused at
+build time rather than dropped: a silently skipped mount produces a binary
+missing the data it was told to carry.
+
 **Both paths resolve the same way** — against the process's working directory,
 exactly like `baseDir` — so write them from the same vantage point. A root that
 does not exist is reported on first use, naming the resolved path, rather than
@@ -208,6 +239,22 @@ field report lost a session to this):
    `serveDirs: { "/crypto": "./crypto" }` — otherwise even the JS bindings 404
    in dev. Prod bundling follows the relative import and needs no mapping;
    compiled binaries embed `.wasm` files as data assets automatically.
+
+### WASM is compressed on the wire
+
+A `.wasm` module is a plain binary, not an already-compressed container, and it
+gzips well — measured on two real modules, a 103 KB one goes out at 46 KB
+(brotli) and a 23 MB one at 6.4 MB (gzip). aio compresses it for you, with no
+configuration:
+
+- Under 8 MB: brotli where the client accepts it, gzip otherwise, cached by ETag
+  so repeat requests cost nothing.
+- Over 8 MB: compressed as it streams, so a large module is never held in memory
+  to compress it. That path is gzip only — the web's `CompressionStream` has no
+  brotli — and the response becomes chunked, so it has no `Content-Length`.
+
+Nothing to turn on. A client that does not send `Accept-Encoding` gets the bytes
+exactly as they are.
 
 ## Quick reference
 
