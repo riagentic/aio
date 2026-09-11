@@ -966,7 +966,7 @@ export async function buildAll(): Promise<number> {
     `${C.b}Building ${
       count(targetList.length, "target")
     } for ${C.blue}${title}${C.r}${C.b} ${version.version} → ${
-      outDir.replace(root + "/", "")
+      outDir.replace(root + SEPARATOR, "")
     }/${C.r}${release ? ` ${C.dim}(release)${C.r}` : ""}`,
   );
 
