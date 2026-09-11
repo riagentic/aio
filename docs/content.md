@@ -56,7 +56,7 @@
 
 ## UI — AIR renderer — components, signals, routing, forms
 
-- [Rendering & UI](ui/README.md) — AIO uses AIR — a built-in signal-based renderer (67 KB gzipped with the
+- [Rendering & UI](ui/README.md) — AIO uses AIR — a built-in signal-based renderer (71 KB gzipped with the
 - [AIR Advanced Patterns](ui/air-advanced.md) — SSR, portals, islands, code splitting, virtual scrolling, dimensions, deferred
 - [AIR Animation](ui/air-animation.md) — CSS-first declarative transitions for enter/exit animations, imperative spring
 - [AIR vs React vs Best-in-Class — Full Comparison](ui/air-comparison.md) — Reference frameworks: React 19, Solid.js 1.9 (signal pioneer), Svelte
@@ -96,6 +96,7 @@
 ## Testing — cell tests, semantic UI tests, driving the live app, linter
 
 - [Testing](testing/README.md) — Verifying cells and UIs work correctly.
+- [Testing a canvas or 3D app](testing/canvas-and-3d.md) — testUI drives a DOM.
 - [Cassettes — record once, replay forever](testing/cassettes.md) — Some async calls cannot be made in CI.
 - [Cell Testing](testing/cell-testing.md) — Test harness that wraps Deno.test with typed helpers.
 - [aiol — AIO Project Linter](testing/linter.md) — Static analysis tool for aio projects.
@@ -117,7 +118,9 @@
 - [CLI toolkit (`aio/cli`)](clients/cli-toolkit.md) — A compact toolkit for command-line apps — typed flags with generated --help,
 - [Desktop apps that drive a CLI](clients/desktop-jobs.md) — The shape: a window, a Browse… button, a long-running external process, a
 - [Electron](clients/electron.md) — Desktop app packaging, thin client, and window management.
+- [Desktop notifications (`notify`)](clients/notifications.md) — A method that finishes something can tell the desktop about it:
 - [Transports — what listens, where](clients/transports.md) — One matrix answering "which sockets does this app open?" per mode and target.
+- [Embedding a web page (`<Browser>`)](clients/webview.md) — An aio desktop app can show somebody else's page inside its own — a reader, a
 
 ## Build & deploy — targets, dev mode, imports, scaling
 
@@ -247,6 +250,7 @@
 ## (root)
 
 - [Building an aio app without a human in the loop](AGENTS.md) — Five verbs.
+- [aio for AI agents](ai.md) — How to work on an aio app when you are a model — and, it turns out, how a
 
 ## deploy
 

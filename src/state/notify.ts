@@ -28,6 +28,8 @@ export type NotifyOptions = {
   route?: string;
 };
 
+/** What `notify()` returns — the options under the framework effect tag,
+ *  routed like `schedule` and `own`. */
 export type NotifyEffect = { type: "__notify" } & NotifyOptions;
 
 /** Build the effect. Refuses an empty title at the call site — the OS would

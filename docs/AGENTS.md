@@ -67,6 +67,7 @@ And in-process, with no server and no DOM: `testCell` for a cell,
 
 ## See also
 
+- [aio for AI agents](ai.md) — what to read first, what to measure, the rules
 - [The app manager](clients/app-manager.md) — every verb, in full
 - [UI testing](testing/ui-testing.md) — the selector-free harness
 - [Where code runs](basics/where-code-runs.md) — the six contexts, one table
