@@ -10,7 +10,12 @@
 // test that only checks the process it started passes on code that has never
 // worked.
 import { within } from "./within.ts";
-import { assertEquals, assertRejects, assertStringIncludes } from "@std/assert";
+import {
+  assert,
+  assertEquals,
+  assertRejects,
+  assertStringIncludes,
+} from "@std/assert";
 import { sessionLeaderSpec, spawn } from "../src/server/spawn.ts";
 
 const posix = Deno.build.os !== "windows";
@@ -255,4 +260,88 @@ Deno.test("sessionLeaderSpec: perl sets the session in-process, then execs", () 
   assertStringIncludes(s.args[1]!, "POSIX::setsid()");
   assertStringIncludes(s.args[1]!, "exec @ARGV");
   assertEquals(s.args.slice(2), ["--", "ffmpeg", "-i", "in.mp4"]);
+});
+
+// ── The backstop: a child nobody claimed must not outlive the app ───────────
+//
+// Every child `spawn()` starts is in a process group OF ITS OWN. That is what
+// makes `kill()` reach the whole tree — and it is exactly why the app's own
+// death does not reach them: a group of its own is a group the app's exit does
+// not signal. An app that spawns a transcode and exits leaves it encoding,
+// holding whatever it holds, with nothing left that knows its pid.
+//
+// `own.set(...)` is the documented way to tie one to a cell's lifetime. This is
+// what happens when somebody forgets.
+
+Deno.test({
+  name:
+    "spawn: a running child is tracked, and stops being tracked when it ends",
+  ignore: Deno.build.os === "windows",
+  fn: async () => {
+    const { _liveSpawned, killAllSpawned, spawn } = await import(
+      "../src/server/spawn.ts"
+    );
+    await killAllSpawned(); // a clean slate, whatever ran before
+    const job = await spawn("sh", { args: ["-c", "sleep 30"] });
+    const live = _liveSpawned();
+    assert(live.has(job.pid), `pid ${job.pid} must be tracked while running`);
+    assertEquals(live.get(job.pid), "sh", "…under the command that started it");
+
+    await job.kill();
+    // The registry must empty itself on exit, or a long-lived server
+    // accumulates one entry per job it ever ran.
+    assert(
+      !_liveSpawned().has(job.pid),
+      "a finished child must be forgotten, not remembered forever",
+    );
+  },
+});
+
+Deno.test({
+  name: "spawn: killAllSpawned kills the ones nobody claimed, and counts them",
+  ignore: Deno.build.os === "windows",
+  fn: async () => {
+    const { _liveSpawned, killAllSpawned, spawn } = await import(
+      "../src/server/spawn.ts"
+    );
+    await killAllSpawned();
+    const a = await spawn("sh", { args: ["-c", "sleep 30"] });
+    const b = await spawn("sh", { args: ["-c", "sleep 30"] });
+    assertEquals(_liveSpawned().size, 2);
+
+    const killed = await killAllSpawned();
+    assertEquals(killed, 2, "the COUNT is what shutdown reports out loud");
+    assertEquals(_liveSpawned().size, 0);
+
+    // Really dead, not merely forgotten — the whole point. `status` settling is
+    // the process's own report, so this cannot pass on bookkeeping alone.
+    const [sa, sb] = await Promise.all([a.status, b.status]);
+    assert(!sa.success && !sb.success, "killed children do not exit cleanly");
+
+    // Idempotent: shutdown must be safe to run on a tidy app.
+    assertEquals(await killAllSpawned(), 0);
+  },
+});
+
+Deno.test({
+  name:
+    "spawn: a child killed through `own` is gone before the backstop sees it",
+  ignore: Deno.build.os === "windows",
+  fn: async () => {
+    // The healthy path. An app that does the right thing must reach shutdown
+    // with NOTHING to report — otherwise the warning fires on tidy apps and
+    // stops meaning anything.
+    const { _liveSpawned, killAllSpawned, spawn } = await import(
+      "../src/server/spawn.ts"
+    );
+    await killAllSpawned();
+    const job = await spawn("sh", { args: ["-c", "sleep 30"] });
+    await job.kill(); // what an `own` disposer does
+    assertEquals(
+      await killAllSpawned(),
+      0,
+      "the backstop must find nothing to do on an app that cleaned up",
+    );
+    void _liveSpawned;
+  },
 });

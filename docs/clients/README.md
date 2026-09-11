@@ -7,6 +7,8 @@ How browsers, Electron, and CLI tools connect to AIO.
   live view, exit codes
 - [Browser](browser.md) — WebSocket client, connection lifecycle
 - [Electron](electron.md) — desktop setup, UDS, packaging
+- [Embedding a web page](webview.md) — `<Browser>`: somebody else's page inside
+  your app, with the navigation loop and the destroyed-login trap closed
 - [Transports](transports.md) — the matrix: what listens (TCP, UDS, none) per
   mode × client × OS, zero ports by default and `--port` as the opt-out,
   `routes` vs `serverFn`, the trojan port

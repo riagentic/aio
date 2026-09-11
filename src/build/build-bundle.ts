@@ -3,7 +3,13 @@
  * Build bundle — esbuild bundling step, freshness cache check, asset copying.
  */
 import { runCssBuild } from "./build-css.ts";
-import { APP_ICON, APP_STYLE, UI_ENTRY } from "../server/app-files.ts";
+import { analyzeBundle, formatAnalysis } from "./bundle-analyze.ts";
+import {
+  APP_ICON,
+  APP_STYLE,
+  BUNDLE_MAP,
+  UI_ENTRY,
+} from "../server/app-files.ts";
 import { DENO_JSON_NAMES } from "../server/deno-json.ts";
 import { resolveShare, type ShareRoot } from "../server/app-dirs.ts";
 import { basename, dirname, join, relative, resolve } from "@std/path";
@@ -516,6 +522,22 @@ export async function runBundle(
       shares,
       frameworkSrcDir: isRemote ? "" : frameworkSrcDir,
       frameworkBase: cfg.frameworkBase,
+      // A SOURCE MAP, always, and never served. Two field reports call the
+      // renderer-console forwarder the best thing in the box and both showed
+      // the same defect: every forwarded line pointed at `app.js:1:22073`,
+      // because the bundle is one minified line and a browser never applies a
+      // map to the string form of `Error.stack`. The SERVER applies it (see
+      // diagnostics/stack-remap.ts), so the map has to reach the server and
+      // must not reach anyone else.
+      //
+      // It lands as the DOTFILE `.app.js.map`: `server-static.ts` refuses any
+      // path with a dot-prefixed segment at any depth, so the map is
+      // unreachable over HTTP while sitting right beside the bundle it
+      // describes. Written plainly as `app.js.map` it would be served —
+      // `.map` is in SHELL_EXT — which is the app's entire source over an
+      // unauthenticated read. No flag: a diagnostic behind a switch nobody
+      // sets is a diagnostic that does not exist.
+      sourcemap: true,
       write: {
         outfile: out,
         // Prepended verbatim after minification: the version and shape stamps
@@ -524,6 +546,39 @@ export async function runBundle(
           targetStamp(doAndroid, cfg.uiEntry ?? UI_ENTRY),
       },
     });
+    // esbuild wrote `<out>.map`; move it to the dot-prefixed name that
+    // `serveStatic` refuses. Best-effort: a build that produced no map, or a
+    // filesystem that will not rename, must not fail the build over a
+    // diagnostic — but it must not leave the SERVED copy behind either, which
+    // is why the remove is attempted regardless of whether the write landed.
+    const plainMap = `${out}.map`;
+    const hiddenMap = join(dirname(out), BUNDLE_MAP);
+    if (bundle.map) {
+      const wrote = await Deno.writeTextFile(hiddenMap, bundle.map, {
+        mode: 0o600,
+      }).then(() => true).catch(() => false);
+      // SAID OUT LOUD. The map's whole value is that a forwarded browser error
+      // names the author's file, and the only way anyone would notice it had
+      // gone missing is by reading a log line that stopped improving. Three
+      // surfaces have to agree for it to work (write · staging allowlist ·
+      // server read) and the first version silently failed at the second, so
+      // the build reports the artifact like every other thing it stages.
+      if (wrote) {
+        staged(
+          `dist/${BUNDLE_MAP}`,
+          `${bytes(bundle.map.length)} — forwarded client errors name your ` +
+            `source, not app.js:1:… (never served: dot-prefixed)`,
+        );
+      }
+    }
+    await Deno.remove(plainMap).catch(() => {
+      // aio-ok: there is usually no `app.js.map` to remove — esbuild only
+      // writes one when a map was produced, and the point of the call is that
+      // the SERVED spelling must not be left behind if it was. A failure here
+      // is "the file was already absent" in every case but a read-only dist,
+      // which the bundle write beside it would already have refused.
+    });
+
     const metaInputs = bundle.inputs as Record<string, unknown>;
     if (!bundle.ok) {
       for (const e of bundle.errors) {
@@ -610,6 +665,29 @@ export async function runBundle(
 
     const stat = await Deno.stat(out);
     staged("dist/app.js", bytes(stat.size));
+
+    // `--analyze`: where those bytes went. Two reports asked for a treemap;
+    // the answerable version of that question is "which twenty things are most
+    // of my bundle, and is anything in here that should not be". Printed on
+    // request only — a size report on every build is a wall people stop
+    // reading, and this one is worth reading when it is asked for.
+    if (Deno.args.includes("--analyze")) {
+      if (bundle.bytesInOutput) {
+        for (
+          const line of formatAnalysis(analyzeBundle(bundle.bytesInOutput))
+        ) {
+          console.log(line);
+        }
+      } else {
+        // Said out loud rather than printing nothing: a flag that silently
+        // does nothing is a flag people believe.
+        warn(
+          "--analyze: esbuild produced no size attribution for this build, " +
+            "so there is nothing to report. (This is a bug in aio, not in " +
+            "your app — the metafile is requested unconditionally.)",
+        );
+      }
+    }
   }
 
   // The app's own CSS toolchain runs FIRST — Tailwind, PostCSS, Sass, anything

@@ -93,7 +93,7 @@ export function useAio<
  *
  *  Neither is "preferred", and saying otherwise was itself the bug: the docs
  *  called the tuple preferred while every worked example (and
- *  `examples/contacts/App.tsx`) used the object form, so a reader following
+ *  `examples/contacts/src/App.tsx`) used the object form, so a reader following
  *  the code reached for the shape the reference told them not to. The honest
  *  rule is what each is FOR — the tuple for a scalar
  *  (`const [text, setText] = useLocal("")`), the object when you want `patch`

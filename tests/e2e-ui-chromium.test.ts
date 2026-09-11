@@ -94,7 +94,12 @@ Deno.test({
         "run",
         "-A",
         "--unstable-kv",
-        "app.ts",
+        // `src/app.ts`: the examples moved to the layout `am create` produces
+        // on 2026-09-11, because five of six could not BUILD from the flat one
+        // (the default entry is `src/app.ts`). A bare "app.ts" here spawned a
+        // process that exited immediately and the failure arrived thirty
+        // seconds later as "timeout waiting for counter server".
+        "src/app.ts",
         "--client=server-only",
         `--port=${port}`,
       ],

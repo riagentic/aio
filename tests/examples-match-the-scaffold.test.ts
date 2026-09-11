@@ -51,8 +51,13 @@ Deno.test({
         );
         for (const f of FILES) {
           const scaffolded = await Deno.readTextFile(join(tmp, dir, "src", f));
+          // `src/` on BOTH sides. The examples were flat until 2026-09-11,
+          // when five of six turned out not to BUILD — the default entry is
+          // `src/app.ts` and the build refused with "src/App.tsx not found" —
+          // so they were moved to the shape `am create` produces, which is
+          // what this test is about in the first place.
           const example = await Deno.readTextFile(
-            join(ROOT, "examples", dir, f),
+            join(ROOT, "examples", dir, "src", f),
           );
           assertEquals(
             example,

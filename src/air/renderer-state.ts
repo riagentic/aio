@@ -47,3 +47,18 @@ export function _registerRoot(handle: MountHandle, state: RootState): void {
   _rootStateMap.set(handle, state);
   _liveRoots.add(state);
 }
+
+/** The `<ErrorBoundary>` vnodes currently being rendered through, innermost
+ *  last.
+ *
+ *  A boundary is a SYMBOL tag, not a component, so it has no
+ *  `ComponentInstance` and cannot be found by walking `inst.parent`. Each
+ *  instance therefore records the boundary that was active when it MOUNTED —
+ *  which is the only moment the answer is knowable, because a re-render
+ *  happens long after this stack has unwound. @internal */
+export const _boundaryStack: unknown[] = [];
+
+/** The innermost boundary vnode being rendered through, or null. @internal */
+export function _currentBoundary(): unknown {
+  return _boundaryStack[_boundaryStack.length - 1] ?? null;
+}

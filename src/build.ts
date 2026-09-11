@@ -25,6 +25,7 @@ import { appDirs, installRoot } from "./server/app-dirs.ts";
 import { BUILD_VERSION_ENV } from "./server/app-version.ts";
 import { forwardedToFleet, targetForFlags, TARGETS } from "./build-all.ts";
 import { APP_ICON, APP_STYLE, BUNDLE_JS } from "./server/app-files.ts";
+import { keepInDistStaging } from "./build/dist-staging.ts";
 import { slugify } from "./server/single-instance-lock.ts";
 import { ensureEmbeddedBundle, runBundle } from "./build/build-bundle.ts";
 import { buildClient } from "./build/build-client.ts";
@@ -149,10 +150,7 @@ export async function build(cfg?: BuildConfig): Promise<void> {
   // --out inside dist/ (R-4).
   try {
     for await (const entry of Deno.readDir(dist)) {
-      if (
-        entry.name === BUNDLE_JS || entry.name === APP_STYLE ||
-        entry.name === APP_ICON || entry.name === ELECTRON_VERSION_FILE
-      ) continue;
+      if (keepInDistStaging(entry.name)) continue;
       await Deno.remove(join(dist, entry.name), { recursive: true });
     }
   } catch { /* no dist/ when headless — skip */ }

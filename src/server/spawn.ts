@@ -144,7 +144,11 @@ export async function spawn(
   const args = opts.args ?? [];
   const grace = opts.killGraceMs ?? 2000;
 
-  if (Deno.build.os === "windows") return _spawnWindows(cmd, args, opts, grace);
+  if (Deno.build.os === "windows") {
+    // Tracked on Windows too — `taskkill /T` walks the tree there, and a
+    // forgotten child is a forgotten child on every platform.
+    return _track(_spawnWindows(cmd, args, opts, grace), cmd);
+  }
 
   let child: Deno.ChildProcess | null = null;
   const tried: string[] = [];
@@ -194,7 +198,52 @@ export async function spawn(
     );
   }
 
-  return _handle(pgid, status, grace, opts.signal, cmd);
+  return _track(_handle(pgid, status, grace, opts.signal, cmd), cmd);
+}
+
+// ── The live-child registry ─────────────────────────────────────────────────
+//
+// EVERY child here is in a process group OF ITS OWN. That is what makes
+// `kill()` reach the whole tree — and it is also why a child does NOT die with
+// the app: a group of its own is a group the app's death does not signal. An
+// app that spawns `ffmpeg` and exits leaves `ffmpeg` encoding, holding the GPU,
+// with nothing left that knows its pid.
+//
+// `own.set(...)` is the documented way to tie a child to a cell's lifetime, and
+// it works. But the failure of forgetting it is a leaked process, which is
+// invisible from inside the app, survives the test suite, and accumulates on a
+// developer's machine until something runs out. Silence is the wrong answer to
+// that; so shutdown kills whatever is still running and SAYS SO, naming the
+// command, and `own` remains the way to do it earlier and on purpose.
+const _live = new Map<number, { cmd: string; handle: SpawnHandle }>();
+
+function _track(handle: SpawnHandle, cmd: string): SpawnHandle {
+  _live.set(handle.pid, { cmd, handle });
+  const forget = () => _live.delete(handle.pid);
+  handle.status.then(forget, forget);
+  return handle;
+}
+
+/** Children spawned through `spawn()` that are still running, as
+ *  `pid → command`. Empty is the healthy answer at shutdown. @internal */
+export function _liveSpawned(): Map<number, string> {
+  return new Map([..._live].map(([pid, v]) => [pid, v.cmd]));
+}
+
+/** Kill every child still running, as whole process groups. Called by
+ *  shutdown's Phase 7 after `own` disposal has had its chance, so anything
+ *  reaching here is a child nobody claimed.
+ *
+ *  Returns how many it had to kill — zero on a tidy app, and the caller is
+ *  expected to say so out loud when it is not. Never throws: a child that has
+ *  already gone, or a signal the platform refuses, must not be the thing that
+ *  stops a shutdown. */
+export async function killAllSpawned(): Promise<number> {
+  const victims = [..._live.values()];
+  if (victims.length === 0) return 0;
+  await Promise.allSettled(victims.map((v) => v.handle.kill()));
+  _live.clear();
+  return victims.length;
 }
 
 /** POSIX handle — every signal goes to `-pgid`, never to a bare pid. */

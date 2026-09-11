@@ -2,8 +2,9 @@
 // Extracted from createServer() closure to keep server.ts focused on HTTP/WS
 
 import { UI_ENTRY } from "./app-files.ts";
+import { isServerOnlyFile } from "../entries.ts";
 import { enc } from "../protocol/envelope.ts";
-import { basename, dirname, join, resolve } from "@std/path";
+import { basename, dirname, fromFileUrl, join, resolve } from "@std/path";
 import { DENO_JSON_NAMES, parseDenoJson } from "./deno-json.ts";
 import type { GraphResult } from "./graph-validator.ts";
 import { type ProdGraphCheck, validateGraph } from "./graph-validator.ts";
@@ -63,6 +64,55 @@ export interface WatcherDeps {
    *  at save speed. A burst whose changes are all self-written skips the step
    *  and the sequence terminates. */
   runCss?: () => Promise<readonly string[]>;
+}
+
+/** The framework's own `src/` when this app imports aio BY PATH, or null.
+ *
+ *  A source-layout app reaches the framework through a `dep/aio` SYMLINK into
+ *  a checkout (see `am link`), and two things follow that the watcher got
+ *  wrong: the checkout is not under `absBaseDir`, and `Deno.watchFs` does not
+ *  follow symlinks anyway. So editing the framework while running an app
+ *  against it changed nothing on screen — the page kept serving the modules it
+ *  had (trading-app report §9.6).
+ *
+ *  Derived from the IMPORT MAP rather than by looking for `dep/aio`, because
+ *  the import map is the thing that actually decides where `aio` comes from:
+ *  an app that pins a checkout at any other path gets the same treatment, and
+ *  one that pins `jsr:`/`npm:` correctly gets none — there is no working tree
+ *  to watch, and watching a read-only cache would be handles spent on nothing.
+ *
+ *  Only `src/`: the whole checkout carries `.git`, `node_modules` and a
+ *  `dist/` that a build rewrites constantly, and a watcher over those is a
+ *  reload storm, not a feature. */
+export function frameworkWatchRoot(
+  importMapObj: Record<string, string>,
+  absBaseDir: string,
+): string | null {
+  const spec = importMapObj["aio"] ?? importMapObj["aio/"];
+  if (!spec || /^(jsr|npm|https?|data):/.test(spec)) return null;
+  try {
+    // `…/mod.ts` → the checkout; `…/aio/` → the checkout. Both spellings
+    // appear in real apps, and `dirname` of a trailing slash is the directory.
+    const asPath = spec.startsWith("file://") ? fromFileUrl(spec) : spec;
+    const abs = resolve(absBaseDir, asPath);
+    const root = abs.endsWith(".ts") || abs.endsWith(".tsx")
+      ? dirname(abs)
+      : abs.replace(/[/\\]+$/, "");
+    // REAL path, because that is what the watcher can actually watch and what
+    // its events will carry — the symlink's own path never appears in them.
+    const real = Deno.realPathSync(root);
+    const src = join(real, "src");
+    if (!Deno.statSync(src).isDirectory) return null;
+    if (!Deno.statSync(join(real, "mod.ts")).isFile) return null;
+    // Already inside a root being watched — nothing to add, and adding it
+    // would double every event.
+    if (resolve(src).startsWith(resolve(absBaseDir))) return null;
+    return src;
+  } catch {
+    // aio-ok: a pin that does not resolve is not this function's problem —
+    // the import map's own reader reports it, loudly, at boot.
+    return null;
+  }
 }
 
 /** Trailing-edge debounce: batch a burst of saves into one reload. */
@@ -178,6 +228,10 @@ export function createFileWatcher(deps: WatcherDeps): FileWatcher {
   let configWatcher: Deno.FsWatcher | null = null;
   let watcherActive = false;
   const _warnedCellFiles = new Set<string>(); // a field report: warn once per cell file
+  /** `*.server.ts` files already warned about this session — see the reload
+   *  handler. Once per file: the point is to answer the question the first
+   *  time it is asked, not to fill the log while somebody iterates. */
+  const _warnedServerFiles = new Set<string>();
   let _sentinelOk = false;
   let healthTimer: ReturnType<typeof setInterval> | null = null;
   // Sentinel lives in per-user lockDir ($XDG_RUNTIME_DIR/aio or /tmp/aio), not
@@ -260,6 +314,32 @@ export function createFileWatcher(deps: WatcherDeps): FileWatcher {
     // server process, so the client reload shows the NEW UI reading OLD cell
     // logic. That silent mismatch sends people ghost-hunting. Warn loudly (once
     // per file per session) with the fix.
+    // …and neither does a `*.server.ts` module, for the same reason one layer
+    // down: a cell method reaches it with `await import()`, and Deno's module
+    // registry hands back the copy it already has. The browser reloads, the
+    // page looks new, and the server is still running the old function.
+    //
+    // A report lost real time to exactly this (composer §6): a fix to a
+    // `.server.ts` module "did not take", so the author verified state twice,
+    // concluded the fix was wrong, and went back to re-reading correct code.
+    // Nothing was wrong with the code. Nothing said so either, which is the
+    // whole defect — the reload event is the moment the question is being
+    // asked, so it is where the answer belongs.
+    if (isServerOnlyFile(path) && !_warnedServerFiles.has(path)) {
+      _warnedServerFiles.add(path);
+      log.warn(
+        "watch",
+        `${
+          path.split("/").pop()
+        } changed — a \`*.server.ts\` module runs in THIS process and is ` +
+          `cached by the module registry, so the \`await import()\` that ` +
+          `reaches it keeps handing back the old copy. The browser reloaded; ` +
+          `this file did not. Restart to apply: stop and re-run ` +
+          `\`deno task dev\` (or \`am restart\`). ` +
+          `\`am where ${path.split("/").pop()}\` says which side any file ` +
+          `runs on.`,
+      );
+    }
     if (!path.endsWith(".css")) {
       try {
         const src = Deno.readTextFileSync(path);
@@ -411,10 +491,40 @@ export function createFileWatcher(deps: WatcherDeps): FileWatcher {
             cssSelfWritten.clear();
             for (const w of await deps.runCss()) cssSelfWritten.add(w);
           }
-          // Normal reload (no graph issues)
+          // Normal reload (no graph issues) — or a PATCH, when the whole
+          // burst is the UI entry and nothing else.
+          //
+          // A patch replaces the root component in place instead of reloading
+          // the document, so a `<webview>` with its logged-in session, 760 MB
+          // of loaded weights and a wallet's unlock all survive the edit —
+          // the three things a `.tsx` save cost three different apps.
+          //
+          // THE CONDITION IS DELIBERATELY NARROW. Re-importing a module gives
+          // a fresh copy, and every module that imported the OLD one still
+          // holds it. Nothing in the client graph imports the UI ENTRY, so
+          // nothing can be left stale by re-importing it; that is not true of
+          // any other file, and a hot reload that silently does not apply an
+          // edit to a child module is worse than a reload that always works.
+          // One changed file, and it is the entry: patch. Anything else:
+          // reload, exactly as before.
+          const patchable = wasFullReload && changed.length === 1 &&
+            changed[0] === uiEntryAbs && fileExists(uiEntryAbs);
           const signal = wasFullReload ? "reload" : "css";
-          debug(`${signal} → broadcasting to clients`);
-          deps.broadcastWs(enc(signal));
+          if (patchable) {
+            // The version makes the browser's `import()` a cache miss. It is
+            // the burst's own timestamp, so two edits in the same millisecond
+            // cannot collide with each other's module.
+            debug(`patch → broadcasting to clients (${uiEntryAbs})`);
+            deps.broadcastWs(
+              enc("patch", {
+                path: `/${deps.uiEntry ?? UI_ENTRY}`,
+                v: Date.now(),
+              }),
+            );
+          } else {
+            debug(`${signal} → broadcasting to clients`);
+            deps.broadcastWs(enc(signal));
+          }
           deps.onReload?.(signal);
           // …and SAY SO. A successful hot reload was the one dev-loop event
           // with no terminal line at all: every failure printed something,
@@ -503,6 +613,17 @@ export function createFileWatcher(deps: WatcherDeps): FileWatcher {
       const roots = Array.isArray(deps.watch) && deps.watch.length > 0
         ? deps.watch.map((p) => resolve(absBaseDir, p))
         : [absBaseDir];
+      // …and the framework itself, when this app imports it by path. See
+      // `frameworkWatchRoot`. An explicit `watch: [...]` is left alone: an app
+      // that narrowed the watcher (because its boot reloads gigabytes) has
+      // said what it wants watched, and this would widen it again.
+      const fw = Array.isArray(deps.watch)
+        ? null
+        : frameworkWatchRoot(deps.importMapObj, absBaseDir);
+      if (fw) {
+        roots.push(fw);
+        deps.debug(`watcher: also watching the framework checkout at ${fw}`);
+      }
       const paths = _sentinelOk ? [...roots, SENTINEL] : roots;
       fsWatcher = Deno.watchFs(paths, { recursive: true });
       startConfigWatcher();

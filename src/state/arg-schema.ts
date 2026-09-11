@@ -28,6 +28,15 @@
  * coercions, deleted.
  */
 
+/** One Standard Schema issue. `path` is what lets an OBJECT schema's failures
+ *  be attributed to the field that caused them — `useForm` reads the first
+ *  segment as the field name. The spec allows either a bare key or a
+ *  `{ key }` wrapper, and both appear in the wild. */
+export type StandardSchemaIssue = {
+  readonly message: string;
+  readonly path?: ReadonlyArray<PropertyKey | { readonly key: PropertyKey }>;
+};
+
 /** The Standard Schema v1 surface, as much of it as this needs.
  *
  *  Structural, not an import: taking a dependency on the spec package to read
@@ -40,7 +49,7 @@ export type StandardSchemaLike = {
       value: unknown,
     ) =>
       | { value: unknown; issues?: undefined }
-      | { issues: readonly { message: string }[] }
+      | { issues: readonly StandardSchemaIssue[] }
       | Promise<unknown>;
   };
 };

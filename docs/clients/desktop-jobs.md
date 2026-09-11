@@ -155,6 +155,30 @@ nicer name.
 
 ## Cleaning up
 
+### A spawned child does not die with your app
+
+Every child `spawn()` starts runs in a **process group of its own**. That is
+what lets `kill()` reach the whole tree instead of orphaning grandchildren — and
+it is also why your app exiting does not stop them. Spawn a transcode, quit the
+app, and the transcode keeps going, with nothing left that knows its pid.
+
+Tie the job to the cell that owns it:
+
+```ts
+const job = await spawn("ffmpeg", { args, signal: s.$signal });
+s.$do(own.set("encode", () => job.kill()));
+```
+
+If you forget, aio kills whatever is still running during shutdown and logs a
+warning naming the commands. That is a backstop, not the plan: it runs at the
+very end, after everything else has closed, so a job holding a file or a GPU
+holds it for the whole shutdown.
+
+Passing `s.$signal` covers the other half — a `cancelOn` supersession kills the
+tree with no extra plumbing.
+
+### Server-only I/O
+
 Server-only I/O in a cell method is flagged by the dev-server graph check,
 because a client-reachable path that calls `Deno.remove` blank-screens the
 browser. When the path genuinely only runs on the server, say so:

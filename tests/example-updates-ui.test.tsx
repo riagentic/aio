@@ -13,8 +13,8 @@
 // in.
 import { assert, assertEquals, assertStringIncludes } from "@std/assert";
 import { testUI } from "../src/testing/ui-test.ts";
-import App from "../examples/updates/App.tsx";
-import { notes } from "../examples/updates/cell.ts";
+import App from "../examples/updates/src/App.tsx";
+import { notes } from "../examples/updates/src/cell.ts";
 
 /** A release the user can take, mid-migration warning and all. */
 const AVAILABLE = {

@@ -22,6 +22,7 @@ export const VALID_UI_KEYS = new Set<string>([
   "dir", // <html dir> — "ltr" | "rtl" | "auto"; mirrors the whole default UI
   "chrome", // desktop window frame: "standard" | "themed" | "none"
   "theme", // the default look: "tokens" (default) | "auto" | "full" | "none"
+  "layout", // false → style ELEMENTS, emit no page layout (see UiConfig.layout)
 ]);
 
 /** Top-level `deno.json` keys aio actually READS (its own + Deno's).
@@ -209,6 +210,7 @@ export const VALID_AIO_CONFIG_KEYS = new Set<string>([
   "feedback",
   "baseDir",
   "serveDirs",
+  "assets", // read-only dirs served in dev AND prod (see CellsConfig.assets)
   "client",
   "keepServer",
   "transport",
@@ -292,6 +294,7 @@ export const VALID_FEATURES_CONFIG_KEYS = new Set<string>([
   "ui",
   "baseDir",
   "serveDirs",
+  "assets", // read-only dirs served in dev AND prod (see CellsConfig.assets)
   "client",
   "keepServer",
   "transport",
@@ -370,6 +373,10 @@ export const CONFIG_DOCS: Record<string, [string, string]> = {
   serveDirs: [
     "",
     'extra READ-ONLY dev-server roots by URL prefix ({"/shared":"../core/lib"}) — dev only; prod bundles follow relative imports',
+  ],
+  assets: [
+    "",
+    'READ-ONLY directories this app SERVES, by URL prefix ({"/media":"./media"}) — dev AND prod, every baseDir guard, and declared in deno.json the build embeds them in the binary',
   ],
   localFirst: [
     "false",
@@ -594,6 +601,10 @@ export const UI_DOCS: Record<string, [string, string]> = {
     '"tokens"',
     'default stylesheet — "tokens" (variables only, nothing paints) | "auto" (steps aside for your style.css) | "full" (keep it alongside yours) | "none"',
   ],
+  layout: [
+    "true",
+    'false → style ELEMENTS only (canvas, type, forms, tables, focus rings) and emit NO layout: no <main> page container, none of .card/.row/.stack/.grid/.muted/.badge. Composes with theme "auto"/"full"; warns on "tokens"/"none", which paint nothing',
+  ],
 };
 
 /** Keys printed in the IDENTITY table (see formatValidConfig). */
@@ -613,6 +624,7 @@ export const CONFIG_GROUPS: [string, string[]][] = [
     "feedback",
     "baseDir",
     "serveDirs",
+    "assets",
     "client",
     "keepServer",
     "transport",

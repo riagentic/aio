@@ -79,7 +79,12 @@ import {
 import type { TrojanDeps } from "./server-trojan.ts";
 import { resetTrojanRateLimit } from "./server-trojan.ts";
 import { encodeResponse } from "./http-encoding.ts";
-import { securityHeaders } from "./security-headers.ts";
+import {
+  contentSecurityPolicy,
+  cspNonce,
+  frameAncestors,
+  securityHeaders,
+} from "./security-headers.ts";
 
 // B-11: tokens in the URL query string leak via browser history, proxy logs,
 // and Referer headers. The timing-safe `?token=` path stays as an opt-in
@@ -691,6 +696,28 @@ export function createServer(config: ServerConfig): ServerHandle {
     // at build time. Gating it here means a production server cannot be made
     // to read outside its own root by a config key at all.
     serveDirs: prod ? undefined : config.serveDirs,
+    // …and `assets` in BOTH. That is the entire difference between the two:
+    // `serveDirs` exists so the DEV server can resolve a module that lives
+    // outside baseDir (prod bundles follow the import themselves), while
+    // `assets` is for DATA a running app serves — a model, a font, a sample
+    // pack — which prod needs exactly as much as dev does.
+    assets: config.assets,
+    // The shell's own CSP, when the app turned a nonce on. `securityHeaders`
+    // computes the server-wide one from the same inputs; this is the same
+    // function with a nonce threaded through, so the two cannot drift.
+    ...(config.security?.cspNonce
+      ? {
+        cspForShell: {
+          nonce: cspNonce,
+          policy: (n: string) =>
+            contentSecurityPolicy(
+              config.security,
+              frameAncestors(config.allowedOrigins),
+              n,
+            ),
+        },
+      }
+      : {}),
     // A declared workspace share (deno.json "share"): dev only, like serveDirs.
     share: prod ? undefined : _shareRoots(absBaseDir),
     absDistDir,
@@ -703,6 +730,7 @@ export function createServer(config: ServerConfig): ServerHandle {
     headExtra: config.headExtra,
     chrome: config.chrome,
     theme: config.theme,
+    layout: config.layout,
     lang: config.lang,
     dir: config.dir,
     themeName: config.themeName,

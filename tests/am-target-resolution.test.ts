@@ -17,6 +17,7 @@
 //  3. "app not running (no lock file)" named neither the directory searched
 //     nor AIO_APPS_DIR, the env var that decides it — two shells genuinely
 //     look in different places and the message was true in both.
+import { dropTempDir, tempDir } from "../src/testing/temp-dir.ts";
 import { assert, assertEquals, assertStringIncludes } from "@std/assert";
 import { join } from "@std/path";
 import { cell } from "../src/state/cell-create.ts";
@@ -39,14 +40,19 @@ import { compareValue } from "../src/am/am-cmd-state.ts";
  *  test, and RESTORE whatever the suite had — never delete it. */
 async function withAppsDir<T>(fn: (root: string) => Promise<T>): Promise<T> {
   const prev = Deno.env.get("AIO_APPS_DIR");
-  const root = await Deno.makeTempDir({ prefix: "aio-am-target-" });
+  // REGISTERED, not raw. The `finally` below removes it on the happy path,
+  // and this is what covers the other one: a test process that is killed, or
+  // one whose child still holds the directory, leaves it behind forever —
+  // four of these were sitting in /tmp when `check:orphans` finally counted
+  // them, months apart and invisible one at a time.
+  const root = await tempDir("aio-am-target-");
   Deno.env.set("AIO_APPS_DIR", root);
   try {
     return await fn(root);
   } finally {
     if (prev === undefined) Deno.env.delete("AIO_APPS_DIR");
     else Deno.env.set("AIO_APPS_DIR", prev);
-    await Deno.remove(root, { recursive: true }).catch(() => {});
+    await dropTempDir(root);
   }
 }
 

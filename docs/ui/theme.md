@@ -257,6 +257,34 @@ Keeping them means `ui.chrome: "themed"`'s title bar (which reads
 `var(--aio-…, fallback)`) stays coherent with the rest of your app, and you can
 reference a token deliberately if you want one.
 
+## Styled elements, your own layout (`ui.layout: false`)
+
+Between `"tokens"` (nothing paints, so every control is the browser's) and
+`"auto"`/`"full"` (a whole page shell) there used to be nothing — and the
+question people actually ask is narrower than either:
+
+> I want my own layout. I do not want to restyle `<input>`, `<textarea>`,
+> `<button>` and focus rings from scratch.
+
+`ui.layout: false` is that. It is a separate switch from `ui.theme`, because it
+answers a separate question, and it composes with each answer to the other:
+
+```ts
+await aio.run({ ui: { theme: "full", layout: false } }); // controls, never layout
+await aio.run({ ui: { theme: "auto", layout: false } }); // …until you ship CSS
+```
+
+| Kept (how an ELEMENT looks)           | Dropped (where things GO)            |
+| ------------------------------------- | ------------------------------------ |
+| canvas, `color-scheme`, dark mode     | `<main>` as a centred page container |
+| typography, headings, lists, links    | `body>header` / `footer` alignment   |
+| every form control, focus rings       | `.card` `.row` `.stack` `.grid`      |
+| tables, `<code>`, `::selection`       | `.muted` `.badge`                    |
+| coarse pointer, reduced motion, print |                                      |
+
+Setting it with `"tokens"` or `"none"` warns at boot rather than doing nothing:
+those emit no visual rules, so there is no layout to drop.
+
 ## Where the colour comes from
 
 The accent hue is a hash of the app's `appId` — the same hash that draws the

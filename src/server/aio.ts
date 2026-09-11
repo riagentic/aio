@@ -1,5 +1,6 @@
 import { validateMemoryConfig } from "../diagnostics/memory-monitor.ts";
 import { refuseRetired } from "../state/removals.ts";
+import { installBundleSourceMap } from "./sourcemap-boot.ts";
 // Core runtime orchestrator — boots KV, server, electron, wires everything together.
 // Phase logic lives in aio-boot, aio-dispatch, aio-server, aio-lifecycle, aio-run-helpers.
 // Cell composition logic lives in aio-composition and aio-cells-bridge.
@@ -8,6 +9,7 @@ import {
   APP_STYLE,
   appHasStylesheet,
   BUNDLE_JS,
+  BUNDLE_MAP,
   UI_ENTRY,
 } from "./app-files.ts";
 import { readLocalPinSync } from "./deno-json.ts";
@@ -345,8 +347,37 @@ export function _warnPinDrift(): void {
 export function _themeBootNote(
   theme: UiConfig["theme"],
   styled: boolean,
+  layout?: boolean,
 ): { level: "info" | "warn"; message: string } | null {
-  if (theme !== "full" && theme !== "auto") return null;
+  if (theme !== "full" && theme !== "auto") {
+    // `ui.layout: false` on a theme that paints nothing is a setting with no
+    // effect — and a setting with no effect is worse than a missing one,
+    // because the author believes it is doing something.
+    if (layout === false) {
+      return {
+        level: "warn",
+        message:
+          `ui.layout: false has no effect with ui.theme "${
+            theme ?? "tokens"
+          }" — ` +
+          `that theme emits no visual rules, so there is no layout to drop. ` +
+          `Set ui.theme "full" (or "auto") to get the ELEMENT defaults ` +
+          `— canvas, type, forms, tables, focus rings — without the page ` +
+          `container or the six layout classes.`,
+      };
+    }
+    return null;
+  }
+  if (layout === false) {
+    return {
+      level: "info",
+      message:
+        `theme: ui.theme "${theme}" with ui.layout false — aio styles ELEMENTS ` +
+        `(canvas, type, forms, tables, code, focus rings) and emits NO layout: ` +
+        `no \`<main>\` page container and none of .card/.row/.stack/.grid/` +
+        `.muted/.badge. Your CSS owns where things go.`,
+    };
+  }
   if (theme === "full" && styled) {
     return {
       level: "warn",
@@ -1684,6 +1715,29 @@ async function _runPhases<S, A, E>(
       );
     }
   }
+  // THE CLIENT BUNDLE'S SOURCE MAP, if the build left one. Without it every
+  // error a browser forwards lands in the log as `app.js:1:22073` — the
+  // bundle is one minified line, and no browser applies a map to the string
+  // form of `Error.stack`, so the server is the only place this can happen.
+  // See diagnostics/stack-remap.ts.
+  //
+  // A dotfile by design (`serveStatic` refuses dot-prefixed segments), so it
+  // ships beside the bundle without being readable over HTTP. Absent is the
+  // normal case for a dev server, which serves unbundled modules whose
+  // positions are already the author's own.
+  if (prod) {
+    const mapped = await installBundleSourceMap(distDir);
+    log.debug(
+      mapped
+        ? `sourcemap: ${
+          join(distDir, BUNDLE_MAP)
+        } loaded — forwarded client errors name your source`
+        : `sourcemap: no usable ${
+          join(distDir, BUNDLE_MAP)
+        }; forwarded client errors keep bundle positions`,
+    );
+  }
+
   const {
     reduce,
     execute,
@@ -1750,6 +1804,7 @@ async function _runPhases<S, A, E>(
   const themeNote = _themeBootNote(
     ui.theme,
     [baseDir, ...baseDirFallbacks].some((d) => appHasStylesheet(d, distDir)),
+    ui.layout,
   );
   if (themeNote) log[themeNote.level](themeNote.message);
 

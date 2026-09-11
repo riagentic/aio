@@ -8,6 +8,7 @@ import type { GlobalFlags } from "./am-types.ts";
 import { detectMode, out, outError } from "./am-output.ts";
 import { liveLock, resolveAmAppId } from "./am-utils.ts";
 import { appPageTargets, cdpConnect, cdpTargets } from "./am-cdp.ts";
+import { comparePng, type PngDiffOptions } from "./png-compare.ts";
 
 /** Pure: the output path — `--out`, or `<appId>-<stamp>.png` in the cwd. */
 export function shotOutPath(
@@ -110,6 +111,36 @@ export async function cmdShot(
     Deno.exit(1);
   }
   const full = args.includes("--full");
+  // `--selector=<css>`: capture ONE element instead of the window. The
+  // measurement comes from the page, not from a guess — a clip computed here
+  // would be wrong the moment the page scrolled.
+  const selector = args.find((a) => a.startsWith("--selector="))?.slice(11);
+  if (selector !== undefined && !selector.trim()) {
+    outError(
+      '--selector= needs a CSS selector (e.g. --selector="#chart"). ' +
+        "`am surface --names` lists the semantic paths; this flag takes CSS.",
+      mode,
+    );
+    Deno.exit(1);
+  }
+  // `--check[=file]` / `--update[=file]` — a committed baseline. aio already
+  // had the three hard parts (headless capture, deterministic state via
+  // `am snapshot load`, any state reachable with `am dispatch`); this is the
+  // last 10% (composer §10.7).
+  const checkFlag = args.find((a) =>
+    a === "--check" || a.startsWith("--check=")
+  );
+  const updateFlag = args.find((a) =>
+    a === "--update" || a.startsWith("--update=")
+  );
+  if (checkFlag && updateFlag) {
+    outError(
+      "--check and --update are opposites: one asserts the baseline, the " +
+        "other replaces it. Pick one.",
+      mode,
+    );
+    Deno.exit(1);
+  }
   const outFile = shotOutPath(
     appId,
     args.find((a) => a.startsWith("--out="))?.slice(6),
@@ -158,12 +189,111 @@ export async function cmdShot(
     // second after a frame has been committed. That is the browser's own
     // definition of "something was painted since you asked".
     const painted = await framePainted(cdp, timeout);
+    let clip: Record<string, number> | undefined;
+    if (selector !== undefined) {
+      clip = (await selectorClip(cdp, selector)) ?? undefined;
+      if (!clip) {
+        outError(
+          `no element matches ${selector} in ${target.url} — nothing to ` +
+            `capture. (\`am surface --names\` lists what the page actually ` +
+            `has; this flag takes a CSS selector, not a semantic path.)`,
+          mode,
+        );
+        Deno.exit(1);
+      }
+      if (clip.width === 0 || clip.height === 0) {
+        // A 0x0 clip makes Chrome return a 1x1 image, which reads as a
+        // successful capture of a collapsed element — the same
+        // "answered with zeroes" failure `am surface --rects` already refuses.
+        outError(
+          `${selector} measures ${clip.width}x${clip.height} in ${target.url}` +
+            ` — it is in the DOM and has no box, so there is nothing to ` +
+            `capture. Either it is \`display:none\`, or the layout has not ` +
+            `run yet.`,
+          mode,
+        );
+        Deno.exit(1);
+      }
+    }
     const r = await cdp.call("Page.captureScreenshot", {
       format: "png",
       captureBeyondViewport: full,
+      ...(clip ? { clip: { ...clip, scale: 1 } } : {}),
     }) as { data?: string };
     if (!r?.data) throw new Error("Page.captureScreenshot returned no data");
     const png = Uint8Array.from(atob(r.data), (c) => c.charCodeAt(0));
+
+    // ── a committed baseline ────────────────────────────────────────────
+    if (checkFlag || updateFlag) {
+      const flag = (checkFlag ?? updateFlag)!;
+      const eq = flag.indexOf("=");
+      const baseline = eq >= 0 ? flag.slice(eq + 1) : outFile;
+      if (!baseline) {
+        outError(`${flag.slice(0, eq)}= needs a path`, mode);
+        Deno.exit(1);
+      }
+      if (updateFlag) {
+        await Deno.writeFile(baseline, png);
+        out(
+          mode === "pretty"
+            ? `updated baseline ${baseline} (${png.byteLength} bytes)`
+            : { baseline, bytes: png.byteLength, updated: true, painted },
+          mode,
+        );
+        return;
+      }
+      const prior = await Deno.readFile(baseline).catch(() => null);
+      if (!prior) {
+        // NOT a pass. A missing baseline is the one case where "nothing to
+        // compare" and "nothing changed" look identical, and a green there is
+        // a check that never ran.
+        outError(
+          `no baseline at ${baseline} — there is nothing to compare against, ` +
+            `and reporting that as a pass would be a check that never ran. ` +
+            `Record one first: am shot --update=${baseline}`,
+          mode,
+        );
+        Deno.exit(1);
+      }
+      const th = args.find((a) => a.startsWith("--threshold="))?.slice(12);
+      const mr = args.find((a) => a.startsWith("--max-diff="))?.slice(11);
+      const opts: PngDiffOptions = {
+        ...(th !== undefined ? { threshold: Number(th) } : {}),
+        ...(mr !== undefined ? { maxRatio: Number(mr) } : {}),
+      };
+      const diff = await comparePng(png, prior, opts);
+      if (diff.same) {
+        out(
+          mode === "pretty"
+            ? `matches ${baseline}${
+              diff.maxDelta > 0
+                ? ` (largest channel change ${diff.maxDelta}, within tolerance)`
+                : ""
+            }`
+            : { baseline, ...diff, painted },
+          mode,
+        );
+        return;
+      }
+      // The ACTUAL pixels are written beside the baseline, because "they
+      // differ" with nothing to look at is a report nobody can act on.
+      const actual = baseline.replace(/(\.png)?$/i, ".actual.png");
+      await Deno.writeFile(actual, png).catch(() => {
+        // aio-ok: the comparison already FAILED and the reason is about to be
+        // printed. An unwritable directory would replace that message with a
+        // filesystem error about a file the user did not ask for — losing the
+        // finding to a footnote about the footnote.
+      });
+      outError(
+        `${baseline} does not match: ${diff.reason}.` +
+          (painted ? "" : " (the window also did not confirm a frame)") +
+          ` The pixels captured now are in ${actual}; accept them with ` +
+          `am shot --update=${baseline}`,
+        mode,
+      );
+      Deno.exit(1);
+    }
+
     await Deno.writeFile(outFile, png);
     const result = {
       file: outFile,
@@ -192,6 +322,39 @@ export async function cmdShot(
   } finally {
     cdp.close();
   }
+}
+
+/** The viewport box of the first element matching `selector`, or `null`.
+ *
+ *  MEASURED IN THE PAGE, through `getBoundingClientRect`, rather than computed
+ *  from a layout tree here. The page is the only thing that knows where the
+ *  element is after a scroll, a transform or a `position: sticky` — and the
+ *  clip Chrome wants is in viewport coordinates, which is exactly what that
+ *  call returns. */
+async function selectorClip(
+  cdp: { call: (m: string, p?: Record<string, unknown>) => Promise<unknown> },
+  selector: string,
+): Promise<Record<string, number> | null> {
+  const expr = `(() => {
+    const el = document.querySelector(${JSON.stringify(selector)});
+    if (!el) return null;
+    const r = el.getBoundingClientRect();
+    return { x: r.x, y: r.y, width: r.width, height: r.height };
+  })()`;
+  const res = await cdp.call("Runtime.evaluate", {
+    expression: expr,
+    returnByValue: true,
+  }) as { result?: { value?: Record<string, number> | null } };
+  const v = res?.result?.value;
+  if (!v || typeof v.width !== "number") return null;
+  // Chrome's clip wants integers it can composite; a fractional box loses a
+  // sliver off two edges and makes a byte-identical re-capture impossible.
+  return {
+    x: Math.floor(v.x ?? 0),
+    y: Math.floor(v.y ?? 0),
+    width: Math.ceil(v.width ?? 0),
+    height: Math.ceil(v.height ?? 0),
+  };
 }
 
 /** Resolve once the page has committed a frame — `true` when it did, `false`

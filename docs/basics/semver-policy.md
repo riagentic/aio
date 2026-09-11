@@ -21,6 +21,8 @@ The public surface is exactly what the CI-enforced snapshot locks
   | `aio/ui`               | the component library                              |
   | `aio/jsx-runtime`      | the JSX factory the compiler imports               |
   | `aio/server`           | the server-only values (SQLite, CLI/UDS transport) |
+  | `aio/server-only`      | the marker: "this file never reaches the browser"  |
+  | `aio/client-only`      | the marker: "this file never runs on the server"   |
   | `aio/state-core`       | the cell registry / send / sync routing            |
   | `aio/db`               | database types + pure schema helpers               |
   | `aio/log`              | the logger, as a leaf — 13 modules, not the barrel |

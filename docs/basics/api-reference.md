@@ -29,14 +29,15 @@ time. They looked for the kit on this page, and it was not here.
 import { Button, Card, Field, Input, Table, toast, UiStyles } from "aio/ui";
 ```
 
-|              |                                                                                      |
-| ------------ | ------------------------------------------------------------------------------------ |
-| **Forms**    | `Button` `Input` `Textarea` `Select` `Checkbox` `RadioGroup` `Switch` `Field`        |
-| **Layout**   | `Card` `Stack` `Row` `Tabs` `Breadcrumb`                                             |
-| **Data**     | `Table` `Pagination` `Markdown` `Avatar`                                             |
-| **Feedback** | `Alert` `Progress` `Spinner` `Skeleton` `EmptyState` `Tooltip` `toast` / `ToastHost` |
-| **Overlay**  | `Modal` `Confirm` `ConfirmButton` `Menu`                                             |
-| **Styles**   | `UiStyles` (render once) · `UI_CSS` (the raw sheet)                                  |
+|              |                                                                                                    |
+| ------------ | -------------------------------------------------------------------------------------------------- |
+| **Forms**    | `Button` `Input` `Textarea` `Select` `Checkbox` `RadioGroup` `Switch` `Field`                      |
+| **Layout**   | `Card` `Stack` `Row` `Tabs` `Breadcrumb`                                                           |
+| **Data**     | `Table` `Pagination` `Markdown` `Avatar`                                                           |
+| **Feedback** | `Alert` `Progress` `Spinner` `Skeleton` `EmptyState` `Tooltip` `toast` / `ToastHost`               |
+| **Overlay**  | `Modal` `Confirm` `ConfirmButton` `Menu`                                                           |
+| **Embed**    | `Browser` (a web page inside your app — see [webview](../clients/webview.md))                      |
+| **Styles**   | `UiStyles` (render once) · `UI_CSS` (the raw sheet) · `css` / `cx` / `collectCss` (scoped classes) |
 
 Every component takes the `Common` props (`class`, `id`, `style`, `t`) and
 renders through AIR — no wrapper, no runtime. The kit is

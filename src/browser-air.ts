@@ -137,6 +137,17 @@ export { Defer, type DeferProps, type DeferTrigger } from "./air/defer.ts";
 
 // ── Async data as signals ────────────────────────────────────────────
 export { type Resource, resource } from "./air/resource.ts";
+// A keyed resource you HOLD (a camera, a socket, a pipeline) and the reaction
+// that decides when to swap it — see air/use-resource.ts.
+export {
+  type Dispose,
+  onChange,
+  type OnChangeOptions,
+  type ResourceHandle,
+  type ResourceKey,
+  useResource,
+  type UseResourceConfig,
+} from "./air/use-resource.ts";
 
 // ── Reactive element dimensions ──────────────────────────────────────
 export { type DimensionsState, useDimensions } from "./air/dimensions.ts";

@@ -453,6 +453,16 @@ export interface StaticDeps {
    *  libraries). Every containment guard that protects baseDir applies to each
    *  root unchanged. */
   serveDirs?: Record<string, string>;
+  /** Extra read-only roots served in DEV **and PROD**, `"/urlPrefix" → dir`.
+   *  Same machinery and same guards as `serveDirs`; the difference is only
+   *  that these survive a build — see `CellsConfig.assets`. */
+  assets?: Record<string, string>;
+  /** Present only when `security.cspNonce` is on. `nonce()` mints one per
+   *  response; `policy()` returns the SAME policy the server-wide headers
+   *  would have sent, with that nonce in it. Handed in as a pair rather than
+   *  re-derived here: the policy is `server.ts`'s to decide, and two places
+   *  computing one header is how they come to disagree. */
+  cspForShell?: { nonce(): string; policy(nonce: string): string | null };
   /** The declared workspace share (deno.json `share`, resolved and validated
    *  by `resolveShare`) — served at `/<basename>/…` with EVERY guard baseDir
    *  has. One fact for both worlds: the bundler resolves the same prefix. Dev
@@ -479,6 +489,8 @@ export interface StaticDeps {
   chrome?: "standard" | "themed" | "none";
   /** ui.theme — how much of the default look the shell emits. */
   theme?: UiTheme;
+  /** ui.layout — false drops the theme layout defaults. */
+  layout?: boolean;
   /** Identity the theme's accent hue is derived from — the appId, so the UI
    *  and the icon are the same colour. */
   themeName?: string;
@@ -566,6 +578,17 @@ export function createStaticHandler(deps: StaticDeps): {
   const _roots: Array<
     { prefix: string; withSlash: string; dir: string; checked: boolean }
   > = [
+    // `assets` FIRST. It is the only one of the three that survives a build,
+    // so when a prefix is declared in both, the one that works in production
+    // is the one that should be working in dev — a mount that resolves
+    // differently either side of a build is the whole class of bug this repo
+    // calls WYSIDIWYSIP.
+    ...Object.entries(deps.assets ?? {}).map(([prefix, dir]) => ({
+      prefix,
+      withSlash: prefix.endsWith("/") ? prefix : prefix + "/",
+      dir: resolve(dir),
+      checked: false,
+    })),
     ...Object.entries(deps.serveDirs ?? {}).map(([prefix, dir]) => ({
       prefix,
       withSlash: prefix.endsWith("/") ? prefix : prefix + "/",
@@ -640,8 +663,19 @@ export function createStaticHandler(deps: StaticDeps): {
    *  missed `syncCells`, so a reloaded deep link silently lost local-first);
    *  one closure makes the next added parameter a one-place change. */
   function appShell(): Response {
+    // A NONCE, fresh for this response, when the app asked for one. It has to
+    // be minted here rather than once at boot: a nonce reused across responses
+    // is a nonce an attacker reads from one page and replays into another,
+    // which is the whole reason the directive exists.
+    //
+    // The shell then sets its OWN `Content-Security-Policy`, and the
+    // server-wide applier leaves it alone — "an explicit header from a route
+    // always wins" is already the rule there, so this needs no new mechanism.
+    const nonce = deps.cspForShell ? deps.cspForShell.nonce() : undefined;
+    const csp = nonce ? deps.cspForShell!.policy(nonce) : null;
     return new Response(
       generateHTML({
+        ...(nonce ? { nonce } : {}),
         title: deps.title,
         prod: deps.prod,
         hasCSS: deps.hasCSS,
@@ -657,12 +691,19 @@ export function createStaticHandler(deps: StaticDeps): {
         callTimeouts: deps.callTimeouts,
         chrome: deps.chrome,
         theme: deps.theme,
+        layout: deps.layout,
         themeName: deps.themeName,
         lang: deps.lang,
         dir: deps.dir,
         appId: deps.appId,
       }),
-      { headers: { "Content-Type": "text/html", ...deps.noCache } },
+      {
+        headers: {
+          "Content-Type": "text/html",
+          ...deps.noCache,
+          ...(csp ? { "Content-Security-Policy": csp } : {}),
+        },
+      },
     );
   }
 

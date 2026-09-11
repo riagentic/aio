@@ -39,7 +39,7 @@ Deno.test({
         "run",
         "-A",
         "--unstable-kv",
-        "app.ts",
+        "src/app.ts", // the examples moved to the `am create` layout, 2026-09-11
         "--client=server-only",
         `--port=${port}`,
       ],
@@ -96,7 +96,7 @@ Deno.test({
         "run",
         "-A",
         "--unstable-kv",
-        "app.ts",
+        "src/app.ts", // the examples moved to the `am create` layout, 2026-09-11
         "--client=server-only",
         `--port=${port}`,
       ],
