@@ -2,7 +2,7 @@
 
 import { slugify } from "../server/single-instance-lock.ts";
 import { generateHTML } from "../server/server-html-gen.ts";
-import type { UiTheme } from "../server/aio-types.ts";
+import type { TrayConfig, UiTheme } from "../server/aio-types.ts";
 import {
   MOUNT_DEADLINE_MS,
   MOUNT_LINE,
@@ -40,6 +40,8 @@ export type AioMeta = {
   childWindows?: boolean;
   /** `ui.chrome` — how much of the window the OS draws. See UiConfig. */
   chrome?: "standard" | "themed" | "none";
+  /** `ui.tray` — a system tray icon, menu and close-to-tray. See UiConfig. */
+  tray?: boolean | TrayConfig;
 };
 
 /** Slugifies a title for use as Electron app name (stable userData path).
@@ -486,6 +488,7 @@ contextBridge.exposeInMainWorld('__aioIPC', {
   // unless the app EXPLICITLY passes sandbox: false (logged).
   openWindow: (url, opts) => ipcRenderer.send('__aio:openWindow', { url, ...(opts || {}) }),
 });
+${shellBridgePreload()}
 // Window controls for ui.chrome "themed"/"none": a frameless window loses
 // minimise, maximise and close along with its frame, and a page cannot get
 // them back on its own. Exposed ALWAYS (not only when themed) so an app using
@@ -663,4 +666,87 @@ export function udsProdHTML(
     themeName: shell?.themeName,
     lang: shell?.lang,
   });
+}
+
+/** The SHELL bridge — what a page can ask the Electron window itself for,
+ *  whatever transport it speaks: focus, and the tray's clicks. Separate from
+ *  `__aioIPC` on purpose — that bridge's PRESENCE is what selects the IPC
+ *  transport, so the WebSocket window must expose this one and not that.
+ *  `standalone` prepends the require for a preload that has nothing else. */
+export function shellBridgePreload(
+  opts: { standalone?: boolean } = {},
+): string {
+  return `${
+    opts.standalone
+      ? "const { contextBridge, ipcRenderer } = require('electron');\n"
+      : ""
+  }contextBridge.exposeInMainWorld('__aioShell', {
+  focus:  ()   => ipcRenderer.send('__aio:focus'),
+  onTray: (fn) => ipcRenderer.on('__aio:tray', (_e, item) => fn(item)),
+});`;
+}
+
+/** `ui.tray` — the system tray icon, its menu, and close-to-tray. ONE
+ *  template for both shells (the zero-port UDS one and the WebSocket one): a
+ *  tray that existed in one and not the other is the shell divergence this
+ *  file exists to prevent. `iconExpr` is a JS expression the shell supplies
+ *  for a nativeImage (or null, or a promise of either); `title` the tooltip
+ *  fallback. Expects `win`, `app`, `ipcMain` and `__aioQuitting` in scope.
+ *  Always emits `__aioHiding` — the UDS shell's close handler reads it. */
+export function tmplTray(
+  meta: AioMeta | undefined,
+  iconExpr: string,
+  title: string | undefined,
+): string {
+  const t = meta?.tray;
+  const cfg: TrayConfig | null = t === true
+    ? {}
+    : (t && typeof t === "object")
+    ? t
+    : null;
+  return `
+  // ── System tray (ui.tray) ──
+  const TRAY = ${JSON.stringify(cfg)};
+  let __aioHiding = false;
+  ipcMain.on('__aio:focus', () => { if (!win.isDestroyed()) { win.show(); win.focus(); } });
+  if (TRAY) {
+    if (TRAY.closeToTray) {
+      // Close = hide. A real quit — the tray's Quit, Cmd+Q, app.quit() — sets
+      // __aioQuitting (before-quit) before 'close' fires, so it passes.
+      win.on('close', (e) => { if (!__aioQuitting) { __aioHiding = true; e.preventDefault(); win.hide(); } });
+    }
+    (async () => {
+      const { Tray, Menu, nativeImage } = require('electron');
+      let icon = null;
+      try { icon = await (${iconExpr}); } catch (e) { console.error('[aio] tray icon: ' + (e && e.message || e)); }
+      // A desktop with no status-notifier host (a bare X session, GNOME
+      // without the AppIndicator extension) throws HERE. That is not the
+      // app failing; it is a tray that cannot exist on this desktop, so it
+      // is named once and the app runs on without it.
+      let tray;
+      try { tray = new Tray(icon || nativeImage.createEmpty()); }
+      catch (e) { console.error("[aio] ui.tray: no system tray on this desktop — " + (e && e.message || e)); return; }
+      tray.setToolTip(TRAY.tooltip || ${JSON.stringify(title ?? "aio app")});
+      const show = () => { if (win.isDestroyed()) return; win.show(); win.focus(); };
+      const items = [];
+      for (const it of TRAY.menu || []) {
+        if (it === '-') { items.push({ type: 'separator' }); continue; }
+        if (!it || typeof it.label !== 'string') continue;
+        items.push({ label: it.label, click: () => {
+          if (it.route) show();
+          // The click is DISPATCHED by the page, through the same door every
+          // button uses — acks, validation, the offline queue.
+          if (!win.isDestroyed()) win.webContents.send('__aio:tray', { method: it.method, args: it.args, route: it.route });
+        } });
+      }
+      if (items.length) items.push({ type: 'separator' });
+      items.push({ label: 'Show', click: show });
+      items.push({ label: 'Hide', click: () => { if (!win.isDestroyed()) win.hide(); } });
+      items.push({ label: 'Quit', click: () => { __aioQuitting = true; app.quit(); } });
+      tray.setContextMenu(Menu.buildFromTemplate(items));
+      tray.on('click', () => { if (win.isDestroyed()) return; if (win.isVisible()) win.hide(); else show(); });
+      // Keep a reference: a Tray nothing holds is garbage-collected and vanishes.
+      globalThis.__aioTray = tray;
+    })();
+  }`;
 }

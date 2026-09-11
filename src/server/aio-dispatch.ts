@@ -22,6 +22,8 @@ import {
 import type { ScheduleEffect } from "../state/schedule.ts";
 import type { OwnEffect } from "../state/own.ts";
 import { routeEffect } from "../state/route-effect.ts";
+import { notifyPayload } from "../state/notify.ts";
+import { enc } from "../protocol/envelope.ts";
 import { diagEmit } from "../diagnostics/diagnostic-bus.ts";
 import { runWithUser } from "./auth-context.ts";
 
@@ -92,6 +94,9 @@ export type DispatchSetupDeps<S, A, E, App = any> = {
   getServer: () => {
     broadcast: (patches?: PatchEntry[]) => void;
     broadcastTT: () => void;
+    /** A raw frame to every UI client (WS and UDS); how many received it.
+     *  Absent in a harness, where a notification has nowhere to go. */
+    broadcastUi?: (raw: string) => number;
   };
   scheduleManager: { handle: (e: ScheduleEffect) => void };
   ownManager: { handle: (e: OwnEffect) => void };
@@ -345,6 +350,19 @@ export function setupDispatch<S, A, E, App = any>(
       routeEffect<E>(effect, {
         schedule: (e) => scheduleManager.handle(e),
         own: (e) => ownManager.handle(e),
+        // A desktop notification is shown by a CLIENT; the server's job is
+        // to hand it to every one that is connected — and to say so when
+        // none is, because a card that never appeared is the silent shape.
+        notify: (e) => {
+          const raw = enc("notify", notifyPayload(e));
+          const reached = getServer().broadcastUi?.(raw) ?? 0;
+          if (reached === 0) {
+            log.warn(
+              `notify: no UI client is connected — "${e.title}" was not ` +
+                `shown (a server-only or CLI-only run has nowhere to show it)`,
+            );
+          }
+        },
         app: (e) => hookedExecute(getApp(), e),
       }),
     getState,

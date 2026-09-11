@@ -48,6 +48,8 @@ import { _setRouterBoot } from "./air/router.ts";
 import { _installRouterListeners } from "./air/router-core.ts";
 import { _setRouteBase } from "./air/router-core.ts";
 import type { SignInProps } from "./browser/browser-auth-ui.ts";
+import { showDesktopNotification } from "./browser/desktop-notify.ts";
+import { notifyPayload } from "./state/notify.ts";
 import type { AioUser } from "./protocol/protocol-types.ts";
 
 // Re-exports for user code
@@ -157,6 +159,10 @@ export {
 } from "./state/async-helpers.ts";
 export type { UntilOptions } from "./state/async-helpers.ts";
 export { own } from "./state/own.ts";
+export { notify } from "./state/notify.ts";
+/** Present so an app compiles for android too; the WebView has no
+ *  Notification API, so it resolves "unsupported" there and says so once. */
+export { requestNotificationPermission } from "./browser/desktop-notify.ts";
 export type { OwnEffect } from "./state/own.ts";
 export { self } from "./state/self.ts";
 export { call } from "./state/cell-impl.ts";
@@ -540,6 +546,8 @@ export function initStandalone<S, A, E>(
         // Schedule effects: hold on the virtual clock so tests can fire them
         // deterministically with ui.advance(ms) / handle.advance(ms).
         schedule: (e) => _scheduler().handle(e),
+        // No server between the method and the page: show it right here.
+        notify: (e) => showDesktopNotification(notifyPayload(e)),
         // Really acquire and dispose. Ignoring `own` here made the in-process
         // harnesses (testCell / testUI / bootCells) more permissive than
         // production — a leaked or misfiring resource could not surface in the

@@ -541,6 +541,16 @@ export function connectCli<S>(
         // "refused" (a field report built a whole parallel error channel —
         // ~150 lines — because a promise could not reject). The browser
         // clients have always branched on `ok`; this is that same contract.
+        case "notify": {
+          // A control client cannot show a desktop card; it can say the
+          // sentence, which is what a headless operator wanted anyway.
+          const n = (frame.d ?? {}) as { title?: string; body?: string };
+          log.info(
+            "cli",
+            `notify: ${n.title ?? ""}${n.body ? ` — ${n.body}` : ""}`,
+          );
+          return;
+        }
         case "ack": {
           const d = (frame.d ?? {}) as AckPayload;
           const { cid, ok, value } = d;

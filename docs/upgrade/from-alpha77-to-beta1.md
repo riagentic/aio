@@ -65,6 +65,18 @@ All of these are **dev-only** and cost a production build nothing.
   including `useRoute<{ id: string }>(…)`, are unchanged.
 - **`docs/AGENTS.md`** — five verbs for driving an app with no human in the
   loop.
+- **`s.$do(notify({ title, body?, tag?, silent?, route? }))`** — a desktop
+  notification, from a method: every connected UI client shows it (browser,
+  Electron, PWA), a click focuses the app and follows `route`, and a server with
+  no client says so. `requestNotificationPermission()` (`aio/air`) for the
+  browser's gesture rule. See [notifications](../clients/notifications.md).
+- **`ui.tray`** — a system tray icon for Electron: `true`, or
+  `{ tooltip, menu, closeToTray }`; menu items dispatch `"cell:method"` through
+  the page or navigate to a `route`. Browser and Android ignore it.
+- **`spawn(cmd, { stdin: true })`** — `handle.stdin.write()` / `close()`; off by
+  default so a child that reads a pipe still gets EOF at once.
+- **`app.loadSnapshot(json, { force: true })`** on the public handle — the
+  override the operator doors already honoured.
 
 ### Fewer false alarms
 
@@ -76,6 +88,14 @@ update data gate reading only `persist: false` and not `"none"` or
 rule flagging argument evaluation, and `// aiol-ok` counting only on the last
 comment line. The renderer stopped asking `<summary>` for a keyboard handler it
 already has, and stopped calling a `null` child an unkeyed sibling.
+
+## Widened, not changed
+
+`s.$do` now also accepts a `NotifyEffect`, and `loadSnapshot` an optional second
+argument. Both are widenings of a parameter on a type only the framework
+constructs (`@served`); every existing call compiles unchanged, and `check:api`
+classifies them additive by a rule pinned in both directions
+(`tests/api-served-widening.test.ts`).
 
 ## The one recorded surface change
 

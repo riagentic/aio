@@ -52,6 +52,22 @@ export type SpawnOptions = {
   signal?: AbortSignal;
   /** How long a killed tree may take to die before SIGKILL. Default 2000. */
   killGraceMs?: number;
+  /** Open the child's stdin for writing — `handle.stdin`. OFF by default: a
+   *  child that reads stdin when it is a pipe blocks until EOF, so a pipe
+   *  nobody asked for is a hang nobody can explain. `"null"` is EOF at once. */
+  stdin?: boolean;
+};
+
+/** The child's stdin, when `spawn(cmd, { stdin: true })` asked for it. */
+export type SpawnStdin = {
+  /** Write to the child. A string is UTF-8. Rejects after the child exited or
+   *  `close()` ran — a write into a closed pipe is a lost message, and a lost
+   *  message must not look like a sent one. */
+  write(data: string | Uint8Array): Promise<void>;
+  /** Send EOF. A child that reads until EOF (`cat`, `sort`, a REPL, most
+   *  filters) does not exit until it gets one. Idempotent; the child's own
+   *  exit closes the pipe too, so forgetting it leaks nothing. */
+  close(): Promise<void>;
 };
 
 /** A running child and everything you can do to it — wait, pause, resume,
@@ -69,7 +85,45 @@ export type SpawnHandle = {
    *  SIGKILL after `killGraceMs` — to the GROUP, so nothing is orphaned. */
   kill(): Promise<SpawnStatus>;
   readonly paused: boolean;
+  /** Present only when `{ stdin: true }` was passed. */
+  readonly stdin?: SpawnStdin;
 };
+
+/** One writer for the pipe's life. The child's exit closes our end as well,
+ *  so a forgotten `close()` is not a leaked resource — and a write after
+ *  that says so instead of vanishing. */
+function _stdin(
+  stream: WritableStream<Uint8Array>,
+  status: Promise<SpawnStatus>,
+  cmd: string,
+): SpawnStdin {
+  const writer = stream.getWriter();
+  let closed = false;
+  const close = async (): Promise<void> => {
+    if (closed) return;
+    closed = true;
+    try {
+      await writer.close();
+    } catch {
+      // aio-ok: the child hung up first — there is nobody left to send EOF to
+    }
+  };
+  status.then(close, close);
+  return {
+    async write(data) {
+      if (closed) {
+        throw new Error(
+          `spawn("${cmd}"): stdin.write() after the child exited or stdin was ` +
+            `closed — the data was not delivered.`,
+        );
+      }
+      await writer.write(
+        typeof data === "string" ? new TextEncoder().encode(data) : data,
+      );
+    },
+    close,
+  };
+}
 
 /** Marker the session-leader shim prints so we learn the GROUP id — the
  *  launcher's own pid is not it (`setsid --wait` forks). Stripped from the
@@ -159,7 +213,9 @@ export async function spawn(
         args: spec.args,
         cwd: opts.cwd,
         env: opts.env,
-        stdin: "null",
+        // The session-leader shim execs the command, so fd 0 is inherited:
+        // a pipe here is the CHILD's stdin.
+        stdin: opts.stdin ? "piped" : "null",
         stdout: "piped",
         stderr: "piped",
       }).spawn();
@@ -198,7 +254,8 @@ export async function spawn(
     );
   }
 
-  return _track(_handle(pgid, status, grace, opts.signal, cmd), cmd);
+  const stdin = opts.stdin ? _stdin(child.stdin, status, cmd) : undefined;
+  return _track(_handle(pgid, status, grace, opts.signal, cmd, stdin), cmd);
 }
 
 // ── The live-child registry ─────────────────────────────────────────────────
@@ -253,6 +310,7 @@ function _handle(
   grace: number,
   signal: AbortSignal | undefined,
   cmd: string,
+  stdin?: SpawnStdin,
 ): SpawnHandle {
   let paused = false;
   let done = false;
@@ -278,6 +336,7 @@ function _handle(
   const handle: SpawnHandle = {
     pid: pgid,
     status,
+    ...(stdin ? { stdin } : {}),
     get paused() {
       return paused;
     },
@@ -332,12 +391,13 @@ function _spawnWindows(
     args,
     cwd: opts.cwd,
     env: opts.env,
-    stdin: "null",
+    stdin: opts.stdin ? "piped" : "null",
     stdout: "piped",
     stderr: "piped",
   }).spawn();
   void _readStreams(child, opts.onLine);
   const status = child.status.then(_toStatus);
+  const stdin = opts.stdin ? _stdin(child.stdin, status, cmd) : undefined;
   const pid = child.pid;
   const unsupported = (op: string) => () => {
     throw new Error(
@@ -349,6 +409,7 @@ function _spawnWindows(
   const handle: SpawnHandle = {
     pid,
     status,
+    ...(stdin ? { stdin } : {}),
     paused: false,
     pause: unsupported("pause"),
     resume: unsupported("resume"),

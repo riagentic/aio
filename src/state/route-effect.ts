@@ -19,6 +19,7 @@
 
 import { isScheduleEffect, type ScheduleEffect } from "./schedule.ts";
 import { isOwnEffect, type OwnEffect } from "./own.ts";
+import { isNotifyEffect, type NotifyEffect } from "./notify.ts";
 
 /** The framework effect kinds every runtime must route. THE registry — add a
  *  kind here and the compiler demands a guard below and a handler at every
@@ -26,6 +27,7 @@ import { isOwnEffect, type OwnEffect } from "./own.ts";
 export type FrameworkEffects = {
   schedule: ScheduleEffect;
   own: OwnEffect;
+  notify: NotifyEffect;
 };
 
 /** Union of all framework effects (what a reducer may emit beside app
@@ -47,6 +49,7 @@ const ROUTES: {
 } = {
   schedule: isScheduleEffect,
   own: isOwnEffect,
+  notify: isNotifyEffect,
 };
 
 const ROUTE_KEYS = Object.keys(ROUTES) as (keyof FrameworkEffects)[];

@@ -23,6 +23,7 @@ export const VALID_UI_KEYS = new Set<string>([
   "chrome", // desktop window frame: "standard" | "themed" | "none"
   "theme", // the default look: "tokens" (default) | "auto" | "full" | "none"
   "layout", // false → style ELEMENTS, emit no page layout (see UiConfig.layout)
+  "tray", // Electron system tray: true | { tooltip, menu, closeToTray } (see UiConfig.tray)
 ]);
 
 /** Top-level `deno.json` keys aio actually READS (its own + Deno's).
@@ -604,6 +605,10 @@ export const UI_DOCS: Record<string, [string, string]> = {
   layout: [
     "true",
     'false → style ELEMENTS only (canvas, type, forms, tables, focus rings) and emit NO layout: no <main> page container, none of .card/.row/.stack/.grid/.muted/.badge. Composes with theme "auto"/"full"; warns on "tokens"/"none", which paint nothing',
+  ],
+  tray: [
+    "false",
+    'Electron system tray: true (icon + Show/Hide/Quit) | { tooltip, menu: [{ label, method: "cell:m", args, route } | "-"], closeToTray }. Browser/Android: no tray, no error',
   ],
 };
 

@@ -6,6 +6,7 @@
 import { diagEmit } from "../diagnostics/diagnostic-bus.ts";
 import { _registerSfnTransport, handleSfnResult } from "./server-fns-client.ts";
 import { installDevOverlay } from "./dev-overlay.ts";
+import { bindShellTray } from "./tray-actions.ts";
 import { installProfileGlobal } from "../air/component-profile.ts";
 import { installConsoleIntercept } from "./console-intercept.ts";
 import { routeCommand } from "./browser-air-commands.ts";
@@ -140,6 +141,10 @@ export function setSyncMessageHandler(
 
 const _bootId: { current: string | null } = { current: null };
 const _ipc: AioIPCBridge | null = detectIPC();
+// The tray (ui.tray) relays a clicked item through the SHELL bridge, which
+// both Electron shells expose whatever the transport — so it is bound here,
+// once, beside the transport choice, not inside one of them.
+bindShellTray();
 let _ipcConnected = false;
 /** The IPC bridge's onOpen/onMessage/onClose are registered once per page —
  *  the bridge has no unbind, so re-registering on reconnect duplicates frames. */

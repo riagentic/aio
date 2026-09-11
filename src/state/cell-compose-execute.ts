@@ -79,6 +79,10 @@ export function buildRootExecutor(
       own: () => {
         frameworkKind = "own";
       },
+      // A notification has no client to reach from here. Unlike a timer or
+      // a resource it arms nothing, so it is not a wrong runtime: the effect
+      // is recorded (testCell reads it) and otherwise inert.
+      notify: () => {},
       app: () => {},
     });
     if (frameworkKind !== null) {

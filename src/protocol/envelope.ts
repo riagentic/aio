@@ -38,6 +38,7 @@ export type Kind =
   | "boot" // S→C — boot id (reload token) {id}
   | "reload" // S→C — dev: full reload
   | "patch" // S→C — dev: re-import the UI entry and swap it in, no reload
+  | "notify" // S→C — desktop notification {title, body?, tag?, silent?, route?}
   | "css" // S→C — dev: css-only reload
   | "ping" // C→S — UDS/IPC keepalive
   | "subs" // C→S — subscription list {subs}
@@ -81,6 +82,7 @@ export const FRAME_KINDS: readonly Kind[] = [
   "boot",
   "reload",
   "patch",
+  "notify",
   "css",
   "ping",
   "subs",
@@ -203,6 +205,7 @@ export const SERVES: Record<
     "type",
   ]),
   browser: new Set<Kind>([
+    "notify",
     "proto",
     "proto-err",
     "boot",
