@@ -23,7 +23,13 @@ async function am(
 ): Promise<{ code: number; out: string; err: string }> {
   const p = await new Deno.Command(Deno.execPath(), {
     args: ["run", "-A", `${REPO}src/am.ts`, ...args],
-    env,
+    // `Deno.Command` MERGES the parent env, and `--instance` yields to an
+    // explicit `AIO_APPS_DIR` on purpose. So a leaked one in the test process
+    // silently turns every case here into a no-op that still passes its
+    // spelling — which is exactly how this file failed, pointing three hundred
+    // files away from the tls module-level pin that caused it. Unless a case
+    // sets it deliberately, it is cleared here.
+    env: { AIO_APPS_DIR: "", ...env },
     stdout: "piped",
     stderr: "piped",
   }).output();

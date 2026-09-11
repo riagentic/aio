@@ -1,5 +1,6 @@
 import { assertEquals, assertStringIncludes } from "@std/assert";
 import { Window } from "happy-dom";
+import { closeWindow } from "../src/testing/close-window.ts";
 import {
   _applyTransition,
   _generateKeyframes,
@@ -13,7 +14,7 @@ import {
 import { Transition } from "../src/air/transition-component.ts";
 import { TransitionGroup } from "../src/air/transition-group.ts";
 
-// happy-dom timers drained via win.happyDOM.close() — sanitizers re-enabled
+// happy-dom timers drained via closeWindow(win) — sanitizers re-enabled
 
 Deno.test({
   name: "fade: returns css function with correct duration",
@@ -25,7 +26,7 @@ Deno.test({
     assertEquals(typeof result.css, "function");
     assertStringIncludes(result.css!(0, 1), "opacity");
     assertStringIncludes(result.css!(1, 0), "opacity");
-    await win.happyDOM.close();
+    await closeWindow(win);
   },
 });
 
@@ -36,7 +37,7 @@ Deno.test({
     const el = win.document.createElement("div") as unknown as HTMLElement;
     const result = fade(el, {});
     assertEquals(result.duration, 300);
-    await win.happyDOM.close();
+    await closeWindow(win);
   },
 });
 
@@ -48,7 +49,7 @@ Deno.test({
     const result = fade(el, {});
     assertEquals(result.css!(0, 1), "opacity: 0");
     assertEquals(result.css!(1, 0), "opacity: 1");
-    await win.happyDOM.close();
+    await closeWindow(win);
   },
 });
 
@@ -60,7 +61,7 @@ Deno.test({
     const result = slide(el, { duration: 250 });
     assertEquals(result.duration, 250);
     assertStringIncludes(result.css!(0, 1), "translateY");
-    await win.happyDOM.close();
+    await closeWindow(win);
   },
 });
 
@@ -72,7 +73,7 @@ Deno.test({
     const result = scale(el, { duration: 200 });
     assertEquals(result.duration, 200);
     assertStringIncludes(result.css!(0, 1), "scale");
-    await win.happyDOM.close();
+    await closeWindow(win);
   },
 });
 
@@ -98,7 +99,7 @@ Deno.test({
     const result = fade(el, { duration: 200, delay: 50, easing: "linear" });
     assertEquals(result.delay, 50);
     assertEquals(result.easing, "linear");
-    await win.happyDOM.close();
+    await closeWindow(win);
   },
 });
 
@@ -109,7 +110,7 @@ Deno.test({
     const el = win.document.createElement("div") as unknown as HTMLElement;
     const result = slide(el, {});
     assertStringIncludes(result.css!(1, 0), "translateY(0%");
-    await win.happyDOM.close();
+    await closeWindow(win);
   },
 });
 
@@ -168,7 +169,7 @@ Deno.test({
     assertStringIncludes(el.style.animation, "ease");
     _removeTransition(handle);
     assertEquals(el.style.animation, "");
-    await win.happyDOM.close();
+    await closeWindow(win);
   },
 });
 
@@ -184,7 +185,7 @@ Deno.test({
     // The injected @keyframes should have reversed values (opacity starts at 1 for "out")
     assertStringIncludes(handle.styleEl.textContent!, "opacity: 1");
     _removeTransition(handle);
-    await win.happyDOM.close();
+    await closeWindow(win);
   },
 });
 
@@ -203,7 +204,7 @@ Deno.test({
     _removeTransition(handle);
     // Style element should be removed
     assertEquals(doc.querySelectorAll("style").length, stylesBefore);
-    await win.happyDOM.close();
+    await closeWindow(win);
   },
 });
 
@@ -220,7 +221,7 @@ Deno.test({
     assertEquals(handle.prevAnimation, "existing 1s linear");
     _removeTransition(handle);
     assertEquals(el.style.animation, "existing 1s linear");
-    await win.happyDOM.close();
+    await closeWindow(win);
   },
 });
 
@@ -235,7 +236,7 @@ Deno.test({
     const handle = _applyTransition(el, result, "in", doc);
     assertStringIncludes(el.style.animation, "100ms");
     _removeTransition(handle);
-    await win.happyDOM.close();
+    await closeWindow(win);
   },
 });
 
@@ -275,7 +276,7 @@ Deno.test({
     await new Promise((r) => setTimeout(r, 10));
     assertEquals(root.childNodes.length, 0); // now removed
 
-    await win.happyDOM.close();
+    await closeWindow(win);
   },
 });
 
@@ -295,7 +296,7 @@ Deno.test({
     _diff(root, null, old, ctx);
     assertEquals(root.childNodes.length, 0); // immediately removed
 
-    await win.happyDOM.close();
+    await closeWindow(win);
   },
 });
 
@@ -318,7 +319,7 @@ Deno.test({
     _diff(root, null, old, ctx);
     assertEquals(root.childNodes.length, 0); // immediately removed
 
-    await win.happyDOM.close();
+    await closeWindow(win);
   },
 });
 

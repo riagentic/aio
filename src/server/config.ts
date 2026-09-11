@@ -218,6 +218,8 @@ export const VALID_AIO_CONFIG_KEYS = new Set<string>([
   "db",
   "perfCheck",
   "perfBudget",
+  "budgets",
+  "watch",
   "renderBudget",
   "effectTimeoutMs",
   "freezeState",
@@ -303,6 +305,8 @@ export const VALID_FEATURES_CONFIG_KEYS = new Set<string>([
   "db",
   "perfCheck",
   "perfBudget",
+  "budgets",
+  "watch",
   "renderBudget",
   "effectTimeoutMs",
   "freezeState",
@@ -521,6 +525,14 @@ export const CONFIG_DOCS: Record<string, [string, string]> = {
   db: ["", "SQLite table definitions — arrays auto-sync"],
   perfCheck: ['"on"', "enable/disable performance violation reporting"],
   perfBudget: ["", "override default budgets (reduce: 100ms, effect: 5ms)"],
+  budgets: [
+    "",
+    'declared limits — { cellState: "1MB", broadcastRate: "20/s" }',
+  ],
+  watch: [
+    "",
+    'live reload: false turns it off, ["src/ui"] narrows what is watched',
+  ],
   "renderBudget.staleness": [
     "300",
     "ms — primary staleness threshold (sent to browser)",
@@ -664,6 +676,8 @@ export const CONFIG_GROUPS: [string, string[]][] = [
   ["Performance & monitoring", [
     "perfCheck",
     "perfBudget",
+    "budgets",
+    "watch",
     "renderBudget",
     "renderBudget.staleness",
     "renderBudget.pendingPatches",

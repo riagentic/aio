@@ -22,6 +22,7 @@
 import { assert, assertEquals, assertStringIncludes } from "@std/assert";
 import { fromFileUrl, join, relative, resolve } from "@std/path";
 import { dbWorkerInclude } from "../src/build.ts";
+import { mask } from "../scripts/check-vacuous.ts";
 import { blockingWorkerMissingHint } from "../src/state/blocking.ts";
 
 const SRC = resolve(join(import.meta.dirname ?? ".", "..", "src"));
@@ -40,7 +41,14 @@ async function untraceableWorkers(): Promise<string[]> {
       if (e.isDirectory) {
         await walk(full);
       } else if (e.isFile && e.name.endsWith(".ts")) {
-        const src = await Deno.readTextFile(full);
+        // COMMENTS MASKED. `graph-validator.ts` documents the shape it
+        // detects by writing it out — `new Worker(new URL("./transcribe.ts",
+        // import.meta.url))` — and the raw scan read that prose as a real
+        // worker, then failed on a file that has never existed. The rule is
+        // the same one check-vacuous.ts learned: a scanner over source has to
+        // know what is code. `mask` blanks comments and string literals in
+        // place, so offsets and every real match survive.
+        const src = mask(await Deno.readTextFile(full), { keepStrings: true });
         // Only files that actually construct a Worker. `new URL(…,
         // import.meta.url)` is also how assets are located, and those are
         // `assetIncludes`' problem, not this one.
@@ -142,4 +150,29 @@ Deno.test("blocking: unrelated worker failures keep their own message", () => {
     "a Module-not-found for something else is NOT this bug",
   );
   assertEquals(blockingWorkerMissingHint(""), null);
+});
+
+Deno.test("mask(keepStrings): comments go, specifiers stay", () => {
+  // The two halves this scanner depends on, stated directly. Without the
+  // first it fails on a path in a doc comment that has never existed; without
+  // the second it finds no workers at all and the ledger silently empties.
+  const src = [
+    `// new Worker(new URL("./ghost.ts", import.meta.url))`,
+    `const w = new Worker(new URL("./real.ts", import.meta.url));`,
+    `/* new Worker(new URL("./block.ts", import.meta.url)) */`,
+    `const s = "not // a comment";`,
+  ].join("\n");
+  const m = mask(src, { keepStrings: true });
+  assertStringIncludes(m, "./real.ts");
+  assertEquals(m.includes("./ghost.ts"), false, "a line comment survived");
+  assertEquals(m.includes("./block.ts"), false, "a block comment survived");
+  assertStringIncludes(
+    m,
+    "not // a comment",
+    "a `//` INSIDE a string opened a phantom comment and ate the rest",
+  );
+  // Offsets are preserved, which is what lets a match report a real line.
+  assertEquals(m.length, src.length);
+  // And the default still blanks strings — nothing else that calls mask moved.
+  assertEquals(mask(src).includes("./real.ts"), false);
 });

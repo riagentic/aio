@@ -52,6 +52,8 @@ import type {
   ScopedApp,
 } from "./cell-types.ts";
 import type { SyncConfig } from "../sync/types.ts";
+import type { ArgSchemas } from "./arg-schema.ts";
+import type { ConcurrencyMode } from "./method-policy.ts";
 
 /** Methods-based config (reactive style) */
 export type MethodsCellConfig<
@@ -93,6 +95,31 @@ export type MethodsCellConfig<
     // proved the pattern (`keyof M & string`); this is the rest of it.
     [K in keyof M & string]?: "self" | (string | { type: string })[];
   };
+  /** What happens when an ASYNC method is called again while it is still
+   *  running. One report had three different hand-written answers to this one
+   *  question in a single app, and the comment on one records that its
+   *  first-wins guard was itself a bug (llama.master §15).
+   *
+   *  ```ts
+   *  concurrency: { search: "newest", scan: "first", save: "queue" }
+   *  ```
+   *
+   *  - `"newest"` — the new call wins, the running one aborts. Exactly what
+   *    `cancelOn: { m: "self" }` does, and it registers that same trigger, so
+   *    there is one mechanism rather than two that can disagree.
+   *  - `"first"` — the running call wins, and the new caller ADOPTS its
+   *    result. Resolving the second caller with `undefined` is the bug the
+   *    report shipped.
+   *  - `"queue"` — the new call waits for the running one, then runs.
+   *
+   *  Declaring both this and `cancelOn: "self"` for one method is refused:
+   *  two spellings of one decision is how they come to disagree. */
+  concurrency?: { [K in keyof M & string]?: ConcurrencyMode };
+  /** Milliseconds for which a SUCCESSFUL async call answers an identical one
+   *  without running it. Keyed by the arguments as well as the method, so
+   *  `fetchUser(1)` never answers `fetchUser(2)`. Failures are never cached —
+   *  that would make one bad minute last the whole ttl. */
+  ttl?: { [K in keyof M & string]?: number };
   /** Async methods that may run as long as they need — no call ceiling, no
    *  effect deadline.
    *
@@ -144,9 +171,45 @@ export type MethodsCellConfig<
   >;
   /** Optional state validator — called after every reduce. Return true to accept, or a string error message to reject. */
   validate?: (state: S) => true | string;
-  /** Persistence filter — "all" (default) persists everything, "none" persists nothing.
-   *  { include: [...] } or { exclude: [...] } for field-level control. */
+  /** Optional per-method ARGUMENT rules, positional, keyed by method name.
+   *
+   *  ```ts
+   *  args: { setAge: [z.number().int().min(0)] },
+   *  ```
+   *
+   *  The boundary is untyped at runtime: a method's TypeScript signature
+   *  protects the call sites you compile, and nothing protects `am dispatch`,
+   *  a hand-written action, a form, a URL or an agent. aio's arity warning
+   *  exists for exactly that reason, and two reports counted the cost — a
+   *  dozen hand-written coercions in one week (cc §9.6, vidtune §12.7).
+   *
+   *  Each entry is a Standard Schema (Zod, Valibot, ArkType all implement it)
+   *  or a plain predicate returning `true` or the reason it is not; `null`
+   *  skips a position. A schema COERCES as well as refuses — the parsed value
+   *  is what the method receives.
+   *
+   *  Checked on the dispatch path, so it guards every caller equally. */
+  args?: ArgSchemas;
+  /** Persistence filter — "all" (default) persists everything, "none" persists
+   *  nothing. { include: [...] } or { exclude: [...] } for field-level control.
+   *  To SHAPE what is written rather than only filter it, see
+   *  {@linkcode MethodsCellConfig.onPersist}. */
   persist?: CellFieldFilter<keyof NoInfer<S> & string>;
+  /** Keep this cell's ACTIONS out of the on-disk dev diagnostics — the action
+   *  journal (`logs/actions.jsonl`) and the dev action timeline.
+   *
+   *  A separate word on purpose. `persist: "none"` was read as covering this
+   *  too (quant §7), and it does not: `persist` is about the STATE STORE, the
+   *  journal is a dev diagnostic that is off in production and lives in the
+   *  app's own data directory. Making one key silently mean two things is
+   *  worse than the surprise, so this is the key that means the other one.
+   *
+   *  It is about ACTIONS, not state. A cell that must keep its state off disk
+   *  says `persist: "none"`; a cell that must keep its method calls and
+   *  payloads out of the diagnostic record says `diagnostics: false`; a cell
+   *  that needs both says both. `redact` remains the tool for hiding one
+   *  FIELD while keeping the rest of the record. */
+  diagnostics?: false;
   /** Network access rule (AUTH-1): who may CALL this cell's methods over the
    *  network. `true` = any authenticated user, `"admin"` = that exact role,
    *  `(user, method) => boolean` = custom. Absent = open (connection-level
@@ -252,6 +315,32 @@ export type MethodsCellConfig<
    *  lifecycle hook: a throw is reported and boot continues with the restored
    *  state unchanged — a repair that fails must not cost you the app. */
   onRestore?: (state: NoInfer<S>) => NoInfer<S> | void;
+  /** Shape this cell's state on its way TO the store — the mirror of
+   *  {@linkcode MethodsCellConfig.onRestore}.
+   *
+   *  aio let you repair what comes back and not shape what goes out (cc §8.4).
+   *  The reporter got lucky — their fat field was dead weight, so an `exclude`
+   *  covered it — and said plainly that had the field been needed ON SCREEN,
+   *  the only move left was a second mirrored cell kept in sync by hand.
+   *
+   *  ```ts
+   *  onPersist: (s) => ({ key: s.thumbKey }),   // 40 MB live, 200 bytes on disk
+   *  onRestore: (s) => { s.thumb = load(s.key) },
+   *  ```
+   *
+   *  Receives the slice AFTER `persist`'s include/exclude, and returns what is
+   *  written. `onPersist` and `onRestore` are a pair and read in that order: a
+   *  shape that only DROPS fields needs no partner (the declared initial fills
+   *  them), one that RESHAPES needs an `onRestore` that knows the new shape.
+   *
+   *  NOT error-guarded, unlike the observe-only hooks. It runs on the persist
+   *  path, and "the write quietly stopped happening" is the worst outcome aio
+   *  has — the app keeps running on state that is not on disk and finds out at
+   *  the next boot. A throw is reported as a failed WRITE, which is what it is.
+   *
+   *  Refused on a `sync: true` cell, for the same reason a `persist` filter is:
+   *  an op IS the method call's payload, written raw. */
+  onPersist?: (state: NoInfer<S>) => Record<string, unknown>;
   /** `initState` is the cell's DECLARED default state — the registry passes it
    *  (`cell-compose-registry.ts`) because `app.getState()` may not yet reflect
    *  `__init` when the hook runs. It was passed at runtime and missing from

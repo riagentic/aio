@@ -4,7 +4,11 @@
 // diag, acks, vitals) — v2 envelope, one decoded frame in, one reply out.
 
 import { handleTTMessage } from "../air/time-travel-panel.ts";
-import { getSerializedSurfaces, runUITrigger } from "../air/ui-remote.ts";
+import {
+  getMeasuredSurfaces,
+  getSerializedSurfaces,
+  runUITrigger,
+} from "../air/ui-remote.ts";
 import { _vitalsTransportProbe, _w } from "./browser-protocol.ts";
 import { _rejectAck, _resolveAck } from "./browser-ack.ts";
 import { _deliverDiag } from "../protocol/protocol-diagnostics.ts";
@@ -24,12 +28,16 @@ export function routeCommand(
   switch (f.t) {
     case "ui-surface":
       try {
-        // `full` lifts the text cap (`am surface --full`).
+        // `full` lifts the text cap (`am surface --full`); `rects` attaches
+        // layout geometry (`am surface --rects`). The rects reply is an
+        // OBJECT, not an array, because the measurement counts travel with it
+        // — see getMeasuredSurfaces.
+        const d = f.d as { full?: boolean; rects?: boolean } | undefined;
         sendRaw(enc(
           "ui-surface-result",
-          getSerializedSurfaces(
-            (f.d as { full?: boolean } | undefined)?.full === true,
-          ),
+          d?.rects === true
+            ? getMeasuredSurfaces(d.full === true)
+            : getSerializedSurfaces(d?.full === true),
         ));
       } catch (e) {
         sendRaw(enc("ui-surface-result", { error: String(e) }));

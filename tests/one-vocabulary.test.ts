@@ -20,20 +20,29 @@ const AIO_ROOT = new URL("..", import.meta.url).pathname;
 
 // ── migrateTasks (pure) ─────────────────────────────────────────────────────
 
-Deno.test("migrateTasks: a pristine old scaffold collapses to the new set exactly", () => {
+Deno.test("migrateTasks: a pristine old scaffold gains the new set and KEEPS the old names", () => {
   const old = legacyStandardTasks(true, "browser");
   const expected = standardTasks(true, "browser");
   delete expected["install:electron"]; // browser app — electron-only task
   const m = migrateTasks(old, expected, legacyTaskTables());
-  assertEquals(
-    Object.keys(m.tasks).sort(),
-    Object.keys(expected).sort(),
-    "nothing but the new matrix survives a pristine migration",
-  );
-  // The retired matrix went via DELETE (recognized as scaffold output)…
-  assert(m.deleted.includes("dev:browser"));
-  assert(m.deleted.includes("compile:remote:service"));
-  assert(m.deleted.includes("dev:remote:cli"));
+  // Every new task is there…
+  const wanted = Object.keys(expected);
+  assert(wanted.length > 5, `only ${wanted.length} tasks in the new matrix`);
+  for (const k of wanted) {
+    assert(k in m.tasks, `the new matrix is missing ${k}`);
+  }
+  // …and the superseded ones are STILL THERE. `am fix` deleting a task
+  // someone runs by name is the one irreversible thing it does, and
+  // "pristine" is a fact about the COMMAND — it says nothing about whether
+  // `dev:browser` is in the app's README, its CLAUDE.md and everyone's
+  // fingers (llama.master §4). They are reported as advice instead.
+  for (const k of ["dev:browser", "compile:remote:service", "dev:remote:cli"]) {
+    assert(m.deleted.includes(k), `${k} was not reported as superseded`);
+    assert(
+      k in m.tasks,
+      `${k} was REMOVED from deno.json — the one thing this must never do`,
+    );
+  }
   // …`compile` changed producer (per-target flags → fleet) and was rewritten…
   assert(m.rewritten.includes("compile"));
   assertEquals(m.tasks["compile"], expected["compile"]);
@@ -131,16 +140,22 @@ Deno.test("cmdFix --migrate-tasks: converts an old scaffold, keeps the customize
     // The key rename happened alongside the migration.
     assertEquals(cfg.client, "browser");
     assertEquals(cfg.target, undefined);
-    // Pristine matrix gone; the diet present; the customization preserved
-    // under the one-vocabulary name; the user's task untouched.
-    assertEquals(cfg.tasks["dev:browser"], undefined);
-    assertEquals(cfg.tasks["compile:remote:electron"], undefined);
+    // The diet is present; the customization is preserved under the
+    // one-vocabulary name; the user's task is untouched — and the superseded
+    // matrix is STILL THERE, reported as advice rather than removed. `am fix`
+    // deleting a task someone runs by name is the one irreversible thing it
+    // does (llama.master §4).
+    assert(cfg.tasks["dev:browser"], "a pristine task was deleted");
+    assert(cfg.tasks["compile:remote:browser"], "a pristine task was deleted");
     assert(cfg.tasks["check"] && cfg.tasks["fmt"] && cfg.tasks["build"]);
     assertStringIncludes(cfg.tasks["compile"]!, "--targets=browser");
     assertEquals(
       cfg.tasks["compile:server"],
       "deno run -A my-build.ts --custom",
     );
+    // `compile:service` was RENAMED (customized `*:service` → `*:server`), so
+    // the old name really is gone — a rename moves a task, it does not delete
+    // one, and the command is intact under the new name asserted above.
     assertEquals(cfg.tasks["compile:service"], undefined);
     assertEquals(cfg.tasks["seed"], "echo seed");
 
@@ -384,9 +399,19 @@ Deno.test("cmdFix --migrate-tasks: derives build.targets from the tasks it delet
     // hardcoded browser… (here the head is browser by task order, so assert
     // the coupling itself:)
     assertStringIncludes(cfg.tasks["compile"]!, `--targets=${fleet[0]}`);
-    // …and the retired tasks are gone.
-    assertEquals(cfg.tasks["compile:electron"], undefined);
-    assertEquals(cfg.tasks["compile:service"], undefined);
+    // …and the superseded tasks are STILL THERE. Deriving the fleet is what
+    // made deletion survivable at all; keeping the names is what makes it
+    // safe. `am fix` removing a task someone runs by name is the one
+    // irreversible thing it does (llama.master §4), and this is the case that
+    // would have hurt most — an app whose whole build vocabulary was those
+    // task names.
+    assert(cfg.tasks["compile:electron"], "a pristine task was deleted");
+    // `compile:service` here is PRISTINE — the scaffold's own command,
+    // unedited — so it is kept like the rest, under its own name. The
+    // `*:service` → `*:server` rename applies to CUSTOMIZED ones, whose
+    // command is the user's and has to travel with them (asserted in the test
+    // above, where the value really was edited).
+    assert(cfg.tasks["compile:service"], "a pristine task was deleted");
   } finally {
     console.log = realLog;
     Deno.chdir(orig);

@@ -21,6 +21,7 @@ import {
 import { evaluateHints } from "./hints.ts";
 import { generateCorrelationId } from "../diagnostics/error.ts";
 import { diagEmit } from "../diagnostics/diagnostic-bus.ts";
+import { declaredBudgets } from "../state/budgets.ts";
 
 // ─── Types ──────────────────────────────────────────────────────────────────
 
@@ -121,14 +122,21 @@ export function createVitalsSystem(config: VitalsConfig): VitalsSystem {
   // in aio.ts resolves VitalsConfig per mode — prod config should set
   // `pressure: false` to disable. Default (undefined) = enabled.
   const pressureCfg = config.pressure;
+  // `aio.run({ budgets })` is the discoverable door onto these two thresholds
+  // (quant §9.3): a dashboard pushing 4 MB once a minute and a game loop
+  // pushing 200 bytes at 60 Hz are both healthy, and no single default calls
+  // them both correctly. An explicit `vitals.pressure` still WINS — it is the
+  // more specific instruction, and silently overriding it would make the
+  // narrower spelling the weaker one.
+  const declared = declaredBudgets();
   const pressureMonitor = pressureCfg !== false
     ? createPressureMonitor({
-      payloadThreshold: typeof pressureCfg === "object"
+      payloadThreshold: (typeof pressureCfg === "object"
         ? pressureCfg.payloadThreshold
-        : undefined,
-      rateThreshold: typeof pressureCfg === "object"
+        : undefined) ?? declared.payload,
+      rateThreshold: (typeof pressureCfg === "object"
         ? pressureCfg.rateThreshold
-        : undefined,
+        : undefined) ?? declared.broadcastRate,
       onDiagnostic: config.onDiagnostic,
     })
     : null;

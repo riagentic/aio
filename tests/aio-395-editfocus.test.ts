@@ -2,6 +2,7 @@
 // mix of keyed and unkeyed nodes (dialogs with a <select> + inputs).
 import { assertEquals } from "@std/assert";
 import { Window } from "happy-dom";
+import { closeWindow } from "../src/testing/close-window.ts";
 import { h } from "../src/air/vdom.ts";
 import { signal } from "../src/state/signal.ts";
 import { testComponent } from "../src/testing/test-component.ts";
@@ -34,7 +35,7 @@ Deno.test("mixed keyed/unkeyed: input node identity survives re-render", () => {
       );
       assertEquals((after as HTMLInputElement).value, "H");
       t.unmount();
-      await win.happyDOM.close();
+      await closeWindow(win);
       resolve();
     }, 10);
   });

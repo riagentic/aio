@@ -81,8 +81,17 @@ and composes primitives it already knows — it will not browse. All six are don
   one extra line offering the other reading, with the exact command line to
   type. Only on failure, only with `--args`, never on an empty list — a hint
   that fires every time buries the message it sits under.
-- **`am surface` has no geometry** (anathomy §10.2). A rect per element behind
-  `--rects` turns "the app looks fine" into "the Stage is 6 886 px tall".
+- ~~**`am surface` has no geometry**~~ (anathomy §10.2) — **DONE 2026-09-11.**
+  `am surface --rects` attaches `w x h @x,y` per element. The measurement was
+  the easy half: `getBoundingClientRect()` answers everywhere and answers `0x0`
+  with no layout engine behind it, which reads as a real measurement of a
+  collapsed UI — the exact bug someone reaching for `--rects` is hunting. So the
+  counts travel with the rects (`measurable` / `laidOut`), the server-side
+  render REFUSES `--rects` instead of answering with zeroes, and a live client
+  that measures all-zero exits 1 naming both readings. Found a gate defect on
+  the way: `check:api` reported the four fields of one NEW OPTIONAL member as
+  four REQUIRED additions — the frozen-surface gate calling the additive shape a
+  break.
 - ~~`am surface --names` / `ui.names()`~~ (anathomy §5a) — **DONE 2026-09-08.**
   `am surface --names` on a running app, `uiNames(ui)` in a test: full
   `Component…:Element` paths, the form `am trigger` takes. A test pins that the
@@ -249,61 +258,129 @@ and composes primitives it already knows — it will not browse. All six are don
 
 #### 5 · Composition inside a cell
 
-- **A cell method cannot call a sibling** (llama.master §6, §9; vidtune §6).
-  Three ways to express it, all wrong: `this.bench(...)` cannot type-check (the
-  declared method takes the draft, the callable one does not); `srv.bench(...)`
-  is a second dispatch with its own draft; extracting a helper works and is the
-  third time that repo has done it. `s.$call.bench(kind)` — typed, same draft,
-  no second dispatch. _"The single most valuable thing aio could add for an app
-  of this size. Composition inside a cell is not exotic."_ The error today is
-  twelve lines of intersected generics naming `MethodDraftServed`.
-- **The workaround escapes `aiol`** (llama.master §7), which is the actual
-  danger: moved into a module-level function taking the draft, a post-await read
-  is no longer analysed, and the absence of a warning now means "not analysed"
-  while reading as "fine". A function whose parameter is the cell's state type
-  is a method body wherever it lives.
+- ~~**A cell method cannot call a sibling**~~ (llama.master §6, §9; vidtune §6)
+  — **DONE 2026-09-11.** `s.$call.bench(kind)`: the sibling's body runs against
+  the CALLER's draft, in the caller's commit. One action, one draft, one
+  publish, where `myCell.bench()` would have been three of each. Served on every
+  draft, sync and async (the parity contract). Refuses by name: an async sibling
+  from a sync method (no way to await it, and a floating promise would write
+  after the commit), an unknown name (with what IS available), and a cycle after
+  32 nested calls — `$call` runs the body inline, so `a → b → a` recurses rather
+  than queueing. **The types had to be found, not assumed.** `check:api` refused
+  the first shape: adding `$call` to `MethodDraftMeta` breaks anyone who
+  CONSTRUCTS one, and a second type parameter is refused on principle. The
+  additive shape is a separate opt-in `MethodDraftCalls<C>` — exactly what
+  `Partial<MethodDraftMeta>` is for `$signal`. Its default is `any` rather than
+  a mapped index signature, because under `noUncheckedIndexedAccess` (which aio
+  itself sets) the obvious spelling forces `s.$call.bench!(…)` on everyone; and
+  the precise form is an interface, not `typeof methods`, which is circular
+  inside the literal the methods live in.
+- ~~**The workaround escapes `aiol`**~~ (llama.master §7) — **DONE 2026-09-11.**
+  `$call` removes the reason to move a body out of the cell, and `$call` itself
+  joins `DRAFT_META` so the documented way to compose is not reported as the
+  post-await hazard it replaces. The test pins the exemption AND that a genuine
+  read is still reported, so the silence means "exempt" and not "the analyser
+  stopped working".
 
 #### 6 · Declared policy instead of per-app invention
 
-- **`s.$append("partial", chunk)`** (llama.master §12). Publishing a streaming
-  reply re-sends the whole accumulated string, so a naive 60 ms flush is
-  quadratic in the reply, doubled per window, measured in production as a
-  sustained `PRESSURE — 33 broadcasts/sec`. The app wrote a byte-rate limiter to
-  hold it flat: a framework problem solved in application code, in the app whose
-  most visible feature is a streaming reply. Append-only strings and arrays need
-  offsets, not a CRDT.
-- **`s.$pending("scan")`** (llama.master §14, cc §9.5). Ten hand-rolled booleans
-  across five cells, each set at the top and reset in a `finally` — ten chances
-  to forget — and replicated, persisted and migrated like real domain state,
-  which they are not. cc got the fourth one wrong: a boolean where two readings
-  overlap, so the first to finish declared silence while the speakers were still
-  going.
-- **`concurrency: "first" | "newest" | "queue"` and `ttl:`** (llama.master §15).
-  Three different hand-written answers to one question in one app, and the
-  comment on one records that the original first-wins guard was itself a bug.
-- **An optional per-method argument schema** (cc §9.6, vidtune §12.7). A dozen
-  hand-written coercions in one week; the existing arity warning exists
-  precisely because the boundary is untyped at runtime.
-- **`onPersist(state)` / `persist: { include, transform }`** (cc §8.4). aio lets
-  you repair what comes back (`onRestore`) and not shape what goes out. The
-  reporter got lucky — the fat field was dead weight — and says plainly that had
-  it been needed on screen, the only move was a second mirrored cell kept in
-  sync by hand.
-- **A `budgets` block** (quant §9.3).
-  `{ cellState: "1MB", broadcastRate:
-  "20/s" }`, declared by the app, warned
-  in dev, failing `deno task check`. Strictly better than aio picking a
-  threshold for everyone.
-- **`aio/server-only` and `aio/client-only` marker modules** (quant §9.1). The
-  graph checker is good and runs at BUILD; Next's marker fails at EDIT time.
+- ~~**`s.$append("partial", chunk)`**~~ (llama.master §12) — **DONE, and better
+  than asked.** The `append` WIRE OP exists (protocol v3) and `narrowPatches`
+  emits it automatically at patch generation: a grown string travels as its
+  SUFFIX, a grown array as its adds. Nothing to call, so every method that
+  already does `s.partial += chunk` gets it — including the ones written before
+  the op existed. Verified 2026-09-11 and pinned as the report's own MEASUREMENT
+  rather than the op name: `tests/streaming-append-broadcast.test.ts` compares
+  narrowed against raw bytes over 40 chunks and asserts the per-chunk cost does
+  not scale with the reply. A string under `APPEND_MIN_LENGTH` deliberately
+  stays a `replace`, and that silence is asserted too.
+- ~~**`$pending`**~~ (llama.master §14, cc §9.5) — **DONE 2026-09-11.** Spelled
+  `cell.$pending("scan")` (reactive, so a component re-renders) rather than
+  `s.$pending` — the consumer is the UI, not the method. A COUNT, never a flag,
+  which is the bug cc shipped. NOT state: never broadcast, persisted, migrated,
+  or in the cell's shape. The count was already being kept on both sides —
+  `trackCall` on the server, the ack registry in a client — and simply never
+  exposed; the counter lives in `protocol/` (dependency-free, the folder both
+  may import) with the signal wrapper in `state/`. Reading returns the LIVE
+  count while subscribing through the signal, because `signal.set` is scheduled
+  and returning `.value` reported one update behind — two overlapping calls read
+  as one, the exact bug a count exists to avoid.
+- ~~**`concurrency: "first" | "newest" | "queue"` and `ttl:`**~~ (llama.master
+  §15) — **DONE 2026-09-11.** `"newest"` IS `cancelOn: "self"` and folds into
+  that map at `cell()` time, so there is one mechanism rather than two that can
+  disagree — declaring both is refused. `"first"` resolves the second caller
+  with the RUNNING call's result, which is the difference between a policy and
+  the silent drop that report shipped. `"queue"` reuses the transactional
+  serialize chaining, per method. `ttl` caches only SUCCESSES and is keyed by
+  the arguments, so `fetchUser(1)` never answers `fetchUser(2)`. Both keys are
+  validated at `cell()`: an unknown name, and a SYNC method (which can never
+  overlap itself, so the policy would silently do nothing). My own test caught
+  the one real bug: a function inside an array serializes as `null`, so
+  `scan(fnA)` and `scan(fnB)` would have shared a cache key.
+- ~~**An optional per-method argument schema**~~ (cc §9.6, vidtune §12.7) —
+  **DONE 2026-09-11.** `args: { setAge: [z.coerce.number().min(0)] }`. STANDARD
+  SCHEMA, not a DSL of aio's own — Zod, Valibot and ArkType all implement it, so
+  it is the app's existing validator doing the job it already does; an app with
+  none can pass a plain predicate. Checked in `methodArgs`, the ONE place both
+  method kinds pass through, so `am dispatch`, a form, a URL and an agent are
+  guarded identically. It COERCES as well as refuses — the parsed value is what
+  the method receives, which is the dozen hand-written coercions deleted.
+  Failures name cell, method and POSITION. An ASYNC schema is refused by name:
+  the dispatch path is synchronous for a sync method, and a schema that silently
+  did not run is worse than none.
+- ~~**`onPersist(state)`**~~ (cc §8.4) — **DONE 2026-09-11.** `persist` FILTERS;
+  `onPersist` SHAPES. It receives the slice after include/exclude and returns
+  what is written, and pairs by NAME with `onRestore` — a shape that only drops
+  fields needs no partner, one that reshapes needs an `onRestore` that knows it.
+  NOT error-guarded, unlike the observe-only hooks: it runs on the persist path,
+  where "the write quietly stopped happening" is the worst outcome there is, so
+  a throw is reported as a failed WRITE, names the cell and turns `/health`
+  degraded. Refused on a `sync: true` cell, same rule as a filter. The report's
+  other spelling — `persist: { transform }` — was built first and `check:api`
+  refused it: widening `persist` breaks anyone who assigns it to a
+  `CellFieldFilter`. `onPersist` adds a key and moves nothing, and is the better
+  shape anyway.
+- ~~**A `budgets` block**~~ (quant §9.3) — **DONE 2026-09-11.**
+  `aio.run({ budgets: { cellState: "1MB", broadcastRate: "20/s", payload:
+  "500KB" } })`.
+  NOT a second mechanism: every limit already existed and was reachable (a
+  hard-coded 1 MiB in the broadcaster, `vitals.pressure`'s two thresholds) —
+  this is one obvious door onto them in human units, which is the round's own
+  meta-finding again. An explicit `vitals.pressure` still wins. They FAIL rather
+  than only warn: `/health` carries the verdict and a breach turns the app
+  `degraded`, so `am health` is a CI step. The ledger keeps the WORST reading —
+  "it went over once" is the fact. An app that declared none gets no field at
+  all, never a green tick. An unreadable value throws at boot, naming the key.
+  Measured on the broadcast path AND on demand at `/health`, because an app with
+  no client connected would otherwise report a budget it had never once
+  measured.
+- ~~**`aio/server-only` and `aio/client-only` marker modules**~~ (quant §9.1) —
+  **DONE 2026-09-11.** The `*.server.ts` convention works and has one hole: it
+  is a FILENAME, and you cannot always rename a file twenty places import, that
+  is generated, or that is published under that name. `import "aio/server-only"`
+  is the same statement made IN the file; the audit treats the two identically,
+  so dev boot and `deno task build` cannot disagree (they already share one
+  decider). It also throws if ever evaluated in a browser — unreachable in
+  practice, and there for the paths a build cannot see. The two halves are
+  deliberately NOT symmetric, because the failures are not: a server module in
+  the browser LEAKS (refused at build, throws at runtime); a browser module on
+  the server BREAKS, loudly, escaping nothing — so `aio/client-only` has no
+  runtime guard and would break SSR if it did. `aiol` refuses a CELL that
+  imports it, since a cell method runs on the server.
 
 #### 7 · Test-harness reach
 
-- **A stubbing tier between `testCell` and `bootCells`** (cc §8.6, §9.3). For a
-  cell that owns an OS process there is no rung where "random actions against a
-  real runtime" is safe — `bootCells` spawns the real child. Cassettes wrap a
-  function you can reach, not a `.server.ts` a cell imports dynamically.
-  `bootCells([session], { stub: { "./claude.server.ts": … } })`.
+- ~~**A stubbing tier between `testCell` and `bootCells`**~~ (cc §8.6, §9.3) —
+  **DONE 2026-09-11.** `bootCells(cells, { stub: { "./claude.server.ts": … } })`
+  — exactly the spelling the report asked for. NOTHING can intercept a raw
+  `await import(…)` in Deno (there is no loader hook a test process can install
+  after the fact), so the seam is a function the cell calls on purpose:
+  `serverImport(spec, import.meta.url)`. That price is stated rather than hidden
+  behind a stub that silently does not apply. Unstubbed it IS the import it
+  replaces — specifier resolved against the caller, module still out of the
+  browser bundle (the audit reads the specifier, not the spelling). Keyed by the
+  specifier AS WRITTEN, so a test stubs the string it can see; a specifier
+  nobody stubbed still loads for real, because the map is not a whitelist.
 - ~~**`testUI`'s window is not `globalThis`**~~ (risoto §19.2) — **DONE
   2026-09-08.** The false green was already closed (testUI THROWS on a
   bare-global DOM listener); what remained was the ceremony. `onWindowEvent` now
@@ -313,29 +390,56 @@ and composes primitives it already knows — it will not browse. All six are don
   aio mounts into more than one window, so `globalThis` is genuinely the wrong
   target, and a harness that accepted it would be lying. See
   `feedback/refused.md`.
-- **Geometry in tests** (risoto §19.1, §22.2; anathomy §10.1). happy-dom
-  measures everything 0×0, which hid two security-relevant defects in a wallet
-  behind 1546 passing tests: a dApp origin running off the edge of the approval
-  card, and that dialog opening scrolled past the origin. Even a narrow
-  `ui.box(selector)` returning a real rect would close most of it; the full
-  shape is a second opt-in runner
-  (`testUI(App, name, { engine: "browser" }, …)`) exposing the SAME semantic
-  names — which is a property nobody else has, since Playwright gives you the
-  browser and makes you invent the names.
-- **`waitFor` failure should route through `fail()`** (cc §9.0). It dumps the
-  whole tree — one failing test printed 31 769 characters — where `fail()` would
-  have printed six ranked names.
-- **`t=` is a handle, not an attribute, and does not appear in `ui.html()`**
-  (risoto §19.3). One doc line.
-- **Typed test locators** (llama.master §11, §18). `ui.App["tab-settings"]` is a
-  string key whose typo is a runtime `undefined`. The `t=` props are in the
-  source; generating a typed map from them is mechanical and the string form can
-  keep working.
+- ~~**Geometry in tests**~~ (risoto §19.1, §22.2; anathomy §10.1) — **DONE
+  2026-09-11**, by the narrow shape the report itself said "would close most of
+  it", and without a second runner. `uiRects(roots)` keys real rects by the same
+  `Component…:Element` paths everything else uses, fed by a surface a REAL
+  client measured (`testServer` + `testBrowser` + `surface/N?rects=1`, or
+  `am surface --rects`). It deliberately does NOT read the harness's DOM: under
+  happy-dom that answers 0×0 and makes a layout assertion PASS, which is how
+  those two defects hid behind 1546 green tests. An unmeasured element is ABSENT
+  rather than reported at the origin — a missing key fails loudly, a plausible
+  zero does not. NOT DONE, and deliberately not claimed: the full
+  `engine: "browser"` runner mirroring the whole `testUI` API. The parts exist
+  (`testBrowser`, the trojan surface, `--rects`) and the recipe is documented; a
+  second runner is its own piece of work and doing it badly would be worse than
+  the recipe.
+- ~~**`waitFor` failure dumped the whole tree**~~ (cc §9.0) — **DONE
+  2026-09-11.** The JSON half of `surfaceDigest` was capped and the component
+  TREE was not, so a wide app turned one timeout into 31 769 characters. Now
+  bounded by the same `NAME_LIMIT` every other name list uses, with the same
+  `AIO_TEST_NAMES=all` escape — two spellings of "how much do we print" is how
+  they come to disagree. Tested on a 200-row app: under 4 kB, still shows the
+  tree, says how many are hidden, and the escape really prints all of it.
+- ~~**`t=` is a handle, not an attribute**~~ (risoto §19.3) — **DONE
+  2026-09-11.** A callout in `docs/testing/ui-testing.md` beside the naming
+  table: it is stripped from the DOM, so it is absent from `ui.html()` and
+  `[t="save"]` matches nothing in a test OR in the app; address it by name, or
+  use `data-testid` when you genuinely need an attribute in the markup.
+- ~~**Typed test locators**~~ (llama.master §11, §18) — **DONE 2026-09-11**, as
+  `am testgen`. The GENERATOR already existed and already answered the ask — and
+  types the RENDER rather than the source, which is strictly better: a `t=` prop
+  inside a branch that never renders is not a locator anyone can use. What was
+  missing was a way to run it without hand-writing a script (happy-dom, a
+  document, the App, the cells, and remembering to re-run), which is why an app
+  that HAD the feature kept using string keys. One command, default
+  `tests/ui.gen.ts`, loud when there is no UI entry. Needed a deliberate
+  boundary widening (`am → testing` for the generator, `am → air` type-only);
+  the laundering check caught the attempt to sneak it through a root entry.
 - **Mount-time rehydration is racy and silent** (llama.master §11). Measured at
   ~40% flake in one repo, now guarded by a house rule and a comment on every
   affected test.
-- **A trace artifact on failure** (quant §9.5) — dump the AIR tree and the last
-  N dispatches, and name the file in the error.
+- ~~**A trace artifact on failure**~~ (quant §9.5) — **DONE 2026-09-11.** Every
+  miss and every `waitFor` timeout writes `.aio/traces/ui-<ts>-<id>.json` and
+  NAMES it in the error: the calls this test made in order (arguments summarised
+  — a trace that inlines a 2 MB payload is one nobody opens, and a secret does
+  not belong in a file the test leaves behind), the surface, the HTML and each
+  cell's state. Written SYNCHRONOUSLY, because `fail()` throws and there is
+  nothing to await it — an async write would be reported by the leak sanitizers
+  against whoever ran next, which is the class this repo has already spent two
+  suite runs on. Bounded at 20: an unbounded artifact directory is one nobody
+  ever cleans. A trace that cannot be written leaves the assertion's own error
+  untouched.
 
 #### 8 · Styling and the shell
 
@@ -387,11 +491,21 @@ and composes primitives it already knows — it will not browse. All six are don
   (newjob), 760 MB of GPU weights (watcher), and a wallet's unlock (risoto). AIR
   already preserves stateful nodes across a re-render; this is wiring existing
   machinery to an existing signal.
-- **`am dev --no-watch` and a `watch:` path list** (watcher §3). The cheap
-  escape hatch that solves 90% of the above. `deno fmt` triggered full model
-  reloads repeatedly.
-- **`am dev --devtools[=PORT]`** (watcher §4). The reporter wrote a launcher
-  shim exploiting `$ELECTRON_PATH` to get a CDP port at all.
+- ~~**`am dev --no-watch` and a `watch:` path list**~~ (watcher §3) — **DONE
+  2026-09-11.** `aio.run({ watch: false })` / `{ watch: ["src/ui"] }`, and
+  `--no-watch` / `--watch=false` / `--watch=src/ui,src/style.css` on the command
+  line, where a flag beats the config value (a flag is a decision about THIS
+  run). `false` is honoured by never opening the watcher rather than by ignoring
+  its events, so the process holds no file handles for a feature nobody asked
+  for. An empty `--watch=` is refused: silently watching nothing is
+  indistinguishable from the watcher being broken.
+- ~~**`am dev --devtools[=PORT]`**~~ (watcher §4) — **DONE 2026-09-11**, as
+  discoverability rather than a second spelling. `--cdp[=PORT]` already existed
+  and does exactly this; the reporter wrote a launcher shim exploiting
+  `$ELECTRON_PATH` because they could not FIND it. A second flag would
+  contradict "one vocabulary", so `am help` now lists it under `dev` with the
+  words someone would grep for — DEVTOOLS / INSPECT / DEBUG — which is the
+  meta-finding's own remedy.
 - **`deno task dev` follows the launching terminal** (anathomy §3). Right for a
   human, wrong for an agent whose every command is a fresh short-lived shell —
   the app vanished about eight times in one session. `am start` solves it and
@@ -428,28 +542,29 @@ thirteen findings that had been read and not written down (see the audit note in
   version that satisfies both has WEAKER type information than the one the docs
   show. Type `deps` from the literal (`readonly [...D]`) and the source-text
   heuristic can go.
-- **aiol rule 23 flags the spelling its own docs call correct** (llama.master
-  §2). It reports every `perfBudget.methods[...].timeout` unconditionally, while
-  `docs/state/methods.md:631` says that spelling "still works and is the right
-  tool for a specific NUMBER". Ten of one app's sixteen are real ceilings on
-  work that is quick by nature, where `long:` would DELETE the report — so they
-  stay, and so do ten permanent warnings. It also calls `report()` directly
-  rather than routing through `isSuppressed`, so there is nowhere to put the
-  acknowledgement. Either fix alone closes it; firing only on `timeout: 0` (the
-  shape that means "forever", and the copied-from-examples case the rule's own
-  comment names) is the better one.
+- ~~**aiol rule 23 flags the spelling its own docs call correct**~~
+  (llama.master §2) — **DONE 2026-09-11.** BOTH fixes, not either: it now fires
+  only on `timeout: 0` — the shape that means "forever", which is what `long:`
+  replaces and what people copy out of the retired example — so a real ceiling,
+  the spelling `docs/state/methods.md` calls the right tool for a specific
+  number, is silent. And it routes through `isSuppressed`, so a deliberate
+  `timeout: 0` can be acknowledged like every other rule; reporting directly
+  left nowhere to put the acknowledgement, and the finding was permanent
+  whatever you did.
 - ~~**`am fix` rewrites the app's version at `fixed` severity**~~ (llama.master
   §3) — **DONE 2026-09-08.** Now `advise`, and the advice names the alternative
   and how to take it. The guard does a REAL `am fix` and asserts `deno.json` is
   unchanged, because an outcome string that says "advise" while the writer still
   runs is the same bug with a new label.
-- **`am fix --migrate-tasks` would delete a working task by name** (llama.master
-  §4). `dev:browser` is in the app's CLAUDE.md, its README and everyone's muscle
-  memory. The capability half is fixed — `targetsFromLegacyTasks` now persists
-  what those names encoded — but deleting a task the user runs by name is the
-  one irreversible thing `am fix` does, and the neighbouring check gets this
-  right ("kept, review manually"). Should be `advise` with the replacement
-  spelled out.
+- ~~**`am fix --migrate-tasks` would delete a working task by name**~~
+  (llama.master §4) — **DONE 2026-09-11.** It no longer deletes. A pristine
+  old-matrix task stays in `deno.json` and is reported as advice with its
+  replacement SPELLED OUT (`dev:browser → deno task dev --client=browser`), the
+  same treatment the neighbouring check already gave customized ones. "Pristine"
+  is a fact about the COMMAND and says nothing about whether the NAME is in the
+  app's README, its CLAUDE.md and everyone's fingers. Deriving the fleet from
+  those names is what made removal survivable; keeping them is what makes it
+  safe.
 - ~~**A version pin makes `.katana/_aio.md`'s own instruction unreachable**~~
   (llama.master §5, quant §7) — **DONE 2026-09-08.** Both halves were the same
   defect: the instruction named `dep/aio/feedback/`, which is absent from a
@@ -469,15 +584,17 @@ thirteen findings that had been read and not written down (see the audit note in
   §17 is the same ask one step further:
   `cfg: +1 field (safe), -1
   field (needs onMigrate)`, and offer the stub.
-- **The 100-msg/sec WS budget is tripped by a legitimate burst** (risoto §10). A
-  demo seed of ~1000 accounts made the sync scheduler exceed the per-connection
-  budget; observed live, the renderer froze on the pre-burst state while the
-  server moved on, and a later dispatch was invisible to the client. The budget
-  is right as an anti-abuse default; the gap is that a one-time seed hits it and
-  the failure mode is a silently dead socket rather than a slowed one. Coalesce
-  patches within a tick before broadcast (N commits in one task ship as one
-  frame), or allow a burst allowance before the 50-in-a-row close. `wsLimits` is
-  the app-side workaround; the batching is the framework's to do.
+- ~~**The 100-msg/sec WS budget is tripped by a legitimate burst**~~ (risoto
+  §10) — **DONE**, by a third route the report did not list and which is better
+  than both it did: the SERVER ADVERTISES its budget in the hello (`rate`) and
+  the client PACES ITSELF against it, so "over budget" stops being reachable by
+  ordinary use. A single op still sends inline — only a burst queues, and it
+  queues frames, never the only copy (the op is durable in the buffer before it
+  is ever sent, so the queue is dropped offline rather than double-sending on
+  reconnect). A peer that advertises nothing is paced at the server's own
+  default, never left unpaced. Verified 2026-09-11 by the report's own scenario,
+  `tests/sync/op-pacing.test.ts`: 1000 ops, asserted as a RATE; with the pacing
+  removed the same test measures 268/sec against an advertised 100.
 - **A canvas app is invisible to `testUI`, and the workaround deserves a page**
   (anathomy §6). Under happy-dom `createEngine` returns null, so the entire 3D
   half of an app has no framework test. That is a fair limitation — but it
@@ -509,8 +626,15 @@ three-reader cost, not an argument.
 
 #### 12 · Smaller, each named once
 
-- `aio-ok` vs `aiol-ok` — one letter apart, two different checkers, placed by
-  copying nearby code (vidtune §8.1). One marker with a scope.
+- ~~`aio-ok` vs `aiol-ok`~~ (vidtune §8.1) — **DONE 2026-09-11.** One marker, in
+  `src/diagnostics/ok-marker.ts`, read by all eight checkers: both spellings
+  everywhere, so the wrong one can no longer be silent. And it gained the scope
+  it never had — `// aio-ok(silent-catch): why` binds to one gate, while the
+  unscoped form keeps meaning exactly what the hundreds of existing ones mean.
+  `aiol` keeps its optional reason (dozens of bare `aiol-ok` lines exist and
+  tightening them would be a silent change for no finding); the script gates
+  keep requiring one. A test refuses any new private marker regex in `scripts/`
+  or `aiol/`.
 - ~~An `aiol` rule for accessible names~~ (cc §9.4) — **DONE 2026-09-08.** An
   interactive element with no name gets no semantic path: absent from
   `am surface`, unreachable by `am trigger`, no handle in `testUI`. The runtime
@@ -520,10 +644,20 @@ three-reader cost, not an argument.
   body, none of which is knowable from source. Ten cases pin the SILENCE as hard
   as the finding: text content, five naming attributes, an `id` that may pair
   with `<label htmlFor>`, a multi-line body, and `aio-ok`.
-- The bundle auditor false-positives on path-shaped strings — a
-  `placeholder="/home/you/documents/cv.pdf"` was reported as a 404 (newjob §6).
-- `am trigger … press "Enter"` refused on a visible, focusable `<input>` (newjob
-  §6).
+- ~~The bundle auditor false-positives on path-shaped strings~~ (newjob §6) —
+  **DONE.** `FS_ROOT_RE` in `assetUrlsIn` drops `/home`, `/Users`, `/tmp` and
+  the rest of an OS's roots: no aio app routes them, and a build warning that
+  cries wolf costs more than it is worth, because the REAL finding (an asset
+  that works in dev and 404s in the artifact) is the one that then goes unread.
+  Pinned by `tests/build.test.ts`.
+- ~~`am trigger … press "Enter"` refused on a visible, focusable `<input>`~~
+  (newjob §6) — **NOT REPRODUCIBLE 2026-09-11, and now pinned.** Driven against
+  the same two functions the CLI calls: `parseChord` turns the positional into a
+  key (chords, and the literal `+`), and `runUITrigger` delivers it — the
+  handler sees `Enter` and the form submits. `assertOperable` is deliberately
+  strict, which is the kind of guard that grows one condition too many, so
+  `tests/trigger-press-enter.test.ts` asserts BOTH that a plain text input
+  passes it and that a disabled / hidden / `type="hidden"` one still does not.
 - ~~`am stop` could not find a demonstrably running app; `--port=N` worked~~
   (newjob §6) — **DONE 2026-09-08.** Two halves. `am stop <appId>` now works at
   all (see the positional fix above — an id from `am instances` used to be read
@@ -532,21 +666,80 @@ three-reader cost, not an argument.
   already pointed at `am instances`, and a pointer costs a round trip at the
   exact moment someone is staring at "not running" for an app they can see in
   their own browser.
-- `am surface` prints ~8 kB as one unwrapped JSON line by default (vidtune
-  §8.2).
-- `am shot /path/to/file.png` — a positional ending in `.png` is a detectable
-  mistake; suggest `--out=` (vidtune §8.4).
-- A `worker: true` hint when a cell's tick exceeds a frame budget (quant §3),
-  and the module-graph checker's output in the default build summary.
-- A documented known-good Electron switch set for headless and VM hosts (quant
-  §7, §9.7) — one console crash-looped on a GPU abort every ~90 s until it got
-  `LIBGL_ALWAYS_SOFTWARE=1`.
-- `feedback/` lives inside the versioned directory, so an upgrade deletes it
-  (quant §7) — the tooling costs the project exactly the reports it wants.
-- A CI recipe for an app built on aio (newjob §8.9).
-- `deno task am migrate --from=alpha76` for known renames (risoto §22.7).
-- A named way to keep a cell out of the dev action journal, distinct from
-  `persist` (quant §7, and see `refused.md`).
+- ~~`am surface` prints ~8 kB as one unwrapped JSON line~~ (vidtune §8.2) —
+  **DONE 2026-09-11.** `--json` is serialized for whoever is reading it: a pipe
+  gets the compact form a parser wants, a terminal gets it indented. Same
+  document either way — `JSON.parse` cannot tell them apart — so it is the call
+  colour output already makes, on the same fact.
+- ~~`am shot /path/to/file.png` suggests `--out=`~~ (vidtune §8.4) — **DONE.** A
+  positional ending in an image extension is a detectable mistake, and "invalid
+  window index: shots/home.png" explained the parser instead of the fix. Pinned
+  by `tests/am-shot.test.ts`.
+- ~~A `worker: true` hint when a cell's tick exceeds a frame budget, and the
+  module-graph checker's output in the default build summary~~ (quant §3) —
+  **DONE.** The hint has shipped for a while (`_budgetMisses`, THREE misses
+  before advising a thread — a cold start, a first big import and one unlucky GC
+  are each a single slow tick, and advising on the strength of one is how a hint
+  becomes noise; `tests/budget-worker-hint.test.ts`). The graph checker already
+  ran per target and REFUSED the artifact; what was missing was that the final
+  summary never named it, so a summary-only reader saw "it compiled".
+  `deno task build` now ends with what was checked, counted over ARTIFACTS
+  rather than attempts — and a test asserts the refusal that makes the claim
+  legal, because the line is only honest while an artifact really cannot reach
+  disk unaudited.
+- ~~A documented known-good Electron switch set for headless and VM hosts~~
+  (quant §7, §9.7) — **DONE 2026-09-11.** Environment variables already reached
+  Electron; Chromium SWITCHES had no way in, so half the remedy was unreachable.
+  `AIO_ELECTRON_ARGS` takes them, appended LAST so an operator can override one
+  of aio's own, and a token that is not a `--switch` is named in the log rather
+  than dropped — "I set the flag and nothing changed" is the failure it exists
+  to end. `docs/clients/electron.md` carries four sets (no GPU, small
+  `/dev/shm`, software rasteriser, and `xvfb-run` for a host with no display at
+  all) and deliberately hands out NO `--no-sandbox`: aio adds that itself, only
+  after measuring the two conditions under which Chromium aborts.
+- ~~`feedback/` lives inside the versioned directory~~ (quant §7) — **DONE.**
+  `am feedback` writes to `$XDG_DATA_HOME/aio/feedback` (or `AIO_FEEDBACK_DIR`),
+  outside anything an upgrade replaces; `docs/clients/app-manager.md` says not
+  to write into `dep/aio/feedback/` and why. Pinned by
+  `tests/am-feedback-survives-pin.test.ts`.
+- ~~A CI recipe for an app built on aio~~ (newjob §8.9) — **DONE 2026-09-11.**
+  `docs/build/ci.md`: a working GitHub Actions workflow, and the three
+  aio-specific facts that decide whether it catches anything. Chiefly that CI
+  must run `deno task check`, not `deno check` — `"aio"` resolves to `mod.ts`
+  for the type-checker and to the browser entry for the bundle, so a server-only
+  import reachable from a cell type-checks and then fails to build, and the task
+  is the half that walks the client graph. Same for `deno task lint` vs
+  `deno lint`. Plus the two things a headless runner cannot do (Electron needs a
+  display, an e2e needs a browser), the target matrix, and the cache.
+  `tests/docs-ci-recipe.test.ts` checks every task name against the scaffold and
+  the pinned Deno version against `MIN_DENO`, because a copy-pasteable workflow
+  is read once and trusted for years.
+- ~~`am migrate --from=alpha76`~~ (risoto §22.7) — **DONE 2026-09-11.** Every
+  piece already existed with no front door: `REMOVALS` carries each retired
+  spelling with its hint and guide, `removalsInSource` finds them,
+  `aiol
+  --safe-fix` rewrites the renames. `am migrate` SCANS rather than lists
+  — "everything removed since alpha76" is a changelog and the changelog exists;
+  the useful answer is the intersection with your code. `--from` narrows to what
+  was removed after a release (default: the app's own pin); exits 1 so it works
+  in CI; `[fixable]` marks the renames and a hit under `tests/` is marked a
+  probable fixture, the same call `am pin` makes. Running it on a real tree
+  found its own defect first: `removalsInSource` documents itself as taking a
+  cell CONFIG BLOCK, and fed whole files it read
+  `{ seed: number; actions:
+  string[] }` as a retired cell key — so the file is
+  now handed over twice, each time as the thing the contract describes (66
+  findings → 39 on this repo, all cell-config false positives gone).
+- ~~A named way to keep a cell out of the dev action journal~~ (quant §7) —
+  **DONE 2026-09-11.** `cell({ diagnostics: false })`. A separate word on
+  purpose: `persist: "none"` was read as covering this too, and it does not —
+  `persist` is the STATE STORE, the journal is a dev diagnostic. The BOUNDARY is
+  the design and is what the tests pin: IN are `logs/actions.jsonl`, the
+  state-diff debug log, the checkpoint's recentActions and `am timeline`; OUT
+  are the durability journal (`journal: true` — dropping a cell from the replay
+  log would be data loss dressed as a privacy feature) and persistence itself.
+  Registered per boot from `composed.cells`, replaced not accumulated, and
+  cleared by `_resetAioRuntime`.
 
 ### The leak sanitizers are off (found 2026-09-04, audit round) — DONE 2026-09-04
 

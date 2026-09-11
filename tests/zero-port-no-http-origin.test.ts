@@ -14,6 +14,7 @@
 import { _teardownNow } from "../src/browser/protocol-subscription.ts";
 import { assert, assertEquals, assertThrows } from "@std/assert";
 import { Window } from "happy-dom";
+import { closeWindow } from "../src/testing/close-window.ts";
 import { devWsScript } from "../src/server/server-html-scripts.ts";
 import { NO_TRANSPORT_MSG } from "../src/browser/browser-shared.ts";
 
@@ -59,7 +60,7 @@ function installPage(url: string, ipc: boolean) {
         if (v === undefined) delete g[k];
         else g[k] = v;
       }
-      await win.happyDOM.close();
+      await closeWindow(win);
     },
   };
 }
@@ -147,7 +148,7 @@ async function runDevWs(url: string, ipc: boolean): Promise<string[]> {
     debug: () => {},
     warn: () => {},
   });
-  await win.happyDOM.close();
+  await closeWindow(win);
   return wsUrls;
 }
 

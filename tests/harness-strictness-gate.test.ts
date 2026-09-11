@@ -59,6 +59,9 @@ const EXEMPT: Record<string, string> = {
   registerAppDirs: "path resolution, no app code",
   _resetAppDirs: "path resolution, no app code",
   createCassette: "transport recording, no app code",
+  uiNames:
+    "reads an ALREADY-BOOTED TestUI handle and returns its element paths — " +
+    "the harness that armed is the testUI that produced the handle",
   openCassette: "transport recording, no app code",
   totpCode: "pure code generator (HMAC over a secret) — runs no app code",
   testBrowser:

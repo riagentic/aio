@@ -1,6 +1,7 @@
 // deno-lint-ignore-file no-explicit-any
 import { assertEquals } from "@std/assert";
 import { Window } from "happy-dom";
+import { closeWindow } from "../src/testing/close-window.ts";
 import { Fragment, h } from "../src/air/vdom.ts";
 import { signal } from "../src/state/signal.ts";
 import { testComponent } from "../src/testing/test-component.ts";
@@ -28,7 +29,7 @@ Deno.test("frag: keyed list reorder keeps order", async () => {
   await new Promise((r) => setTimeout(r, 5));
   assertEquals(txt(doc), "33110022");
   t.unmount();
-  await win.happyDOM.close();
+  await closeWindow(win);
 });
 
 // add + remove fragments from a keyed list
@@ -54,7 +55,7 @@ Deno.test("frag: add/remove in keyed list", async () => {
   await new Promise((r) => setTimeout(r, 5)); // reorder
   assertEquals(txt(doc), "4023");
   t.unmount();
-  await win.happyDOM.close();
+  await closeWindow(win);
 });
 
 // nested fragments in a map
@@ -81,7 +82,7 @@ Deno.test("frag: nested fragments interleave correctly", async () => {
   await new Promise((r) => setTimeout(r, 5));
   assertEquals(txt(doc), "0a0b-91a1b-9");
   t.unmount();
-  await win.happyDOM.close();
+  await closeWindow(win);
 });
 
 // fragment with a conditional (variable child count)
@@ -110,5 +111,5 @@ Deno.test("frag: variable child count via conditional", async () => {
   await new Promise((r) => setTimeout(r, 5));
   assertEquals(txt(doc), "xyz");
   t.unmount();
-  await win.happyDOM.close();
+  await closeWindow(win);
 });

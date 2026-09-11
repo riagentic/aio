@@ -95,6 +95,7 @@ import {
   AIO_RUNTIME_FLAG_SPECS,
   AIO_RUNTIME_FLAGS,
 } from "../src/diagnostics/runtime-flags.ts";
+import { justified as okMarker } from "../src/diagnostics/ok-marker.ts";
 
 // ── harness ─────────────────────────────────────────────────────────
 
@@ -804,7 +805,7 @@ function round11(r: () => number): void {
       }
       for (const line of css.split("\n")) {
         const code = line.replace(/\/\*.*?\*\//g, "");
-        if (/\baio-ok\b\s*[:\-—]/.test(line)) continue;
+        if (okMarker(line)) continue;
         if (PHYSICAL.test(code)) {
           finding("11", `physical property: ${code.trim().slice(0, 90)}`);
         }
@@ -813,7 +814,7 @@ function round11(r: () => number): void {
   }
   for (const line of UI_CSS.split("\n")) {
     const code = line.replace(/\/\*.*?\*\//g, "");
-    if (/\baio-ok\b\s*[:\-—]/.test(line)) continue;
+    if (okMarker(line)) continue;
     if (PHYSICAL.test(code)) {
       finding("11", `UI_CSS physical property: ${code.trim().slice(0, 90)}`);
     }

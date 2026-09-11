@@ -6,6 +6,7 @@
  */
 import { assertEquals, assertNotEquals } from "@std/assert";
 import { Window } from "happy-dom";
+import { closeWindow } from "../src/testing/close-window.ts";
 import { signal } from "../src/state/signal.ts";
 import { h } from "../src/air/vdom.ts";
 import {
@@ -25,7 +26,7 @@ function createDOM(): {
   const doc = win.document as unknown as Document;
   const root = doc.createElement("div");
   doc.body.appendChild(root);
-  return { document: doc, root, cleanup: () => win.happyDOM.close() };
+  return { document: doc, root, cleanup: () => closeWindow(win) };
 }
 
 /** Inline useLocal (same logic as adapters/air.ts) to avoid adapter import complications */

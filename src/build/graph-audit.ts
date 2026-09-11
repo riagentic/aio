@@ -17,7 +17,7 @@
 // deciders, one wrong. Now the rule is written once, against the graph esbuild
 // actually built, and the validator asks the bundler.
 
-import { isServerOnlyFile } from "../entries.ts";
+import { isServerOnlyFile, isServerOnlyMarker } from "../entries.ts";
 import { codeText } from "../diagnostics/code-mask.ts";
 
 /** esbuild's plugin namespace for the `@std/*` / `node:*` stub modules. A
@@ -261,6 +261,29 @@ export function auditClientGraph(opts: {
   const { entry, inputs } = opts;
   const { order, parent } = reach(entry, inputs);
   const findings: AuditFinding[] = [];
+  // `import "aio/server-only"` — the same statement `*.server.ts` makes, made
+  // in the FILE instead of in its name (quant §9.1). The convention is good
+  // and its one hole is that it is a filename: you cannot always rename a
+  // file that twenty places already import, that is generated, or that is
+  // published under that name.
+  //
+  // Read off the GRAPH, not the source: the specifier may be an import-map
+  // alias, and esbuild has already resolved it. Computed once — a module that
+  // declares it does so for every edge into it.
+  const declared = new Set<string>();
+  for (const key of Object.keys(inputs)) {
+    for (const imp of inputs[key]?.imports ?? []) {
+      if (
+        isServerOnlyMarker(imp.original ?? "") || isServerOnlyMarker(imp.path)
+      ) {
+        declared.add(key);
+        break;
+      }
+    }
+  }
+  /** Server-only by the filename convention OR by the in-file declaration. */
+  const serverOnly = (path: string) =>
+    isServerOnlyFile(path) || declared.has(path);
   const show = (chain: string[]) =>
     opts.hideEntry && chain[0] === entry ? chain.slice(1) : chain;
 
@@ -273,7 +296,7 @@ export function auditClientGraph(opts: {
       const target = imp.original && imp.original !== imp.path
         ? `${imp.path} (imported as "${imp.original}")`
         : imp.path;
-      if (isServerOnlyFile(imp.path)) {
+      if (serverOnly(imp.path)) {
         // Any edge: a `*.server.*` file esbuild READ is in dist/app.js —
         // keys, tokens, queries, readable by anyone. (A dynamic import of one
         // is external and never gets here; this is the static form, the
@@ -283,12 +306,18 @@ export function auditClientGraph(opts: {
           file: cur,
           target,
           chain: show(chainTo(cur, parent)),
-          message:
-            `"${target}" is a *.server.* module and it is IN the browser bundle` +
+          message: `"${target}" is ${
+            declared.has(imp.path)
+              ? 'marked `import "aio/server-only"`'
+              : "a *.server.* module"
+          } and it is IN the browser bundle` +
             (isStatic
               ? " (statically imported)"
               : " (esbuild inlined the import)"),
-          fix: "a *.server.ts module is server-only BY CONVENTION — the dev " +
+          fix: (declared.has(imp.path)
+            ? 'that module declares `import "aio/server-only"`, which means ' +
+              "exactly what a *.server.ts name means — "
+            : "a *.server.ts module is server-only BY CONVENTION — the dev ") +
             "server refuses to serve one, and anything it holds is readable " +
             "by anyone who opens dist/app.js. Import it dynamically from " +
             'the cell method that needs it (`const { x } = await import("./io.server.ts")`), ' +
@@ -331,7 +360,7 @@ export function auditClientGraph(opts: {
   // same; the RESOLVED input list is the truth.
   const reachedSet = new Set(order);
   for (const key of Object.keys(inputs).sort()) {
-    if (reachedSet.has(key) || !isServerOnlyFile(key)) continue;
+    if (reachedSet.has(key) || !serverOnly(key)) continue;
     findings.push({
       rule: "server-only-leak",
       file: key,

@@ -10,7 +10,9 @@
 import { _liveRoots } from "./renderer-state.ts";
 import {
   buildUISurface,
+  measureSurface,
   serializeSurface,
+  type SurfaceMeasurement,
   type UIElementInfo,
   type UISurfaceNode,
 } from "./ui-surface.ts";
@@ -95,6 +97,24 @@ export function getLiveSurfaces(full = false): UISurfaceNode[] {
 /** Wire-safe serialized surfaces (the "ui-surface-result" payload). */
 export function getSerializedSurfaces(full = false): UISurfaceNode[] {
   return getLiveSurfaces(full).map(serializeSurface);
+}
+
+/** The same, with layout geometry attached (`am surface --rects`).
+ *
+ *  The measurement counts come back beside the roots because a client in a
+ *  real browser and a client in a WebView with a zero-sized window produce the
+ *  same all-zero rects, and only the caller can say which it is looking at. */
+export function getMeasuredSurfaces(
+  full = false,
+): { roots: UISurfaceNode[]; measured: SurfaceMeasurement } {
+  const live = getLiveSurfaces(full);
+  const measured = { measurable: 0, laidOut: 0 };
+  for (const root of live) {
+    const m = measureSurface(root);
+    measured.measurable += m.measurable;
+    measured.laidOut += m.laidOut;
+  }
+  return { roots: live.map(serializeSurface), measured };
 }
 
 function findByPath(path: string): UIElementInfo | undefined {

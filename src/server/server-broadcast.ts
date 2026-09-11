@@ -27,6 +27,7 @@ import type { VitalsSystem } from "../vitals/mod.ts";
 import type { AioUser } from "./aio.ts";
 import { log } from "../diagnostics/logger-api.ts";
 import { bytes } from "../diagnostics/fmt.ts";
+import { declaredBudgets, recordBudgetBreach } from "../state/budgets.ts";
 
 /** Payload stats per client — tracked for vitals/trojan introspection */
 export type PayloadStats = Map<
@@ -696,7 +697,13 @@ const _warnedBigCells = new Set<string>();
 let _analyzedFrameLen = 0;
 
 export function warnBigFullState(json: string, view: () => unknown): void {
-  if (json.length <= BROADCAST_FULL_WARN_BYTES) return;
+  // `aio.run({ budgets: { cellState } })` replaces aio's own number. The
+  // hard-coded 1 MiB is a guess that has to serve every app, and a field
+  // report said plainly that an app declaring its own is strictly better
+  // (quant §9.3) — a 4 MB table pushed once a minute is not the same problem
+  // as 4 MB pushed per keystroke, and only the app knows which it is.
+  const limit = declaredBudgets().cellState ?? BROADCAST_FULL_WARN_BYTES;
+  if (json.length <= limit) return;
   if (json.length <= _analyzedFrameLen) return; // already analyzed this size
   try {
     _analyzedFrameLen = json.length;
@@ -711,7 +718,13 @@ export function warnBigFullState(json: string, view: () => unknown): void {
         return [cellName, n] as const;
       },
     );
-    const over = sizes.filter(([, n]) => n > BROADCAST_FULL_WARN_BYTES);
+    const over = sizes.filter(([, n]) => n > limit);
+    // Recorded, not only logged: a budget the app DECLARED has to be
+    // assertable, and a log line cannot fail a CI step. No-op when nothing
+    // was declared — aio's own default is a hint, not a commitment.
+    for (const [cellName, n] of over) {
+      recordBudgetBreach("cellState", n, `cell "${cellName}"`);
+    }
     // No single cell over the line but the sum is → name the biggest one.
     const biggest = sizes.sort((a, b) => b[1] - a[1])[0];
     const offenders = over.length > 0 ? over : biggest ? [biggest] : [];
@@ -722,7 +735,11 @@ export function warnBigFullState(json: string, view: () => unknown): void {
     for (const [cellName] of fresh) _warnedBigCells.add(cellName);
     log.warn(
       `[aio] broadcast: a full-state frame is ${bytes(json.length)} — over ` +
-        `the ${bytes(BROADCAST_FULL_WARN_BYTES)} budget. Largest cell(s): ${
+        `the ${bytes(limit)} budget${
+          declaredBudgets().cellState !== undefined
+            ? " you declared (aio.run({ budgets: { cellState } }))"
+            : ""
+        }. Largest cell(s): ${
           fresh.map(([c, n]) => `"${c}" (${bytes(n)})`).join(", ")
         }. Cell state is pushed to every client on change — bulk rows belong ` +
         `in db: tables, binaries in files — see docs/persistence/big-data.md.`,

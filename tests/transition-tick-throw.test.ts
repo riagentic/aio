@@ -8,6 +8,7 @@
 // the state the transition promised rather than abandoning it mid-flight.
 import { assert, assertEquals } from "@std/assert";
 import { Window } from "happy-dom";
+import { closeWindow } from "../src/testing/close-window.ts";
 import { _runTickTransition } from "../src/air/transition-component.ts";
 
 function env() {
@@ -18,7 +19,7 @@ function env() {
   return {
     win,
     el: el as unknown as HTMLElement,
-    cleanup: () => win.happyDOM.close(),
+    cleanup: () => closeWindow(win),
   };
 }
 

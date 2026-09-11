@@ -98,6 +98,20 @@
             "cd4c2b619920db14"
           ]
         },
+        "ArgSchemas": {
+          "kind": "typeAlias",
+          "sig": "5206cf17205645a5",
+          "sigs": [
+            "5206cf17205645a5"
+          ]
+        },
+        "ArgSpec": {
+          "kind": "typeAlias",
+          "sig": "51d2b12adbf6819a",
+          "sigs": [
+            "51d2b12adbf6819a"
+          ]
+        },
         "AsyncMethod": {
           "kind": "typeAlias",
           "sig": "bd99017cafff3a3b",
@@ -167,6 +181,18 @@
             "b9806ed43c38ad8e"
           ]
         },
+        "Budgets": {
+          "kind": "typeAlias",
+          "sig": "54d0e64c0bafaf0f",
+          "members": {
+            "cellState": "opt:60d81f7053bb0224",
+            "broadcastRate": "opt:60d81f7053bb0224",
+            "payload": "opt:60d81f7053bb0224"
+          },
+          "sigs": [
+            "54d0e64c0bafaf0f"
+          ]
+        },
         "bytes": {
           "kind": "function",
           "sig": "a3e777ce9fa9750a",
@@ -214,7 +240,7 @@
         },
         "CellAio": {
           "kind": "typeAlias",
-          "sig": "15168801ebf45164",
+          "sig": "e9424e6afc11bbe0",
           "members": {
             "typeParams": "req:b4d1afd901b76a44",
             "state": "req:754ca6fcde94b4a0",
@@ -242,6 +268,9 @@
             "longMethods": "opt:6941c580c10685fb",
             "validate": "opt:476d97494be409fa",
             "persist": "opt:6bf73d8d8ca4d4a7",
+            "argSchemas": "opt:7e62dd881749634d",
+            "persistTransform": "opt:be8d659fcd213aee",
+            "diagnostics": "opt:ab4da4560abb2dcb",
             "access": "opt:1b9f3f6099e6f4f6",
             "ui": "opt:6bf73d8d8ca4d4a7",
             "uiForUser": "opt:c627f0aa1f7da8d2",
@@ -257,7 +286,7 @@
             "stateType": "opt:754ca6fcde94b4a0"
           },
           "sigs": [
-            "15168801ebf45164"
+            "e9424e6afc11bbe0"
           ]
         },
         "CellDef": {
@@ -311,7 +340,7 @@
         },
         "CellsConfig": {
           "kind": "typeAlias",
-          "sig": "3f4f147c1fec07c3",
+          "sig": "61e9e41dc02a6ca4",
           "members": {
             "appId": "opt:2fb40568533c1a6d",
             "cells": "opt:58dbae2820cab862",
@@ -353,6 +382,7 @@
             "db": "opt:0540e45bb92e2f1c",
             "perfCheck": "opt:c9d4c47af1d95972",
             "perfBudget": "opt:26e244ebdbe0fd36",
+            "budgets": "opt:45e7227680f3b8c1",
             "renderBudget": "opt:06ed737d9c722828",
             "effectTimeoutMs": "opt:f6522636230fa080",
             "freezeState": "opt:0ecca0fe3beba89b",
@@ -398,7 +428,7 @@
             "onCheckpointRestore": "opt:bc30aaf8d4dd00e2"
           },
           "sigs": [
-            "3f4f147c1fec07c3"
+            "61e9e41dc02a6ca4"
           ]
         },
         "CellStatus": {
@@ -521,6 +551,13 @@
           },
           "sigs": [
             "76c4ea372e59a95b"
+          ]
+        },
+        "ConcurrencyMode": {
+          "kind": "typeAlias",
+          "sig": "16501b622ef530e1",
+          "sigs": [
+            "16501b622ef530e1"
           ]
         },
         "CookieOptions": {
@@ -940,6 +977,24 @@
             "7e82fa22d93957ca"
           ]
         },
+        "MethodCalls": {
+          "kind": "typeAlias",
+          "sig": "188a5dc0c33a2f6d",
+          "sigs": [
+            "188a5dc0c33a2f6d"
+          ]
+        },
+        "MethodDraftCalls": {
+          "kind": "typeAlias",
+          "sig": "495be9b87cabf351",
+          "members": {
+            "typeParams": "req:277846668a6ab02a",
+            "$call": "req:ea9d2052c6567b42"
+          },
+          "sigs": [
+            "495be9b87cabf351"
+          ]
+        },
         "MethodDraftMeta": {
           "kind": "typeAlias",
           "sig": "e66598c4dfe9667e",
@@ -966,18 +1021,22 @@
         },
         "MethodsCellConfig": {
           "kind": "typeAlias",
-          "sig": "c99908ed6b3de6b3",
+          "sig": "6c686483e35328cb",
           "members": {
             "typeParams": "req:e45ed71e42b8e9ff",
             "state": "req:a0f0b90d711a3904",
             "methods": "opt:555972f45811f088",
             "scope": "opt:aa1f71b970b8f774",
             "cancelOn": "opt:6d10ee7e1728427c",
+            "concurrency": "opt:a6027247869967ef",
+            "ttl": "opt:f44c9f55fee5888a",
             "long": "opt:924fb90b8457e79b",
             "selectors": "opt:2946cc0c48824257",
             "listensTo": "opt:8663560464136952",
             "validate": "opt:1bcd529a7c6f8dbc",
+            "args": "opt:ce2695f85da47ecb",
             "persist": "opt:978605027e43a7e2",
+            "diagnostics": "opt:ab4da4560abb2dcb",
             "access": "opt:faf2b19f331a6d06",
             "visible": "opt:d811577bb4dc2ec2",
             "sync": "opt:6c1af94af41ba4ee",
@@ -988,11 +1047,12 @@
             "version": "opt:f6522636230fa080",
             "onMigrate": "opt:470a09bb7411bdae",
             "onRestore": "opt:e8a079d4832ed591",
+            "onPersist": "opt:cf129cf60ff61c4f",
             "onInit": "opt:167cda2b8419caf2",
             "onDestroy": "opt:6190ad991ab4d7a0"
           },
           "sigs": [
-            "c99908ed6b3de6b3"
+            "6c686483e35328cb"
           ]
         },
         "Msg": {
@@ -1185,6 +1245,18 @@
           },
           "sigs": [
             "496789ac3b08d4f1"
+          ]
+        },
+        "ResolvedBudgets": {
+          "kind": "typeAlias",
+          "sig": "a3f8408538f9d0b7",
+          "members": {
+            "cellState": "opt:f6522636230fa080",
+            "broadcastRate": "opt:f6522636230fa080",
+            "payload": "opt:f6522636230fa080"
+          },
+          "sigs": [
+            "a3f8408538f9d0b7"
           ]
         },
         "ResolveUserFn": {
@@ -1407,6 +1479,19 @@
           },
           "sigs": [
             "e1a29f278ab5b88d"
+          ]
+        },
+        "serverImport": {
+          "kind": "function",
+          "sig": "979c2d583f2e3518",
+          "members": {
+            "param0": "req:f6c2bce213147f9c|336e2b46aff6c271~string",
+            "param1": "req:f6c2bce213147f9c|336e2b46aff6c271~string",
+            "return": "req:195eb86fcaf474a6",
+            "typeParams": "req:404437b7b1c53e2c"
+          },
+          "sigs": [
+            "58b4b1a56251e38f"
           ]
         },
         "serverRequest": {
@@ -3845,6 +3930,9 @@
         }
       }
     },
+    "./client-only": {
+      "symbols": {}
+    },
     "./db": {
       "symbols": {
         "DB": {
@@ -4043,7 +4131,7 @@
         },
         "CliFlags": {
           "kind": "typeAlias",
-          "sig": "321650fe8d8c6506",
+          "sig": "67acdb6c3e337775",
           "members": {
             "port": "opt:f6522636230fa080",
             "persist": "opt:0ecca0fe3beba89b",
@@ -4072,10 +4160,11 @@
             "backupLogs": "opt:0ecca0fe3beba89b",
             "logBudget": "opt:f6522636230fa080",
             "noDataMigrate": "opt:0ecca0fe3beba89b",
-            "cdp": "opt:8daa393fece80d5f"
+            "cdp": "opt:8daa393fece80d5f",
+            "watch": "opt:53469494ce2e14b4"
           },
           "sigs": [
-            "321650fe8d8c6506"
+            "67acdb6c3e337775"
           ]
         },
         "createSliceSelector": {
@@ -5320,6 +5409,17 @@
         }
       }
     },
+    "./server-only": {
+      "symbols": {
+        "SERVER_ONLY": {
+          "kind": "variable",
+          "sig": "c9f98630f588fa8d",
+          "sigs": [
+            "c9f98630f588fa8d"
+          ]
+        }
+      }
+    },
     "./ship": {
       "symbols": {
         "artifactFormat": {
@@ -5906,14 +6006,15 @@
         },
         "HarnessBootOptions": {
           "kind": "typeAlias",
-          "sig": "78e0e442abd633b1",
+          "sig": "ef7d0c6f8453096b",
           "members": {
+            "stub": "opt:43c27b1501a10616",
             "cellDefaults": "opt:0c4fa55e7637b196",
             "localFirst": "opt:0ecca0fe3beba89b",
             "perfBudget": "opt:05b89f57abeea2fa"
           },
           "sigs": [
-            "78e0e442abd633b1"
+            "ef7d0c6f8453096b"
           ]
         },
         "KeyModifiers": {
@@ -6349,7 +6450,7 @@
         },
         "UIElementInfo": {
           "kind": "typeAlias",
-          "sig": "84e8fba4b7396352",
+          "sig": "285eee0a11b455e2",
           "members": {
             "name": "req:2fb40568533c1a6d",
             "tag": "req:2fb40568533c1a6d",
@@ -6361,11 +6462,16 @@
             "readonly": "opt:0ecca0fe3beba89b",
             "required": "opt:0ecca0fe3beba89b",
             "path": "req:2fb40568533c1a6d",
+            "rect": "opt:object",
+            "rect.x": "req:f6522636230fa080",
+            "rect.y": "req:f6522636230fa080",
+            "rect.w": "req:f6522636230fa080",
+            "rect.h": "req:f6522636230fa080",
             "_vnode": "opt:aba403b6ecb255cd",
             "_el": "opt:e21f3629ed25788f"
           },
           "sigs": [
-            "84e8fba4b7396352"
+            "285eee0a11b455e2"
           ]
         },
         "UIKind": {
@@ -6384,6 +6490,17 @@
           },
           "sigs": [
             "bd101d8977ab8c06"
+          ]
+        },
+        "uiRects": {
+          "kind": "function",
+          "sig": "7da65f1cc673e3a5",
+          "members": {
+            "param0": "req:8a0195ffd96928c3|e2e9e83e047a6f75~unknown",
+            "return": "req:9cb0a1d24fa174e5"
+          },
+          "sigs": [
+            "e1c09b6fde9574a2"
           ]
         },
         "UISurfaceNode": {
@@ -7644,6 +7761,10 @@
           "kind": "verb",
           "sig": "verb"
         },
+        "am migrate": {
+          "kind": "verb",
+          "sig": "verb"
+        },
         "am migrations": {
           "kind": "verb",
           "sig": "verb"
@@ -7733,6 +7854,10 @@
           "sig": "verb"
         },
         "am tables": {
+          "kind": "verb",
+          "sig": "verb"
+        },
+        "am testgen": {
           "kind": "verb",
           "sig": "verb"
         },

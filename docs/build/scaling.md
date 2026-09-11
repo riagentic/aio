@@ -179,6 +179,67 @@ methods: {
 },
 ```
 
+## Limits your app declares (`budgets`)
+
+`perfBudget` is the TIMES — milliseconds per dispatch. `budgets` is the SIZES
+and RATES:
+
+```ts
+await aio.run({
+  cells: [todo],
+  budgets: {
+    cellState: "1MB", // largest a single cell's state may get
+    broadcastRate: "20/s", // broadcast rounds per second
+    payload: "500KB", // largest single payload to one client
+  },
+});
+```
+
+Every one of these already existed and was reachable — a hard-coded 1 MiB inside
+the broadcaster, and `vitals.pressure`'s `rateThreshold` / `payloadThreshold`.
+This is one obvious door onto them, in the units a person writes, because no
+single default calls a 4 MB table pushed once a minute and 200 bytes at 60 Hz
+both correctly.
+
+An explicit `vitals.pressure` still **wins** — it is the more specific
+instruction.
+
+### They fail, not just warn
+
+A warning is for a person watching a dev server. A budget is a limit the app
+committed to, so `/health` reports it and a breach turns the app `degraded`:
+
+```json
+{
+  "status": "degraded",
+  "budgets": {
+    "ok": false,
+    "breaches": [
+      {
+        "budget": "cellState",
+        "limit": 1048576,
+        "worst": 4210688,
+        "detail": "cell \"rows\""
+      }
+    ]
+  }
+}
+```
+
+That makes it a CI step: `deno task am health` exits non-zero. The ledger keeps
+the **worst** reading, not the latest — "it went over once" is the fact, and a
+later healthy sample must not erase it.
+
+An app that declared no budgets gets **no** `budgets` field at all, rather than
+a green tick: aio's own numbers are hints, not commitments, and a tick for a
+promise nobody made reads as assurance.
+
+### Unreadable values throw at boot
+
+`budgets: { cellState: "1 gigabyte" }` fails the boot, naming the key. A budget
+that quietly fell back to aio's default is a limit nobody declared and nobody
+can see — worse than having none, because the app believes it has one.
+
 ## Performance tuning by scenario
 
 ### State is large (>1MB)

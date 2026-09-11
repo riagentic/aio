@@ -12,7 +12,7 @@ import type { SkvInstance, SkvStmt } from "./skv.ts";
 
 /** Key separator for multi-key rows. Unit Separator (U+001F) — cell names
  *  are identifier-safe by validation, so it can never collide. */
-const SEP = "";
+const SEP = "\x1f";
 /** Upper bound for prefix range scans (max BMP char). */
 const HIGH = "￿";
 

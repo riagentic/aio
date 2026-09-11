@@ -241,13 +241,14 @@ Deno.test("android `aio`: log is present, and is THE logger", () => {
 // standalone runtime (which does receive the config) enables it at boot.
 import { androidLocalHTML } from "../src/server/server-html-gen.ts";
 import { Window } from "happy-dom";
+import { closeWindow } from "../src/testing/close-window.ts";
 
 function shellDoc(opts: { appCss?: boolean } = {}) {
   const win = new Window();
   win.document.write(
     androidLocalHTML("probe", opts.appCss ?? false, { themeName: "probe" }),
   );
-  return { doc: win.document, close: () => win.happyDOM.close() };
+  return { doc: win.document, close: () => closeWindow(win) };
 }
 
 Deno.test("android shell: the default look ships disabled, not applied", async () => {

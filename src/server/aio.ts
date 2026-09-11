@@ -204,6 +204,8 @@ import {
   validateConfig,
 } from "./config.ts";
 import { count } from "../diagnostics/fmt.ts";
+import { isDiagnosticsOptOut } from "../diagnostics/diagnostics-optout.ts";
+import { resolveBudgets, setBudgets } from "../state/budgets.ts";
 
 /** Default broadcast throttle: 50ms = max 20 state pushes/sec */
 export const DEFAULT_SYNC_INTERVAL_MS = 50;
@@ -1602,6 +1604,12 @@ async function _runPhases<S, A, E>(
     }
   }
 
+  // `budgets` — the limits this app declares, parsed BEFORE anything reads
+  // them, so an unreadable value fails the boot rather than silently falling
+  // back to aio's own number (quant §9.3). A budget that did not parse is a
+  // limit nobody declared and nobody can see.
+  setBudgets(resolveBudgets(config.budgets));
+
   // One redaction predicate for every place an action is recorded — the
   // journal (disk), the timeline (`am timeline`) and the action log. Built
   // here, before any of them exists, so none can be created without it.
@@ -2085,7 +2093,16 @@ async function _runPhases<S, A, E>(
         user: (action as { _user?: AioUser })._user,
       }, ts)
       : timeline.lastSeq() + 1;
-    timeline.record(seq, t, payload, prev, next, ts, origin);
+    // `cell({ diagnostics: false })` covers `am timeline` too. A key by that
+    // name that still listed the cell in the diagnostic surface people
+    // actually read would be dishonest.
+    //
+    // AFTER the journal append, never instead of it: `journal: true` is a
+    // durability promise, and dropping a cell's committed actions from the
+    // replay log would be data loss dressed as a privacy feature.
+    if (!isDiagnosticsOptOut(t)) {
+      timeline.record(seq, t, payload, prev, next, ts, origin);
+    }
   };
   // The journal append is NOT an observe-only hook — it is the durability
   // promise `journal: true` makes ("every committed action is appended before
@@ -2716,6 +2733,11 @@ async function _runPhases<S, A, E>(
       ? "flag" as const
       : "config" as const,
     cliTransport: cli.transport,
+    // `--no-watch` / `--watch=…` beats the config value: a flag is a decision
+    // about THIS run, a config value is the app's standing preference. Merged
+    // HERE because `config` below is passed whole and must stay the app's own
+    // object (tests/config-bridge-hop2.test.ts).
+    cliWatch: cli.watch,
     ui,
     title,
     // HOP 2 of the config bridge — MECHANICAL, never a hand-copied literal.

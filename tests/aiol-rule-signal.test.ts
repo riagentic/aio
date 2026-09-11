@@ -159,6 +159,21 @@ const cellFile = (name: string, body: string) =>
 type Case = { name: string; files: Record<string, string>; expect: string };
 
 const VIOLATIONS: Case[] = [
+  // A cell that imports `aio/client-only` says two opposite things about the
+  // same code: the marker declares "must not run on the server", and a cell
+  // method runs on the server. Without the rule it arrives as a
+  // `window is not defined` during SSR, three files from the decision.
+  {
+    name: "a cell that imports aio/client-only",
+    files: app({
+      "src/cell.ts": `import "aio/client-only";\n` +
+        cellFile(
+          "counter",
+          `{ state: { n: 0 }, methods: { inc(s) { s.n++ } } }`,
+        ),
+    }),
+    expect: "runs ON the server",
+  },
   // The update data gate only protects cells that declare a `version` — an
   // unversioned cell is never stamped, never in the contract, never compared.
   // Reported only for an app that configures `updates`, which is why the

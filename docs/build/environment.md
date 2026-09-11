@@ -25,15 +25,16 @@ name, so the table cannot fall behind the code.
 
 ## Building
 
-| Variable                  | Read by       | Effect                                                                                           |
-| ------------------------- | ------------- | ------------------------------------------------------------------------------------------------ |
-| `AIO_BUILD_VERSION`       | build         | **The supported way a parent build hands a version to a child.** See below                       |
-| `AIO_BUILD_COMMIT`        | update check  | The commit a build came from, when git is not available where the binary runs                    |
-| `AIO_ELECTRON_PROTOCOL=1` | dev           | Load the dev window over `aio://` — the packaged path — instead of `http://`. Test what you ship |
-| `AIO_ELECTRON_SANDBOX=1`  | Electron      | Force the strict sandbox behaviour rather than the platform default                              |
-| `ELECTRON_PATH`           | Electron      | Use this Electron runtime instead of the downloaded one                                          |
-| `ELECTRON_MIRROR`         | Electron      | Mirror to download Electron from                                                                 |
-| `AIO_AVD`                 | `dev-android` | Which Android emulator image to boot. Default: the first one                                     |
+| Variable                  | Read by       | Effect                                                                                                                                                                             |
+| ------------------------- | ------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `AIO_BUILD_VERSION`       | build         | **The supported way a parent build hands a version to a child.** See below                                                                                                         |
+| `AIO_BUILD_COMMIT`        | update check  | The commit a build came from, when git is not available where the binary runs                                                                                                      |
+| `AIO_ELECTRON_PROTOCOL=1` | dev           | Load the dev window over `aio://` — the packaged path — instead of `http://`. Test what you ship                                                                                   |
+| `AIO_ELECTRON_SANDBOX=1`  | Electron      | Force the strict sandbox behaviour rather than the platform default                                                                                                                |
+| `AIO_ELECTRON_ARGS=…`     | Electron      | Extra Chromium switches, space separated (`--disable-gpu --disable-dev-shm-usage`). A token that is not a `--switch` is refused and named in the log. See docs/clients/electron.md |
+| `ELECTRON_PATH`           | Electron      | Use this Electron runtime instead of the downloaded one                                                                                                                            |
+| `ELECTRON_MIRROR`         | Electron      | Mirror to download Electron from                                                                                                                                                   |
+| `AIO_AVD`                 | `dev-android` | Which Android emulator image to boot. Default: the first one                                                                                                                       |
 
 ### `AIO_BUILD_VERSION` — one build, one version
 
@@ -59,14 +60,15 @@ the supported hand-off for any parent build.
 
 ## Diagnostics and tests
 
-| Variable               | Read by          | Effect                                                                            |
-| ---------------------- | ---------------- | --------------------------------------------------------------------------------- |
-| `AIO_DEBUG=1`          | `deno task ship` | Keep the stack trace on a ship error that would otherwise print one line and exit |
-| `AIO_DEV`              | `install.sh`     | Marks a development checkout so `am upgrade` leaves it alone                      |
-| `AIO_AM_NO_DELEGATE=1` | `am`             | Do not delegate to the app's pinned aio — run this `am`                           |
-| `AIO_CDP=1`            | app              | Open a CDP port so `am shot` can attach                                           |
-| `AIO_TEST_NAMES=all`   | `testUI`         | Print every semantic name the harness resolved, not just the misses               |
-| `AIO_TEST_DISPLAY`     | test helper      | Set by the test display helper; tells `open-external` it is inside a harness      |
+| Variable               | Read by          | Effect                                                                                                                                              |
+| ---------------------- | ---------------- | --------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `AIO_DEBUG=1`          | `deno task ship` | Keep the stack trace on a ship error that would otherwise print one line and exit                                                                   |
+| `AIO_DEV`              | `install.sh`     | Marks a development checkout so `am upgrade` leaves it alone                                                                                        |
+| `AIO_AM_NO_DELEGATE=1` | `am`             | Do not delegate to the app's pinned aio — run this `am`                                                                                             |
+| `AIO_CDP=1`            | app              | Open a CDP port so `am shot` can attach                                                                                                             |
+| `AIO_TEST_NAMES=all`   | `testUI`         | Print every semantic name the harness resolved, not just the misses                                                                                 |
+| `AIO_TEST_DISPLAY`     | test helper      | Set by the test display helper; tells `open-external` it is inside a harness                                                                        |
+| `AIO_FEEDBACK_DIR=…`   | `am feedback`    | Where findings about aio are written. Defaults to `$XDG_DATA_HOME/aio/feedback` — OUTSIDE the versioned directory, so an upgrade cannot delete them |
 
 ## Not aio's
 

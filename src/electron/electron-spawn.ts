@@ -508,6 +508,38 @@ export async function sandboxUsable(
   }
 }
 
+/** Chromium switches from `AIO_ELECTRON_ARGS`, validated.
+ *
+ *  A headless or VM host sometimes needs one to start at all: a field report's
+ *  console crash-looped on a GPU abort every ~90 s until the machine got
+ *  `LIBGL_ALWAYS_SOFTWARE=1` (quant §7, §9.7), and the switch half of that
+ *  vocabulary — `--disable-gpu`, `--disable-dev-shm-usage` — had no way in at
+ *  all. Environment variables already reach Electron (the spawn merges the
+ *  inherited environment); switches did not.
+ *
+ *  VALIDATED, not passed through. This ends up in `argv`, never in a shell, so
+ *  the risk is not injection — it is a typo that Chromium ignores in silence,
+ *  on the one host where the person cannot see the window to tell. A token
+ *  that is not a `--switch` is REFUSED with the value quoted back, rather than
+ *  dropped, because "I set the flag and nothing changed" is the failure this
+ *  variable exists to end.
+ *
+ *  Splitting is on whitespace, so a switch whose value contains a space is not
+ *  expressible here. That is a deliberate floor: the alternative is a quoting
+ *  grammar of our own, and every switch in the documented sets is a bare flag
+ *  or a simple `--key=value`. */
+export function electronArgsFromEnv(
+  raw: string | undefined,
+): { args: string[]; refused: string[] } {
+  const args: string[] = [];
+  const refused: string[] = [];
+  for (const tok of (raw ?? "").split(/\s+/).filter(Boolean)) {
+    if (/^--[A-Za-z0-9][A-Za-z0-9-]*(=[^\s]*)?$/.test(tok)) args.push(tok);
+    else refused.push(tok);
+  }
+  return { args, refused };
+}
+
 /** Writes script to temp file, spawns Electron, cleans up after exit or process unload */
 async function spawnElectron(
   bin: string,
@@ -532,8 +564,24 @@ async function spawnElectron(
     );
     sandboxArgs.push("--no-sandbox");
   }
+  // The caller's switches go LAST: Chromium takes the last occurrence of a
+  // repeated switch, so an operator who has to override one of aio's own can.
+  const envArgs = electronArgsFromEnv(Deno.env.get("AIO_ELECTRON_ARGS"));
+  if (envArgs.refused.length) {
+    log.warn(
+      `[aio] electron: AIO_ELECTRON_ARGS has ${envArgs.refused.length} ` +
+        `entr${envArgs.refused.length === 1 ? "y" : "ies"} that ` +
+        `${envArgs.refused.length === 1 ? "is" : "are"} not a Chromium ` +
+        `switch and ${
+          envArgs.refused.length === 1 ? "was" : "were"
+        } NOT passed: ` +
+        envArgs.refused.map((r) => JSON.stringify(r)).join(", ") +
+        "\n      a switch looks like --disable-gpu or --key=value; see " +
+        "docs/clients/electron.md",
+    );
+  }
   const proc = new Deno.Command(bin, {
-    args: [tmpFile, ...sandboxArgs, ...extraArgs],
+    args: [tmpFile, ...sandboxArgs, ...extraArgs, ...envArgs.args],
     // The window dies with this process — see tmplParentWatch. Merged into
     // the inherited environment, so the shim passes it through to Electron.
     env: { AIO_PARENT_PID: String(Deno.pid) },

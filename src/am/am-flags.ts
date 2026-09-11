@@ -107,7 +107,7 @@ export const VERB_FLAGS: Readonly<Record<string, readonly string[]>> = {
   // Inspect
   clients: [],
   client: [],
-  surface: ["--full", "--component", "--path", "--depth", "--names"],
+  surface: ["--full", "--component", "--path", "--depth", "--names", "--rects"],
   trigger: [],
   where: [],
   // `--pose` is NOT here: cmdShot refuses it by name with a better message,
@@ -139,6 +139,8 @@ export const VERB_FLAGS: Readonly<Record<string, readonly string[]>> = {
   heap: [],
   // Does the client graph BUILD? `deno check` cannot answer this.
   check: [],
+  migrate: ["--from"],
+  testgen: ["--out", "--entry"],
   // Where findings about aio go — outside the version store.
   feedback: ["--create"],
   // Meta

@@ -62,6 +62,8 @@
 //   deno task check:dead-wiring --all           every offender, ledger included
 //   deno task check:dead-wiring --print-ledger  paste-ready regenerated ledger
 
+import { justified as okMarker } from "../src/diagnostics/ok-marker.ts";
+
 export type Offender = {
   file: string;
   line: number;
@@ -176,7 +178,9 @@ const lineOf = (src: string, idx: number): number =>
  *  (`scripts/check-vacuous.ts`, `scripts/check-silent-catch.ts`,
  *  `src/server/graph-validator.ts`). A bare `aio-ok` with nothing after it is
  *  not an acknowledgement, it is a mute button. */
-const JUSTIFIED = /\baio-ok\b\s*[:\-—]\s*\S/;
+/** One marker, both spellings, honoured only when it is addressed to
+ *  this gate or to nobody in particular. See scripts/ok-marker.ts. */
+const JUSTIFIED = { test: (line: string) => okMarker(line, "dead-wiring") };
 
 /** Is the `/` at `i` a REGEX literal rather than division?
  *

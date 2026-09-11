@@ -8,6 +8,7 @@
 // keyed list really does break keyed moves.
 import { assert, assertEquals } from "@std/assert";
 import { Window } from "happy-dom";
+import { closeWindow } from "../src/testing/close-window.ts";
 import { h, setDevMode } from "../src/air/vdom.ts";
 import { _setDocument, _unmount, mount } from "../src/air/aio-renderer.ts";
 import { signal } from "../src/state/signal.ts";
@@ -23,7 +24,7 @@ async function withDom<T>(
   try {
     return await fn(doc, root);
   } finally {
-    await win.happyDOM.close();
+    await closeWindow(win);
   }
 }
 

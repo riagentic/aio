@@ -16,6 +16,7 @@
 // just took.
 import { assertEquals } from "@std/assert";
 import { Window } from "happy-dom";
+import { closeWindow } from "../src/testing/close-window.ts";
 import { h } from "../src/air/vdom.ts";
 import { _setDocument, _unmount, mount } from "../src/air/aio-renderer.ts";
 import { signal } from "../src/state/signal.ts";
@@ -25,7 +26,7 @@ function createDOM() {
   const doc = win.document as unknown as Document;
   const root = doc.createElement("div");
   doc.body.appendChild(root);
-  return { doc, root, cleanup: () => win.happyDOM.close() };
+  return { doc, root, cleanup: () => closeWindow(win) };
 }
 
 function fire(doc: Document, el: Element, name: string): void {

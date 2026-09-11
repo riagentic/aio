@@ -65,6 +65,81 @@ export type AsyncMethod<S> = (
   // deno-lint-ignore no-explicit-any
 ) => Promise<any>;
 
+/** `s.$call.sibling(args)` — one cell method calling another, on the SAME
+ *  draft (llama.master §6/§9, vidtune §6).
+ *
+ *  There were three ways to express it and all three were wrong.
+ *  `this.bench(...)` cannot type-check: the declared method takes the draft and
+ *  the callable one does not. `myCell.bench(...)` is a SECOND dispatch with its
+ *  own draft, so the caller's uncommitted writes are invisible to it and its
+ *  writes land in a different commit. Extracting a module-level helper works
+ *  and is the workaround every report reached for — and it is the dangerous
+ *  one, because a post-await read inside it is no longer analysed by `aiol`,
+ *  so the absence of a warning starts meaning "not analysed" while reading as
+ *  "fine".
+ *
+ *  `$call` is none of those: the sibling's body runs against the caller's own
+ *  draft, in the caller's own commit, and returns what it returns. An async
+ *  sibling hands back its promise; calling one from a SYNC method is refused by
+ *  name, because a sync method cannot await and a floating promise would commit
+ *  its writes into someone else's tick.
+ *
+ *  `M` is the cell's own method map. Pass it for precise types
+ *  (`MethodDraftMeta<MyState, typeof myMethods>`); the default keeps the
+ *  spelling available everywhere it is served, which is every method. */
+/** A cell's method map, as the sibling-call table sees it: each method minus
+ *  the draft parameter `$call` supplies for you.
+ *
+ *  Use it when you HAVE a method map to derive from —
+ *  `MethodDraftCalls<MethodCalls<typeof helpers>>`. Note that
+ *  `typeof methods` inside the same object literal is circular (TS7022,
+ *  "referenced directly or indirectly in its own initializer"), so the
+ *  everyday spelling is an interface: see {@linkcode MethodDraftCalls}. */
+export type MethodCalls<M> = {
+  readonly [K in keyof M]: M[K] extends // deno-lint-ignore no-explicit-any
+  (s: any, ...args: infer A) => infer R ? (...args: A) => R
+    // deno-lint-ignore no-explicit-any
+    : (...args: any[]) => any;
+};
+
+/** Opt-in draft annotation for `s.$call` — the sibling-call channel.
+ *
+ *  ```ts
+ *  interface Calls {
+ *    bench(kind: string): number
+ *  }
+ *
+ *  methods: {
+ *    bench(s: State, kind: string) { … },
+ *    async run(s: State & MethodDraftCalls<Calls>) {
+ *      s.$call.bench("cold")          // same draft, same commit
+ *    },
+ *  }
+ *  ```
+ *
+ *  `C` is what the table CALLS — the methods without their draft parameter,
+ *  because `$call` supplies it. An interface, not `typeof methods`: that is
+ *  circular inside the object literal the methods live in. Derive one with
+ *  {@linkcode MethodCalls} when the map is declared elsewhere.
+ *
+ *  Left at its default it is `any`: every sibling name resolves and nothing is
+ *  claimed about its arguments. A mapped type over an index signature would be
+ *  the obvious permissive spelling and is the wrong one — under
+ *  `noUncheckedIndexedAccess`, which aio itself sets, every lookup comes back
+ *  `fn | undefined` and the default would force `s.$call.bench!(…)` on
+ *  everyone.
+ *
+ *  A SEPARATE type rather than a member of {@linkcode MethodDraftMeta},
+ *  because that one is frozen: adding a required member would break any code
+ *  that CONSTRUCTS one — a hand-built fake draft in somebody's test — and
+ *  aio's surface promise has no exceptions. `$call` is served at runtime on
+ *  every draft either way; this type is only how a method SAYS so to the
+ *  type-checker, exactly as `Partial<MethodDraftMeta>` is for `$signal`. */
+// deno-lint-ignore no-explicit-any
+export type MethodDraftCalls<C = any> = {
+  readonly $call: C;
+};
+
 /** Opt-in draft annotation for cancellation-aware methods (perfect-aio D1):
  *  `async place(s: MyState & Partial<MethodDraftMeta>) { … s.$signal.… }`.
  *  At runtime all four are served on EVERY method, sync and async alike (the
@@ -998,7 +1073,7 @@ export const LIVE_RAW = Symbol("aio.liveRaw");
 /** The root-level pseudo-keys the live proxy SERVES rather than reads out of
  *  state — kept in one place so the `get` trap that answers them and the `has`
  *  trap that reports them exist cannot drift apart. */
-const ROOT_KEYS = new Set(["$do", "$commit", "$live", "$signal"]);
+const ROOT_KEYS = new Set(["$do", "$commit", "$live", "$signal", "$call"]);
 
 /** Identity through which a live proxy exposes its PATH, so a write that
  *  contains it can record an ALIAS of that path (see {@linkcode recordValue}).
@@ -1747,6 +1822,10 @@ export function createLiveProxy<S extends Record<string, unknown>>(
   // executor wires it to an immediate `__effects` dispatch so an own.set
   // factory is consumed in the same tick.
   _do?: (...effects: unknown[]) => void,
+  // `s.$call.sibling(...)` — the cell's own methods, bound to THIS draft.
+  // Root-level only, like $do/$commit/$live: a sibling call is about the cell,
+  // not about `s.items[3]`.
+  _call?: Record<string, (...args: unknown[]) => unknown>,
   // Stale-capture detection: shared per-invocation overwrite ledger + this
   // proxy's birth cursor into it. Defaults create the ledger at the root; the
   // recursion threads it through.
@@ -1825,6 +1904,9 @@ export function createLiveProxy<S extends Record<string, unknown>>(
           undefined,
           _watch,
           undefined,
+          undefined,
+          // `_call` — root-level only. A sibling call is about the cell, not
+          // about `s.items[3]`.
           undefined,
           _stale,
           _stale.log.length,
@@ -1941,6 +2023,10 @@ export function createLiveProxy<S extends Record<string, unknown>>(
       // like $commit/$live.
       if (key === "$do" && path.length === 0 && _do) {
         return _do;
+      }
+      // `s.$call.sibling(...)` — the sibling's body, on THIS draft.
+      if (key === "$call" && path.length === 0 && _call) {
+        return _call;
       }
       const fresh = effectiveAt();
       const value = (fresh as Record<string, unknown>)[key];
@@ -2147,6 +2233,7 @@ export function createLiveProxy<S extends Record<string, unknown>>(
       // executor wired the effect channel (it always does at runtime; a bare
       // `createLiveProxy` in a unit test does not), the other three always do.
       if (path.length === 0 && ROOT_KEYS.has(prop as string)) {
+        if (prop === "$call") return _call !== undefined;
         return prop !== "$do" || _do !== undefined;
       }
       // `"x" in s` reads x's existence — record the probed path, not the whole
@@ -2291,10 +2378,12 @@ export const DRAFT_DO_TARGET = Symbol("aio.draftDoTarget");
 export function withDraftDo<S extends object>(
   draft: S,
   doFn: (...effects: unknown[]) => void,
+  callFns?: Record<string, (...args: unknown[]) => unknown>,
 ): S {
   const wrapper: S = new Proxy(draft, {
     get(t, p, _r) {
       if (p === "$do") return doFn;
+      if (p === "$call" && callFns) return callFns;
       if (p === DRAFT_DO_TARGET) return t;
       if (p === "$commit") return _noCommit;
       if (p === "$live") return wrapper;

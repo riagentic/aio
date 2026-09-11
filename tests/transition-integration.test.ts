@@ -3,6 +3,7 @@
 
 import { assertEquals } from "@std/assert";
 import { Window } from "happy-dom";
+import { closeWindow } from "../src/testing/close-window.ts";
 import { signal } from "../src/state/signal.ts";
 import { h } from "../src/air/vdom.ts";
 import { _setDocument, _unmount, mount } from "../src/air/aio-renderer.ts";
@@ -10,7 +11,7 @@ import { Transition } from "../src/air/transition-component.ts";
 import { TransitionGroup } from "../src/air/transition-group.ts";
 import { fade, scale, slide } from "../src/air/transition.ts";
 
-// happy-dom timers drained via win.happyDOM.close() — sanitizers enabled
+// happy-dom timers drained via closeWindow(win) — sanitizers enabled
 
 function createDOM() {
   const win = new Window({ url: "https://localhost" });
@@ -85,7 +86,7 @@ Deno.test({
     );
 
     _unmount(handle);
-    await win.happyDOM.close();
+    await closeWindow(win);
   },
 });
 
@@ -142,7 +143,7 @@ Deno.test({
     assertEquals(root.querySelectorAll("div").length, 3, "3 items remain");
 
     _unmount(handle);
-    await win.happyDOM.close();
+    await closeWindow(win);
   },
 });
 
@@ -187,7 +188,7 @@ Deno.test({
     );
 
     _unmount(handle);
-    await win.happyDOM.close();
+    await closeWindow(win);
   },
 });
 
@@ -239,7 +240,7 @@ Deno.test({
     assertEquals(root.querySelectorAll("div").length, 3, "3 items total");
 
     _unmount(handle);
-    await win.happyDOM.close();
+    await closeWindow(win);
   },
 });
 
@@ -289,7 +290,7 @@ Deno.test({
     );
 
     _unmount(handle);
-    await win.happyDOM.close();
+    await closeWindow(win);
   },
 });
 
@@ -330,7 +331,7 @@ Deno.test({
     assertEquals(root.querySelector("#c"), null, "c removed");
 
     _unmount(handle);
-    await win.happyDOM.close();
+    await closeWindow(win);
   },
 });
 
@@ -389,6 +390,6 @@ Deno.test({
     );
 
     _unmount(handle);
-    await win.happyDOM.close();
+    await closeWindow(win);
   },
 });

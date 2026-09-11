@@ -3,6 +3,7 @@
 
 import { assert, assertEquals, assertExists } from "@std/assert";
 import { Window } from "happy-dom";
+import { closeWindow } from "../src/testing/close-window.ts";
 import { batch, computed, signal } from "../src/state/signal.ts";
 import {
   _diff,
@@ -42,12 +43,12 @@ import {
   connectAioDevTools,
 } from "../src/diagnostics/devtools.ts";
 
-// happy-dom timers drained via win.happyDOM.close() — sanitizers re-enabled
+// happy-dom timers drained via closeWindow(win) — sanitizers re-enabled
 
 function createDOM(): { document: Document; cleanup: () => void } {
   const win = new Window({ url: "https://localhost" });
   const doc = win.document as unknown as Document;
-  return { document: doc, cleanup: () => win.happyDOM.close() };
+  return { document: doc, cleanup: () => closeWindow(win) };
 }
 
 function setupMount(): {

@@ -27,6 +27,7 @@ import { VALID_AIO_CONFIG_KEYS } from "./config.ts";
 import { appDirs } from "./app-dirs.ts";
 import type { AioApp, AioConfig, AioUser, CellsConfig } from "./aio-types.ts";
 import type { CellFieldFilter } from "../state/cell-types.ts";
+import { setDiagnosticsOptOut } from "../diagnostics/diagnostics-optout.ts";
 
 /** Whether a top-level state key survives a `persist`/`ui` field filter.
  *  Mirrors the runtime filter semantics ("all"/"none"/include/exclude; default
@@ -86,6 +87,17 @@ export function buildLegacyConfig(
     logger,
     appRef,
   } = input;
+  // `cell({ diagnostics: false })` — this cell's actions stay out of the
+  // on-disk dev diagnostics. Registered HERE, beside the other per-cell facts
+  // pulled off `composed.cells`, rather than threaded through
+  // `initDiagnostics`: the writer is built before the cells are, and widening
+  // an exported signature for a process-global fact buys nothing. Replaced,
+  // not accumulated, so a second app in the same process starts clean.
+  setDiagnosticsOptOut(
+    composed.cells
+      .filter((c) => c.__aio.diagnostics === false)
+      .map((c) => c.__aio.id),
+  );
   // Dispatch-storm guard (watcher-loop field report #2) — every server dispatch
   // flows through beforeReduce, so frequency is measured (and optionally
   // circuit-broken) before reducers/effects/logging amplify the loop.

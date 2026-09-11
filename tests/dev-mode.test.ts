@@ -1,5 +1,6 @@
 import { assertEquals } from "@std/assert";
 import { Window } from "happy-dom";
+import { closeWindow } from "../src/testing/close-window.ts";
 import { h } from "../src/air/vdom.ts";
 import {
   _setDocument,
@@ -13,7 +14,7 @@ function createDOM() {
   const doc = win.document as unknown as Document;
   const root = doc.createElement("div");
   doc.body.appendChild(root);
-  return { document: doc, root, cleanup: () => win.happyDOM.close() };
+  return { document: doc, root, cleanup: () => closeWindow(win) };
 }
 
 Deno.test({

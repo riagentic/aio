@@ -2,7 +2,6 @@
 // schedule.after/every deterministically — toast auto-dismiss, debounce,
 // backoff, poll are now unit-testable without real timers.
 import { assertEquals } from "@std/assert";
-import { Window } from "happy-dom";
 import { h } from "../src/air/vdom.ts";
 import { cell } from "../src/state/cell-create.ts";
 import { schedule } from "../src/state/schedule.ts";
@@ -28,9 +27,7 @@ const T = toast as unknown as {
 };
 
 Deno.test("ui.advance fires the scheduled auto-dismiss", async () => {
-  const ui = await testUI(() => h("div", null, T.msg), {
-    document: new Window().document as any,
-  });
+  const ui = await testUI(() => h("div", null, T.msg));
   await T.push("hello");
   await ui.settle();
   assertEquals(T.msg, "hello");

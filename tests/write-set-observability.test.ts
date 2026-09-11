@@ -28,6 +28,7 @@ import { _resetAioRuntime } from "../src/state/runtime-reset.ts";
 import { createTimeline } from "../src/server/timeline.ts";
 import { makeRedactor, REDACTED } from "../src/diagnostics/redact.ts";
 import { testServer } from "../src/testing/server-test.ts";
+import { tempDir } from "../src/testing/temp-dir.ts";
 
 // deno-lint-ignore no-explicit-any
 type Any = any;
@@ -69,7 +70,7 @@ function asyncCell() {
 // ─── Journal: replay must reproduce what the method wrote ───────────────────
 
 Deno.test("write-set: journal replay reconstructs an ASYNC method's writes", async () => {
-  const dir = await Deno.makeTempDir({ prefix: "aio-wso-async-" });
+  const dir = await tempDir("aio-wso-async-");
   try {
     const c1 = asyncCell();
     const app1 = await boot([c1], dir);
@@ -96,7 +97,7 @@ Deno.test("write-set: journal replay reconstructs an ASYNC method's writes", asy
 
     // SIGKILL: that journal tail exists and no snapshot ever caught up.
     // A pristine data dir + the tail is exactly that situation.
-    const crashDir = await Deno.makeTempDir({ prefix: "aio-wso-crash-" });
+    const crashDir = await tempDir("aio-wso-crash-");
     await Deno.writeTextFile(`${crashDir}/data.db.journal`, jtxt);
     const app2 = await boot([asyncCell()], crashDir);
     assertEquals(
@@ -126,7 +127,7 @@ Deno.test("write-set: a TRANSACTIONAL commit is one journal entry, and replay re
         },
       },
     });
-  const dir = await Deno.makeTempDir({ prefix: "aio-wso-txn-" });
+  const dir = await tempDir("aio-wso-txn-");
   try {
     const t1 = mk();
     const app1 = await boot([t1], dir);
@@ -147,7 +148,7 @@ Deno.test("write-set: a TRANSACTIONAL commit is one journal entry, and replay re
       "the docs promise ONE journal entry per transactional commit",
     );
 
-    const crashDir = await Deno.makeTempDir({ prefix: "aio-wso-txn-crash-" });
+    const crashDir = await tempDir("aio-wso-txn-crash-");
     await Deno.writeTextFile(`${crashDir}/data.db.journal`, jtxt);
     const app2 = await boot([mk()], crashDir);
     assertEquals(
@@ -166,7 +167,7 @@ Deno.test("write-set: a TRANSACTIONAL commit is one journal entry, and replay re
 // ─── Timeline: the diff must describe the change ────────────────────────────
 
 Deno.test("write-set: the timeline shows the diff, attributed to the method", async () => {
-  const dir = await Deno.makeTempDir({ prefix: "aio-wso-tl-" });
+  const dir = await tempDir("aio-wso-tl-");
   try {
     const c = asyncCell();
     await using srv = await testServer({
@@ -233,7 +234,7 @@ Deno.test("write-set: an EXACT redaction pattern still covers the write-set it p
 // ─── Time travel: every entry is a state the app really had ─────────────────
 
 Deno.test("write-set: undo/redo never destroys a committed async write", async () => {
-  const dir = await Deno.makeTempDir({ prefix: "aio-wso-tt-" });
+  const dir = await tempDir("aio-wso-tt-");
   try {
     const c = asyncCell();
     await using srv = await testServer({

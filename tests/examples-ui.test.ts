@@ -4,6 +4,7 @@
 // Cells run on the real standalone dispatch loop (the android runtime path).
 import { assert, assertEquals, assertStringIncludes } from "@std/assert";
 import { Window } from "happy-dom";
+import { closeWindow } from "../src/testing/close-window.ts";
 import { _setDocument, _unmount, mount } from "../src/air/aio-renderer.ts";
 import { _reset, ensureConnected } from "../src/standalone-air.ts";
 
@@ -33,7 +34,7 @@ function createDOM(): {
   _setDocument(doc);
   const root = doc.createElement("div");
   doc.body.appendChild(root);
-  return { win, root, cleanup: () => win.happyDOM.close() };
+  return { win, root, cleanup: () => closeWindow(win) };
 }
 
 const tick = (ms = 30) => new Promise((r) => setTimeout(r, ms));

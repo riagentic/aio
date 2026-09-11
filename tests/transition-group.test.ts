@@ -1,12 +1,13 @@
 import { assertEquals } from "@std/assert";
 import { Window } from "happy-dom";
+import { closeWindow } from "../src/testing/close-window.ts";
 import { signal } from "../src/state/signal.ts";
 import { h } from "../src/air/vdom.ts";
 import { _setDocument, _unmount, mount } from "../src/air/aio-renderer.ts";
 import { TransitionGroup } from "../src/air/transition-group.ts";
 import { fade } from "../src/air/transition.ts";
 
-// happy-dom timers drained via win.happyDOM.close() — sanitizers enabled
+// happy-dom timers drained via closeWindow(win) — sanitizers enabled
 
 function createDOM() {
   const win = new Window({ url: "https://localhost" });
@@ -36,7 +37,7 @@ Deno.test({
     // Wait for enter animation timers to complete before unmount
     await new Promise((r) => setTimeout(r, 350));
     _unmount(handle);
-    await win.happyDOM.close();
+    await closeWindow(win);
   },
 });
 
@@ -68,7 +69,7 @@ Deno.test({
     // Wait for enter animation timers to complete before unmount
     await new Promise((r) => setTimeout(r, 350));
     _unmount(handle);
-    await win.happyDOM.close();
+    await closeWindow(win);
   },
 });
 
@@ -99,7 +100,7 @@ Deno.test({
     assertEquals(root.querySelector("#b"), null);
 
     _unmount(handle);
-    await win.happyDOM.close();
+    await closeWindow(win);
   },
 });
 
@@ -130,7 +131,7 @@ Deno.test({
     // Wait for FLIP animation timers to complete before unmount
     await new Promise((r) => setTimeout(r, 400));
     _unmount(handle);
-    await win.happyDOM.close();
+    await closeWindow(win);
   },
 });
 
@@ -150,7 +151,7 @@ Deno.test({
     assertEquals(root.querySelectorAll("div").length, 0);
     _unmount(handle);
     // No animations started — no wait needed
-    await win.happyDOM.close();
+    await closeWindow(win);
   },
 });
 
@@ -240,7 +241,7 @@ Deno.test({
 
     await new Promise((r) => setTimeout(r, 150));
     _unmount(handle);
-    await win.happyDOM.close();
+    await closeWindow(win);
   },
 });
 
@@ -286,7 +287,7 @@ Deno.test({
 
     await new Promise((r) => setTimeout(r, 300));
     _unmount(handle);
-    await win.happyDOM.close();
+    await closeWindow(win);
   },
 });
 
@@ -331,6 +332,6 @@ Deno.test({
     );
 
     _unmount(handle);
-    await win.happyDOM.close();
+    await closeWindow(win);
   },
 });

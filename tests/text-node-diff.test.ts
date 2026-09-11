@@ -7,6 +7,7 @@
 
 import { assertEquals } from "@std/assert";
 import { Window } from "happy-dom";
+import { closeWindow } from "../src/testing/close-window.ts";
 import { signal } from "../src/state/signal.ts";
 import { h } from "../src/air/vdom.ts";
 import { _setDocument, _unmount, mount } from "../src/air/aio-renderer.ts";
@@ -16,7 +17,7 @@ function dom() {
   const doc = win.document as unknown as Document;
   const root = doc.createElement("div");
   doc.body.appendChild(root);
-  return { doc, root, cleanup: () => win.happyDOM.close() };
+  return { doc, root, cleanup: () => closeWindow(win) };
 }
 const tick = () => new Promise<void>((r) => setTimeout(r, 0));
 

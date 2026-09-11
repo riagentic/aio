@@ -21,6 +21,7 @@
 // ratchet that is allowed to sit above the real count is just a ceiling, and a
 // ceiling rots.
 import { codeText } from "../src/diagnostics/code-mask.ts";
+import { justified as okMarker } from "../src/diagnostics/ok-marker.ts";
 
 /** The number of UNJUSTIFIED silent catches allowed in `src/`.
  *
@@ -82,7 +83,9 @@ const SILENT_HANDLER =
 /** The acknowledgement marker, matched the way graph-validator matches its
  *  own: `aio-ok` followed by a reason. A bare `aio-ok` with nothing after it
  *  is not an acknowledgement, it is a mute button. */
-const JUSTIFIED = /\baio-ok\b\s*[:\-—]\s*\S/;
+/** One marker, both spellings, honoured only when it is addressed to
+ *  this gate or to nobody in particular. See scripts/ok-marker.ts. */
+const JUSTIFIED = { test: (line: string) => okMarker(line, "silent-catch") };
 
 export type Hit = { file: string; line: number };
 

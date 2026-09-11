@@ -1,5 +1,6 @@
 import { assertEquals } from "@std/assert";
 import { useForm } from "../src/air/form.ts";
+import { closeWindow } from "../src/testing/close-window.ts";
 
 function delay(ms: number) {
   return new Promise<void>((r) => setTimeout(r, ms));
@@ -211,5 +212,5 @@ Deno.test("form.bind(): reset() puts the DOM back, and the value is a snapshot",
   assertEquals(input.value, "start", "reset() must clear the DOM too");
 
   _unmount(handle);
-  await win.happyDOM.close();
+  await closeWindow(win);
 });

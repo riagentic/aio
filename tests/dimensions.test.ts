@@ -1,5 +1,6 @@
 import { assertEquals, assertExists } from "@std/assert";
 import { Window } from "happy-dom";
+import { closeWindow } from "../src/testing/close-window.ts";
 import { h } from "../src/air/vdom.ts";
 import { _setDocument, _unmount, mount } from "../src/air/aio-renderer.ts";
 import { useDimensions } from "../src/air/dimensions.ts";
@@ -10,7 +11,7 @@ function createDOM() {
   const doc = win.document as unknown as Document;
   const root = doc.createElement("div");
   doc.body.appendChild(root);
-  return { document: doc, root, cleanup: () => win.happyDOM.close() };
+  return { document: doc, root, cleanup: () => closeWindow(win) };
 }
 
 Deno.test({
@@ -100,7 +101,7 @@ Deno.test({
       assertEquals(dims.height.value, 48);
       _unmount(handle);
     } finally {
-      await win.happyDOM.close();
+      await closeWindow(win);
     }
   },
 });

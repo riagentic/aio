@@ -965,6 +965,217 @@ it in tests with `t.expect.state((s) => s.status === "running")`.
 
 ---
 
+## Is it running? — `cell.$pending()`
+
+```tsx
+function Scanner() {
+  const busy = jobs.$pending("scan"); // reactive: re-renders when it changes
+  return (
+    <button disabled={busy > 0}>
+      {busy > 0 ? `Scanning (${busy})` : "Scan"}
+    </button>
+  );
+}
+```
+
+One app hand-rolled ten of these as booleans across five cells, each set at the
+top of a method and reset in a `finally` — ten chances to forget — and then
+replicated, persisted and migrated them like real domain state, which they are
+not.
+
+A **count**, not a flag. The fourth hand-rolled one was wrong in exactly the way
+a boolean has to be: two readings overlapped, so the first to finish declared
+silence while the speakers were still going.
+
+`$pending(method)` counts calls to that method; `$pending()` counts the whole
+cell. It is **not state**: never broadcast, never persisted, never migrated, and
+it does not appear in the cell's shape.
+
+It reports **this runtime**. On the server that is the executor's in-flight
+calls; in a browser it is that browser's own outstanding calls — which is what a
+spinner in that browser is actually about. aio was already bracketing both; the
+count was simply never exposed.
+
+A method that **throws** still releases its count — the `finally` everyone
+forgets, and the one case where a stuck spinner would hide the failure people
+most want to see.
+
+## Overlapping calls — `concurrency` and `ttl`
+
+Every app needs an answer to "what if this async method is called again while it
+is still running", most need two or three different ones, and none of them
+should be writing the plumbing. One app had **three** hand-written answers, and
+the comment on one records that its first-wins guard was itself a bug.
+
+```ts
+cell("search", {
+  concurrency: {
+    query: "newest", // the new call wins, the running one aborts
+    scan: "first", // the running call wins; the new caller adopts its result
+    save: "queue", // the new call waits, then runs
+  },
+  ttl: { fetchUser: 30_000 }, // ms an identical successful call is answered from
+  methods: {/* … */},
+});
+```
+
+`"newest"` **is** `cancelOn: { query: "self" }` — it registers exactly that
+trigger, so there is one mechanism and not two that can disagree. Declaring both
+for one method is refused.
+
+`"first"` resolves the second caller with the **running call's result**, not
+`undefined`. Resolving it with nothing is the bug that report shipped, and the
+difference between a policy and a silent drop.
+
+`"queue"` runs every call, one at a time, in order. It is not "drop".
+
+### `ttl`
+
+Within `ttl` milliseconds of a call that **succeeded**, an identical call
+returns the previous value without running. Two rules make it a cache rather
+than a hazard:
+
+- Keyed by the **arguments** as well as the method, so `fetchUser(1)` never
+  answers `fetchUser(2)`.
+- **Failures are never cached.** Caching one would make a single bad minute last
+  the whole ttl, which is the opposite of what a ttl is for.
+
+An argument with no stable key — a function, a symbol, a cycle — means the call
+is simply not cached and not deduped. Treating two different calls as the same
+one is the failure a cache must not have.
+
+Both keys are checked at `cell()` time: an unknown method name, and a **sync**
+method (which runs to completion inside one dispatch, so a second call can never
+overlap the first and the policy would silently never do anything).
+
+## Guarding the arguments — `args`
+
+A method's TypeScript signature protects the call sites you compile. Nothing
+protects `am dispatch`, a hand-written `{ type, payload: { args } }`, a form, a
+URL, or an agent — the boundary is untyped at runtime, which is why aio warns
+when the arity is wrong.
+
+```ts
+import { z } from "zod";
+
+cell("user", {
+  state: { age: 0 },
+  args: { setAge: [z.coerce.number().int().min(0)] },
+  methods: {
+    setAge(s, age: number) {
+      s.age = age;
+    },
+  },
+});
+```
+
+**Standard Schema**, not a schema language of aio's own — Zod, Valibot and
+ArkType all implement it, so this is the validator your app already uses doing
+the job it already does. An app with none of them can pass a plain predicate:
+
+```ts
+args: {
+  rename: [(v) => (typeof v === "string" && v.length > 0) || "name must not be empty"],
+}
+```
+
+Rules are **positional**, and `null` skips a position. Arguments past the
+declared list pass through untouched — declaring a rule for the first must not
+silently forbid the rest.
+
+It **coerces** as well as refuses: a schema returns the parsed value, and that
+value is what the method receives. `setAge("42")` from a form arrives as `42`.
+
+A failure names the cell, the method and the position, and the call never runs:
+
+```
+[user:setAge] argument 1 is invalid: must be >= 0
+```
+
+An **asynchronous** schema is refused by name. This runs on the dispatch path,
+which is synchronous for a sync method — awaiting would make one method kind
+behave differently from the other, and a schema that silently did not run is
+worse than none, because the app believes the boundary is guarded. Use the
+schema's sync form, or validate inside the method where you can await.
+
+## One method calling another — `s.$call`
+
+Composition inside a cell is not exotic, and until `s.$call` there were three
+ways to express it, all wrong:
+
+| spelling              | what happens                                                                                                                                                                             |
+| --------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `this.bench(...)`     | cannot type-check — the declared method takes the draft, the callable one does not                                                                                                       |
+| `myCell.bench(...)`   | a **second dispatch** with its own draft: your uncommitted writes are invisible to it, and its writes land in a different commit                                                         |
+| a module-level helper | works, and takes the body out of `aiol`'s reach — a post-await read there is no longer analysed, so the absence of a warning starts meaning "not analysed" while still reading as "fine" |
+
+`s.$call.bench(kind)` is none of those. The sibling's body runs against **your**
+draft, in **your** commit:
+
+```ts
+methods: {
+  bench(s: State, kind: string) {
+    s.samples.push({ kind, at: Date.now() })
+    return s.samples.length
+  },
+
+  async run(s: State) {
+    s.status = "running"
+    const n = s.$call.bench("cold")   // sees status === "running"
+    await load()
+    s.$call.bench("warm")             // same commit as everything above
+    s.status = "done"
+  },
+}
+```
+
+One action, one draft, one state publish. `myCell.bench()` would have been three
+of each.
+
+### Types
+
+`$call` is served at runtime on every draft, sync and async. To have the
+type-checker know about it, annotate the draft:
+
+```ts
+interface Calls {
+  bench(kind: string): number
+}
+
+methods: {
+  bench(s: State, kind: string) { /* … */ },
+  async run(s: State & MethodDraftCalls<Calls>) {
+    const n: number = s.$call.bench("cold")
+  },
+}
+```
+
+The interface lists what you **call** — the methods without the draft parameter,
+because `$call` supplies it. Write it out rather than deriving it with
+`typeof methods`: that is circular inside the object literal the methods live in
+(TS7022). When the map is declared elsewhere,
+`MethodDraftCalls<MethodCalls<typeof helpers>>` derives it for you.
+
+With no type argument (`s: State & MethodDraftCalls`) every sibling name
+resolves and nothing is claimed about its arguments.
+
+### What it refuses
+
+- **An async sibling from a sync method.** There is no way to await it there,
+  and a floating promise would write into the draft after the commit — changes
+  landing in somebody else's tick, which presents as "sometimes it works". The
+  refusal names the sibling and the fix.
+- **A name the cell does not have.** `s.$call.bnech()` says so and lists what is
+  available, instead of `undefined is not a function`.
+- **A cycle.** `$call` runs the body inline, so `a → b → a` recurses rather than
+  queueing. After 32 nested calls it stops with a sentence about your two
+  methods rather than a stack trace through aio's proxy.
+
+`$call` is not a dispatch: no action is journalled for the sibling, and
+`cancelOn`, `transaction` and access rules are the CALLER's. If you want the
+sibling to be its own action with its own draft — its own access check, its own
+journal entry — call it the ordinary way: `myCell.bench(kind)`.
+
 ## Selectors
 
 Derived values from cell state:

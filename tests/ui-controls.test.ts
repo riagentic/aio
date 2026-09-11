@@ -7,6 +7,7 @@
 // WAI-ARIA keyboard contracts, not the rendered markup.
 import { assert, assertEquals } from "@std/assert";
 import { Window } from "happy-dom";
+import { closeWindow } from "../src/testing/close-window.ts";
 import { h } from "../src/air/vdom.ts";
 import { _setDocument, mount } from "../src/air/aio-renderer.ts";
 import {
@@ -38,7 +39,7 @@ function setup() {
   const root = doc.createElement("div");
   doc.body.appendChild(root);
   _resetControlIds();
-  return { win, doc, root, cleanup: () => win.happyDOM.close() };
+  return { win, doc, root, cleanup: () => closeWindow(win) };
 }
 
 /** Dispatch a real keydown the component's handler will see. */

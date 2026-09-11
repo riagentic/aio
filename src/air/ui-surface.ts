@@ -48,6 +48,12 @@ export type UIElementInfo = {
   required?: boolean;
   /** Address: `<componentPath>:<name>` */
   path: string;
+  /** Layout geometry in CSS pixels, viewport-relative — present only when the
+   *  caller asked for it (`am surface --rects`) AND the element is in a real
+   *  laid-out document. See {@linkcode measureSurface}: a headless render has
+   *  no layout, and an all-zero rect there is a measurement that did not
+   *  happen, not an element of zero size. */
+  rect?: { x: number; y: number; w: number; h: number };
   /** Live references — local use only; stripped by {@linkcode serializeSurface} */
   _vnode?: VNode;
   _el?: Element;
@@ -551,6 +557,50 @@ export function buildUISurface(
   return node;
 }
 
+/** What {@linkcode measureSurface} found, so a caller can tell "everything is
+ *  0×0" from "there was no layout engine to ask". */
+export type SurfaceMeasurement = {
+  /** Elements that carry a live DOM reference (the measurable population). */
+  measurable: number;
+  /** Of those, how many reported a non-empty box. */
+  laidOut: number;
+};
+
+/** Attach `rect` to every element in a surface, in place.
+ *
+ *  WHY THIS RETURNS COUNTS. `getBoundingClientRect()` exists in happy-dom and
+ *  in any SSR shim, and it answers `0,0 0×0` for everything — there is no
+ *  layout engine behind it. A grid of zeroes is the most plausible-looking
+ *  wrong answer this repo can produce: it reads as a real measurement of a
+ *  collapsed UI, which is exactly the bug a reader would be hunting. So the
+ *  caller gets the population and the hit count and must say which it is. */
+export function measureSurface(node: UISurfaceNode): SurfaceMeasurement {
+  let measurable = 0;
+  let laidOut = 0;
+  const stack: UISurfaceNode[] = [node];
+  while (stack.length) {
+    const n = stack.pop()!;
+    for (const el of n.elements) {
+      const dom = el._el as
+        | { getBoundingClientRect?: () => DOMRect }
+        | undefined;
+      if (typeof dom?.getBoundingClientRect !== "function") continue;
+      measurable++;
+      const r = dom.getBoundingClientRect();
+      const rect = {
+        x: Math.round(r.left ?? 0),
+        y: Math.round(r.top ?? 0),
+        w: Math.round(r.width ?? 0),
+        h: Math.round(r.height ?? 0),
+      };
+      el.rect = rect;
+      if (rect.w !== 0 || rect.h !== 0) laidOut++;
+    }
+    stack.push(...n.children);
+  }
+  return { measurable, laidOut };
+}
+
 /** Wire-safe copy of a surface node — live vnode/element refs stripped.
  *  This is what a "ui-surface" request returns and what AI/`am` consumers read. */
 export function serializeSurface(node: UISurfaceNode): UISurfaceNode {
@@ -563,6 +613,7 @@ export function serializeSurface(node: UISurfaceNode): UISurfaceNode {
     path: node.path,
     text: node.text,
     // _dom intentionally dropped (wire-safety)
+    // `rect` rides along in `...rest` when measureSurface() ran first.
     elements: node.elements.map((
       { _vnode: _v, _el: _e, ...rest },
     ) => rest),

@@ -28,6 +28,7 @@
 // sweep finds comes back as a one-line repro.
 import { assert, assertEquals } from "@std/assert";
 import { Window } from "happy-dom";
+import { closeWindow } from "../src/testing/close-window.ts";
 import { fuzzEnvInt } from "./fuzz-seed.ts";
 import {
   ErrorBoundary,
@@ -641,7 +642,7 @@ Deno.test("differential: incremental diff renders what a fresh render would", as
   } finally {
     setDevMode(false);
     console.warn = origWarn;
-    await win.happyDOM.close();
+    await closeWindow(win);
   }
   // A fuzzer that explored nothing is a vacuous green (see fuzz-seed.ts).
   assert(
@@ -706,7 +707,7 @@ Deno.test("differential: SSR + hydrate + diff renders what mount would", async (
       }
     }
   } finally {
-    await win.happyDOM.close();
+    await closeWindow(win);
   }
   // If every round fell back to a full render, this suite proved only that the
   // fallback works — the hydrate path itself would be untested.
@@ -848,7 +849,7 @@ Deno.test("differential: hydrate ADOPTS the server's markup — no fallback, no 
       );
     }
   } finally {
-    await win.happyDOM.close();
+    await closeWindow(win);
   }
   // Negative evidence is worthless if the sweep touched nothing.
   assert(
@@ -964,7 +965,7 @@ Deno.test("differential: a signal-valued prop renders exactly what the plain val
       }
     }
   } finally {
-    await win.happyDOM.close();
+    await closeWindow(win);
   }
   assert(compared >= 15, `only ${compared} prop shapes compared`);
 });
@@ -1179,7 +1180,7 @@ Deno.test("differential: a keyed diff MOVES the node it already has — never re
     }
   } finally {
     _stampSid = false;
-    await win.happyDOM.close();
+    await closeWindow(win);
   }
   assert(
     identitiesChecked > ROUNDS * STEPS,
@@ -1342,7 +1343,7 @@ Deno.test("differential: a form control holds the same live state after SSR+hydr
       }
     }
   } finally {
-    await win.happyDOM.close();
+    await closeWindow(win);
   }
 });
 
@@ -1418,7 +1419,7 @@ Deno.test("differential: removing a prop leaves the control where a fresh render
       }
     }
   } finally {
-    await win.happyDOM.close();
+    await closeWindow(win);
   }
 });
 
@@ -1578,7 +1579,7 @@ Deno.test("differential: a boundary showing a fallback keeps its slot and patche
   } finally {
     setDevMode(false);
     console.warn = origWarn;
-    await win.happyDOM.close();
+    await closeWindow(win);
   }
 });
 
@@ -1633,7 +1634,7 @@ Deno.test("differential: a boundary that falls back removes its own region and n
       );
     }
   } finally {
-    await win.happyDOM.close();
+    await closeWindow(win);
   }
 });
 
@@ -2377,7 +2378,7 @@ async function runExtended(mode: "diff" | "hydrate"): Promise<XRun> {
     setDevMode(false);
     console.warn = origWarn;
     listeners.restore();
-    await win.happyDOM.close();
+    await closeWindow(win);
   }
   return {
     rounds,
@@ -2540,6 +2541,6 @@ Deno.test("a portal shares a target without touching the other portal's nodes", 
     _diff(host, null, v2, { doc });
     assertEquals(target.innerHTML, "", "portal content leaked in the target");
   } finally {
-    await win.happyDOM.close();
+    await closeWindow(win);
   }
 });

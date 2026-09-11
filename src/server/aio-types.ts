@@ -24,6 +24,7 @@ import type { ReduceBreakdown } from "../diagnostics/time-travel.ts";
  *  `resolveUser`/`users` entry attaches are readable without casting — the
  *  one opened definition lives in state/cell-types.ts (`AccessUser`). */
 import type { AccessUser } from "../state/cell-types.ts";
+import type { Budgets } from "../state/budgets.ts";
 /** The signed-in caller an aio app sees — `id` plus whatever your
  *  `resolveUser`/`users` config attaches (roles, profile fields). */
 export type AioUser = AccessUser;
@@ -392,6 +393,32 @@ export type AioConfig<S, A, E> = {
    *  silences them. Both spellings work — see {@linkcode PerfCheck}. */
   perfCheck?: PerfCheck;
   perfBudget?: PerfBudget; // override default budgets (reduce: 100, effect: 5)
+  /** Limits this app declares, in the units a person writes them in:
+   *  `{ cellState: "1MB", broadcastRate: "20/s", payload: "500KB" }`.
+   *
+   *  `perfBudget` is the TIMES (per-dispatch milliseconds); this is the SIZES
+   *  and RATES. Every one of these already existed and was reachable — a
+   *  hard-coded 1 MiB in the broadcaster, and `vitals.pressure.rateThreshold`
+   *  / `payloadThreshold` — and a field report asked for one obvious door onto
+   *  them, because no single default calls a 4 MB table pushed once a minute
+   *  and 200 bytes at 60 Hz both correctly (quant §9.3). An explicit
+   *  `vitals.pressure` still wins: it is the more specific instruction.
+   *
+   *  An unreadable value THROWS at boot, naming the key — a budget that
+   *  silently fell back to aio's own is a limit nobody declared and nobody can
+   *  see. */
+  /** Live reload: `false` turns it off, an array narrows what is watched.
+   *
+   *  Dev watches the whole app directory, and a `deno fmt` over the repo
+   *  therefore triggered full reloads repeatedly — which cost one app 760 MB
+   *  of GPU weights each time (watcher §3). `watch: ["src/ui"]` is the cheap
+   *  escape hatch; `watch: false` is for a process you simply do not want
+   *  restarted under you.
+   *
+   *  Paths are relative to the app directory (or absolute). Dev-only: a
+   *  production build has no watcher to turn off. */
+  watch?: false | string[];
+  budgets?: Budgets;
   renderBudget?: RenderBudget; // override render staleness/patch thresholds (sent to browser)
   /** How long an async method may run before the framework stops waiting for
    *  it (default 30000). It bounds BOTH sides of the same call: the effect
@@ -740,6 +767,8 @@ export type CellsConfig = {
   /** See {@linkcode CellsConfig.perfCheck}. */
   perfCheck?: PerfCheck;
   perfBudget?: PerfBudget;
+  /** Declared size/rate limits — see {@link AioConfig.budgets}. */
+  budgets?: Budgets;
   /** Client render-staleness / pending-patch thresholds — sent to the browser
    *  (page shell + `cfg` frame). Was accepted by the option validator but
    *  missing from this type AND dropped by the bridge; all three now agree. */

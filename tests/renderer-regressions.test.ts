@@ -7,6 +7,7 @@
 // what nobody thought of, these say what went wrong when it does.
 import { assert, assertEquals, assertStringIncludes } from "@std/assert";
 import { Window } from "happy-dom";
+import { closeWindow } from "../src/testing/close-window.ts";
 import {
   _diff,
   _render,
@@ -29,7 +30,7 @@ async function withDoc<T>(
   try {
     return await fn(win.document as unknown as Document, win);
   } finally {
-    await win.happyDOM.close();
+    await closeWindow(win);
   }
 }
 
