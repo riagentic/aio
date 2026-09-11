@@ -1,5 +1,6 @@
 import { assertEquals, assertRejects, assertStringIncludes } from "@std/assert";
 import { join } from "@std/path";
+import { tempDir } from "../src/testing/temp-dir.ts";
 import {
   copyDir,
   formatMb,
@@ -1314,6 +1315,33 @@ Deno.test("writeServiceFile: a build with no $USER does NOT run the service as r
   } finally {
     if (prev === undefined) Deno.env.delete("USER");
     else Deno.env.set("USER", prev);
+    await Deno.remove(dir, { recursive: true }).catch(() => {});
+  }
+});
+
+Deno.test("writeServiceFile: a cross-compiled server's unit names the artifact that EXISTS", async () => {
+  // The artifact on disk is `<name>` only on the host platform; a foreign
+  // platform ships `<name>-<platform>`. The unit's install hint said
+  // `cp <name>`, naming a file the build never produced — a service that
+  // fails on the target's first boot, the one place nobody is watching.
+  const { writeServiceFile } = await import("../src/build/build-compile.ts");
+  const { isHostPlatform } = await import("../src/build/platforms.ts");
+  const foreign = isHostPlatform("linux-arm64") ? "linux" : "linux-arm64";
+  const dir = await tempDir("aio-unit-x");
+  try {
+    await writeServiceFile(
+      {
+        binaryName: "svc",
+        appTitle: "Svc",
+        outDir: dir,
+        root: dir,
+        platform: foreign,
+      } as unknown as Parameters<typeof writeServiceFile>[0],
+    );
+    const unit = await Deno.readTextFile(join(dir, "svc.service"));
+    assertStringIncludes(unit, `sudo cp svc-${foreign} /usr/local/bin/svc`);
+    assertStringIncludes(unit, "ExecStart=/usr/local/bin/svc ");
+  } finally {
     await Deno.remove(dir, { recursive: true }).catch(() => {});
   }
 });

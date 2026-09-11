@@ -26,7 +26,7 @@ import { deepMerge } from "../state/deep-merge.ts";
 import { isCompiled, resolveKvPath } from "./paths.ts";
 import { parseCli } from "./aio-cli.ts";
 import { SYNC_VERSION_UNKNOWN } from "../sync/compact.ts";
-import { dirname, resolve } from "@std/path";
+import { dirname, resolve, SEPARATOR } from "@std/path";
 import { appDirs } from "./app-dirs.ts";
 import {
   AioError,
@@ -914,7 +914,9 @@ export async function bootStorage<S>(
   // say so once, at the moment the split is created.
   if (dbPathOverride && dbPathOverride !== ":memory:" && !cfg.appDir) {
     const home = appDirs(appId, cfg.appDir).home;
-    if (!resolve(dbPathOverride).startsWith(resolve(home) + "/")) {
+    // `SEPARATOR`, not "/": on Windows `resolve` answers with backslashes,
+    // and a literal "/" made this warning fire for every path there.
+    if (!resolve(dbPathOverride).startsWith(resolve(home) + SEPARATOR)) {
       log.warn(
         `dbPath puts the database at ${dbPathOverride}, but everything else ` +
           `(auth.db, tls/, meta.json, the journal) stays under ${home} — two ` +

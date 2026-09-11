@@ -166,10 +166,20 @@ export function replayJournal<S, A>(
   return { state: s, replayed, skipped };
 }
 
-/** Parse a journal file's lines into entries, skipping any corrupt tail line
- *  (a torn last write from a crash) — durability over strictness. */
+/** Parse a journal file's lines into entries, skipping any corrupt line —
+ *  durability over strictness.
+ *
+ *  A corrupt line is a torn write: a crash mid-append. This used to STOP the
+ *  parse there, on the reasoning that a torn line is the last line. It is the
+ *  last line only until the next boot appends after it — the file is
+ *  append-only, and the compaction that would drop the tear runs at the first
+ *  persist, not at boot. A crash inside that window left every entry after
+ *  the tear, all of them intact, unread and unreplayed. Skipping the line and
+ *  continuing loses exactly the torn entry (and, when the next append landed
+ *  on its line with no newline between, the one fused to it) — never the
+ *  tail. */
 export function parseJournal(text: string): JournalEntry[] {
-  let torn = false;
+  let corrupt = 0;
   const out: JournalEntry[] = [];
   for (const line of text.split("\n")) {
     if (!line.trim()) continue;
@@ -177,17 +187,16 @@ export function parseJournal(text: string): JournalEntry[] {
       const e = JSON.parse(line) as JournalEntry;
       if (typeof e.seq === "number" && typeof e.type === "string") out.push(e);
     } catch {
-      // torn/partial line (crash mid-write) — stop; nothing after it is trusted.
-      torn = true;
-      break;
+      corrupt++;
     }
   }
-  if (torn) {
+  if (corrupt > 0) {
     log.warn(
       "journal",
-      `journal: a torn line was found (a crash mid-write) — ${out.length} ` +
-        `entr${out.length === 1 ? "y" : "ies"} before it replay; anything ` +
-        `after it is discarded`,
+      `journal: ${corrupt} torn line${corrupt === 1 ? "" : "s"} skipped (a ` +
+        `crash mid-write) — ${out.length} intact entr${
+          out.length === 1 ? "y" : "ies"
+        } replay; the torn one${corrupt === 1 ? " is" : "s are"} lost`,
     );
   }
   return out;

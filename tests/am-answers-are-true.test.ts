@@ -137,3 +137,28 @@ Deno.test("VERB_FLAGS lists nothing a verb refuses, and nothing twice", () => {
   );
   assert(seen > 0, "`logs` declares no flags — nothing was checked");
 });
+
+// `--wait` is the one value flag whose BARE form is legal, so `--wait 30`
+// could not be expanded like `--port 3000`: it parsed as the default wait
+// plus a positional "30", which the verb then refused as a component that
+// does not exist — a true sentence about the wrong thing. It is refused by
+// name now, and the bare form and the `=` form are exactly what they were.
+Deno.test("am: `--wait 30` is refused by name, not read as a component called 30", () => {
+  const spaced = parseGlobalFlags(["--wait", "30"]).flags;
+  assert(
+    spaced.error?.includes("--wait=30"),
+    `no spelling hint: ${spaced.error}`,
+  );
+  assertEquals(
+    parseGlobalFlags(["--wait"]).flags.error,
+    undefined,
+    "bare --wait is the default",
+  );
+  assertEquals(parseGlobalFlags(["--wait=30"]).flags.wait, 30);
+  const named = parseGlobalFlags(["--wait", "myapp"]).flags;
+  assertEquals(
+    named.error,
+    undefined,
+    "a NAME after --wait is still the positional it was",
+  );
+});

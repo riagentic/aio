@@ -36,7 +36,17 @@ export type OwnEffect =
 
 // One-shot factory side-channel — consumed by the manager on handle().
 const pendingFactories = new Map<number, () => OwnResource>();
+/** When each parked factory was parked — the age a stale sweep reads.
+ *  Tokens are monotonic, so insertion order IS age order. */
+const parkedAt = new Map<number, number>();
 let nextToken = 1;
+let _now: () => number = () => Date.now();
+
+/** @internal Test seam — the clock the stale sweep reads. */
+// aio-ok: a test-only seam; production keeps Date.now
+export function _setOwnClockForTests(fn: (() => number) | null): void {
+  _now = fn ?? (() => Date.now());
+}
 
 /** Reset pending factories — for test isolation. A factory parked in
  *  `pendingFactories` (because the own.set effect was created but never
@@ -44,6 +54,7 @@ let nextToken = 1;
  *  otherwise leak for the process lifetime, capturing its closure scope. */
 export function _resetPendingFactories(): void {
   pendingFactories.clear();
+  parkedAt.clear();
   _leakWarned = false;
 }
 
@@ -69,7 +80,18 @@ export interface Own {
 /** How many parked factories may pile up before the side-channel is treated as
  *  leaking. A dispatch consumes its token in the same tick, so more than a
  *  handful outstanding means effects are being created and never handled. */
+/** Above this many parked factories a sweep runs. NOT a cap — a sweep drops
+ *  only factories older than `STALE_AFTER_MS`. It used to be a cap: the 65th
+ *  `own.set()` of one dispatch evicted the first, before the runtime had had
+ *  its turn, so a loop acquiring a hundred resources silently kept sixty-four
+ *  and warned once about a leak that was not one. */
 const MAX_PENDING = 64;
+/** A factory the runtime has not consumed this long after it was parked was
+ *  never going to be — effects are handled in the SAME dispatch that emitted
+ *  them, microseconds later. Five seconds is many dispatches. */
+const STALE_AFTER_MS = 5_000;
+/** The memory bound that still holds when everything parked is fresh. */
+const HARD_CAP = 4096;
 let _leakWarned = false;
 
 /** Evict the oldest parked factories once the side-channel stops draining.
@@ -82,14 +104,22 @@ let _leakWarned = false;
  *  nothing to say so. Tokens are monotonic, so Map order IS age order. */
 function _evictStaleFactories(): void {
   if (pendingFactories.size <= MAX_PENDING) return;
-  const overflow = pendingFactories.size - MAX_PENDING;
+  const now = _now();
   let dropped = 0;
-  for (const token of pendingFactories.keys()) {
-    if (dropped >= overflow) break;
+  for (const [token, at] of parkedAt) {
+    if (now - at < STALE_AFTER_MS) break; // everything after it is newer
     pendingFactories.delete(token);
+    parkedAt.delete(token);
     dropped++;
   }
-  if (!_leakWarned) {
+  // A burst can be fresh AND enormous; the bound is still a bound.
+  for (const token of pendingFactories.keys()) {
+    if (pendingFactories.size <= HARD_CAP) break;
+    pendingFactories.delete(token);
+    parkedAt.delete(token);
+    dropped++;
+  }
+  if (dropped > 0 && !_leakWarned) {
     _leakWarned = true;
     log.warn(
       "own",
@@ -110,6 +140,7 @@ export const own: Own = {
   set(id: string, factory: () => OwnResource): OwnEffect {
     const token = nextToken++;
     pendingFactories.set(token, factory);
+    parkedAt.set(token, _now());
     _evictStaleFactories();
     return { type: "__own", kind: "set", id, token };
   },
@@ -197,6 +228,7 @@ export function createOwnManager(log: Log): {
     }
     const factory = pendingFactories.get(effect.token);
     pendingFactories.delete(effect.token);
+    parkedAt.delete(effect.token);
     if (!factory) {
       // Replay or duplicate delivery — the one-shot factory was already
       // consumed. Never re-acquire (and never kill the live resource).

@@ -1010,6 +1010,13 @@ export function serviceExecFlags(
 /** Write a systemd .service unit file for the compiled binary. */
 export async function writeServiceFile(cfg: BuildConfig): Promise<void> {
   const { binaryName, appTitle, doRemote, doHeadless } = cfg;
+  // The artifact on disk is `binaryName` only on the host platform; a
+  // cross-compiled server target ships `binaryName-<platform>`, and a unit
+  // that said `cp binaryName` named a file the build never produced — a
+  // service that fails on the target's first boot, the one place the
+  // operator is not watching. The unit is installed under the plain name,
+  // so ExecStart keeps it; only the copy's SOURCE is the artifact.
+  const artifact = artifactName(binaryName, cfg.platform);
   // BUILD-MACHINE IDENTITY, and the unit is copied verbatim to a server.
   //
   // `User=` and `HOME=` were taken from the build environment and written as
@@ -1069,7 +1076,7 @@ After=network.target
 
 [Service]
 Type=simple
-# Adjust the path after install (sudo cp ${binaryName} /usr/local/bin/).
+# Adjust the path after install (sudo cp ${artifact} /usr/local/bin/${binaryName}).
 ExecStart=/usr/local/bin/${binaryName} ${execFlags.join(" ")}
 # Restart=always, not on-failure: an aio app that updates ITSELF stops with a
 # clean exit code 0 on purpose, so the supervisor starts the new binary. Under
@@ -1099,7 +1106,7 @@ WantedBy=multi-user.target
   console.log(`${OK} ${serviceFile}`);
   console.log(`
   Install:
-    sudo cp ${binaryName} /usr/local/bin/
+    sudo cp ${artifact} /usr/local/bin/${binaryName}
     sudo cp ${serviceFile} /etc/systemd/system/
     sudo systemctl enable --now ${binaryName}
 

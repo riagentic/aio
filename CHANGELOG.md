@@ -960,6 +960,56 @@ against a committed baseline. `--template=canvas` and `--template=assets`.
   at the right tool (the control plane carries commands, not bulk data). The
   request's true size stays unknown on purpose — the read aborts at the cap,
   which is the point of the bound.
+
+### The alpha52 hunt file, routed
+
+A 60-finding internal read of alpha52 had sat as "report only" since 2026-08-07.
+Every finding was checked against this tree: 17 had been fixed by a later alpha,
+36 are refused with the reason in `feedback/refused.md`, and six were real:
+
+- **A torn journal line in the MIDDLE discarded every intact entry after it.**
+  `parseJournal` stopped at the first corrupt line as if it were the last — true
+  only until the next boot appended after it, and compaction runs at the first
+  persist, not at boot. A crash in that window lost the whole tail. It skips the
+  tear and continues; the plain and the fused shape are pinned.
+- **`own.set()` dropped the 65th factory of one dispatch.** The leak bound was a
+  count taken at park time, before the runtime had its turn: a loop acquiring a
+  hundred resources silently kept sixty-four. The sweep is by age (five seconds
+  unconsumed), with a 4096 bound for a fresh flood.
+- **`am start --wait 30` was read as the default wait plus a component called
+  "30"** and refused for the wrong reason. Refused by name now, naming
+  `--wait=30`; the bare form and a name after it are unchanged.
+- **A cross-compiled server's `.service` told the operator to copy a file the
+  build never produced.** The install hint names the `<name>-<platform>`
+  artifact and the plain install name.
+- **Two literal `"/"` path comparisons** fired the `dbPath`-outside-`appDir`
+  warning for every Windows path and printed absolute paths in the build summary
+  there. `SEPARATOR` in both.
+- **`lww-per-key` now documents what a shared key resolves by** (the record's
+  clock, not a per-key one) and what to reach for when the merge must be
+  field-wise.
+
+## v1.0.0-alpha77 — the page the browser was actually served (2026-09-04)
+
+> The public surface is frozen from this release on
+> (`docs/basics/semver-policy.md`): an app that compiles and runs against
+> alpha76 compiles and runs against every later alpha, every beta, and 1.0.0.
+> Nothing in this entry is a migration.
+>
+> The release began with one report — the visual app manager had "stopped
+> working with the last aio" — and the cause is the shape everything else here
+> takes: the dev server's graph validator read `await import('/app.js')` inside
+> the framework's own HTML template as a real import, found `/app.js` in no
+> import map, and served the diagnostic page instead of the app; every gate was
+> green because no test had ever opened the manager in a browser. Then five
+> parallel hunts went over the renderer, the two transports, Electron,
+> state/persistence/sync and build/`am`, each finding proven with a test that is
+> red on the old code. Seventeen audit rounds committed after alpha76 and never
+> released are in the last section. Twenty-eight framework defects, eleven of
+> them silent data or update loss; the surface is byte-identical.
+
+### The visual app manager, and the validator that hid it
+
 - **`amui` was served the diagnostic page.** Its `*.server.ts` re-exports reach
   the framework's own `server-html-gen.ts`, whose prod HTML template contains
   `await import('/app.js')` — inside a template literal. The import scanner

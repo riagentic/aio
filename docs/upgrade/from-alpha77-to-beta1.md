@@ -90,6 +90,47 @@ Why it was worth taking once: with the literal inferred, **every release bump
 reported itself as a breaking change**, at exactly the moment somebody is
 cutting a release and inclined to regenerate without reading.
 
+## Stricter now — where an alpha77 app can notice
+
+None of these is a surface change. Each was silent, lenient or wrong on alpha77
+and now says so — and each is listed because a test, a script or a habit could
+have leaned on the old silence. The wire is protocol v3 as before; `hello.rate`
+and the dev-only `patch` frame are additions an alpha77 peer ignores.
+
+| what                                                                                                                           | alpha77                                                                           | beta1                                                                                                    | if it hits you                                                                             |
+| ------------------------------------------------------------------------------------------------------------------------------ | --------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------ |
+| `testCell`: a framework effect (`schedule.*`, `own.*`) that no dispatch ran (`settle()`) and no assertion read                 | green                                                                             | fails at the end of the test, naming the effect                                                          | read it (`t.getEffects()`, `t.expect.effects`), `settle()` it, or use `bootCells`/`testUI` |
+| `POST /__aio/trojan/dispatch` for a write `validate` refused, a method the cell lacks, a cell never booted or breaker-disabled | `200 {"ok":true}`                                                                 | `409 {"ok":false}`; `am dispatch` exits 1                                                                | a script that read `ok` was reading a lie — read the reason it now carries                 |
+| `am dispatch cell:method '{"args":[…]}'` (positional)                                                                          | parsed as one object argument, corrupting state                                   | refused, naming `--args=[…]`                                                                             | `--args='[…]'`; the literal object stays reachable as `--args='[{"args":[…]}]'`            |
+| a `spawn()`ed child still running at shutdown                                                                                  | outlived the app, invisibly                                                       | killed in shutdown phase 7, logged with the command and the `own.set` line that would have tied it       | tie it with `own.set`; a child meant to outlive the app is not what `spawn()` is for       |
+| `connectCli` offline queue                                                                                                     | flushed into whatever answered on that port; at 100 queued, refused the NEWEST    | verifies `appId` from `/__aio/health` before reopening; at cap evicts the OLDEST and rejects that caller | none, unless a script leaned on the old cap rule                                           |
+| a method payload JSON cannot carry (a BigInt, a cycle)                                                                         | threw inside the transport online; queued offline, then lost everything behind it | refused at the call site, online and offline, naming the action                                          | fix the payload                                                                            |
+| `onMount(() => fn)` returning a function                                                                                       | return value dropped                                                              | registered as the cleanup, exactly like `onCleanup(fn)`                                                  | if you ALSO wrote `onCleanup(fn)` beside it, delete one — it runs twice otherwise          |
+| `<ErrorBoundary>` on a re-render throw                                                                                         | error propagated; the boundary caught only the first render                       | the fallback renders, with the error                                                                     | none — the documented contract, now kept                                                   |
+| the HTTP accept loop dying (`EMFILE`, a low `ulimit -n`)                                                                       | process stayed up with nothing listening                                          | exits 1 with the reason, so a supervisor restarts it                                                     | none                                                                                       |
+| a sync burst over the server's per-connection rate                                                                             | client closed and denylisted for a minute                                         | paced at 60 % of the advertised `rate`; it lands                                                         | none — slower, and it succeeds                                                             |
+| `application/wasm`, and any compressible body over 8 MB                                                                        | sent raw                                                                          | gzip/br when accepted; streamed above 8 MB, so no `Content-Length`                                       | a progress bar reading `Content-Length` on a `.wasm` shows indeterminate                   |
+| an `async visible.forUser`                                                                                                     | the cell reached every client as `{}`, silently                                   | still `{}`, with a `log.error` naming the cell and the fix                                               | make the filter synchronous                                                                |
+| `am fix` on a three-part `"version"`                                                                                           | rewrote it to two parts                                                           | advises, writes nothing                                                                                  | none                                                                                       |
+| `am restart`                                                                                                                   | dropped the app's launch flags                                                    | keeps them                                                                                               | to shed a flag: `am stop`, then `am start` without it                                      |
+| draft root key `$call`, cell-stub property `$pending`                                                                          | —                                                                                 | reserved, like `$do` and `$live`                                                                         | a state field literally named `$call` is shadowed on the draft                             |
+
+Dev-only, never in a production build, all observe-only: an `App.tsx`-only edit
+is a `patch` (the module is re-imported and swapped in — module-level code in
+that one file runs again; `useLocal`, scroll and an embedded `<webview>`
+survive), the `*.server.ts` did-not-reload notice, the watcher following a
+path-imported framework, the boot line for a NEW state field, the short-argument
+warning, the contrast walk, and the error overlay.
+
+### How this was checked
+
+An app scaffolded by alpha77's own `am create`, with `dep/aio` pointed at beta1:
+`deno task check`, its starter test and `deno task build` are green, and the
+browser binary runs. alpha77's five example apps boot on beta1, serve the shell,
+answer `/__aio/health` and stop with `errors=0`. Across every file that declares
+a public type, the only line removed since alpha77 is the `VERSION` literal
+above.
+
 ## Retire
 
 Workarounds an app may still carry for bugs fixed here — each safe to delete

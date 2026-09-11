@@ -635,6 +635,15 @@ export function parseGlobalFlags(
     ) {
       // `-i N` — the short form of `--client-index=N`.
       expanded.push(`--client-index=${raw[++i]}`);
+    } else if (a === "--wait" && /^\d+$/.test(raw[i + 1] ?? "")) {
+      // `--wait` is the one value flag whose BARE form is legal, so it cannot
+      // join `takesValue` — but `--wait 30` is not "the default wait, plus a
+      // component called 30", which is what it parsed as; the refusal then
+      // blamed the number. Name the spelling instead.
+      flags.error ??= `--wait ${raw[i + 1]} is not a spelling am reads — ` +
+        `write --wait=${raw[i + 1]}. A bare --wait means the default wait, ` +
+        `and "${raw[i + 1]}" on its own is read as a component name.`;
+      expanded.push(`--wait=${raw[++i]}`);
     } else expanded.push(a);
   }
 
