@@ -113,6 +113,14 @@ Additive: `result = base + localDelta + remoteDelta`. Never conflicts.
 
 LWW per object key. Union of all keys from both sides.
 
+A key only one side has is kept. A key **both** sides changed is decided by the
+record's HLC — the later write of the whole record wins every shared key, so two
+replicas editing _different_ keys of one record at the same time do not each
+keep their own: the later record wins both. Per-key timestamps would need a
+per-key clock on the wire, which the protocol does not carry; put independently
+edited fields in separate records, or use `counter` / `set-add` where the merge
+must be field-wise.
+
 ```ts
 // A: { name: "Alice", age: 30 }, B: { name: "Alicia", bio: "eng" }
 // Result: { name: "Alicia", age: 30, bio: "eng" } (B's name wins by HLC)

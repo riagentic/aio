@@ -98,6 +98,25 @@ Deno.test("parseJournal: a torn final line (crash mid-write) is dropped", () => 
   assertEquals(entries.map((e) => e.seq), [1, 2]);
 });
 
+Deno.test("parseJournal: a torn MIDDLE line does not discard the intact tail", () => {
+  // A crash tore seq 2; the next boot appended 3 and 4 after it, then crashed
+  // again before the first persist could compact the tear away. Stopping at
+  // the tear lost 3 and 4 — both intact, both unreplayed.
+  const text = `{"seq":1,"type":"add","payload":1,"ts":0}
+{"seq":2,"type":"ad
+{"seq":3,"type":"add","payload":3,"ts":0}
+{"seq":4,"type":"add","payload":4,"ts":0}
+`;
+  assertEquals(parseJournal(text).map((e) => e.seq), [1, 3, 4]);
+  // FUSED: the tear had no newline, so the next append landed on its line.
+  // That one entry is lost with the tear; the line after it is not.
+  const fused = `{"seq":1,"type":"add","payload":1,"ts":0}
+{"seq":2,"type":"ad{"seq":3,"type":"add","payload":3,"ts":0}
+{"seq":4,"type":"add","payload":4,"ts":0}
+`;
+  assertEquals(parseJournal(fused).map((e) => e.seq), [1, 4]);
+});
+
 Deno.test("journal: sync mode fsyncs each append (power-cut durability)", async () => {
   await withDir((dir) => {
     const j = createJournal(join(dir, "j.log"), { sync: true });

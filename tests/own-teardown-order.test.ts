@@ -17,6 +17,7 @@ import { assert, assertEquals, assertRejects } from "@std/assert";
 import {
   _pendingFactoryCount,
   _resetPendingFactories,
+  _setOwnClockForTests,
   createOwnManager,
   own,
 } from "../src/state/own.ts";
@@ -58,22 +59,33 @@ Deno.test("own: disposeByPrefix tears down in REVERSE acquisition order too", ()
   m.disposeAll();
 });
 
-Deno.test("own: parked factories that never reach the runtime are bounded and reported", () => {
+Deno.test("own: a BURST of parked factories is kept whole — only STALE ones are dropped, and reported", () => {
   _resetPendingFactories();
   const warnings: string[] = [];
   const orig = console.warn;
   console.warn = (...a: unknown[]) => warnings.push(a.join(" "));
+  let t = 1_000_000;
+  _setOwnClockForTests(() => t);
   try {
-    // 500 effects created and NEVER handled — the shape of a method that
-    // throws after own.set(), repeated by a retry loop.
+    // 500 own.set() in ONE dispatch — a loop acquiring resources. The runtime
+    // has not had its turn yet, so nothing may be dropped: dropping by count
+    // here was the bug (64 kept, 436 silently never acquired, one warning
+    // about a leak that was not one).
     const heavy = new Uint8Array(1024);
     for (let i = 0; i < 500; i++) {
-      own.set(`leak:${i}`, () => () => void heavy.length);
+      own.set(`burst:${i}`, () => () => void heavy.length);
     }
-    assert(
-      _pendingFactoryCount() <= 64,
-      `the side-channel must be bounded — it held ${_pendingFactoryCount()} ` +
-        `closures, one per unhandled effect, for the process lifetime`,
+    assertEquals(_pendingFactoryCount(), 500, "a fresh burst is intact");
+    assertEquals(warnings.length, 0, "and nothing was reported as a leak");
+    // Six seconds later the same 500 are still parked: the shape of a method
+    // that threw after own.set(), repeated by a retry loop. The next park
+    // sweeps them, keeps itself, and says so — once.
+    t += 6_000;
+    own.set("later", () => () => {});
+    assertEquals(
+      _pendingFactoryCount(),
+      1,
+      "stale factories swept, the fresh one kept",
     );
     assert(
       warnings.some((w) => /own\.set\(\) factories were parked/i.test(w)),
@@ -86,8 +98,15 @@ Deno.test("own: parked factories that never reach the runtime are bounded and re
       1,
       "warned once, not once per drop",
     );
+    // The memory bound still holds for a FRESH flood.
+    for (let i = 0; i < 5000; i++) own.set(`flood:${i}`, () => () => {});
+    assert(
+      _pendingFactoryCount() <= 4096,
+      `bounded even when everything is fresh — held ${_pendingFactoryCount()}`,
+    );
   } finally {
     console.warn = orig;
+    _setOwnClockForTests(null);
     _resetPendingFactories();
   }
 });
