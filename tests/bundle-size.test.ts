@@ -78,9 +78,25 @@ const CEILING_GZ = {
   // chunk-aware reader in three places is the trade `feedback/refused.md`
   // already declined once — recorded in todo.md instead of decided in a hurry
   // at release time.
-  air: 68,
-  /** The same, plus one cell — measured 2 KB, which is what a cell costs. */
-  app: 70,
+  //
+  // Raised 68 → 72 at the beta1 release check (measured 71). The last day of
+  // the round put ~4 KB gz on the page, and this gate — flagged behind
+  // AIO_BUNDLE_SIZE — was not in the per-change runs, so it is itemised here
+  // from an esbuild metafile rather than remembered:
+  //   · the notify client (~1.5 KB: desktop-notify.ts, tray-actions.ts, the
+  //     effect and its frame) — a desktop notification a METHOD emits, shown
+  //     by every renderer, and a tray click dispatched through the page's
+  //     own door; the first bytes here that a user asked for by name;
+  //   · useResource / onChange (~1 KB) — a held thing with a refcount and a
+  //     generation guard, so a 760 MB model is opened once, not per render;
+  //   · the App.tsx hot-swap (~0.5 KB) — a .tsx edit patches the page instead
+  //     of reloading it, keeping a <webview> login and loaded weights;
+  //   · the component profiler and the dev error overlay (~1.8 KB) — dev-only
+  //     again, and the same trade as above: production downloads what it
+  //     never runs, until the dev-only chunk in todo.md exists.
+  air: 72,
+  /** The same, plus one cell — measured 3 KB, which is what a cell costs. */
+  app: 75,
 };
 
 const RUN = Deno.env.get("AIO_BUNDLE_SIZE") === "1";
