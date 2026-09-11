@@ -211,3 +211,7 @@ export {
 // React migration compat hooks (useState/useEffect/useMemo/useCallback) live
 // at "aio/air/compat" only — off the main surface. `useRef` is a native AIR
 // primitive and remains exported above.
+
+/** Ask for desktop-notification permission from a click handler — the one
+ *  place a browser grants it. See `notify()` and docs/clients/notifications.md. */
+export { requestNotificationPermission } from "./browser/desktop-notify.ts";

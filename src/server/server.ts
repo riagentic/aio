@@ -1719,6 +1719,7 @@ export function createServer(config: ServerConfig): ServerHandle {
     broadcast: (patches) => broadcaster.broadcast(patches),
     broadcastRaw: (msg, exclude) => broadcaster.broadcastRaw(msg, exclude),
     broadcastTT: () => broadcaster.broadcastTT(),
+    broadcastUi: (raw) => broadcaster.broadcastUi(raw),
     clientCount: () => wsMgr.connections.size,
     trojanPort,
     boundPort,

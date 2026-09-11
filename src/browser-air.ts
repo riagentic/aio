@@ -167,7 +167,10 @@ export {
 export { renderToStream } from "./air/ssr-stream.ts";
 
 // ── Shared utilities (AIO-47) ──────────────────────────────────────
-export { msg, own, schedule } from "./browser/browser-shared.ts";
+export { msg, notify, own, schedule } from "./browser/browser-shared.ts";
+/** Ask for desktop-notification permission from a click handler — the one
+ *  place a browser grants it. See `notify()`. */
+export { requestNotificationPermission } from "./browser/desktop-notify.ts";
 
 // ── AIR hooks (signal-based) ────────────────────────────────────────
 export {

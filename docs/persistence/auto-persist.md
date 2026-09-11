@@ -317,6 +317,7 @@ const app = await aio.run({ cells: [myCell] });
 
 const json = app.snapshot!(); // export current state as JSON
 app.loadSnapshot!('{"counter": 42}'); // replace state, broadcast to all clients
+app.loadSnapshot!(otherAppsFile, { force: true }); // a file whose cell set does not match — refused without force
 ```
 
 ### HTTP endpoints

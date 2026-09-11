@@ -17,6 +17,7 @@ import {
   tmplKeyboardShortcuts,
   tmplParentWatch,
   tmplRendererDiagnostics,
+  tmplTray,
   tmplWillNavigate,
   tmplWindowShape,
   toSlug,
@@ -259,6 +260,7 @@ ${tmplWindowShape(opts.meta, { preload: "preloadFile" })}
   const win = new BrowserWindow(b);
   if (b.x == null) win.center();
 
+  let __aioIcon = null;
   try {
     const { nativeImage } = require('electron');
     const iconPath = BASE_DIR
@@ -273,10 +275,12 @@ ${tmplWindowShape(opts.meta, { preload: "preloadFile" })}
       ? fs.readFileSync(iconPath).toString('base64')
       : ${JSON.stringify(opts.defaultIcon ?? "")};
     if (b64) {
-      win.setIcon(nativeImage.createFromDataURL('data:image/png;base64,' + b64));
+      __aioIcon = nativeImage.createFromDataURL('data:image/png;base64,' + b64);
+      win.setIcon(__aioIcon);
     }
   } catch {}
 
+${tmplTray(opts.meta, "__aioIcon", opts.title)}
 ${tmplBoundsTracking()}
 ${tmplRendererDiagnostics(true)}
 
@@ -327,7 +331,9 @@ ${tmplRendererDiagnostics(true)}
   let down = false, lastErrCode = null; // report a backend outage ONCE, not per retry
   const _ipcQueue = [], IPC_QUEUE_MAX = 100; // AIO-284: offline queue
   let closing = false;
-  win.on('close', () => { closing = true; __aioQuitting = true; });
+  // close-to-tray (ui.tray) turned this close into a hide one listener
+  // earlier; that is not the app going away, so it must not read as one.
+  win.on('close', () => { if (__aioHiding) { __aioHiding = false; return; } closing = true; __aioQuitting = true; });
 
   // Frames the renderer has not received yet, in order. Nothing is ever
   // relayed straight past this queue — one path in, one path out, so a frame

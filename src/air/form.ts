@@ -2,10 +2,9 @@
 // Signal-based, works with the AIO renderer's tracking system.
 
 import { type Signal, signal } from "../state/signal.ts";
-import {
-  isStandardSchema,
-  type StandardSchemaIssue,
-  type StandardSchemaLike,
+import type {
+  StandardSchemaIssue,
+  StandardSchemaLike,
 } from "../state/arg-schema.ts";
 import { count } from "../diagnostics/fmt.ts";
 

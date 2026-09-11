@@ -31,6 +31,9 @@ export { schedule } from "../state/schedule.ts";
 // action creators, so the import must resolve. It is the REAL `own` — pure
 // effect creators plus a Map, no Deno API, nothing to gain from a second copy.
 export { own } from "../state/own.ts";
+export { notify } from "../state/notify.ts";
+import type { NotifyOptions } from "../state/notify.ts";
+import { showDesktopNotification } from "./desktop-notify.ts";
 
 // ── Transport helpers (shared between browser.ts and browser-air.ts) ──
 
@@ -236,6 +239,12 @@ export function handleControlFrame(
     // A3: version hellos on transports without their own handler (IPC —
     // client and server ship in one bundle, a real mismatch is a packaging
     // bug).
+    case "notify":
+      // A desktop notification a method emitted (`s.$do(notify(...))`), for
+      // this client to show. Shared by the WebSocket and IPC transports, like
+      // every other control frame here.
+      showDesktopNotification(f.d as NotifyOptions);
+      return true;
     case "proto": {
       const theirs = parseProtoHello(f.d);
       if (theirs) {

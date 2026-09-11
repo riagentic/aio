@@ -484,6 +484,38 @@ hand-built bar uses the same bridge aio's does:
 themed bar checks for `window.__aioWindow` and does not mount without it, so the
 same page serves a browser tab with no dead buttons and no build-time branch.
 
+## System tray (`ui.tray`)
+
+```ts
+await aio.run({
+  ui: {
+    tray: {
+      tooltip: "Player",
+      menu: [
+        { label: "Pause", method: "player:pause" },
+        { label: "Library", route: "/library" },
+        "-",
+      ],
+      closeToTray: true,
+    },
+  },
+});
+```
+
+`tray: true` is the icon with Show / Hide / Quit. Your items go above them: a
+`method` (`"cell:method"`, with `args`) is dispatched by the page through the
+same door a button uses — acks, validation, the offline queue — and a `route`
+shows the window and navigates. `closeToTray` turns the window's close button
+into hide; the tray's Quit, Cmd+Q and `app.quit()` still quit. Left-clicking the
+icon toggles the window where the desktop delivers a click (macOS shows the menu
+instead when one is set). The icon is the app's own — `icon.png`, or the
+generated monogram — so the tray shows the same identity as the taskbar.
+
+Both Electron shells carry it (the zero-port UDS one and the WebSocket one); the
+browser and Android targets ignore the key, with nothing to configure away.
+Linux needs the desktop's status-notifier support (GNOME: the AppIndicator
+extension); without it the icon is simply absent.
+
 ## Window state persistence
 
 Electron remembers window size and position across runs. Bounds are saved to

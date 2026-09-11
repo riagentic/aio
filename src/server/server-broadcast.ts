@@ -75,6 +75,8 @@ export interface Broadcaster {
   broadcast: (patches?: PatchEntry[]) => void;
   broadcastTT: () => void;
   broadcastRaw: (msg: string, exclude?: WebSocket) => void;
+  /** A raw frame to every UI client (WS + UDS); how many received it. */
+  broadcastUi: (raw: string) => number;
   /** Interactive priority: drain the coalescer NOW (client-action latency —
    *  see Coalescer.flushUrgent). */
   flushUrgent: () => void;
@@ -595,6 +597,30 @@ export function createBroadcaster(deps: BroadcastDeps): Broadcaster {
     }
   }
 
+  /** A raw frame to EVERY UI client — the WS connections and, through the
+   *  late-bound ref, the UDS/Electron ones. Returns how many received it, so
+   *  the caller can say "nobody was there" instead of assuming. Distinct
+   *  from `broadcastRaw`, which is the sync path and WS-only on purpose. */
+  function broadcastUi(raw: string): number {
+    let n = 0;
+    for (const [ws] of connections) {
+      try {
+        if (ws.readyState === WebSocket.OPEN) {
+          ws.send(raw);
+          n++;
+        }
+      } catch {
+        // aio-ok: a socket mid-close; the count is what actually reached one
+      }
+    }
+    const uds = deps.udsClientCount?.() ?? 0;
+    if (uds > 0 && deps.udsBroadcastRef?.fn) {
+      deps.udsBroadcastRef.fn(raw);
+      n += uds;
+    }
+    return n;
+  }
+
   function shutdown(): void {
     coalescer.dispose();
     ttCoalescer.dispose();
@@ -604,6 +630,7 @@ export function createBroadcaster(deps: BroadcastDeps): Broadcaster {
     broadcast,
     broadcastTT,
     broadcastRaw,
+    broadcastUi,
     flushUrgent: () => coalescer.flushUrgent(),
     /** Broadcast bytes/messages since this process started — see `_lifetime`. */
     lifetimeBroadcast: () => ({ ..._lifetime }),

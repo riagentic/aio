@@ -180,6 +180,8 @@ export interface ServerHandle {
   /** Send raw string message to all connected WS clients, optionally excluding one */
   broadcastRaw: (msg: string, exclude?: WebSocket) => void;
   broadcastTT: () => void;
+  /** A raw frame to every UI client, WS and UDS; how many received it. */
+  broadcastUi?: (raw: string) => number;
   shutdown: () => Promise<void>;
   clientCount: () => number;
   trojanPort?: number; // set when TLS is active — HTTP-only trojan endpoint on 127.0.0.1

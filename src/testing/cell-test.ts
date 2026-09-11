@@ -452,6 +452,7 @@ export function testCell(
         own: () => {
           fw = true;
         },
+        notify: () => {}, // inert in a test: readable, never armed, never owed
         app: () => {},
       });
       return fw;

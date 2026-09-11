@@ -86,6 +86,7 @@ const EXTRA_ON_BROWSER: Record<string, string> = {
   cell: "the `aio` specifier maps here — browser cell() stub",
   msg: "the `aio` specifier maps here — action creator",
   own: "the `aio` specifier maps here — owned-resource effect creators",
+  notify: "the `aio` specifier maps here — desktop-notification effect creator",
   schedule: "the `aio` specifier maps here — browser schedule stub",
   serverFn: "the `aio` specifier maps here — serverFn client proxy",
   serverFns: "the `aio` specifier maps here — serverFn definition passthrough",

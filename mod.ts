@@ -55,6 +55,8 @@ export type {
   ResolveUserFn,
   UiConfig,
 } from "./src/server/aio.ts";
+/** `ui.tray` — the system tray's shape. */
+export type { TrayConfig, TrayMenuItem } from "./src/server/aio-types.ts";
 /** The option types INSIDE that config. Each is the declared type of a key an
  *  app writes, and none of them was exported: an app that lifted
  *  `auth: {...}`, `ui: { theme }`, `wsLimits: {...}` or `dispatchStorm: {...}`
@@ -314,6 +316,9 @@ export type { SelfAction } from "./src/state/self.ts";
  * disable and app shutdown.
  */
 export { own } from "./src/state/own.ts";
+/** `s.$do(notify({ title, body }))` — a desktop notification, from a method. */
+export { notify } from "./src/state/notify.ts";
+export type { NotifyEffect, NotifyOptions } from "./src/state/notify.ts";
 /** Own effect type for keyed resource slots */
 export type { OwnDisposer, OwnEffect, OwnResource } from "./src/state/own.ts";
 /** Union of everything a method may return as an effect — use as the return

@@ -60,6 +60,7 @@ export {
   type SpawnHandle,
   type SpawnOptions,
   type SpawnStatus,
+  type SpawnStdin,
 } from "./server/spawn.ts";
 
 // The binary-tier primitive (tier ③, docs/persistence/big-data.md):

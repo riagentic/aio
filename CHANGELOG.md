@@ -961,6 +961,71 @@ against a committed baseline. `--template=canvas` and `--template=assets`.
   request's true size stays unknown on purpose — the read aborts at the cap,
   which is the point of the bound.
 
+### Desktop: notifications, a tray, and a child you can talk to
+
+Three asks from the same afternoon, each the aio way — one door, no second
+mechanism, and a client that says why when it cannot.
+
+- **`s.$do(notify({ title, body?, tag?, silent?, route? }))` — a desktop
+  notification is an EFFECT a method emits**, routed by the same `routeEffect`
+  as `schedule` and `own`, sent to every connected UI client as the new S→C
+  frame `notify`, and shown through the one Notification API every renderer has
+  (a browser tab, the Electron window — granted without a prompt — a PWA). The
+  icon is the app's monogram; a click focuses the app and follows `route`. A
+  browser that needs a gesture is told once, and
+  `requestNotificationPermission()` (`aio/air`) is the click handler's call.
+  Nothing is silent: a server with no UI client logs the title it could not
+  show; a WebView with no API says so once; a `connectCli` client prints the
+  line; `testCell` records it (`t.expect.effects(["__notify"])`) and, since it
+  arms nothing, an unread one owes the test nothing.
+  `docs/clients/notifications.md`.
+- **`ui.tray` — a system tray (Electron).** `true` for the app's own icon with
+  Show / Hide / Quit; an object for a tooltip, menu items (a `"cell:method"` is
+  dispatched by the PAGE through the same door as a button — acks, validation,
+  the offline queue; a `route` shows the window and navigates) and
+  `closeToTray`, which turns the close button into hide while the tray's Quit,
+  Cmd+Q and `app.quit()` still quit. ONE template for both shells (zero-port UDS
+  and WebSocket), so a tray cannot exist in one and not the other; the WebSocket
+  shell gained the minimal preload the relay needed — `__aioShell`, separate
+  from `__aioIPC` on purpose, because that bridge's presence is what selects the
+  IPC transport. Browser and Android ignore the key.
+  `docs/clients/electron.md#system-tray-uitray`.
+- **`spawn(cmd, { stdin: true })` — `handle.stdin.write()` / `close()`.** Off by
+  default (a child that reads a pipe blocks until EOF, so the default is EOF at
+  once); asked for, a pipe the app writes and closes, and a write after the
+  child exited is refused instead of lost. `docs/clients/desktop-jobs.md`.
+
+**Found by measuring the tray, and older than it: `ui.chrome`, `ui.theme`,
+`ui.layout` and `ui.lang` never reached the Electron launch.** `aio.run` handed
+the lifecycle a hand-picked FIVE-key copy of `ui` (alpha44); the lifecycle began
+reading those four from it in alpha61, and `tray` joined them today — all
+`undefined`, for sixteen releases, because every test fed the generated-script
+functions a hand-built `meta` and nothing read the script a real launch
+produced. Measured on a real Electron: `const TRAY = null` in the generated main
+of an app that configured a tray (the window closed and the app quit with
+`closeToTray: true`), and `b.frame = true` for `chrome: "none"`. The packaged
+binary runs the same launch, so it was the same there. The copy now carries
+every key the lifecycle names, and `tests/electron-launch-carries-ui.test.ts`
+boots an app against a fake `electron` (`$ELECTRON_PATH`) that captures the main
+it was handed and reads the keys back out of it — red on the old copy, naming
+`closeToTray`. Measured after the fix, dev and AppImage alike: tray populated,
+`b.frame = false`, `lang="de"` in the packaged shell, and close-to-tray hides
+the window with the app alive.
+
+**And the gate learned one more provable rule, narrowly.** `$do` needed to
+accept the third effect, and `check:api` called that BREAKING — correctly, by
+default: a property's function type is contravariant in its parameters, so
+widening one breaks whoever IMPLEMENTS the type (an app writing a config
+callback), even though every caller keeps compiling. What makes it safe is a
+fact the gate could not see: nobody outside the framework implements a method
+draft or the app handle. `@served` on a type says so, and under it a
+function-typed property is broken into parameters and return exactly as a
+top-level function is — a widened parameter reads as the addition it is; a
+narrowed one, an added required one or a changed return still break. Pinned on
+real `deno doc` output in both directions (`tests/api-served-widening.test.ts`).
+It also let **`app.loadSnapshot(json, { force: true })`** onto the public handle
+— the override the operator doors already honoured.
+
 ### The alpha52 hunt file, routed
 
 A 60-finding internal read of alpha52 had sat as "report only" since 2026-08-07.

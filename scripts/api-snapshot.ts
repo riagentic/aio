@@ -165,6 +165,20 @@ function hasTag(decl: DocDeclaration, tag: string): boolean {
   return tags?.some((t) => t.kind === tag) ?? false;
 }
 
+/** `@served` — a type the FRAMEWORK constructs and an app only calls (a
+ *  method draft, the app handle). `deno doc` has no such tag, so it arrives
+ *  as `{ kind: "unsupported", value: "@served …" }` — measured, which is why
+ *  this reads the value and not the kind. */
+function hasServedTag(decl: DocDeclaration): boolean {
+  const tags = decl.jsDoc?.tags as
+    | { kind: string; value?: unknown }[]
+    | undefined;
+  return tags?.some((t) =>
+    t.kind === "unsupported" && typeof t.value === "string" &&
+    /^@served\b/.test(t.value)
+  ) ?? false;
+}
+
 /** The digest a symbol carries when nothing about it can be pinned.
  *
  *  `deno doc` describes some `export const` declarations as bare
@@ -255,6 +269,14 @@ function typeLabel(t: DocDeclaration | undefined): string {
  *  erases the record. Each part is `<digest>~<label>`: compared by digest,
  *  printed by label. */
 async function unionParts(t: DocDeclaration | undefined): Promise<string[]> {
+  // A REST parameter's type is an array; what it accepts is the element. So
+  // `...more: A[]` growing to `...more: (A | B)[]` reads as the widening it
+  // is, instead of as one opaque part replaced by another.
+  // `(A | B)[]` arrives as array → parenthesized → union; both wrappers are
+  // spelling, not type.
+  if (t?.kind === "array" || t?.kind === "parenthesized") {
+    return unionParts(t.value as DocDeclaration | undefined);
+  }
   const branches = t?.kind === "union" && Array.isArray(t.value)
     ? t.value as DocDeclaration[]
     : t
@@ -276,6 +298,12 @@ async function unionParts(t: DocDeclaration | undefined): Promise<string[]> {
  *  against the real emitted JSON instead of against a whole snapshot diff. */
 export const _objectMembersForTest = (t: unknown): DocDeclaration[] =>
   objectMembers(t as DocDeclaration | undefined);
+/** Test seam: the member map for one symbol's declarations, as `deno doc`
+ *  emitted them — so the `@served` rule is pinned against the real shape. */
+export const _extractMembersForTest = (
+  decls: unknown[],
+): Promise<Record<string, string> | undefined> =>
+  extractMembers(decls as DocDeclaration[]);
 
 function objectMembers(tsType: DocDeclaration | undefined): DocDeclaration[] {
   if (!tsType) return [];
@@ -372,8 +400,44 @@ async function extractMembers(
     return undefined;
   }
 
+  const served = hasServedTag(decl);
   for (const m of props) {
     if (typeof m?.name !== "string") continue;
+    // A FUNCTION-TYPED property of a `@served` type is broken into its
+    // parameters and return exactly as a top-level function is, so a
+    // parameter that WIDENS reads as the addition it is.
+    //
+    // Only `@served`, deliberately. A property's function type is
+    // contravariant in its parameters: widening one is additive for every
+    // CALLER and breaking for an IMPLEMENTOR — an app that writes the
+    // function itself, as it does for every config callback. The tag is the
+    // framework's word that nothing outside it implements the type, which is
+    // the one fact that makes the widening provable; without it the whole-
+    // member digest and its blunt verdict stay, correctly.
+    const fnT = m.tsType as DocDeclaration | undefined;
+    const fn = served && fnT?.kind === "fnOrConstructor"
+      ? fnT.value as {
+        constructor?: boolean;
+        params?: DocDeclaration[];
+        tsType?: DocDeclaration;
+      }
+      : null;
+    if (fn && !fn.constructor) {
+      out[m.name] = `${m.optional ? "opt" : "req"}:fn`;
+      const params = fn.params ?? [];
+      for (let i = 0; i < params.length; i++) {
+        const p = params[i]!;
+        await put(
+          `${m.name}.param${i}`,
+          !!p.optional || p.kind === "rest",
+          p,
+        );
+        const parts = await unionParts(p.tsType as DocDeclaration | undefined);
+        out[`${m.name}.param${i}`] += `|${parts.join("+")}`;
+      }
+      await put(`${m.name}.return`, false, { tsType: fn.tsType });
+      continue;
+    }
     // ONE LEVEL DOWN, for a member whose type is an inline object literal.
     //
     // Same reasoning as the per-member digests themselves, one level deeper:
