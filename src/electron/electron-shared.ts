@@ -255,7 +255,7 @@ export function tmplWillNavigate(
       // it and no document came to reopen it). And every navigation TO / from
       // elsewhere reloaded the whole window: a white flash, a re-mounted tree
       // and a new connection on every app's most frequent navigation. A field
-      // report renamed its home page to /chat to escape it (cc §5.3).
+      // report renamed its home page to /chat to escape it (report 9 §5.3).
       let cur = null;
       try { cur = new URL(win.webContents.getURL()); } catch {}
       const noHash = (x) => x.protocol + '//' + x.host + x.pathname + x.search;

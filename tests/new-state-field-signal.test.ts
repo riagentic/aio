@@ -2,7 +2,7 @@
 //
 // _"A new field is safe — a stored blob without it deep-merges — but the author
 // had to reason that out. Silence on the safe case and a loud warning on the
-// unsafe one are indistinguishable from 'nobody checked'."_ (llama.master §10)
+// unsafe one are indistinguishable from 'nobody checked'."_ (report 8 §10)
 //
 // The detector already walked both shapes at boot and threw this direction
 // away: it reported a stored field the code no longer declares, and nothing at

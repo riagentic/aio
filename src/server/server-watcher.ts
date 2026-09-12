@@ -26,7 +26,7 @@ export interface WatcherDeps {
   /** `aio.run({ watch })` — `false` turns live reload OFF, an array narrows
    *  what is watched to those paths (relative to `absBaseDir`, or absolute).
    *
-   *  The cheap escape hatch (watcher §3): a `deno fmt` over the repo triggered
+   *  The cheap escape hatch (report 7 §3): a `deno fmt` over the repo triggered
    *  full model reloads repeatedly, because the watcher sees the whole app
    *  directory and a reload cost that app 760 MB of GPU weights. Narrowing to
    *  `["src/ui"]` costs one line and solves most of it; `false` is for the
@@ -73,7 +73,7 @@ export interface WatcherDeps {
  *  wrong: the checkout is not under `absBaseDir`, and `Deno.watchFs` does not
  *  follow symlinks anyway. So editing the framework while running an app
  *  against it changed nothing on screen — the page kept serving the modules it
- *  had (trading-app report §9.6).
+ *  had (report 2 §9.6).
  *
  *  Derived from the IMPORT MAP rather than by looking for `dep/aio`, because
  *  the import map is the thing that actually decides where `aio` comes from:
@@ -319,7 +319,7 @@ export function createFileWatcher(deps: WatcherDeps): FileWatcher {
     // registry hands back the copy it already has. The browser reloads, the
     // page looks new, and the server is still running the old function.
     //
-    // A report lost real time to exactly this (composer §6): a fix to a
+    // A report lost real time to exactly this (report 4 §6): a fix to a
     // `.server.ts` module "did not take", so the author verified state twice,
     // concluded the fix was wrong, and went back to re-reading correct code.
     // Nothing was wrong with the code. Nothing said so either, which is the

@@ -1,4 +1,4 @@
-// `AioErrorCode` is a PUBLIC union, and at beta1 it freezes: a member can
+// `AioErrorCode` is a PUBLIC union, and at 1.0.0-beta it freezes: a member can
 // never be removed again. So the only thing that can go wrong afterwards is
 // what had already gone wrong — a member that names a failure the framework
 // does not produce, documented in `docs/debugging/errors.md` as if it did.

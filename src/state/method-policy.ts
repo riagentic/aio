@@ -5,7 +5,7 @@
  *
  * One field report had THREE different hand-written answers to that one
  * question in a single app, and the comment on one of them records that the
- * original first-wins guard was itself a bug (llama.master §15). It is a
+ * original first-wins guard was itself a bug (report 8 §15). It is a
  * policy, not a feature: every app needs an answer, most apps need two or
  * three different ones, and none of them should be writing the plumbing.
  *

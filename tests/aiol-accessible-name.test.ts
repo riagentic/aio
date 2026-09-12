@@ -3,7 +3,7 @@
 // aio names UI by LABEL + ROLE: `<div class="button">Submit</div>` is
 // `SubmitButton`. An element with no name gets no semantic path, so it is absent
 // from `am surface`, unreachable by `am trigger`, and has no handle in `testUI`
-// — a framework-specific consequence no general linter can state (cc §9.4).
+// — a framework-specific consequence no general linter can state (report 9 §9.4).
 //
 // The rule is deliberately NARROW: one line, an empty body, no naming
 // attribute. A name can come from a variable, a child component or a multi-line
@@ -95,4 +95,19 @@ Deno.test("aiol: anything that HAS a name is silent", async (t) => {
       "aio-ok on the line above",
     );
   });
+});
+
+// Code, not text. A `<button></button>` inside a comment, a string or a regex
+// literal is not an element; the rule read raw lines and reported all three,
+// which is the tax the round set out to remove (1.0.0-beta field report).
+Deno.test("aiol: an unnamed element that exists only in a comment, a string or a regex is silent", () => {
+  const found = lintTsx(`
+// The old markup was <button></button> and nobody missed it.
+const example = "<input />";
+const re = /<select><\\/select>/;
+export default function App() {
+  return <button t="go">Go</button>;
+}
+`);
+  assertEquals(found, [], "nothing here is an element");
 });

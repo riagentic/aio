@@ -2,7 +2,7 @@
  * @module
  * `am migrate` — what THIS app has to change to move forward.
  *
- * A field report (wallet report §22.7) asked for `am migrate --from=alpha76`. The
+ * A field report (report 1 §22.7) asked for `am migrate --from=alpha76`. The
  * machinery for it already existed and had no front door: `REMOVALS` carries
  * every retired spelling with its hint and its upgrade guide, `removalsInSource`
  * finds them in real source, and `aiol --safe-fix` rewrites the ones that can
@@ -16,11 +16,12 @@
  * common and most reassuring outcome.
  *
  * `--from` narrows the registry to what was removed AFTER that release, so an
- * app already on beta1 is not shown alpha27's restructure. Omitted, it is read
+ * app already on 1.0.0-beta is not shown alpha27's restructure. Omitted, it is read
  * from the app's own pin, because the version the app is actually on is a fact
  * the tool can look up and a person has to remember.
  */
 import { join, relative } from "@std/path";
+import { parseVersion } from "./am-versions.ts";
 import type { GlobalFlags } from "./am-types.ts";
 import { detectMode, out } from "./am-output.ts";
 import {
@@ -54,14 +55,20 @@ const SKIP_DIRS = new Set([
  *  than silently hiding rows — a migration tool that under-reports is worse
  *  than one that over-reports, because the app boots and then explodes. */
 export function seriesRank(series: string): number {
-  const s = series.trim().toLowerCase().replace(/^v?1\.0\.0-/, "");
-  const m = /^(alpha|beta|rc)(\d+)$/.exec(s);
-  if (m) {
-    const tier = { alpha: 0, beta: 1, rc: 2 }[m[1] as "alpha"] ?? 0;
-    return tier * 100_000 + Number(m[2]);
-  }
-  if (/^\d+\.\d+/.test(s)) return 3 * 100_000; // a real release, after them all
-  return Number.MAX_SAFE_INTEGER;
+  // ONE ORDERING (am-versions.ts): the bare series (`alpha27`, `beta`) is the
+  // tagged release with its `1.0.0-` prefix elided, and everything else is a
+  // version string. From 1.0.0-beta on a release is `MAJOR.MINOR.PATCH-beta`
+  // (no digit after the word) until the suffix is dropped, so the rank has to
+  // be the version order itself, not a hand-rolled tier table keyed on `\d+`
+  // — that table read `1.0.1-beta` as "unknown" and showed EVERY removal.
+  const s = series.trim().toLowerCase();
+  const v = parseVersion(/^(alpha|beta|rc)\d*$/.test(s) ? `1.0.0-${s}` : s);
+  if (!v) return Number.MAX_SAFE_INTEGER;
+  const tier = v.pre === ""
+    ? 3
+    : { alpha: 0, beta: 1, rc: 2 }[v.pre as "alpha"] ?? 0;
+  return (((v.major * 1000 + v.minor) * 1000 + v.patch) * 4 + tier) * 1000 +
+    Math.min(v.preNum, 999);
 }
 
 /** Removals that landed AFTER `from`. No `from` = all of them. */

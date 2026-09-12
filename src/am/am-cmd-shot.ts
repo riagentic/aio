@@ -88,7 +88,7 @@ export async function cmdShot(
   const idxRaw = args.find((a) => !a.startsWith("--"));
   // The positional is a WINDOW INDEX, and the thing people type there is a
   // filename — `am shot shots/home.png` reads like every other screenshot tool
-  // on earth (vidtune §8.4). It is a detectable mistake, so it gets the flag
+  // on earth (report 3 §8.4). It is a detectable mistake, so it gets the flag
   // rather than "invalid window index: shots/home.png", which explains the
   // parser and not the intent.
   if (idxRaw !== undefined && /[/\\]|\.(?:png|jpe?g|webp)$/i.test(idxRaw)) {
@@ -126,7 +126,7 @@ export async function cmdShot(
   // `--check[=file]` / `--update[=file]` — a committed baseline. aio already
   // had the three hard parts (headless capture, deterministic state via
   // `am snapshot load`, any state reachable with `am dispatch`); this is the
-  // last 10% (composer §10.7).
+  // last 10% (report 4 §10.7).
   const checkFlag = args.find((a) =>
     a === "--check" || a.startsWith("--check=")
   );
@@ -182,7 +182,7 @@ export async function cmdShot(
     // composited. Immediately after an `am dispatch` — the exact moment anyone
     // takes a screenshot — the state has changed, the render is queued, and
     // nothing has been painted yet. The old pixels came back and the command
-    // said `wrote shot.png`. A field report (anathomy §2) read that as proof
+    // said `wrote shot.png`. A field report (report 6 §2) read that as proof
     // the UI had not updated, which was the opposite of the truth.
     //
     // Two `requestAnimationFrame`s: the first runs before the next paint, the

@@ -155,7 +155,7 @@ export async function latestTag(
 //    newest but semantically older, so date order would hand a 2.x user a 1.x
 //    checkout;
 //  • this repo already proves the two orders disagree — an abandoned
-//    `v1.0.0-beta1` (July 9) sorts above `v1.0.0-alpha38` (July 28) by version
+//    `v1.0.0-beta` (July 9) sorts above `v1.0.0-alpha38` (July 28) by version
 //    and below it by date.
 //
 // Git's own `--sort=-v:refname` gets prerelease ordering wrong for our scheme

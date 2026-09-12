@@ -123,7 +123,7 @@ export function createVitalsSystem(config: VitalsConfig): VitalsSystem {
   // `pressure: false` to disable. Default (undefined) = enabled.
   const pressureCfg = config.pressure;
   // `aio.run({ budgets })` is the discoverable door onto these two thresholds
-  // (trading-app report §9.3): a dashboard pushing 4 MB once a minute and a game loop
+  // (report 2 §9.3): a dashboard pushing 4 MB once a minute and a game loop
   // pushing 200 bytes at 60 Hz are both healthy, and no single default calls
   // them both correctly. An explicit `vitals.pressure` still WINS — it is the
   // more specific instruction, and silently overriding it would make the

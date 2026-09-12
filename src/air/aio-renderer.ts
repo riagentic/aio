@@ -21,6 +21,7 @@ import {
   h,
   setDevMode as _setDevModeVdom,
 } from "./vdom.ts";
+import { _resetHeadSsr } from "./head.ts";
 import { _detachRef } from "./vdom-create.ts";
 import { _cleanupActions, _unbindSignalText } from "./vdom-helpers.ts";
 import { _componentName } from "./hook-error.ts";
@@ -257,8 +258,12 @@ _setDevA11yCheck(_devA11yCheck);
 _setLifecycleHooks(onMount, onCleanup, afterRender);
 _setGroupAfterRender(afterRender, useRef);
 
-// Wire SSR ID counter reset into renderToString
-_setSsrStartHook(_resetSsrIdCounter);
+// Wire the per-render resets into renderToString: the useId counter and the
+// collected <head> (one request's title must never leak into the next).
+_setSsrStartHook(() => {
+  _resetSsrIdCounter();
+  _resetHeadSsr();
+});
 
 // -- Mount -------------------------------------------------------------
 

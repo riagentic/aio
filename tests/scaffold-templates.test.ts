@@ -1,10 +1,10 @@
 // `--template=canvas` and `--template=assets`.
 //
 // _"A template encodes tribal knowledge that documentation cannot make anyone
-// read, and it cannot break an existing app."_ (anathomy §10.6). These two
+// read, and it cannot break an existing app."_ (report 6 §10.6). These two
 // encode the knowledge two OTHER reports produced: the shape that makes a
-// canvas app testable (anathomy §6), and the pair of declarations an `assets`
-// mount needs (anathomy §7).
+// canvas app testable (report 6 §6), and the pair of declarations an `assets`
+// mount needs (report 6 §7).
 import { assert, assertEquals, assertStringIncludes } from "@std/assert";
 import { scaffold, TEMPLATES } from "../src/am/am-cmd-create.ts";
 import { dropTempDir, tempDir } from "../src/testing/temp-dir.ts";

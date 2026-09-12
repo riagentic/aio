@@ -1,7 +1,7 @@
 // `am testgen` — a typed test client, without the script.
 //
 // `ui.App["tab-settings"]` is a string key whose typo is a runtime `undefined`
-// (llama.master §11, §18). The GENERATOR already answered that: types come
+// (report 8 §11, §18). The GENERATOR already answered that: types come
 // from what actually renders, so `ui.App.SaveButton.click()` autocompletes and
 // a renamed button breaks the test at compile time.
 //

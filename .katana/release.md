@@ -45,6 +45,9 @@ Release surfaces (must be updated, not just the code — checked, not assumed):
 
 - the version string is identical in `deno.json`, `src/server/aio-cli.ts`
   (`VERSION`), and the README badge — none left on the previous version
+- the version is spelled per `docs/basics/semver-policy.md` "Version names":
+  `MAJOR.MINOR.PATCH-beta` with no digit after the word (`1.0.1-beta`, never
+  `1.0.0-beta2`), and a stable is the same triple with the suffix dropped
 - `CHANGELOG.md` has a dated entry for this exact version
 - an upgrade guide `docs/upgrade/from-<prev>-to-<this>.md` exists and is listed
   in `docs/upgrade/README.md`

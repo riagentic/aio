@@ -147,7 +147,7 @@ const TOKENS_END = "/* ── canvas ";
 /** The two regions `ui.theme: "base"` drops, as [start banner, end banner].
  *
  *  _"I want my own layout; I do not want to restyle `<input>`, `<textarea>`,
- *  `<button>` and focus rings from scratch."_ (newjob §4). Between "tokens"
+ *  `<button>` and focus rings from scratch."_ (report 5 §4). Between "tokens"
  *  (nothing paints, so every control is the browser's) and "auto" (a whole
  *  page shell) there was nothing, and the choice was 200 lines of control CSS
  *  or fighting a layout you did not ask for.

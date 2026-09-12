@@ -2,8 +2,8 @@
 // matches, read as "no errors". An unknown flag is a refusal naming the
 // accepted ones.
 //
-// `--level=`, `--tag=` and `--since=` are REAL flags since beta1 (watcher §6,
-// §8.8; composer §9.8), so the example that founded this test is now supported.
+// `--level=`, `--tag=` and `--since=` are REAL flags since 1.0.0-beta (report 7 §6,
+// §8.8; report 4 §9.8), so the example that founded this test is now supported.
 // The rule it exists for is unchanged and is what the cases below pin: a flag
 // `am logs` does not know must never be silently demoted to a search word,
 // because "no matches" and "that is not a filter" look identical in the output.

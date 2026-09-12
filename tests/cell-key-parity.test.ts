@@ -1,6 +1,6 @@
 // The runtime's key set and the TYPE's keys must agree.
 //
-// Field report (a trading app, a 24/7 trading desk): "the most expensive aio bug I have
+// Field report (report 2): "the most expensive aio bug I have
 // hit, by a wide margin. Cost: 61 type errors, about half a day, and — much
 // worse — EIGHT RELEASES of silently degraded type safety that nothing
 // reported."

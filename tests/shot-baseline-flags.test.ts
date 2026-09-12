@@ -3,7 +3,7 @@
 //
 // aio already had all three hard parts of visual regression: headless capture,
 // deterministic state via `am snapshot load`, and any state reachable with
-// `am dispatch` (composer §10.7). What was missing was the comparison — and
+// `am dispatch` (report 4 §10.7). What was missing was the comparison — and
 // the comparison is where the traps are, so this file asserts the ones that
 // decide whether a gate is trustworthy. The capture itself needs a live
 // Electron window and lives in the e2e suite.

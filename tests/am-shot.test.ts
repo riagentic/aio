@@ -279,7 +279,7 @@ Deno.test("noCdpMessage: an electron app still gets the --cdp remedy; an old loc
 // Immediately after an `am dispatch` — the exact moment anyone takes a
 // screenshot — the state has changed, the render is queued, and nothing has
 // been painted yet. The old pixels came back and the command said
-// `wrote shot.png`. A field report (anathomy §2) read that as proof the UI had
+// `wrote shot.png`. A field report (report 6 §2) read that as proof the UI had
 // not updated, which was the opposite of the truth.
 //
 // The command now waits for a committed frame, and when it cannot get one it
@@ -372,7 +372,7 @@ Deno.test("am shot: a window that will not paint is reported, not passed off as 
 // ── the positional is a window index, and people type a filename there ──────
 //
 // `am shot shots/home.png` reads like every other screenshot tool on earth
-// (vidtune §8.4). It got "invalid window index: shots/home.png" — a message
+// (report 3 §8.4). It got "invalid window index: shots/home.png" — a message
 // that explains the parser and not the intent. The mistake is detectable, so
 // it gets the flag.
 

@@ -1,7 +1,7 @@
 // `import "aio/server-only"` / `import "aio/client-only"` — the same statement
 // `*.server.ts` makes, made in the FILE instead of in its name.
 //
-// aio's convention is good and has one hole: it is a FILENAME (trading-app report §9.1).
+// aio's convention is good and has one hole: it is a FILENAME (report 2 §9.1).
 // You cannot always rename a file that twenty places already import, that is
 // generated, or that is published under that name. The markers close it.
 //

@@ -867,7 +867,7 @@ async function run(a?: any, b?: any): Promise<AioApp<any, any>> {
     // `updates  prod · manifest · every 6h · ask first` in the boot report,
     // and only THEN called `beginUpdates()` — which threw as an unhandled
     // rejection, after the success banner, leaving the app running with the
-    // feature dead. A field report (dm) shipped a self-update that could
+    // feature dead. A field report (report 10) shipped a self-update that could
     // never run for the app's whole life, green in every test and every
     // `deno task dev`, because the config that reaches this branch only
     // exists in a released build.
@@ -1637,7 +1637,7 @@ async function _runPhases<S, A, E>(
 
   // `budgets` — the limits this app declares, parsed BEFORE anything reads
   // them, so an unreadable value fails the boot rather than silently falling
-  // back to aio's own number (trading-app report §9.3). A budget that did not parse is a
+  // back to aio's own number (report 2 §9.3). A budget that did not parse is a
   // limit nobody declared and nobody can see.
   setBudgets(resolveBudgets(config.budgets));
 

@@ -125,7 +125,7 @@ const ALLOWED: Record<string, string[]> = {
     // envelope's single catalog exists to prevent (`SERVES.am` records it).
     "protocol",
     // `am testgen` writes a TYPED TEST CLIENT from the app's rendered surface
-    // (llama.master §11/§18: `ui.App["tab-settings"]` is a string key whose
+    // (report 8 §11/§18: `ui.App["tab-settings"]` is a string key whose
     // typo is a runtime undefined). The generator already existed in
     // `testing/ui-testgen.ts` and the only thing missing was a way to run it
     // without hand-writing a script — which is why an app that HAD the feature

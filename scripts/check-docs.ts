@@ -384,15 +384,24 @@ async function checkRetiredSpellings(): Promise<string[]> {
 /** The first upgrade guide that must carry `## Retire`; every later one too. */
 const RETIRE_SECTION_SINCE = 65;
 
-/** `docs/upgrade/from-alphaNN-to-alphaMM.md` with MM >= 65 must contain a
+/** `docs/upgrade/from-X-to-Y.md` with Y >= alpha65 (or any beta) must contain a
  *  `## Retire` heading. Older guides are history and stay as written. */
 async function checkRetireSections(): Promise<string[]> {
   const issues: string[] = [];
   const dir = `${DOCS_DIR}upgrade/`;
   for await (const entry of Deno.readDir(dir)) {
     if (!entry.isFile) continue;
-    const m = /^from-alpha(\d+)-to-alpha(\d+)\.md$/.exec(entry.name);
-    if (!m || Number(m[2]) < RETIRE_SECTION_SINCE) continue;
+    // `from-<a>-to-<b>.md`; only an alpha target below the floor is history.
+    // A beta-line target (`-to-1.0.1-beta.md`) is always in scope.
+    const m = /^from-(.+)-to-(.+)\.md$/.exec(entry.name);
+    if (!m) continue;
+    // In scope: `alphaN` from the floor on, and every beta-line / rc / stable
+    // name. Everything else (`v0.9`, `v1.0.0-alpha`, early alphas) is history.
+    const alpha = /^alpha(\d+)$/.exec(m[2]!);
+    const inScope = alpha
+      ? Number(alpha[1]) >= RETIRE_SECTION_SINCE
+      : /^\d+\.\d+\.\d+(?:-(?:beta|rc))?$/.test(m[2]!);
+    if (!inScope) continue;
     const text = await Deno.readTextFile(dir + entry.name);
     if (!/^## Retire\s*$/m.test(text)) {
       issues.push(`  upgrade/${entry.name}  no \`## Retire\` heading`);

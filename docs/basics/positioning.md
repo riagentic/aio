@@ -24,8 +24,11 @@ The full posture, the known limitations, and the nginx/Caddy recipes are in
 
 ## Deliberately not for
 
-- **Content/marketing sites & SEO** — AIR is client-rendered with basic SSR;
-  there are no server components. Use a content framework.
+- **Static sites and CDN-served content** — an aio app is one running process;
+  there is no static export. A content site that runs as an app is fine: SSR,
+  hydration and a per-page `<head>` (`useHead`) are there; server components are
+  not.
+
 - **Planet-scale public APIs** — the embedded model (SQLite, one process) is the
   point, not a limitation to engineer around. Multi-region distributed state,
   horizontal fleets → use a distributed stack.

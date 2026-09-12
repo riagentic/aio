@@ -1,7 +1,7 @@
 // `persist: { transform }` — shaping what goes OUT, not only repairing what
 // comes back.
 //
-// aio let you repair a restore (`onRestore`) and not shape a write (cc §8.4).
+// aio let you repair a restore (`onRestore`) and not shape a write (report 9 §8.4).
 // The reporter got lucky — their fat field was dead weight, so an `exclude`
 // covered it — and said plainly that had the field been needed ON SCREEN, the
 // only move left was a second mirrored cell kept in sync by hand.

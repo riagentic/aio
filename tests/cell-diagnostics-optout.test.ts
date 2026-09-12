@@ -1,7 +1,7 @@
 // `cell({ diagnostics: false })` — the key that means what `persist` does not.
 //
 // A field report read `persist: "none"` as also keeping the cell out of
-// `logs/actions.jsonl` (trading-app report §7). It does not, and the refusal in
+// `logs/actions.jsonl` (report 2 §7). It does not, and the refusal in
 // `feedback/refused.md` says why: `persist` is about the STATE STORE, the
 // journal is a dev diagnostic that is off in production and lives in the app's
 // own data directory, and making one key silently mean two things is worse

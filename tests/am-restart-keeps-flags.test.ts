@@ -4,8 +4,8 @@
 // skipped the recorded launch entirely. So `am restart --force` — where
 // `--force` means "yes, take over that other checkout" and says nothing about
 // how the app should boot — dropped the `--cdp --port=8140` it was started
-// with, and the app came back with `port: 0` and no debugging port (composer
-// §5, wallet report §22.4). The downstream error was excellent; the cause was silent,
+// with, and the app came back with `port: 0` and no debugging port (report 4
+// §5, report 1 §22.4). The downstream error was excellent; the cause was silent,
 // which is the half that costs an afternoon.
 //
 // The rule is per FLAG now, and it is pure, so it is pinned here rather than by
@@ -80,7 +80,7 @@ Deno.test("am restart: a typed app flag lands even with nothing to merge", () =>
 //
 // `--args` is the ARGUMENT LIST: `--args='["a","b"]'` passes TWO arguments, and
 // what people usually mean is one array. The app then throws about a value its
-// author never knowingly passed — `v.startsWith is not a function` (vidtune §4)
+// author never knowingly passed — `v.startsWith is not a function` (report 3 §4)
 // — and nothing in that message points back at the command line.
 //
 // Both readings are legal, so this is never a refusal. It is one line, offered

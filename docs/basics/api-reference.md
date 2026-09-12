@@ -188,16 +188,17 @@ reads state through `useAio()` / a cell handle.
 
 ## URL Routing
 
-| API                   | Description                                    |
-| --------------------- | ---------------------------------------------- |
-| `useRoute(pattern?)`  | Subscribe to URL -- `{ path, params, search }` |
-| `useNavigate()`       | Returns `navigate` function                    |
-| `navigate(to, opts?)` | Programmatic navigation                        |
-| `<Route>`             | Renders `element` when `path` matches          |
-| `<Outlet>`            | Renders matched child route in layout          |
-| `<Link to>`           | SPA anchor with active class support           |
-| `<NavLink to>`        | Link with automatic `active` class             |
-| `<Redirect to>`       | Navigate on mount (auth guards)                |
+| API                              | Description                                                       |
+| -------------------------------- | ----------------------------------------------------------------- |
+| `useRoute(pattern?)`             | Subscribe to URL -- `{ path, params, search }`                    |
+| `useHead({ title, meta, link })` | This page owns its `<head>` while mounted; `collectHead()` on SSR |
+| `useNavigate()`                  | Returns `navigate` function                                       |
+| `navigate(to, opts?)`            | Programmatic navigation                                           |
+| `<Route>`                        | Renders `element` when `path` matches                             |
+| `<Outlet>`                       | Renders matched child route in layout                             |
+| `<Link to>`                      | SPA anchor with active class support                              |
+| `<NavLink to>`                   | Link with automatic `active` class                                |
+| `<Redirect to>`                  | Navigate on mount (auth guards)                                   |
 
 ---
 

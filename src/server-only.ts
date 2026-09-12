@@ -5,7 +5,7 @@
  * aio already has a convention: `*.server.ts` is server-only, the dev server
  * refuses to serve one, and the build refuses a bundle that reached one. The
  * convention is good and it has one hole — it is a FILENAME. A field report
- * (trading-app report §9.1) named the shape: you cannot always rename the file. It is
+ * (report 2 §9.1) named the shape: you cannot always rename the file. It is
  * already imported by twenty places, it is a published module, it is generated,
  * or the name carries meaning the team relies on.
  *

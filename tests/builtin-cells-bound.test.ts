@@ -8,7 +8,7 @@
 // threw as an unhandled rejection, AFTER the success banner, leaving the app
 // running with the feature dead.
 //
-// A field report (a messenger app, a two-app repo whose client passes an explicit list)
+// A field report (report 10)
 // shipped a self-update that could never run for the app's entire life —
 // green in every test and every `deno task dev`, because the config that
 // reaches this branch exists only in a released build.

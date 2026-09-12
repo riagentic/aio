@@ -38,6 +38,18 @@ const OWNERS: Record<string, [Owner, string]> = {
     "the bleed that matters — a map from one test remapping another test's " +
     "forwarded positions. This is the same clear under a test-only name",
   ],
+  _resetHead: [
+    "HARNESS",
+    "the live <head> owners and the remembered base title. testUI's mount " +
+    "reset clears them beside _resetAioRuntime; a page left mounted by one " +
+    "test must not title the next test's document.",
+  ],
+  _resetHeadSsr: [
+    "LIFECYCLE",
+    "the entries one top-level renderToString/renderToStream collected; the " +
+    "SSR start hook clears them so one request's head never leaks into the " +
+    "next.",
+  ],
   _resetCss: [
     "MANUAL",
     "scoped-CSS rules live in src/ui/, and neither src/state/ (where " +

@@ -3,8 +3,8 @@
 // aio starts from a better position than anyone: cell state lives on the
 // server and already survives a reload, so what a reload costs is usually
 // small — `useLocal`, scroll, focus, stateful DOM. But "small" included an
-// embedded `<webview>` with its logged-in session (newjob §8.3), 760 MB of
-// loaded GPU weights (watcher §8.2) and a wallet's unlock (wallet report §22.4).
+// embedded `<webview>` with its logged-in session (report 5 §8.3), 760 MB of
+// loaded GPU weights (report 7 §8.2) and a wallet's unlock (report 1 §22.4).
 //
 // The mechanism is one line — `RootState.App` is the component a root renders
 // — and the whole difficulty is knowing WHEN it is safe. Re-importing a module

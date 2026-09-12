@@ -887,7 +887,7 @@ export function noLockMessage(appId: string): string {
   const apps = Deno.env.get("AIO_APPS_DIR");
   // What IS running, said HERE. The message already pointed at `am instances`,
   // and a pointer costs a round trip at the exact moment someone is looking at
-  // "not running" for an app they can see in their own browser (newjob §6:
+  // "not running" for an app they can see in their own browser (report 5 §6:
   // `am stop` missed a demonstrably running app while `--port=N` worked). The
   // id is almost always right there — a different cwd resolves a different
   // appId, and the running one is the answer.
@@ -1457,7 +1457,7 @@ const flagName = (a: string): string => a.split("=", 1)[0]!;
  *  recorded launch entirely. So `am restart --force` — where `--force` means
  *  "yes, take over that other checkout" and nothing about how to boot — threw
  *  away the `--cdp --port=8140` the app was started with, and the app came back
- *  with `port: 0` and no debugging port (composer §5, wallet report §22.4). The
+ *  with `port: 0` and no debugging port (report 4 §5, report 1 §22.4). The
  *  downstream error was excellent; the cause was silent.
  *
  *  Per FLAG, not all-or-nothing: an explicit `--port=9000` overrides a recorded
@@ -2002,7 +2002,7 @@ export function cmdInstances(_args: string[], flags: GlobalFlags): void {
       // case is noise, and the reader who needs it always has one.
       ...(anyCdp ? { CDP: inst.cdpPort ? String(inst.cdpPort) : "" } : {}),
       // DATA before HOME: three things are spelled like "where this app
-      // lives" and only `appDir` moves the database (wallet report §20). `home` was
+      // lives" and only `appDir` moves the database (report 1 §20). `home` was
       // the only one shown, so an app whose `appDir` pointed elsewhere looked
       // like it lived where its data did not. Shown only when it differs from
       // the default under `home` — a column repeating the obvious is noise.
@@ -2066,7 +2066,7 @@ export function cmdInstances(_args: string[], flags: GlobalFlags): void {
         home: inst.home,
         // Where the DATA is. `home` and `dataDir` are the SAME question only
         // when the app did not set `appDir`; three spellings mean "where this
-        // app lives" and only that one moves the database (wallet report §20). Always
+        // app lives" and only that one moves the database (report 1 §20). Always
         // present in --json (null when the lock predates it) — a field that
         // appears conditionally is a field a script has to guess about.
         dataDir: inst.dataDir ?? null,

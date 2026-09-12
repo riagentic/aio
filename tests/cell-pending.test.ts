@@ -3,7 +3,7 @@
 // A field report counted ten hand-rolled booleans across five cells, each set
 // at the top of a method and reset in a `finally` — ten chances to forget —
 // then replicated, persisted and migrated like real domain state, which they
-// are not (llama.master §14, cc §9.5).
+// are not (report 8 §14, report 9 §9.5).
 //
 // AND A COUNT, NEVER A FLAG. The fourth hand-rolled one was wrong in exactly
 // the way a boolean must be: two readings overlapped, so the first to finish

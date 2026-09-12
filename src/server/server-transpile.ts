@@ -94,7 +94,7 @@ export const transpileCache = new Map<
 
 // Resolved-realpath cache — realPathSync is a syscall; memoizing it keeps the
 // per-request transpile path off the event loop after the first hit. Cleared
-// alongside transpileCache on file change/delete (watcher) and on eviction.
+// alongside transpileCache on file change/delete (report 7) and on eviction.
 const _realPathCache = new Map<string, string>();
 
 /** Normalize path — resolve symlinks when possible, fall back to resolve().

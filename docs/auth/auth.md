@@ -876,10 +876,24 @@ security: { csp: "strict", cspNonce: true },
 ```
 
 Every `<script>` in the shell is stamped with a fresh per-response nonce,
-including anything you put in `ui.head`. Styles deliberately keep
-`'unsafe-inline'`: that directive also governs the `style=` **attribute**, which
-`style={{…}}` produces on ordinary components, so noncing styles would break
-most apps in exchange for a directive nobody asked about.
+including anything you put in `ui.head`. The nonce **composes** with your own
+`cspDirectives`: a `script-src` you write gets `'nonce-…'` appended, and
+`{nonce}` names it anywhere you need it — so one extra script host and the nonce
+are not a choice:
+
+```ts
+security: {
+  csp: "strict",
+  cspNonce: true,
+  cspDirectives: { "script-src": "'self' https://cdn.example.com" }, // + the nonce
+}
+```
+
+A `{nonce}` with `cspNonce` off is refused at boot — there is nothing to put
+there, and a policy with a literal placeholder blocks everything. Styles
+deliberately keep `'unsafe-inline'`: that directive also governs the `style=`
+**attribute**, which `style={{…}}` produces on ordinary components, so noncing
+styles would break most apps in exchange for a directive nobody asked about.
 
 ### Keeping secrets out of clients and disk
 

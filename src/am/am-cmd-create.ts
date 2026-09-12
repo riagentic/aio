@@ -566,7 +566,7 @@ release-key.json
 //
 // The 3D/2D half of an app has no framework test: under happy-dom there is no
 // WebGL context, so `testUI` cannot drive a canvas at all. A report found the
-// answer unaided (anathomy §6) and it is worth scaffolding rather than only
+// answer unaided (report 6 §6) and it is worth scaffolding rather than only
 // writing down: pull the DECISIONS out of the imperative shell, so "what did
 // the ray hit" and "where is everything now" are pure functions of what the
 // renderer knows, and only the drawing calls stay untestable.

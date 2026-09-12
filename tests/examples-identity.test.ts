@@ -7,7 +7,7 @@
 // different apps. MEASURED before the fix — starting the counter example while
 // the updates example ran:
 //
-//   [AIO] Already running: aio at http://localhost:52312 (pid …) (home /home/dev/.aio)
+//   [AIO] Already running: aio at http://localhost:52312 (pid …) (home /home/u/.aio)
 //   … the appId also picks the data home, so both would read and write one
 //   database. Rename this one: aio.run({ appId: "…" })
 //

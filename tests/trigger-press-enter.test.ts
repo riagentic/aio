@@ -1,6 +1,6 @@
 // `am trigger <path> press "Enter"` on a visible, focusable <input>.
 //
-// A field report (newjob §6) had this refused. It is not refused now — but
+// A field report (report 5 §6) had this refused. It is not refused now — but
 // "I could not reproduce it" is not a fix, and an unreproducible report whose
 // shape nobody pinned is one release away from coming back. So the two layers
 // it passes through are asserted end to end, against the SAME functions the

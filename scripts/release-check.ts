@@ -237,17 +237,24 @@ async function surfaceChecks(): Promise<Result[]> {
 
   // The upgrade guide has to exist AND be reachable. Written-but-unlinked is
   // the failure mode: it looks done in the diff and is invisible to a reader.
+  // Two spellings of "this version" in a guide name: the alpha habit elided
+  // the `1.0.0-` (`from-alpha76-to-alpha77.md`); from the beta line on the
+  // guide carries the full triple (`from-alpha77-to-1.0.0-beta.md`,
+  // `from-1.0.0-beta-to-1.0.1-beta.md`), because `-to-beta.md` would name
+  // every beta at once.
   const cur = VERSION.replace(/^1\.0\.0-/, "");
   const guides = [...Deno.readDirSync(root + "docs/upgrade")]
     .map((e) => e.name)
-    .filter((n) => n.endsWith(`-to-${cur}.md`));
+    .filter((n) =>
+      n.endsWith(`-to-${cur}.md`) || n.endsWith(`-to-${VERSION}.md`)
+    );
   const index = await read("docs/upgrade/README.md");
   const linked = guides.some((g) => index.includes(g));
   out.push(surface(
     "upgrade guide exists and is listed",
     guides.length > 0 && linked,
     guides.length === 0
-      ? `no docs/upgrade/*-to-${cur}.md`
+      ? `no docs/upgrade/*-to-${VERSION}.md (or *-to-${cur}.md)`
       : linked
       ? guides.join(", ")
       : `${guides[0]} exists but is not listed in docs/upgrade/README.md`,

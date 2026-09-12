@@ -1,6 +1,6 @@
 // `serverImport` + `bootCells({ stub })` — the rung that did not exist.
 //
-// A field report named a cell there is no safe tier for (cc §8.6, §9.3): it
+// A field report named a cell there is no safe tier for (report 9 §8.6, §9.3): it
 // owns an OS process, `testCell` never reaches the spawn, and `bootCells`
 // spawns the REAL child — so "random actions against a real runtime" means a
 // real subprocess per action. Cassettes wrap a function you can reach; they

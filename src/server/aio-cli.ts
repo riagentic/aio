@@ -13,7 +13,7 @@ import { BUILD_BOOL_FLAGS, BUILD_VALUE_FLAGS } from "../build/build-flags.ts";
 /** Framework version — printed by --version, checked in tests.
  *
  *  Annotated `: string` on purpose. Left to inference this is the LITERAL type
- *  `"1.0.0-beta1"`, which lands in the public API snapshot — so every release
+ *  `"1.0.0-beta"`, which lands in the public API snapshot — so every release
  *  bump reported itself to `check:api` as a BREAKING signature change, at the
  *  exact moment the release is being cut and the tempting move is to regenerate
  *  and stop reading. A gate that cries wolf on the one action that always
@@ -24,7 +24,7 @@ import { BUILD_BOOL_FLAGS, BUILD_VALUE_FLAGS } from "../build/build-flags.ts";
  *  annotation is a WIDENING for every consumer — with the literal type,
  *  `VERSION === "1.0.0-alpha76"` was a compile error for having no overlap;
  *  now it is an ordinary comparison. */
-export const VERSION: string = "1.0.0-beta1";
+export const VERSION: string = "1.0.0-beta";
 
 /** What `--version` prints: what this artifact IS, and what it was built with.
  *
@@ -450,7 +450,7 @@ function _parseCliUncached(args: readonly string[]): CliFlags {
     } else if (arg === "--no-watch" || arg === "--watch=false") {
       // Live reload off for THIS run. `deno fmt` over a repo triggered full
       // reloads repeatedly, and a reload cost one app 760 MB of GPU weights
-      // (watcher §3). Both spellings, because `--no-x` and `--x=false` are
+      // (report 7 §3). Both spellings, because `--no-x` and `--x=false` are
       // each the obvious one to somebody and refusing either teaches nothing.
       r.watch = false;
     } else if (arg.startsWith("--watch=")) {

@@ -35,7 +35,7 @@ Deno.test("migrateTasks: a pristine old scaffold gains the new set and KEEPS the
   // someone runs by name is the one irreversible thing it does, and
   // "pristine" is a fact about the COMMAND — it says nothing about whether
   // `dev:browser` is in the app's README, its CLAUDE.md and everyone's
-  // fingers (llama.master §4). They are reported as advice instead.
+  // fingers (report 8 §4). They are reported as advice instead.
   for (const k of ["dev:browser", "compile:remote:service", "dev:remote:cli"]) {
     assert(m.deleted.includes(k), `${k} was not reported as superseded`);
     assert(
@@ -144,7 +144,7 @@ Deno.test("cmdFix --migrate-tasks: converts an old scaffold, keeps the customize
     // one-vocabulary name; the user's task is untouched — and the superseded
     // matrix is STILL THERE, reported as advice rather than removed. `am fix`
     // deleting a task someone runs by name is the one irreversible thing it
-    // does (llama.master §4).
+    // does (report 8 §4).
     assert(cfg.tasks["dev:browser"], "a pristine task was deleted");
     assert(cfg.tasks["compile:remote:browser"], "a pristine task was deleted");
     assert(cfg.tasks["check"] && cfg.tasks["fmt"] && cfg.tasks["build"]);
@@ -402,7 +402,7 @@ Deno.test("cmdFix --migrate-tasks: derives build.targets from the tasks it delet
     // …and the superseded tasks are STILL THERE. Deriving the fleet is what
     // made deletion survivable at all; keeping the names is what makes it
     // safe. `am fix` removing a task someone runs by name is the one
-    // irreversible thing it does (llama.master §4), and this is the case that
+    // irreversible thing it does (report 8 §4), and this is the case that
     // would have hurt most — an app whose whole build vocabulary was those
     // task names.
     assert(cfg.tasks["compile:electron"], "a pristine task was deleted");

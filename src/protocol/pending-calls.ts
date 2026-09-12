@@ -5,7 +5,7 @@
  * A field report counted ten hand-rolled booleans across five cells, each set
  * at the top of a method and reset in a `finally` — ten chances to forget —
  * and then replicated, persisted and migrated like real domain state, which
- * they are not (llama.master §14, cc §9.5). A fourth one was wrong: a BOOLEAN
+ * they are not (report 8 §14, report 9 §9.5). A fourth one was wrong: a BOOLEAN
  * where two readings overlap, so the first to finish declared silence while
  * the speakers were still going.
  *

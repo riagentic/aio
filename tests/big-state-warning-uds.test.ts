@@ -1,6 +1,6 @@
 // The 1 MB cell-state guardrail was WS-only, so a desktop app never saw it.
 //
-// Field report (a trading app, a 24/7 trading desk): a catalog page put 83,000 rows in
+// Field report (report 2): a catalog page put 83,000 rows in
 // cell state — "a 17 GB heap and 200 ms render stalls… it is a bug aio makes
 // easy and gives no feedback about."
 //

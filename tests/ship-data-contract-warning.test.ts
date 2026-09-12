@@ -6,7 +6,7 @@
 // contract only by declaring `version` or an `onMigrate`, so an app whose
 // cells declare neither publishes the dangerous empty one.
 //
-// A field report (dm) published EVERY release that way. `aio ship`'s CLI does
+// A field report (report 10) published EVERY release that way. `aio ship`'s CLI does
 // print the count — but a repo with two apps must call `shipApp()` directly
 // (the fleet builder reads one `entry`), and the function said nothing. The
 // count was in the wrapper, not in the thing that builds the manifest.
