@@ -55,7 +55,7 @@ export type AioErrorCode =
   | "ACTION_REFUSED"
   // ── Reserved: named by the union, not currently EMITTED ─────────────────
   // Kept because removing a public union member is a breaking change and
-  // this union is frozen at beta1. `MACHINE_BLOCKED` belonged to the
+  // this union is frozen at 1.0.0-beta. `MACHINE_BLOCKED` belonged to the
   // `machine:` cell key, removed in alpha27 (src/state/removals-core.ts) —
   // a guarded action now reports as the `action-guarded` diagnostic event.
   // The three vitals codes report through the diagnostic bus

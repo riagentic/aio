@@ -1,7 +1,7 @@
 // `worker: true` was the best thing a field report adopted, and they found it
 // by hand-rolling one first.
 //
-// trading-app report §3: "Unambiguously the best thing I adopted this cycle — it deleted a
+// report 2 §3: "Unambiguously the best thing I adopted this cycle — it deleted a
 // hand-rolled worker and came out 456 lines lighter… The only criticism is
 // discoverability: I hand-rolled first and found the built-in later. If a
 // cell's tick regularly exceeds a frame budget, a dev-mode hint ('this cell

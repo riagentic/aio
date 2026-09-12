@@ -253,7 +253,7 @@ export function bindCell(
  *  at definition), so installing and overriding them is always safe. */
 export function installDefaultStateGetters(def: CellDef): void {
   // `cell.$pending("scan")` — how many calls to that method are in flight in
-  // THIS runtime, reactively (llama.master §14, cc §9.5). Ten hand-rolled
+  // THIS runtime, reactively (report 8 §14, report 9 §9.5). Ten hand-rolled
   // booleans across five cells, each set at the top and reset in a `finally`,
   // then replicated, persisted and migrated like real domain state — which
   // they are not. This is not state: it is never broadcast, never persisted,

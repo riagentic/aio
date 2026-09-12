@@ -4,8 +4,8 @@
 // anyone here — cell state lives on the server and already survives a reload —
 // so what is lost is usually small: `useLocal`, scroll, focus, stateful DOM.
 // But "small" included an embedded `<webview>` with its logged-in session
-// (newjob §8.3), 760 MB of GPU weights (watcher §8.2) and a wallet's unlock
-// (wallet report §22.4). Those do not come back.
+// (report 5 §8.3), 760 MB of GPU weights (report 7 §8.2) and a wallet's unlock
+// (report 1 §22.4). Those do not come back.
 //
 // AIR already preserves stateful nodes across a re-render: the diff PATCHES
 // the DOM rather than replacing it, so a `<webview>`, a `<video>`, focus and

@@ -4,14 +4,14 @@
 // `resource()` covers "fetch when this changes". It does not cover a resource
 // you HOLD — a camera, a socket, a GPU pipeline — where the close matters and
 // the key decides which one you have. The reporting app wrote that itself and
-// every one of its lifecycle bugs came out of that code (watcher §2, §8.5):
+// every one of its lifecycle bugs came out of that code (report 7 §2, §8.5):
 // two pipelines fighting over one camera on a remount, a hand-written
 // `alive(s)` guard at ~twenty call sites each of which is a bug if forgotten,
 // and a stale open installed over a newer one.
 //
 // And the rule deciding WHEN to swap could only live in a JSX handler, so
 // `am dispatch settings:patch` changed the state and the camera stayed open
-// (watcher §5, §8.4) — logically correct and genuinely surprising, which is
+// (report 7 §5, §8.4) — logically correct and genuinely surprising, which is
 // what a missing primitive looks like.
 import { assert, assertEquals } from "@std/assert";
 import { signal } from "../src/state/signal.ts";
@@ -113,7 +113,7 @@ function fakeCamera() {
 
 Deno.test("one open per key, reference-counted across holders", async () => {
   // Three components mounting the same resource fire three identical opens,
-  // and there is no key to dedup on (composer §10.4).
+  // and there is no key to dedup on (report 4 §10.4).
   const cam = fakeCamera();
   const key = signal<string | null>("front");
   const mk = () =>

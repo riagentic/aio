@@ -370,7 +370,7 @@ export const ${symbol} = cell("${name}", {
     out(mode === "pretty" ? `created ${file}` : { created: file }, mode);
   } else if (kind === "server") {
     // A SERVER-ONLY module plus the line that makes it exist. The report's
-    // complaint (anathomy §10.6-adjacent) is that scaffolding the file is the
+    // complaint (report 6 §10.6-adjacent) is that scaffolding the file is the
     // easy half: a `serverFns` namespace that nothing imports is registered
     // nowhere, so calling it from a cell fails at runtime with "unknown
     // namespace" — and the author has a file that looks finished.

@@ -169,7 +169,7 @@ export function trackCall(
   }
   entry.set.add(controller);
   // `cell.$pending("m")` — the count aio was already keeping and not showing
-  // (llama.master §14, cc §9.5). A COUNT, never a flag: a boolean is wrong the
+  // (report 8 §14, report 9 §9.5). A COUNT, never a flag: a boolean is wrong the
   // moment two readings overlap, which is the bug that report shipped.
   bumpPending(`${cellPrefix}:${method}`, 1);
   let released = false;

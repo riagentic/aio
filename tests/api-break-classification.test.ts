@@ -287,7 +287,7 @@ Deno.test("api: @experimental still carries no promise at member level", () => {
 Deno.test("api: only an alpha version may break; beta onward is frozen", () => {
   assertEquals(releaseChannel("1.0.0-alpha76"), "alpha");
   assertEquals(releaseChannel("1.0.0-alpha100"), "alpha");
-  assertEquals(releaseChannel("1.0.0-beta1"), "frozen");
+  assertEquals(releaseChannel("1.0.0-beta"), "frozen");
   assertEquals(releaseChannel("1.0.0-rc1"), "frozen");
   assertEquals(releaseChannel("1.0.0"), "frozen");
   assertEquals(releaseChannel("1.2.3"), "frozen");

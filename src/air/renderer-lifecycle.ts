@@ -16,6 +16,12 @@ import {
  *  mistake. The symptom was "my subscription never runs" with nothing to
  *  search for. Observe-only, so dev and prod behave identically — prod drops
  *  it exactly as before, dev additionally names it. */
+/** @internal Is a component body running right now? Hooks that would
+ *  otherwise warn "outside a component render" ask this first. */
+export function _inRender(): boolean {
+  return _currentCollector !== null;
+}
+
 function _warnOutsideRender(hook: string): void {
   if (!isDevMode()) return;
   console.warn(

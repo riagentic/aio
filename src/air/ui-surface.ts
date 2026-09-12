@@ -439,7 +439,7 @@ function walkOutput(
  *  Surface paths join their segments with `/` and wrap a key in `[…]`, so a key
  *  containing either character produces an address nothing can parse back:
  *
- *      App/TreePage/TreeRow[/home/dev/tmp/cc/src]:SrcButton
+ *      App/TreePage/TreeRow[/home/u/tmp/cc/src]:SrcButton
  *
  *  An absolute path is the NATURAL key for a file tree — it IS the row's
  *  identity — so this is a shape apps keep arriving at (a field report). Lookup

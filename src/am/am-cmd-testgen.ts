@@ -3,7 +3,7 @@
  * `am testgen` — write a typed test client from what the app actually renders.
  *
  * `ui.App["tab-settings"]` is a string key, and a typo in one is a runtime
- * `undefined` rather than a compile error (llama.master §11, §18).
+ * `undefined` rather than a compile error (report 8 §11, §18).
  *
  * The GENERATOR already existed and already answered that: `generateUITypes`
  * types the surface, so `ui.App.SubmitButton.click()` autocompletes and a

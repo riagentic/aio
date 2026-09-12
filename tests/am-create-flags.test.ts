@@ -4,7 +4,7 @@
 // recognise fell off the end in silence. Measured:
 //
 //     $ am create audit28 --dir=/tmp/somewhere
-//     {"created":"audit28","dir":"/home/dev/code/gen/aio/audit28", …}
+//     {"created":"audit28","dir":"/home/u/code/gen/aio/audit28", …}
 //
 // — success, in the current directory, naming a path the user had not asked
 // for. It scaffolded an app INSIDE the framework repo. The project's own words,

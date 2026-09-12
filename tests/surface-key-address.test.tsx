@@ -1,9 +1,9 @@
 // A list key containing `/` made a whole page unaddressable.
 //
-// Field report (cc, a file-tree UI): surface paths join their segments with `/`
+// Field report (report 9): surface paths join their segments with `/`
 // and wrap a key in `[…]`, so a row keyed by an absolute path produced
 //
-//     App/TreePage/TreeRow[/home/dev/tmp/cc/src]:SrcButton
+//     App/TreePage/TreeRow[/home/u/tmp/cc/src]:SrcButton
 //
 // "…which nothing can parse back." An absolute path is the NATURAL key for a
 // file tree — it IS the row's identity — so this is a shape apps keep arriving
@@ -15,7 +15,7 @@ import { getLiveSurfaces, runUITrigger } from "../src/air/ui-remote.ts";
 function Row({ path }: { path: string }) {
   return <button t="Open">{path}</button>;
 }
-const PATHS = ["/home/dev/tmp/cc/src", "/home/dev/tmp/cc/tests"];
+const PATHS = ["/home/u/tmp/cc/src", "/home/u/tmp/cc/tests"];
 const Tree = () => <div>{PATHS.map((p) => <Row key={p} path={p} />)}</div>;
 
 /** Every component path in the live surface, flattened. */
@@ -47,7 +47,7 @@ testUI(Tree, "surface: a `/` in a key never reaches the address", (_ui) => {
       `the key must not carry a path separator into the address: ${p}`,
     );
     // …and it is still legible: the original is recoverable.
-    assertStringIncludes(decodeURIComponent(key), "/home/dev/tmp/cc/");
+    assertStringIncludes(decodeURIComponent(key), "/home/u/tmp/cc/");
   }
   // The segment count is now meaningful — this is what "parse it back" means.
   assertEquals(rows[0]!.split("/").length, 2, rows[0]);

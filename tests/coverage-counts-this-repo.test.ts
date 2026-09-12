@@ -22,7 +22,7 @@ Deno.test("coverage: a second copy of the source is not this repo", () => {
   assertEquals(includeFile("/repo/src/state/cell.ts", ROOT), true);
   // The exact path that cost thirty points.
   assertEquals(
-    includeFile("/home/dev/.local/lib/aio/src/state/cell.ts", ROOT),
+    includeFile("/home/u/.local/lib/aio/src/state/cell.ts", ROOT),
     false,
   );
   // A scaffolded app's `dep/aio` symlink resolves elsewhere too.

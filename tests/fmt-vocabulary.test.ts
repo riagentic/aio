@@ -66,8 +66,8 @@ Deno.test("fmt wrap: fits the width, keeps long words whole, honours hard newlin
   assertEquals(lines.join(" "), "the quick brown fox jumps over the lazy dog");
   // A path or URL is never chopped in half — half a path is worse than a
   // ragged right edge, because it cannot be copied.
-  const long = wrap("run /home/dev/very/long/path/to/a/file.ts now", 10);
-  assert(long.includes("/home/dev/very/long/path/to/a/file.ts"));
+  const long = wrap("run /home/u/very/long/path/to/a/file.ts now", 10);
+  assert(long.includes("/home/u/very/long/path/to/a/file.ts"));
   assertEquals(wrap("a\nb", 40), ["a", "b"]);
 });
 

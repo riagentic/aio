@@ -3,7 +3,7 @@
  * `am preview <file> [--export=Name] [--props=JSON]` — render ONE component,
  * with props you choose, and print what it produces.
  *
- * The gap it fills (vidtune §12.5): checking a component in a state the app
+ * The gap it fills (report 3 §12.5): checking a component in a state the app
  * does not currently have meant driving the whole app into that state — a
  * dispatch, a fixture, sometimes a login — or writing a throwaway script with
  * happy-dom, a document and an import in it. Neither is a thing anyone does

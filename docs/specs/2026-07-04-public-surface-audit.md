@@ -94,7 +94,7 @@ must stay exported for cross-module wiring move behind non-public paths or get
 
 ### `air/compat` — 6
 
-- [x] **A5 decision applies** (permanent vs removed at beta1) — decided
+- [x] **A5 decision applies** (permanent vs removed at 1.0.0-beta) — decided
       2026-07-06: **permanent** (module doc records it). If kept:
 - [x] **fix-doc**: `useState`, `useEffect`, `useMemo`, `useCallback` (all
       NODOC).
@@ -110,7 +110,7 @@ must stay exported for cross-module wiring move behind non-public paths or get
 - [x] Self-described "backward compat" layer; every hook (`useAio`, `useCell`,
       `useConnected`, `useLocal`) duplicates `aio/air`. React adapter was
       removed in alpha12; this is the same era. Delete the export + entry before
-      beta1; migration note: import from `aio/air`.
+      1.0.0-beta; migration note: import from `aio/air`.
 
 ### `state-core` — 33 → **@experimental**
 

@@ -72,7 +72,7 @@ export type AsyncMethod<S> = (
 ) => Promise<any>;
 
 /** `s.$call.sibling(args)` — one cell method calling another, on the SAME
- *  draft (llama.master §6/§9, vidtune §6).
+ *  draft (report 8 §6/§9, report 3 §6).
  *
  *  There were three ways to express it and all three were wrong.
  *  `this.bench(...)` cannot type-check: the declared method takes the draft and

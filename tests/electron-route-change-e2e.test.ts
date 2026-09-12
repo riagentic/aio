@@ -1,7 +1,7 @@
 // REAL Electron, real UDS server, real link click: does a broadcast still reach
 // the renderer afterwards?
 //
-// cc §5.3, ask 1, verbatim: "Test the relay against real Electron, not only
+// report 9 §5.3, ask 1, verbatim: "Test the relay against real Electron, not only
 // the stub. One end-to-end case — launch a window, click an in-app link, assert
 // a broadcast arrives — would have caught both §5.1 and its non-working fix.
 // The stub suite is valuable; it is not evidence about Electron."
@@ -189,7 +189,7 @@ Deno.test({
           "state never reached the first document — the harness itself is broken",
         );
         // Mark the document, so a full reload (which would ALSO "fix" the
-        // downlink, and did — cc §5.3's root-path escape) cannot pass as an
+        // downlink, and did — report 9 §5.3's root-path escape) cannot pass as an
         // in-app route change.
         await cdp.eval("window.__doc = 'first'; 'ok'");
 

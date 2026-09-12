@@ -77,7 +77,7 @@ Deno.test("aio26: a reloading renderer is re-seeded with the last full state", (
   );
   // The re-seed lives at the COMMIT (`did-navigate`), not at the start: a
   // vetoed navigation starts and never commits, and destroying the queue of a
-  // document that then stayed was half of cc §5.1.
+  // document that then stayed was half of report 9 §5.1.
   // Anchored on the relay's OWN did-navigate handler: the renderer-diagnostics
   // template registers one too (the mount watchdog), earlier in the script.
   const commitAt = script.indexOf("// The document REALLY changed.");

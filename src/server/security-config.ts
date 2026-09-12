@@ -55,7 +55,7 @@ export interface SecurityConfig {
    *  a page your app serves that is not about your app — an archived document,
    *  a mirrored page, a print preview — where the original `<base href>` is
    *  load-bearing and dropping it rewrites every relative URL in the capture
-   *  (newjob §3). Writing a verbatim policy to lose one directive means
+   *  (report 5 §3). Writing a verbatim policy to lose one directive means
    *  re-deriving `frame-ancestors` from `allowedOrigins` by hand and keeping
    *  it in sync forever, so:
    *
@@ -73,7 +73,7 @@ export interface SecurityConfig {
    *
    *  The served shell inlines its own bootstrap, so `"strict"` had to keep
    *  `'unsafe-inline'` for scripts and a hardened app carried that as a
-   *  documented waiver (wallet report §11). With a nonce the shell's own scripts are
+   *  documented waiver (report 1 §11). With a nonce the shell's own scripts are
    *  named and every other inline script is refused.
    *
    *  STYLES ARE NOT NONCED, deliberately. `style-src 'unsafe-inline'` also

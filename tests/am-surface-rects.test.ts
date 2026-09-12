@@ -1,6 +1,6 @@
 // `am surface --rects` — geometry, and the refusal to fake it.
 //
-// From a field report (anathomy §10.2): `am surface` said what was on screen
+// From a field report (report 6 §10.2): `am surface` said what was on screen
 // and never how big it was, so "the app looks fine" could not be turned into
 // "the Stage is 6886 px tall". A rect per element closes that.
 //

@@ -2,7 +2,7 @@
  * @module
  * `import "aio/client-only"` — this file must never be reached by a cell.
  *
- * The mirror of {@linkcode module:server-only} (trading-app report §9.1), and the halves are
+ * The mirror of {@linkcode module:server-only} (report 2 §9.1), and the halves are
  * not symmetric, because the two failures are not:
  *
  * - A server module in the browser LEAKS. Keys and queries end up in a file

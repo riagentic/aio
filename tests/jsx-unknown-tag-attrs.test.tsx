@@ -1,6 +1,6 @@
 // A custom element — `<webview>`, a web component — and its attributes.
 //
-// newjob §6: `<webview>` is admitted and its attributes are not. Real: the
+// report 5 §6: `<webview>` is admitted and its attributes are not. Real: the
 // intrinsic map's index accepts any tag NAME and hands back `AioHTMLAttributes`,
 // a closed set — so the element is admitted in name and refused in every
 // property it exists for.

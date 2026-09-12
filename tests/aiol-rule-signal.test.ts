@@ -1405,7 +1405,7 @@ await aio.run({ perfBudget: { methods: { "models:scan": { timeout: 0 } } } });
   {
     // An interactive element with no accessible name has no semantic path, so
     // it is absent from `am surface`, unreachable by `am trigger` and has no
-    // handle in testUI (cc §9.4). The rule is narrow on purpose — one line, an
+    // handle in testUI (report 9 §9.4). The rule is narrow on purpose — one line, an
     // empty body, no naming attribute — and this is that shape.
     name: "a <button> with no accessible name",
     files: app({

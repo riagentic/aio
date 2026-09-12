@@ -4,7 +4,7 @@
 // the call sites you compile; nothing protects `am dispatch`, a hand-written
 // `{ type, payload: { args } }`, a form, a URL or an agent. aio's arity warning
 // exists precisely because of that, and two reports counted the consequence: a
-// dozen hand-written coercions in one week (cc §9.6, vidtune §12.7).
+// dozen hand-written coercions in one week (report 9 §9.6, report 3 §12.7).
 //
 // STANDARD SCHEMA, not a DSL of aio's own — Zod, Valibot and ArkType all
 // implement it, so this is the app's existing validator doing the job it

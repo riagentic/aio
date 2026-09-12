@@ -40,7 +40,7 @@ Deno.test("rule 23: a real NUMBER is the documented right tool, and is SILENT", 
   // tool for a specific NUMBER". The rule reported it anyway. One app had ten
   // of sixteen as genuine ceilings on work that is quick by nature — where
   // `long:` would DELETE the limit — so they stayed, and so did ten permanent
-  // warnings (llama.master §2).
+  // warnings (report 8 §2).
   for (const ms of ["5000", "250", "60000"]) {
     assertEquals(
       lint(
@@ -69,7 +69,7 @@ Deno.test("am fix: a pristine task is KEPT, and the advice names its replacement
   // Deleting a task someone runs BY NAME is the one irreversible thing
   // `am fix` does. "Pristine" is a fact about the COMMAND — it says nothing
   // about whether `dev:browser` is in the app's README, its CLAUDE.md and
-  // everyone's fingers (llama.master §4). The neighbouring check already gets
+  // everyone's fingers (report 8 §4). The neighbouring check already gets
   // this right for customized tasks ("kept, review manually").
   const current = {
     "dev:browser": "deno run -A src/app.ts --client=browser",

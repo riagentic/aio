@@ -1,6 +1,6 @@
 // A per-user filter must survive the wire, not just the full-state frame.
 //
-// Field report (dm #1, rated the report's highest severity — "a privacy hole
+// Field report (report 10 #1, rated the report's highest severity — "a privacy hole
 // with no symptom at the call site"): a relay declared
 //
 //     ui: { forUser: (s, user) => viewFor(s, user) }

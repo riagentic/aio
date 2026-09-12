@@ -447,7 +447,19 @@ export class AioLogger {
     if (this._modeFixed.has(path)) return;
     this._modeFixed.add(path);
     if (Deno.build.os === "windows") return;
-    Deno.chmod(path, 0o600).catch(() => {});
+    // TRACKED, not fired and forgotten: the chmod joins `_pending`, the set
+    // `flush()` awaits, so a flush that returns has really finished with the
+    // file. Un-awaited it was an async op still open when a test ended — the
+    // one non-deterministic red in the 1.0.0-beta suite, resource-leak shaped like
+    // every other in that class. Best-effort by design (above): the catch
+    // stays, the promise no longer escapes.
+    // aio-ok: a mode-less filesystem must not cost the app its voice
+    const c: Promise<void> = Deno.chmod(path, 0o600).catch(() => {}).finally(
+      () => {
+        this._pending.delete(c);
+      },
+    );
+    this._pending.add(c);
   }
 
   private _flushBuffers(): void {

@@ -23,7 +23,7 @@ import { isComparableVersion } from "../src/server/updates-core.ts";
 const TAGS = [
   "v1.0.0",
   "v1.0.0-alpha77",
-  "v1.0.0-beta1",
+  "v1.0.0-beta",
   "v1.0.0-rc.1",
   "v1.0.0-rc1",
   "v1.2.3+build1",

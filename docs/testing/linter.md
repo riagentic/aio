@@ -261,7 +261,7 @@ emergencies.
 ## Example Output
 
 ```
-aiol v1.0.0-beta1 — scanning project
+aiol v1.0.0-beta — scanning project
 
   ✓ appId: my-app
   ✓ entry: src/app.ts

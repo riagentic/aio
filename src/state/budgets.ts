@@ -7,7 +7,7 @@
  * ```
  *
  * A field report asked for this and said why it is strictly better than aio
- * picking a number for everyone (trading-app report §9.3). A dashboard that pushes a 4 MB
+ * picking a number for everyone (report 2 §9.3). A dashboard that pushes a 4 MB
  * table once a minute and a game loop that pushes 200 bytes at 60 Hz are both
  * healthy, and no single threshold calls them both correctly.
  *
@@ -163,7 +163,7 @@ const _breaches = new Map<string, BudgetBreach>();
  *
  *  WHY THIS IS KEPT AND NOT ONLY LOGGED. A warning is for a person watching a
  *  dev server; a budget is a limit an app committed to, and the report asked
- *  for one that FAILS (trading-app report §9.3). A log line cannot fail anything. This
+ *  for one that FAILS (report 2 §9.3). A log line cannot fail anything. This
  *  ledger is what `/health` reports, so a test or a CI step can assert on it —
  *  and it keeps the WORST reading rather than the latest, because "it went
  *  over once" is the fact, and a later healthy sample must not erase it.

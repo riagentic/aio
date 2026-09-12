@@ -24,7 +24,7 @@ export type { AioError } from "../diagnostics/error.ts";
  *  work: this was the ONE string-boolean among ~14 boolean switches in
  *  `aio.run()`, and internally it has always been a boolean anyway
  *  (`composeCells([cell], { perfCheck: false })`). Widening accepts the house
- *  spelling without taking the old one away — and after beta1 the union
+ *  spelling without taking the old one away — and after 1.0.0-beta the union
  *  freezes, so it was this release or never. */
 export type PerfCheck = boolean | "on" | "off";
 
@@ -194,7 +194,7 @@ import { count } from "../diagnostics/fmt.ts";
  *  author most needs: "this came from YOUR onStop". `onStop` runs at shutdown
  *  Phase 5 — after the drain (Phase 1) and after the final persist (Phase 2)
  *  — so a dispatch from it is refused, and could not have been saved even if
- *  it were admitted. A field report's `onStop` was one line, `dm.lockVault()`,
+ *  it were admitted. A field report's `onStop` was one line, `vault.lock()`,
  *  whose whole job is wiping key material on exit: it never ran, on every
  *  clean shutdown, and said so in a warning emitted at the one moment nobody
  *  is watching. */

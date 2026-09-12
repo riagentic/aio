@@ -1,7 +1,7 @@
 // Every generated script must PARSE — with a negative control proving the
 // check can fail.
 //
-// cc §5.4: the Electron main process is generated source, and a generator that
+// report 9 §5.4: the Electron main process is generated source, and a generator that
 // can emit text can emit text that does not parse. One `'\n'` written where the
 // outer template literal consumed it left main.cjs with a string literal broken
 // across two lines — and "the app would not start at all. The server booted,

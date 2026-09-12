@@ -132,7 +132,7 @@ Deno.test(
 
 // ── forUser ⇒ never a patch strategy that bypasses it ─────────────────────
 //
-// A field report (dm #1, "highest severity — a privacy hole with no symptom at
+// A field report (report 10 #1, "highest severity — a privacy hole with no symptom at
 // the call site"): `ui: { forUser }` with no include/exclude classified as
 // `raw`, so clients received Immer patches computed from UNFILTERED server
 // state. The per-user filter guarded the full-state frame and nothing else.

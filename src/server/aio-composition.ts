@@ -465,7 +465,7 @@ function buildDBStateGetter(composed: ComposedCells): (s: unknown) => unknown {
         cellState as Record<string, unknown>,
       );
       if (!filtered) continue;
-      // `persist: { transform }` — the app SHAPES what goes to disk (cc §8.4).
+      // `persist: { transform }` — the app SHAPES what goes to disk (report 9 §8.4).
       // AFTER include/exclude, so the two compose in the order they read.
       //
       // A THROW HERE IS NOT SWALLOWED. This runs on the persist path, and

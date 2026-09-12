@@ -4,7 +4,7 @@
 // hands back the copy it already has. The browser reloads, the page looks new,
 // and the server is still running the old function.
 //
-// A report lost real time to exactly this (composer §6): a fix to a
+// A report lost real time to exactly this (report 4 §6): a fix to a
 // `.server.ts` module "did not take", so the author verified state twice,
 // concluded the fix was wrong, and went back to re-reading correct code.
 // Nothing was wrong with the code, and nothing said so — which is the defect.

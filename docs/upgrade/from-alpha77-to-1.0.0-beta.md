@@ -1,4 +1,4 @@
-# Upgrading from alpha77 to beta1
+# Upgrading from alpha77 to 1.0.0-beta
 
 **Nothing breaks.** The public surface was frozen on 2026-09-04
 (`docs/basics/semver-policy.md`): every export, signature, flag, config key and
@@ -14,9 +14,9 @@ not change, and does not until 2.0.0.
 
 ## What got better
 
-beta1 answers nine field reports from nine real apps, read end to end with every
-finding verified against the code. The full account is `CHANGELOG.md`; this is
-what you will notice.
+1.0.0-beta answers nine field reports from nine real apps, read end to end with
+every finding verified against the code. The full account is `CHANGELOG.md`;
+this is what you will notice.
 
 ### Two doors that were documented and unreachable
 
@@ -100,10 +100,10 @@ classifies them additive by a rule pinned in both directions
 ## The one recorded surface change
 
 `VERSION` is annotated `export const VERSION: string` rather than inferring the
-literal `"1.0.0-beta1"`. It is a **widening** — `VERSION === "1.0.0-alpha76"`
-was a compile error under the literal type and is now an ordinary comparison —
-and it is recorded here because `check:api` requires a decision to be written
-down rather than absorbed. Nothing to do: the only shape that could break is
+literal `"1.0.0-beta"`. It is a **widening** — `VERSION === "1.0.0-alpha76"` was
+a compile error under the literal type and is now an ordinary comparison — and
+it is recorded here because `check:api` requires a decision to be written down
+rather than absorbed. Nothing to do: the only shape that could break is
 `const x: "1.0.0-alpha77" = VERSION`.
 
 Why it was worth taking once: with the literal inferred, **every release bump
@@ -117,7 +117,7 @@ and now says so — and each is listed because a test, a script or a habit could
 have leaned on the old silence. The wire is protocol v3 as before; `hello.rate`
 and the dev-only `patch` frame are additions an alpha77 peer ignores.
 
-| what                                                                                                                           | alpha77                                                                           | beta1                                                                                                    | if it hits you                                                                             |
+| what                                                                                                                           | alpha77                                                                           | 1.0.0-beta                                                                                               | if it hits you                                                                             |
 | ------------------------------------------------------------------------------------------------------------------------------ | --------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------ |
 | `testCell`: a framework effect (`schedule.*`, `own.*`) that no dispatch ran (`settle()`) and no assertion read                 | green                                                                             | fails at the end of the test, naming the effect                                                          | read it (`t.getEffects()`, `t.expect.effects`), `settle()` it, or use `bootCells`/`testUI` |
 | `POST /__aio/trojan/dispatch` for a write `validate` refused, a method the cell lacks, a cell never booted or breaker-disabled | `200 {"ok":true}`                                                                 | `409 {"ok":false}`; `am dispatch` exits 1                                                                | a script that read `ok` was reading a lie — read the reason it now carries                 |
@@ -144,34 +144,37 @@ warning, the contrast walk, and the error overlay.
 
 ### How this was checked
 
-An app scaffolded by alpha77's own `am create`, with `dep/aio` pointed at beta1:
-`deno task check`, its starter test and `deno task build` are green, and the
-browser binary runs. alpha77's five example apps boot on beta1, serve the shell,
-answer `/__aio/health` and stop with `errors=0`. Across every file that declares
-a public type, the only line removed since alpha77 is the `VERSION` literal
-above.
+An app scaffolded by alpha77's own `am create`, with `dep/aio` pointed at
+1.0.0-beta: `deno task check`, its starter test and `deno task build` are green,
+and the browser binary runs. alpha77's five example apps boot on 1.0.0-beta,
+serve the shell, answer `/__aio/health` and stop with `errors=0`. Across every
+file that declares a public type, the only line removed since alpha77 is the
+`VERSION` literal above.
 
 ## Retire
 
 Workarounds an app may still carry for bugs fixed here — each safe to delete
 now, with the version that fixed it.
 
-| workaround                                                                                        | fixed in |
-| ------------------------------------------------------------------------------------------------- | -------- |
-| a hand-rolled `:param` parser (and its traversal guard) written because `route()` was unreachable | beta1    |
-| a hand-declared `{ params: Record<string, string> }` for a raw route handler's second argument    | beta1    |
-| a deep import of `dep/aio/src/diagnostics/logger.ts` to avoid the barrel                          | beta1    |
-| an `onCleanup(...)` added beside `onMount` only because the returned cleanup was dropped          | beta1    |
-| a hidden placeholder element rendered to silence "Mixed keyed and unkeyed children"               | beta1    |
-| an `onKeyDown` on `<summary>`, `<label>` or `<option>` added only to silence the a11y warning     | beta1    |
-| `visible: { publicFields: [...] }` on a field named `monkey`, `keyboard`, `seedling` or `privacy` | beta1    |
-| a field renamed away from `passwordless` because the boot refused it                              | beta1    |
-| `// aiol-ok` moved to the last line of a comment block, or an explanation deleted to make it work | beta1    |
-| `version: 1` added to a `persist: "none"` or `scope: "client"` cell only to quiet the data gate   | beta1    |
-| a `cfg()` helper written because `t.init()` could not take a partial nested object                | beta1    |
-| `assertRejects` imported into a cell test because `t.expect.rejects` did not exist                | beta1    |
-| a hand-written CDP client for geometry or computed styles (`am eval` does it)                     | beta1    |
-| `ss -ltnp` scraping to find an app's DevTools port (`am instances` reports `cdpPort`)             | beta1    |
-| a message prefix (`[gate]`, `[capture]`) added only to tell renderer log lines apart              | beta1    |
-| `useRoute<{ id: string }>("/users/:id")` where the pattern is a literal — the type is inferred    | beta1    |
-| `deno.json` `build.css` run by hand in a second terminal beside `deno task dev`                   | beta1    |
+| workaround                                                                                         | fixed in   |
+| -------------------------------------------------------------------------------------------------- | ---------- |
+| a hand-rolled `:param` parser (and its traversal guard) written because `route()` was unreachable  | 1.0.0-beta |
+| a hand-declared `{ params: Record<string, string> }` for a raw route handler's second argument     | 1.0.0-beta |
+| a deep import of `dep/aio/src/diagnostics/logger.ts` to avoid the barrel                           | 1.0.0-beta |
+| an `onCleanup(...)` added beside `onMount` only because the returned cleanup was dropped           | 1.0.0-beta |
+| a hidden placeholder element rendered to silence "Mixed keyed and unkeyed children"                | 1.0.0-beta |
+| an `onKeyDown` on `<summary>`, `<label>` or `<option>` added only to silence the a11y warning      | 1.0.0-beta |
+| `visible: { publicFields: [...] }` on a field named `monkey`, `keyboard`, `seedling` or `privacy`  | 1.0.0-beta |
+| a field renamed away from `passwordless` because the boot refused it                               | 1.0.0-beta |
+| `// aiol-ok` moved to the last line of a comment block, or an explanation deleted to make it work  | 1.0.0-beta |
+| `version: 1` added to a `persist: "none"` or `scope: "client"` cell only to quiet the data gate    | 1.0.0-beta |
+| a `cfg()` helper written because `t.init()` could not take a partial nested object                 | 1.0.0-beta |
+| `assertRejects` imported into a cell test because `t.expect.rejects` did not exist                 | 1.0.0-beta |
+| a hand-written CDP client for geometry or computed styles (`am eval` does it)                      | 1.0.0-beta |
+| `ss -ltnp` scraping to find an app's DevTools port (`am instances` reports `cdpPort`)              | 1.0.0-beta |
+| a message prefix (`[gate]`, `[capture]`) added only to tell renderer log lines apart               | 1.0.0-beta |
+| `useRoute<{ id: string }>("/users/:id")` where the pattern is a literal — the type is inferred     | 1.0.0-beta |
+| `deno.json` `build.css` run by hand in a second terminal beside `deno task dev`                    | 1.0.0-beta |
+| a hand-written `{ type: "cell:method", payload: { args } }` in a test because `.action()` was gone | 1.0.0-beta |
+| a `script-src` override that dropped the nonce to admit one host                                   | 1.0.0-beta |
+| an `// aiol-ok` on an element that only existed inside a comment                                   | 1.0.0-beta |

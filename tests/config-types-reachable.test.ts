@@ -10,7 +10,7 @@
 // spelling: every shell imports this type rather than re-typing the union" —
 // a rule the framework kept internally and could not offer to an app.
 //
-// Adding an export is additive; it is also impossible after beta1, when the
+// Adding an export is additive; it is also impossible after 1.0.0-beta, when the
 // surface freezes. So this walks the two config declarations and requires
 // every type they name to be importable from SOME `aio/*` entry. It reads the
 // declarations, not a list, so a config key added tomorrow with a private type
@@ -152,7 +152,7 @@ Deno.test("config types: every type an app writes is importable from an entry", 
       "aio entry point — so the app must re-declare them by hand and let the " +
       "copy drift. Export each from the entry that owns it (add the line to " +
       "the entry module; src/entries.ts stays the list of ENTRIES). Adding an " +
-      "export is additive today and impossible after beta1.",
+      "export is additive today and impossible after 1.0.0-beta.",
   );
 });
 

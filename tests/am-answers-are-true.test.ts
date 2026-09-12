@@ -116,7 +116,7 @@ Deno.test("VERB_FLAGS lists nothing a verb refuses, and nothing twice", () => {
   // Asked of the COMMAND, not of a remembered flag name. The original spelling
   // asserted `!includes("--level")`, which encoded one side of a disagreement
   // rather than the rule — and went stale the moment `--level` became real
-  // (beta1). This form cannot: whatever the table lists, the verb's own parser
+  // (1.0.0-beta). This form cannot: whatever the table lists, the verb's own parser
   // has to accept.
   let seen = 0;
   for (const flag of VERB_FLAGS.logs ?? []) {

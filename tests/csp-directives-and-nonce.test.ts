@@ -4,14 +4,14 @@
 //     break a page". True of an app's OWN pages — and false of any page your
 //     app SERVES that is not about your app: an archived document, a mirrored
 //     page, a print preview, where the original `<base href>` is load-bearing
-//     and dropping it rewrites every relative URL in the capture (newjob §3).
+//     and dropping it rewrites every relative URL in the capture (report 5 §3).
 //     Losing one directive meant writing the whole policy by hand, including
 //     re-deriving `frame-ancestors` from `allowedOrigins` and keeping it in
 //     sync forever.
 //
 //  2. The served shell inlines its own bootstrap, so `"strict"` had to keep
 //     `script-src 'unsafe-inline'` — and a hardened wallet carried that as a
-//     documented HIGH waiver (wallet report §11).
+//     documented HIGH waiver (report 1 §11).
 import { assert, assertEquals, assertStringIncludes } from "@std/assert";
 import {
   contentSecurityPolicy,
@@ -191,4 +191,74 @@ Deno.test("the header builder still ships the policy it computed", () => {
   });
   assert(!h["Content-Security-Policy"]!.includes("base-uri"));
   assertStringIncludes(h["Content-Security-Policy"]!, "object-src 'none'");
+});
+
+// ── the nonce COMPOSES with the app's own directives ──────────────────────
+// A wallet needed one extra script host AND the nonce. The override won
+// whole, so it was one or the other; and the nonce is per-response, so it
+// could not be written by hand. Now a `script-src` you write gets the nonce
+// appended, `{nonce}` names it anywhere, and a placeholder with no nonce to
+// fill it is refused instead of shipping a policy that blocks everything.
+Deno.test("cspNonce + a user script-src: the host AND the nonce, not one or the other", () => {
+  const n = cspNonce();
+  const p = parse(
+    contentSecurityPolicy(
+      {
+        csp: "strict",
+        cspNonce: true,
+        cspDirectives: { "script-src": "'self' https://cdn.example.com" },
+      } as never,
+      "'none'",
+      n,
+    )!,
+  );
+  assertStringIncludes(p["script-src"]!, "https://cdn.example.com");
+  assertStringIncludes(p["script-src"]!, `'nonce-${n}'`);
+  assert(!p["script-src"]!.includes("'unsafe-inline'"));
+});
+Deno.test("{nonce} names the per-response nonce in ANY directive", () => {
+  const n = cspNonce();
+  const p = parse(
+    contentSecurityPolicy(
+      {
+        csp: "strict",
+        cspNonce: true,
+        cspDirectives: {
+          "style-src": "'self' {nonce}",
+          "script-src": "{nonce} 'self'",
+        },
+      } as never,
+      "'none'",
+      n,
+    )!,
+  );
+  assertEquals(p["style-src"], `'self' 'nonce-${n}'`);
+  assertEquals(p["script-src"], `'nonce-${n}' 'self'`);
+});
+Deno.test("a {nonce} placeholder with cspNonce OFF is refused — a literal one blocks every script", () => {
+  let err = "";
+  try {
+    contentSecurityPolicy(
+      {
+        csp: "strict",
+        cspDirectives: { "script-src": "'self' {nonce}" },
+      } as never,
+      "'none'",
+    );
+  } catch (e) {
+    err = String(e);
+  }
+  assertStringIncludes(err, "cspNonce");
+});
+Deno.test("without a nonce, a user script-src is taken verbatim (nothing appended)", () => {
+  const p = parse(
+    contentSecurityPolicy(
+      {
+        csp: "strict",
+        cspDirectives: { "script-src": "'self' https://x" },
+      } as never,
+      "'none'",
+    )!,
+  );
+  assertEquals(p["script-src"], "'self' https://x");
 });

@@ -727,7 +727,7 @@ export function warnBigFullState(json: string, view: () => unknown): void {
   // `aio.run({ budgets: { cellState } })` replaces aio's own number. The
   // hard-coded 1 MiB is a guess that has to serve every app, and a field
   // report said plainly that an app declaring its own is strictly better
-  // (trading-app report §9.3) — a 4 MB table pushed once a minute is not the same problem
+  // (report 2 §9.3) — a 4 MB table pushed once a minute is not the same problem
   // as 4 MB pushed per keystroke, and only the app knows which it is.
   const limit = declaredBudgets().cellState ?? BROADCAST_FULL_WARN_BYTES;
   if (json.length <= limit) return;

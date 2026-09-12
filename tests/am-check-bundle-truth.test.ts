@@ -1,6 +1,6 @@
 // `am check` — a green `deno check` must stop preceding a failing bundle.
 //
-// From a field report (composer §1 — the ONLY thing that report calls a defect).
+// From a field report (report 4 §1 — the ONLY thing that report calls a defect).
 // `"aio"` resolves to `mod.ts` for the type-checker and to `browser-air.ts` for
 // the browser bundle: TypeScript checks the UNION, the bundle gets the
 // INTERSECTION. So anything server-only imported into a cell type-checks

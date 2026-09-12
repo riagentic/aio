@@ -2,7 +2,7 @@
 //
 // THE REPORT. One app's MediaPipe call failed on every single frame, and the
 // only evidence was a counter in a panel the author happened to have written
-// (vidtune §12.4, watcher §8.7). Everything the framework knew was in the
+// (report 3 §12.4, report 7 §8.7). Everything the framework knew was in the
 // console and in `client.log` — both of which you have to be looking at, and
 // neither of which you are looking at while you are looking at the page.
 //

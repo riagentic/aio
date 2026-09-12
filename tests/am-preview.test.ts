@@ -3,7 +3,7 @@
 // Checking a component in a state the app does not currently have meant
 // driving the whole app into that state — a dispatch, a fixture, sometimes a
 // login — or writing a throwaway script with happy-dom, a document and an
-// import in it (vidtune §12.5). Neither is a thing anyone does while iterating
+// import in it (report 3 §12.5). Neither is a thing anyone does while iterating
 // on an empty state or an error card.
 //
 // The render is the SAME path `am surface` and `am testgen` use, so what is

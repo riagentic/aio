@@ -5,7 +5,7 @@
 // restores — has that work IN FLIGHT when the test body starts, so whether the
 // first assertion saw the before or the after came down to how many
 // microtasks the harness happened to have spent. One repo measured ~40% flake
-// (llama.master §11), and the answer until now was a house rule plus a comment
+// (report 8 §11), and the answer until now was a house rule plus a comment
 // on every affected test — which is a rule enforced by remembering, i.e. not
 // enforced.
 //

@@ -63,7 +63,7 @@ export function _refuseUnsafeCells(
 export type HarnessBootOptions = {
   /** Stand in for a module a cell imports through `serverImport(…)`.
    *
-   *  For a cell that owns an OS PROCESS there was no safe rung (cc §8.6,
+   *  For a cell that owns an OS PROCESS there was no safe rung (report 9 §8.6,
    *  §9.3): `testCell` never reaches the spawn, and `bootCells` spawns the
    *  REAL child, so "random actions against a real runtime" means a real
    *  subprocess per action. Cassettes wrap a function you can reach; they

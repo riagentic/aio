@@ -3,7 +3,7 @@
 // aio has one global stylesheet, so class names are global. The worst UI bug of
 // one build was a `class="track"` defined in two places: every music row
 // clipped to a single line, no error, correct DOM, correct component tree — the
-// later rule simply won (vidtune §12.1, composer §10.3, newjob §8.5). `aiol`
+// later rule simply won (report 3 §12.1, report 4 §10.3, report 5 §8.5). `aiol`
 // now reports that collision; this is the other half, a name that cannot
 // collide at all.
 import { assert, assertEquals, assertStringIncludes } from "@std/assert";

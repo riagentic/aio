@@ -230,7 +230,7 @@ await new Promise(() => {});
 
       // `am status` disagreed with `am clients` about THIS app.
       //
-      // Second field report (cc, an Electron app over UDS), reproduced by its
+      // Second field report (report 9), reproduced by its
       // author: `am clients` listed one live electron/uds client while
       // `am status` printed `connections: 0` in the same breath. Two trojan
       // routes, twenty lines apart, one running app, two answers — and nothing

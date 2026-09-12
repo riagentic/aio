@@ -61,7 +61,7 @@ export function detectMode(flags: GlobalFlags): OutputMode {
  *
  *  A pipe gets the compact form a parser wants. A TERMINAL gets it indented,
  *  because a person typed `--json` and got ~8 kB on one unwrapped line
- *  (vidtune §8.2) — `am surface --json` was unreadable without piping it
+ *  (report 3 §8.2) — `am surface --json` was unreadable without piping it
  *  through another tool, which is the "am made me write a script" shape this
  *  CLI keeps trying to remove.
  *

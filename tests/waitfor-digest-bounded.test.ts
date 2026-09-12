@@ -2,7 +2,7 @@
 //
 // `waitFor`'s failure dumps the current surface so a reader can see what WAS
 // there. The JSON half was capped and the component TREE was not, so a wide app
-// turned one timeout into 31 769 characters of names (cc §9.0) — which nobody
+// turned one timeout into 31 769 characters of names (report 9 §9.0) — which nobody
 // reads, in place of the few lines that would have said what happened.
 //
 // Bounded the way every other name list in this harness is bounded, with the

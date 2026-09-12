@@ -4,7 +4,7 @@
 // `{ deps: ["prices"], fn: (s, deps) => deps[0] }` is the CURRENT form written
 // with a named parameter. At runtime they are the same function — one argument
 // after the slice, and no `[` to read — so `secondParamIsTuple` cannot tell
-// them apart, and only reading the SOURCE TEXT ever could (composer §4).
+// them apart, and only reading the SOURCE TEXT ever could (report 4 §4).
 //
 // It resolves toward the spread, so the second one receives the slice where it
 // expects a tuple and `deps[0]` is `undefined`: correct-looking code, wrong

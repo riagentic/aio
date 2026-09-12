@@ -2012,6 +2012,16 @@
             "ab8dee5e9b6487f0"
           ]
         },
+        "collectHead": {
+          "kind": "function",
+          "sig": "6ef6486f1aff326f",
+          "members": {
+            "return": "req:2fb40568533c1a6d"
+          },
+          "sigs": [
+            "5f76d1167b9cb1ef"
+          ]
+        },
         "ComponentFn": {
           "kind": "typeAlias",
           "sig": "4fd91f7fe3436040",
@@ -2291,6 +2301,25 @@
           },
           "sigs": [
             "0e4a1a77d343e464"
+          ]
+        },
+        "HeadInput": {
+          "kind": "interface",
+          "sig": "7f24827f1e9b7c50",
+          "members": {
+            "title": "opt:9081d68fba9c8c8c",
+            "meta": "opt:1d956dc0870049f5",
+            "link": "opt:1d956dc0870049f5"
+          },
+          "sigs": [
+            "7f24827f1e9b7c50"
+          ]
+        },
+        "HeadTag": {
+          "kind": "typeAlias",
+          "sig": "0a5ab81cffca61d9",
+          "sigs": [
+            "0a5ab81cffca61d9"
           ]
         },
         "hydrate": {
@@ -3099,6 +3128,17 @@
           },
           "sigs": [
             "213ff40e0963a472"
+          ]
+        },
+        "useHead": {
+          "kind": "function",
+          "sig": "d52ae91ad6ab5446",
+          "members": {
+            "param0": "req:ca49125d6d449f0b|291e02ab222249e3~HeadInput",
+            "return": "req:b5f6ae1b8a43e31d"
+          },
+          "sigs": [
+            "e3da57e2a08f760b"
           ]
         },
         "useId": {

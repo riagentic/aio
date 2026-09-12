@@ -1476,7 +1476,7 @@ Deno.test("android manifest: the template asks for the cleartext decision", () =
 // bundle by construction. The same dynamism keeps it out of `deno compile`'s
 // module graph — so the app WORKED in dev, where the dev server transpiles on
 // demand, and died in a compiled binary with "Module not found", pointing
-// nowhere near the cause. Two field reports (vidtune §3, llama.master §13), and
+// nowhere near the cause. Two field reports (report 3 §3, report 8 §13), and
 // the rule was guarded by a comment telling people to hand-register each one.
 //
 // Dev == prod is load-bearing, so the convention IS the registration.
@@ -1544,7 +1544,7 @@ Deno.test("assetIncludes: every *.server.ts is embedded without being declared",
 //
 // The scan reduces every quoted `/…` in the bundle to "a URL the page might
 // fetch", and a bundle is full of strings that merely look like one. A field
-// report (newjob §6) had `placeholder="/home/you/documents/cv.pdf"` — help text
+// report (report 5 §6) had `placeholder="/home/you/documents/cv.pdf"` — help text
 // in a file picker — reported as an asset that would 404. A build warning that
 // cries wolf is one people learn to scroll past, and then the REAL finding (an
 // asset that works in dev and 404s in the artifact) goes unread too.

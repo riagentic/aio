@@ -57,7 +57,7 @@ const CEILING_GZ = {
    *    · the sync engine drops an op the server refuses as older than the
    *      tombstone window instead of re-sending it forever.
    *  Still nothing on the page that a user did not ask for. */
-  // Raised 64 → 68 for v1.0.0-beta1, and itemised because the policy above
+  // Raised 64 → 68 for v1.0.0-beta, and itemised because the policy above
   // asks for an argument rather than a number. Measured 67; +4 KB gz over
   // alpha77's 63, all of it CLIENT-side diagnostics that answer top-of-report
   // findings:
@@ -79,7 +79,7 @@ const CEILING_GZ = {
   // already declined once — recorded in todo.md instead of decided in a hurry
   // at release time.
   //
-  // Raised 68 → 72 at the beta1 release check (measured 71). The last day of
+  // Raised 68 → 72 at the 1.0.0-beta release check (measured 71). The last day of
   // the round put ~4 KB gz on the page, and this gate — flagged behind
   // AIO_BUNDLE_SIZE — was not in the per-change runs, so it is itemised here
   // from an esbuild metafile rather than remembered:

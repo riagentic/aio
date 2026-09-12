@@ -175,7 +175,7 @@ export const CORE_REMOVALS: readonly Removal[] = [
     ...ALPHA70,
   },
   // alpha76 — the pre-beta sweep: every "deprecated through beta" spelling that
-  // would otherwise become permanent public surface at beta1.
+  // would otherwise become permanent public surface at 1.0.0-beta.
   {
     key: "return effect(s) from a method",
     kind: "api",

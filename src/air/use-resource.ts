@@ -1,7 +1,7 @@
 // use-resource.ts — a keyed thing that is OPEN, and a reaction to state that
 // does not live in a JSX handler.
 //
-// Two reports, one shape (watcher §2/§5/§8.4/§8.5, composer §10.4).
+// Two reports, one shape (report 7 §2/§5/§8.4/§8.5, report 4 §10.4).
 //
 // `resource()` already covers "fetch when this changes". What it does not cover
 // is a resource you HOLD: a camera, a socket, a GPU pipeline, a file handle —

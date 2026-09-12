@@ -1,5 +1,5 @@
 // Three public option types that could never be narrowed or widened again
-// after beta1, and one rule they all serve: the TYPE and the RUNTIME must
+// after 1.0.0-beta, and one rule they all serve: the TYPE and the RUNTIME must
 // accept the same values.
 //
 //   • `AioApp.mode?: string` had exactly one value ever, `"standalone"`

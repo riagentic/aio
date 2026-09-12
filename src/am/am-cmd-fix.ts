@@ -241,7 +241,7 @@ export interface MigrateTasksResult {
    *  KEPT, not removed. Deleting a task someone runs BY NAME is the one
    *  irreversible thing `am fix` does, and "pristine" only means the COMMAND
    *  was never edited — it says nothing about whether `dev:browser` is in the
-   *  app's README, its CLAUDE.md and everyone's fingers (llama.master §4). The
+   *  app's README, its CLAUDE.md and everyone's fingers (report 8 §4). The
    *  neighbouring check already gets this right for customized tasks ("kept,
    *  review manually"), and there is no reason the two should differ. So these
    *  are reported with the replacement spelled out and left in place. */
@@ -1055,7 +1055,7 @@ export async function cmdFix(
       if (m.deleted.length) {
         // Advise, never delete: "pristine" is a fact about the COMMAND, and
         // says nothing about whether the NAME is in the app's README, its
-        // CLAUDE.md and everyone's fingers (llama.master §4). The replacement
+        // CLAUDE.md and everyone's fingers (report 8 §4). The replacement
         // is spelled out so the advice is something to run, not a category.
         add(
           "superseded old-matrix tasks",

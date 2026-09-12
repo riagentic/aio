@@ -124,6 +124,12 @@ export {
 // React (and other framework) components as islands — the blessed path.
 export { reactIsland, type ReactIslandConfig } from "./air/react-island.ts";
 export { renderToString } from "./air/vdom.ts";
+export {
+  collectHead,
+  type HeadInput,
+  type HeadTag,
+  useHead,
+} from "./browser-air.ts";
 export type { Ref } from "./air/vdom.ts";
 
 // ── Transitions and animation ────────────────────────────────────────

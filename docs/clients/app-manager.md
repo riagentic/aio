@@ -213,7 +213,8 @@ only one moves the database:
 | `aio.run({ appDir })` | moves the app's own directory, and the data with it |
 
 `am instances --json` reports `dataDir` on every row (`null` for a lock written
-before beta1), and `--long` shows a `DATA` column when it differs from `home`.
+before 1.0.0-beta), and `--long` shows a `DATA` column when it differs from
+`home`.
 
 ## Accounts and trust (`am auth`, `am trust`)
 

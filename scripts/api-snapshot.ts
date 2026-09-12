@@ -507,7 +507,7 @@ async function docOnce(path: string): Promise<string> {
  * surface move?", and it answers by reading the surface once and comparing to a
  * file. If the READING is unstable, a stable file plus an unstable reading is
  * indistinguishable from a real break — and that is not hypothetical: cutting
- * v1.0.0-beta1, `check:api` reported three type aliases and one member of
+ * v1.0.0-beta, `check:api` reported three type aliases and one member of
  * `src/state/` as BREAKING inside `check:release`, reproducibly, while ~20
  * runs in every other shape were green and four consecutive regenerations were
  * byte-identical. Nothing in the tree had moved.

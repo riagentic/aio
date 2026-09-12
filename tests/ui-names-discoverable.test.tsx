@@ -1,7 +1,7 @@
 // The list of addressable names must be reachable WITHOUT provoking a failure.
 //
 // It existed all along: a miss prints `available: …`, so "what can I address?"
-// was answered by asking for something that is not there (anathomy §5a). That is
+// was answered by asking for something that is not there (report 6 §5a). That is
 // a fine recovery path and a poor discovery one — and it is exactly the list an
 // agent needs BEFORE it writes its first line, not after its first mistake.
 //

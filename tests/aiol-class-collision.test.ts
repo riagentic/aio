@@ -157,3 +157,39 @@ Deno.test("two collisions in one pair report once, on the FIRST disagreement", (
   assertEquals(found.length, 1);
   assert(["color", "width", "height"].includes(found[0]!.prop));
 });
+
+// Every rule takes the marker; this one shipped without it. A collision that
+// is on purpose — a theme override, a print stylesheet — is silenced where it
+// is written, and only there.
+import { checkStyles } from "../aiol/checks.ts";
+function lintCss(files: Record<string, string>): string[] {
+  const found: string[] = [];
+  // deno-lint-ignore no-explicit-any
+  const ctx: any = {
+    cssFiles: Object.entries(files).map(([relative, content]) => ({
+      relative,
+      ext: ".css",
+      content,
+    })),
+    report: (_l: string, _a: string, msg: string) => found.push(msg),
+    pass: () => {},
+  };
+  checkStyles(ctx);
+  return found;
+}
+Deno.test("aiol: a deliberate collision is silenced with /* aiol-ok */ on the line above", () => {
+  const a = `.track { overflow: hidden; }\n`;
+  const loud = `.track { overflow: visible; }\n`;
+  const quiet =
+    `/* aiol-ok: the print stylesheet un-clips on purpose */\n.track { overflow: visible; }\n`;
+  assertEquals(
+    lintCss({ "src/style.css": a, "src/print.css": loud }).length,
+    1,
+    "reported without the marker",
+  );
+  assertEquals(
+    lintCss({ "src/style.css": a, "src/print.css": quiet }),
+    [],
+    "silent with it",
+  );
+});

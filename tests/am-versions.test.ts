@@ -25,7 +25,7 @@ Deno.test("versions: am and the updater order every pair the same way", () => {
     "1.0.0-alpha63",
     "1.0.0-alpha.9",
     "1.0.0-alpha.62",
-    "1.0.0-beta1",
+    "1.0.0-beta",
     "1.0.0-rc1",
     "1.0.0-rc2",
     "v1.0.0-alpha62",
@@ -53,8 +53,8 @@ Deno.test("versions: the project's own tag style orders by NUMBER", () => {
   older("1.0.0-alpha9", "1.0.0-alpha10");
   older("1.0.0-alpha9", "1.0.0-alpha62");
   older("1.0.0-alpha62", "1.0.0-alpha63");
-  older("1.0.0-alpha63", "1.0.0-beta1");
-  older("1.0.0-beta1", "1.0.0-rc1");
+  older("1.0.0-alpha63", "1.0.0-beta");
+  older("1.0.0-beta", "1.0.0-rc1");
   older("1.0.0-rc1", "1.0.0");
   older("1.0.0", "1.0.1");
 });
@@ -64,7 +64,7 @@ Deno.test("versions: ordering is a total order (antisymmetric, transitive)", () 
     "1.0.0",
     "1.0.0-alpha9",
     "1.0.0-alpha62",
-    "1.0.0-beta1",
+    "1.0.0-beta",
     "1.0.0-rc1",
     "1.0.1",
     "2.0.0",

@@ -3,7 +3,7 @@
 // The singleton lock is on the appId and the appId picks the data home, so an
 // agent could not run its own copy next to a human's: every `am dispatch`
 // landed in the human's session and their clicks landed in the agent's
-// measurements (anathomy §4). `--takeover` steals the lock; it never gave an
+// measurements (report 6 §4). `--takeover` steals the lock; it never gave an
 // isolated one.
 //
 // Not a new isolation mechanism. `single-instance-lock.ts` already says

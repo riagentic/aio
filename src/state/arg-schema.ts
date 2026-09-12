@@ -7,7 +7,7 @@
  * `{ type, payload: { args } }`, a form, a URL, or an agent. aio already warns
  * when the arity is wrong — that warning exists precisely because the boundary
  * is untyped — and two field reports counted the consequence: a dozen
- * hand-written coercions in one week (cc §9.6, vidtune §12.7).
+ * hand-written coercions in one week (report 9 §9.6, report 3 §12.7).
  *
  * ```ts
  * cell("user", {

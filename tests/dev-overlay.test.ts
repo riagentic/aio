@@ -1,8 +1,8 @@
 // The dev error overlay — the problems a page makes, ON the page.
 //
 // One app's MediaPipe call failed on every single frame and the only evidence
-// was a counter in a panel the author happened to have written (vidtune §12.4,
-// watcher §8.7). Everything aio knew was in the console and in `client.log`,
+// was a counter in a panel the author happened to have written (report 3 §12.4,
+// report 7 §8.7). Everything aio knew was in the console and in `client.log`,
 // both of which require you to be looking somewhere other than the page.
 //
 // The seam had existed since alpha52 — `_deliverDiag` calls `window._aioDiag`,

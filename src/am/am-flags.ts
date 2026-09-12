@@ -121,7 +121,7 @@ export const VERB_FLAGS: Readonly<Record<string, readonly string[]>> = {
   // central gate permitted a flag the verb did not take, and the two tests
   // around this table pin "every gated verb refuses --zzz" and "every verb
   // appears in the table" — neither half can see an entry the command
-  // rejects. That is resolved in the other direction as of beta1: the three
+  // rejects. That is resolved in the other direction as of 1.0.0-beta: the three
   // structured filters are REAL now (`logFlagError` accepts them), so the
   // table lists them and the two sides agree again.
   logs: ["--level", "--tag", "--since"],

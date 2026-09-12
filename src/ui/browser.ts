@@ -4,7 +4,7 @@
 // its own. It is gated behind `childWindows` (the same opt-in as
 // `openWindow` — both are "render remote content inside the app"), and until
 // now that gate was documented in exactly one place: a source comment in
-// `electron-shared.ts` (newjob §2).
+// `electron-shared.ts` (report 5 §2).
 //
 // TWO TRAPS, and every author meets both in hour one:
 //

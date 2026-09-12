@@ -1,6 +1,6 @@
 // bundle-analyze.ts — where the bundle's bytes actually went.
 //
-// Two reports asked for a treemap (newjob §8.9, wallet report §22.7), and the honest
+// Two reports asked for a treemap (report 5 §8.9, report 1 §22.7), and the honest
 // version of that question is smaller than a treemap: "which twenty things are
 // most of my bundle, and is anything in there that should not be".
 //

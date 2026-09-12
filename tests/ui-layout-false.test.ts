@@ -1,7 +1,7 @@
 // `ui.layout: false` — style my ELEMENTS, do not place my boxes.
 //
 // _"I want my own layout; I do not want to restyle `<input>`, `<textarea>`,
-// `<button>` and focus rings from scratch."_ (newjob §4). Between `"tokens"`
+// `<button>` and focus rings from scratch."_ (report 5 §4). Between `"tokens"`
 // (nothing paints, so every control is the browser's) and `"auto"`/`"full"`
 // (a whole page shell) there was nothing, and the choice was ~200 lines of
 // control CSS or fighting a layout you did not ask for.

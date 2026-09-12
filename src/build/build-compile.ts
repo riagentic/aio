@@ -359,7 +359,7 @@ const ASSET_URL_EXT =
  *
  *  The scan below reduces every quoted `/…` in the bundle to "a URL the page
  *  might fetch", and a bundle is full of strings that merely look like one. A
- *  field report (newjob §6) had `placeholder="/home/you/documents/cv.pdf"` —
+ *  field report (report 5 §6) had `placeholder="/home/you/documents/cv.pdf"` —
  *  help text in a file picker — reported as an asset that would 404.
  *
  *  These prefixes are the roots of an operating system, not of a web server.

@@ -4,7 +4,7 @@
 // (`am link`). Two facts follow and the watcher got both wrong: the checkout is
 // not under `absBaseDir`, and `Deno.watchFs` does not follow symlinks anyway.
 // So the page kept serving the modules it had, and the person editing the
-// framework saw no reason why (trading-app report §9.6).
+// framework saw no reason why (report 2 §9.6).
 //
 // Derived from the IMPORT MAP, not by looking for a `dep/aio` path, because the
 // import map is what actually decides where `aio` comes from — so an app that

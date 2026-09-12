@@ -206,15 +206,17 @@ h("ul", null, items.map((i) => h("li", { key: i.id }, i.name)));
 
 ## Routing
 
-| Function      | Signature                          | Description             |
-| ------------- | ---------------------------------- | ----------------------- |
-| `useRoute`    | `useRoute(pattern?): RouteState`   | Current route state     |
-| `useNavigate` | `useNavigate(): NavigateFn`        | Programmatic navigation |
-| `Route`       | `<Route path="..." element={...}>` | Route render            |
-| `Outlet`      | `<Outlet />`                       | Nested route content    |
-| `Link`        | `<Link to="...">`                  | Navigation link         |
-| `NavLink`     | `<NavLink to="...">`               | Link with active class  |
-| `Redirect`    | `<Redirect to="...">`              | Navigate on mount       |
+| Function      | Signature                           | Description             |
+| ------------- | ----------------------------------- | ----------------------- |
+| `useRoute`    | `useRoute(pattern?): RouteState`    | Current route state     |
+| `useHead`     | `useHead({ title?, meta?, link? })` | This page's `<head>`    |
+| `collectHead` | `collectHead(): string`             | SSR: the collected head |
+| `useNavigate` | `useNavigate(): NavigateFn`         | Programmatic navigation |
+| `Route`       | `<Route path="..." element={...}>`  | Route render            |
+| `Outlet`      | `<Outlet />`                        | Nested route content    |
+| `Link`        | `<Link to="...">`                   | Navigation link         |
+| `NavLink`     | `<NavLink to="...">`                | Link with active class  |
+| `Redirect`    | `<Redirect to="...">`               | Navigate on mount       |
 
 ### Standalone (Android) builds
 

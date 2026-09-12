@@ -4,7 +4,7 @@
  *
  * `cell({ diagnostics: false })`. A separate word from `persist` on purpose: a
  * field report read `persist: "none"` as covering the action journal too
- * (trading-app report §7), and it does not — `persist` is about the STATE STORE, the
+ * (report 2 §7), and it does not — `persist` is about the STATE STORE, the
  * journal is a dev diagnostic that is off in production and lives in the app's
  * own data directory. Making one key silently mean two things is worse than
  * the surprise, so this is the key that means the other one.

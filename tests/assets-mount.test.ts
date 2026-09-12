@@ -2,7 +2,7 @@
 //
 // _"Every app with binary data writes the same twenty lines — route, MIME,
 // caching, range, traversal guard, `compile.include` — and one of them will
-// forget the guard."_ (anathomy §7, §10.5).
+// forget the guard."_ (report 6 §7, §10.5).
 //
 // `serveDirs` already did the serving, and is DEV-ONLY on purpose: it exists so
 // the dev server can resolve a MODULE that lives outside baseDir, which a prod

@@ -1275,7 +1275,7 @@ Deno.test("gitWorkTreeOf: finds the tree from a nested path, .git file or dir", 
 
 Deno.test("ship: a captured keygen SUMMARY is refused, and points at the real key", () => {
   const summary = JSON.stringify({
-    keyPath: "/home/dev/.aio/keys/probe-release-key.json",
+    keyPath: "/home/u/.aio/keys/probe-release-key.json",
     publicKey: { kty: "OKP", crv: "Ed25519", x: "AAAA" },
   });
   const e = assertThrows(
@@ -1290,7 +1290,7 @@ Deno.test("ship: a captured keygen SUMMARY is refused, and points at the real ke
   // …why it looks like a key (so the reader recognises what they did)…
   assertStringIncludes(msg, "keygen");
   // …and the fix, which here is a specific file, not general advice.
-  assertStringIncludes(msg, "/home/dev/.aio/keys/probe-release-key.json");
+  assertStringIncludes(msg, "/home/u/.aio/keys/probe-release-key.json");
   assertStringIncludes(msg, "--key=");
 });
 

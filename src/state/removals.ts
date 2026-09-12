@@ -367,7 +367,7 @@ export function removalsInSource(text: string): RemovalHit[] {
   // nowhere else. `machine: {` is also a perfectly ordinary key in a UI
   // scope-label map, and matching it anywhere in a file that happens to call
   // `cell(` somewhere refused `am pin` on a false positive with `--force` as
-  // the only way past (cc §5.2). When the text contains cell() calls, only
+  // the only way past (report 9 §5.2). When the text contains cell() calls, only
   // lines inside their argument lists count; when it contains none — aiol
   // hands over one cell's config BLOCK, already extracted — every line does.
   const spans = _cellCallSpans(code);

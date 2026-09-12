@@ -1,7 +1,7 @@
 // `<Browser>` — an embedded page, with the two traps closed.
 //
 // Electron's `<webview>` is how an aio app shows somebody else's page inside
-// its own, and every author meets the same two problems in hour one (newjob
+// its own, and every author meets the same two problems in hour one (report 5
 // §2):
 //
 //  1. A REACTIVE `src` IS AN INFINITE NAVIGATION LOOP. Setting `src` navigates;
