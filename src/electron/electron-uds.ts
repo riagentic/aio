@@ -345,7 +345,7 @@ ${tmplRendererDiagnostics(true)}
   // screen that does not change. The old queue said nothing until it had
   // dropped 500 frames — which for a quiet app is never. Fail loud instead:
   // one line naming the stall, and the window is told too, so a dev sees it in
-  // the app rather than in a terminal they are not reading. (cc §5.1.)
+  // the app rather than in a terminal they are not reading. (report 9 §5.1.)
   let _notReadySince = 0, _stallReported = false;
   // A stall needs a VICTIM: a document that was alive and listening when the
   // gate closed, and that nothing has replaced since. Without this the
@@ -359,7 +359,7 @@ ${tmplRendererDiagnostics(true)}
   // COMMITS (did-navigate): the old document is gone and the new one will
   // announce itself, or did-fail-load restores the old one — neither is a
   // stall. The stall is the gap in between: gate closed on a ready document,
-  // no commit, no veto, no failure — cc §5.1's frozen page.
+  // no commit, no veto, no failure — report 9 §5.1's frozen page.
   let _stallCandidate = false, _slowLoadNoted = false;
   const STALL_MS = 5000;
   function _queue(k, line) {
@@ -398,7 +398,7 @@ ${tmplRendererDiagnostics(true)}
       // Said where it can be SEEN, not only in a terminal nobody is reading:
       // the window gets the same signal a dropped socket gives it, so its
       // connection banner shows instead of a frozen page that claims to be
-      // connected (cc §5.3, ask 2) — and the server hears it as a client
+      // connected (report 9 §5.3, ask 2) — and the server hears it as a client
       // degradation, so /__aio/health and am status stop saying "healthy"
       // (ask 3). Reopened by whatever restores the relay: the new document's
       // __aio:ready, did-fail-load, or a vetoed navigation.
@@ -436,7 +436,7 @@ ${tmplRendererDiagnostics(true)}
   // new document is coming. And a vetoed navigation emits NO did-fail-load,
   // so nothing after the veto will ever reopen what was closed.
   //
-  // That is the whole of field report cc §5.1/§5.2/§5.3: clearing readiness
+  // That is the whole of field report report 9 §5.1/§5.2/§5.3: clearing readiness
   // here on every cross-document navigation closed the relay on every link
   // click, the veto kept the old document, and the relay stayed closed for its
   // life — frames queued, none delivered, uplink fine, screen frozen,
@@ -514,7 +514,7 @@ ${tmplRendererDiagnostics(true)}
   // own degraded() escalation travels on. It lands in /__aio/health as
   // clientDegraded, which is what am status and am health read: the
   // field report's "connected for minutes, received nothing, and every
-  // instrument said fine" (cc §5.3, ask 3).
+  // instrument said fine" (report 9 §5.3, ask 3).
   function _relayHealth(kind, lastError) {
     if (!sock || sock.destroyed) return;
     try {

@@ -1,7 +1,7 @@
 // `AIO_ELECTRON_ARGS` — the switch half of "make it start on this VM".
 //
 // A field report's console crash-looped on a GPU abort every ~90 seconds until
-// the machine got `LIBGL_ALWAYS_SOFTWARE=1` (quant §7, §9.7). Environment
+// the machine got `LIBGL_ALWAYS_SOFTWARE=1` (report 2 §7, §9.7). Environment
 // variables already reached Electron, because the spawn inherits them.
 // Chromium SWITCHES — `--disable-gpu`, `--disable-dev-shm-usage` — had no way
 // in at all, so half the documented remedy for a headless host was

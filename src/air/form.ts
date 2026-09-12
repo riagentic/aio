@@ -129,7 +129,7 @@ export interface FieldArrayState<T> {
 /** Run the form's Standard Schema over all its values.
  *
  *  WHY A SCHEMA AT ALL, when `rules` already exists. Two reports wrote the same
- *  adapter by hand (composer §10.6, newjob §8.7): the app already has a Zod /
+ *  adapter by hand (report 4 §10.6, report 5 §8.7): the app already has a Zod /
  *  Valibot / ArkType schema for the thing being edited, and restating it as
  *  `rules` is one constraint written twice, in two languages, drifting from the
  *  moment either changes. Standard Schema v1 is one well-known property, so

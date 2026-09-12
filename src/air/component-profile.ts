@@ -3,7 +3,7 @@
 //
 // THE REPORT. One page root ran `tuneAll` three times per render at ~14 ms —
 // half of "typing is slow while the model answers". It was found by READING
-// CODE and then confirmed over CDP (llama.master §16, risoto §22.3), which is
+// CODE and then confirmed over CDP (report 8 §16, report 1 §22.3), which is
 // the expensive order: the renderer already counts every re-render and already
 // times them, and nothing added those numbers up.
 //

@@ -3,7 +3,7 @@
 //
 // One app had THREE different hand-written answers to that one question, and
 // the comment on one records that its first-wins guard was itself a bug
-// (llama.master §15). It is a policy: every app needs an answer, most need
+// (report 8 §15). It is a policy: every app needs an answer, most need
 // two or three different ones, and none of them should be writing the
 // plumbing.
 import { assert, assertEquals } from "@std/assert";

@@ -1,7 +1,7 @@
 // `aio.run({ budgets })` — the limits an APP declares, in human units.
 //
 // A field report asked for it and said why it beats aio picking a number
-// (quant §9.3): a dashboard pushing a 4 MB table once a minute and a game loop
+// (report 2 §9.3): a dashboard pushing a 4 MB table once a minute and a game loop
 // pushing 200 bytes at 60 Hz are both healthy, and no single threshold calls
 // them both correctly.
 //

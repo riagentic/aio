@@ -223,7 +223,7 @@ export function _rerenderComponent(inst: ComponentInstance): void {
     // `<ErrorBoundary>` on the RE-RENDER path. Mount already unwinds to the
     // boundary; a later throw did not, so the subtree kept its last good
     // output and silently stopped updating — a panel that quietly stops being
-    // true, which is the failure risoto §22.1 describes from the other side.
+    // true, which is the failure report 1 §22.1 describes from the other side.
     //
     // The failing component renders the boundary's FALLBACK this time, which
     // reuses the whole existing diff path below rather than adding a second

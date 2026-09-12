@@ -4,7 +4,7 @@
 // `winner` narrowed nothing: every use of the winner's value needed a cast, and
 // `deno check` reported TS18046 ("'value' is of type 'unknown'") on the exact
 // shape `mod.ts`'s own module example teaches. `race` is one of five async
-// helpers on the CORE entry — after beta1 its return type can never change, so
+// helpers on the CORE entry — after 1.0.0-beta its return type can never change, so
 // the discriminated union had to land now or never. (audit a16/3)
 //
 // These assertions are ANNOTATIONS as much as expectations: each `const x: T =`

@@ -1,6 +1,6 @@
 // `expectCell`'s predicate could assert nothing, and pass.
 //
-// Field report (quant, a 24/7 trading desk): "the object the predicate receives
+// Field report (report 2): "the object the predicate receives
 // is the cell DEFINITION, whose reactive getters fall back to their declared
 // initial values when nothing has been set. So a null-check like
 // `c.view !== null` passes against `undefined` and asserts nothing — a green

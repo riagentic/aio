@@ -83,7 +83,17 @@ Deno.test({
         stdout: "piped",
         stderr: "null",
       }).output();
-      assertStringIncludes(dec.decode(desc.stdout), "v1.0.0-alpha");
+      // A tag, not an era: the first beta tag ON HEAD was the first time
+      // `git describe` had nothing to fall back to, and "contains alpha" —
+      // true through 77 alphas by accident — failed on the release it was
+      // meant to prove.
+      const described = dec.decode(desc.stdout).trim();
+      assert(
+        /^v\d+\.\d+\.\d+(?:-(?:alpha|beta|rc)\d*)?(?:-\d+-g[0-9a-f]+)?$/.test(
+          described,
+        ),
+        `install pinned to something that is not a release tag: "${described}"`,
+      );
     } finally {
       await Deno.remove(root, { recursive: true });
     }

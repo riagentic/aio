@@ -338,8 +338,8 @@ export function logEventHead(
 /** Does this EVENT (its lines) pass the structured filters?
  *
  *  Two field reports re-grepped the same throwaway Python out of one JSON blob
- *  dozens of times because `am logs` could only match a substring (watcher §6,
- *  §8.8; composer §9.8). A substring cannot express "warnings and worse", and
+ *  dozens of times because `am logs` could only match a substring (report 7 §6,
+ *  §8.8; report 4 §9.8). A substring cannot express "warnings and worse", and
  *  it cannot express "since the restart" at all.
  *
  *  An event whose first line is not a recognised header (a raw write, a
@@ -402,7 +402,7 @@ export function logFlagError(args: readonly string[]): string | null {
  *  `am state` answers the second question. Nothing answered the first: a field
  *  report watched a console peak at 31.8 GB and restart 16 times in 24 hours
  *  with no way to ask, from outside, how much of that was heap and which cell
- *  it was in (quant §9.4). */
+ *  it was in (report 2 §9.4). */
 export async function cmdHeap(
   _args: string[],
   flags: GlobalFlags,
@@ -1327,7 +1327,7 @@ export async function cmdSurface(
   //
   // The list existed and was reachable only by PROVOKING A FAILURE — a miss
   // prints `available: …`, so "what can I address?" was answered by asking for
-  // something that is not there (anathomy §5a). A fine recovery path and a poor
+  // something that is not there (report 6 §5a). A fine recovery path and a poor
   // discovery one, and the same list is what an agent needs BEFORE it writes
   // the first `am trigger`. `ui.names()` is the same answer in a test.
   if (args.includes("--names")) {

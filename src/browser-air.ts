@@ -148,6 +148,15 @@ export {
   useResource,
   type UseResourceConfig,
 } from "./air/use-resource.ts";
+// ── Per-page <head> ───────────────────────────────────────────────────────
+// `useHead` owns document.title and its meta/link tags while a component is
+// mounted; `collectHead` is the SSR half — see air/head.ts.
+export {
+  collectHead,
+  type HeadInput,
+  type HeadTag,
+  useHead,
+} from "./air/head.ts";
 
 // ── Reactive element dimensions ──────────────────────────────────────
 export { type DimensionsState, useDimensions } from "./air/dimensions.ts";

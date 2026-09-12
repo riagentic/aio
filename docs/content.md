@@ -23,6 +23,8 @@
 ## Start here — install, first app, concepts, architecture
 
 - [Basics](basics/README.md) — Getting started with AIO — concepts, setup, and reference.
+- [Building an aio app without a human in the loop](AGENTS.md) — Five verbs.
+- [aio for AI agents](ai.md) — How to work on an aio app when you are a model — and, it turns out, how a
 - [API Reference](basics/api-reference.md) — Universal: import { aio, cell, log } from "aio" (state, lifecycle, logging)
 - [App architectures — the two canonical shapes](basics/app-architectures.md) — Almost every aio deployment is one of two shapes.
 - [Architecture](basics/architecture.md) — AIO is a full-stack Deno/TypeScript application framework built around cells
@@ -136,6 +138,8 @@
 - [Build Targets](build/targets.md) — build.targets; that is all there is to decide.
 - [Full-matrix validation runbook (perfect-aio D6/B5)](build/validation-runbook.md) — D6 promises FULL support: 5 local targets + 6 remote forms, on
 - [Versioning — `major.minor.build`, derived from the code](build/versioning.md) — An aio app's version is major.minor.build.
+- [Release signing](deploy/signing.md) — An aio app updates itself by fetching a ship manifest and, if it likes what
+- [Keeping an app up to date](deploy/updates.md) — One line turns it on:
 
 ## Debugging & production — errors, vitals, monitoring
 
@@ -158,82 +162,10 @@
 
 ## Upgrade guides — version-to-version migration notes
 
-- [Upgrade Guides](upgrade/README.md) — One guide per version migration.
-- [Upgrade from v1.0.0-alpha1 to v1.0.0-alpha2](upgrade/from-alpha1-to-alpha2.md) — browser fallback)
-- [Upgrading from alpha10 to alpha11](upgrade/from-alpha10-to-alpha11.md) — The core API has been renamed.
-- [Upgrading from alpha11 to alpha12](upgrade/from-alpha11-to-alpha12.md) — The useTransition() hook has been removed from aio/air.
-- [Upgrading from alpha12 to alpha13](upgrade/from-alpha12-to-alpha13.md) — alpha13 is the DX overhaul + production hardening release — the largest
-- [Upgrade: 1.0.0-alpha13 → 1.0.0-alpha14](upgrade/from-alpha13-to-alpha14.md) — Alpha14 applies the public-surface audit (roadmap A1,
-- [Upgrade: 1.0.0-alpha17 → 1.0.0-alpha18](upgrade/from-alpha17-to-alpha18.md) — Alpha18 is additive (no exports removed, no config renamed) — most apps upgrade
-- [Upgrade from v1.0.0-alpha2 to v1.0.0-alpha3](upgrade/from-alpha2-to-alpha3.md) — If you have tooling parsing JSON logs, update it.
-- [Upgrade: 1.0.0-alpha26 → 1.0.0-alpha27](upgrade/from-alpha26-to-alpha27.md) — alpha27 is the start of the restructure — the largest breaking change in aio's
-- [Upgrade: 1.0.0-alpha27 → 1.0.0-alpha28](upgrade/from-alpha27-to-alpha28.md) — alpha28 completes the restructure (B3–B5).
-- [Upgrade: 1.0.0-alpha28 → 1.0.0-alpha29](upgrade/from-alpha28-to-alpha29.md) — alpha29's headline is the wire-protocol v2 bump.
-- [Upgrade: 1.0.0-alpha29 → 1.0.0-alpha30](upgrade/from-alpha29-to-alpha30.md) — alpha30's headline is built-in enterprise auth — everything is opt-in, so
-- [Upgrade from v1.0.0-alpha3 to v1.0.0-alpha4](upgrade/from-alpha3-to-alpha4.md) — If you rely on effects completing after timeout (e.g., fire-and-forget with a
-- [Upgrade: 1.0.0-alpha30 → 1.0.0-alpha31](upgrade/from-alpha30-to-alpha31.md) — A sanity & cleanup release — no new features.
-- [Upgrade: 1.0.0-alpha31 → 1.0.0-alpha32](upgrade/from-alpha31-to-alpha32.md) — A feature release — the headline is aui, a visual app manager (new example),
-- [Upgrade: 1.0.0-alpha32 → 1.0.0-alpha33](upgrade/from-alpha32-to-alpha33.md) — A feature + hardening release.
-- [Upgrade: 1.0.0-alpha33 → 1.0.0-alpha34](upgrade/from-alpha33-to-alpha34.md) — The dream-list release — a large batch of new capabilities, all opt-in or purely
-- [Upgrade: 1.0.0-alpha34 → 1.0.0-alpha35](upgrade/from-alpha34-to-alpha35.md) — Purely additive.
-- [Upgrade: 1.0.0-alpha35 → 1.0.0-alpha36](upgrade/from-alpha35-to-alpha36.md) — Purely additive.
-- [Upgrade: 1.0.0-alpha36 → 1.0.0-alpha37](upgrade/from-alpha36-to-alpha37.md) — DEFAULTPRAGMAS, connectCli or connectCliUDS from "aio" — one command
-- [Upgrade: 1.0.0-alpha37 → 1.0.0-alpha38](upgrade/from-alpha37-to-alpha38.md) — automatically, on the first boot.
-- [Upgrade: 1.0.0-alpha38 → 1.0.0-alpha39](upgrade/from-alpha38-to-alpha39.md) — ever shipped in a release, and everything else is additive.
-- [Upgrade: 1.0.0-alpha39 → 1.0.0-alpha40](upgrade/from-alpha39-to-alpha40.md) — situations loud.
-- [Upgrade from v1.0.0-alpha4 to v1.0.0-alpha5](upgrade/from-alpha4-to-alpha5.md) — None.
-- [Upgrade: alpha40 → alpha41](upgrade/from-alpha40-to-alpha41.md) — Most apps upgrade with no changes.
-- [Upgrade: alpha41 → alpha42](upgrade/from-alpha41-to-alpha42.md) — on changed.
-- [Upgrade: alpha42 → alpha43](upgrade/from-alpha42-to-alpha43.md) — every API is additive.
-- [Upgrade: alpha43 → alpha44](upgrade/from-alpha43-to-alpha44.md) — every API change is additive.
-- [Upgrade: alpha44 → alpha45](upgrade/from-alpha44-to-alpha45.md) — Everything here came out of one field report — two apps in one repository, a
-- [Upgrade: alpha45 → alpha46](upgrade/from-alpha45-to-alpha46.md) — alpha46 is a bug-hunt release: no new capability, 27 real defects closed.
-- [Upgrade: alpha46 → alpha47](upgrade/from-alpha46-to-alpha47.md) — A second bug-hunt release: 17 more defects, found by pointing randomized
-- [Upgrade: alpha47 → alpha48](upgrade/from-alpha47-to-alpha48.md) — A third bug-hunt release: 19 defects across observability and the client
-- [Upgrade: alpha48 → alpha49](upgrade/from-alpha48-to-alpha49.md) — stopped every scheduled task on Android from ever firing.
-- [Upgrade: alpha49 → alpha50](upgrade/from-alpha49-to-alpha50.md) — A bug-hunt release (hunts 7, 8 and 9 — the same series that produced
-- [Upgrade from v1.0.0-alpha5 to v1.0.0-alpha6](upgrade/from-alpha5-to-alpha6.md) — None.
-- [Upgrade: alpha50 → alpha51](upgrade/from-alpha50-to-alpha51.md) — The zero-inbox release: every open field-report item resolved or refused, plus
-- [Upgrade: alpha51 → alpha52](upgrade/from-alpha51-to-alpha52.md) — in one version — and every old spelling keeps working through beta:
-- [Upgrade: alpha52 → alpha53](upgrade/from-alpha52-to-alpha53.md) — Small and additive after the big one.
-- [alpha53 → alpha54](upgrade/from-alpha53-to-alpha54.md) — app that adds nothing to its config behaves exactly as it did on alpha53.
-- [alpha54 → alpha55](upgrade/from-alpha54-to-alpha55.md) — additive or a behaviour improvement your app gets for free.
-- [alpha55 → alpha56](upgrade/from-alpha55-to-alpha56.md) — Two changes can be noticed, and one is a refusal you might meet at boot.
-- [alpha56 → alpha57](upgrade/from-alpha56-to-alpha57.md) — again.
-- [alpha57 → alpha58](upgrade/from-alpha57-to-alpha58.md) — wiped.
-- [alpha58 → alpha59](upgrade/from-alpha58-to-alpha59.md) — a change to what aio prints and where the one-liner puts things.
-- [alpha59 → alpha60](upgrade/from-alpha59-to-alpha60.md) — not how anything runs — and every renamed thing kept its old spelling working.
-- [Upgrade from v1.0.0-alpha6 to v1.0.0-alpha7](upgrade/from-alpha6-to-alpha7.md) — mod.ts no longer re-exports renderer primitives.
-- [Upgrading from alpha60 to alpha61](upgrade/from-alpha60-to-alpha61.md) — Nothing breaks.
-- [Upgrading from alpha61 to alpha62](upgrade/from-alpha61-to-alpha62.md) — Nothing breaks in your app's code.
-- [Upgrading from alpha62 to alpha63](upgrade/from-alpha62-to-alpha63.md) — One default flips, and it flips towards your app: aio's stylesheet no longer
-- [Upgrading from alpha63 to alpha64](upgrade/from-alpha63-to-alpha64.md) — Nothing in your app code changes.
-- [Upgrading from alpha64 to alpha65](upgrade/from-alpha64-to-alpha65.md) — Nothing in your app code changes.
-- [Upgrading from alpha65 to alpha66](upgrade/from-alpha65-to-alpha66.md) — Four behaviours change; three can break an app.
-- [Upgrading from alpha66 to alpha67](upgrade/from-alpha66-to-alpha67.md) — Nothing in your app code changes.
-- [Upgrading from alpha67 to alpha68](upgrade/from-alpha67-to-alpha68.md) — Nothing in your app code changes.
-- [Upgrading from alpha68 to alpha69](upgrade/from-alpha68-to-alpha69.md) — Nothing in your app code changes.
-- [Upgrading from alpha69 to alpha70](upgrade/from-alpha69-to-alpha70.md) — duplicate import path that had been "deprecated through beta" is retired, one
-- [Upgrade from v1.0.0-alpha7 to v1.0.0-alpha8](upgrade/from-alpha7-to-alpha8.md) — None.
-- [Upgrading from alpha70 to alpha71](upgrade/from-alpha70-to-alpha71.md) — this release is what alpha70's own promise looks like when it is checked: every
-- [Upgrading from alpha71 to alpha72](upgrade/from-alpha71-to-alpha72.md) — key (security), one new UI key (ui.dir), one new config array (plugins),
-- [Upgrading from alpha72 to alpha73](upgrade/from-alpha72-to-alpha73.md) — every line it prints to a person, in one vocabulary — plus three tiny additions
-- [Upgrading from alpha73 to alpha74](upgrade/from-alpha73-to-alpha74.md) — end to end plus the hunt that followed them: fixes to what aio serves, what it
-- [Upgrading from alpha74 to alpha75](upgrade/from-alpha74-to-alpha75.md) — snapshot moved by exactly one hash, the version string.
-- [Upgrading from alpha75 to alpha76](upgrade/from-alpha75-to-alpha76.md) — compatibility.
+- [Upgrade Guides](upgrade/README.md) — every one, newest first (75 pages)
+- [Upgrading from alpha77 to 1.0.0-beta](upgrade/from-alpha77-to-1.0.0-beta.md) — (docs/basics/semver-policy.md): every export, signature, flag, config key and
 - [Upgrading from alpha76 to alpha77](upgrade/from-alpha76-to-alpha77.md) — (docs/basics/semver-policy.md): every export, signature, flag, config key and
-- [Upgrading from alpha77 to beta1](upgrade/from-alpha77-to-beta1.md) — (docs/basics/semver-policy.md): every export, signature, flag, config key and
-- [Upgrade from v1.0.0-alpha8 to v1.0.0-alpha9](upgrade/from-alpha8-to-alpha9.md) — The internal machine state field is renamed.
-- [Upgrade from v1.0.0-alpha9 to v1.0.0-alpha10](upgrade/from-alpha9-to-alpha10.md) — Alpha10 is fully additive.
-- [Upgrade from v0.1 to v0.2](upgrade/from-v0.1-to-v0.2.md) — preserved)
-- [Upgrade from v0.2 to v0.3](upgrade/from-v0.2-to-v0.3.md) — perfMode: 'strict' | 'soft' and perfBudget: { reduce?, effect? } in
-- [Upgrade from v0.3 to v0.4](upgrade/from-v0.3-to-v0.4.md) — P-256 cert (cached in .aio-tls/).
-- [Upgrade from v0.4 to v0.5](upgrade/from-v0.4-to-v0.5.md) — v0.5 introduces feature() — one function defines state, actions, effects,
-- [Upgrade from v0.5 to v0.6](upgrade/from-v0.5-to-v0.6.md) — v0.6 adds flow() — sequential async workflows using generators.
-- [Upgrade from v0.6 to v0.7](upgrade/from-v0.6-to-v0.7.md) — v0.7 adds reactive(), improves flow(), and overhauls DX.
-- [Upgrade from v0.7 to v0.8](upgrade/from-v0.7-to-v0.8.md) — The function form with { A } / { E } context is removed from the default
-- [Upgrade from v0.8 to v0.9](upgrade/from-v0.8-to-v0.9.md) — All app.db calls must be awaited.
-- [Upgrade from v0.9 to v1.0.0-alpha](upgrade/from-v0.9-to-v1.0.0-alpha.md) — appId is no longer read from deno.json — it must be passed directly.
+- [Upgrading from alpha75 to alpha76](upgrade/from-alpha75-to-alpha76.md) — compatibility.
 - [The aio restructure — alpha27/alpha28 breaking changes](upgrade/restructure.md) — This guide tracks every breaking change of the restructure
 
 ## Design specs — decision records — background, not manuals
@@ -247,22 +179,6 @@
 - [One data directory, and updating a deployed app — design](specs/2026-07-26-data-dir-and-updates.md) — Status: Part 1 SHIPPED in 1.0.0-alpha38 (see
 - [Channelled app updates — design](specs/2026-08-08-app-updates.md) — Status: SHIPPED and wired — updates: "<url>" in aio.run() turns it on.
 
-## (root)
+## Release notes — the alpha19–29 long-form notes; since then the CHANGELOG entry is the note
 
-- [Building an aio app without a human in the loop](AGENTS.md) — Five verbs.
-- [aio for AI agents](ai.md) — How to work on an aio app when you are a model — and, it turns out, how a
-
-## deploy
-
-- [Release signing](deploy/signing.md) — An aio app updates itself by fetching a ship manifest and, if it likes what
-- [Keeping an app up to date](deploy/updates.md) — One line turns it on:
-
-## release-notes
-
-- [aio v1.0.0-alpha19 — zero-config DX + no-await UI tests](release-notes/RELEASE_NOTES-v1.0.0-alpha19.md) — The theme: delete the boilerplate.
-- [v1.0.0-alpha24 — onboarding that feels like magic](release-notes/RELEASE_NOTES-v1.0.0-alpha24.md) — Install once, and am does the rest.
-- [v1.0.0-alpha25 — source-first onboarding + feature freeze](release-notes/RELEASE_NOTES-v1.0.0-alpha25.md) — Install once, create, run, ship — four lines, no JSR.
-- [v1.0.0-alpha26 — sync cursor hardening + field-report P1 closure](release-notes/RELEASE_NOTES-v1.0.0-alpha26.md) — Fix/test/field-report release (per the alpha25 feature freeze — the one
-- [v1.0.0-alpha27 — the restructure begins: methods is the ONE style](release-notes/RELEASE_NOTES-v1.0.0-alpha27.md) — The biggest breaking change in aio's history, and the biggest simplification:
-- [aio 1.0.0-alpha28 — the restructure completes: B3–B5](release-notes/RELEASE_NOTES-v1.0.0-alpha28.md) — alpha27 made methods the ONE style (B1) and un-globaled the runtime (B2).
-- [aio 1.0.0-alpha29 — wire protocol v2: ONE envelope](release-notes/RELEASE_NOTES-v1.0.0-alpha29.md) — alpha28 typed the v1 wire (B4b phase 1).
+- [Release notes — the alpha19 to alpha29 era](release-notes/README.md) — every one, newest first (7 pages)

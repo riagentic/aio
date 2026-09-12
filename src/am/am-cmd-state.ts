@@ -232,7 +232,7 @@ export async function cmdState(
   //
   // `--wait=N` already re-read the value every N seconds and printed it every
   // time — which is a poll loop with nicer syntax, and both reports that asked
-  // for this wrote `until` loops around `am state` anyway, all session (watcher
+  // for this wrote `until` loops around `am state` anyway, all session (report 7
   // §6). What they wanted was to be told when something HAPPENED. A change is
   // rare and a tick is not, so printing per tick buries the one line that
   // matters under hundreds that do not.
@@ -557,7 +557,7 @@ export async function cmdDispatch(
     // and only then. `--args` is the ARGUMENT LIST, so `--args='["a","b"]'`
     // passes two arguments — and the thing people mean is usually one array.
     // The app then throws about a value its author never knowingly passed
-    // (`v.startsWith is not a function`, vidtune §4), and nothing in that
+    // (`v.startsWith is not a function`, report 3 §4), and nothing in that
     // message points back at the command line. The CLI cannot tell which
     // reading was meant — both are legal — but it knows it just sent N
     // arguments, and it can say the other reading exists.

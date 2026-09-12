@@ -1146,7 +1146,7 @@ Deno.test("electron aio://: FROM_DISK serves dist/ and falls through to the sock
   }, { baseDir: mkDist });
 });
 
-// ── cc §5.1 / §5.2 / §5.3 — ONE in-app route change killed the downlink ──
+// ── report 9 §5.1 / §5.2 / §5.3 — ONE in-app route change killed the downlink ──
 //
 // The sequence below is what REAL Electron 44 emits for a click on an in-app
 // link, measured (scratch probe, 2026-09-04) rather than assumed:
@@ -1233,7 +1233,7 @@ Deno.test("electron main: a reload of the CURRENT url is allowed on any route", 
 // …and navigating HOME is a route change like any other. The root-path
 // exemption reloaded the whole window — a white flash, a re-mounted tree, a
 // new connection — on every app's most frequent navigation; a field report
-// renamed its home page to /chat to escape it (cc §5.3, ask 4).
+// renamed its home page to /chat to escape it (report 9 §5.3, ask 4).
 Deno.test("electron main: navigating to / from another route is in-app, not a reload", async () => {
   await withHarness(async (srv, main) => {
     await srv.writeLine('{"v":2,"t":"state","d":{"n":1}}');
@@ -1267,7 +1267,7 @@ Deno.test("electron main: with no document yet, the root is still allowed throug
 // A stalled relay must be SAID where it can be seen: the window gets the
 // dropped-socket signal (its banner shows instead of a frozen page claiming to
 // be connected) and the server hears a client degradation for /__aio/health
-// and `am status`. Then the heal is reported the same way. (cc §5.3, asks 2+3.)
+// and `am status`. Then the heal is reported the same way. (report 9 §5.3, asks 2+3.)
 Deno.test({
   name:
     "electron main: a stalled relay reaches the window and the server, and reports its heal",

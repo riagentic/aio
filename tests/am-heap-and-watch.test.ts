@@ -3,11 +3,11 @@
 // `am state` says what an app is SERVING. Nothing said what it was HOLDING: a
 // field report watched a console peak at 31.8 GB and restart 16 times in 24
 // hours with no way to ask, from outside, how much of that was heap and which
-// cell it was in (quant §9.4).
+// cell it was in (report 2 §9.4).
 //
 // And `--wait=N` re-printed the value every N seconds — a poll loop with nicer
 // syntax. Both reports that asked for a watch wrote `until` loops around
-// `am state` anyway, all session (watcher §6). A change is rare and a tick is
+// `am state` anyway, all session (report 7 §6). A change is rare and a tick is
 // not, so a line per tick buries the one line that matters.
 import { assert, assertEquals, assertStringIncludes } from "@std/assert";
 import { aio, cell } from "../mod.ts";

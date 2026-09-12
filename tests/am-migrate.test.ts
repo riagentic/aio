@@ -1,6 +1,6 @@
 // `am migrate` — the retired spellings THIS app still uses.
 //
-// A field report asked for `am migrate --from=alpha76` (risoto §22.7). Every
+// A field report asked for `am migrate --from=alpha76` (report 1 §22.7). Every
 // piece already existed with no front door: REMOVALS carries each retired
 // spelling with its hint and its guide, `removalsInSource` finds them in real
 // source, and `aiol --safe-fix` rewrites the renames.
@@ -38,8 +38,13 @@ async function am(
 
 Deno.test("seriesRank orders the release vocabulary", () => {
   assert(seriesRank("alpha52") < seriesRank("alpha76"));
-  assert(seriesRank("alpha76") < seriesRank("beta1"));
-  assert(seriesRank("beta1") < seriesRank("1.0.0"));
+  assert(seriesRank("alpha76") < seriesRank("beta"));
+  // The beta LINE: `1.0.0-beta`, then `1.0.1-beta`, … until the suffix drops.
+  assert(seriesRank("beta") < seriesRank("1.0.1-beta"));
+  assert(seriesRank("1.0.1-beta") < seriesRank("1.0.1"));
+  assert(seriesRank("1.0.1") < seriesRank("1.1.0-beta"));
+  assert(seriesRank("beta") < seriesRank("rc"));
+  assert(seriesRank("rc") < seriesRank("1.0.0"));
   // The tagged spelling and the bare series are the same release.
   assertEquals(seriesRank("v1.0.0-alpha76"), seriesRank("alpha76"));
   // Unreadable sorts LAST, so an unrecognised --from shows EVERYTHING. A

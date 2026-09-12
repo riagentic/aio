@@ -183,7 +183,7 @@ export function createDom(
     // gone, so each component mounted in here remembers the boundary it is
     // inside (see `_currentBoundary`). Without it a component that starts
     // throwing mid-session keeps its last good output forever — the subtree
-    // silently stops updating, which for the wallet in risoto §22.1 is a panel
+    // silently stops updating, which for the wallet in report 1 §22.1 is a panel
     // that quietly stops being true.
     _boundaryStack.push(vnode);
     try {

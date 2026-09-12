@@ -57,7 +57,7 @@ Deno.test("aiol-ok: unsuppressed stays unsuppressed", () => {
 //
 // There were two markers one letter apart — `aio-ok` for the repo's own gates,
 // `aiol-ok` for this linter — and they were placed by copying nearby code,
-// which is exactly how you end up with the wrong one (vidtune §8.1: "one marker
+// which is exactly how you end up with the wrong one (report 3 §8.1: "one marker
 // with a scope"). `aio-ok` wins on the count that matters, ~100 uses to 3, so it
 // is accepted here too and is the one to write. The old spelling keeps working
 // forever: a suppression that stops suppressing turns a silent, deliberate

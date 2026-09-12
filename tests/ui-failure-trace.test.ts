@@ -1,7 +1,7 @@
 // A failing UI assertion should say how it GOT there.
 //
 // "dump the AIR tree and the last N dispatches, and name the file in the
-// error" (quant §9.5). A failure prints what the surface looks like NOW; what
+// error" (report 2 §9.5). A failure prints what the surface looks like NOW; what
 // it can never print is the sequence, and reconstructing that from a test body
 // is exactly the work this removes.
 import { assert, assertEquals, assertStringIncludes } from "@std/assert";

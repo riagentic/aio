@@ -1,6 +1,6 @@
 // The CI recipe has to stay TRUE, or it is worse than no recipe.
 //
-// A copy-pasteable workflow (newjob §8.9) is read once and then trusted for
+// A copy-pasteable workflow (report 5 §8.9) is read once and then trusted for
 // years. Every line of it is a claim about this repo — that a task exists,
 // that it runs both halves, that a version floor is what aio actually
 // requires — and each one rots silently the day someone renames something.

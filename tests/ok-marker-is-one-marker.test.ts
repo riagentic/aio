@@ -1,6 +1,6 @@
 // One suppression marker, honoured by every checker, with a scope.
 //
-// There were two, one letter apart (vidtune §8.1). `aiol-ok` worked for the
+// There were two, one letter apart (report 3 §8.1). `aiol-ok` worked for the
 // project linter and for nothing else; `aio-ok` worked for every script gate.
 // Both get placed by copying a nearby line, so the wrong one is SILENT: you
 // write `aiol-ok` beside a `check:silent-catch` finding, the gate keeps

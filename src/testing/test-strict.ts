@@ -264,7 +264,7 @@ function isThenable(v: unknown): boolean {
  *
  *  A failing UI assertion says what the surface looks like NOW. What it could
  *  never say is how it got there, and "dump the AIR tree and the last N
- *  dispatches" was the ask (quant §9.5): the sequence is usually the answer,
+ *  dispatches" was the ask (report 2 §9.5): the sequence is usually the answer,
  *  and reconstructing it from a test body is exactly the work the trace exists
  *  to remove.
  *
@@ -284,7 +284,7 @@ export function _recordCalls(
       if (typeof original !== "function") continue;
       const call = original as (...args: unknown[]) => unknown;
       const label = `${def.__aio.id}.${key}`;
-      holder[key] = (...args: unknown[]): unknown => {
+      const wrapped = (...args: unknown[]): unknown => {
         // Arguments are SUMMARISED, never serialized whole: a trace that
         // inlines a 2 MB payload is one nobody opens, and a secret in a
         // payload does not belong in a file the test leaves behind.
@@ -292,6 +292,16 @@ export function _recordCalls(
         if (ring.length > max) ring.shift();
         return call.apply(def, args);
       };
+      // The SAME line the ledger wrapper has, and the one this copy lost: a
+      // bound method carries `.action()` and `.type` (the catalog), and
+      // `schedule.after(ms, cell.method.action(id))` — the idiom the docs
+      // teach — reads them off the WRAPPER. Without this every scheduled
+      // follow-up in a testUI test was built from `undefined`, and the
+      // failure pointed at the schedule, thirty tests away from the cause.
+      // 1.0.0-beta shipped it; tests/testui-trace-keeps-action.test.tsx is red on it.
+      const creator = (def.__aio.actions as Record<string, unknown>)[key];
+      if (creator) attachMeta(wrapped, creator);
+      holder[key] = wrapped;
       undo.push(() => {
         holder[key] = original;
       });

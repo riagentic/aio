@@ -1,6 +1,6 @@
 // A one-time seed must not kill the socket.
 //
-// risoto §10: a demo seed of ~1000 accounts made the sync scheduler exceed the
+// report 1 §10: a demo seed of ~1000 accounts made the sync scheduler exceed the
 // per-connection budget. Observed live, the renderer froze on the pre-burst
 // state while the server moved on, and a later dispatch was invisible to the
 // client — the failure mode is a silently DEAD socket, not a slowed one, since
@@ -91,7 +91,7 @@ Deno.test("a 1000-op seed never exceeds the rate the server advertised", async (
       perSec <= RATE,
       `${perSec.toFixed(0)} frames/sec against an advertised ${RATE}/sec — ` +
         `this is the burst that closed the socket after 50 consecutive drops ` +
-        `(risoto §10)`,
+        `(report 1 §10)`,
     );
     // …and it uses HEADROOM rather than sending at the ceiling, because
     // sending at it races the server's own window boundary. 0.6 is the

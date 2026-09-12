@@ -5,11 +5,11 @@
 <p align="center">
   <b>Write the state. Get the app.</b><br>
   One <code>cell</code> is your server state, your database, your sync and your UI —
-  building to browser, desktop and Android from the same two files.
+  building to browser, desktop and mobile from the same two files.
 </p>
 
 <p align="center">
-  <code>v1.0.0-beta1</code> · <a href="LICENSE">MIT</a> ·
+  <code>v1.0.0-beta</code> · <a href="LICENSE">MIT</a> ·
   <a href="docs/content.md">Docs</a> ·
   <a href="docs/basics/quickstart.md">Quickstart</a> ·
   <a href="CHANGELOG.md">Changelog</a>
@@ -28,7 +28,9 @@ That is a running app — persisted, synced, testable — and one flag from the
 rest:
 
 - 🖥️ **Desktop** — `deno task dev --client=electron`
-- 📱 **Android** — `deno task build --targets=android`
+- 📱 **Mobile** — Android, `deno task build --targets=android` (a standalone
+  APK); iPhone, `--targets=ios-client` (an Xcode project that connects to your
+  server — Deno does not run on iOS)
 - 📦 **One binary** — `deno task compile`
 - 🪟 **Windows** — install with `irm …/install.ps1 | iex`
 
@@ -107,14 +109,14 @@ screen, `am trigger` acts on it.
 
 ## 📦 What you get
 
-|                |                                                                        |
-| -------------- | ---------------------------------------------------------------------- |
-| 💾 **Data**    | worker-thread SQLite · CRDT sync · offline queue · migrations · backup |
-| 🎨 **UI**      | signals renderer · a default theme · routing · forms · SSR + hydrate   |
-| 🔐 **Auth**    | sessions · per-user tokens · TOTP · OIDC · PIN pairing                 |
-| 🧪 **Testing** | `testCell` / `testUI` — semantic, selector-free · time-travel          |
-| 🚚 **Ship**    | browser · Electron · Android · CLI · systemd service · signed updates  |
-| 🛠️ **Operate** | `am` — status, health, logs, state, dispatch, pins, installs           |
+|                |                                                                            |
+| -------------- | -------------------------------------------------------------------------- |
+| 💾 **Data**    | worker-thread SQLite · CRDT sync · offline queue · migrations · backup     |
+| 🎨 **UI**      | signals renderer · a default theme · routing · forms · SSR + hydrate       |
+| 🔐 **Auth**    | sessions · per-user tokens · TOTP · OIDC · PIN pairing                     |
+| 🧪 **Testing** | `testCell` / `testUI` — semantic, selector-free · time-travel              |
+| 🚚 **Ship**    | browser · Electron · Android · iOS client · CLI · service · signed updates |
+| 🛠️ **Operate** | `am` — status, health, logs, state, dispatch, pins, installs               |
 
 A whole client — renderer, protocol, offline queue, CRDT merge — is **71 KB
 gzipped**, 62 KB brotli. `deno task bench:bundle` prints it, and
@@ -134,14 +136,26 @@ Installs what is missing, builds, starts it. Nothing to read first.
 
 ## 🎯 Honestly
 
-- 🧊 **Beta — the surface is frozen.** An app that compiles and runs against
-  `v1.0.0-alpha76` compiles and runs against every later release, up to and
-  including `1.0.0`. Additions only, enforced by `deno task check:api`, not by
-  good intentions.
-- ✅ **Built for** apps where state is the product — dashboards, ops and trading
-  tools, control panels, internal tools, local-first desktop and mobile.
-- ❌ **Not for** content sites, SEO, or planet-scale public APIs. It is one
-  embedded process, by design.
+- 🧊 **Beta means the surface is frozen, not that the work is done.** An app
+  that compiles and runs against `v1.0.0-alpha76` compiles and runs against
+  every later release of the 1.x line — additions only, enforced by
+  `deno task check:api`, not by good intentions. Versions run `1.0.0-beta`,
+  `1.0.1-beta`, … and the first stable is the same triple without the suffix
+  ([why](docs/basics/semver-policy.md)).
+- 📏 **What is measured, and what is not.** Every release is gate-built and
+  booted on Linux, in a fresh container, and under Wine. A real Windows or macOS
+  machine, a physical Android device and iOS are **not** release gates yet —
+  `deno task check:proof` prints exactly what has been run. The suite is large;
+  it is still one machine's opinion.
+- 🧑‍🔬 **A small number of real apps run on it.** Their field reports drove most
+  of what changed since alpha52, and they still find bugs — the first beta was
+  re-cut the same evening for one. Expect rough edges; please report them.
+- ✅ **Built for** apps where state is the product — dashboards, ops tools,
+  control panels, internal tools, local-first desktop and mobile.
+- ❌ **Not for** anything that needs a CDN, a static export or horizontal
+  scale-out — it is one embedded process, by design — or for native iOS (Deno
+  does not run there; a thin WebView client does). A content site is fine: SSR,
+  hydration and a per-page `<head>` are there; server components are not.
 
 [Positioning & non-goals](docs/basics/positioning.md)
 

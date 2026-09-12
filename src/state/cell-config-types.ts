@@ -98,7 +98,7 @@ export type MethodsCellConfig<
   /** What happens when an ASYNC method is called again while it is still
    *  running. One report had three different hand-written answers to this one
    *  question in a single app, and the comment on one records that its
-   *  first-wins guard was itself a bug (llama.master §15).
+   *  first-wins guard was itself a bug (report 8 §15).
    *
    *  ```ts
    *  concurrency: { search: "newest", scan: "first", save: "queue" }
@@ -181,7 +181,7 @@ export type MethodsCellConfig<
    *  protects the call sites you compile, and nothing protects `am dispatch`,
    *  a hand-written action, a form, a URL or an agent. aio's arity warning
    *  exists for exactly that reason, and two reports counted the cost — a
-   *  dozen hand-written coercions in one week (cc §9.6, vidtune §12.7).
+   *  dozen hand-written coercions in one week (report 9 §9.6, report 3 §12.7).
    *
    *  Each entry is a Standard Schema (Zod, Valibot, ArkType all implement it)
    *  or a plain predicate returning `true` or the reason it is not; `null`
@@ -199,7 +199,7 @@ export type MethodsCellConfig<
    *  journal (`logs/actions.jsonl`) and the dev action timeline.
    *
    *  A separate word on purpose. `persist: "none"` was read as covering this
-   *  too (quant §7), and it does not: `persist` is about the STATE STORE, the
+   *  too (report 2 §7), and it does not: `persist` is about the STATE STORE, the
    *  journal is a dev diagnostic that is off in production and lives in the
    *  app's own data directory. Making one key silently mean two things is
    *  worse than the surprise, so this is the key that means the other one.
@@ -318,7 +318,7 @@ export type MethodsCellConfig<
   /** Shape this cell's state on its way TO the store — the mirror of
    *  {@linkcode MethodsCellConfig.onRestore}.
    *
-   *  aio let you repair what comes back and not shape what goes out (cc §8.4).
+   *  aio let you repair what comes back and not shape what goes out (report 9 §8.4).
    *  The reporter got lucky — their fat field was dead weight, so an `exclude`
    *  covered it — and said plainly that had the field been needed ON SCREEN,
    *  the only move left was a second mirrored cell kept in sync by hand.

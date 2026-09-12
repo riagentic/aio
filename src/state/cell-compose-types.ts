@@ -16,7 +16,7 @@ export type CellStatus = {
    *  made `{ name, enabled, errors }` a type error and forced every builder of
    *  a `CellStatus` (a test double, a health report an app assembles itself)
    *  to write `status: undefined` out loud. Optional accepts both, so this is
-   *  a widening — and one that can never be made after beta1. */
+   *  a widening — and one that can never be made after 1.0.0-beta. */
   status?: string;
   enabled: boolean;
   errors: number;

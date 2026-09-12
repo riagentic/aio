@@ -810,7 +810,7 @@ export async function setupTransport<S, A>(
         // never told. `ok: true` is stated positively so a monitor can alert
         // on its absence as well as on `degraded`.
         // Declared budgets are a claim the app made, so "healthy" has to
-        // account for them (quant §9.3): a limit that only warns cannot fail a
+        // account for them (report 2 §9.3): a limit that only warns cannot fail a
         // CI step, and the report asked for one that does. `null` when the app
         // declared none — a green field for a promise nobody made reads as
         // assurance.

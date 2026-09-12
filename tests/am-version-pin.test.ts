@@ -226,7 +226,7 @@ Deno.test("order: semver, not tag date — across the whole lifecycle", () => {
   const tags = [
     "v1.0.0-alpha9",
     "v1.0.0-alpha38",
-    "v1.0.0-beta1",
+    "v1.0.0-beta",
     "v1.0.0",
     "v1.2.1",
     "v2.0.0-rc1",
@@ -239,14 +239,14 @@ Deno.test("order: semver, not tag date — across the whole lifecycle", () => {
       "v2.0.0-rc1",
       "v1.2.1",
       "v1.0.0",
-      "v1.0.0-beta1",
+      "v1.0.0-beta",
       "v1.0.0-alpha38",
       "v1.0.0-alpha9",
     ],
     "alpha < beta < rc < final, and alpha38 > alpha9 (numeric, not lexical)",
   );
   // Date order would be wrong here in two ways at once: this very repo has an
-  // abandoned v1.0.0-beta1 tagged BEFORE v1.0.0-alpha38, and post-1.0 a
+  // abandoned v1.0.0-beta tagged BEFORE v1.0.0-alpha38, and post-1.0 a
   // maintenance release (v1.2.1) can be tagged after a new major.
   assertEquals(newestVersion(tags)?.raw, "v2.0.0");
 });

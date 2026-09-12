@@ -561,7 +561,7 @@ function handleGet(
     // serving. `am state` answers the second question and nothing answered the
     // first: a field report watched a console peak at 31.8 GB and restart 16
     // times in 24 hours with no way to ask, from outside, how much of that was
-    // heap and which cell it was in (quant §9.4).
+    // heap and which cell it was in (report 2 §9.4).
     //
     // The numbers are V8's own, read at the moment of asking — no sampling to
     // start, nothing to enable. `heapLimit` is the real ceiling

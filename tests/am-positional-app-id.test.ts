@@ -2,7 +2,7 @@
 //
 // The positional was read only as a COMPONENT label — a declared `build.targets`
 // entry — so typing a running app's id straight from `am instances` was refused
-// with "this project declares no components, so <id> names nothing" (vidtune
+// with "this project declares no components, so <id> names nothing" (report 3
 // §5). True about components, and useless about the thing the user was holding.
 // `am instances` is exactly where you go to find that name.
 import { assert, assertEquals, assertStringIncludes } from "@std/assert";

@@ -298,6 +298,51 @@ Two things are specific to a packaged app:
   reloads the shell and starts at `/` again — keep screen identity in cell state
   if it must survive that, exactly as you would for a browser reload.
 
+## Per-page `<head>` — useHead()
+
+A page owns its title, description and canonical link for as long as it is
+mounted. Call it in the component body, like any hook:
+
+```tsx
+import { useHead } from "aio/air";
+
+function Post({ id }: { id: string }) {
+  const post = blog.posts[id];
+  useHead({
+    title: `${post.title} — My Blog`,
+    meta: [{ name: "description", content: post.summary }],
+    link: [{ rel: "canonical", href: `https://example.com/p/${id}` }],
+  });
+  return <article>…</article>;
+}
+```
+
+- **Reactive.** `post.title` is read during render, so when it changes the
+  component re-renders and the tab title follows.
+- **Nested.** A layout can set the app's default (`title: "My Blog"`, an
+  `og:site_name`); a page inside it overrides the title and replaces the tags
+  that share an identity (`meta` by `name`/`property`, `link` by `rel`+`href`,
+  `canonical`/`manifest`/`icon` by `rel` alone). Leave the page and the layout's
+  values are back; unmount every owner and the document's original title is
+  restored.
+- **Render-driven, not router-driven.** It works with `<Route>`, `page()`, a tab
+  switch or a modal — anything that mounts and unmounts — because the renderer
+  already knows when that happens.
+- **On the server**, inside `renderToString`, nothing is written; the entries
+  are collected and `collectHead()` returns them as markup for your own
+  `<head>`, exactly like `collectCss()`:
+
+```ts
+const body = renderToString(<App />); // sync — the head is known after it
+const html =
+  `<!doctype html><html><head>${collectHead()}${collectCss()}</head>` +
+  `<body><div id="app">${body}</div></body></html>`;
+```
+
+The tags carry `data-aio-head`, so on hydration the client takes them over. With
+`renderToStream` the head is complete only when the stream ends — render the
+page once with `renderToString` for its head, or write the head after.
+
 ## page() — State-Based Routing
 
 For Electron, kiosk, or single-tab apps where URL doesn't matter:

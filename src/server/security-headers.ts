@@ -229,7 +229,27 @@ export function contentSecurityPolicy(
     if (!key) continue;
     if (value === false) directives.delete(key);
     else if (typeof value === "string" && value.trim()) {
-      directives.set(key, value.trim());
+      let v = value.trim();
+      // COMPOSE with the nonce rather than replace it. A wallet that needed
+      // one extra script host had to choose: its host, or the nonce that let
+      // 'unsafe-inline' go — never both, because the override won whole and
+      // the nonce is per-response, so it cannot be written by hand. `{nonce}`
+      // names it anywhere; a `script-src` written without one gets it
+      // appended, because dropping the nonce silently is the outage the nonce
+      // exists to prevent.
+      if (v.includes("{nonce}")) {
+        if (!nonce) {
+          throw new Error(
+            `security.cspDirectives["${key}"] uses {nonce}, but ` +
+              `security.cspNonce is not on — there is no nonce to put there. ` +
+              `Set cspNonce: true, or remove the placeholder.`,
+          );
+        }
+        v = v.replaceAll("{nonce}", `'nonce-${nonce}'`);
+      } else if (key === "script-src" && nonce && !v.includes("'nonce-")) {
+        v = `${v} 'nonce-${nonce}'`;
+      }
+      directives.set(key, v);
     }
   }
   if (directives.size === 0) return null;

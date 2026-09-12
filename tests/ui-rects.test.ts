@@ -2,8 +2,8 @@
 //
 // happy-dom measures everything 0×0. That hid two security-relevant defects in
 // a wallet behind 1546 passing tests: a dApp origin running off the edge of the
-// approval card, and that dialog opening scrolled past the origin (risoto
-// §19.1/§22.2, anathomy §10.1). A harness that answers "0×0" to "where is
+// approval card, and that dialog opening scrolled past the origin (report 1
+// §19.1/§22.2, report 6 §10.1). A harness that answers "0×0" to "where is
 // this?" does not merely fail to help — it makes a layout assertion PASS.
 //
 // So the rule this pins is the one that makes geometry trustworthy: an

@@ -3,7 +3,7 @@
  * `s.$call.sibling(args)` — one cell method calling another, on the same draft.
  *
  * Three field reports reached for this and all three workarounds are wrong
- * (llama.master §6/§9, vidtune §6):
+ * (report 8 §6/§9, report 3 §6):
  *
  *   `this.bench(...)`     cannot type-check — the declared method takes the
  *                         draft, the callable one does not.

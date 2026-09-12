@@ -1,10 +1,10 @@
 # Changelog
 
-## v1.0.0-beta1 — the reports answered (2026-09-11)
+## v1.0.0-beta — the reports answered (2026-09-12)
 
 > **The surface is frozen and stays frozen.** Everything in this release is a
 > fix or an addition: an app that compiles and runs against alpha76 compiles and
-> runs against beta1. Nothing here is a migration you have to perform.
+> runs against 1.0.0-beta. Nothing here is a migration you have to perform.
 >
 > Beta is a QUALITY statement. What earns it: nine field reports from nine real
 > apps — a wallet, a 24/7 trading desk, a Claude Code control surface, a 3D
@@ -12,6 +12,58 @@
 > video captioner, a live-transcription app and an AI music studio — read end to
 > end, every finding verified against the code, and every one of them fixed,
 > refused in writing, or queued in the open. Ratings ranged 8 to 9 out of 10.
+
+### The version line, and a contents page you can read
+
+- **`MAJOR.MINOR.PATCH-beta` — no digit after the word.** `1.0.0-beta1` is
+  retired unreleased; this is `1.0.0-beta`, the next fix round is `1.0.1-beta`,
+  a feature is `1.1.0-beta`, and the first stable is the same triple with the
+  suffix dropped. SemVer sorts `beta10` below `beta2` (ASCII), which only `am`'s
+  own parser hid; the patch number is the counter now and every tool agrees on
+  the order. `docs/basics/semver-policy.md` "Version names";
+  `tests/am-versions-beta-line.test.ts` pins the whole line.
+- **`am fix` / `am migrate` rank the beta line correctly.** `seriesRank` read
+  `1.0.1-beta` as "unknown" (a `\d+` after the word was required) and would have
+  shown every removal ever made; it ranks through the one version ordering now.
+- **`docs/content.md` folds history.** 77 upgrade guides and 7 alpha-era release
+  notes were 85 of 268 index lines; each folder's README is the full list
+  (newest first), and the contents page shows the README, the newest three
+  guides, and a count. `update:docs` fails loud if a folded folder has a page
+  its README does not link.
+- **`useHead({ title, meta, link })` — per-page `<head>`.** A component owns its
+  title, description and canonical link while mounted; innermost wins, tags
+  deduplicate by identity, unmounting restores the layout's and then the
+  document's own title. Render-driven, so it works with `<Route>`, `page()`,
+  tabs and modals alike. On SSR, `collectHead()` returns the markup for your
+  `<head>` (the `collectCss()` contract); one render never leaks into the next.
+  This was the last named gap for content sites.
+- **The tree names no application.** Field reports are cited as `report N §x.y`;
+  example home paths are `/home/u`.
+
+### Folded in the same evening — the first field report on 1.0.0-beta
+
+A wallet ran end to end against the tag and found one real bug and two rough
+edges. 1.0.0-beta had one known consumer, so the tag was moved to include them
+rather than cutting a beta a day.
+
+- **Under `testUI`, `cell.method.action(...)` was `undefined`.** The failure
+  trace's method wrapper was a copy of the unobserved-call ledger's loop minus
+  the line that re-attaches the catalog — and the comment on it already said why
+  a second interception over one set of methods is dangerous. The idiom the docs
+  teach, `s.$do(schedule.after(ms, toast.dismiss.action(id)))`, built nothing in
+  a test and failed thirty tests away from the cause. Production never loads the
+  harness. Fixed; `tests/testui-trace-keeps-
+  action.test.tsx` is red on
+  1.0.0-beta.
+- **The CSP nonce composes with the app's own directives.** A `script-src`
+  written in `cspDirectives` gets `'nonce-…'` appended when `cspNonce` is on;
+  `{nonce}` names the per-response nonce in any directive; a placeholder with no
+  nonce to fill it is refused at boot. A wallet no longer chooses between its
+  one extra host and dropping `'unsafe-inline'`.
+- **Two `aiol` rules that fired on correct code.** The unnamed-control rule now
+  scans code-masked text (a `<button></button>` in a comment, a string or a
+  regex literal is not an element); the stylesheet-collision rule honours
+  `/* aiol-ok */` like every other rule.
 
 ### The round's two shapes
 
@@ -106,7 +158,7 @@ that promises "all exports".
 ### One recorded surface change, and it is a widening
 
 `VERSION` is now annotated `export const VERSION: string` instead of inferring
-the literal `"1.0.0-beta1"`. Taken through `update:api --allow-break` and
+the literal `"1.0.0-beta"`. Taken through `update:api --allow-break` and
 recorded here because the gate requires a decision to be written down, not
 absorbed — but it **widens**: `VERSION === "1.0.0-alpha76"` was a compile error
 under the literal type (no overlap) and is now an ordinary comparison, and every
@@ -1444,7 +1496,7 @@ here because this is the first entry they appear in.
 > on one origin flushed each other's offline queues. Almost all of it is
 > additive. The exception is deliberate and is the last chance to take it: seven
 > spellings that had been "deprecated through beta" with no removal date are
-> retired here, because beta1 is one or two releases away and after it they
+> retired here, because 1.0.0-beta is one or two releases away and after it they
 > would be permanent. Each leaves through the removals registry, most are
 > rewritten by `aiol --safe-fix`, and the alpha75-to-alpha76 upgrade guide lists
 > every one.
@@ -2342,7 +2394,7 @@ here because this is the first entry they appear in.
   and is not additive: `AioApp.mode` was typed `string` while `"standalone"` is
   the only value it has ever held, so `app.mode === "web"` stops compiling —
   code that was always dead at runtime. A union can only be narrowed before
-  beta1 freezes it, which is why it happens here rather than never.
+  1.0.0-beta freezes it, which is why it happens here rather than never.
 
 ### Seven more audits, and the last chance to break
 
@@ -2722,10 +2774,10 @@ here because this is the first entry they appear in.
   refuses an unknown flag by throwing — so `aio.run({ appFlags: ["--sync"] })`
   invoked as `app --sync` died in the parser before the declaration it needed
   was made. Both documented spellings failed, switch and value alike. The
-  feature came from a field report (dm §5) whose own workaround — deleting its
-  words out of `Deno.args` before calling `aio.run()` — therefore remained the
-  only thing that worked. Declared before argv is read now; an UNDECLARED flag
-  is still refused, which was always the point.
+  feature came from a field report (report 10 §5) whose own workaround —
+  deleting its words out of `Deno.args` before calling `aio.run()` — therefore
+  remained the only thing that worked. Declared before argv is read now; an
+  UNDECLARED flag is still refused, which was always the point.
 
   Its five tests passed throughout, because every one of them calls
   `declareAppFlags` directly and never goes through `aio.run()` — the
@@ -2969,7 +3021,7 @@ here because this is the first entry they appear in.
   fires.
 
 - **A malformed `schedules:` entry is refused as config, not at fire time.**
-  Found by building quant's app shape — a long-running server-only app whose
+  Found by building report 2's app shape — a long-running server-only app whose
   work is armed by a static schedule. Two failures, one cause: `every: "1s"`
   slipped past every numeric comparison (`"1s" < 10` is false) and threw out of
   `scheduleManager.start()` — AFTER persistence was open, the port bound, cell
@@ -8743,7 +8795,7 @@ several apps on one machine can pin different versions simultaneously.
 re-run, not a stored state that mutates an app's framework behind its back);
 `--latest` means newest **within the app's major**, with `--major` to cross
 deliberately; and versions are ordered by **semver, not tag date** — this repo
-already contains an abandoned `v1.0.0-beta1` tagged before `v1.0.0-alpha38`, and
+already contains an abandoned `v1.0.0-beta` tagged before `v1.0.0-alpha38`, and
 post-1.0 a maintenance release can be tagged after a new major.
 
 **The pin covers the framework's dependencies too.** A source-layout app's
@@ -8757,7 +8809,7 @@ never declared are never added.
 **Only releases that actually happened are pinnable.** A version tag has to be
 reachable from `origin/main`; a tag on an orphaned commit names a release that
 was abandoned. This is not hypothetical — the first live run of `am create`
-after the ordering fix pinned `v1.0.0-beta1`, an abandoned local feature-freeze
+after the ordering fix pinned `v1.0.0-beta`, an abandoned local feature-freeze
 tag from three weeks earlier that out-ranked the real latest release by semver.
 The ordering was right; the data wasn't. (The stale tag is deleted; it was never
 pushed.)

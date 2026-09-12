@@ -110,7 +110,7 @@ export type { Patch } from "./testing/multi-client-test.ts";
 export type { HarnessBootOptions } from "./testing/boot-refusals.ts";
 /** `testUI`'s FIRST parameter — the component under test — and the
  *  element-vs-component discriminator its queries take. */
-// The addressable-name list, without provoking a miss (anathomy §5a). A free
+// The addressable-name list, without provoking a miss (report 6 §5a). A free
 // function, not a `ui.names()` member: `TestUI` is frozen, so a member could
 // only ever be added as OPTIONAL and every caller would write `ui.names?.()`.
 // One spelling, no `?.`.

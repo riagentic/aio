@@ -62,10 +62,10 @@ export type LockData = {
    *  the ROOT that homes are resolved under, and `appDir` moves the app's own
    *  directory. `AIO_APPS_DIR` therefore *appears* to work — the lock and the
    *  discovery files move, so `am` follows the app — while an `appDir` set in
-   *  code keeps the database exactly where it was (risoto §20). `home` was in
+   *  code keeps the database exactly where it was (report 1 §20). `home` was in
    *  the lock and this was not, so nothing could show the difference.
    *
-   *  Absent on locks written before beta1, where `home` is the best answer. */
+   *  Absent on locks written before 1.0.0-beta, where `home` is the best answer. */
   dataDir?: string;
   /** A kernel stamp that changes when a pid is REUSED — see
    *  {@linkcode processStartToken}.

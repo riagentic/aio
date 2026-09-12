@@ -162,7 +162,7 @@ export const app = cell("demo", { state: { n: 0 }, machine: { initial: "a" } });
   }
 });
 
-// cc §5.2: `am pin ~/code/gen/aio` was refused for an app whose only `machine:`
+// report 9 §5.2: `am pin ~/code/gen/aio` was refused for an app whose only `machine:`
 // was a key in a UI scope-label map (`src/ui/RunViews.tsx:35`), in a file that
 // also calls `cell(`. The guard matched the text anywhere in the file, and
 // `--force` was the only way past a check that is otherwise exactly right to

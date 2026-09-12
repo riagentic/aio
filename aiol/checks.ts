@@ -94,7 +94,7 @@ const SITE_RULED_REMOVALS: ReadonlySet<string> = new Set([
  *
  *  There were two markers one letter apart — `aio-ok` for the repo's own
  *  gates, `aiol-ok` for this linter — and they were placed by copying nearby
- *  code, which is exactly how you get the wrong one. A field report (vidtune
+ *  code, which is exactly how you get the wrong one. A field report (report 3
  *  §8.1) asked for one marker with a scope.
  *
  *  `aio-ok` wins on the count that matters: ~100 uses against 3. So it is now
@@ -1267,7 +1267,7 @@ export const checkUI: Checker = (ctx) => {
   // `SubmitButton`. An interactive element with no name gets no semantic path,
   // so it is absent from `am surface`, unreachable by `am trigger`, and has no
   // handle in `testUI` — a framework-specific consequence no general linter can
-  // state (cc §9.4). The runtime already warns for `<input>` at render time;
+  // state (report 9 §9.4). The runtime already warns for `<input>` at render time;
   // this catches the ones a render never reaches, which is where the silence
   // actually hurts.
   //
@@ -1282,8 +1282,13 @@ export const checkUI: Checker = (ctx) => {
     /<(button|select|textarea)([^>]*)>\s*<\/\1>|<(input)([^>]*?)\/?>/;
   for (const file of tsxFiles) {
     const lines = file.content.split("\n");
+    // Scan CODE, not text: a `<button></button>` inside a comment, a string
+    // or a regex literal is not an element. `codeText` blanks those bodies
+    // and keeps every line where it was, so the raw lines still serve the
+    // marker check and the report.
+    const code = codeText(file.content).split("\n");
     for (let i = 0; i < lines.length; i++) {
-      const line = lines[i]!;
+      const line = code[i] ?? "";
       const m = EMPTY_INTERACTIVE.exec(line);
       if (!m) continue;
       const tag = m[1] ?? m[3]!;
@@ -4047,7 +4052,7 @@ export const checkOldWayPerfBudget: Checker = (ctx) => {
       // `long:` would DELETE the limit — so they stayed, and so did ten
       // permanent warnings. A linter that contradicts its own documentation is
       // how people learn to stop reading it, and the rest of this file is
-      // load-bearing (llama.master §2).
+      // load-bearing (report 8 §2).
       if (m[2] !== "0") continue;
       const cellName = owned.get(key);
       if (!cellName) continue; // a foreign/unknown key — checkConfig owns that
@@ -5674,7 +5679,7 @@ export const checkOwnKeyIdentity: Checker = (ctx) => {
 // ══════════════════════════════════════════════════════════════════════
 //
 // `import "aio/client-only"` is a statement that a module must not run on the
-// server (quant §9.1). A cell method runs ON the server. A cell file that
+// server (report 2 §9.1). A cell method runs ON the server. A cell file that
 // imports one is therefore a statement that contradicts itself, and the
 // failure it produces without this rule is a `window is not defined` during
 // SSR — a stack in the renderer, three files from the decision that caused it.
@@ -5723,7 +5728,7 @@ export const checkClientOnlyInCell: Checker = (ctx) => {
 
 // ── the class-name collision ────────────────────────────────────────────────
 //
-// _"The worst UI bug of one build"_ (vidtune §12.1, composer §10.3, newjob
+// _"The worst UI bug of one build"_ (report 3 §12.1, report 4 §10.3, report 5
 // §8.5): a `class="track"` defined in two stylesheets, one clipping every music
 // row to a single line. No error, a correct DOM, a correct component tree, and
 // a correct-looking cascade — the later rule simply won, and nothing anywhere
@@ -5894,6 +5899,11 @@ export const checkStyles: Checker = (ctx) => {
     return;
   }
   for (const h of hits) {
+    // `/* aiol-ok: <why> */` on the line above a rule that collides on
+    // purpose (a theme override, a print stylesheet) — every rule takes the
+    // marker; this one shipped without it.
+    const css = cssFiles.find((f) => f.relative === h.b.file)?.content ?? "";
+    if (isSuppressed(css.split("\n"), h.b.line - 1)) continue;
     report(
       "warn",
       "styles",

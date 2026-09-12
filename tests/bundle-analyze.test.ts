@@ -1,6 +1,6 @@
 // `aio build --analyze` — where the bundle's bytes went.
 //
-// Two reports asked for a treemap (newjob §8.9, risoto §22.7). The answerable
+// Two reports asked for a treemap (report 5 §8.9, report 1 §22.7). The answerable
 // version of that question is smaller: "which twenty things are most of my
 // bundle, and is anything in here that should not be".
 //

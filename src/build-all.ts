@@ -1341,7 +1341,7 @@ export async function buildAll(): Promise<number> {
       `\n  ${C.dim}clients connect to server:${C.r} ${C.blue}${block.server}${C.r}`,
     );
   }
-  // What was CHECKED, not only what was produced (quant §3). The client-graph
+  // What was CHECKED, not only what was produced (report 2 §3). The client-graph
   // audit and the module-scope evaluation run per target and refuse the
   // artifact outright, so an artifact on the list above is already proof they
   // passed — but that proof is only legible to someone who read the whole

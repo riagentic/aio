@@ -196,6 +196,13 @@ export function _regionHtml(html: string, nodes: number): string {
 // ── SSR depth counter ──────────────────────────────────────────────
 let _ssrDepth = 0;
 
+/** @internal True while a top-level `renderToString` / `renderToStream` is
+ *  running — the branch a hook takes when there is no component instance
+ *  (SSR calls component functions directly) and no document. */
+export function _isSsrRendering(): boolean {
+  return _ssrDepth > 0;
+}
+
 /** Render a VNode tree to an HTML string (no DOM required). */
 export function renderToString(
   vnode: VNode | string | number | null,

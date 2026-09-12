@@ -33,7 +33,7 @@ export type GlobalFlags = {
    *  The singleton lock is on the appId and the appId picks the data home, so
    *  an agent could not run its own copy beside a human's: every dispatch
    *  landed in the human's session and their clicks landed in the agent's
-   *  measurements (anathomy §4). `--takeover` steals the lock; it never gave
+   *  measurements (report 6 §4). `--takeover` steals the lock; it never gave
    *  an isolated one.
    *
    *  Not a new isolation mechanism — a NAME for the one aio already has.

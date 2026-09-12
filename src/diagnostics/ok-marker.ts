@@ -2,7 +2,7 @@
  * @module
  * One suppression marker, with a scope.
  *
- * There were two, one letter apart, honoured by different checkers (vidtune
+ * There were two, one letter apart, honoured by different checkers (report 3
  * §8.1). `aiol-ok` worked for the project linter and for nothing else;
  * `aio-ok` worked for every script gate and, since alpha77, for the linter
  * too. Both are placed by copying a nearby line, so the wrong one is silent —

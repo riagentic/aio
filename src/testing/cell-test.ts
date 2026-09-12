@@ -17,6 +17,7 @@ import {
   _pendingCallPromises,
 } from "../state/method-cancel.ts";
 import { _resetAioRuntime } from "../state/runtime-reset.ts";
+import { _resetHead } from "../air/head.ts";
 import { routeEffect } from "../state/route-effect.ts";
 import { assertionFailure, formatCellState } from "./test-format.ts";
 import { frozenWriteMessage, isFrozenWriteError } from "../state/immutable.ts";
@@ -396,6 +397,7 @@ export function testCell(
   Deno.test(`[${f.__aio.id}] ${testName}`, async () => {
     // Reset shared runtime state for test isolation — prevents bleed from prior runs
     _resetAioRuntime();
+    _resetHead();
 
     // Compose a single-cell system
     const composed = composeCells([f]);
@@ -1014,6 +1016,7 @@ export async function bootCells(
   // AFTER `_resetState()`: that call destroys any previously booted cells, whose
   // onDestroy hooks must still find their methods bound.
   _resetAioRuntime();
+  _resetHead();
   // AFTER the reset, and before anything composes. `_resetAioRuntime()` clears
   // the stub registry (one test's fake module must never answer the next
   // test's import), so installing them earlier put them in exactly the place
@@ -1135,6 +1138,7 @@ export async function bootCells(
     // for the rest of the process and every later settle() burns its whole
     // budget on it (see the boot note above).
     _resetAioRuntime();
+    _resetHead();
     ledger.raise();
   };
   return {

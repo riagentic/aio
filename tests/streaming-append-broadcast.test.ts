@@ -1,6 +1,6 @@
 // A streaming reply must travel as its SUFFIX, not as the whole string again.
 //
-// llama.master §12 measured the cost: publishing a growing reply re-sent the
+// report 8 §12 measured the cost: publishing a growing reply re-sent the
 // accumulated string every flush, so a naive 60 ms cadence is QUADRATIC in the
 // reply length and doubled per window — a sustained
 // `PRESSURE — 33 broadcasts/sec` in production. That app wrote a byte-rate
@@ -58,7 +58,7 @@ Deno.test("a streaming reply costs its SUFFIX — linear, not quadratic", () => 
     narrowed < raw / 8,
     `the reply re-sent itself: ${narrowed} bytes narrowed vs ${raw} raw for ` +
       `${STEPS} chunks of ${CHUNK.length}. This is the production ` +
-      `measurement from llama.master §12.`,
+      `measurement from report 8 §12.`,
   );
   // And it stays flat as the reply grows — the property, not one reading.
   const perStep = narrowed / STEPS;

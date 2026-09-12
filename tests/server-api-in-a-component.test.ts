@@ -4,7 +4,7 @@
 // want IS on `aio/server`, and a component is where they are writing. What the
 // bundler said:
 //
-//     No matching export in "../../../../../../../home/dev/code/gen/aio/
+//     No matching export in "../../../../../../../home/u/code/gen/aio/
 //     src/server-entry.ts" for import "route"
 //
 // — the rule nowhere, the fix nowhere, and seven `../` in the path. The
@@ -16,7 +16,7 @@ import { assert, assertEquals, assertStringIncludes } from "@std/assert";
 import { explainServerOnlyImport } from "../src/server/server-only-specs.ts";
 
 const RESOLVED =
-  "../../../../../../../home/dev/.aio/versions/v1.0.0-alpha72/src/server-entry.ts";
+  "../../../../../../../home/u/.aio/versions/v1.0.0-alpha72/src/server-entry.ts";
 
 Deno.test("server API: the explanation names the rule, the fix and the escape hatch", () => {
   const out = explainServerOnlyImport(

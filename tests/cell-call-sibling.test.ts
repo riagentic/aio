@@ -1,7 +1,7 @@
 // `s.$call.sibling(args)` — one cell method calling another, on the same draft.
 //
 // Three reports reached for this and all three workarounds are wrong
-// (llama.master §6/§9, vidtune §6): `this.bench(...)` cannot type-check,
+// (report 8 §6/§9, report 3 §6): `this.bench(...)` cannot type-check,
 // `myCell.bench(...)` is a SECOND dispatch with its own draft, and a
 // module-level helper works but takes the body out of `aiol`'s reach, so the
 // absence of a warning starts meaning "not analysed" while reading as "fine".
@@ -296,7 +296,7 @@ testCell(
 
 // ── the aiol half of the same report ────────────────────────────────────────
 //
-// llama.master §7 named the workaround as the actual danger, not the
+// report 8 §7 named the workaround as the actual danger, not the
 // inconvenience: moved into a module-level function taking the draft, a
 // post-await read is no longer analysed, and the absence of a warning starts
 // meaning "not analysed" while still reading as "fine".

@@ -1,6 +1,6 @@
 // The build summary has to say what was CHECKED, not only what was produced.
 //
-// A field report (quant §3) asked for the module-graph checker's output in the
+// A field report (report 2 §3) asked for the module-graph checker's output in the
 // default build summary. It already runs — per target, refusing the artifact on
 // a server-only leak, a module-scope Node global, or a bundle whose top level
 // throws — so an artifact on the list is already proof it passed. But that

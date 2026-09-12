@@ -8,7 +8,7 @@
 // The escape the error offered — "put an app's own arguments after a bare
 // `--`" — cannot work for a compiled binary that bakes arguments into its
 // argv: the baked ones come first, the operator types theirs last, and no
-// position satisfies both. A field report (dm, a relay documenting six verbs
+// position satisfies both. A field report (report 10
 // in its own `--help`) found its two fall-through verbs KILLED the process:
 //
 //     $ dm-relay --update
@@ -90,7 +90,7 @@ Deno.test("appFlags: declaring resets a parse made under the old vocabulary", ()
 // while the feature was dead end to end: `aio.run()` called `parseCli()` for
 // the `--help` query ~120 lines BEFORE it declared the app's flags, and
 // `parseCli` refuses an unknown flag by throwing. So the field report that
-// asked for this (dm §5) got a feature that could not be used, and the
+// asked for this (report 10 §5) got a feature that could not be used, and the
 // workaround it had already invented — deleting its own words out of
 // `Deno.args` before calling `aio.run()` — remained the only thing that
 // worked.

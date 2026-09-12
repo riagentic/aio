@@ -126,10 +126,29 @@ quality demands it" — none.
 | ---------- | ---------------------------------------------------------------- | ---------------------------------------------- |
 | alpha ≤ 76 | (history)                                                        | the seven retirements in alpha76 were the last |
 | alpha ≥ 77 | —                                                                | `check:api`: additive only, no approval path   |
-| beta       | —                                                                | same                                           |
-| 1.0.0      | —                                                                | exit criteria in todo.md (field reports, soak) |
+| beta line  | —                                                                | same                                           |
+| stable     | —                                                                | exit criteria in todo.md (field reports, soak) |
 | 1.x        | additive only (1.1.0) / fixes only (1.0.1)                       | api:check + this policy                        |
 | 2.0.0+     | breaking allowed, with upgrade guide + deprecation cycle honored | docs/upgrade/ guide mandatory                  |
+
+### Version names
+
+From `1.0.0-beta` on, a release is `MAJOR.MINOR.PATCH-beta` — the word, with
+**no digit after it**. The alphas were `1.0.0-alphaNN`, and that spelling has a
+cliff the alphas got away with only because `am` carries its own parser: SemVer
+compares `beta10` and `beta2` as ASCII, so JSR, `deno`, and `sort -V` all put
+the tenth beta below the second. The patch number is the counter instead, and it
+means what it means everywhere else:
+
+- a fix round bumps PATCH: `1.0.0-beta` → `1.0.1-beta` → `1.0.2-beta`;
+- a feature bumps MINOR: `1.1.0-beta`;
+- an rc is the same triple with `-rc`: `1.1.0-rc`;
+- the first stable is the same triple with the suffix dropped: `1.1.0`.
+
+`1.0.0` itself is never cut — the alphas and `1.0.0-beta` already sit under it,
+and every `1.0.N-beta` sorts above it. The suffix is a **maturity** flag
+(unproven surfaces, listed in todo.md), not a stability one: the frozen surface
+holds through every beta exactly as it holds after.
 
 This supersedes the earlier "beta is a quality statement, not a stability
 freeze" position (2026-08-07), which budgeted one or two isolated breaks across

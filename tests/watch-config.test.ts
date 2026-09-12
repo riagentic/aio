@@ -2,7 +2,7 @@
 // money.
 //
 // Dev watches the whole app directory, so a `deno fmt` over the repo triggered
-// full reloads repeatedly (watcher §3). aio starts from a good position — cell
+// full reloads repeatedly (report 7 §3). aio starts from a good position — cell
 // state lives on the server and survives a reload — but "what is lost is small"
 // included 760 MB of GPU weights, an embedded `<webview>`'s logged-in session,
 // and a wallet's unlock.
@@ -122,7 +122,7 @@ Deno.test("--no-watch and --watch=… reach the config, and beat it", async () =
 
 Deno.test("am help names --cdp and --watch under dev", async () => {
   // The reporter wrote a launcher shim exploiting $ELECTRON_PATH to get a CDP
-  // port, because `--cdp` already existed and could not be found (watcher §4).
+  // port, because `--cdp` already existed and could not be found (report 7 §4).
   // A second spelling would contradict "one vocabulary"; being findable is the
   // fix.
   const help = await Deno.readTextFile(

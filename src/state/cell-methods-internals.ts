@@ -453,7 +453,7 @@ export function buildMethodsReducer(
       _warnShortCall(cell, key, methods[key], raw.length);
       // Validated and COERCED before the method sees them. A schema returns
       // the parsed value and that value is what runs — which is the dozen
-      // hand-written coercions the reports counted (cc §9.6, vidtune §12.7).
+      // hand-written coercions the reports counted (report 9 §9.6, report 3 §12.7).
       return validateMethodArgs(cell, key, argSchemas?.[key], raw);
     }
     throw new Error(
@@ -703,7 +703,7 @@ export function buildMethodsExecutor(
       }
 
       // `concurrency:` / `ttl:` — what happens when this method is called
-      // again while it is still running (llama.master §15). Decided BEFORE any
+      // again while it is still running (report 8 §15). Decided BEFORE any
       // controller, tracking or proxy exists, because two of the three answers
       // are "do not run".
       const policyMode = (config as {

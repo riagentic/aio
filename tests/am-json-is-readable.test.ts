@@ -1,6 +1,6 @@
 // `--json` in a terminal was one unwrapped 8 kB line.
 //
-// From a field report (vidtune §8.2): `am surface --json` printed the whole
+// From a field report (report 3 §8.2): `am surface --json` printed the whole
 // surface on a single line, so reading one component out of it meant piping
 // into another tool — the "am made me write a script" shape this CLI keeps
 // removing.

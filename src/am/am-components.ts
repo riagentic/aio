@@ -210,7 +210,7 @@ export function processPlan(
   // component miss. `am instances` prints app ids and is exactly where you go
   // to find the name, so `am restart <appId>` — typed straight from that list
   // — was refused with "this project declares no components, so it names
-  // nothing" (vidtune §5). The refusal was true about components and useless
+  // nothing" (report 3 §5). The refusal was true about components and useless
   // about the thing the user was holding.
   //
   // Checked BEFORE the component lookup only when there is no component by

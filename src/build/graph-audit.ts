@@ -59,7 +59,7 @@ export const NODE_GLOBALS: readonly string[] = [
  *  `module` is a parameter, and a bare `require` is rewritten to esbuild's own
  *  `__require`. `module.exports = x` and `require("y")` are just how the file
  *  is SPELLED; the bundle defines both. Flagging them refuses every app that
- *  bundles an npm package written in CommonJS (risoto's client graph: 13 of 14
+ *  bundles an npm package written in CommonJS (report 1's client graph: 13 of 14
  *  findings, all of them from bs58 / bn.js / jayson / safe-buffer — and the
  *  bundle it refused evaluated clean in both shells).
  *
@@ -262,7 +262,7 @@ export function auditClientGraph(opts: {
   const { order, parent } = reach(entry, inputs);
   const findings: AuditFinding[] = [];
   // `import "aio/server-only"` — the same statement `*.server.ts` makes, made
-  // in the FILE instead of in its name (quant §9.1). The convention is good
+  // in the FILE instead of in its name (report 2 §9.1). The convention is good
   // and its one hole is that it is a filename: you cannot always rename a
   // file that twenty places already import, that is generated, or that is
   // published under that name.

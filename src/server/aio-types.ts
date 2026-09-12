@@ -415,7 +415,7 @@ export type AioConfig<S, A, E> = {
    *
    *  _"Every app with binary data writes the same twenty lines — route, MIME,
    *  caching, range, traversal guard, `compile.include` — and one of them will
-   *  forget the guard."_ (anathomy §7). This is those twenty lines, once:
+   *  forget the guard."_ (report 6 §7). This is those twenty lines, once:
    *
    *  ```ts
    *  await aio.run({ cells, assets: { "/media": "./media" } });
@@ -461,7 +461,7 @@ export type AioConfig<S, A, E> = {
    *  hard-coded 1 MiB in the broadcaster, and `vitals.pressure.rateThreshold`
    *  / `payloadThreshold` — and a field report asked for one obvious door onto
    *  them, because no single default calls a 4 MB table pushed once a minute
-   *  and 200 bytes at 60 Hz both correctly (quant §9.3). An explicit
+   *  and 200 bytes at 60 Hz both correctly (report 2 §9.3). An explicit
    *  `vitals.pressure` still wins: it is the more specific instruction.
    *
    *  An unreadable value THROWS at boot, naming the key — a budget that
@@ -471,7 +471,7 @@ export type AioConfig<S, A, E> = {
    *
    *  Dev watches the whole app directory, and a `deno fmt` over the repo
    *  therefore triggered full reloads repeatedly — which cost one app 760 MB
-   *  of GPU weights each time (watcher §3). `watch: ["src/ui"]` is the cheap
+   *  of GPU weights each time (report 7 §3). `watch: ["src/ui"]` is the cheap
    *  escape hatch; `watch: false` is for a process you simply do not want
    *  restarted under you.
    *
@@ -682,7 +682,7 @@ export type AioApp<S = unknown, A = unknown> = {
    *  ever been — `src/standalone-air.ts` is the one place it is set), absent
    *  everywhere else. Branch effects on it: `if (app.mode === "standalone")`.
    *
-   *  Typed as the union rather than `string`, because at beta1 it freezes and
+   *  Typed as the union rather than `string`, because at 1.0.0-beta it freezes and
    *  `string` would freeze with it — leaving the one fact this key carries
    *  (which of a CLOSED set of runtimes am I in?) unable to autocomplete, and
    *  a typo in the comparison unable to fail. Widening a union later is

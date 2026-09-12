@@ -512,7 +512,7 @@ export async function sandboxUsable(
  *
  *  A headless or VM host sometimes needs one to start at all: a field report's
  *  console crash-looped on a GPU abort every ~90 s until the machine got
- *  `LIBGL_ALWAYS_SOFTWARE=1` (quant §7, §9.7), and the switch half of that
+ *  `LIBGL_ALWAYS_SOFTWARE=1` (report 2 §7, §9.7), and the switch half of that
  *  vocabulary — `--disable-gpu`, `--disable-dev-shm-usage` — had no way in at
  *  all. Environment variables already reach Electron (the spawn merges the
  *  inherited environment); switches did not.

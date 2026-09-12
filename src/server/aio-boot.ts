@@ -1976,7 +1976,7 @@ export type ShapeAdditionEntry = {
  *  THE OTHER HALF OF `detectShapeDrift`, and the reason it exists: adding a
  *  field is SAFE — a stored blob without it deep-merges and the declared value
  *  fills the gap — but the author of one report had to reason that out from
- *  first principles, because the tool said nothing (llama.master §10). Silence
+ *  first principles, because the tool said nothing (report 8 §10). Silence
  *  on the safe case and a loud warning on the unsafe one are indistinguishable
  *  from "nobody checked": both are the absence of a sentence. The detector
  *  already walks both shapes; it simply threw this direction away.

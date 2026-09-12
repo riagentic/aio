@@ -6,7 +6,7 @@
 // move state the final snapshot has already read, landing in memory and never
 // on disk.
 //
-// A field report's `onStop` was one line, `dm.lockVault()`, whose whole job is
+// A field report's `onStop` was one line, `vault.lock()`, whose whole job is
 // wiping key material on exit. It never ran, on every clean shutdown, and said
 // so in a warning emitted at the one moment nobody is watching. The warning was
 // right; what it could not say is "this is your onStop", which is the sentence

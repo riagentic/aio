@@ -3,7 +3,7 @@
  * `serverImport("./claude.server.ts", import.meta.url)` — a dynamic import a
  * TEST can stand in for.
  *
- * A field report (cc §8.6, §9.3) named a cell there is no safe rung for. It
+ * A field report (report 9 §8.6, §9.3) named a cell there is no safe rung for. It
  * owns an OS process: `testCell` never reaches the spawn, and `bootCells`
  * spawns the REAL child — so "random actions against a real runtime" means a
  * real `claude` subprocess per action. Cassettes wrap a function you can

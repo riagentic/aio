@@ -1,7 +1,7 @@
 // `am instances` must say where the DATA is, not only where the home is.
 //
 // Three things are spelled like "where this app lives" and only one of them
-// moves the database (risoto §20):
+// moves the database (report 1 §20):
 //
 //   --home <dir>     addresses an existing instance; moves nothing
 //   AIO_APPS_DIR     moves the ROOT that homes resolve under

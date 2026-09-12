@@ -386,7 +386,7 @@ function surfaceDigest(node: UISurfaceNode, maxChars = 2000): string {
   walk(node, 0);
   // BOUNDED, like every other name list this harness prints. The JSON half was
   // already capped and the TREE was not, so a wide app turned one timeout into
-  // 31 769 characters of component names (cc §9.0) — a wall nobody reads, in
+  // 31 769 characters of component names (report 9 §9.0) — a wall nobody reads, in
   // place of the six lines that would have said what happened. Same escape as
   // `fail()`: one environment variable prints all of it.
   const all = Deno.env.get("AIO_TEST_NAMES") === "all";
@@ -466,7 +466,7 @@ const TRACE_KEEP = 20;
 /** Everything a failure knows, written where a reader can open it.
  *
  *  "dump the AIR tree and the last N dispatches, and name the file in the
- *  error" (quant §9.5). A failing assertion prints what the surface looks like
+ *  error" (report 2 §9.5). A failing assertion prints what the surface looks like
  *  NOW; what it can never print is how it got there, and reconstructing the
  *  sequence from a test body is the work this removes.
  *
@@ -2381,7 +2381,7 @@ async function _buildTestUI(
   // first assertion saw the before or the after came down to how many
   // microtasks the harness happened to have spent, which is why one repo
   // measured ~40% flake and why the answer so far was a house rule and a
-  // comment on every affected test (llama.master §11). A rule enforced by
+  // comment on every affected test (report 8 §11). A rule enforced by
   // remembering is not enforced.
   //
   // Non-strict on purpose. A mount that never quiesces must not fail HERE,
@@ -2455,7 +2455,7 @@ async function _buildTestUI(
  *
  * The list existed all along and was reachable only by PROVOKING A FAILURE: a
  * miss prints `available: …`, so "what can I address?" was answered by asking
- * for something that is not there (anathomy §5a). A fine recovery path and a
+ * for something that is not there (report 6 §5a). A fine recovery path and a
  * poor discovery one — and it is exactly the list you want BEFORE writing the
  * first line, not after the first mistake. `am surface --names` is the same
  * answer for a running app.
@@ -2488,8 +2488,8 @@ export function uiNames(ui: TestUI): string[] {
  *
  * happy-dom measures everything 0×0. That hid two security-relevant defects in
  * a wallet behind 1546 passing tests — a dApp origin running off the edge of
- * the approval card, and that dialog opening scrolled past the origin (risoto
- * §19.1/§22.2, anathomy §10.1). A harness that answers "0×0" to "where is
+ * the approval card, and that dialog opening scrolled past the origin (report 1
+ * §19.1/§22.2, report 6 §10.1). A harness that answers "0×0" to "where is
  * this?" is not merely unhelpful; it makes a layout assertion PASS.
  *
  * So this does not read the harness's DOM. It reads a surface that a REAL
