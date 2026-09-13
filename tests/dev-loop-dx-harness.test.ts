@@ -229,14 +229,14 @@ testCell(
   },
 );
 
-// ── #10 a nested same-cell call silently did half the work ──────────────────
+// ── #10 two self-calls in one method ────────────────────────────────────────
 //
-// REPRODUCED: `addTwice() { notes.add(); notes.add() }` returns `{"ok":true}`
-// and adds ONE item (zero, in the test harness), with no diagnostics at all.
-// The existing rule only fired when the caller had already written to its own
-// draft — and the method that queues two calls usually takes no draft at all.
+// Once reported as "adds ONE item". MEASURED on a real server now: the calls
+// queue behind the caller's commit and both land — the harness that showed
+// otherwise was `testCell` running the nested call inline (fixed, and pinned
+// in tests/testcell-self-call-queue.test.ts). Flagging it would be noise.
 
-Deno.test("aiol: TWO self-calls in one method are flagged, naming the queue", async () => {
+Deno.test("aiol: TWO self-calls in one sync method are not flagged — both land", async () => {
   const found = await lint({
     "src/notes.ts": `import { cell } from "aio";
 export const notes = cell("notes", {
@@ -248,12 +248,7 @@ export const notes = cell("notes", {
 });
 `,
   }, checkSelfMethodCall);
-  assertEquals(found.length, 2, "both calls in the pair are named");
-  for (const f of found) {
-    assertStringIncludes(f.message, "queued");
-    assertStringIncludes(f.message, "COMMITTED state");
-    assertStringIncludes(f.message, "a fraction of what it reads like");
-  }
+  assertEquals(found, []);
 });
 
 Deno.test("aiol: ONE self-call with no draft write is still not flagged", async () => {
