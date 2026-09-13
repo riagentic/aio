@@ -964,11 +964,22 @@ await aio.run({ perfBudget: { methods: { "models:scan": { timeout: 0 } } } });
     // the check standing between a server-only import and a blank screen.
     name: "deep import of framework internals",
     files: app({
+      "src/deep.ts": `import { x } from "../dep/aio/src/state/dispatch.ts";\n` +
+        `export const v = x;\n`,
+    }),
+    expect: "an entry can be added",
+  },
+  {
+    // …and when a public COMMAND already does the internal's whole job, the
+    // hint names it instead of inviting a duplicate entry (risoto §6: an app's
+    // copy of the browser-graph checker, which is `am check`).
+    name: "deep import of an internal a command already wraps",
+    files: app({
       "src/deep.ts":
         `import { validateGraph } from "../dep/aio/src/server/graph-validator.ts";\n` +
         `export const v = validateGraph;\n`,
     }),
-    expect: "is framework INTERNALS",
+    expect: "public already: `am check`",
   },
   {
     name: "Node.js API",

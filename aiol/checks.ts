@@ -2319,6 +2319,11 @@ export const checkPatterns: Checker = (ctx) => {
     // internals, outside the surface `check:api` snapshots, and it can move
     // without notice — as a hint, because sometimes there is genuinely no
     // other door. Both carry a line.
+    /** Internals a public command already wraps end to end. */
+    const INTERNALS_WITH_A_COMMAND: Record<string, string> = {
+      "src/server/graph-validator.ts": "am check",
+      "src/server/server-transpile.ts": "am check",
+    };
     const DEEP_RE =
       /(?:^|\n)([ \t]*(?:import|export)\b[^\n]*from\s*['"](\.\.\/)+dep\/aio\/([^'"]+)['"])/g;
     for (const m of codeMatches(file.content, DEEP_RE)) {
@@ -2347,6 +2352,21 @@ export const checkPatterns: Checker = (ctx) => {
             line: lineIdx + 1,
             fix: `import { ... } from '${entry}'`,
           },
+        );
+      } else if (INTERNALS_WITH_A_COMMAND[rel]) {
+        // An internal whose whole job a public COMMAND already does. The
+        // generic "say so — an entry can be added" sent a field app to ask
+        // for an `aio/graph` export duplicating `am check` (risoto §6).
+        const cmd = INTERNALS_WITH_A_COMMAND[rel]!;
+        report(
+          "hint",
+          "patterns",
+          `${file.relative}:${lineIdx + 1} — "dep/aio/${rel}" is framework ` +
+            `INTERNALS, and what it is for is public already: \`${cmd}\`. ` +
+            `Run that from your check task instead of importing it — the ` +
+            `command is covered by the compatibility promise, this path is ` +
+            `not. Acknowledge a deliberate import with \`// aio-ok\`.`,
+          { file: file.relative, line: lineIdx + 1, fix: cmd },
         );
       } else {
         report(
