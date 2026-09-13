@@ -17,7 +17,8 @@ import { closeWindow } from "../src/testing/close-window.ts";
 import { h } from "../src/air/vdom.ts";
 import { _setDocument, _unmount, mount } from "../src/air/aio-renderer.ts";
 import { afterRender } from "../src/air/renderer-flush.ts";
-import { onMount } from "../src/air/renderer-lifecycle.ts";
+import { onMount, useSignal } from "../src/air/renderer-lifecycle.ts";
+import { useLocal } from "../src/adapters/air.ts";
 import { signal } from "../src/state/signal.ts";
 import { setDevModeOverride } from "../src/state/dev-flag.ts";
 import { _resetUntrackedReadWarnings } from "../src/air/untracked-read.ts";
@@ -28,7 +29,7 @@ function dom() {
   _setDocument(doc);
   const root = doc.createElement("div");
   doc.body.appendChild(root);
-  return { root, close: () => closeWindow(win) };
+  return { win, root, close: () => closeWindow(win) };
 }
 
 async function warningsFrom(build: () => void): Promise<string[]> {
@@ -155,5 +156,60 @@ Deno.test("untracked read: production is untouched", async () => {
     setDevModeOverride(true);
   }
   assertEquals(out.filter((w) => w.includes("read inside")), []);
+  await close();
+});
+
+Deno.test("afterRender: a listener it DISPATCHES to is not the callback — its reads are not blamed", async () => {
+  // wallet report §8: `<PanelDivider>`'s afterRender fired `resize`; every other
+  // component's resize listener ran inside that hook's frame, and their reads
+  // were reported as `<PanelDivider>`'s — advice that cannot be followed.
+  const { win, root, close } = dom();
+  const nav = signal("list", "nav.panelType");
+  const own = signal(0, "divider.width");
+  const onResize = () => void nav.get(); // another component's listener
+  win.addEventListener("resize", onResize);
+  const PanelDivider = () => {
+    afterRender(() => {
+      win.dispatchEvent(new win.Event("resize"));
+      void own.get(); // …while the hook's OWN read is still named
+    });
+    return h("div", null, "|");
+  };
+  const warns = await warningsFrom(() => {
+    mount(root, PanelDivider);
+  });
+  const hit = warns.filter((w) => w.includes("read inside afterRender"));
+  assertEquals(hit.length, 1, warns.join("\n"));
+  assert(hit[0]!.includes("divider.width"), hit[0]);
+  // …and the dispatch patch is gone once the callback returns.
+  assert(
+    !Object.hasOwn(win.EventTarget.prototype, "dispatchEvent") ||
+      !String(win.EventTarget.prototype.dispatchEvent).includes("untrack"),
+    "dispatchEvent must be restored",
+  );
+  win.removeEventListener("resize", onResize);
+  await close();
+});
+
+Deno.test("untracked read: an unnamed hook signal is named by component and slot", async () => {
+  const { root, close } = dom();
+  const Portal = () => {
+    const open = useSignal(false);
+    const hidden = useLocal(false);
+    afterRender(() => {
+      void open.get();
+      void hidden.local;
+    });
+    return h("div", null, "x");
+  };
+  const warns = await warningsFrom(() => {
+    mount(root, Portal);
+  });
+  const hit = warns.filter((w) => w.includes("read inside afterRender"));
+  assert(
+    hit.some((w) => w.includes("`<Portal> useSignal #1`")),
+    hit.join("\n"),
+  );
+  assert(hit.some((w) => w.includes("`<Portal> useLocal #2`")), hit.join("\n"));
   await close();
 });

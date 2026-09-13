@@ -22,11 +22,73 @@
 //
 // Dev only, once per (component, signal) pair, and it changes no behaviour —
 // the read still subscribes to nothing, exactly as before. It just says so.
-import { _trackEnd, _trackStart } from "../state/signal.ts";
+import { _trackEnd, _trackStart, untrack } from "../state/signal.ts";
 import { isDevMode } from "../state/dev-flag.ts";
 import { cellSignalName } from "../state/state-signals.ts";
 
 const _said = new Set<string>();
+
+/** Dev-only names for the signals a hook created, so an unnamed `useLocal`
+ *  is reported as `<Row> useLocal #2` rather than "a cell/signal value" —
+ *  which left a field report bisecting to find which one (wallet report §8). */
+const _hookSignalNames = new WeakMap<object, string>();
+
+/** @internal Name a hook-created signal after its component and slot. */
+export function _nameHookSignal(
+  sig: object,
+  hook: string,
+  component: string | undefined,
+  slot: number,
+): void {
+  if (!isDevMode() || _hookSignalNames.has(sig)) return;
+  _hookSignalNames.set(sig, `<${component ?? "?"}> ${hook} #${slot + 1}`);
+}
+
+/** While `fn` runs, give every NESTED `dispatchEvent` its own untracked frame.
+ *
+ *  `dispatchEvent` runs listeners synchronously, so a `resize` fired from one
+ *  component's `afterRender` ran every OTHER component's listener inside this
+ *  hook's frame — and their reads were reported as this hook's, with advice
+ *  ("read it in the render body") that cannot be followed for a signal
+ *  another instance owns (wallet report §8). A listener is not the callback: what
+ *  it reads is its own component's business.
+ *
+ *  Patched where `dispatchEvent` is owned — the window of the realm the
+ *  component renders into, its `EventTarget.prototype`, and the global one
+ *  (the realms differ under happy-dom) — and restored in `finally` — so it exists only for the duration of a dev
+ *  lifecycle callback. The frame is a throwaway, exactly as outside dev a
+ *  lifecycle callback has none, so no subscription changes. */
+function isolateNestedDispatch(el: unknown): () => void {
+  const view = (el as { ownerDocument?: { defaultView?: unknown } } | null)
+    ?.ownerDocument?.defaultView as { EventTarget?: unknown } | undefined;
+  const restores: (() => void)[] = [];
+  const seen = new Set<object>();
+  // The window object too: happy-dom binds `dispatchEvent` as an OWN property
+  // of each window, so patching the prototype alone missed `window.dispatchEvent`.
+  const starts = [
+    view,
+    (view?.EventTarget as { prototype?: object } | undefined)?.prototype,
+    globalThis.EventTarget?.prototype,
+  ];
+  for (const start of starts) {
+    let proto = start as object | null | undefined;
+    while (proto && !Object.hasOwn(proto, "dispatchEvent")) {
+      proto = Object.getPrototypeOf(proto);
+    }
+    if (!proto || seen.has(proto)) continue;
+    seen.add(proto);
+    const owner = proto as { dispatchEvent: (ev: unknown) => boolean };
+    const orig = owner.dispatchEvent;
+    if (typeof orig !== "function") continue;
+    owner.dispatchEvent = function (this: unknown, ev: unknown): boolean {
+      return untrack(() => orig.call(this, ev));
+    };
+    restores.push(() => owner.dispatchEvent = orig);
+  }
+  return () => {
+    for (let i = restores.length - 1; i >= 0; i--) restores[i]!();
+  };
+}
 
 /**
  * Run `fn` as a lifecycle callback, and warn about any reactive read it makes
@@ -43,6 +105,9 @@ export function runTrackedLifecycle(
   component: string | undefined,
   renderDeps: Set<unknown> | null | undefined,
   fn: () => unknown,
+  /** An element of the tree being rendered — names the DOM realm whose
+   *  `dispatchEvent` a nested listener arrives through. */
+  el?: unknown,
 ): unknown {
   if (!isDevMode()) return fn();
   // A throwaway frame: pushing it does not create subscriptions (nothing
@@ -50,15 +115,17 @@ export function runTrackedLifecycle(
   // observable. Popping in `finally` keeps the stack balanced even if the
   // callback throws, which `_trackEnd` treats as an internal invariant.
   const seen = _trackStart();
+  const restoreDispatch = isolateNestedDispatch(el);
   try {
     return fn();
   } finally {
+    restoreDispatch();
     _trackEnd(seen);
     if (renderDeps) {
       for (const sig of seen) {
         if (renderDeps.has(sig)) continue;
         const name = (sig as { _name?: string })._name ??
-          cellSignalName(sig);
+          cellSignalName(sig) ?? _hookSignalNames.get(sig as object);
         const where = component ? `<${component}>` : "a component";
         const key = `${hook}|${where}|${name ?? "?"}`;
         if (_said.has(key)) continue;
