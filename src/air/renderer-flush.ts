@@ -115,6 +115,7 @@ function _flushMounts(root: RootState): void {
             entry.component,
             inst.deps,
             cb as () => unknown,
+            root.root,
           );
           if (typeof disposer === "function") onCleanup(disposer as () => void);
         } catch (e) {
@@ -154,6 +155,7 @@ export function _flushAfterRender(root: RootState): void {
           entry.component,
           entry.renderDeps,
           entry.fn,
+          root.root,
         );
       } catch (e) {
         _reportHookError("afterRender", e, entry.component);

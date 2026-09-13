@@ -353,3 +353,33 @@ Deno.test({
     await cleanup();
   },
 });
+
+// risoto §10 — the keyboard already lives elsewhere by WAI-ARIA design, so
+// "add onKeyDown" cannot be followed; `role="presentation"` would erase the
+// semantics. The unfocusable owner and a role with no pattern still warn.
+for (
+  const [label, props, warns] of [
+    ["option row", { role: "option" }, false],
+    ["gridcell", { role: "gridcell" }, false],
+    ["menuitemradio", { role: "menuitemradio" }, false],
+    ["focusable listbox", { role: "listbox", tabIndex: 0 }, false],
+    ["alert toast", { role: "alert" }, false],
+    ["dialog viewer", { role: "dialog" }, false],
+    ["UNFOCUSABLE listbox", { role: "listbox" }, true],
+    ["role=region", { role: "region" }, true],
+  ] as const
+) {
+  Deno.test({
+    name: `a11y: onClick on a ${label} ${
+      warns ? "still warns" : "is not told to add onKeyDown"
+    }`,
+    async fn() {
+      const { root, cleanup } = setup();
+      const warnings = captureWarnings(() => {
+        mount(root, () => h("div", { ...props, onClick: () => {} }, "x"));
+      });
+      assertEquals(warnings.some((w) => w.includes("keyboard")), warns);
+      await cleanup();
+    },
+  });
+}

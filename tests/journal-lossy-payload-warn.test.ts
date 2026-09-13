@@ -92,3 +92,36 @@ Deno.test("journal: said once per action type; JSON-shaped and redacted payloads
     await Deno.remove(dir, { recursive: true });
   }
 });
+
+Deno.test("journal: undefined that replays as the same value says nothing — a delete's record, a missing payload", async () => {
+  // risoto §7: aio's own record of `delete s.optimistic[k]` and a no-argument
+  // call were each reported as "rebuild a different state".
+  const dir = await Deno.makeTempDir({ prefix: "aio-journal-lossy-" });
+  try {
+    const t = `jr${uniq()}`;
+    const j = createJournal(join(dir, "journal"));
+    const warned = await capture(() => {
+      j.append({
+        type: `${t}:__setRefresh`,
+        payload: {
+          mutations: [
+            { path: ["optimistic", "a"], value: undefined, op: "delete" },
+            { path: ["x"], value: undefined },
+          ],
+        },
+      }, 1);
+      j.append({ type: `${t}:checkAvailability`, payload: undefined }, 1);
+      // …while an undefined PROPERTY inside a written value still is lossy
+      // (`in`, Object.keys and a spread over defaults all see the difference).
+      j.append({
+        type: `${t}:__setOther`,
+        payload: { mutations: [{ path: ["o"], value: { k: undefined } }] },
+      }, 1);
+    });
+    assertEquals(warned.length, 1, warned.join("\n---\n"));
+    assert(warned[0]!.includes(`"${t}:__setOther"`), warned[0]);
+    assert(warned[0]!.includes("payload.mutations.0.value.k"), warned[0]);
+  } finally {
+    await Deno.remove(dir, { recursive: true });
+  }
+});

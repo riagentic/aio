@@ -73,6 +73,10 @@ export interface ComponentInstance {
   _hookCount?: number;
   /** Dev mode: rolling window of render timestamps for burst detection. */
   _devRenderTimestamps?: number[];
+  /** Dev mode: the pending render was asked for by something OTHER than an
+   *  event handler running outside a render — so it may be a render loop and
+   *  counts toward the burst tripwire. A pure input render never does. */
+  _devLoopCandidate?: boolean;
   /** Dev mode: name of the signal that triggered the last re-render. */
   _triggerSignals?: Set<string>;
   /** Parent component instance — used to rebuild ancestor stack (AIO-249). */

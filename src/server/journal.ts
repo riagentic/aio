@@ -409,6 +409,25 @@ export function parseJournal(
   return out;
 }
 
+/** An `undefined` JSON drops that nevertheless comes back as the SAME value
+ *  wherever replay reads it — so warning about it trains the reader to skip
+ *  the warning that is real (risoto §7).
+ *
+ *  - `payload` itself: a missing key reads back `undefined`, which is what the
+ *    method got live.
+ *  - a write-set record's own `value` (`payload.mutations.N.value`): aio's
+ *    record of `delete s.x` carries `value: undefined`, and `applyMutations`
+ *    reads `m.value` — `undefined` whether the key was there or not.
+ *
+ *  An `undefined` object property ANYWHERE ELSE stays reported: `{k:
+ *  undefined}` and `{}` differ to `in`, `Object.keys` and a spread over
+ *  defaults (`{ ...defaults, ...opts }` keeps the default only when the key
+ *  is absent), so a replay can genuinely rebuild a different state. */
+function replaysIdentically(i: PersistIssue): boolean {
+  return i.kind === "undefined" &&
+    (i.path === "payload" || /^payload\.mutations\.\d+\.value$/.test(i.path));
+}
+
 /** Action types already reported by {@linkcode warnLossyEntry} — once per
  *  type per process: the same call shape repeats on every call. */
 const _lossyWarned = new Set<string>();
@@ -634,8 +653,9 @@ export function createJournal(
       // A time-travel line is STATE, not call arguments: the persist path
       // already names every value in it that JSON would change, and the
       // advice below ("call it with JSON-shaped arguments") would be false.
-      if (issues.length > 0 && action.type !== TT_RESTORE_TYPE) {
-        warnLossyEntry(action.type, issues);
+      const lossy = issues.filter((i) => !replaysIdentically(i));
+      if (lossy.length > 0 && action.type !== TT_RESTORE_TYPE) {
+        warnLossyEntry(action.type, lossy);
       }
       if (baseOwed) {
         try {

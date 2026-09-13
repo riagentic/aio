@@ -4,6 +4,7 @@
 import { type Signal, signal } from "../state/signal.ts";
 import { isDevMode } from "../state/dev-flag.ts";
 import type { ComponentInstance } from "./renderer-types.ts";
+import { _nameHookSignal } from "./untracked-read.ts";
 import {
   _activeRoot,
   _currentCollector,
@@ -311,6 +312,7 @@ export function useSignal<T>(initial: T): Signal<T> {
   const idx = collector.refIndex++;
   if (idx >= collector.refs.length) {
     const sig = signal(initial);
+    _nameHookSignal(sig, "useSignal", collector._component, idx);
     collector.refs.push(sig as unknown as { current: unknown });
     return sig;
   }

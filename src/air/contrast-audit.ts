@@ -207,7 +207,15 @@ function effectiveBackground(
   let node: Element | null = el;
   let hops = 0;
   while (node && hops++ < 40) {
-    const raw = win.getComputedStyle(node).getPropertyValue("background-color");
+    const style = win.getComputedStyle(node);
+    // A `background-image` (a gradient, a `url()`) paints OVER the colour, and
+    // under a gradient the colour is usually `transparent` — so reading the
+    // colour alone composited straight through to the panel behind and
+    // reported the gradient's ink as dark-on-dark, 1.03:1, in every theme of
+    // a field app whose cursor row is a gradient. A layer we cannot sample is
+    // "could not look", the same answer as an unreadable colour.
+    if (!isTransparent(style.getPropertyValue("background-image"))) return null;
+    const raw = style.getPropertyValue("background-color");
     const bg = parseRgb(raw);
     if (!bg && !isTransparent(raw)) return null; // a layer we cannot read
     if (bg && bg.a > 0) {
@@ -279,6 +287,7 @@ export function auditContrast(root: Element | null | undefined): number {
     return 0;
   }
   const win = windowOf(root)!;
+  const moving = colourInMotion(root);
 
   let scanned = 0;
   let found = 0;
@@ -286,7 +295,7 @@ export function auditContrast(root: Element | null | undefined): number {
   const walk = (el: Element): void => {
     if (scanned >= MAX_ELEMENTS || _findings >= MAX_FINDINGS) return;
     scanned++;
-    if (hasOwnText(el)) {
+    if (hasOwnText(el) && !(moving && isMoving(el, moving.targets))) {
       let cs: { getPropertyValue(p: string): string };
       try {
         cs = win.getComputedStyle(el);
@@ -343,10 +352,112 @@ export function auditContrast(root: Element | null | undefined): number {
   } catch {
     return found; // a hostile DOM must never break a render
   }
+  if (moving?.finished.length && !_rerunPending) {
+    // What was skipped is looked at once it has landed — otherwise a theme
+    // switch with no later commit would leave those elements never audited.
+    // An infinite animation never settles, and its elements stay unmeasured:
+    // correct, since no single frame of it is THE colour.
+    // Paced by the same throttle as a commit: the re-run lands at most once
+    // per THROTTLE_MS, so nothing an engine reports can make it spin.
+    _rerunPending = true;
+    Promise.allSettled(moving.finished).then(() =>
+      setTimeout(() => {
+        _rerunPending = false;
+        try {
+          auditContrast(root);
+        } catch {
+          // aio-ok: a dev-only observation must never throw out of a timer;
+          // every finding it makes is reported where it is made.
+        }
+      }, THROTTLE_MS)
+    );
+  }
   // `measuredAny === false` means the engine reported nothing we could read —
   // report zero findings, but do not let the caller mistake that for a pass.
   return measuredAny ? found : 0;
 }
+
+/** The properties whose computed value this audit reads. */
+const COLOUR_PROPS = new Set([
+  "color",
+  "background",
+  "background-color",
+  "background-image",
+]);
+
+type Anim = {
+  playState?: string;
+  effect?: {
+    target?: unknown;
+    getKeyframes?(): Record<string, unknown>[];
+    getComputedTiming?(): { endTime?: number };
+  };
+  finished?: Promise<unknown>;
+};
+
+/** Does this animation move a colour the audit reads? An unreadable keyframe
+ *  set counts as yes: skipping an element is safe, measuring one mid-flight
+ *  is a false alarm. */
+function touchesColour(a: Anim): boolean {
+  try {
+    return (a.effect?.getKeyframes?.() ?? []).some((k) =>
+      Object.keys(k).some((p) =>
+        COLOUR_PROPS.has(p.replace(/[A-Z]/g, (c) => `-${c.toLowerCase()}`))
+      )
+    );
+  } catch {
+    return true;
+  }
+}
+
+/** The elements whose colour is mid-animation right now, or null when none.
+ *
+ *  `getComputedStyle` answers with the CURRENT frame of a transition, so a
+ *  theme switch measured at t≈0 reported every transitioned property at its
+ *  OLD value and every other one at its NEW value — twelve findings on a
+ *  field app's light variant, none real, each pairing a dark ink with a light
+ *  panel. Asked once per pass, of the document, so the common case (nothing
+ *  moving) costs one call. An engine with no `getAnimations` (happy-dom)
+ *  has no transitions to be caught in either. */
+function colourInMotion(
+  root: Element,
+): { targets: Set<unknown>; finished: Promise<unknown>[] } | null {
+  const doc = (root as unknown as {
+    ownerDocument?: { getAnimations?(): Anim[] };
+  }).ownerDocument;
+  if (typeof doc?.getAnimations !== "function") return null;
+  const targets = new Set<unknown>();
+  const finished: Promise<unknown>[] = [];
+  for (const a of doc.getAnimations()) {
+    // A finished animation holding its end value (`fill: forwards`) is still
+    // listed, but its colour is settled — measurable, and nothing to wait on.
+    if (a.playState === "finished") continue;
+    if (!a.effect?.target || !touchesColour(a)) continue;
+    targets.add(a.effect.target);
+    // Only a FINITE animation is worth waiting on: an infinite one (a pulsing
+    // skeleton) never settles, and waiting on it would hold the one pending
+    // re-run forever — the next theme switch would never be looked at again.
+    let end = Infinity;
+    try {
+      end = a.effect.getComputedTiming?.().endTime ?? Infinity;
+    } catch { /* aio-ok: unknown timing is treated as never-ending */ }
+    if (a.finished && Number.isFinite(end)) finished.push(a.finished);
+  }
+  return targets.size ? { targets, finished } : null;
+}
+
+/** True when `el` or an ancestor is animating a colour — an ancestor's
+ *  `color` is inherited and its background is composited under `el`. */
+function isMoving(el: Element, targets: Set<unknown>): boolean {
+  for (let n: Element | null = el, hops = 0; n && hops < 80; hops++) {
+    if (targets.has(n)) return true;
+    n = n.parentElement;
+  }
+  return false;
+}
+
+/** One deferred re-audit at a time, however many passes found motion. */
+let _rerunPending = false;
 
 /** The window that would compute styles for `root`, or null. */
 function windowOf(root: Element | null | undefined): Win | null {
@@ -397,5 +508,6 @@ export function _resetContrastAudit(
   _reported.clear();
   _lastRun = 0;
   _findings = 0;
+  _rerunPending = false;
   if (opts.cascadeNotice) _saidCannotResolve = false;
 }

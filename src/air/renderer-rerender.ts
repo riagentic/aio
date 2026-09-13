@@ -42,6 +42,7 @@ import {
   _suspenseRetries,
 } from "./renderer-state.ts";
 import { _flushPending } from "./renderer-flush.ts";
+import { _inEventHandler } from "./vdom-events.ts";
 import { _componentName } from "./hook-error.ts";
 import { count } from "../diagnostics/fmt.ts";
 
@@ -75,6 +76,20 @@ export function _scheduleComponentRender(inst: ComponentInstance): void {
     inst.pendingRender = true;
   }
   inst.selfTriggered = true;
+  // What asked for this render, for the dev burst tripwire below. A write made
+  // by an event handler — outside any render, mount or flush — is input, and
+  // input is allowed to be fast: `testUI`'s `setValue` types a 118-character
+  // value as 118 synchronous handler→render steps, and every one of them was
+  // counted as a loop, telling the author to move a write that was already in
+  // a handler (risoto §11). Anything else — a write during a render or an
+  // afterRender, a promise continuation, a socket frame — still counts, so a
+  // render → fetch → write cycle is caught exactly as before.
+  if (
+    isDevMode() &&
+    (!_inEventHandler() || root.flushing || _currentCollector !== null)
+  ) {
+    inst._devLoopCandidate = true;
+  }
   root.pendingComponents.add(inst);
   if (!root.flushScheduled) {
     root.flushScheduled = true;
@@ -131,7 +146,9 @@ export function _rerenderComponent(inst: ComponentInstance): void {
   // Taken now, whatever this render does: the mark belongs to THIS render.
   const lent = _lentRenders.delete(inst);
 
-  if (isDevMode()) {
+  const loopCandidate = inst._devLoopCandidate === true;
+  inst._devLoopCandidate = false;
+  if (isDevMode() && loopCandidate) {
     const now = performance.now();
     const window = inst._devRenderTimestamps ?? [];
     // Evict timestamps older than 1 second
