@@ -12,9 +12,23 @@
  * ```
  */
 
-/** Validate cell defs without booting — `checkCells(cells)` returns findings
+/** Validate an app's configuration without booting — the same findings
+ *  `aio.run()` prints at boot.
+ *
+ *  ```ts
+ *  const findings = await checkCells(initialState, config, Deno.cwd());
+ *  ```
+ *
+ *  NOT `checkCells(cells)`. That is what this comment said and what
+ *  `api-reference.md` said, and it throws: the first argument is the initial
+ *  STATE and the second the run config, so a cell array arrived where a
+ *  config was expected and the first `config.reduce` read blew up with
+ *  "Cannot read properties of undefined". `docs/api-snapshot.json` has always
+ *  recorded the real signature, so `check:api` saw the truth while the doc
+ *  comment beside the export did not.
+ *
  *  (alpha52 name; its `lint` alias — which collided with aiol's project
- *  linter — went out in alpha70, see src/state/removals.ts). */
+ *  linter — went out in alpha70, see src/state/removals.ts.) */
 export { checkCells, parseCli } from "../server/aio.ts";
 export type { CliFlags, Lint } from "../server/aio.ts";
 

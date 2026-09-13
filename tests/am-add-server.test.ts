@@ -37,7 +37,9 @@ Deno.test("it writes the module and imports it from the app entry", async () => 
 
     const mod = await Deno.readTextFile(`${dir}/src/server/billing.server.ts`);
     assertStringIncludes(mod, 'serverFns("billing"');
-    assertStringIncludes(mod, 'from "aio/server"');
+    // From "aio" — `aio/server` does not export serverFns (the generated
+    // import resolving is pinned in am-add-server-imports-resolve.test.ts).
+    assertStringIncludes(mod, 'import { serverFns } from "aio";');
     // The `.server.ts` NAME is the convention aio enforces — a generator that
     // produced `billing.ts` would put the keys in the browser bundle.
     assert(mod.includes("server-only") || mod.includes(".server.ts"));

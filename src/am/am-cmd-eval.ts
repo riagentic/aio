@@ -142,8 +142,17 @@ export async function cmdEval(
   }
   if (!pf.cdpPort) {
     // The same message `am shot` gives, deliberately: two verbs that need the
-    // same flag must not explain it two ways.
-    outError(noCdpMessage(appId, pf.client), mode);
+    // same flag must not explain it two ways — but they must each name their
+    // OWN job. It was hardcoded to a screenshot, so this answered "a
+    // screenshot needs it… then `am shot` again" to someone evaluating an
+    // expression.
+    outError(
+      noCdpMessage(appId, pf.client, {
+        what: "evaluating an expression in the page",
+        verb: "eval",
+      }),
+      mode,
+    );
     Deno.exit(1);
   }
   const timeout = flags.timeout ?? 8000;

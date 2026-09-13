@@ -149,6 +149,29 @@ export function _cancelTriggerCount(): number {
   return n;
 }
 
+/** @internal Which CELL PREFIXES have a method this action type cancels.
+ *
+ *  Read-only — it answers from `_triggers`, the same map `notifyMethodCancel`
+ *  sweeps, so the two can never disagree about what an action cancels. It
+ *  exists because `notifyMethodCancel` can only abort controllers that live in
+ *  THIS isolate's `_inflight`, and a `worker: true` cell's controllers live in
+ *  another one. The worker pool asks this, then forwards the trigger across
+ *  the thread so the worker fires its own registry. */
+export function _cancelTargetPrefixes(
+  actionType: string,
+  app: AppScope = "",
+): string[] {
+  const triggers = _triggers.get(actionType);
+  if (!triggers) return [];
+  const out: string[] = [];
+  for (const t of triggers) {
+    if (!sameApp(t.app, app)) continue;
+    const prefix = t.key.slice(0, t.key.indexOf(":"));
+    if (prefix !== "" && !out.includes(prefix)) out.push(prefix);
+  }
+  return out;
+}
+
 /** Track an in-flight async method call. Returns an untrack fn. */
 export function trackCall(
   cellPrefix: string,

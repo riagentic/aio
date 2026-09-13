@@ -131,8 +131,8 @@ render health while RenderProbe detects freezes.
 Staleness-based status: `< threshold` = healthy, `>= 1x` = degraded, `>= 2x` =
 warning, `>= 5x` = frozen. Default staleness threshold: 300ms.
 
-Frozen clients stop receiving deltas from server. Visibility pause: hidden tabs
-suppress false alarms.
+Frozen clients stop receiving deltas from server, and are sent whole state the
+moment they recover. Visibility pause: hidden tabs suppress false alarms.
 
 The key is `renderBudget: { staleness, pendingPatches }` on `aio.run`. It
 reaches the page through the shell (`__aioConfig`) and the `cfg` frame, and the
@@ -172,8 +172,9 @@ Two different measurements, on purpose:
   freezes on its own. Frozen clients are skipped by the broadcaster
   (`server-broadcast.ts`) and are what raises the `transport` alert.
 
-IPC keepalive (UDS mode): lightweight `__ping` every 60s over IPC bridge. Full
-vitals protocol runs over WebSocket only.
+The vitals protocol runs over WebSocket only. There is no IPC keepalive: the
+envelope refuses `vitals-ping` on UDS and IPC by name, so the Electron bridge
+never pings (`src/browser/browser-vitals.ts`).
 
 ---
 
@@ -206,7 +207,7 @@ Pipeline runs on each heartbeat interval (default: 1000ms).
 ## Hint engine
 
 Pure function: takes `VitalsSnapshot`, produces a `VitalHint` with cause,
-evidence, and suggestion. Seven rules evaluated in priority order -- first match
+evidence, and suggestion. Six rules evaluated in priority order -- first match
 wins:
 
 | # | Rule                  | Trigger                                                | Severity   |
@@ -217,7 +218,6 @@ wins:
 | 2 | Queue saturation      | Queue depth over frozen threshold + loop degraded      | `likely`   |
 | 3 | Transport stall       | Transport frozen + render/loop healthy                 | `possible` |
 | 4 | Client-only freeze    | Render frozen + transport/loop healthy + no AIO action | `possible` |
-| 7 | Re-render storm       | >30 subscribe callbacks/sec (client-side)              | `possible` |
 
 Severity: **likely** = 2+ probes corroborate. **possible** = 1+ probe with
 direct measurement. **speculative** = insufficient evidence.
@@ -301,12 +301,6 @@ aio.run({
 
 Fires for every event with no throttling. Console output is throttled (same
 kind+trigger suppressed for 2s).
-
-### Re-render storm detection
-
-Checks every 1s whether `_subscribe` callbacks exceeded 30. Runs independently
-of probe status. Indicates expensive components or unstable selectors:
-`[aio:vitals] RE-RENDER STORM -- 47 subscribe callbacks in last 1s`.
 
 ### Resource pressure warnings
 

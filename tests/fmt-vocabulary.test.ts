@@ -62,6 +62,10 @@ Deno.test("fmt pad: pads by DISPLAY width, so a coloured cell keeps its column",
 
 Deno.test("fmt wrap: fits the width, keeps long words whole, honours hard newlines", () => {
   const lines = wrap("the quick brown fox jumps over the lazy dog", 12);
+  assert(
+    lines.length > 1,
+    "the text really wrapped, so there are lines to check",
+  );
   for (const l of lines) assert(width(l) <= 12, `too wide: ${l}`);
   assertEquals(lines.join(" "), "the quick brown fox jumps over the lazy dog");
   // A path or URL is never chopped in half — half a path is worse than a

@@ -196,3 +196,106 @@ Deno.test({
       assertEquals(engine!.getStatus("scs-board").status !== "blocked", true);
     }),
 });
+
+// ── An ASYNC method on a sync cell must go to the SERVER, not the op log ──
+//
+// `handleSyncLocalAction` claimed every non-`__` method on a sync cell,
+// async ones included, and resolved the caller's ack the moment the op was
+// queued — with no value, because that IS the honest settle point for a
+// local-first write. For an async method it is not a settle point at all: the
+// answer comes from the server, correlated by the `_callId` the plain action
+// path stamps. So `const id = await notes.create(…)` resolved `undefined` in
+// a BROWSER TAB while the identical call over `am`/CLI returned the value —
+// one call, two answers, decided by which kind of client you were. Under
+// `localFirst: true` every methods-style cell is adopted, so it was every
+// async method in the app, silently.
+//
+// The routing is what is pinned here: a sync method goes down the CRDT
+// transport, an async one goes down the plain client send carrying a
+// `_callId`. That is the decision the bug got wrong, and it is observable
+// without a server.
+Deno.test({
+  name:
+    "sync cell: an async method routes to the server, a sync one to the op log",
+  async fn() {
+    shimLocalStorage();
+    _setAckTimeoutMs(0);
+    _resetEnsured();
+    _resetBrowserSync();
+    _resetCellRegistry();
+    _resetSignals();
+    const win = new Window({ url: "https://localhost" });
+    const rawSends: string[] = [];
+    const plainSends: unknown[] = [];
+    _setClientSend((a) => void plainSends.push(a));
+    _registerSyncTransport((raw) => void rawSends.push(raw), () => {});
+    _setSyncLoaderForTest(() => Promise.resolve(browserSync));
+    cell("scs-mixed", {
+      state: { notes: [] as string[] },
+      sync: true,
+      methods: {
+        addSync(s: { notes: string[] }, text: string) {
+          s.notes.push(text);
+          return "SYNC-RET";
+        },
+        // deno-lint-ignore require-await
+        async addAsync(s: { notes: string[] }, text: string) {
+          s.notes.push(text);
+          return "ASYNC-RET";
+        },
+      },
+    });
+    try {
+      ensureConnected();
+      await tick();
+      const board = getRegisteredCells().get("scs-mixed") as unknown as {
+        addSync: (t: string) => Promise<unknown>;
+        addAsync: (t: string) => Promise<unknown>;
+      };
+
+      await within(board.addSync("a"), 500);
+      const opsAfterSync = rawSends.filter((f) => f.includes('"t":"op"'));
+      assertEquals(
+        opsAfterSync.length,
+        1,
+        "a SYNC method on a sync cell is a CRDT op",
+      );
+      assertEquals(plainSends.length, 0, "and it does not go to the server");
+
+      // The async call will not settle here — there is no server to answer —
+      // which is itself the point: it is WAITING for a return value now.
+      void board.addAsync("b");
+      await tick();
+      assertEquals(
+        rawSends.filter((f) => f.includes('"t":"op"')).length,
+        1,
+        "an ASYNC method must NOT be written to the op log: it has no local " +
+          "reduction, and replaying it is what the reducer already refuses",
+      );
+      assertEquals(
+        plainSends.length,
+        1,
+        "it goes down the ordinary action path, where the answer comes from",
+      );
+      const sent = plainSends[0] as {
+        type?: string;
+        payload?: { _callId?: string };
+      };
+      assertEquals(sent.type, "scs-mixed:addAsync");
+      assert(
+        typeof sent.payload?._callId === "string",
+        "carrying the _callId the server resolves with the RETURN VALUE — " +
+          `got ${JSON.stringify(sent)}`,
+      );
+    } finally {
+      _setSyncLoaderForTest(null);
+      _rejectAllPending(new Error("test teardown"));
+      _setAckTimeoutMs(15_000);
+      _resetEnsured();
+      _resetBrowserSync();
+      _resetCellRegistry();
+      _resetSignals();
+      await closeWindow(win);
+    }
+  },
+});

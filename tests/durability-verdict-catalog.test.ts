@@ -317,7 +317,14 @@ const CATALOG: Row[] = [
       const aio = await code("src/server/aio.ts");
       const body = fnBody(aio, "_journalAppend");
       assertMatch(body, /createAioError\("PERSIST_ERROR"/);
-      assertMatch(body, /persistence\.flushPersist\(\)/);
+      // The compensating flush is a parameter now (a sync cell's fold closes
+      // the gap, not a KV flush) — its DEFAULT is still the persist flush,
+      // and the body still runs it.
+      assertMatch(
+        aio,
+        /function _journalAppend\([^]*?compensate: \(\) => Promise<void> = \(\) =>\s*persistence\.flushPersist\(\),?\s*\)/,
+      );
+      assertMatch(body, /compensate\(\)\.catch\(/);
       assertMatch(body, /_journalHealth\.fail\(e\)/);
       assertMatch(body, /_journalHealth\.ok\(\)/);
       // The compensating flush's rejection handler is LOUD — flushPersist

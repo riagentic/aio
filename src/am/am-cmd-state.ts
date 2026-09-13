@@ -10,12 +10,14 @@ import {
   detectMode,
   out,
   outError,
+  outValue,
   stack,
   style,
 } from "./am-output.ts";
 import {
   amCtx,
   overwriteRefusal,
+  parseNumArg,
   parsePayload,
   resolveAmAppId,
   resolvePath,
@@ -66,6 +68,19 @@ export function compareValue(
       ? { ok: false, reason: `${sym} needs numbers — ${bad} is not one` }
       : { ok: cmp(a, b), reason: `${j(actual)} ${sym} ${j(expected)}` };
   };
+  // A path that is not there has no value to compare. Answering the
+  // comparison anyway made a typo pass: `am expect todo.itmes.length ne 0`
+  // compared `undefined` with 0, found them different, and printed PASS —
+  // the exact assertion a script uses to prove the list is non-empty. Only
+  // `absent` is ABOUT a missing path; every other op fails on one, and says
+  // which word asks the question it was probably meant to.
+  if (!found && op !== "absent" && op !== "exists" && isExpectOp(op)) {
+    return {
+      ok: false,
+      reason: "path not found — no actual value to compare (use `absent` " +
+        "to assert a path is missing)",
+    };
+  }
   switch (op) {
     case "exists":
       return { ok: found, reason: found ? "present" : "path not found" };
@@ -114,6 +129,60 @@ export function compareValue(
   }
 }
 
+function isExpectOp(op: string): op is typeof EXPECT_OPS[number] {
+  return (EXPECT_OPS as readonly string[]).includes(op);
+}
+
+/** The usage error for `am expect`'s positionals, or null when they are
+ *  well-formed. Pure, so the refusals are testable without a server.
+ *
+ *  Each of these used to be a PASS or a silent reinterpretation: `eq` with no
+ *  value compared against `undefined` (and a missing path "equalled" it), a
+ *  fourth word was dropped (`am expect title eq hello world` asserted
+ *  "hello"), and an unknown op under `--wait` polled for the whole timeout
+ *  before saying the op did not exist. */
+export function expectUsageError(args: readonly string[]): string | null {
+  const usage = `usage: am expect <path> <op> [value] — ops: ${
+    EXPECT_OPS.join(" ")
+  }`;
+  const [path, op] = args;
+  if (!path || !op) return usage;
+  if (!isExpectOp(op)) {
+    return `unknown op "${op}" (use: ${EXPECT_OPS.join(" ")})`;
+  }
+  const unary = op === "exists" || op === "absent";
+  const want = unary ? 2 : 3;
+  if (args.length < want) {
+    return `am expect ${path} ${op} needs a value to compare against — ` +
+      `e.g. am expect ${path} ${op} 3 (quote a string with spaces)`;
+  }
+  if (args.length > want) {
+    return `am expect ${path} ${op} takes ${
+      unary ? "no value" : "exactly one value"
+    }, got extra: ${args.slice(want).join(" ")}` +
+      (unary ? "" : ` — quote a value with spaces: '"hello world"'`);
+  }
+  return null;
+}
+
+/** Is this `am dispatch` argument a NAMED one (`key=value`)?
+ *
+ *  "Contains an `=`" was the test, so any positional that happened to hold one
+ *  changed the whole call's shape: `am dispatch todo:add
+ *  "https://example.com/?q=1"` sent `{"https://example.com/?q": 1}` instead of
+ *  the URL, and a JSON positional like `{"f":"a=b"}` went the same way. A
+ *  payload key is a property name, so the key must look like one.
+ *
+ *  A NAME, though, not a JS identifier. The first tightening took
+ *  `[A-Za-z_$][\w$]*`, and `due-date=…`, `user.name=…` and `título=…` — named
+ *  arguments for as long as the verb existed — silently became positionals.
+ *  So: a letter (any script), `_` or `$`, then letters, digits, `_`, `$`, `-`
+ *  and `.`. What the rule exists to keep positional still is: a URL (`:`, `/`,
+ *  `?`), a sentence (a space), a JSON value (`{`, `[`, `"`), a leading digit. */
+export function isNamedArg(arg: string): boolean {
+  return /^[\p{L}_$][\p{L}\p{N}_$.-]*=/u.test(arg);
+}
+
 /** `am expect <path> <op> [value]` — assert on live server state; exit 1 on
  *  mismatch. `--wait=<s>` polls until it passes (state settles async in e2e).
  *  The building block for a scripted `deno task test:e2e` over the real socket. */
@@ -122,18 +191,16 @@ export async function cmdExpect(
   flags: GlobalFlags,
 ): Promise<void> {
   const mode = detectMode(flags);
+  const usageError = expectUsageError(args);
+  if (usageError) {
+    outError(usageError, mode);
+    Deno.exit(1);
+  }
   const appId = resolveAmAppId(flags.app);
   const port = resolvePort(flags.port, appId, {
     explicit: flags.app !== undefined,
   });
-  const [path, op, rawValue] = args;
-  if (!path || !op) {
-    outError(
-      `usage: am expect <path> <op> [value] — ops: ${EXPECT_OPS.join(" ")}`,
-      mode,
-    );
-    Deno.exit(1);
-  }
+  const [path, op, rawValue] = args as [string, string, string | undefined];
   const expected = rawValue === undefined ? undefined : parseScalar(rawValue);
 
   const evaluate = async (): Promise<{ ok: boolean; reason: string }> => {
@@ -228,7 +295,9 @@ export async function cmdState(
     return { ok: true, data: r.value };
   };
 
-  // `--watch`: a line per CHANGE, not a line per poll.
+  // `--watch`: a line per observed change, not a line per poll. It is still a
+  // POLL underneath — a value that changes and changes back between two reads
+  // prints nothing — and the help says so rather than promising every change.
   //
   // `--wait=N` already re-read the value every N seconds and printed it every
   // time — which is a poll loop with nicer syntax, and both reports that asked
@@ -242,7 +311,7 @@ export async function cmdState(
   if (flags.wait === undefined && !watch) {
     const r = await fetchAndResolve();
     if (!r.ok) Deno.exit(1);
-    out(r.data, mode);
+    outValue(r.data, mode);
     return;
   }
 
@@ -268,10 +337,10 @@ export async function cmdState(
         // to know where it is starting from, or the first real change is
         // unreadable for want of a baseline.
         lastSeen = now;
-        out(r.data, mode);
+        outValue(r.data, mode);
       }
     } else {
-      out(r.data, mode);
+      outValue(r.data, mode);
     }
     await new Promise((r) => setTimeout(r, interval));
   }
@@ -299,7 +368,7 @@ async function uiProjection(
     outError(result.error, mode);
     Deno.exit(1);
   }
-  out(result.data, mode);
+  outValue(result.data, mode);
 }
 
 // ── Actions ─────────────────────────────────────────────────
@@ -330,6 +399,33 @@ export function envelopePayload(
   // state, and `am` reported `{"ok":true}`.
   const isCellMethod = CELL_METHOD_SEP.test(type);
   return isCellMethod ? { args: [named] } : named;
+}
+
+/**
+ * Shape a RAW JSON value for the action type it is going to.
+ *
+ * `envelopePayload` above takes named PAIRS — the `k=v` form the CLI parses.
+ * A text box holds something else: one JSON value the person typed, and for a
+ * cell method the natural spelling of "positional arguments" is a JSON ARRAY.
+ * amui's box says so in its own placeholder (`["ada@example.com"]`), then fed
+ * the parsed value to `envelopePayload`, which wraps whatever it gets as ONE
+ * argument. So the documented spelling produced `args: [["ada@example.com"]]`:
+ * the method's first parameter was an Array where a string was expected, the
+ * wrong value was persisted, and the trojan answered ok so the UI reported
+ * "dispatched".
+ *
+ * The rule, matching `am dispatch --args='[…]'`:
+ *   • not a cell method → the value IS the payload (redux-style).
+ *   • cell method + array → those are the positional arguments.
+ *   • cell method + anything else → one argument, as before.
+ *
+ * Pure — exported for the test that pins all three.
+ */
+export function envelopeJsonPayload(type: string, value: unknown): unknown {
+  // A plain action's payload IS the value — nothing to decide, and inventing a
+  // wrapper here would be the same class of guess this function exists to end.
+  if (!CELL_METHOD_SEP.test(type)) return value;
+  return { args: Array.isArray(value) ? value : [value] };
 }
 
 /** The forms `am dispatch` actually accepts — printed on every usage error so
@@ -504,11 +600,13 @@ export async function cmdDispatch(
     // exactly where it matters — `{"panel":0,"type":"nfts"}` is a payload whose
     // own field is called `type`, which is how this was first hit.
     const body = action as Record<string, unknown> | null;
-    if (
-      body !== null && typeof body === "object" && !Array.isArray(body) &&
-      args.length > 0
-    ) {
-      action = { type: args[0], payload: envelopePayload(args[0]!, body) };
+    if (body !== null && typeof body === "object" && args.length > 0) {
+      // An ARRAY body used to fall through this branch untouched, so
+      // `--body='["x"]'` posted a bare array as the whole action — no `type`,
+      // refused at the far end for a reason that named nothing the caller had
+      // typed. It is the same question `--args` answers, so it gets the same
+      // answer: for a cell method, an array IS the argument list.
+      action = { type: args[0], payload: envelopeJsonPayload(args[0]!, body) };
     }
   } else if (args.length === 0) {
     outError(DISPATCH_USAGE, mode);
@@ -519,9 +617,9 @@ export async function cmdDispatch(
       action = { type };
     } else {
       const rest = args.slice(1);
-      // If any arg has '=' → action-style named payload: { key: val }
+      // If any arg is `key=value` → action-style named payload: { key: val }
       // Otherwise → method-style positional args: { args: [...] }
-      const hasNamedArgs = rest.some((a) => a.includes("="));
+      const hasNamedArgs = rest.some(isNamedArg);
       if (hasNamedArgs) {
         action = { type, payload: envelopePayload(type!, parsePayload(rest)) };
       } else {
@@ -658,10 +756,60 @@ async function persistRefusal(
 }
 
 export async function cmdActions(
-  _args: string[],
+  args: string[],
   flags: GlobalFlags,
 ): Promise<void> {
-  await runTrojanGet(amCtx(flags), "history");
+  // `am actions 50` is the documented spelling (docs/clients/app-manager.md)
+  // and `--lines=50` the one every other listing verb takes; both were
+  // accepted and ignored. Either one, never both, and never a word that is
+  // not a count.
+  const mode = detectMode(flags);
+  if (args.length > 1 || (args.length === 1 && flags.lines !== undefined)) {
+    outError(
+      `am actions takes one count — am actions 50, or am actions --lines=50`,
+      mode,
+    );
+    Deno.exit(1);
+  }
+  let lines = flags.lines;
+  if (args.length === 1) {
+    const n = parseNumArg(args[0], "am actions <count>", {
+      min: 1,
+      integer: true,
+    });
+    if (!n.ok) {
+      outError(n.error, mode);
+      Deno.exit(1);
+    }
+    lines = n.value;
+  }
+  if (lines === undefined) {
+    await runTrojanGet(amCtx(flags), "history");
+    return;
+  }
+  const ctx = amCtx(flags);
+  const r = await trojanGet(ctx.port, "history", ctx.appId);
+  if (!r.ok) {
+    outError(r.error, ctx.mode);
+    Deno.exit(1);
+  }
+  outValue(lastHistoryEntries(r.data, lines), ctx.mode);
+}
+
+/** `am actions --lines=N`: the NEWEST N entries — the same meaning `--lines`
+ *  has on `timeline`, `logs` and `errors`. It was accepted and ignored, so the
+ *  whole 2000-entry window printed. `index` stays what the app reports (a
+ *  position in the FULL history, which `total` now states) — entries carry
+ *  their own `id`, and ids are what `am timetravel goto` takes. */
+export function lastHistoryEntries(data: unknown, n: number): unknown {
+  const h = data as { entries?: unknown[] } | null;
+  if (!h || !Array.isArray(h.entries)) return data;
+  return {
+    ...h,
+    entries: h.entries.slice(-n),
+    shown: Math.min(n, h.entries.length),
+    total: h.entries.length,
+  };
 }
 
 // ── Time-travel ─────────────────────────────────────────────
@@ -713,17 +861,63 @@ export async function cmdTT(args: string[], flags: GlobalFlags): Promise<void> {
     );
     Deno.exit(1);
   }
+  const before = await trojanGet(port, "history", appId);
   const result = await trojanPost(port, "tt", { cmd, arg }, appId);
   if (!result.ok) {
     outError(result.error, mode);
     Deno.exit(1);
   }
+  const after = await trojanGet(port, "history", appId);
+  const verdict = before.ok && after.ok
+    ? ttMoved(cmd, before.data, after.data)
+    : null;
   out(
     mode === "pretty"
-      ? `tt: ${cmd}${arg !== undefined ? " " + arg : ""}`
+      ? `tt: ${cmd}${arg !== undefined ? " " + arg : ""}` +
+        (verdict && !verdict.moved ? ` — nothing moved: ${verdict.note}` : "")
+      : verdict
+      ? {
+        ...(result.data as Record<string, unknown>),
+        moved: verdict.moved,
+        ...(verdict.moved ? {} : { note: verdict.note }),
+      }
       : result.data,
     mode,
   );
+}
+
+/** Did a time-travel command change anything? Compared on the app's own
+ *  history before and after, so the answer is what happened rather than a
+ *  prediction of it.
+ *
+ *  `undo` at the oldest entry and `redo` at the newest are no-ops by design
+ *  (`time-travel.ts`), and the route answered `{"ok":true}` for both — a loop
+ *  of `am timetravel undo` "succeeded" forever at index 0. The exit stays 0
+ *  (being at the end of history is not an error) and `ok` keeps its meaning
+ *  ("the command was accepted"); `moved` and `note` are added beside it. */
+export function ttMoved(
+  cmd: string,
+  before: unknown,
+  after: unknown,
+): { moved: boolean; note: string } {
+  type H = { entries?: unknown[]; index?: number; paused?: boolean };
+  const b = (before ?? {}) as H, a = (after ?? {}) as H;
+  const moved = b.index !== a.index || b.paused !== a.paused ||
+    (b.entries?.length ?? 0) !== (a.entries?.length ?? 0);
+  if (moved) return { moved, note: "" };
+  const total = a.entries?.length ?? 0;
+  const note = total === 0
+    ? "the history is empty"
+    : cmd === "undo"
+    ? `already at the oldest entry (index ${a.index}) — nothing to undo`
+    : cmd === "redo"
+    ? `already at the newest entry (index ${a.index}) — nothing to redo`
+    : cmd === "pause"
+    ? "already paused"
+    : cmd === "resume"
+    ? "not paused — nothing to resume"
+    : `already at that entry (index ${a.index})`;
+  return { moved, note };
 }
 
 // ── Persistence ─────────────────────────────────────────────
@@ -741,7 +935,7 @@ export async function cmdMigrations(
     Deno.exit(1);
   }
   if (ctx.mode !== "pretty") {
-    out(r.data, ctx.mode);
+    outValue(r.data, ctx.mode);
     return;
   }
   const m = r.data as {

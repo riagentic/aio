@@ -38,8 +38,12 @@ re-issue it from state your app owns.
 
 Nothing is dropped quietly:
 
-- past 1000 queued actions the OLDEST is dropped and its caller's promise
-  rejects immediately with the real reason (not a timeout 15s later);
+- past 1000 actions queued while offline the OLDEST is dropped and its caller's
+  promise rejects immediately with the real reason (not a timeout 15s later).
+  Calls the client had already accepted — still waiting on the send pacer when
+  the connection dropped — are never evicted by that cap; they replay first
+  (`connectCli`, cap 100, refuses the new call instead when only those are
+  left);
 - `isConnectionDegraded()` returns true once a queue passes 80% full — use it
   for a "reconnecting / slow connection" indicator;
 - when the client tears down (or hits a protocol-version gap) the queue is
@@ -81,12 +85,35 @@ ops, ack tracking, and rebase on reconnect. See
 
 Default for all browser clients. Persistent bidirectional connection.
 
-Rate limits (server-enforced):
+Rate limits (server-enforced, `wsLimits`):
 
 - 100 messages/sec per client
 - 5MB/s bandwidth per client
 - 1MB max message size
 - 100 max concurrent connections (configurable via `maxConnections`)
+
+The client paces itself to the budget the server advertises in its hello: every
+frame the page writes (method calls, `send()`, sync ops, `serverFn`, forwarded
+logs) leaves through one writer held to 80% of `messagesPerSec`. A burst —
+`Promise.all` over 1000 `cell.method()` calls — queues and resolves late, never
+refused. A frame the server still drops over a per-second budget is answered
+with `retryAfterMs`; the client holds that call and re-sends it (up to 8 times,
+then the caller gets the server's refusal). A frame refused for what it is (too
+large, not allowed, or bigger than the whole `bytesPerSec` — no re-send could
+ever fit) rejects at once, without holding the calls behind it; a refused frame
+is not charged to the byte window. A server whose `maxMessageBytes` exceeds its
+`bytesPerSec` says so at startup.
+
+A peer that ignores all of that — 50 dropped frames in a row — is closed with
+`1008` and its address refused (HTTP 429, `Retry-After`) for 5 s, doubling per
+repeat within 10 minutes up to 60 s. Both are logged on the server. The aio
+client reconnects with its normal backoff (≤ 8 s) once the block ends.
+
+The per-client budget is checked first; a frame it refuses is not counted
+against the server-wide fuse (`messagesPerSec` × clients, from 2 up to 50
+clients' worth). When that fuse trips, only a client that has sent more than its
+even share of it this second is refused (with `retryAfterMs`, never closed), so
+one flooding socket cannot starve the others at any budget.
 
 ### UDS + IPC (Electron)
 
@@ -166,7 +193,10 @@ await aio.run({
 });
 ```
 
-Localhost is always allowed. Additional hostnames via `allowedOrigins`.
+A WebSocket is admitted from the app's own origin — the host it was reached as
+AND the scheme it serves — and from whatever `allowedOrigins` admits. There is
+no blanket localhost exemption: another port on `localhost` is another origin.
+See [Cross-origin requests](../auth/auth.md#cross-origin-requests).
 
 ## Optimization checklist
 
@@ -228,27 +258,37 @@ second knob to remember and no per-subsystem path to override.
 
 ## Defaults reference
 
-| Parameter                  | Default        | Source                       |
-| -------------------------- | -------------- | ---------------------------- |
-| `syncIntervalMs`           | 50ms           | `aio.ts:114`                 |
-| `fullStateThreshold`       | 0.5            | `server.ts:331`              |
-| `maxConnections`           | 100            | `server.ts:257`              |
-| Max WS message size        | 1 MB           | `server.ts:256`              |
-| Backpressure: moderate     | >100ms → 2x    | `server.ts:260`              |
-| Backpressure: heavy        | >300ms → 4x    | `server.ts:259`              |
-| Backpressure: recovery     | 3 healthy → /2 | `server.ts:261`              |
-| Subscription grace period  | 300ms          | `browser.ts:744`             |
-| Offline queue max          | 100            | `protocol/protocol-types.ts` |
-| Offline queue TTL          | 24 hours       | `browser.ts`                 |
-| Render staleness threshold | 300ms          | `vitals/render-meter.ts`     |
-| Pressure: payload size     | 500 KB         | `vitals/pressure-monitor.ts` |
-| Pressure: broadcast rate   | 30/sec         | `vitals/pressure-monitor.ts` |
-| Pressure: client bandwidth | 1 MB/sec       | `vitals/pressure-monitor.ts` |
+Sources are FILES, not line numbers: every line number in this table had
+drifted, and three named a `browser.ts` that does not exist.
+
+| Parameter                   | Default        | Source                             |
+| --------------------------- | -------------- | ---------------------------------- |
+| `syncIntervalMs`            | 50ms           | `server/aio.ts`                    |
+| `fullStateThreshold`        | 0.5            | `server/server-broadcast.ts`       |
+| `maxConnections`            | 100            | `server/server-ws.ts`              |
+| Max WS message size         | 1 MB           | `server/server-ws.ts`              |
+| Backpressure: moderate      | >100ms → 2x    | `server/server-ws.ts`              |
+| Backpressure: heavy         | >300ms → 4x    | `server/server-ws.ts`              |
+| Backpressure: recovery      | 3 healthy → /2 | `server/server-ws.ts`              |
+| Subscription grace period   | 300ms          | `browser/protocol-subscription.ts` |
+| Offline queue max — methods | 1000 actions   | `browser/browser-air-transport.ts` |
+| Offline queue max — `send`  | 100 actions    | `protocol/protocol-types.ts`       |
+| Render staleness threshold  | 300ms          | `vitals/render-meter.ts`           |
+| Pressure: payload size      | 500 KB         | `vitals/pressure-monitor.ts`       |
+| Pressure: broadcast rate    | 30/sec         | `vitals/pressure-monitor.ts`       |
+| Pressure: client bandwidth  | 1 MB/sec       | `vitals/pressure-monitor.ts`       |
+
+There are TWO offline queues and one drop policy: a cell-method call queues in
+the browser transport (1000), `useCell().send` / `useAio().send` queue in the
+isomorphic core (100). Neither has a TTL — the queue stores `{action, seq}` and
+holds no timestamp at all, so nothing can expire. (The 24 hours that used to
+appear here is the CRDT tombstone window, a different subsystem.)
 
 ## Diagnosis workflow
 
-1. **Check vitals**: `curl http://localhost:8000/__aio/vitals | jq .` — look for
-   frozen clients, high staleness, payload warnings
+1. **Check vitals**: `curl http://localhost:$PORT/__aio/vitals | jq .` (`$PORT`
+   from `am instances`) — look for frozen clients, high staleness, payload
+   warnings
 2. **Console backpressure**: look for `[aio:vitals]` escalation messages
 3. **Payload sizes**: `grep -i "pressure" logs/warning.log` — >500KB means state
    too large or cell `ui` config not filtering enough

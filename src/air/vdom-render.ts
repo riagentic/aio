@@ -14,7 +14,7 @@ import {
 } from "./vdom-create.ts";
 import { _componentName } from "./hook-error.ts";
 import { applyChildDependentProps, applyProps } from "./vdom-props.ts";
-import { getDom } from "./vdom-remove.ts";
+import { _removeDomCleanup, getDom } from "./vdom-remove.ts";
 import { _getActiveDelegationRoot, _setDelegationRoot } from "./vdom-events.ts";
 import {
   _devA11yCheckFn,
@@ -30,7 +30,7 @@ import {
   SVG_TAGS,
 } from "./vdom-types.ts";
 import type { ComponentFn, RenderCtx, VNode } from "./vdom-types.ts";
-import { _boundaryStack } from "./renderer-state.ts";
+import { _boundaryStack, _noteDiscard } from "./renderer-state.ts";
 
 const SVG_NS = "http://www.w3.org/2000/svg";
 
@@ -49,6 +49,63 @@ export function _occupied(
   childDom: Node,
 ): Node | null {
   return childDom.nodeType === 11 ? getDom(child) : childDom;
+}
+
+/** What a boundary that is SHOWING its fallback holds as `_rendered`: the
+ *  fallback, or a `nullSlot()` when the fallback renders nothing.
+ *
+ *  `_rendered != null` is how every walker asks "is this boundary in its
+ *  fallback?" — the diff (retry vs. patch the children), the teardown walks,
+ *  the discarded-subtree sweep. A fallback of `null` (`fallback={() => null}`,
+ *  or a `<Suspense>` with no fallback) stored `null` there and so answered
+ *  "no": the next diff patched the DISCARDED children as if they were on
+ *  screen, so the boundary never came back once the error cleared, and a
+ *  later fall-back retired a region it did not own — measured, the sibling
+ *  after the boundary was deleted. A fallback of nothing is a POSITION, like a
+ *  component that renders nothing, and holds it with the same placeholder;
+ *  both SSR writers emit its comment. @internal */
+export function _fallbackSlot(
+  fallback: VNode | string | number | null | undefined,
+): VNode | string | number {
+  return fallback ?? nullSlot();
+}
+
+/** The slot of a NEW component whose throw was contained (see the component
+ *  branch of `createDom`): the enclosing boundary's fallback, or an empty
+ *  placeholder. A fallback that itself fails to build is reported and the slot
+ *  stays empty — it must not unwind the pass the containment protects. */
+function _containedSlot(
+  vnode: VNode,
+  error: unknown,
+  ctx: RenderCtx,
+  isSvg: boolean,
+  parentDom: Node | undefined,
+): Node | null {
+  let shown: VNode | string | number | undefined;
+  try {
+    const found = ctx.hooks?.containedFallback?.(error) ?? null;
+    if (found) {
+      shown = _fallbackSlot(found.fallback);
+      const dom = createDom(shown, ctx, isSvg, parentDom);
+      vnode._rendered = shown;
+      vnode._dom = (dom ? _occupied(shown, dom) : null) ?? undefined;
+      return dom;
+    }
+  } catch (fallbackError) {
+    console.error("[aio:vdom] ErrorBoundary fallback threw:", fallbackError);
+    // Whatever the fallback built before it threw goes with it.
+    if (shown !== undefined && typeof shown === "object") {
+      try {
+        _removeDomCleanup(shown, ctx);
+      } catch { /* a malformed fallback node: nothing below it was built */ }
+    }
+  }
+  const slot = nullSlot();
+  const comment = ctx.doc.createComment("");
+  slot._dom = comment;
+  vnode._rendered = slot;
+  vnode._dom = comment;
+  return comment;
 }
 
 /** An empty container holds its SLOT with a comment anchor (AIO-195).
@@ -143,7 +200,23 @@ export function createDom(
       });
     } catch (e) {
       ctx.hooks?.abortComponent?.(vnode, hookState);
-      if (e !== _LAZY_PENDING) _tagComponentError(e, vnode.tag);
+      if (e !== _LAZY_PENDING) {
+        _tagComponentError(e, vnode.tag);
+        // Contained during a re-render pass: a NEW component has no last good
+        // output, so its slot shows what an existing component that throws
+        // there shows — the enclosing `<ErrorBoundary>`'s fallback, in its
+        // place — or, outside any boundary, an empty slot (the same thing a
+        // component that rendered `null` leaves). Either way it is retried
+        // when a signal its failed render read changes.
+        //
+        // The fallback used to be skipped: an `<ErrorBoundary>` ABOVE the
+        // component that re-rendered is not on the boundary stack during that
+        // pass, so a child mounted by the pass (`{open && <Panel/>}`) that
+        // threw left a blank where its boundary promised a fallback.
+        if (ctx.hooks?.isolateComponentError?.(vnode, null, e, hookState)) {
+          return _containedSlot(vnode, e, ctx, isSvg, parentDom);
+        }
+      }
       throw e;
     }
     // A component that renders nothing still OCCUPIES its written position —
@@ -200,12 +273,20 @@ export function createDom(
       else _anchorEmpty(ctx, frag, vnode);
       return frag;
     } catch (error) {
+      // What the children built before the throw is discarded here or by the
+      // boundary above — retired by the region's owner (`_sweepDiscarded`). A
+      // throw that was not a component body's (a malformed child) passes no
+      // `abortComponent`, so the boundary records it itself — the same rule
+      // as `_diffErrorBoundary`; without it a boundary MOUNTED over a malformed
+      // child kept one discarded wrapper per mount, past unmount.
+      _noteDiscard();
       // AIO-178: re-throw _LAZY_PENDING so Suspense can handle it
       if (error === _LAZY_PENDING) throw error;
       if (!fallback) throw error;
-      const fallbackVnode = fallback(error as Error);
+      // A fallback that renders nothing is still SHOWING the fallback — see
+      // `_fallbackSlot`.
+      const fallbackVnode = _fallbackSlot(fallback(error as Error));
       vnode._rendered = fallbackVnode;
-      if (fallbackVnode == null) return null;
       const dom = createDom(fallbackVnode, ctx, isSvg, parentDom);
       // The node the fallback OCCUPIES — never the DocumentFragment a Fragment
       // fallback returns, which insertion empties and leaves detached (AIO-167
@@ -240,14 +321,17 @@ export function createDom(
       else _anchorEmpty(ctx, frag, vnode);
       return frag;
     } catch (thrown) {
+      // Same as the ErrorBoundary catch above: this build is discarded.
+      _noteDiscard();
       if (thrown !== _LAZY_PENDING) throw thrown;
       // Register for lazy resolution notifications
       _registerLazyListeners(vnode.children, ctx);
-      // Lazy child not ready — render fallback
-      vnode._rendered = fallback ?? null;
-      if (fallback == null) return null;
-      const dom = createDom(fallback, ctx, isSvg, parentDom);
-      vnode._dom = (dom ? _occupied(fallback, dom) : null) ?? undefined;
+      // Lazy child not ready — render fallback (none is a placeholder, see
+      // `_fallbackSlot`)
+      const shown = _fallbackSlot(fallback);
+      vnode._rendered = shown;
+      const dom = createDom(shown, ctx, isSvg, parentDom);
+      vnode._dom = (dom ? _occupied(shown, dom) : null) ?? undefined;
       return dom;
     }
   }

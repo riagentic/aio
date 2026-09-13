@@ -29,11 +29,11 @@ export function _redactCheckpointState(
   state: Record<string, unknown>,
   redact: Redactor,
 ): Record<string, unknown> {
-  if (redact.cells.size === 0) return state;
+  if (!redact.redactsAnyCell()) return state;
   let touched = false;
   const out: Record<string, unknown> = {};
   for (const [k, v] of Object.entries(state)) {
-    if (redact.cells.has(k)) {
+    if (redact.redactsCell(k)) {
       out[k] = REDACTED;
       touched = true;
     } else out[k] = v;
@@ -141,7 +141,7 @@ export function createCheckpoint(
   }
 
   const scrub = (data: CheckpointData): CheckpointData =>
-    redact.cells.size === 0
+    !redact.redactsAnyCell()
       ? data
       : { ...data, state: _redactCheckpointState(data.state, redact) };
 

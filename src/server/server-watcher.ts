@@ -421,9 +421,13 @@ export function createFileWatcher(deps: WatcherDeps): FileWatcher {
         }
         if (rootHere) {
           const gen = ++graphGeneration;
-          const timeout = new Promise<null>((r) =>
-            setTimeout(() => r(null), graphTimeoutMs)
-          );
+          // The loser's timer is cleared below: the check nearly always wins,
+          // and a timer left armed kept the process from unloading for the
+          // whole budget after every save of the root.
+          let timer: ReturnType<typeof setTimeout> | undefined;
+          const timeout = new Promise<null>((r) => {
+            timer = setTimeout(() => r(null), graphTimeoutMs);
+          });
           const revalTranspile = (s: string, f: string) => transpile(s, f);
           const validation = validateGraph(
             join(absBaseDir, deps.uiEntry ?? UI_ENTRY),
@@ -432,7 +436,9 @@ export function createFileWatcher(deps: WatcherDeps): FileWatcher {
             undefined,
             deps.prodGraph,
           );
-          const result = await Promise.race([validation, timeout]);
+          const result = await Promise.race([validation, timeout]).finally(
+            () => clearTimeout(timer),
+          );
           // Stale validation — a newer file change already started a new validation
           if (gen !== graphGeneration) return;
           if (result === null) {

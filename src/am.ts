@@ -22,7 +22,7 @@
 
 // ── Command imports ────────────────────────────────────────
 
-import { join } from "@std/path";
+import { join, resolve } from "@std/path";
 import { homedir } from "./server/paths.ts";
 import {
   cmdInstances,
@@ -57,6 +57,7 @@ import {
 } from "./am/am-cmd-inspect.ts";
 
 import { cmdAdd, cmdHelp, cmdUninstall, cmdVersion } from "./am/am-cmd-meta.ts";
+import { cmdAgent } from "./am/am-cmd-agent.ts";
 import { cmdCreate } from "./am/am-cmd-create.ts";
 import { cmdBuild, cmdCompile, cmdDev } from "./am/am-cmd-build.ts";
 import { cmdPublish } from "./am/am-cmd-publish.ts";
@@ -92,6 +93,7 @@ import { cmdEval } from "./am/am-cmd-eval.ts";
 import { cmdLab } from "./am/am-cmd-lab.ts";
 import {
   adoptRunningHome,
+  argsForHandler,
   parseGlobalFlags,
   resolveAmAppId,
   targetHome,
@@ -106,7 +108,11 @@ import { PATH_PIN_PREFIX } from "./am/am-versions.ts";
 import { removedAmVerb, retiredSpellingLine } from "./state/removals.ts";
 import { readDenoJsonSync, readLocalPinSync } from "./server/deno-json.ts";
 import { routeAmLogsToStderr } from "./am/am-log.ts";
-import { unknownFlagError } from "./am/am-flags.ts";
+import {
+  misplacedFlagError,
+  PASSTHROUGH,
+  unknownFlagError,
+} from "./am/am-flags.ts";
 
 // ── Command map ────────────────────────────────────────────
 
@@ -191,6 +197,9 @@ const COMMANDS: Record<string, CmdHandler> = {
   upgrade: cmdUpgrade, // am itself / an installed app / a dev checkout
   version: cmdVersion,
   trust: cmdTrust,
+  // The one command a model runs FIRST: the whole contract for working on
+  // an aio app, printed, so it never has to decide to open a doc.
+  agent: cmdAgent,
   help: (args, flags) => cmdHelp(args, flags, Object.keys(COMMANDS)),
 };
 
@@ -335,10 +344,19 @@ async function main(): Promise<void> {
       );
       Deno.exit(1);
     }
-    if (!Deno.env.get("AIO_APPS_DIR")) {
-      Deno.env.set(
-        "AIO_APPS_DIR",
-        join(homedir(), ".aio-instances", flags.instance),
+    const wanted = join(homedir(), ".aio-instances", flags.instance);
+    const explicit = Deno.env.get("AIO_APPS_DIR");
+    if (!explicit) {
+      Deno.env.set("AIO_APPS_DIR", wanted);
+    } else if (resolve(explicit) !== resolve(wanted)) {
+      // Winning is fine; winning SILENTLY is not. `--instance=agent1` is a
+      // request for a private copy, and a shell that happens to export
+      // AIO_APPS_DIR turned it into "whatever that scope is" — possibly the
+      // human's — with nothing on any stream saying the flag did nothing.
+      console.error(
+        `am: warning: --instance=${flags.instance} is ignored — AIO_APPS_DIR ` +
+          `is set (${explicit}) and wins, so this runs in that scope, not ` +
+          `${wanted}. Unset AIO_APPS_DIR to use --instance.`,
       );
     }
   }
@@ -381,8 +399,15 @@ async function main(): Promise<void> {
     outError(flagError, detectMode(flags));
     Deno.exit(1);
   }
+  // A known global flag on a verb that does not read it is WARNED about, not
+  // refused: it was accepted (and silently ignored) through every release so
+  // far, so a script passing `am status --all` must keep running — the surface
+  // is frozen. What it must not do any more is look like a flag that worked.
+  // stderr, so `--json` on stdout still parses.
+  const misplaced = misplacedFlagError(cmd, Deno.args);
+  if (misplaced) console.error(`warning: ${misplaced}`);
   try {
-    await handler(args, flags);
+    await handler(argsForHandler(args, cmd in PASSTHROUGH), flags);
   } catch (e) {
     outError(e instanceof Error ? e.message : String(e), detectMode(flags));
     Deno.exit(1);

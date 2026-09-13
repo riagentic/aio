@@ -49,6 +49,82 @@ function valueAt(root: unknown, path: readonly (string | number)[]): unknown {
   return cur;
 }
 
+/** Identity key for a patch path: every segment LENGTH-PREFIXED, never joined
+ *  with a separator.
+ *
+ *  A separator is a character, and a state key may contain any character. The
+ *  NUL this used to join with made `["files", "a\0b"]` and
+ *  `["files", "a", "b"]` the same key, so `compactPatches` read a write to one
+ *  as superseded by a write to the other and dropped it: the client kept the
+ *  old value, no error on either side. A length prefix cannot collide — the
+ *  digits run to a `:` that no digit is, so reading a key back is
+ *  unambiguous — and it keeps the one property every caller leans on:
+ *  `pathKey(a)` is a string PREFIX of `pathKey(b)` exactly when `a` is a path
+ *  prefix of `b` (the root, `[]`, is `""` and prefixes everything).
+ *
+ *  `String(seg)`, never a template on the raw segment: an Immer patch path
+ *  carries the KEY it was written under, and a SYMBOL key throws on implicit
+ *  conversion — see patch-compact.ts, where that surfaced as a bogus
+ *  REDUCE_ERROR. It also keeps `0` and `"0"` one key, as `join` did: they are
+ *  the same property.
+ *
+ *  @internal Shared by patch-compact.ts — the one path-identity decider. */
+export function _pathKey(
+  path: readonly (string | number | symbol)[],
+): string {
+  let k = "";
+  for (const seg of path) {
+    const s = String(seg);
+    k += s.length + ":" + s;
+  }
+  return k;
+}
+
+/** The one path segment no applier may walk or write, anywhere in a path.
+ *
+ *  `__proto__` is the only key whose READ on a plain object yields an object
+ *  that is not the object's own data (the prototype), so it is the only one a
+ *  crafted path can use to reach shared state. It is refused outright, at
+ *  every position: even a final `__proto__` write would re-prototype the
+ *  object it lands on.
+ *
+ *  `constructor` and `prototype` are NOT refused, because they are ordinary
+ *  state keys (a word list, a glossary) and refusing them turned every delta
+ *  touching one into a dropped frame plus a full resync. They are safe here
+ *  for concrete reasons, not by hope:
+ *    • a FINAL `constructor`/`prototype` write is a plain own-property
+ *      assignment on the parent;
+ *    • a non-final `prototype` on a plain object resolves to OWN data or to
+ *      nothing (`Object.prototype` has no `prototype` property), and a
+ *      function — the one thing with a real `prototype` — is unreachable
+ *      without walking an inherited `constructor`;
+ *    • a non-final `constructor` is the dangerous one (`{}.constructor` is
+ *      `Object`, whose `prototype` is `Object.prototype`). Immer refuses it
+ *      outright, even when the key is the object's OWN data, so
+ *      `expandAppends` rewrites it — only after proving the key is own and
+ *      holds an object. An inherited `constructor` is a throw.
+ *
+ *  @internal Shared with state-message.ts, which refuses the frame up front. */
+export const RESERVED_PATH_SEGMENT = "__proto__";
+
+/** The first op in `ops` whose path walks `__proto__`, or null. */
+export function _reservedPathOp(ops: readonly WirePatch[]): WirePatch | null {
+  for (const p of ops) {
+    for (const seg of p.path) {
+      if (seg === RESERVED_PATH_SEGMENT) return p;
+    }
+  }
+  return null;
+}
+
+/** Index of the first NON-FINAL `constructor` segment in `path`, or -1. */
+function nestedConstructorAt(path: readonly (string | number)[]): number {
+  for (let i = 0; i < path.length - 1; i++) {
+    if (path[i] === "constructor") return i;
+  }
+  return -1;
+}
+
 /**
  * Rewrite every `append` in `ops` as the `replace` it stands for, against the
  * value the state holds at that path AS THE OPS APPLY — not against `base`
@@ -61,6 +137,15 @@ function valueAt(root: unknown, path: readonly (string | number)[]): unknown {
  * Throws when the value there is not a string: an append onto something else
  * means the two sides disagree about the state, which is a desync — every
  * caller already treats a throw here as "request a full resync".
+ *
+ * The same pass also rewrites a path through a non-final `constructor`: a
+ * `replace` of that `constructor` key with the result of applying the rest of
+ * the path inside it. Immer refuses such a path outright ("Patching reserved
+ * attributes"), yet the server's own Immer PRODUCES it for
+ * `s.words.constructor.count++` — so the one delta was refused by every client
+ * and the worker-cell host, forever, while the server was fine. Rewritten only
+ * when `constructor` is the container's OWN key holding an object; anything
+ * else is inherited (`Object`) or a desync, and throws.
  */
 export function expandAppends(
   base: unknown,
@@ -71,7 +156,8 @@ export function expandAppends(
   let applied = 0; // ops[0..applied) are folded into `state`
   for (let i = 0; i < ops.length; i++) {
     const p = ops[i]!;
-    if (p.op !== "append") {
+    const c = nestedConstructorAt(p.path);
+    if (p.op !== "append" && c < 0) {
       out?.push(p);
       continue;
     }
@@ -79,6 +165,32 @@ export function expandAppends(
     if (applied < i) {
       state = applyPatches(state as object, out.slice(applied, i));
       applied = i;
+    }
+    if (c >= 0) {
+      const at = p.path.slice(0, c + 1);
+      const container = valueAt(state, p.path.slice(0, c));
+      const own = container !== null && typeof container === "object" &&
+          Object.hasOwn(container, "constructor")
+        ? (container as { constructor: unknown }).constructor
+        : undefined;
+      if (own === null || typeof own !== "object") {
+        throw new Error(
+          `Cannot apply ${p.op} at /${p.path.join("/")}: /${
+            at.join("/")
+          } is not an own object key in the state — refusing to walk an ` +
+            `inherited constructor`,
+        );
+      }
+      // The rest of the path, applied INSIDE the own value — recursively, so a
+      // second `constructor` or an `append` further down is handled the same.
+      out.push({
+        op: "replace",
+        path: at,
+        value: applyWirePatches(own, [
+          { ...p, path: p.path.slice(c + 1) } as WirePatch,
+        ]),
+      });
+      continue;
     }
     const cur = valueAt(state, p.path);
     if (typeof cur !== "string") {
@@ -119,8 +231,7 @@ function _impossibleOp(
   base: unknown,
   ops: readonly WirePatch[],
 ): string | null {
-  const SEP = "\u0000";
-  const key = (p: readonly (string | number)[]) => p.join(SEP);
+  const key = _pathKey;
   // Lengths we know EXACTLY, and the containers we no longer know anything
   // under. A length is seeded lazily from `base`, so it is only trustworthy
   // while nothing has written at or above it — `dirty` is what makes that
@@ -129,7 +240,8 @@ function _impossibleOp(
   const dirty = new Set<string>();
 
   const isDirty = (k: string) => {
-    for (const d of dirty) if (k === d || k.startsWith(d + SEP)) return true;
+    // `_pathKey` prefixes are path prefixes, the root `""` included.
+    for (const d of dirty) if (k.startsWith(d)) return true;
     return false;
   };
   const lengthOf = (parent: readonly (string | number)[]): number | null => {
@@ -148,7 +260,7 @@ function _impossibleOp(
     const k = key(path);
     dirty.add(k);
     for (const t of [...lens.keys()]) {
-      if (t === k || t.startsWith(k + SEP)) lens.delete(t);
+      if (t.startsWith(k)) lens.delete(t);
     }
   };
 
@@ -204,6 +316,16 @@ function _impossibleOp(
 /** Apply a `patches` frame — Immer ops and `append` alike — to `base`.
  *  The one function every consumer of a delta goes through. */
 export function applyWirePatches<T>(base: T, ops: readonly WirePatch[]): T {
+  // Checked HERE, not only by the browser's handleMessage: the CLI client and
+  // the worker-cell host apply frames through this same function.
+  const reserved = _reservedPathOp(ops);
+  if (reserved) {
+    throw new Error(
+      `Cannot apply ${reserved.op} at /${
+        reserved.path.join("/")
+      }: "${RESERVED_PATH_SEGMENT}" is never a state key a patch may walk`,
+    );
+  }
   const impossible = _impossibleOp(base, ops);
   if (impossible) {
     throw new Error(

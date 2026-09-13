@@ -15,7 +15,7 @@
 //   • say what moved, per file, once
 //
 // Legacy layout (see docs/specs/2026-07-26-data-dir-and-updates.md):
-//   ./data.db (+ -wal/-shm/.journal)          → <data>/state.db (+ sidecars)
+//   ./data.db (+ -wal/-shm/.journal/.journal.wm) → <data>/state.db (+ sidecars)
 //   ~/.local/share/<appId>/auth.db (+ sidecars) → <data>/auth.db
 //   ./.aio-tls/*                              → <data>/tls/
 //   ./.aio/log/*                              → <logs>/
@@ -92,6 +92,24 @@ function moveDatabase(from: string, to: string): Move[] {
   return out;
 }
 
+/** The journal plus its `.wm` watermark side file (written by builds from
+ *  before the watermark moved into the store). Leaving the `.wm` behind made
+ *  the moved journal look entirely unapplied, so every action already in the
+ *  snapshot was replayed a second time — a deposit counted twice. The
+ *  watermark moves FIRST: a watermark without its journal replays nothing,
+ *  while a journal without its watermark replays everything. */
+function moveJournal(from: string, to: string): Move[] {
+  if (!exists(from)) return [];
+  const out: Move[] = [];
+  if (exists(from + ".wm")) {
+    const wm = moveFile(from + ".wm", to + ".wm");
+    out.push(wm);
+    if (wm.outcome === "failed") return out; // keep the pair together
+  }
+  out.push(moveFile(from, to));
+  return out;
+}
+
 /** Move every entry of a directory, then remove the directory if it emptied. */
 function moveDirContents(fromDir: string, toDir: string): Move[] {
   const out: Move[] = [];
@@ -159,7 +177,7 @@ export function migrateLegacyLayout(opts: {
   ensureAppDirs(dirs);
   const moves: Move[] = [
     ...moveDatabase(legacyDb, dirs.stateDb),
-    ...(exists(legacyJournal) ? [moveFile(legacyJournal, dirs.journal)] : []),
+    ...moveJournal(legacyJournal, dirs.journal),
     ...moveDatabase(legacyAuth, dirs.authDb),
     ...moveDirContents(legacyTls, dirs.tls),
     ...moveDirContents(legacyLogs, dirs.logs),

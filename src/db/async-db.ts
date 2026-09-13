@@ -10,6 +10,7 @@ import type {
 import { AsyncLocalStorage } from "node:async_hooks";
 import { isCompiled } from "../server/paths.ts";
 import { log } from "../diagnostics/logger-api.ts";
+import { looksLikeWrite, statementVerb } from "./sql-shape.ts";
 
 /** Marker phrase every "the db worker isn't in this binary" error carries, so
  *  the condition is recognised by ONE predicate wherever it surfaces. */
@@ -86,8 +87,86 @@ export function countSqlStatements(sql: string): number {
   if (
     /^\s*CREATE\s+(OR\s+REPLACE\s+)?(TEMP\s+|TEMPORARY\s+)?TRIGGER\b/i.test(sql)
   ) {
-    return 1;
+    // A trigger's BEGIN … END body holds semicolons that are not statement
+    // separators — but everything AFTER its `END` is, and this returned a
+    // flat 1 without looking. So `CREATE TRIGGER t … BEGIN … END; DROP TABLE
+    // x;` counted as one statement, `multiStatementRejection` returned null,
+    // SQLite prepared only the trigger, and the DROP was discarded with
+    // `changes` reported for the trigger alone and no error raised. That is
+    // both the partial-migration failure the rejection message describes and
+    // the property that "keeps the `am sql` route from being a
+    // multi-statement injection surface".
+    const after = _afterTriggerBody(sql);
+    // A body that never closes is malformed. Fall through to the ordinary
+    // count, which will be ≥2 and therefore REFUSED — the safe direction for
+    // a guard whose whole job is refusing a second statement.
+    if (after >= 0) return 1 + _countStatements(sql.slice(after));
   }
+  return _countStatements(sql);
+}
+
+/** The index just past a `CREATE TRIGGER`'s closing `END`, or -1.
+ *
+ *  `BEGIN` and `CASE` open a block, `END` closes one; the trigger body is done
+ *  when the depth returns to zero. Strings, quoted identifiers and comments
+ *  are skipped exactly as {@linkcode countSqlStatements} skips them, so an
+ *  `END` inside one is text. */
+function _afterTriggerBody(sql: string): number {
+  let depth = 0;
+  let opened = false;
+  for (let i = 0; i < sql.length; i++) {
+    const c = sql[i]!;
+    if (c === "'" || c === '"' || c === "`") {
+      i++;
+      while (i < sql.length) {
+        if (sql[i] === c) {
+          if (sql[i + 1] === c) {
+            i += 2;
+            continue;
+          }
+          break;
+        }
+        i++;
+      }
+      continue;
+    }
+    if (c === "[") {
+      while (i < sql.length && sql[i] !== "]") i++;
+      continue;
+    }
+    if (c === "-" && sql[i + 1] === "-") {
+      while (i < sql.length && sql[i] !== "\n") i++;
+      continue;
+    }
+    if (c === "/" && sql[i + 1] === "*") {
+      i += 2;
+      while (i < sql.length && !(sql[i] === "*" && sql[i + 1] === "/")) i++;
+      i++;
+      continue;
+    }
+    if (!/[A-Za-z]/.test(c)) continue;
+    let j = i;
+    while (j < sql.length && /[A-Za-z]/.test(sql[j]!)) j++;
+    const word = sql.slice(i, j).toUpperCase();
+    i = j - 1;
+    if (word === "BEGIN" || word === "CASE") {
+      depth++;
+      opened = true;
+    } else if (word === "END" && depth > 0) {
+      depth--;
+      if (depth === 0 && opened) {
+        // Swallow the statement terminator that closes the CREATE TRIGGER.
+        let k = j;
+        while (k < sql.length && /\s/.test(sql[k]!)) k++;
+        return sql[k] === ";" ? k + 1 : j;
+      }
+    }
+  }
+  return -1;
+}
+
+/** Statements in `sql`, with no trigger special case. */
+function _countStatements(sql: string): number {
   let count = 0;
   let hasContent = false; // anything meaningful since the last ';'
   for (let i = 0; i < sql.length; i++) {
@@ -291,6 +370,21 @@ export function createDB(path: string, opts: DBOpts = {}): DB {
   let readerWorkers: Worker[] = [];
   let readerIndex = 0;
   let ready: Promise<void> | null = null;
+  /** Has `close()` finished? A closed handle must REFUSE, not re-open.
+   *
+   *  `close()` ends with `ready = null; writerWorker = null`, which is exactly
+   *  the state `ensureWorkers()` reads as "never opened" — so one late
+   *  `db.query()` (an effect, a timer, an `onStop` hook racing shutdown)
+   *  spawned the whole worker pool again, answered happily, and left a live
+   *  Worker holding the event loop open forever. Measured: the process ran
+   *  14 ms of work and then had to be killed by `timeout` at 20 s. On
+   *  `:memory:` it is worse than a hang — the resurrected pool is a
+   *  DIFFERENT, empty database, so the query answers from nothing.
+   *
+   *  This file already documents fixing that exact "a live worker keeps the
+   *  event loop open" failure twice, on the open path; this is the close
+   *  path. */
+  let closed = false;
 
   // Wire a worker's message handler into the shared pending map
   function wire(w: Worker): void {
@@ -475,10 +569,29 @@ export function createDB(path: string, opts: DBOpts = {}): DB {
   }
 
   async function gate<T>(msg: WorkerMsg, toWriter = true): Promise<T> {
+    if (closed) {
+      throw new Error(
+        `db: this handle is CLOSED — ${
+          String((msg as { sql?: string }).sql ?? "the operation")
+            .slice(0, 60)
+        } was not run. Re-opening it here would spawn a new worker pool that ` +
+          `nothing closes (and, for :memory:, a different empty database), ` +
+          `so the call is refused instead. Move the work before close(), or ` +
+          `open a new handle.`,
+      );
+    }
     await ensureWorkers();
     const w = toWriter ? writerWorker! : pickReader();
     return sendTo<T>(w, msg);
   }
+
+  // Once per statement KIND (its first keyword), not once per handle. One
+  // latch for the whole handle meant whichever write reached `query()` first
+  // spoke for all of them: the framework's own `PRAGMA table_info` (counted as
+  // a write until sql-shape learned the read pragmas) took the only warning at
+  // boot, and the app's `query("DELETE …")` a moment later went unreported.
+  // Bounded by the SQL grammar — a handful of leading keywords.
+  const _warnedQueryWrite = new Set<string>();
 
   // Serial write lock — all writes (execute + transaction) queue through this so
   // standalone execute() calls can never interleave into an open transaction.
@@ -492,7 +605,31 @@ export function createDB(path: string, opts: DBOpts = {}): DB {
   // real nesting was the only case it was meant to catch. Only code running
   // INSIDE a callback (through any number of awaits) sees the store; a
   // sibling caller sees nothing and simply queues on the writer lock.
-  const _txScope = new AsyncLocalStorage<true>();
+  //
+  // The store is a SCOPE OBJECT whose `open` is cleared the moment the
+  // callback settles. AsyncLocalStorage carries into everything the callback
+  // starts — a `setTimeout`, an un-awaited promise — and those outlive it: a
+  // timer armed inside a transaction and firing after COMMIT still "saw" the
+  // scope and its own, perfectly sequential `db.transaction()` was refused as
+  // nested.
+  const _txScope = new AsyncLocalStorage<{ open: boolean }>();
+  const _inOpenCallback = (): boolean => _txScope.getStore()?.open === true;
+  let _warnedLockInScope = false;
+  /** Said once per handle: a write that queues on the writer lock from INSIDE
+   *  a callback cannot run until that callback finishes — awaited, it never
+   *  resolves, and nothing else would ever say why. */
+  function _warnLockInScope(what: string): void {
+    if (_warnedLockInScope || !_inOpenCallback()) return;
+    _warnedLockInScope = true;
+    log.warn(
+      "db",
+      `${what} was called inside a db.transaction() callback. It queues ` +
+        `behind that transaction, so if the callback awaits it, the ` +
+        `transaction never finishes (a deadlock, with no error). Use the ` +
+        `callback's \`tx\` handle (tx.execute / tx.query) for work that ` +
+        `belongs to the transaction. Said once.`,
+    );
+  }
   function withWriterLock<T>(fn: () => Promise<T>): Promise<T> {
     const result: Promise<T> = _writerLock.then(fn);
     _writerLock = result.then(
@@ -515,12 +652,49 @@ export function createDB(path: string, opts: DBOpts = {}): DB {
       // drops the rest, so `query("A; B")` answered A and nobody heard of B.
       const bad = multiStatementRejection(sql, "db.query()");
       if (bad) return Promise.reject(new Error(bad));
+      // A WRITE issued through `query()` used to bypass the serial writer lock
+      // entirely — the lock's own comment says it exists so "standalone
+      // execute() calls can never interleave into an open transaction", and
+      // `query()` was not in that set. With the default `readers: 0` it runs
+      // on the WRITER worker, so a `DELETE` issued while a callback
+      // transaction was open joined that transaction and went down with its
+      // ROLLBACK. Measured: the call resolved `true`, `changes: 0`, and the
+      // row was still there. Nothing was logged.
+      //
+      // Not refused, because refusing would break an app that works today.
+      // It takes the lock like every other write, so it can no longer be
+      // swallowed by someone else's rollback — and dev says to use
+      // `execute()`, which is the door that reports `changes` truthfully.
+      if (looksLikeWrite(sql)) {
+        // The flag directly: `src/db` may not import `src/state` (the
+        // folder matrix), and this is observe-only either way.
+        const dev = (globalThis as Record<string, unknown>).__aioDev === true;
+        const verb = statementVerb(sql);
+        if (dev && !_warnedQueryWrite.has(verb)) {
+          _warnedQueryWrite.add(verb);
+          log.warn(
+            "db",
+            `db.query() was given a statement that WRITES ` +
+              `(${sql.trim().slice(0, 40)}…). Use db.execute() — query() is ` +
+              `documented as the read path, and it reports \`changes: 0\` for ` +
+              `every write, so the usual \`if (r.changes === 0)\` check is ` +
+              `wrong. Said once per kind of statement.`,
+          );
+        }
+        _warnLockInScope("db.query() with a writing statement");
+        // To the WRITER: a reader worker opens the file read-only, so a write
+        // routed there with `readers > 0` could only fail.
+        return withWriterLock(() =>
+          gate<QueryResult<T>>({ type: "query", sql, params }, true)
+        );
+      }
       return gate<QueryResult<T>>({ type: "query", sql, params }, false);
     },
     // Writes serialize through the lock so they can't sneak into an open transaction
     execute(sql: string, params?: unknown[]): Promise<QueryResult> {
       const bad = multiStatementRejection(sql);
       if (bad) return Promise.reject(new Error(bad));
+      _warnLockInScope("db.execute()");
       return withWriterLock(() =>
         gate<QueryResult>({ type: "execute", sql, params })
       );
@@ -532,7 +706,7 @@ export function createDB(path: string, opts: DBOpts = {}): DB {
         | ((tx: Tx) => Promise<any>),
       // deno-lint-ignore no-explicit-any
     ): Promise<any> {
-      if (_txScope.getStore()) {
+      if (_inOpenCallback()) {
         // The old text advised "use savepoints if needed". aio has no
         // savepoint API, so the one actionable-looking phrase in the message
         // pointed at nothing the reader could type.
@@ -555,6 +729,7 @@ export function createDB(path: string, opts: DBOpts = {}): DB {
 
       // Callback form: acquire write lock, BEGIN/COMMIT wrapping the async callback
       return withWriterLock(async () => {
+        const scope = { open: true };
         try {
           await gate<QueryResult>({ type: "execute", sql: "BEGIN" });
           const tx: Tx = {
@@ -573,7 +748,13 @@ export function createDB(path: string, opts: DBOpts = {}): DB {
           // The callback — and everything it awaits — runs inside the scope,
           // so a `db.transaction()` reached from within it is the real
           // nesting the check above refuses.
-          const result = await _txScope.run(true, () => stmts_or_fn(tx));
+          let result: unknown;
+          try {
+            result = await _txScope.run(scope, () => stmts_or_fn(tx));
+          } finally {
+            // Whatever the callback left running is no longer inside it.
+            scope.open = false;
+          }
           await gate<QueryResult>({ type: "execute", sql: "COMMIT" });
           return result;
         } catch (e) {
@@ -584,6 +765,8 @@ export function createDB(path: string, opts: DBOpts = {}): DB {
             /* ROLLBACK may fail if BEGIN never succeeded — safe to ignore */
           }
           throw e;
+        } finally {
+          scope.open = false;
         }
       });
     },
@@ -752,6 +935,7 @@ export function createDB(path: string, opts: DBOpts = {}): DB {
       writerWorker = null;
       readerWorkers = [];
       ready = null;
+      closed = true;
       // Anything STILL pending here waited out the 5s drain and then had its
       // worker terminated under it — its response is never coming. Clearing the
       // map without settling those promises left every such caller's

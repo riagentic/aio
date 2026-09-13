@@ -165,10 +165,15 @@ export const orders = cell("orders", {
 });
 ```
 
-| Option    | Type          | Effect                                     |
-| --------- | ------------- | ------------------------------------------ |
-| `timeout` | `number` (ms) | Rejects if method doesn't complete in time |
-| `retries` | `number`      | Retries on failure up to N times           |
+| Option      | Type          | Effect                                                                          |
+| ----------- | ------------- | ------------------------------------------------------------------------------- |
+| `timeoutMs` | `number` (ms) | Rejects `call(): timeout after Nms` if an attempt doesn't settle in time        |
+| `retries`   | `number`      | On a rejection (a timeout included), tries again — up to N more times, no delay |
+
+A timeout stops the **wait**, not the work: the method keeps running and its
+writes still commit. The pre-alpha52 spelling `call({ timeout })` throws
+(`call({ timeout }) was removed in alpha52`) rather than silently arming no
+timeout — `aiol --safe-fix` renames it.
 
 ### until — pause until another cell's state changes
 

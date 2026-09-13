@@ -21,10 +21,13 @@ import {
 } from "../entries.ts";
 import type { GlobalFlags } from "./am-types.ts";
 import { detectMode, fail, out } from "./am-output.ts";
+import { reservedAppNameError } from "./am-utils.ts";
 import { resolve } from "@std/path";
 import { colorEnabled } from "../diagnostics/color.ts";
 import { styleWith } from "../diagnostics/fmt.ts";
 import { PATH_PIN_PREFIX } from "../server/framework-pin.ts";
+import { appHome, type AppMeta } from "../server/app-dirs.ts";
+import { resolveAppId } from "../server/single-instance-lock.ts";
 import { GIT_NO_PROMPT_ENV } from "../server/git-noninteractive.ts";
 import {
   ensureVersion,
@@ -34,6 +37,7 @@ import {
   writePin,
 } from "./am-versions.ts";
 import { type Template, TEMPLATES } from "./am-help-text.ts";
+import { agentsMdScaffold, CLAUDE_MD_SCAFFOLD } from "./am-agent-text.ts";
 
 const PKG = "@riagentic/aio";
 /** THE scaffold templates — declared once in `am-help-text.ts`, which is also
@@ -158,6 +162,17 @@ export function parseCreateArgs(args: string[]): CreateOpts {
           `want it first.`,
       );
     } else if (opts.name === undefined) opts.name = a;
+    else {
+      // One name, one directory. `am create my app` scaffolded `my` and
+      // dropped `app` without a word — and `--template counter` (space, not
+      // `=`) lost the template the same way, creating the default one.
+      throw new Error(
+        `am create: unexpected argument "${a}" — the app name is ` +
+          `"${opts.name}", and create takes exactly one\n` +
+          `  a name is one word (my-app, my_app); flags take their value ` +
+          `with '=' (--template=todo)`,
+      );
+    }
   }
   // A CLI template is a CLI: with no `--target`, its default is `cli`, not
   // the browser — a scaffold whose `deno task compile` built a browser shell
@@ -312,7 +327,12 @@ export function standardTasks(
     // failure is obscure (dev boot names file, line, column and fix) but
     // because it arrives AFTER the tool the author trusts, and the one CI
     // runs, has said the code is fine. A task called `check` has to be true.
-    check: `deno check src/ && deno run -A ${fw.am} check`,
+    //
+    // `tests/` too, because every template scaffolds one: replace the cell and
+    // the starter test still imports `counter`, so `deno check src/` passed
+    // and the break waited for `deno task test` — not the gate an agent runs
+    // first (report 9b §7).
+    check: `deno check src/ tests/ && deno run -A ${fw.am} check`,
     fmt: "deno fmt",
     // BOTH linters, in one task. `aiol` knows the aio rules and NOTHING about
     // the language: a scaffolded app whose `lint` ran aiol alone was never
@@ -509,6 +529,12 @@ export function denoJson(
     // writes `media/hello.txt` beside this, and the build reads THIS key to
     // decide what to embed in the binary — so there is nothing to keep in
     // sync with a `compile.include` entry.
+    // The BUILD reads this to decide what to embed. The SERVER reads its own
+    // copy from `aio.run({ assets })` in the entry — see ASSETS_APP. The
+    // scaffold used to write only this one, so the template's own feature
+    // 404'd in dev AND in the compiled binary: the directory was embedded and
+    // nothing mounted it, while every gate (`check`, `lint`, `doctor`,
+    // `am fix`) reported the app fine and only the runtime warned.
     (obj as Record<string, unknown>).assets = { "/media": "./media" };
   }
   if (css === "tailwind") {
@@ -700,6 +726,8 @@ const CANVAS_TEST =
 //
 // \`step()\` is a pure function of the world, so bouncing is an ordinary
 // assertion. See docs/testing/canvas-and-3d.md.
+// It imports the cell by name, so rewrite or delete this when you replace the cell
+// (\`deno task check\` reads tests/ too, so a stale import fails there first).
 import { assertEquals } from "@std/assert";
 import { testCell } from "aio/testing";
 import { step, world } from "../src/cell.ts";
@@ -744,16 +772,19 @@ const ASSETS_APP = `// Entry — with an \`assets\` mount.
 //
 // \`assets\` serves a directory in dev AND in production, with every guard
 // \`baseDir\` has (traversal, symlink escape, dotfiles, *.server.ts) plus the
-// MIME table, ETag revalidation, range requests and compression. Declared in
-// deno.json (see the \`assets\` key there), the BUILD embeds the directory in
-// the binary — so it is one fact rather than an \`assets\` mount and a
-// \`compile.include\` entry that have to be kept in sync.
+// MIME table, ETag revalidation, range requests and compression.
+//
+// It is declared TWICE on purpose, and they are two different questions:
+//   • here, so the running server MOUNTS it — deno.json carries identity and
+//     build facts only, and aio says so at boot if you put it there;
+//   • in deno.json, so the BUILD knows to EMBED the directory in the binary,
+//     instead of a \`compile.include\` entry you would have to keep in sync.
 //
 // docs/build/imports.md has the whole story.
 import "./cell.ts";
 import { aio } from "aio";
 
-await aio.run({ ui: { theme: "auto" } });
+await aio.run({ assets: { "/media": "./media" }, ui: { theme: "auto" } });
 `;
 
 const ASSETS_UI = `// UI — reading from the \`assets\` mount.
@@ -864,6 +895,8 @@ export function scaffold(
       "src/cell.ts": CLI_CELL,
       "tests/cell.test.ts": CLI_TEST,
       "README.md": readme(name, template, target),
+      "AGENTS.md": agentsMdScaffold(name),
+      "CLAUDE.md": CLAUDE_MD_SCAFFOLD,
     };
   }
   const src = templateSources(template);
@@ -917,6 +950,13 @@ export function scaffold(
     // what the quickstart already ran.
     "tests/cell.test.ts": src.test,
     "README.md": readme(name, template, target),
+    // The one file every coding agent loads without being asked. Its whole
+    // job is to name `am agent` — a pointer cannot drift from the brief, and
+    // a second copy of the brief would. Generated from the same leaf the
+    // brief is, so `am create` and `am agent` cannot disagree about aio.
+    "AGENTS.md": agentsMdScaffold(name),
+    // Claude Code reads CLAUDE.md, not AGENTS.md — one line that imports it.
+    "CLAUDE.md": CLAUDE_MD_SCAFFOLD,
   };
   return files;
 }
@@ -948,6 +988,10 @@ export async function cmdCreate(
       `invalid project name '${opts.name}' — start with a letter/digit, then letters, digits, '-', '_', '.'`,
       mode,
     );
+  }
+  {
+    const reserved = reservedAppNameError(opts.name, "am create");
+    if (reserved) fail(reserved, mode);
   }
   if (!TEMPLATES.includes(opts.template)) {
     fail(
@@ -1090,6 +1134,12 @@ export async function cmdCreate(
   // Make it a real project from second one — best-effort, never fatal.
   const git = await tryGitInit(dir);
 
+  // Data an earlier app with this appId left behind — said, never silently
+  // reused (report 9b §2). The scaffold declares its identity as `title` in
+  // deno.json, which `resolveAppId` slugs exactly as the booted app will.
+  const appId = resolveAppId(opts.name);
+  const existingData = priorAppData(appId);
+
   // `mode`, NOT `flags.json`: stdout that is not a tty IS json mode (that is
   // what `detectMode` decides), so `am create x | tee`, every CI log and every
   // coding agent used to fall through to the HUMAN branch below and receive
@@ -1105,6 +1155,8 @@ export async function cmdCreate(
       aioVersion: pinnedVersion ?? null,
       files: Object.keys(files),
       git,
+      /** The home an earlier app with this appId left, or null. */
+      existingData,
     }, mode);
     return;
   }
@@ -1126,6 +1178,9 @@ export async function cmdCreate(
       }`,
       `    ${dim(dir)}`,
       `    ${dim(gitSentence(git))}`,
+      ...(existingData
+        ? [`  ${st.yellow("⚠")} ${priorAppDataLine(appId, existingData)}`]
+        : []),
       "",
       `  ${dim("run it")}`,
       `    cd ${opts.name}`,
@@ -1151,6 +1206,61 @@ export async function cmdCreate(
     ].join("\n"),
     mode,
   );
+}
+
+/** What an EARLIER app with the same appId left in its home. */
+export type PriorAppData = {
+  /** `appHome(appId)` — `$AIO_APPS_DIR/<appId>`, else `~/.<appId>`. */
+  home: string;
+  /** From `data/meta.json`; null when it is missing or unreadable. */
+  aio: string | null;
+  createdAt: string | null;
+  updatedAt: string | null;
+};
+
+/** The data a new app with this appId would boot on, or null when its home
+ *  does not exist.
+ *
+ *  report 9b §2: `am create x` succeeded silently over `~/.x/data/state.db`
+ *  from an alpha68 app with the same id, and the first `deno task dev` booted
+ *  on that state — then refused on shape drift, naming no directory. The
+ *  resolver is the SERVER's (`appHome`), so this cannot disagree with where
+ *  the app will actually look. Missing meta fields stay null rather than
+ *  guessed: a home with no meta.json is still somebody's data. */
+export function priorAppData(appId: string): PriorAppData | null {
+  const home = appHome(appId);
+  try {
+    if (!Deno.statSync(home).isDirectory) return null;
+  } catch {
+    return null; // aio-ok: no home — nothing to warn about
+  }
+  let meta: Partial<AppMeta> = {};
+  try {
+    meta = JSON.parse(
+      Deno.readTextFileSync(`${home}/data/meta.json`),
+    ) as Partial<AppMeta>;
+  } catch {
+    /* aio-ok: no/unreadable meta.json — the home itself is reported */
+  }
+  const str = (v: unknown) => typeof v === "string" && v !== "" ? v : null;
+  return {
+    home,
+    aio: str(meta.aio),
+    createdAt: str(meta.createdAt),
+    updatedAt: str(meta.updatedAt),
+  };
+}
+
+/** The human line for {@linkcode priorAppData}. Pure. */
+export function priorAppDataLine(appId: string, prior: PriorAppData): string {
+  const facts = [
+    prior.aio && `aio ${prior.aio}`,
+    prior.createdAt && `since ${prior.createdAt.slice(0, 10)}`,
+  ].filter(Boolean).join(", ");
+  return `appId "${appId}" already has data at ${prior.home}` +
+    (facts ? ` (${facts})` : "") +
+    ` — the first run boots on it. See it with \`am data\` (from the app ` +
+    `directory); start fresh with \`am backup\`, then remove that directory.`;
 }
 
 /** What `am create` did about git — never a bare `false` with no reason. */
@@ -1256,7 +1366,7 @@ deno task dev              # ${
 deno task test             # run the starter test
 deno task compile          # build the default target (${target})
 deno task build            # build every target in deno.json build.targets → dist/
-deno task check            # type-check src/
+deno task check            # type-check src/ + tests/, then am check
 \`\`\`
 
 \`deno task dev\` runs in the FOREGROUND and dies with the terminal that started
@@ -1489,7 +1599,9 @@ export default function App(): JSX.Element {
 
 const COUNTER_TEST =
   `// A starter test — \`deno task test\`. Cells are pure, so they test in isolation
-// (no server, no DOM) with the testCell harness.
+// (no server, no DOM) with the testCell harness. It imports the cell by name:
+// rewrite or delete this when you replace the cell (\`deno task check\` reads
+// tests/ too, so a stale import fails there first).
 import { testCell } from "aio/testing";
 import { counter } from "../src/cell.ts";
 
@@ -1545,7 +1657,9 @@ export const view = cell("view", {
 
 const TODO_TEST =
   `// A starter test — \`deno task test\`. Cells are pure, so they test in isolation
-// (no server, no DOM) with the testCell harness.
+// (no server, no DOM) with the testCell harness. It imports the cell by name:
+// rewrite or delete this when you replace the cell (\`deno task check\` reads
+// tests/ too, so a stale import fails there first).
 import { testCell } from "aio/testing";
 import { todo, view } from "../src/cell.ts";
 
@@ -1618,11 +1732,20 @@ import { connectCli } from "aio/server";
 import { instances, resolveAppId } from "aio/extras";
 import { args, EXIT, fail, style, table, watch } from "aio/cli";
 import { todos } from "./cell.ts";
+import config from "../deno.json" with { type: "json" };
+
+// WHO this tool is — from ITS OWN deno.json, imported (so a compiled binary
+// carries it too), never inferred. Both roles find each other by this id, and
+// inference reads the deno.json of whatever directory you run the command
+// from: \`todo list\` from ~ looked for a different app than \`deno task dev\`
+// had started, and either role run inside another project became that project
+// — its lock, its data.
+const APP_ID = resolveAppId(config.title);
 
 if (Deno.args[0] === "serve") {
   // aio parses its own flags (--port, --expose, …) from Deno.args; the bare
   // \`serve\` word is not a flag, so it passes through.
-  await aio.run({ client: "server-only" });
+  await aio.run({ appId: APP_ID, client: "server-only" });
 } else {
   const a = args({
     name: "todo",
@@ -1650,7 +1773,7 @@ if (Deno.args[0] === "serve") {
   // hard-coded ws://localhost:8000 was wrong on nearly every run: \`todo list\`
   // said "no server" against a server that was running. The lock the app
   // writes is the one place that knows, and it is what \`am\` reads too.
-  const live = instances(resolveAppId()).find((i) => i.alive && i.port > 0);
+  const live = instances(APP_ID).find((i) => i.alive && i.port > 0);
   const url = a.flags.url ??
     (live ? \`ws://localhost:\${live.port}/ws\` : undefined);
   if (!url) {
@@ -1716,7 +1839,9 @@ if (Deno.args[0] === "serve") {
 
 const CLI_TEST =
   `// A starter test — \`deno task test\`. Cells are pure, so they test in isolation
-// (no server, no DOM) with the testCell harness.
+// (no server, no DOM) with the testCell harness. It imports the cell by name:
+// rewrite or delete this when you replace the cell (\`deno task check\` reads
+// tests/ too, so a stale import fails there first).
 import { testCell } from "aio/testing";
 import { todos } from "../src/cell.ts";
 
@@ -1779,6 +1904,7 @@ export default function App(): JSX.Element {
           value={input}
           onChange={(e) => setInput(e.currentTarget.value)}
           placeholder="What needs to be done?"
+          aria-label="What needs to be done?"
           style={{ flex: 1 }}
         />
         <button type="submit">Add</button>

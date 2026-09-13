@@ -44,6 +44,8 @@ src/App.tsx                      <- root UI (convention; override with ui.entry)
 src/client.ts                    <- thin CLI client (the cli-client build target)
 tests/cell.test.ts               <- a passing starter test
 README.md
+AGENTS.md                        <- the aio brief for a coding agent
+CLAUDE.md                        <- one line: read AGENTS.md
 dep/aio                          <- symlink to the pinned framework (gitignored)
 ```
 
@@ -58,7 +60,7 @@ target) and `deno task build --targets=electron|android` (any other target;
 are scaffolded too.
 
 It is also **pinned to an exact aio version**, recorded in its own `deno.json`
-(`"aioVersion": "v1.0.0-alphaNN"`) and committed with your code. So the app you
+(`"aioVersion": "v1.0.0-beta"`) and committed with your code. So the app you
 push is the app your colleague builds:
 
 ```sh
@@ -123,8 +125,9 @@ This is the file it writes for `am create my-app` (browser target):
 
 ```json
 {
+  "aioVersion": "v1.0.0-beta",
   "title": "my-app",
-  "version": "0.1.0",
+  "version": "0.1",
   "client": "browser",
   "build": {
     "targets": ["browser"],
@@ -147,45 +150,56 @@ This is the file it writes for `am create my-app` (browser target):
     "aio/ui": "./dep/aio/src/ui/mod.ts",
     "aio/jsx-runtime": "./dep/aio/src/jsx-runtime.ts",
     "aio/server": "./dep/aio/src/server-entry.ts",
+    "aio/server-only": "./dep/aio/src/server-only.ts",
+    "aio/client-only": "./dep/aio/src/client-only.ts",
     "aio/state-core": "./dep/aio/src/state-core.ts",
     "aio/db": "./dep/aio/src/db/mod.ts",
+    "aio/log": "./dep/aio/src/diagnostics/logger.ts",
     "aio/extras": "./dep/aio/src/extras/mod.ts",
     "aio/sync": "./dep/aio/src/sync/mod.ts",
     "aio/testing": "./dep/aio/src/cell-test.ts",
     "aio/updates": "./dep/aio/src/updates.ts",
+    "aio/cli": "./dep/aio/src/cli.ts",
     "aio/feedback": "./dep/aio/src/feedback.ts",
     "aio/build": "./dep/aio/src/build.ts",
-    "esbuild": "npm:esbuild@^0.24",
-    "immer": "npm:immer@^10",
-    "happy-dom": "npm:happy-dom@^17",
-    "@std/path": "jsr:@std/path@^1",
-    "@std/assert": "jsr:@std/assert@^1",
-    "electron": "npm:electron"
+    "aio/ship": "./dep/aio/src/build/ship.ts",
+    "esbuild": "npm:esbuild@0.24.2",
+    "immer": "npm:immer@10.2.0",
+    "happy-dom": "npm:happy-dom@17.6.3",
+    "@std/path": "jsr:@std/path@1.1.3",
+    "@std/assert": "jsr:@std/assert@1.0.19"
   },
   "tasks": {
     "dev": "deno run -A src/app.ts",
     "build": "deno run -A ./dep/aio/src/build-all.ts --build-spec=./dep/aio/src/build.ts",
     "compile": "deno run -A ./dep/aio/src/build-all.ts --build-spec=./dep/aio/src/build.ts --targets=browser",
+    "publish": "deno run -A ./dep/aio/src/am.ts publish",
     "ship": "deno run -A ./dep/aio/src/build/ship.ts",
     "test": "deno test -A",
-    "check": "deno check src/",
+    "check": "deno check src/ tests/ && deno run -A ./dep/aio/src/am.ts check",
     "fmt": "deno fmt",
-    "lint": "deno run -A ./dep/aio/aiol/mod.ts",
+    "lint": "deno lint src/ && deno run -A ./dep/aio/aiol/mod.ts",
     "doctor": "deno run -A ./dep/aio/src/server/doctor.ts",
     "am": "deno run -A ./dep/aio/src/am.ts"
   }
 }
 ```
 
-- `"jsxImportSource": "aio"` — uses air, the built-in renderer (71 KB gzipped
+- `"jsxImportSource": "aio"` — uses air, the built-in renderer (81 KB gzipped
   with the client runtime, zero deps)
 - `"aio/jsx-runtime"` entry is required so the JSX compiler can resolve the
   runtime when it rewrites `<div/>` into `jsx()` calls
 - `"title"` — app name, used as window title and binary name
+- `"version"` is `major.minor` only — the build number comes from the commit
+  count, so an artifact is `my-app-0.1.<build>…`
+  ([versioning](../build/versioning.md))
+- `"aioVersion"` is the pin `am pin` reads and writes
 - Every public entry is mapped, not just the ones the template uses — a
   specifier the app cannot resolve is the "docs lie" class of failure
 - Source mode must also map aio's own bare deps (`esbuild`, `immer`,
-  `happy-dom`, `@std/*`); JSR would resolve those transitively
+  `happy-dom`, `@std/*`), at the **exact** versions the pinned aio declares in
+  its own deno.json — `dep/aio/**` resolves through this map, so a range here
+  would be half a pin (`am pin` re-syncs them). JSR resolves those transitively
 - `install:electron` is scaffolded only for an electron app, `install:android`
   only for an android one
 - The `dep/aio` symlink is gitignored — a clone repairs it with `am fix`
@@ -199,10 +213,11 @@ mkdir -p dep && git clone https://github.com/riagentic/aio dep/aio
 #### JSR variant (`am create --jsr`)
 
 `--jsr` swaps every `./dep/aio/…` specifier for an **exact** pin
-(`jsr:@riagentic/aio@1.0.0-alpha68`, `…@1.0.0-alpha68/air`, …) and drops the
-bare-dep entries, which JSR resolves transitively. Tasks change the same way —
-`"doctor": "deno run -A jsr:@riagentic/aio@1.0.0-alpha68/doctor"`. Never a
-range; see the note above.
+(`jsr:@riagentic/aio@1.0.0-beta`, `…@1.0.0-beta/air`, …), drops the bare-dep
+entries, which JSR resolves transitively, and writes no `aioVersion` (the
+specifiers are the pin). Tasks change the same way —
+`"doctor": "deno run -A jsr:@riagentic/aio@1.0.0-beta/doctor"`. Never a range;
+see the note above.
 
 The rest of the project (`import { cell } from "aio"`) is unchanged — the import
 map abstracts the source.
@@ -264,10 +279,10 @@ export default function App() {
 import "./cell.ts"; // defines + registers the cell
 import { aio } from "aio";
 
-await aio.run(); // zero config
+await aio.run({ ui: { theme: "auto" } }); // the scaffold's one opt-in — see below
 ```
 
-Everything is inferred: `appId`/`title` from `deno.json` (or the entry's
+Everything else is inferred: `appId`/`title` from `deno.json` (or the entry's
 directory name), `version` from `deno.json`, cells from the registry (every
 imported `cell()` self-registers), `baseDir` from the entry module. Pass config
 only to override.
@@ -281,12 +296,15 @@ deno task dev
 The URL is printed, state persists across restarts, and multiple tabs stay in
 sync. Want the desktop shell instead? `deno task dev --client=electron`.
 
-It renders with the browser's own defaults — aio styles nothing you did not ask
-it to. For a finished look without writing CSS, opt in with
-`aio.run({ ui: { theme: "auto" } })` ([the default theme](../ui/theme.md)); it
-steps aside the moment you write your own `style.css`.
+The scaffold opts into `ui: { theme: "auto" }`
+([the default theme](../ui/theme.md)): a finished look without writing CSS,
+which steps aside the moment you write your own `src/style.css`. Drop the option
+(`await aio.run()`) and the app renders with the browser's own defaults — aio
+styles nothing you did not ask it to.
 
 ### Window size
+
+A window size is for a desktop window — the Electron client:
 
 ```ts
 import { aio } from "aio";
@@ -296,7 +314,10 @@ await aio.run({
 });
 ```
 
-Or via CLI: `deno task dev --width=1200 --height=800`.
+Or via CLI: `deno task dev --client=electron --width=1200 --height=800`. The
+flags are Electron-only: on the default browser app `deno task dev --width=1200`
+refuses to boot (`--width only applies when client is electron`) rather than set
+a size no window reads.
 
 ### Testing
 
@@ -366,8 +387,8 @@ methods: {
 ```
 
 Mutations to the draft are batched and produce a state diff. Reads on the draft
-see the current (mutated) state. Values returned (or put into a returned
-schedule/own effect) are snapshots of the current draft — they are not reactive.
+see the current (mutated) state. Values returned (and effect payloads passed to
+`s.$do(...)`) are snapshots of the current draft — they are not reactive.
 
 For the live-proxy read semantics inside `async` methods (where you `await`
 something and re-read state), see
@@ -388,5 +409,6 @@ something and re-read state), see
 - **State resets on restart** -- Persistence is ON by default; a reset means the
   state shape changed (old keys deep-merge with new defaults — see
   [cell versioning](../state/cells.md)) or `state.db` was deleted
-- **Port 8000 in use** -- Use `deno task am stop` or `--port=9000`
+- **Port in use** -- only with an explicit `--port=N`; without it dev picks a
+  free port. `am instances` shows which app holds it; `am stop` stops it
 - **Hot reload not working** -- Ensure `prod: false` (default in dev)

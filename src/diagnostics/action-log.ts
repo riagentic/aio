@@ -9,9 +9,25 @@ import { log } from "./logger-api.ts";
 // sequence", while the journal, the timeline and time travel all recorded them.
 import { isActionNoise } from "./action-kind.ts";
 
-/** Create a rolling JSONL action recorder that auto-truncates at max lines */
-export function createActionLog(path: string, max: number) {
+/** Bytes one line may carry. A payload past it is recorded as elided — the
+ *  action still happened and is still in sequence — because a line cap alone
+ *  bounds nothing: one `setBlob("x".repeat(400_000))` per line under the
+ *  default 1000-line cap is a 400 MB diagnostic file. */
+export const ACTION_LOG_LINE_BYTES = 64 * 1024;
+/** Bytes the whole file may hold before the oldest half is cut. */
+export const ACTION_LOG_BYTES = 4 * 1024 * 1024;
+
+const _enc = new TextEncoder();
+
+/** Create a rolling JSONL action recorder that auto-truncates at `max` lines
+ *  or `maxBytes` bytes, whichever comes first. */
+export function createActionLog(
+  path: string,
+  max: number,
+  maxBytes: number = ACTION_LOG_BYTES,
+) {
   let lineCount = 0;
+  let byteCount = 0;
   let writeErrors = 0;
   let modeFixed = false;
   // Serialize all file operations to prevent interleaved writes/truncation
@@ -38,8 +54,10 @@ export function createActionLog(path: string, max: number) {
     try {
       const text = await Deno.readTextFile(path);
       lineCount = text.trim().split("\n").filter((l) => l.length > 0).length;
+      byteCount = _enc.encode(text).length;
     } catch {
       lineCount = 0;
+      byteCount = 0;
     }
   };
 
@@ -69,6 +87,19 @@ export function createActionLog(path: string, max: number) {
         // Circular ref or BigInt — fall back to type-only
         line = JSON.stringify({ type, payload: {}, ts: Date.now() }) + "\n";
       }
+      let bytes = _enc.encode(line).length;
+      if (bytes > ACTION_LOG_LINE_BYTES) {
+        line = JSON.stringify({
+          type,
+          payload: {
+            _elided: `payload was ${Math.round(bytes / 1024)}KB — over the ${
+              ACTION_LOG_LINE_BYTES / 1024
+            }KB line cap`,
+          },
+          ts: Date.now(),
+        }) + "\n";
+        bytes = _enc.encode(line).length;
+      }
       try {
         // 0600 like every other payload-retaining sink (journal, checkpoint):
         // action payloads are user data, and redaction only covers the methods
@@ -76,6 +107,7 @@ export function createActionLog(path: string, max: number) {
         // tightened once below.
         await Deno.writeTextFile(path, line, { append: true, mode: 0o600 });
         lineCount++;
+        byteCount += bytes;
         if (!modeFixed) {
           modeFixed = true;
           try {
@@ -96,7 +128,7 @@ export function createActionLog(path: string, max: number) {
     // contract of a "rolling" log: it is what stops an always-on diagnostic
     // from filling a disk, and (with action payloads on those lines) how long
     // history sticks around.
-    if (lineCount > max) await truncateIfNeeded();
+    if (lineCount > max || byteCount > maxBytes) await truncateIfNeeded();
   }
 
   /** Cut the file back under `max`.
@@ -109,22 +141,38 @@ export function createActionLog(path: string, max: number) {
    *  append. */
   async function truncateIfNeeded(): Promise<void> {
     await _enqueue(async () => {
-      if (lineCount <= max) return;
+      if (lineCount <= max && byteCount <= maxBytes) return;
       try {
         const text = await Deno.readTextFile(path);
         const lines = text.trim().split("\n").filter((l) => l.length > 0);
-        if (lines.length <= max) {
+        const total = _enc.encode(text).length;
+        if (lines.length <= max && total <= maxBytes) {
           lineCount = lines.length;
+          byteCount = total;
           return;
         }
-        const keep = lines.slice(-Math.max(1, Math.floor(max / 2)));
+        // The newest half of BOTH bounds, walking back from the end.
+        const lineBudget = Math.max(1, Math.floor(max / 2));
+        const byteBudget = Math.floor(maxBytes / 2);
+        const keep: string[] = [];
+        let kept = 0;
+        for (let i = lines.length - 1; i >= 0; i--) {
+          const b = _enc.encode(lines[i]!).length + 1;
+          if (keep.length >= lineBudget) break;
+          if (keep.length > 0 && kept + b > byteBudget) break;
+          keep.push(lines[i]!);
+          kept += b;
+        }
+        keep.reverse();
         await Deno.writeTextFile(path, keep.join("\n") + "\n", {
           mode: 0o600,
         });
         lineCount = keep.length;
+        byteCount = kept;
       } catch (e) {
         if (e instanceof Deno.errors.NotFound) {
           lineCount = 0; // file vanished externally — nothing left to bound
+          byteCount = 0;
           return;
         }
         // The bound IS the contract of a rolling log. Zeroing the counter

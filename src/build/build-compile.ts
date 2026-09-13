@@ -16,6 +16,8 @@ import { isProcessAlive } from "../server/single-instance-lock.ts";
 import { dirname, fromFileUrl, isAbsolute, join, relative } from "@std/path";
 import { artifactName } from "./platforms.ts";
 import { BUILD_STAMP_FILE } from "./build-version.ts";
+import { BUILD_VERSION_ENV } from "../server/app-version.ts";
+import { DEFAULT_PORT_ENV } from "../server/aio-cli.ts";
 import {
   compiledMaxHeapMB,
   physicalMemoryBytes,
@@ -1001,10 +1003,61 @@ async function warnUnservableAssets(
 export function serviceExecFlags(
   opts: { doRemote: boolean; doHeadless: boolean; port?: number },
 ): string[] {
-  const flags = [`--port=${opts.port ?? 3000}`];
+  // No invented default. `--port=3000` was written into every unit that named
+  // no port, and `--port` outranks everything (`--port` > `AIO_PORT` >
+  // `aio.run({ port })`), so an app that declared `port: 8123` was installed
+  // as a service on 3000 — its clients, configured for 8123, found nothing.
+  // Without the flag the runtime's own chain decides, exactly as it does when
+  // the binary is started by hand.
+  const flags = opts.port !== undefined ? [`--port=${opts.port}`] : [];
   if (opts.doRemote) flags.push("--expose");
   if (opts.doHeadless) flags.push("--client=server-only");
   return flags;
+}
+
+/** What a service unit binds when neither `build.server` nor the app names a
+ *  port — the number every unit said before it stopped pinning one, so an
+ *  installed fleet's clients keep finding it. */
+const SERVICE_DEFAULT_PORT = 3000;
+
+/** The port a service unit should pin: the one `build.server` names
+ *  explicitly (`relay.example:8443`), else undefined — the unit then leaves
+ *  the port to the runtime. `build.server` is where the clients of this build
+ *  were told the server listens, so a service that bound anything else would
+ *  ship a fleet that cannot reach itself. A scheme's default port (`https://x`)
+ *  names none: `URL.port` is empty for it. */
+export function servicePort(
+  bakedServer: string | null | undefined,
+): number | undefined {
+  if (!bakedServer) return undefined;
+  const p = new URL(bakedServer).port;
+  return p ? Number(p) : undefined;
+}
+
+/** A value safe to follow `Key=` in a unit that expands specifiers.
+ *
+ *  `%` starts a specifier in `Description=`, `User=` and `Environment=`
+ *  (`%h`, `%n`…), so a title or a path with a literal `%` was silently
+ *  rewritten by systemd, or refused as an unknown specifier. */
+export function systemdSpecifierEscape(v: string): string {
+  return v.replace(/%/g, "%%");
+}
+
+/** One `Environment=` assignment, quoted the way systemd reads it.
+ *
+ *  Unquoted, the value ends at the first space: `Environment=HOME=/home/a b`
+ *  is two assignments, and `b` is not one — `systemd-analyze verify` reports
+ *  "Invalid environment assignment" and the variable is never set, so the app
+ *  resolved its data directory from no `HOME` at all. Inside double quotes
+ *  systemd applies C-style unescaping, so `\` and `"` are escaped; control
+ *  characters are flattened (a newline would start a new directive). */
+export function systemdEnvAssignment(key: string, value: string): string {
+  const inner = systemdSpecifierEscape(`${key}=${value}`)
+    // deno-lint-ignore no-control-regex
+    .replace(/[\u0000-\u001f\u007f]/g, " ")
+    .replace(/\\/g, "\\\\")
+    .replace(/"/g, '\\"');
+  return `Environment="${inner}"`;
 }
 
 /** Write a systemd .service unit file for the compiled binary. */
@@ -1049,14 +1102,43 @@ export async function writeServiceFile(cfg: BuildConfig): Promise<void> {
     cfg.outDir ?? cfg.root ?? ".",
     `${binaryName}.service`,
   );
-  const execFlags = serviceExecFlags({ doRemote, doHeadless });
+  const port = servicePort(cfg.bakedServer);
+  const execFlags = serviceExecFlags({ doRemote, doHeadless, port });
+  // With no port of its own to pin, the unit still owes the service a STABLE
+  // one. Leaving it to the runtime alone bound a fresh random port on every
+  // restart (:49167, then :57074 — no client finds that twice), and `--port`
+  // or `AIO_PORT` would outrank a declared `aio.run({ port })` again. The
+  // chain's bottom rung (`envDefaultPort`) is the one that says "this, unless
+  // the app declares its own".
+  const defaultPortLine = port === undefined
+    ? `# No --port above: the app's own port wins (aio.run({ port }), or
+# AIO_PORT). This is only what it binds when it declares none — without it a
+# restart would come up on a different random port.
+${systemdEnvAssignment(DEFAULT_PORT_ENV, String(SERVICE_DEFAULT_PORT))}
+`
+    : "";
+  if (port === undefined) {
+    console.warn(
+      `${HEY} ${binaryName}.service names no --port: the service binds the ` +
+        `port the app declares (aio.run({ port }) or $AIO_PORT), and ` +
+        `${SERVICE_DEFAULT_PORT} when it declares none ` +
+        `(${DEFAULT_PORT_ENV}=${SERVICE_DEFAULT_PORT} in the unit). To pin ` +
+        `it, set "build": { "server": "host:port" } in deno.json, or edit ` +
+        `that line.`,
+    );
+  }
   // systemd units are line-oriented: a newline in the title starts a new
   // DIRECTIVE. `"title": "My App\nExecStart=/bin/sh -c '…'\nUser=root"` in
   // deno.json therefore wrote a unit that ran something else, as root, on the
   // machine the operator installs it on. `binaryName` is slugified;
   // `appTitle` is free text and must be flattened the same way
   // build-electron.ts already flattens displayName for .desktop files.
-  const safeTitle = (appTitle ?? binaryName).replace(
+  //
+  // `--name=` first: it is how a per-target `name` reaches this build, and a
+  // `relay` target's unit read `Description=spapp (aio)` — the PROJECT's
+  // title, on the unit of a different app.
+  const named = Deno.args.find((a) => a.startsWith("--name="))?.slice(7);
+  const safeTitle = (named || appTitle || binaryName).replace(
     // deno-lint-ignore no-control-regex
     /[\u0000-\u001f\u007f]/g,
     " ",
@@ -1071,7 +1153,7 @@ export async function writeServiceFile(cfg: BuildConfig): Promise<void> {
   // passes bare words through to the app, so the service booted and nothing
   // said the unit was wrong — a broken file that happens to work.
   const unit = `[Unit]
-Description=${safeTitle || binaryName} (aio)
+Description=${systemdSpecifierEscape(safeTitle || binaryName)} (aio)
 After=network.target
 
 [Service]
@@ -1090,20 +1172,25 @@ RestartSec=5
 # BUILD-MACHINE VALUE — this came from the machine that built the binary, not
 # from the host you are installing on. Set it to the account this service
 # should run as (aio has no way to know, and will not guess).
-User=${user}
+User=${systemdSpecifierEscape(user)}
 # Tells the app it is supervised, so it EXITS after an update instead of
 # spawning its own successor (two processes fighting over one app lock). systemd
 # sets INVOCATION_ID, which aio also honours; this is the explicit spelling for
 # any other supervisor.
 Environment=AIO_SUPERVISED=1
-# Also a build-machine value — the app's data directory hangs off it.
-Environment=HOME=${home}
+${defaultPortLine}# Also a build-machine value — the app's data directory hangs off it.
+${systemdEnvAssignment("HOME", home)}
 
 [Install]
 WantedBy=multi-user.target
 `;
   await Deno.writeTextFile(serviceFile, unit);
   console.log(`${OK} ${serviceFile}`);
+  // Under the fleet (every CLI build) these files are about to be renamed into
+  // `dist/` as `<name>-<version>…`, so steps naming them here would name files
+  // that no longer exist — the fleet prints them after placement instead
+  // (`placeServiceUnit` in build-all.ts).
+  if (Deno.env.get(BUILD_VERSION_ENV) !== undefined) return;
   console.log(`
   Install:
     sudo cp ${artifact} /usr/local/bin/${binaryName}

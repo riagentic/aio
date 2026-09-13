@@ -70,8 +70,13 @@ await aio.run({
 Or use `--keep-server` CLI flag. Useful for apps where the server is the primary
 process and electron is optional.
 
-The HTTP server always runs regardless of Electron — you can access the app at
-`localhost:8000` in any browser, and multiple tabs stay in sync.
+A local Electron app binds **no TCP port** by default, so there is no
+`localhost` address to open in a browser: the window talks to the server over a
+local socket, and `am` reaches it the same way
+([Zero TCP ports](#zero-tcp-ports--and-the-apps-own-routes)). To open the app in
+a browser tab as well — beside the window, or after it closes under `keepServer`
+— name a port: `--port=N` (or `AIO_PORT`, or `aio.run({ port })`). The app is
+then served at `http://127.0.0.1:N`, and every tab and the window stay in sync.
 
 ### DevTools Protocol (`--cdp`)
 
@@ -299,10 +304,11 @@ in accept order. On the packaged `aio://` shell `cfg` is the only carrier of
 `syncCells`, `callTimeouts` and `renderBudget`, so without the re-seed one
 Ctrl+R silently turned every localFirst cell back into a server round-trip.
 
-**IPC keepalive:** The browser sends a `__ping` message every 60 seconds over
-the IPC bridge as defense-in-depth. The server silently ignores these messages.
-This ensures the connection stays visibly alive even during purely passive
-viewing (dashboards, monitoring screens).
+**No IPC keepalive.** The bridge sends nothing on a timer: the envelope lists
+`vitals-ping` as unsupported on UDS and IPC and rejects it loudly, so a
+passively-viewed window (a dashboard, a monitoring screen) simply sends nothing
+until it has something to say. `__aio:close`, below, is a real message and is
+not a keepalive.
 
 **Write error handling:** If `sock.write()` in the Electron main process fails
 (broken pipe, destroyed socket), the socket is destroyed and the renderer is

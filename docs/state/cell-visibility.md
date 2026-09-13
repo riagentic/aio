@@ -8,10 +8,13 @@ Control what state each cell exposes to clients (`visible`) and persists to disk
 (`persist`). Default for both: `"all"` — zero-config persists and exposes
 everything. Opt out per cell (or via `cellDefaults`) for privacy or size tuning.
 
-> **Renamed in alpha52**: the cell key is `visible:` (READ side; `access:` gates
-> CALLS). The old spelling `ui:` keeps working through beta with a one-time boot
-> hint, and `aiol --safe-fix` renames it. App-level `aio.run({ ui: {...} })`
-> (window config) is a different key and unchanged.
+> **Renamed in alpha52, removed in alpha70**: the cell key is `visible:` (READ
+> side; `access:` gates CALLS). The old spelling `cell({ ui })` throws in a dev
+> boot or a test (`cell({ ui }) was removed in alpha70`); a production build
+> logs the same line at error level and still honours the key, because silently
+> dropping a visibility filter would be a leak. `aiol --safe-fix` renames it.
+> App-level `aio.run({ ui: {...} })` (window config) is a different key and
+> unchanged.
 
 ## Quick Start
 
@@ -30,20 +33,19 @@ sensitive or large data.
 
 Both `persist` and `visible` accept the same filter shapes:
 
-| Config                             | Effect                                                                                             |
-| ---------------------------------- | -------------------------------------------------------------------------------------------------- |
-| `"all"`                            | Include everything (default)                                                                       |
-| `"none"`                           | Include nothing                                                                                    |
-| `{ include: ["a", "b"] }`          | Only these top-level fields                                                                        |
-| `{ exclude: ["cache"] }`           | Everything except these                                                                            |
-| `{ exclude: ["accounts.secKey"] }` | **Deep**: remove the field everywhere under `accounts` (arrays traversed element-wise)             |
-| `{ include: ["accounts.name"] }`   | **Deep**, the same spelling the other way round: keep only that field, everywhere under `accounts` |
+| Config                             | Effect                                                                                 |
+| ---------------------------------- | -------------------------------------------------------------------------------------- |
+| `"all"`                            | Include everything (default)                                                           |
+| `"none"`                           | Include nothing                                                                        |
+| `{ include: ["a", "b"] }`          | Only these top-level fields                                                            |
+| `{ exclude: ["cache"] }`           | Everything except these                                                                |
+| `{ exclude: ["accounts.secKey"] }` | **Deep**: remove the field everywhere under `accounts` (arrays traversed element-wise) |
 
 A dot path through an ARRAY keeps the array's shape: the client sees a list of
-the same length, one entry per row, holding only the included fields (`{}` for a
-row that has none of them). An empty list stays an empty list. The length is
-what index-addressed deltas resolve against, so a projection that dropped it
-would leave the client unable to apply the next patch.
+the same length, one entry per row, each row without the excluded field. An
+empty list stays an empty list. The length is what index-addressed deltas
+resolve against, so a projection that dropped it would leave the client unable
+to apply the next patch.
 
 ```ts
 const trading = cell("trading", {
@@ -56,8 +58,9 @@ const trading = cell("trading", {
 });
 ```
 
-`include` is a **top-level allowlist** — dot-paths are exclude-only (a dotted
-include warns at boot).
+`include` is a **top-level allowlist** — dot-paths are exclude-only. A dotted
+include throws at `cell()`:
+`visible.include does not support nested paths ("accounts.name"). Include the top-level key "accounts", or use exclude for nested fields.`
 
 ## Resolution Order
 
@@ -242,7 +245,7 @@ const sync = cell("sync", {
   state: { queue: [], lastSync: null },
   methods: {/* ... */},
   persist: "all",
-  // visible not set = "none" = invisible to clients
+  visible: "none", // invisible to clients — say so: unset means "all"
 });
 ```
 

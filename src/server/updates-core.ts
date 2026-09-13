@@ -107,6 +107,11 @@ export type ResolvedUpdates = {
   allowUnsigned: boolean;
   prerelease: boolean;
   canApply?: () => boolean | Promise<boolean>;
+  /** What the app itself wrote for the two channel-derived settings, so a
+   *  channel change (`setChannel`) can re-derive the ones it left to the
+   *  channel and keep the ones it pinned. Absent on a hand-built config, which
+   *  then keeps its values across a channel change. */
+  declared?: { check?: boolean | number; prerelease?: boolean };
 };
 
 /** Poll intervals by channel.
@@ -252,6 +257,30 @@ export function resolveUpdates(
     // is alphas and rcs; every other channel is a release channel, where a
     // prerelease is an accident until somebody says otherwise.
     prerelease: cfg.prerelease ?? channel === "dev",
+    declared: { check: cfg.check, prerelease: cfg.prerelease },
+  };
+}
+
+/** The same config, following `channel` instead.
+ *
+ *  `intervalMs` and `prerelease` are DERIVED from the channel when the app did
+ *  not pin them (`check: true`, no `prerelease`). A `setChannel("dev")` that
+ *  only swapped the name kept prod's 6h poll and its "a prerelease is not
+ *  offered" rule — so the dev channel, which exists to be shipped alphas into,
+ *  never offered one until the app restarted and resolved the pin afresh.
+ *  Re-deriving here makes the running app and the next boot agree. */
+export function withChannel(
+  config: ResolvedUpdates,
+  channel: string,
+): ResolvedUpdates {
+  const d = config.declared;
+  return {
+    ...config,
+    channel,
+    intervalMs: d
+      ? resolveInterval(d.check ?? true, channel)
+      : config.intervalMs,
+    prerelease: d ? d.prerelease ?? channel === "dev" : config.prerelease,
   };
 }
 

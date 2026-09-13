@@ -12,11 +12,12 @@
 // cell's own actions keep their FIFO guarantee. Across cells there was never an
 // ordering guarantee for async methods, and there still isn't.
 
+import { noteScheduleOwner } from "../state/schedule.ts";
 import type { WirePatch as Patch } from "../protocol/patch-ops.ts";
 import type { CellDef, Msg } from "../state/cell-types.ts";
 import {
   type AmbientContext,
-  CELL_WORKER_PREFIX,
+  cellWorkerName,
   type FromWorker,
   type ToWorker,
   WORKER_CLOSE_DEADLINE_MS,
@@ -43,6 +44,8 @@ export type CellWorkerDeps = {
   /** The owner's resolved `freezeState` — forwarded to the worker so both
    *  isolates freeze on one decision (see ToWorker["init"]). */
   freezeState: boolean;
+  /** The owner's resolved appId, handed to the worker (see cellWorkerName). */
+  appId?: string;
 };
 
 export type CellWorker = {
@@ -56,6 +59,12 @@ export type CellWorker = {
    *  state wholesale (time travel, snapshot load) — otherwise the worker would
    *  keep mutating the state we just discarded. */
   reseed(slice: Record<string, unknown>): void;
+  /** Tell the worker a cancelOn TRIGGER fired on the main isolate.
+   *
+   *  The cancel registry is per-isolate, so main aborting its own in-flight
+   *  calls says nothing about this thread's. Fire-and-forget: an abort has no
+   *  reply, and a worker with nothing in flight simply finds no entry. */
+  cancel(actionType: string): void;
   /** Graceful stop, then terminate. Safe to call twice. */
   close(): Promise<void>;
   /** Kill the thread NOW — the only way to stop a method that never returns.
@@ -92,7 +101,10 @@ export function createCellWorker(
   const name = cell.__aio.id;
   const worker = new Worker(deps.entry, {
     type: "module",
-    name: `${CELL_WORKER_PREFIX}${name}`,
+    // The owner's resolved appId travels in the name: the worker re-runs the
+    // app's entry, and must take ITS identity from here, never re-derive it
+    // (see cellWorkerName for why it cannot).
+    name: cellWorkerName(name, deps.appId),
   });
 
   let seq = 0;
@@ -108,6 +120,16 @@ export function createCellWorker(
     }
   >();
   let closed = false;
+  /** Why the worker is gone, when it went on its own.
+   *
+   *  A CRASH used to log, reject `ready` and fail the in-flight calls — and
+   *  then leave `closed` false, so every LATER `call()` took the live path and
+   *  posted to a dead thread. An async method was bounded by the 30 s call
+   *  ceiling; a SYNC method has no ceiling at all and never settled. Measured:
+   *  one stray unhandled rejection inside a worker cell made the cell
+   *  permanently unreachable, with two subsequent calls still pending after
+   *  six seconds and no answer coming. */
+  let crashError: Error | null = null;
   let readyResolve: (() => void) | null = null;
   let readyReject: ((e: Error) => void) | null = null;
   let closedResolve: (() => void) | null = null;
@@ -166,7 +188,13 @@ export function createCellWorker(
         deps.applyPatches(name, msg.ops);
         return;
       case "effects":
-        for (const e of msg.list) deps.runEffect(e);
+        for (const e of msg.list) {
+          // The issuer does not survive structured clone (it is a WeakMap
+          // entry on the worker's object), so re-record it here: disabling a
+          // worker cell cancels the schedules it issued, prefixed or not.
+          noteScheduleOwner(e, name);
+          deps.runEffect(e);
+        }
         return;
       case "done": {
         const entry = inflight.get(msg.id);
@@ -182,8 +210,10 @@ export function createCellWorker(
       case "fail": {
         const entry = inflight.get(msg.id);
         inflight.delete(msg.id);
-        const err = new Error(msg.message);
+        const err = new Error(msg.message) as Error & { code?: string };
         if (msg.stack) err.stack = msg.stack;
+        if (msg.name) err.name = msg.name;
+        if (msg.code !== undefined) err.code = msg.code;
         if (entry?.callId) {
           // The awaiter sees the rejection via the registry; the transport
           // promise resolves so the fire-and-forget dispatch inside the bound
@@ -214,6 +244,17 @@ export function createCellWorker(
     clearTimeout(readyTimer);
     readyReject?.(err);
     failAll(err);
+    // The cell is gone. SAY so for every later call rather than posting into
+    // a dead thread: the `closed` branch in `call()` already answers by name
+    // and settles both the transport promise and the registry one.
+    crashError = err;
+    closed = true;
+    try {
+      worker.terminate();
+    } catch {
+      // aio-ok: it already died — terminating a dead worker is the no-op we
+      // want, and a throw here must not replace the crash we are reporting.
+    }
   };
 
   const send = (msg: ToWorker) => worker.postMessage(msg);
@@ -243,12 +284,21 @@ export function createCellWorker(
         dev: devFlag(),
       });
     },
+    cancel(actionType: string): void {
+      if (closed) return;
+      send({ t: "cancel", type: actionType });
+    },
     call(action: Msg): Promise<unknown> {
       const callId = (action as { payload?: { _callId?: string } }).payload
         ?._callId;
       if (closed) {
         const err = new Error(
-          `[aio] cell worker "${name}" is closed — action "${action.type}" was not applied`,
+          crashError
+            ? `${crashError.message} — action "${action.type}" was not ` +
+              `applied, and this cell is unreachable for the life of the ` +
+              `process. Restart the app, or keep the work that can throw out ` +
+              `of the worker isolate.`
+            : `[aio] cell worker "${name}" is closed — action "${action.type}" was not applied`,
         );
         // An ASYNC method's caller awaits the REGISTRY promise (`_callId`), not
         // this one — so rejecting only the transport left that caller hanging

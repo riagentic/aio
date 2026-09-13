@@ -157,11 +157,13 @@ export function warnWireLoss(
     value?: unknown;
   }[],
 ): void {
-  // Where a developer can act on it: the test harness and the browser set
-  // `__aioDev`; a dev server running from source does not, and that is exactly
-  // the person most able to fix a Map in their own state. A compiled binary
-  // matches neither and pays one boolean. The message is observe-only, so
-  // showing it in both is the allowed half of the dev/prod split.
+  // Where a developer can act on it: `__aioDev` is set by the test harness, the
+  // browser shell, and the dev server itself (stamped when the server graph is
+  // imported — aio-boot.ts). `isRunningFromSource()` also covers a `--prod` run
+  // from source, which is still the person most able to fix a Map in their own
+  // state. A compiled binary matches neither and pays one boolean. The message
+  // is observe-only, so showing it in both is the allowed half of the dev/prod
+  // split.
   if (
     !(globalThis as Record<string, unknown>).__aioDev && !isRunningFromSource()
   ) return;

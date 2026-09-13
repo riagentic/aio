@@ -158,3 +158,28 @@ Deno.test("am check: the scaffolded `check` task runs BOTH halves", async () => 
   );
   assertStringIncludes(tasks.check ?? "", "check");
 });
+
+Deno.test('am check: a name "aio" exports but the browser bundle lacks FAILS the check', async () => {
+  // report 9b §3: `self` type-checked through mod.ts and only failed in
+  // esbuild, because `am check` walked the graph without bundling it. `VERSION`
+  // stays server-only, so it keeps this test red if the prod-graph bundle is
+  // ever dropped from `am check` again.
+  const dir = await tempDir("am-check-barrel-gap-");
+  try {
+    await makeApp(
+      dir,
+      `import { v } from "./cell.ts";\n` +
+        `export default function App() { return <div class="root">{v}</div>; }\n`,
+      `import { VERSION } from "aio";\nexport const v = VERSION;\n`,
+    );
+    const r = await amCheck(dir, ["--json"]);
+    assertEquals(
+      r.code,
+      1,
+      `a graph esbuild refuses exited 0:\n${r.out}${r.err}`,
+    );
+    assertStringIncludes(r.out, "VERSION");
+  } finally {
+    await dropTempDir(dir);
+  }
+});

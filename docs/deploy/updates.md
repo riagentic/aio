@@ -158,6 +158,13 @@ must be `true`, `false`, or a number of milliseconds **>= 1000** — anything el
 throws at boot naming the value, because a negative interval silently never
 polled and `NaN` became a tight loop against the release host.
 
+`setChannel(name)` is a real channel change, not a rename: the cadence and the
+prerelease default (below) follow the new channel at once, unless the app pinned
+them with `check: <ms>` or `prerelease`. The name is checked at the call — a
+manifest channel is a path segment and must be a name `deno task ship` can
+publish (letters, digits, `. _ + -`), and a git channel must be a branch or tag
+name — so `setChannel("../prod")` throws instead of being pinned.
+
 ## Publishing
 
 ```sh

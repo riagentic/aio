@@ -36,6 +36,18 @@ const c = cell("shortcall", {
     none(s: { rows: unknown[] }) {
       s.rows.length = 0;
     },
+    // Report 9 §5: a TypeScript `?` compiles away, so `fn.length` counts it —
+    // the warning must say that a `?` alone is not what it reads.
+    ingestOpt(s: { rows: unknown[] }, evt: string, token?: number) {
+      s.rows.push({ evt, token });
+    },
+    ingestDefault(
+      s: { rows: unknown[] },
+      evt: string,
+      token: number | undefined = undefined,
+    ) {
+      s.rows.push({ evt, token });
+    },
   },
 });
 
@@ -90,6 +102,10 @@ Deno.test("a short call is named, a complete one is silent", async () => {
     );
     assertStringIncludes(hit, "declares 2 arguments and this call passed 1");
     assertStringIncludes(hit, "= 0"); // the signature-default fix
+    assertStringIncludes(
+      hit,
+      "A `?` alone does not make a parameter optional here",
+    );
 
     // …said ONCE for that method and count — a stale client repeats it forever.
     warns.length = 0;
@@ -112,6 +128,18 @@ Deno.test("a short call is named, a complete one is silent", async () => {
       [],
       "a signature default (or no parameters) is not a short call",
     );
+
+    // The `?` parameter warns and names the `?`; the same parameter with
+    // `= undefined` — the fix the message gives — is silent.
+    warns.length = 0;
+    for (const type of ["shortcall:ingestOpt", "shortcall:ingestDefault"]) {
+      const r2 = await post(port, { type, payload: { args: ["evt"] } });
+      await r2.body?.cancel();
+    }
+    const opt = warns.filter((w) => w.includes("declares"));
+    assertEquals(opt.length, 1, opt.join(" | "));
+    assertStringIncludes(opt[0]!, "shortcall:ingestOpt declares 2 arguments");
+    assertStringIncludes(opt[0]!, "`= undefined`");
   } finally {
     setLogger(prev);
     await app.close();

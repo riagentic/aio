@@ -14,7 +14,8 @@ caveats here apply to them.)
 | A method's **arguments**                                | ✅ yes (JSON-serialized)                                   |
 | A method's **return value**                             | ✅ yes, if JSON-serializable (else `undefined` + dev warn) |
 | **State** the method wrote                              | ✅ yes — synced to the replica reactively                  |
-| A returned **schedule/own effect**                      | ▶️ scheduled server-side; `await` resolves `undefined`     |
+| An **effect** run with `s.$do(schedule.*/own.*)`        | ▶️ runs server-side; never crosses — `return` a value      |
+| A **returned** effect (`return schedule.after(…)`)      | ❌ removed in alpha76 — dev/test throws, prod logs + runs  |
 | A non-serializable return (fn, class, `BigInt`, cyclic) | ⚠️ becomes `undefined` on the client                       |
 | A **thrown error**                                      | ✅ the client `await` rejects with the message             |
 

@@ -216,7 +216,8 @@ app.cells!.enable("analytics"); // re-enables, resets state
 1. Actions no longer routed (own and foreign)
 2. Effects not executed
 3. Running flows cancelled
-4. Scheduled effects cancelled
+4. Scheduled effects cancelled — every schedule the cell issued, whatever its id
+   (`schedule.every("poll", …)` as well as `"analytics:poll"`)
 5. Destroy hook runs, `cell:__destroy` dispatches
 6. State resets to initial
 

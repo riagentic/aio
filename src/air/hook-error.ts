@@ -38,11 +38,50 @@ const _hinted = new Set<string>();
  * Adds an actionable hint when the cause is DOM access with no DOM (testUI/SSR),
  * where the raw "document is not defined" lands far from its fix.
  */
+/** Where a CONTAINED failure also goes, when someone is listening.
+ *
+ *  A hook that throws is contained on purpose: the render it belongs to is
+ *  kept, and production logs and carries on. That is right for an app and
+ *  wrong for a test — `testUI` already turns a re-render throw into a failed
+ *  test through `_setRenderErrorSink`, and the two channels beside it (an
+ *  `onMount` that throws, an event handler that throws) only reached
+ *  `console.error`. So a `TypeError` in an `onClick` — the single most common
+ *  app bug there is — was reported as a PASS. "Tests are the strictest
+ *  environment" has to include the failures the framework deliberately
+ *  swallows for production's sake. */
+let _containedSink:
+  | ((kind: string, e: unknown, component?: string) => void)
+  | null = null;
+
+/** @internal Harness seam — see `_containedSink`. */
+export function _setContainedErrorSink(
+  fn: ((kind: string, e: unknown, component?: string) => void) | null,
+): void {
+  _containedSink = fn;
+}
+
+/** @internal Tell the harness, if one is listening. Never throws: a sink that
+ *  fails must not take the render with it, which is the whole point of
+ *  containing the error in the first place. */
+export function _notifyContained(
+  kind: string,
+  e: unknown,
+  component?: string,
+): void {
+  try {
+    _containedSink?.(kind, e, component);
+  } catch {
+    // aio-ok: a harness sink that throws must not escalate a CONTAINED
+    // failure into an uncontained one — the test still gets the console line.
+  }
+}
+
 export function _reportHookError(
   kind: string,
   e: unknown,
   component?: string,
 ): void {
+  _notifyContained(kind, e, component);
   const where = component ? ` in <${component}>` : "";
   console.error(
     `[aio-renderer] ${kind} callback error${where} ` +

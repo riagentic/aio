@@ -22,12 +22,13 @@
  * task runs both — exactly the treatment `lint` already gets, where one task
  * runs `deno lint` AND `aiol` because a task's name has to be true.
  */
-import { isAbsolute, resolve } from "@std/path";
+import { isAbsolute, relative, resolve } from "@std/path";
 import type { GlobalFlags } from "./am-types.ts";
 import { detectMode, out, outError } from "./am-output.ts";
 import { projectRoot } from "./am-cmd-process.ts";
 import {
   BLOCKING_CATEGORIES,
+  createProdGraphCheck,
   type GraphError,
   validateGraph,
 } from "../server/graph-validator.ts";
@@ -100,6 +101,14 @@ export async function cmdCheck(
         vendorImmer: hasVendorImmer(),
       }),
       (s, f) => transpile(s, f),
+      undefined,
+      // "Does the client bundle build" is answered by BUILDING it: a name
+      // `mod.ts` exports and the browser barrel does not type-checks clean
+      // and only fails in esbuild (report 9b §3).
+      createProdGraphCheck({
+        absBaseDir: baseDir,
+        uiEntry: relative(baseDir, entry),
+      }),
     );
   } catch (e) {
     outError(

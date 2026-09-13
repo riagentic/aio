@@ -14,6 +14,49 @@ import type { Msg } from "../state/cell-types.ts";
  *  which cell it hosts. `self.name` is set by the main side at spawn. */
 export const CELL_WORKER_PREFIX = "aio-cell:";
 
+/** Separator between the hosted cell and the OWNER's appId in a worker name.
+ *  Neither side can contain it: a cell name is `/^[A-Za-z_][\w\-]*$/` and an
+ *  appId is a slug (`[a-z0-9-]`). */
+const APP_ID_SEP = "@";
+
+/** The worker name the main isolate spawns a cell host under:
+ *  `aio-cell:<cell>@<appId>`.
+ *
+ *  The appId rides in the name because it is the ONE thing a worker can read
+ *  synchronously before its entry module's top-level `aio.run()` executes — a
+ *  message would arrive after the identity was already needed. And the worker
+ *  cannot derive the identity itself: inside a Deno worker `Deno.mainModule`
+ *  is undefined (in `deno run` and in a compiled binary alike), so the
+ *  embedded-deno.json and entry-directory branches of `resolveAppId` never
+ *  fire there. A compiled app with no explicit appId launched from `/` died at
+ *  boot ("cannot infer an appId"), and launched from another project's
+ *  directory its worker silently took THAT project's identity. */
+export function cellWorkerName(cell: string, appId?: string): string {
+  return `${CELL_WORKER_PREFIX}${cell}${appId ? APP_ID_SEP + appId : ""}`;
+}
+
+/** Split a worker name into the hosted cell and the owner's appId. Null when
+ *  the name is not a cell host's. */
+export function parseCellWorkerName(
+  name: string | undefined,
+): { cell: string; appId: string | null } | null {
+  if (typeof name !== "string" || !name.startsWith(CELL_WORKER_PREFIX)) {
+    return null;
+  }
+  const rest = name.slice(CELL_WORKER_PREFIX.length);
+  const at = rest.lastIndexOf(APP_ID_SEP);
+  return at < 0
+    ? { cell: rest, appId: null }
+    : { cell: rest.slice(0, at), appId: rest.slice(at + 1) || null };
+}
+
+/** The appId the owning main isolate resolved, when this code runs inside a
+ *  cell worker it spawned; null anywhere else. */
+export function inheritedWorkerAppId(): string | null {
+  return parseCellWorkerName((globalThis as { name?: string }).name)?.appId ??
+    null;
+}
+
 /** True inside a `worker: true` cell's worker, which re-imports the app's OWN
  *  entry module. Boot-time work in that entry (creating directories, migrating
  *  files, opening databases, starting servers) then runs TWICE — and anything
@@ -74,6 +117,20 @@ export type ToWorker =
   }
   /** Run one action. `id` correlates the reply. */
   | { t: "call"; id: number; action: Msg; ctx?: AmbientContext }
+  /** A cancelOn TRIGGER fired on the other side of the thread.
+   *
+   *  The cancel registry (`src/state/method-cancel.ts`) is module-scoped, so
+   *  each isolate holds its own. `notifyMethodCancel` fires in whichever
+   *  isolate ran the reduce — and a peer cell reduces on main, where the
+   *  worker's AbortController does not exist. Nothing else on this wire
+   *  carries a peer's action, so `cancelOn: { slow: [peer.stop] }` on a
+   *  `worker: true` cell was simply inert in production while passing
+   *  in-isolate, where one registry holds both halves.
+   *
+   *  `type` is the trigger ACTION type, not the target method: the worker
+   *  composed the same cell def and so registered the same edge, and letting
+   *  it resolve the edge itself keeps one decider. */
+  | { t: "cancel"; type: string }
   /** Graceful stop — the worker aborts its in-flight methods, streams their
    *  final writes home as patches, then acks with `closed`. */
   | { t: "close" };
@@ -105,7 +162,16 @@ export type FromWorker =
   /** The call settled. `ret` is the method's transported return value. */
   | { t: "done"; id: number; ret?: unknown }
   /** The call threw. `message`/`stack` are carried as plain data. */
-  | { t: "fail"; id: number; message: string; stack?: string }
+  | {
+    t: "fail";
+    id: number;
+    message: string;
+    stack?: string;
+    /** The error's `name` and string `code` — what a caller branches on, and
+     *  what structured clone of a custom Error subclass does not carry. */
+    name?: string;
+    code?: string;
+  }
   /** The host could not start (bad cell name, unsupported config). Fatal. */
   | { t: "boot-error"; message: string }
   /** Close is complete: in-flight methods were aborted and their final

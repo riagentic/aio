@@ -11,7 +11,7 @@
 // file inside the watched tree, so a step writing `style.css` wakes the watcher
 // that ran it. Without knowing what the step touched, that is an edit loop at
 // save speed.
-import { join } from "@std/path";
+import { dirname, join } from "@std/path";
 import { cssBuildStep, runCssBuild } from "../build/build-css.ts";
 import { readDenoJson } from "./deno-json.ts";
 import { log } from "../diagnostics/logger.ts";
@@ -47,6 +47,18 @@ async function cssStamps(dir: string): Promise<Map<string, string>> {
 
 let _saidFailure = false;
 
+/** The nearest directory at or above `dir` holding a deno.json — the app's
+ *  project root. Walks up, because the app dir is normally `<project>/src`. */
+async function _projectRootOf(dir: string): Promise<string> {
+  let at = dir;
+  for (;;) {
+    if (await readDenoJson(at)) return at;
+    const up = dirname(at);
+    if (up === at) return dir; // no project above: behave as before
+    at = up;
+  }
+}
+
 /** Run the app's declared CSS step. Returns the files it wrote. */
 export async function _runAppCssStep(
   absBaseDir: string,
@@ -57,10 +69,27 @@ export async function _runAppCssStep(
   // for anything, and the sanitizers caught it: eight tests that merely boot a
   // server reported "readDir created during the test, but not cleaned up".
   // A feature nobody opted into must cost nothing, including no I/O.
-  const step = cssBuildStep((await readDenoJson(absBaseDir))?.config);
+  // The deno.json is at the PROJECT ROOT; `absBaseDir` is the app dir, which
+  // for every scaffold is `<project>/src` ("Zero-config baseDir: the main
+  // module's directory"). So this looked one level below the file it needed
+  // and found nothing — and the whole step ran only in `build`, which does
+  // read from the root.
+  //
+  // Measured on `am create --css=tailwind`: `deno task dev` never produced
+  // `src/style.css`, not on boot and not after an edit, so the app rendered
+  // completely unstyled in the only mode a newcomer uses for the first hour —
+  // and `deno task compile` produced a correct 13 KB stylesheet. Green in dev,
+  // different in prod, from the one flag a Tailwind user reaches for. The
+  // scaffold's own comment on that key says "Runs before every dev reload and
+  // every build".
+  //
+  // The root is also the right CWD: the declared command's paths are relative
+  // to the deno.json that declares it (`-i src/app.css -o src/style.css`).
+  const root = await _projectRootOf(absBaseDir);
+  const step = cssBuildStep((await readDenoJson(root))?.config);
   if (!step) return [];
-  const before = await cssStamps(absBaseDir);
-  const res = await runCssBuild(absBaseDir, {
+  const before = await cssStamps(root);
+  const res = await runCssBuild(root, {
     throwOnFail: false,
     log: (msg) => {
       // Repeated on every save while the stylesheet is broken, which is
@@ -84,7 +113,7 @@ export async function _runAppCssStep(
     _saidFailure = false;
     log.debug("css", `${res.command} (${res.ms}ms)`);
   }
-  const after = await cssStamps(absBaseDir);
+  const after = await cssStamps(root);
   const written: string[] = [];
   for (const [p, stamp] of after) {
     if (before.get(p) !== stamp) written.push(p);

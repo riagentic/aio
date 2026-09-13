@@ -16,6 +16,86 @@ is frozen — additive only, bugfix-only through beta; 1.0.0 = boring.
 
 ## Open work
 
+### Two browser-bundle gaps left after report 9 (2026-09-13)
+
+- `docs/auth/auth.md:357` imports `serverUser` into a cell module: that example
+  still fails the browser build. A re-export cannot fix it (the module needs
+  `node:async_hooks`); a browser `serverUser` that throws when called is a
+  design decision.
+- `blocking` is not on the browser bundle: `src/state/blocking.ts` has a
+  module-level initializer esbuild cannot drop (+0.8 KB gz on every page). Make
+  it lazy, then ship it.
+
+### A size pass on the page (1.0.1-beta, 2026-09-13)
+
+The page grew 71 → 81 KB gz across three hunt rounds (+26 KB minified, all
+fixes; itemised in `tests/bundle-size.test.ts`). Measure message prose vs code
+in the metafile, and move dev-only diagnostics to the dev-only chunk already
+discussed below before raising the ceiling again.
+
+### The read-your-writes overlay is QUADRATIC in an async method (measured, attempted, reverted)
+
+`effectiveRoot()` (`src/state/cell-impl.ts`) memoises on
+`(committed, pendingArray, pending.length)`, so EVERY write invalidates it and
+the next read deep-clones committed state and replays the entire pending batch.
+A loop that reads its own writes is therefore O(n²) in both time and allocation.
+Measured on the identical body (`push`, then read `length`):
+
+    N=  250   sync   4ms   async     76ms
+    N=  500   sync   5ms   async    218ms
+    N= 1000   sync   6ms   async    768ms
+    N= 2000   sync  12ms   async  3,176ms
+    N= 4000   sync  23ms   async 12,882ms
+
+Sync is linear; async is quadratic. A bulk import or scan that reads its own
+writes blocks the whole server loop for seconds, and the only diagnostic the
+author gets is `BUDGET_EFFECT … hand CPU work to blocking("id", fn, arg)` —
+advice about a cause that is not theirs. Rewriting the identical body as a sync
+method is a 560× speedup nobody is told about.
+
+ATTEMPTED and REVERTED: applying only the new tail of the batch to the memoised
+root (same base, same array identity, count grew) takes the 4000-item case from
+12,882ms to 82ms — and `tests/proxy-differential.test.ts` found a real
+divergence at seed 1779560461, round 14: an `objarr_push` following a
+`read_map_json` was missing from the async read. `applyMutations` is a plain
+sequential loop and `batch.mutations` is only appended to within a batch, so the
+equivalence LOOKS sound and is not; the reason was not found in the time
+available, and this is the framework's most delicate file. The fuzzer is right
+and the change is out.
+
+Whoever picks this up: the win is real and large, the naive memo tweak is not
+equivalent, and the fuzzer (with `arr_sort_counting` now in its op set) is the
+instrument that will tell you. Start by finding what the full rebuild gives a
+caller that a mutated-in-place root does not.
+
+### Found in the post-beta audit (2026-09-12), verified, not yet fixed
+
+Both reproduced; neither is a correctness bug in shipped behaviour, which is why
+they are here rather than in the round's commits. The round's fixes are in
+`git log v1.0.0-beta..`, and what would need a major version is in
+`future/v2.md`.
+
+- **`uiNames(ui)` and the miss listing are two producers of one fact, and they
+  disagree in both directions.** `uiNames` returns full `Component:Element`
+  paths — which `ui["App:SaveButton"]` then REFUSES ("no component or element
+  named…") — and omits every child COMPONENT name, which the miss listing
+  includes. Its guard, `tests/ui-names-discoverable.test.tsx`, cannot catch
+  either: its fixture has no child components, so the component half can never
+  appear, and it compares only `n.split(":").pop()`, which hides that the full
+  string is not addressable. A vacuous guard, same class as the `check-vacuous`
+  holes this round closed. `docs/testing/ui-testing.md` sells the list as the
+  pre-flight discovery step for agents.
+- **Two deciders for "where does a test's scratch directory go".**
+  `src/testing/test-strict.ts` argues at length that `/tmp` is the wrong place
+  and puts everything under `~/tmp/aio/`; `src/testing/temp-dir.ts` — which
+  calls itself "ONE decider for 'this test needs a throwaway directory'" — calls
+  `Deno.makeTempDir()` with no `dir`, i.e. `/tmp`. Only one honours
+  `AIO_TEST_ROOT`. Measured consequence: `scripts/check-orphans.ts` and
+  `deno task clean:tmp` sweep `/tmp/aio-*` only, so `~/tmp/aio` is ungated — 151
+  directories, 122 of them over a day old, back to 2026-09-02. The gate built
+  because of 5,612 leaked `/tmp/aio-*` dirs is blind to the tree that replaced
+  them.
+
 ### 1.0.1-beta — per-page head (proposed 2026-09-11)
 
 aio is one process by design — no load balancer, no CDN, no static-site export;

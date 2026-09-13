@@ -379,6 +379,13 @@ export const ${symbol} = cell("${name}", {
     if (await exists(file)) fail(`${file} already exists`, mode);
     const symbol = name.replace(/-([a-z0-9])/gi, (_m, c) => c.toUpperCase());
     await Deno.mkdir(dir, { recursive: true });
+    // `serverFns` comes from "aio", NOT "aio/server": the server entry holds
+    // only what would poison a browser graph (SQLite, CLI transport), and
+    // serverFns is isomorphic (the browser build maps it to the WS proxy). The
+    // generator shipped with "aio/server", so every module it wrote
+    // failed its own type-check and the app died at boot on a missing export.
+    // tests/am-add-server-imports-resolve.test.ts checks the generated names
+    // against the real entry.
     await Deno.writeTextFile(
       file,
       `// Server-only functions. The \`.server.ts\` name is the convention aio
@@ -387,7 +394,7 @@ export const ${symbol} = cell("${name}", {
 // filesystem) stays on the server.
 //
 // Call it from a cell method: \`const rows = await ${symbol}.list()\`.
-import { serverFns } from "aio/server";
+import { serverFns } from "aio";
 
 export const ${symbol} = serverFns("${name}", {
   list(): string[] {

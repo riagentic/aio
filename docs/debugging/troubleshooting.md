@@ -57,7 +57,7 @@ Something wrong?
 | `ACCESS_DENIED`      | The cell's `access:` rule (or a serverFn's `{ access }`) refused the caller   | Sign the user in, give them the role the rule requires, or widen the rule. Branch with `errorCode(e)`                                        |
 | `ACTION_REFUSED`     | The action reached the server and applied nothing                             | A renamed/removed method still called by an older client, a cell missing from `aio.run({ cells })`, a disabled cell, or a `validate` refusal |
 | `QUEUE_OVERFLOW`     | Queue exceeded 10,000                                                         | Find dispatch loop -- see S4                                                                                                                 |
-| `DISPATCH_LOOP`      | 1000+ iterations detected                                                     | Effect dispatching to itself -- break cycle                                                                                                  |
+| `DISPATCH_LOOP`      | 10,000+ iterations detected                                                   | Effect dispatching to itself -- break cycle                                                                                                  |
 | `MEMORY_PRESSURE`    | Heap above 75%                                                                | See S5                                                                                                                                       |
 | `MEMORY_CRITICAL`    | Heap above 90%                                                                | See S5 (urgent)                                                                                                                              |
 | `BUDGET_REDUCE`      | Reducer exceeded 100ms                                                        | Move heavy work to async effects                                                                                                             |
@@ -222,12 +222,20 @@ See [production](./production.md#v8-heap-limits).
 
 ## S7 -- Too many re-renders
 
-```
-[aio:vitals] RE-RENDER STORM -- 47 subscribe callbacks in last 1s
+Nothing warns about this on its own -- a component that re-renders too often is
+slow, not broken, so you ASK. `__aioProfile()` counts renders per component and
+times them:
+
+```sh
+deno task am eval '__aioProfile()'
 ```
 
+See
+[Which components are re-rendering](performance.md#which-components-are-re-rendering-__aioprofile).
+
 `useAio()` auto-tracks accessed paths via deep Proxy -- subscribes only to what
-you read. If you still see storms, the issue is expensive components:
+you read. If the profile still shows a component rendering far more than the
+data behind it changes, the issue is the component itself:
 
 ```ts
 // FINE -- useAio() only subscribes to accessed paths

@@ -175,6 +175,20 @@ target freely and name its `kind`:
 }
 ```
 
+`name` renames the **binary**, not the app. A compiled binary takes its identity
+(its lock, its data directory) from the project's deno.json, which every target
+embeds — so give each entry its own:
+
+```ts
+// src/agent/app.ts
+await aio.run({ appId: "remote-agent" /* … */ });
+```
+
+Without it all three run as the project's app: the second one started on a
+machine refuses with "Already running", and apps that never meet share one data
+directory. The fleet build asks each host-built binary which appId it runs under
+and warns when differently named targets answer the same.
+
 The label is what you pass to `--targets=agent,relay`, what names the artifact
 group in the summary, and what the manifest records. A label that IS a target
 name (`"electron": {…}`) keeps meaning exactly what it always did.
@@ -214,7 +228,17 @@ already knew. `build.server` is now baked into what the build produces:
   script already controls; nothing is baked.
 
 Write it the way you would say it — `192.168.1.50:8000` — the scheme is inferred
-when you leave it out, and an explicit `https://` is honoured.
+when you leave it out, and an explicit `https://` is honoured, in any case.
+`ws://` and `wss://` name the same server as `http://` and `https://`. A value
+that is not an address (`host:99999`, `ftp://…`) refuses the build, naming it —
+it is never baked as "no server".
+
+An explicit port in `build.server` is also the port the `server` targets'
+systemd unit pins (`--port=8000`); without one the unit names no `--port`, and
+the service binds what the app declares (`aio.run({ port })`, `$AIO_PORT`) — or,
+when it declares none, `3000`: the unit sets `AIO_DEFAULT_PORT=3000`, the bottom
+rung of the port chain, so a restart never moves the service to a new random
+port and never overrides a port the app declares.
 
 ## Build for other operating systems — `--platforms`
 
@@ -523,7 +547,7 @@ const args = compileArgs({
   hasDist: true, // embed dist/ (the browser bundle)
   workerInclude: dbWorkerInclude(), // ← the SQLite worker
   assets: await assetIncludes(Deno.cwd()), // ← .wasm + compile.include + deno.json
-  v8Flags: await v8FlagsArg(Deno.cwd()), // ← compile.v8Flags
+  v8Flags: await v8FlagsArg(Deno.cwd()), // ← build.v8Flags
   excludes: [],
   out: "myapp",
   entry: "src/app.ts",
@@ -531,7 +555,7 @@ const args = compileArgs({
 await new Deno.Command("deno", { args }).output();
 ```
 
-### Memory: `compile.v8Flags`
+### Memory: `build.v8Flags`
 
 V8 caps its old-space heap at roughly **4 GB regardless of installed RAM**. For
 most apps that is irrelevant — but if peak memory scales with the input (a large
@@ -686,14 +710,14 @@ cli.subscribe((s) => {
 
 `connectCli<S>(url, opts?)` returns a `CliApp<S>`:
 
-| Property        | Type                  | Description                                                 |
-| --------------- | --------------------- | ----------------------------------------------------------- |
-| `state`         | `S \| null`           | Current state (null until connected)                        |
-| `send(action)`  | `(action) => void`    | Dispatch action to server                                   |
-| `subscribe(fn)` | `(fn) => unsubscribe` | Listen to state changes (fires immediately if state exists) |
-| `close()`       | `() => void`          | Close connection                                            |
-| `connected`     | `boolean`             | Whether WS is currently open                                |
-| `ready`         | `Promise<S>`          | Resolves when first state arrives                           |
+| Property        | Type                  | Description                                                                                   |
+| --------------- | --------------------- | --------------------------------------------------------------------------------------------- |
+| `state`         | `S \| null`           | Current state (null until connected)                                                          |
+| `send(action)`  | `(action) => void`    | Dispatch action to server                                                                     |
+| `subscribe(fn)` | `(fn) => unsubscribe` | Listen to state changes (fires immediately if state exists)                                   |
+| `close()`       | `() => void`          | Close connection                                                                              |
+| `connected`     | `boolean`             | Whether WS is currently open                                                                  |
+| `ready`         | `Promise<S>`          | Resolves when first state arrives; rejects if `readyTimeoutMs` passes or `close()` runs first |
 
 | `bind(...cells)` | `(cells) => void` | Bind cell defs — `await cell.method()`
 over the socket |
@@ -746,8 +770,15 @@ client that connects to a remote aio server. Same `connectCli()` API.
 import { connectCli } from "aio/server";
 import type { AppState } from "./state.ts";
 
-const url = Deno.args[0] ?? "http://localhost:8000";
-const cli = connectCli<AppState>(url);
+// No default URL: a server binds a FREE port unless one is named, so a
+// hard-coded one connects to nothing — or to another app. The port is on the
+// server's boot line and in `am instances`; a remote one is the URL you deploy.
+const url = Deno.args[0];
+if (!url) {
+  console.error("usage: client <ws://host:port/ws>");
+  Deno.exit(2);
+}
+const cli = connectCli<AppState>(url, { readyTimeoutMs: 10_000 });
 await cli.ready;
 cli.subscribe((s) => console.log("state:", JSON.stringify(s)));
 ```
@@ -933,12 +964,15 @@ dials nothing.
 deno run -A dep/aio/src/build.ts --compile --service --remote
 ```
 
-Standalone binary + systemd unit file with `--expose --port=3000`. Browsers on
+Standalone binary + systemd unit file with `--expose` (plus `--port=N` when
+`build.server` names a port — otherwise the app's own port decides). Browsers on
 the network access the full UI.
 
+The build prints these steps with the file names it placed in `dist/`:
+
 ```sh
-sudo cp aio-counter /usr/local/bin/
-sudo cp aio-counter.service /etc/systemd/system/
+sudo cp dist/aio-counter-1.2.345 /usr/local/bin/aio-counter
+sudo cp dist/aio-counter-1.2.345.service /etc/systemd/system/aio-counter.service
 sudo systemctl enable --now aio-counter
 journalctl -u aio-counter -f  # view logs + auth token
 ```
@@ -951,7 +985,7 @@ deno run -A dep/aio/src/build.ts --compile --service --headless --remote
 
 Same as the exposed browser server but headless — no browser auto-open. This is
 the fleet's `server` target. **Systemd ExecStart:**
-`--expose --headless --port=3000`
+`--expose --client=server-only` (and `--port=N` from `build.server`'s port)
 
 > **Note:** without `--remote`, `--compile --service --headless` generates
-> `--headless --port=3000` and no `--expose` — binds 127.0.0.1 only.
+> `--client=server-only` and no `--expose` — binds 127.0.0.1 only.

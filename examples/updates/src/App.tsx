@@ -105,10 +105,18 @@ export default function App() {
           <span style={{ flex: "1" }}>
             You said no to {updates.dismissed}.
           </span>
+          {
+            /* `undismiss()` forgets the "no"; the NEXT check offers it again.
+              Check right away — otherwise this panel vanishes and nothing
+              replaces it until the next poll (6h on prod), which reads as
+              the button having thrown the update away. */
+          }
           <button
             type="button"
-            onClick={() =>
-              updates.undismiss()}
+            onClick={async () => {
+              await updates.undismiss();
+              await updates.check();
+            }}
           >
             Show it again
           </button>
@@ -119,7 +127,12 @@ export default function App() {
         <div
           style={{ ...bar, background: "#fff5f5", border: "1px solid #ff8787" }}
         >
-          Update check failed: {updates.error}
+          {
+            /* Not "check failed": `error` is set by whichever step failed —
+              a check, an install, a refused blocked release, a channel
+              change — and the message itself says which. */
+          }
+          Updates: {updates.error}
         </div>
       )}
 
@@ -131,7 +144,7 @@ export default function App() {
         Add a note
       </button>
 
-      <p style={{ color: "#868e96", fontSize: "0.9rem", marginTop: "2rem" }}>
+      <p style={{ color: "#6b7280", fontSize: "0.9rem", marginTop: "2rem" }}>
         {
           /* `current` is null when this build cannot say what version it is;
             `currentUnknown` says why. They used to be ONE string field, so

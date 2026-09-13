@@ -104,6 +104,13 @@ A transactional method executes at **snapshot isolation**:
 - **Abort.** If the method throws or is cancelled (`s.$signal`), `W` is
   **discarded** — no partial commit (matches the sync-method doctrine already in
   cell-methods-internals.ts).
+- **Effects ride with `W`.** `s.$do(...)` in a transactional method is validated
+  where it is called, but the effect is held with the write-set: it goes out
+  when `W` commits (at return, or at `s.$commit()` for what was scheduled before
+  it) and is **dropped** on a throw, a `TX_CONFLICT` or a cancel. A withdrawal
+  refused as a conflict does not send its receipt. (A non-transactional async
+  method dispatches `$do` effects immediately, as its writes commit
+  incrementally.)
 
 ### Concurrency
 
@@ -271,7 +278,8 @@ transactional cell.
 - **Atomic commit:** other clients/actions observe **zero** intermediate states
   — exactly one broadcast/patch for the whole method (assert one `__set`).
 - **Abort:** throw mid-method → no committed change. Cancel via `s.$signal` → no
-  committed change.
+  committed change. Neither sends an effect the method `$do`'d
+  (`tests/tx-effects-abort-with-write-set.test.ts`).
 - **`s.$commit()`:** intermediate publish is visible; post-commit reads see Σ'.
 - **`serialize`:** two concurrent RMW increments → no lost update.
 - **Conflict:** without `serialize`, two concurrent RMW increments → exactly one

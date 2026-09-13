@@ -78,9 +78,14 @@ requires an `X-AIO` header that a cross-origin page cannot set.
 **Pairing the aio client** — when a key is set, `--expose` prints a **pair
 code** on startup. In the aio client, click the app under "Apps on your network"
 and type the 6-digit code; the client pulls the profile (cert + key) once and
-connects forever after. The code is attempt-limited and session-scoped — restart
-to issue a fresh one. (For headless/scripted setups, `am profile` exports a
-`.aioapp` file you import instead — see [the client](../clients/electron.md).)
+connects forever after. The code is single-use, lives 3 minutes, and belongs to
+this app alone (two apps in one process print two codes, and each pairs only its
+own app). Wrong guesses are limited to 8 per address, and **20 wrong guesses in
+total, from any number of addresses, burn the code** — the server logs it, and
+`am pair` mints a fresh one on the running app, no restart. Wrong codes also
+count against the same per-address failed-auth budget as wrong keys. (For
+headless/scripted setups, `am profile` exports a `.aioapp` file you import
+instead — see [the client](../clients/electron.md).)
 
 ```
 [12:00:00][INFO] tls: self-signed cert at ~/.<appId>/data/tls/tls-cert.pem
@@ -494,11 +499,25 @@ const app = await aio.run({ cells: [/* … */], auth: true });
   hash). 8-character NIST minimum enforced.
 - Sessions: issued from the AUTH-1 store on signup/login; the token doubles as
   an `HttpOnly; SameSite=Strict` cookie (+ `Secure` under TLS) so browsers
-  authenticate the WS handshake without tokens in URLs.
+  authenticate the WS handshake without tokens in URLs. The cookie is named per
+  app (`aio_session_<appId>`) — cookies ignore the port, so two apps on one host
+  sharing one name logged each other out and handed each other their session
+  tokens. A session issued under the older shared `aio_session` name still signs
+  in; it is retired on the next login or logout, and a value under that name
+  this app did not issue is never cleared (it is another app's).
 - CSRF: SameSite=Strict cookie + an Origin same-host check on every POST.
 - The app **shell is public** in auth mode (a browser must load the login UI
   before it has a session); `/ws` and `/__aio/snapshot` stay gated — state never
-  flows unauthenticated.
+  flows unauthenticated. "Shell" is decided by what a sign-in page loads: code,
+  styles, source maps, fonts, images, `.html`, `/__aio/*`, `favicon.ico`,
+  `manifest.json`, `robots.txt`/`humans.txt`, and everything under
+  `/.well-known/`. Any other file under `baseDir` — `.txt`, `.json`, `.csv`,
+  `.db`, `.pdf`, a file with no extension at all (`uploads/3f9a2c`, `LICENSE`),
+  … — needs a signed-in user; an extensionless path that is NOT a file is a
+  client route and gets the shell. **Images, `.html` and `.js` under `baseDir`
+  are still anonymous**, because a sign-in page's logo is one of them: never
+  write private uploads into the app directory — put them in the blob store
+  (`/__aio/blobs/*` is always gated).
 - `auth: { signup: false }` disables open registration — seed accounts with
   `app.auth.create("root", password, "admin")`.
 - **Admin screens: `serverAuth()`.** The same store, ambient — usable inside any
@@ -675,21 +694,41 @@ await aio.run({
       issuer: "https://accounts.google.com",
       clientId: Deno.env.get("OIDC_CLIENT_ID")!,
       clientSecret: Deno.env.get("OIDC_CLIENT_SECRET"), // omit for pure PKCE
-      role: (claims) => claims.email === "boss@corp.com" ? "admin" : "user",
+      role: (claims) =>
+        claims.email_verified === true && claims.email === "boss@corp.com"
+          ? "admin"
+          : "user",
     },
   },
 });
 // Point a "Continue with …" button at /__aio/auth/oidc/start — done.
 ```
 
-The callback verifies the ID token (issuer, audience, expiry, signature via the
-provider's JWKS), issues a session cookie, and redirects to `/` — or to the
-same-origin path passed as `/__aio/auth/oidc/start?redirect=/orders/7`. That
+The callback verifies the ID token (issuer, audience, `azp`, expiry, signature
+via the provider's JWKS), issues a session cookie, and redirects to `/` — or to
+the same-origin path passed as `/__aio/auth/oidc/start?redirect=/orders/7`. That
 path is sanitized, not trusted: a non-ASCII path (`/文档`) is percent-encoded so
 the redirect header is always buildable, and anything that could leave the
 origin (an absolute URL, `//host`, `/\host`, a control character) falls back to
 `/`. The state parameter is a stored one-shot token carrying the PKCE verifier —
 replay is dead on arrival.
+
+**An email is an identity only when the provider verified it.** A provider lets
+its account holders type any address; `email_verified: true` (the JSON boolean)
+is the provider saying it proved the address. Without it the address is ignored:
+it is not stored on the account, the account is not marked verified, and
+`claims.email` is **removed from the claims `role` receives** — so a role mapped
+from an email can never be claimed by typing that email at the provider (the
+"nOAuth" class; Microsoft Entra, for one, does not verify `email`). The server
+logs this once per issuer. A `role` function that throws refuses the login with
+a 401 and logs why.
+
+The rest of the token checks follow OIDC Core: when the token names an `azp`
+(authorized party), it must be your `clientId`, and a token with several
+audiences must name one. The discovery document's own `issuer` must match the
+configured `issuer` (a trailing slash aside) or login refuses to start and says
+which value the provider uses; a document with no `issuer` at all still works,
+with a one-time warning.
 
 **External identities live in their own namespace.** The account id is
 `oidc:<issuer-without-scheme>:<sub>` — never the bare `sub`:
@@ -719,7 +758,15 @@ replay is dead on arrival.
 Independent of the per-IP budget: **5 consecutive wrong passwords lock the
 account for 15 minutes** (login answers `423`), and even the correct password is
 refused while locked. A successful login resets the counter. Timing is uniform
-across unknown/locked/wrong paths — one PBKDF2 each, no enumeration.
+across unknown/locked/wrong paths — one PBKDF2 each, no enumeration. Guesses for
+one account are checked one at a time, so a burst fired at once gets exactly the
+five tries sequential attempts get.
+
+**Wrong TOTP codes count against the same counter.** With a second factor
+enrolled, a correct password is half a login and does not reset it; a correct
+code does. Once locked, `/__aio/auth/totp` answers `423` and the account's
+outstanding TOTP pending tokens are burned — a password that has leaked cannot
+be paired with unlimited code guesses from rotating addresses.
 
 ### Operator console (`am auth`)
 
@@ -746,6 +793,18 @@ session — so the intruder's session does not survive the rescue.
 its role from the users row on every request, so a demotion takes effect on the
 next request (HTTP and WebSocket alike) rather than at the end of the 30-day
 session TTL.
+
+A WebSocket opened with a `users:`/`resolveUser` token (an API key, a JWT) is
+re-checked too: every 5 seconds the socket's token goes back through
+`resolveUser` (once per distinct token, never per frame), and a token it no
+longer accepts closes the socket with `1008`. A hook that **throws** closes the
+sockets on that token as well — fail closed, logged as a warning — so the
+client's reconnect gets exactly the verdict a fresh handshake would. Tokens are
+re-checked in parallel (8 at a time); a call that has not answered within 3
+seconds stops holding up the others, keeps its sockets open on their last
+verdict, is not called again until it answers, and its verdict is applied when
+it lands — warned every round it lasts. A re-check that returns a different user
+(a changed role) sends that socket its new view at once.
 
 ### Brute-force protection
 
@@ -826,7 +885,7 @@ may frame the page, so the two can never disagree.
 ```ts
 await aio.run({
   cells,
-  allowedOrigins: ["https://dash.corp"], // may connect AND may embed
+  allowedOrigins: ["https://dash.corp"], // may connect, POST AND embed
   security: {
     csp: "strict", // opt in to `default-src 'self'` — widen it if you use a CDN
     permissionsPolicy: "camera=(), microphone=()",
@@ -910,20 +969,26 @@ cell("settings", {
 
 `/__aio/snapshot` (state export/import for tooling) returns **raw, unfiltered
 state**. In multi-user mode (`users`/`resolveUser`) it therefore requires
-`role: "admin"`; in single-token mode the token holder is the owner. Treat
+`role: "admin"`; in single-token and public mode it is same-machine only. Treat
 snapshot files like backups: they contain everything, including fields hidden
 from `ui`.
 
+"Same machine" means a loopback or unix-socket peer **that no proxy relayed**. A
+request carrying `X-Forwarded-For`, `Forwarded`, `X-Real-IP`,
+`CF-Connecting-IP`, `True-Client-IP` or your `trustProxyHeader` is treated as
+remote even when it arrives from `127.0.0.1` — behind nginx on the same host,
+every internet client does. The same rule gates `/__aio/trojan/*`.
+
 ### Known limitations
 
-| Limitation                                   | Mitigation                                                                                                                                                                                         |
-| -------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Self-signed cert warning in browsers         | One-time "trust" click; or use `--cert`/`--key` with a CA-signed cert                                                                                                                              |
-| Token appears in URL (`?token=`)             | Use `Authorization: Bearer <token>` header instead; avoid sharing URLs in logs                                                                                                                     |
-| Token regenerates on restart                 | Compile targets pin the token via env or config; `am` tooling doesn't capture it                                                                                                                   |
-| `users:` tokens are static secrets in source | Use environment variables: `'alice-token': Deno.env.get('ALICE_TOKEN')!`                                                                                                                           |
-| `--expose` origin policy                     | Origin is always validated (exposed or not): the server's own origin — host AND scheme — plus `allowedOrigins` pass, everything else is 403; `strictOrigin: true` additionally requires the header |
-| DNS rebinding                                | The `Host` header is validated on every request: loopback names, IP literals, the bound host and `allowedOrigins` pass; any other domain is 403                                                    |
+| Limitation                                   | Mitigation                                                                                                                                                                                                                                                                                                       |
+| -------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Self-signed cert warning in browsers         | One-time "trust" click; or use `--cert`/`--key` with a CA-signed cert                                                                                                                                                                                                                                            |
+| Token appears in URL (`?token=`)             | Use `Authorization: Bearer <token>` header instead; avoid sharing URLs in logs                                                                                                                                                                                                                                   |
+| Token regenerates on restart                 | Compile targets pin the token via env or config; `am` tooling doesn't capture it                                                                                                                                                                                                                                 |
+| `users:` tokens are static secrets in source | Use environment variables: `'alice-token': Deno.env.get('ALICE_TOKEN')!`                                                                                                                                                                                                                                         |
+| `--expose` origin policy                     | Origin is always validated (exposed or not) on the WebSocket upgrade, and on a state-changing HTTP request that carries a cookie or reaches an unexposed/open app from this machine: see [Cross-origin requests](#cross-origin-requests); `strictOrigin: true` additionally requires the header on the WebSocket |
+| DNS rebinding                                | The `Host` header is validated on every request: loopback names, IP literals, the bound host and `allowedOrigins` pass; any other domain is 403                                                                                                                                                                  |
 
 ### Intended deployment model
 
@@ -982,3 +1047,50 @@ await aio.run({
   trustProxyHeader: "x-forwarded-for",
 });
 ```
+
+### Cross-origin requests
+
+A browser attaches the visitor's cookies to a request another site's page sends
+— and a sibling port on the same machine is the same "site", so `SameSite` does
+not stop it. And a page in a browser on the app's own machine can reach an app
+bound to `127.0.0.1` that nobody else can. aio therefore checks `Origin`
+wherever a page could act with authority it does not have:
+
+- **The WebSocket upgrade**, always.
+- **An HTTP request whose method can change something** (anything but `GET`,
+  `HEAD`, `OPTIONS`) — app `routes`, the auth flows, pairing, snapshot, the
+  control plane — when the cross-site request would borrow something:
+  - it carries a **cookie** (aio's own cookies are `SameSite=Strict`, so a
+    cookie on a foreign-Origin request is a sibling port or an app cookie set
+    `SameSite=None` — the CSRF cases), or
+  - its authority is **network position**: the app is not exposed (loopback
+    only), or the request comes from this machine with no proxy in between and
+    the app has no auth configured.
+- **Admitted:** the server's own origin (the `Host` it was reached as, AND the
+  scheme it speaks — an `https` app is not same-origin with an `http` page of
+  the same name), and whatever `allowedOrigins` admits. A refused request gets a
+  `403` that names the origin and the fix, and the server logs it once per
+  origin. An opaque `Origin: null` (a sandboxed frame, a `file:` page, some
+  cross-site redirects) cannot be allowlisted.
+- **Not judged:** a request with no `Origin` header (webhook senders, `curl`,
+  `am`, native clients, server-to-server calls), and a cookieless request to an
+  **exposed** app from another machine or through a proxy. That is how a public
+  route on an exposed app keeps receiving a cross-site browser form post — a
+  payment provider's return URL, a SAML/OIDC `form_post` response — exactly as
+  before: it grants the page nothing `curl` could not do. A header credential
+  (`Authorization: Bearer`) is not ambient, and a page cannot attach one
+  cross-site.
+
+How an `allowedOrigins` entry matches an `Origin`:
+
+| Entry                      | Admits                                                                               |
+| -------------------------- | ------------------------------------------------------------------------------------ |
+| `"*"`                      | every origin                                                                         |
+| `"dash.corp"`              | that host on any port and any scheme                                                 |
+| `"dash.corp:8443"`         | that host and port, any scheme                                                       |
+| `"https://dash.corp:8443"` | exactly that origin — scheme, host and port; an omitted port is the scheme's default |
+
+A full-origin entry used to admit every port and scheme on its host, so any
+other service on that machine passed; spell an entry as a bare hostname if that
+is what you mean. (The `Host` gate, which has no scheme to compare, still reads
+a full-origin entry as its hostname.)

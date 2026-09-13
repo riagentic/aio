@@ -46,25 +46,40 @@ effects run → deltas broadcast back.
 
 ## cell() config
 
-| Key         | Type                       | Required | Description                                                                                                                                                       |
-| ----------- | -------------------------- | -------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `state`     | `Record<string, unknown>`  | Yes      | Initial state                                                                                                                                                     |
-| `methods`   | `Record<string, Function>` | Yes      | Sync or async methods — `(s, ...args) => void`                                                                                                                    |
-| `selectors` | `Record<string, (s) => T>` | No       | Derived values, auto-scoped to cell state                                                                                                                         |
-| `cancelOn`  | `{ method: [triggers] }`   | No       | Foreign actions that abort a running async method — see [Methods](methods.md#cancellation--cancelon--ssignal)                                                     |
-| `listensTo` | `{ handler: source(s) }`   | No       | Run a sync method on foreign actions — `{ onX: other.m }`, values may be arrays (array form deprecated)                                                           |
-| `validate`  | `(s) => true \| string`    | No       | State validator, runs after every mutation — string = rejection message                                                                                           |
-| `sync`      | `true \| SyncConfig`       | No       | Enable CRDT sync — see [CRDT docs](../persistence/crdt.md)                                                                                                        |
-| `worker`    | `boolean`                  | No       | Run this cell's methods on their own thread — see [cell workers](cell-workers.md)                                                                                 |
-| `access`    | `Access`                   | No       | CALL side: who may call methods over the network — `true`/role/predicate; absent = open. On an exposed/multi-user app, `access` without `visible` refuses to boot |
-| `persist`   | filter                     | No       | `"all"`, `"none"`, `{ include: [...] }`, `{ exclude: [...] }` — default `"all"`. [Filter options](cell-visibility.md#filter-options)                              |
-| `visible`   | filter + `forUser`         | No       | READ side (`access` gates calls, `visible` gates reads): as persist, plus `forUser`/`publicFields` — default `"all"`. `ui` is the deprecated alpha52 alias        |
-| `version`   | `number`                   | No       | State-shape version — pairs with `onMigrate`                                                                                                                      |
-| `onMigrate` | `(state, from) => state`   | No       | Migration hook when persisted version < `version`                                                                                                                 |
-| `onInit`    | `(app) => void`            | No       | Called when cell initializes                                                                                                                                      |
-| `onDestroy` | `(app) => void`            | No       | Called when cell destroys                                                                                                                                         |
+| Key         | Type                       | Required | Description                                                                                                                                                        |
+| ----------- | -------------------------- | -------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `state`     | `Record<string, unknown>`  | Yes      | Initial state                                                                                                                                                      |
+| `methods`   | `Record<string, Function>` | Yes      | Sync or async methods — `(s, ...args) => void`                                                                                                                     |
+| `selectors` | `Record<string, (s) => T>` | No       | Derived values, auto-scoped to cell state                                                                                                                          |
+| `cancelOn`  | `{ method: [triggers] }`   | No       | Foreign actions that abort a running async method — see [Methods](methods.md#cancellation--cancelon--ssignal)                                                      |
+| `listensTo` | `{ handler: source(s) }`   | No       | Run a sync method on foreign actions — `{ onX: other.m }`, a value may be one source or an array of them; the bare `listensTo: [...]` form was REMOVED in alpha70  |
+| `validate`  | `(s) => true \| string`    | No       | State validator, runs after every mutation — string = rejection message                                                                                            |
+| `sync`      | `true \| SyncConfig`       | No       | Enable CRDT sync — see [CRDT docs](../persistence/crdt.md)                                                                                                         |
+| `worker`    | `boolean`                  | No       | Run this cell's methods on their own thread — see [cell workers](cell-workers.md)                                                                                  |
+| `access`    | `Access`                   | No       | CALL side: who may call methods over the network — `true`/role/predicate; absent = open. On an exposed/multi-user app, `access` without `visible` refuses to boot  |
+| `persist`   | filter                     | No       | `"all"`, `"none"`, `{ include: [...] }`, `{ exclude: [...] }` — default `"all"`. [Filter options](cell-visibility.md#filter-options)                               |
+| `visible`   | filter + `forUser`         | No       | READ side (`access` gates calls, `visible` gates reads): as persist, plus `forUser`/`publicFields` — default `"all"`. The old `ui` spelling was removed in alpha70 |
+| `version`   | `number`                   | No       | State-shape version — pairs with `onMigrate`                                                                                                                       |
+| `onMigrate` | `(state, from) => state`   | No       | Migration hook when persisted version < `version`                                                                                                                  |
+| `onInit`    | `(app) => void`            | No       | Called when cell initializes                                                                                                                                       |
+| `onDestroy` | `(app) => void`            | No       | Called when cell destroys                                                                                                                                          |
 
-> ### ⚠️ Two TypeScript traps to know first
+> ### ⚠️ Three TypeScript traps to know first
+>
+> **State types are `type` aliases, not `interface`.** `state` is typed
+> `Record<string, unknown>`, and an interface has no index signature, so
+> `interface State { count: number }` is refused — and the error does not say
+> why:
+> `TS2322 Type 'State' is not assignable to type 'Record<string, unknown>'`,
+> then `TS18046 's.count' is of type 'unknown'` on every field in every method.
+> Casting to `State & Record<string, unknown>` only moves the error. The same
+> shape as a `type` checks clean:
+>
+> ```ts
+> // ❌ interface State { count: number }
+> // ✅
+> type State = { count: number };
+> ```
 >
 > **Don't `satisfies` your `state`.** `state: {...} satisfies MyState` narrows
 > union fields to their literal type, so inside methods the Immer draft rejects
@@ -96,7 +111,8 @@ From the name `'counter'` and method `increment`, you get:
 | `counter.increment.type`      | `'counter:increment'`                            | Type string for matching      |
 | `counter.increment.action(5)` | `{ type, payload }` descriptor                   | Schedules, tests, composition |
 
-**Action type format:** `cellName:methodKey` — all lowercase.
+**Action type format:** `cellName:methodKey`, exactly as written — no case
+change (`cart.setQty.type` is `'cart:setQty'`).
 
 ---
 

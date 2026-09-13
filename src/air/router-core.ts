@@ -41,6 +41,17 @@ export function _setRouteBase(base: string): void {
   if (typeof location !== "undefined") _rSync();
 }
 
+/** The URL an app-absolute `to` really lives at: under the route base. The
+ *  one spelling both `navigate` and `<Link href>` use — a Link that wrote
+ *  `to` raw pointed its `href` at the ORIGIN's `/about` on android, so every
+ *  gesture the router leaves to the anchor (open in new tab, copy link, a
+ *  modified click) left the app for a path the asset loader does not serve,
+ *  while a plain click went to `/assets/about`. @internal */
+export function _appHref(to: string): string {
+  // `//host/x` is scheme-relative — another origin, never an app path.
+  return _base && to.startsWith("/") && !to.startsWith("//") ? _base + to : to;
+}
+
 /** The current route base — "" unless a packaged shell installed one. */
 // aio-ok: test seam — read by tests/standalone-router.test.tsx (route base adoption)
 export function _getRouteBase(): string {
@@ -128,6 +139,54 @@ export function _rSnapshot(): string {
     : "/";
 }
 
+/** Decode a path's percent-escapes for COMPARISON, keeping the two that would
+ *  change its shape: `%2F` (a slash inside one segment) and `%25` (a literal
+ *  percent, which a second decode would otherwise read as the start of an
+ *  escape).
+ *
+ *  `routePath` is `location.pathname`, and a browser percent-encodes that: the
+ *  page at `/café` has the pathname `/caf%C3%A9`, `/about us` has
+ *  `/about%20us`. Static pattern segments were compared against it raw, so
+ *  `<Route path="/café">` never matched ANY url — reached by a link, by
+ *  `navigate("/café")` or typed in the address bar — and nothing said why. A
+ *  malformed escape run is left as written, exactly as a param always was. */
+function _pathForMatch(path: string): string {
+  return path.replace(/(?:%[0-9A-Fa-f]{2})+/g, (run) => {
+    let out = "";
+    let pending = "";
+    const flush = () => {
+      if (!pending) return;
+      try {
+        out += decodeURIComponent(pending);
+      } catch {
+        out += pending;
+      }
+      pending = "";
+    };
+    for (let i = 0; i < run.length; i += 3) {
+      const tok = run.slice(i, i + 3);
+      const hex = tok.slice(1).toUpperCase();
+      if (hex === "2F" || hex === "25") {
+        flush();
+        out += tok;
+      } else {
+        pending += tok;
+      }
+    }
+    flush();
+    return out;
+  });
+}
+
+/** A path reduced to what route matching compares: no query or hash, escapes
+ *  decoded (see `_pathForMatch`), no trailing slash except on the root.
+ *  @internal */
+export function _normalizeRoutePath(path: string): string {
+  const bare = path.replace(/[?#].*$/, "");
+  const decoded = _pathForMatch(bare);
+  return decoded.length > 1 ? decoded.replace(/\/+$/, "") || "/" : decoded;
+}
+
 export function matchPath(
   pattern: string,
   path: string,
@@ -144,11 +203,26 @@ export function matchPath(
       keys.push("*");
       return "(.*)";
     }
-    return seg.replace(/[.+?^${}()|[\]\\]/g, "\\$&");
+    // `*` is escaped too: only a WHOLE `*` segment is the wildcard. Left raw,
+    // `/a*b` became the regex `a*b` — "zero or more a's, then b" — and matched
+    // `/b`.
+    return _pathForMatch(seg).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
   });
   const suffix = exact ? "\\/?$" : "(\\/|$)";
-  const re = new RegExp("^" + regParts.join("\\/") + suffix);
-  const m = re.exec(path);
+  // A trailing wildcard's separator is optional: `/files/*` matches `/files`
+  // with `*` = "". The server's `matchRoute` always did, and this required the
+  // slash — so the same app answered `/files` from its HTTP route and rendered
+  // nothing for it in `<Route path="/files/*">`. Pinned against the server over
+  // one table in tests/route-matching-parity.test.ts.
+  const last = regParts.length - 1;
+  const re = new RegExp(
+    "^" +
+      (last > 0 && segments[last] === "*"
+        ? regParts.slice(0, last).join("\\/") + "(?:\\/(.*))?"
+        : regParts.join("\\/")) +
+      suffix,
+  );
+  const m = re.exec(_pathForMatch(path));
   if (!m) return null;
   const params: Record<string, string> = {};
   keys.forEach((k, i) => {
@@ -180,7 +254,7 @@ export function navigate(
   let url: URL;
   try {
     // An app-absolute path is relative to the route base, never to the origin.
-    url = new URL(_base && to.startsWith("/") ? _base + to : to, location.href);
+    url = new URL(_appHref(to), location.href);
   } catch {
     console.error(`[aio:navigate] Invalid URL: ${to}`);
     return;
@@ -197,8 +271,14 @@ export function navigate(
     location.assign(url.href);
     return;
   }
-  if (opts?.replace) history.replaceState(null, "", url);
-  else history.pushState(null, "", url);
+  // Navigating to the URL the page is ALREADY at replaces its entry — the HTML
+  // navigate algorithm's own rule for a same-URL navigation, and what a plain
+  // `<a>` does. Pushing made a `<Link>` to the current page (a nav bar's own
+  // item, clicked twice) a duplicate history entry, so Back looked dead once
+  // per click. A different hash or query is a different URL and still pushes.
+  if (opts?.replace || url.href === location.href) {
+    history.replaceState(null, "", url);
+  } else history.pushState(null, "", url);
   _rSync();
 }
 

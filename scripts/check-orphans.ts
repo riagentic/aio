@@ -83,13 +83,23 @@ function lockRoots(): string[] {
   return [...roots].filter(Boolean);
 }
 
-/** Temp roots a leftover app's cwd/home can sit under. */
+/** Temp roots a leftover app's cwd/home can sit under.
+ *
+ *  Includes the TEST root (`AIO_TEST_ROOT`, else `~/tmp/aio`). A harness pins
+ *  every app directory into one, so a leftover lock under it is a test's
+ *  leftover exactly as a `/tmp/aio-*` one is — and this list decided which
+ *  stale locks were in scope, so locks in that tree were never reaped. */
 function tempRoots(): string[] {
   const out = ["/tmp", "/var/tmp"];
   for (const v of ["TMPDIR", "TEMP", "TMP"]) {
     const p = Deno.env.get(v);
     if (p) out.push(p.replace(/\/+$/, ""));
   }
+  const override = Deno.env.get("AIO_TEST_ROOT")?.trim();
+  const home = (Deno.env.get("HOME") ?? Deno.env.get("USERPROFILE") ?? "")
+    .replace(/[/\\]+$/, "");
+  const testRoot = override || (home ? join(home, "tmp", "aio") : "");
+  if (testRoot) out.push(testRoot);
   return out;
 }
 const TEMP_ROOTS = tempRoots();
@@ -227,22 +237,47 @@ try {
     } catch { /* not ours */ }
   }
 } catch { /* no /proc */ }
+/** Where a test's throwaway directories live.
+ *
+ *  BOTH roots. This swept `/tmp` only, and `src/testing/temp-dir.ts` used to
+ *  put them there — but `src/testing/test-strict.ts` has always created its
+ *  own under `~/tmp/aio/` (or `AIO_TEST_ROOT`), so that tree was ungated:
+ *  measured at 151 directories, 122 of them over a day old, going back weeks.
+ *  The gate built because of 5,612 leaked `/tmp/aio-*` dirs was blind to the
+ *  tree that replaced them. `temp-dir.ts` now creates under the same root, and
+ *  `/tmp` stays here so anything an older checkout left behind is still found.
+ *
+ *  Under the test root a directory is a leftover whatever it is called, so the
+ *  `aio-` prefix is only required in the shared `/tmp`. */
+function scratchRoots(): { dir: string; requirePrefix: boolean }[] {
+  const out = [{ dir: "/tmp", requirePrefix: true }];
+  const override = Deno.env.get("AIO_TEST_ROOT")?.trim();
+  const home = (Deno.env.get("HOME") ?? Deno.env.get("USERPROFILE") ?? "")
+    .replace(/[/\\]+$/, "");
+  const root = override || (home ? join(home, "tmp", "aio") : "");
+  if (root && root !== "/tmp") out.push({ dir: root, requirePrefix: false });
+  return out;
+}
+
 const tmpDirs: string[] = [];
-try {
-  for (const e of Deno.readDirSync("/tmp")) {
-    if (!e.isDirectory || !e.name.startsWith("aio-")) continue;
-    const dir = join("/tmp", e.name);
-    if (liveRefs.some((r) => r.includes(dir))) continue;
-    let mtime = 0;
-    try {
-      mtime = Deno.statSync(dir).mtime?.getTime() ?? 0;
-    } catch {
-      continue;
+for (const { dir: root, requirePrefix } of scratchRoots()) {
+  try {
+    for (const e of Deno.readDirSync(root)) {
+      if (!e.isDirectory) continue;
+      if (requirePrefix && !e.name.startsWith("aio-")) continue;
+      const dir = join(root, e.name);
+      if (liveRefs.some((r) => r.includes(dir))) continue;
+      let mtime = 0;
+      try {
+        mtime = Deno.statSync(dir).mtime?.getTime() ?? 0;
+      } catch {
+        continue;
+      }
+      if (Date.now() - mtime < RECENT_MS) continue;
+      tmpDirs.push(dir);
     }
-    if (Date.now() - mtime < RECENT_MS) continue;
-    tmpDirs.push(dir);
-  }
-} catch { /* no /tmp */ }
+  } catch { /* no such root */ }
+}
 
 for (const o of orphans) {
   console.error(

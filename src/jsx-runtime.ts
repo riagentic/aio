@@ -16,6 +16,7 @@
 
 import { Fragment, h } from "./air/vdom.ts";
 import type { VNode } from "./air/vdom.ts";
+import type { Computed, Signal } from "./state/signal.ts";
 
 /** VDOM fragment — groups children without a wrapper element. */
 export { Fragment };
@@ -140,17 +141,44 @@ type AioMappedEventHandlers<T extends EventTarget = HTMLElement> = {
   ) => void;
 };
 
+/** One style declaration's value, as `styleValue` (air/ssr-utils.ts) reads
+ *  it: a number gets `px` unless the property is unitless, and `null`,
+ *  `undefined`, `false` and `true` mean "no declaration" — which is what makes
+ *  `style={{ display: hidden && "none" }}` the documented way to toggle one. */
+type AioStyleScalar = string | number | boolean | null | undefined;
+
+/** A style object: each property a plain value, or a signal/computed the
+ *  renderer binds per property (`style={{ color: colorSignal }}`). The types
+ *  used to admit only `string | number`, so both documented forms failed to
+ *  compile while rendering correctly. */
+type AioStyleObject = Record<
+  string,
+  | AioStyleScalar
+  | Signal<string>
+  | Signal<number>
+  | Signal<AioStyleScalar>
+  | Computed<string>
+  | Computed<number>
+  | Computed<AioStyleScalar>
+>;
+
+/** A `className` array: the truthy entries are joined (`resolveClassName`),
+ *  so `["foo", isActive && "active"]` — `string | false` — is the point, not a
+ *  mistake. */
+type AioClassList = ReadonlyArray<string | false | null | undefined | 0>;
+
 /** Base JSX attributes for intrinsic elements (global attrs + typed events). */
 type AioHTMLAttributes<T extends EventTarget = HTMLElement> =
   & AioMappedEventHandlers<T>
   & {
     id?: string;
-    className?: string | string[] | Record<string, boolean>;
+    className?: string | string[] | AioClassList | Record<string, boolean>;
     class?: string;
     style?:
       | string
       | Partial<CSSStyleDeclaration>
-      | Record<string, string | number>;
+      | Record<string, string | number>
+      | AioStyleObject;
     title?: string;
     tabIndex?: number;
     hidden?: boolean;
@@ -249,7 +277,9 @@ type AioTextAreaAttributes = AioHTMLAttributes<HTMLTextAreaElement> & {
 
 /** `<select>` JSX attributes. */
 type AioSelectAttributes = AioHTMLAttributes<HTMLSelectElement> & {
-  value?: string | number;
+  /** An array with `multiple`: every option whose value is in it is selected
+   *  (`applyChildDependentProps`, air/vdom-props.ts). */
+  value?: string | number | readonly (string | number)[];
   defaultValue?: string | number;
   disabled?: boolean;
   required?: boolean;

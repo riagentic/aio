@@ -206,6 +206,10 @@ function Stage() {
    tracked reads change; if it read `.peek()`, it never will.
 6. **Did a cache hand it back without reading?** See below — this one is
    permanent, per instance, and looks like nothing.
+7. **Is the signal created in the component body with `signal()`?** The body
+   re-runs on every render, so each render makes a fresh signal and a writer
+   holding the first one updates nothing on screen. Use `useSignal()` (per
+   instance) or a module-scope `signal()`.
 
 ## A cache hit skips the read — so it skips the subscription
 

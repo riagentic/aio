@@ -94,9 +94,25 @@ const CEILING_GZ = {
   //   · the component profiler and the dev error overlay (~1.8 KB) — dev-only
   //     again, and the same trade as above: production downloads what it
   //     never runs, until the dev-only chunk in todo.md exists.
-  air: 72,
-  /** The same, plus one cell — measured 3 KB, which is what a cell costs. */
-  app: 75,
+  //
+  // Raised 72 → 83 at the 1.0.1-beta release check (measured 81; app 83).
+  // Three hunt rounds put +26 KB minified on the page, itemised from an
+  // esbuild metafile against the 1.0.0-beta tag — every byte a fix with a
+  // red-without-it test, none a feature:
+  //   · sync engine (+6.3 KB) and state-patch (+2.3 KB) — token-bucket op
+  //     pacing, a lost catch-up that froze the cell, writes it did not make
+  //     itself, a drop reported once;
+  //   · renderer-rerender (+3.6 KB) — boundaries dispose the work a failed
+  //     attempt built (subscriptions grew by one per retry), null fallbacks
+  //     recover, a thrower mid-pass shows its fallback;
+  //   · browser transport + send-pacer (+4.2 KB) — held calls survive a blip,
+  //     a timed-out call is not re-sent, oversized frames fail at once;
+  //   · cell-reactive, vdom diff/render, prop-write, contrast audit (~4 KB) —
+  //     the per-user view, keyed lists, SSR/hydrate agreement.
+  // Not paid down at release time; a size pass is on todo.md.
+  air: 83,
+  /** The same, plus one cell — measured 2 KB, which is what a cell costs. */
+  app: 86,
 };
 
 const RUN = Deno.env.get("AIO_BUNDLE_SIZE") === "1";
@@ -194,6 +210,11 @@ Deno.test({
     // release while the artifact measured 61.
     const gz = [kb(s.airGzip), kb(s.appGzip)];
     const br = [kb(s.airBrotli), kb(s.appBrotli)];
+    /** What aio's OWN server puts on the wire — brotli at the quality
+     *  `http-encoding.ts` compresses at, which is q5, not the q11 the
+     *  `brotli` column reports. The two are 6 KB apart, so "on the wire" is
+     *  neither of the other columns and needs its own figure. */
+    const wire = [kb(s.airServed), kb(s.appServed)];
     /** KB off the nearest measured figure. */
     const drift = (n: number, from: number[]) =>
       Math.min(...from.map((m) => Math.abs(n - m)));
@@ -243,6 +264,24 @@ Deno.test({
         if (drift(n, br) > TOLERANCE) {
           stale.push(
             `${page}: "${m[0]}" — measured ${br.join(" or ")} KB brotli`,
+          );
+        }
+      }
+      // …and "N KB on the wire", which nothing read. air-comparison.md said
+      // the counter app was "50 KB on the wire" — 20 KB under the measured
+      // 70 — and escaped every rule above twice over: the words "gz" and
+      // "brotli" are not next to the number, and the claim WRAPPED across a
+      // newline, so even a hand-grep for it came back empty. `\s` crosses a
+      // line break; a line-oriented search does not.
+      for (
+        const m of text.matchAll(/~?(\d+)\s*KB\s+on\s+the\s+wire/gi)
+      ) {
+        const n = Number(m[1]);
+        if (drift(n, wire) > TOLERANCE) {
+          stale.push(
+            `${page}: "${m[0].replace(/\s+/g, " ")}" — measured ${
+              wire.join(" or ")
+            } KB served`,
           );
         }
       }

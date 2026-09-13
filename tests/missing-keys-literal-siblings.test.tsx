@@ -131,12 +131,16 @@ Deno.test("(b'') classic h(): a nested array argument warns", async () => {
   assertEquals(missing(await warningsOf(App)).length, 1);
 });
 
-Deno.test("(c) a literal sibling next to a KEYED .map list is still mixed-keys", async () => {
+// A literal sibling beside a keyed `.map` is NOT mixed — unkeyed children are
+// matched positionally among the unkeyed ones, so it cannot be displaced (see
+// tests/mixed-keys-literal-siblings-around-list.test.tsx). Mixed is a LIST that
+// keys some rows and not others.
+Deno.test("(c) a .map list that keys only SOME rows is mixed-keys", async () => {
   const items = ["a", "b", "c"];
   const App = () => (
     <ul id="mixed">
       <li>head</li>
-      {items.map((i) => <li key={i}>{i}</li>)}
+      {items.map((i) => i === "b" ? <li>{i}</li> : <li key={i}>{i}</li>)}
     </ul>
   );
   const w = await warningsOf(App);
@@ -175,12 +179,10 @@ Deno.test("dedupe is per site: two parents both warn, one parent warns once", as
   const MixedTwo = () => (
     <div>
       <ul id="m1">
-        <li>head</li>
-        {items.map((i) => <li key={i}>{i}</li>)}
+        {items.map((i) => i === "b" ? <li>{i}</li> : <li key={i}>{i}</li>)}
       </ul>
       <ul id="m2">
-        <li>head</li>
-        {items.map((i) => <li key={i}>{i}</li>)}
+        {items.map((i) => i === "b" ? <li>{i}</li> : <li key={i}>{i}</li>)}
       </ul>
     </div>
   );

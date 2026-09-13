@@ -220,6 +220,15 @@ Deno.test("offline-queue differential: the browser path IS the shared policy on 
   const { client, ensureConnected } = await import(
     "../src/browser/browser-protocol.ts"
   );
+  // The socket's writer paces to the server's advertised budget, so a replay
+  // of 1000 actions leaves over seconds, not in one tick. This file pins the
+  // queue POLICY (who is refused, replay order), not the pace — so the fake
+  // server advertises a budget large enough that the whole replay fits in one
+  // burst, which is what a real server with that budget would allow.
+  const { parseProtoHello, rememberPeerHello } = await import(
+    "../src/protocol/protocol-version.ts"
+  );
+  rememberPeerHello(parseProtoHello({ v: 3, min: 3, rate: 1_000_000 })!);
   try {
     for (let seed = 101; seed <= 106; seed++) {
       const evs = sequence(seed, BROWSER_CAP);

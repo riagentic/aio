@@ -11,8 +11,10 @@ import type {
 } from "./renderer-types.ts";
 import {
   _activeRoot,
+  _boundaryStack,
   _currentCollector,
   _instanceStack,
+  _isolationBases,
   _setActiveRoot,
   _setCurrentCollector,
   _setInsideMount,
@@ -311,6 +313,9 @@ export function _rerenderRoot(state: RootState): void {
   _setDelegationRoot(state.root);
   try {
     const vnode = h(state.App, null);
+    // A re-render pass like a component's: a component body that throws in
+    // here is contained where it stands (see `_isolationBases`).
+    _isolationBases.push(_boundaryStack.length);
     try {
       _diff(state.root, vnode, oldVnode, state.ctx);
     } catch (e) {
@@ -323,6 +328,8 @@ export function _rerenderRoot(state: RootState): void {
           "the DOM this pass had already committed:",
         e,
       );
+    } finally {
+      _isolationBases.pop();
     }
     // Committed or not, the tree the reconciler must diff against NEXT time is
     // this one. Leaving `state.vnode` on the pre-throw vnode made every later

@@ -25,6 +25,45 @@ export type CrashHandlerDeps = {
   isBootComplete?: () => boolean;
 };
 
+/** The one rejection the guard must NOT survive: the script's own top level.
+ *
+ *  Deno reports a rejected top-level `await` as an `unhandledrejection` of the
+ *  main module's evaluation — the same event as a stray fire-and-forget. The
+ *  guard prevented it like any other, so the script's remaining statements
+ *  (its assertions, its `app.close()`) never ran, and the server it had booted
+ *  kept the event loop alive: a CI script whose top level threw logged one
+ *  line and then HUNG until the job's timeout, instead of exiting non-zero the
+ *  way the same script does with `guardDispatches: false`.
+ *
+ *  Told apart exactly, not by guessing from the stack: `import()` of the main
+ *  module settles with the module's own evaluation result, so it rejects with
+ *  THIS reason only when the top level is what failed. A stray — before,
+ *  during or after the top level runs — finds the module fine, and the guard
+ *  keeps doing its job. Exits 1 after the crash line is already logged, which
+ *  is what Deno does without the guard. */
+function exitIfMainModuleFailed(reason: unknown): void {
+  if (typeof Deno === "undefined" || !Deno.mainModule) return;
+  let evaluated: Promise<unknown>;
+  try {
+    evaluated = import(Deno.mainModule);
+  } catch {
+    return; // aio-ok: no module graph to ask (an embedder) — the guard stands
+  }
+  evaluated.then(() => {}, (err: unknown) => {
+    if (err !== reason) return; // aio-ok: a different failure — not the top level
+    console.error(
+      `[crash-handler] the main module's top level threw ` +
+        `(${Deno.mainModule}) — exiting 1. guardDispatches keeps the app ` +
+        `alive through a stray rejection at runtime, never through the ` +
+        `script itself failing: nothing after that \`await\` will run, so ` +
+        `staying up would only hang. Cause: ${
+          reason instanceof Error ? reason.message : String(reason)
+        }`,
+    );
+    Deno.exit(1);
+  });
+}
+
 /** Install global unhandledrejection + error handlers. Returns uninstall function. */
 export function installCrashHandler(deps: CrashHandlerDeps): () => void {
   const {
@@ -84,7 +123,10 @@ export function installCrashHandler(deps: CrashHandlerDeps): () => void {
     // is never hidden — the process just doesn't die from a stray rejection.
     // Boot rejections stay fatal (see isBootComplete): supervision is for
     // RUNTIME strays, never for "the app refused to start".
-    if (guardRejections && (isBootComplete?.() ?? true)) e.preventDefault();
+    if (guardRejections && (isBootComplete?.() ?? true)) {
+      e.preventDefault();
+      exitIfMainModuleFailed(e.reason);
+    }
   };
   const onError = (e: ErrorEvent) => {
     handle("uncaughtException", e.error ?? e.message);

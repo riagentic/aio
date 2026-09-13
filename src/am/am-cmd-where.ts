@@ -17,10 +17,11 @@
  * The verdict is derived, never guessed: a file the walk never reached is not
  * in the client graph, and that is a fact about the graph, not an opinion.
  */
-import { basename, isAbsolute, relative, resolve } from "@std/path";
+import { basename, relative, resolve } from "@std/path";
 import type { GlobalFlags } from "./am-types.ts";
 import { detectMode, fail, kv, out, outError, stack } from "./am-output.ts";
 import { projectRoot } from "./am-cmd-process.ts";
+import { resolveFileArg } from "./am-project.ts";
 import { type GraphResult, validateGraph } from "../server/graph-validator.ts";
 import { transpile } from "../server/server-transpile.ts";
 import {
@@ -217,12 +218,10 @@ export async function cmdWhere(
     Deno.exit(1);
   }
   const root = projectRoot();
-  const file = isAbsolute(target) ? target : resolve(root, target);
-  try {
-    Deno.statSync(file);
-  } catch {
-    fail(`no such file: ${file}`, mode);
-  }
+  // One rule with `am preview`: cwd-relative first, then the project root.
+  const found = resolveFileArg(target, [root]);
+  if (!found.ok) fail(`no such file: ${found.tried.join(", ")}`, mode);
+  const file = found.path;
 
   // The UI entry the app actually declares — the same decider the dev server
   // uses. Asking a different question here than the server asks is how the two

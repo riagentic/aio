@@ -1,7 +1,7 @@
 // Lifecycle & client launch — globals, onStart, schedules, startup logging, electron/browser
 // Extracted from aio.ts _run() to keep the orchestrator lean.
 
-import type { TrayConfig } from "./aio-types.ts";
+import type { UiConfig } from "./aio-types.ts";
 import { join } from "@std/path";
 import { isPipePath } from "./local-listen.ts";
 import { hasDesktopSession, openExternalBestEffort } from "./open-external.ts";
@@ -10,7 +10,6 @@ import type { ServerHandle } from "./server-types.ts";
 import type { UDSHandle } from "./uds.ts";
 import type { TlsCert } from "./tls.ts";
 import type { AioUser } from "./aio.ts";
-import type { UiTheme } from "./aio-types.ts";
 import { cdpPort, cliLine, VERSION } from "./aio-cli.ts";
 import { type BootExtras, bootLines, buildFacts } from "./boot-facts.ts";
 import { diagEmit } from "../diagnostics/diagnostic-bus.ts";
@@ -224,18 +223,26 @@ export interface LifecycleDeps<S, A> {
   };
   // Not just the window box: the head-shaped keys travel to the templated
   // aio:// Electron shell, which has no other way to learn them.
-  ui: {
-    width?: number;
-    height?: number;
-    showStatus?: boolean;
-    viewport?: string | false;
-    head?: string;
-    chrome?: "standard" | "themed" | "none";
-    theme?: UiTheme;
-    layout?: boolean; // ui.layout — false drops the page-layout defaults
-    tray?: boolean | TrayConfig; // ui.tray — the Electron tray, see UiConfig
-    lang?: string;
-  };
+  //
+  // PICKED from `UiConfig`, not re-declared. It was a hand-kept copy — a third
+  // place a `ui.` key had to be added, after the config type and the shell
+  // type — and `ui.dir` is what that cost: declared on `UiConfig`, accepted by
+  // the config, and simply absent from this shape, so nothing could forward
+  // it. A `Pick` cannot drift.
+  ui: Pick<
+    UiConfig,
+    | "width"
+    | "height"
+    | "showStatus"
+    | "viewport"
+    | "head"
+    | "chrome"
+    | "theme"
+    | "layout"
+    | "tray"
+    | "lang"
+    | "dir"
+  >;
   keepServer: boolean | undefined;
   /** Library/test mode — no process-wide signal handlers (the same contract
    *  aio-server honours for SIGINT/SIGTERM): an embedding host or test runner
@@ -250,6 +257,51 @@ export interface LifecycleDeps<S, A> {
     | { update?: (partial: Record<string, unknown>) => void }
     | null;
   log: Log;
+}
+
+/** What an app listens on — aio.ts `_listening` (the one decider for the TCP
+ *  port and the local socket), plus the HTTP handler's socket when it has no
+ *  port (`.http.sock`, which is what answers `curl --unix-socket`). */
+type Listening = {
+  port?: number;
+  socketPath?: string;
+  httpSocketPath?: string;
+};
+
+/** The no-desktop-session warning for an Electron client, naming what REALLY
+ *  listens (report 9b §5).
+ *
+ *  It used to say "The server is up at http://localhost:<port>" whatever the
+ *  transport. An Electron dev app is UDS-only — its HTTP handler is on a
+ *  socket and it binds no TCP port — so the URL it printed answered nothing
+ *  (`curl` → 000) while `curl --unix-socket` on the real socket answered 200.
+ *  A URL is exactly what the reader wanted, so the zero-port form says how to
+ *  get one: the browser client, which binds a port. Pure — testable without a
+ *  boot or a display. */
+export function noDesktopSessionWarning(
+  listening: Listening,
+  localUrl: string,
+): string {
+  const head = "electron client, but this machine has no desktop session " +
+    "(no DISPLAY/WAYLAND_DISPLAY) — not launching a window. ";
+  if (listening.port !== undefined) {
+    return head +
+      `The server is up at ${localUrl}; use --client=browser to open it ` +
+      `from another machine, or --client=server-only to say so explicitly.`;
+  }
+  const socks = [
+    listening.httpSocketPath && `${listening.httpSocketPath} (HTTP — ` +
+      `\`curl --unix-socket ${listening.httpSocketPath} http://x/\`)`,
+    listening.socketPath && `${listening.socketPath} (client transport)`,
+  ].filter(Boolean);
+  const where = socks.length
+    ? `it listens only on local socket(s): ${socks.join(", ")}`
+    : "it has no network listener";
+  return head +
+    `This app binds NO TCP port — ${where}, so there is no URL to open. ` +
+    `For one, restart with the browser client: \`deno task dev ` +
+    `--client=browser\` (or \`am start --client=browser\`); or ` +
+    `--client=server-only to say no window is wanted.`;
 }
 
 /** Run lifecycle startup — set globals, fire hooks, log info, launch client */
@@ -561,7 +613,9 @@ export function startLifecycle<S, A>(deps: LifecycleDeps<S, A>): void {
     log.info(`key file: ${appKeyPath(appId)} (owner-only)`);
     // Friendly pairing: the aio client enters this code once to pull the
     // profile (cert + key) and connect forever — no file to hand over.
-    const pin = generatePin();
+    // Scoped to this app's key: a process hosting two apps shows two codes,
+    // and each pairs only its own app (see pairing.ts).
+    const pin = generatePin(token);
     log.info(`pair code: ${pin}  (enter it in the aio client → Add app)`);
   }
 
@@ -658,12 +712,13 @@ export function startLifecycle<S, A>(deps: LifecycleDeps<S, A>): void {
     // UI", which is a property of the app, while this is a property of the
     // MACHINE. Two different questions that happened to share an answer on a
     // developer's laptop.
-    log.warn(
-      "electron client, but this machine has no desktop session " +
-        "(no DISPLAY/WAYLAND_DISPLAY) — not launching a window. The server " +
-        `is up at ${localUrl}; use --client=browser to open it from another ` +
-        `machine, or --client=server-only to say so explicitly.`,
-    );
+    log.warn(noDesktopSessionWarning(
+      {
+        ...(app as { _listening?: Listening })._listening,
+        httpSocketPath: deps.httpSocketPath,
+      },
+      localUrl,
+    ));
   } else if (useElectron) {
     const meta: AioMeta = {
       title,
@@ -708,6 +763,11 @@ export function startLifecycle<S, A>(deps: LifecycleDeps<S, A>): void {
         // The aio:// shell is templated at launch, so every `<head>` input has
         // to travel with it. Omitting them is how a packaged app ends up with
         // a different `<head>` than `deno task dev` serves.
+        // ANNOTATED, so an excess or misspelled key is a compile error. It
+        // was an un-annotated const spread into the call, which turns excess-
+        // property checking off entirely — which is why `layout` sat here for
+        // releases, set by this file and read by nobody, with a green
+        // `deno task check`.
         shell: {
           showStatus: ui.showStatus,
           width: meta.width,
@@ -717,6 +777,7 @@ export function startLifecycle<S, A>(deps: LifecycleDeps<S, A>): void {
           chrome: ui.chrome,
           theme: ui.theme,
           layout: ui.layout,
+          dir: ui.dir,
           lang: ui.lang,
           themeName: appId,
         },

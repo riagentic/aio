@@ -2,6 +2,9 @@
 // testCell for cells. Wraps the renderer's mount + document wiring so tests no
 // longer reach into the underscore-prefixed internals.
 
+import { repairProxiedSiblings } from "./happy-dom-repair.ts";
+import { _setContrastCascadeProbe } from "../air/contrast-audit.ts";
+import { contrastCascadeNotice } from "../air/contrast-cascade.ts";
 import { _setDocument, _unmount, mount } from "../air/aio-renderer.ts";
 import { _armTestStrict } from "./test-strict.ts";
 import type { ComponentFn } from "../air/vdom-types.ts";
@@ -68,6 +71,14 @@ export function testComponent(
         "document) or run where globalThis.document exists",
     );
   }
+  // happy-dom answers `null` for a `<form>`'s or `<select>`'s siblings, and the
+  // keyed diff positions rows by walking siblings. `testUI` has repaired this
+  // since it owned a window; a caller's own document needs the same repair
+  // (it proves the defect first, so a working DOM is left untouched).
+  repairProxiedSiblings((doc as { defaultView?: unknown }).defaultView);
+  // …and the contrast walk must not believe a cascade that is not a
+  // browser's (see contrast-cascade.ts). The same install `testUI` does.
+  _setContrastCascadeProbe(contrastCascadeNotice);
   setDocument(doc);
   const root = opts.root ?? doc.createElement("div");
   if (!root.parentNode && doc.body) doc.body.appendChild(root);

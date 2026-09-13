@@ -9,7 +9,7 @@
 // environment, never the most permissive" — with authorization as the subject
 // it was lenient about. `access` is a rule about network callers, and a
 // `testUI` click stands in for exactly one.
-import { assert, assertEquals } from "@std/assert";
+import { assert, assertEquals, assertRejects } from "@std/assert";
 import { cell } from "../mod.ts";
 import { testUI } from "../src/testing/ui-test.ts";
 
@@ -39,7 +39,10 @@ Deno.test("testUI: a customer's click on an admin-only method is DENIED", async 
     user: { id: "u1", role: "customer" },
   });
   ui.DeleteButton.click();
-  await ui.settle();
+  // The denial is a rejection nobody awaited (the click is fire-and-forget),
+  // so it surfaces at settle() — the same rule as any other failing call. It
+  // passed silently only while sync methods were left out of the ledger.
+  await assertRejects(() => ui.settle(), Error, "access denied");
   // The click must change nothing — exactly as over a real socket.
   assertEquals(admin.products.length, 2, "the gated method must not have run");
 });
@@ -59,7 +62,7 @@ Deno.test("testUI: an admin's click on the same method RUNS", async () => {
 Deno.test("testUI: an anonymous UI is denied a rule that needs a user", async () => {
   await using ui = await testUI(App, { cells: [admin], user: null });
   ui.DeleteButton.click();
-  await ui.settle();
+  await assertRejects(() => ui.settle(), Error, "access denied");
   assertEquals(admin.products.length, 2);
 });
 

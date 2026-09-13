@@ -469,6 +469,15 @@ export async function encodeResponse(
   // an early exit.
   if (req.method.toUpperCase() === "HEAD") return resp;
 
+  // A 304 answers a conditional GET, and nothing else. RFC 9110 §13.1.2:
+  // If-None-Match on any other method is a PRECONDITION (412 before acting),
+  // never a cache hit — and this finisher runs AFTER the handler, so by now a
+  // POST has already created its row. Turning that 200 into an empty 304 threw
+  // away the response of a write that happened (`If-None-Match: *` on a POST
+  // did exactly that). Non-GET responses still compress; they just never
+  // collapse into "not modified".
+  const conditional = req.method.toUpperCase() === "GET";
+
   const ct = resp.headers.get("Content-Type");
   const cacheControl = resp.headers.get("Cache-Control") ?? "";
   // `no-transform` is the standard way for a handler to say "these are the
@@ -489,20 +498,30 @@ export async function encodeResponse(
   // request first, using the tag the HANDLER supplied (the static path now
   // sets a weak mtime/size one for binaries). Never hash here: buffering a
   // video to hash it is the cost this early return exists to avoid.
-  if (!isCompressible(ct)) {
-    const handlerTag = resp.headers.get("ETag");
-    if (
-      handlerTag && !cacheControl.includes("no-store") &&
-      etagMatches(req.headers.get("If-None-Match"), handlerTag)
-    ) {
-      const h = new Headers(resp.headers);
-      h.delete("Content-Length");
-      h.delete("Content-Encoding");
-      void resp.body?.cancel();
-      return new Response(null, { status: 304, headers: h });
+  //
+  // For EVERY type, not only incompressible ones. A compressible body over
+  // `MAX_BUFFER_BYTES` never reaches the conditional block below (it is
+  // streamed, not buffered), yet it carried the handler's tag — so a >8 MB
+  // JSON or WASM went out with an ETag that never produced a 304: measured,
+  // a conditional GET for a 10 MB `.json` with its own tag re-downloaded it
+  // as a 200 gzip every time. A tag the handler already knows needs no body
+  // to compare, so answering here also skips buffering a small one.
+  const handlerTag = resp.headers.get("ETag");
+  if (
+    conditional && handlerTag && !cacheControl.includes("no-store") &&
+    etagMatches(req.headers.get("If-None-Match"), handlerTag)
+  ) {
+    const h = new Headers(resp.headers);
+    h.delete("Content-Length");
+    h.delete("Content-Encoding");
+    // The same representation-selecting header the 200 would carry.
+    if (isCompressible(ct)) {
+      h.set("Vary", mergeVary(h.get("Vary"), "Accept-Encoding"));
     }
-    return resp;
+    void resp.body?.cancel();
+    return new Response(null, { status: 304, headers: h });
   }
+  if (!isCompressible(ct)) return resp;
   if (!resp.body) return resp;
 
   // Deno does NOT put `Content-Length` on an in-process Response — it is added
@@ -536,7 +555,10 @@ export async function encodeResponse(
   const noStore = cacheControl.includes("no-store");
 
   // ── Conditional request: the whole point of `no-cache` ──
-  if (!noStore && etagMatches(req.headers.get("If-None-Match"), etag)) {
+  if (
+    conditional && !noStore &&
+    etagMatches(req.headers.get("If-None-Match"), etag)
+  ) {
     // A 304 carries the headers that would have been sent — including
     // Set-Cookie, which a session refresh depends on — but never a body.
     const h = new Headers(resp.headers);

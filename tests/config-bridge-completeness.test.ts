@@ -114,8 +114,15 @@ Deno.test("config bridge: every documented option comes OUT of the bridge", () =
   assertEquals(out._diagnostics, "sentinel:diagnostics");
   assertEquals(out._onCheckpointRestore, "sentinel:onCheckpointRestore");
   // Wrapped hooks exist as functions (the wrapper is the point).
+  // These three are WRAPPERS the bridge builds, so unlike the sentinel values
+  // above they cannot be compared to what went in; that one is callable at all
+  // is the fact this file asserts, and what they do when called is pinned in
+  // tests/lifecycle-hooks.test.ts.
+  // aio-ok: vacuous — a wrapper's identity is unobservable, see above.
   assert(typeof out.beforeReduce === "function");
+  // aio-ok: vacuous — see above.
   assert(typeof out.onStart === "function");
+  // aio-ok: vacuous — see above.
   assert(typeof out.onStop === "function");
   _resetAioRuntime();
 });

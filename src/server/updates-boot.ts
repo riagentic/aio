@@ -12,8 +12,14 @@
 // build that just replaced another one is the thing that decides whether it
 // worked.
 import type { Log } from "../diagnostics/logger-api.ts";
-import type { CheckResult, UpdatesRuntime } from "../state/updates-cell.ts";
+import type {
+  CheckResult,
+  UpdatesRuntime,
+  UpdatesSlot,
+} from "../state/updates-cell.ts";
 import {
+  _installUpdatesRuntimeIn,
+  _isProcessUpdatesSlot,
   createUpdatesCell,
   installUpdatesRuntime,
   readyUpdates,
@@ -220,6 +226,9 @@ export type StartUpdatesDeps = {
   shutdown?: () => Promise<void>;
   /** Ask a human on the terminal. Absent ⇒ never prompt. */
   prompt?: (question: string) => Promise<boolean>;
+  /** Which app's `updates` cell and runtime this is (`_updatesForApp`).
+   *  Absent ⇒ the process slot `aio/updates` exports. */
+  slot?: UpdatesSlot;
 };
 
 /** What the boot report needs to describe the update configuration. */
@@ -238,12 +247,18 @@ export type StartedUpdates = {
  *  Returns the resolved configuration so the boot report can print it — an app
  *  that follows a channel should say which one, once, where somebody will see
  *  it. */
-let _pendingBegin: (() => void) | null = null;
+// Armed PER SLOT, as in feedback-boot.ts: one module-level slot let a second
+// concurrent boot overwrite the first's, so one app published the other's
+// config into a cell not yet bound and never published its own. `null` keys a
+// caller that passed no slot (the process cell).
+const _pendingBegin = new Map<UpdatesSlot | null, () => void>();
 
-/** Fire the boot check. Called once the cells are bound — see startUpdates. */
-export function beginUpdates(): void {
-  const begin = _pendingBegin;
-  _pendingBegin = null;
+/** Fire `slot`'s boot check. Called once the cells are bound — see
+ *  startUpdates. */
+export function beginUpdates(slot?: UpdatesSlot): void {
+  const key = slot ?? null;
+  const begin = _pendingBegin.get(key);
+  _pendingBegin.delete(key);
   begin?.();
 }
 
@@ -265,7 +280,13 @@ export function startUpdates(deps: StartUpdatesDeps): StartedUpdates {
   // from there is what deadlocked module evaluation. The cost of importing
   // these eagerly is graph size for apps that never configure updates; the cost
   // of the dynamic form was an app that would not boot at all.
+  // THIS app's cell. A second app in the process has its own (see
+  // `UpdatesSlot`); every read and write below goes to it, never to the
+  // process-wide one another app is showing.
+  const slot = deps.slot;
+  const updatesCell = () => slot?.cell ?? createUpdatesCell();
   const runtime = createUpdatesRuntime({
+    cell: slot?.cell ?? undefined,
     config,
     dataDir: deps.dataDir,
     appVersion: deps.appVersion,
@@ -286,7 +307,10 @@ export function startUpdates(deps: StartUpdatesDeps): StartedUpdates {
   // …but only when it is not one WE installed. `startUpdates` runs once per app
   // boot, and several apps can share a process (D2), so replacing aio's own
   // previous runtime is ordinary. Replacing an app's is the ambiguity.
-  const installed = updatesRuntime();
+  // Only the process slot can hold an app's own runtime — it is the one
+  // `installUpdatesRuntime` fills. A per-app slot is aio's alone.
+  const processSlot = !slot || _isProcessUpdatesSlot(slot);
+  const installed = processSlot ? updatesRuntime() : null;
   if (installed && installed !== _aioInstalled) {
     throw new Error(
       `[aio] updates: an update runtime is already installed, and \`updates:\` ` +
@@ -300,8 +324,9 @@ export function startUpdates(deps: StartUpdatesDeps): StartedUpdates {
         `installUpdatesRuntime() call.`,
     );
   }
-  installUpdatesRuntime(runtime);
-  _aioInstalled = runtime;
+  if (slot) _installUpdatesRuntimeIn(slot, runtime);
+  else installUpdatesRuntime(runtime);
+  if (processSlot) _aioInstalled = runtime;
   // Remember the channel this install follows, so a later run keeps following
   // it without the flag that chose it — but ONLY when the choice was durable.
   // A one-off `--channel=beta` (or `AIO_UPDATE_CHANNEL` from one shell) used to
@@ -348,7 +373,7 @@ export function startUpdates(deps: StartUpdatesDeps): StartedUpdates {
     // The same instance the boot path created — the factory memoises, so this
     // is a lookup, not a second cell. (It used to be a dynamic import for the
     // side effect; see `createUpdatesCell` for why that shape is gone.)
-    const result = await createUpdatesCell().check() as CheckResult | undefined;
+    const result = await updatesCell().check() as CheckResult | undefined;
     if (result?.kind === "error") {
       fail("update check failed", result.error);
       return;
@@ -363,7 +388,7 @@ export function startUpdates(deps: StartUpdatesDeps): StartedUpdates {
         `${available.version} is available — installing it (auto)`,
       );
       try {
-        await createUpdatesCell().apply();
+        await updatesCell().apply();
       } catch (e) {
         // An auto-apply that fails at the same step every interval used to
         // re-download the entire artifact each time. Count it like any other
@@ -387,8 +412,8 @@ export function startUpdates(deps: StartUpdatesDeps): StartedUpdates {
       const yes = await deps.prompt(
         `Update to ${available.version}? The app will restart. [y/N] `,
       );
-      if (yes) await createUpdatesCell().apply();
-      else await createUpdatesCell().dismiss();
+      if (yes) await updatesCell().apply();
+      else await updatesCell().dismiss();
     }
   };
 
@@ -414,12 +439,13 @@ export function startUpdates(deps: StartUpdatesDeps): StartedUpdates {
   // cell's methods are bound after the server is up, and calling one before
   // that throws "runtime not booted". So it is armed now and fired by
   // `beginUpdates()` once binding is done.
-  _pendingBegin = () => {
+  const beginKey = slot ?? null;
+  _pendingBegin.set(beginKey, () => {
     // What the app is CONFIGURED for, published before anything is fetched.
     // `check: false` never runs a boot check, so without this an app that opted
     // out of polling would report `enabled: false` — "updates are not
     // configured" — for its entire life.
-    readyUpdates();
+    readyUpdates(slot);
     // `check: false` is documented as "manual `check()` only" and was not:
     // the BOOT check fired anyway, so an app that opted out of polling still
     // contacted the release host on every single launch. `intervalMs === 0` is
@@ -436,7 +462,7 @@ export function startUpdates(deps: StartUpdatesDeps): StartedUpdates {
       deps.log.warn("updates", String(e));
     });
     schedule();
-  };
+  });
 
   return {
     source: config.source,
@@ -446,7 +472,7 @@ export function startUpdates(deps: StartUpdatesDeps): StartedUpdates {
     auto: config.auto,
     stop: () => {
       stopped = true;
-      _pendingBegin = null;
+      _pendingBegin.delete(beginKey);
       if (timer !== undefined) clearTimeout(timer);
     },
   };

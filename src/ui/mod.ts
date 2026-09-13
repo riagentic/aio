@@ -31,6 +31,7 @@ import {
   onCleanup,
   onMount,
   signal,
+  useRef,
   useSignal,
 } from "../air/aio-renderer.ts";
 import type { VChild, VNode } from "../air/vdom.ts";
@@ -168,11 +169,22 @@ export function Select(props: SelectProps): VNode {
     return h("option", {
       value: opt.value,
       disabled: opt.disabled,
-      selected: opt.value === value,
     }, opt.label ?? opt.value);
   });
   return h("select", {
     ...rest(props, ["options", "value", "invalid", "onChange", "class"]),
+    // `value` on the SELECT, not `selected` on each option.
+    //
+    // Marking the option was enough to OPEN on the right entry and nothing
+    // more: setting `selected` on an option the DOM has already selected is a
+    // no-op, so when the app REFUSED a choice — heard `onChange`, left `value`
+    // alone — the next render had nothing to change and the user's pick stayed
+    // on screen. The dropdown showed one thing, state held another, and the
+    // control the kit wraps does not behave that way (`tests/vdom.test.ts`
+    // pins it). The renderer owns this: it re-asserts the value AFTER the
+    // options exist, and SSR marks the right one. It only ever needed the
+    // value.
+    value,
     class: joinClass(
       `aio-input aio-select${invalid ? " aio-input--invalid" : ""}`,
       cls,
@@ -364,7 +376,15 @@ export function Table<Row extends Record<string, unknown>>(
         null,
         h(
           "td",
-          { colSpan: columns.length, class: "aio-td aio-table__empty" },
+          {
+            // `colspan="0"` is not a valid span — the attribute's minimum is
+            // 1, and a table with no columns declared still has one cell to
+            // put "No rows" in. Browsers disagree about what 0 means, so the
+            // empty state rendered inconsistently for the one shape that
+            // needs it most.
+            colSpan: Math.max(1, columns.length),
+            class: "aio-td aio-table__empty",
+          },
           empty ?? "No rows",
         ),
       ),
@@ -391,6 +411,12 @@ export function Table<Row extends Record<string, unknown>>(
                 tabIndex: 0,
                 onKeyDown: (e: KeyboardEvent) => {
                   if (e.key !== "Enter" && e.key !== " ") return;
+                  // Only a key on the ROW itself. keydown bubbles, so without
+                  // this a Space typed into an <input> in a cell opened the row
+                  // and ate the space, and Enter on a cell's own button opened
+                  // the row instead of pressing the button (a prevented Enter
+                  // suppresses the button's native click).
+                  if (e.target !== e.currentTarget) return;
                   e.preventDefault(); // Space must not scroll the page
                   onRowClick(row, i);
                 },
@@ -510,23 +536,183 @@ export interface ModalProps extends Common {
   children?: VChild;
 }
 
+/** One mounted Modal, as the document key handler sees it. */
+interface ModalEntry {
+  /** Rendered open right now. */
+  open: boolean;
+  /** Set only while open AND dismissable AND there is an `onClose`. */
+  close?: () => void;
+  /** The dialog box element, while it is in the DOM. */
+  dialog?: HTMLElement | null;
+}
+
+/** Mounted modals, most recently OPENED last — see `Modal`. One document
+ *  listener serves them all, installed with the first and removed with the
+ *  last. */
+const _modalStack: ModalEntry[] = [];
+let _modalKeyHandler: ((e: KeyboardEvent) => void) | null = null;
+
+/** What Tab can reach inside a dialog, in document order. */
+const FOCUSABLE = "a[href],area[href],button:not([disabled])," +
+  'input:not([disabled]):not([type="hidden"]),select:not([disabled]),' +
+  'textarea:not([disabled]),iframe,[contenteditable=""],' +
+  '[contenteditable="true"],[tabindex]';
+
+function focusablesIn(root: HTMLElement): HTMLElement[] {
+  return Array.from(root.querySelectorAll<HTMLElement>(FOCUSABLE)).filter(
+    (el) =>
+      el.getAttribute("tabindex") !== "-1" && !el.closest("[hidden],[inert]"),
+  );
+}
+
+/** The document key handler: Escape and Tab belong to the TOP open dialog. */
+function onModalKey(e: KeyboardEvent): void {
+  // Already handled below us — an open Menu inside the dialog closes itself on
+  // Escape and says so with preventDefault; the dialog must not close too.
+  // Mid-IME-composition, Escape cancels the composition, not the dialog.
+  if (e.defaultPrevented || e.isComposing) return;
+  if (e.key !== "Escape" && e.key !== "Tab") return;
+  // The topmost OPEN entry decides, and nothing below it is consulted: a
+  // non-dismissable dialog on top ("Saving…") blocks Escape — it used to be
+  // skipped, and the key closed the dialog BEHIND it.
+  let top: ModalEntry | undefined;
+  for (let i = _modalStack.length - 1; i >= 0 && !top; i--) {
+    if (_modalStack[i]!.open) top = _modalStack[i];
+  }
+  if (!top) return;
+  if (e.key === "Escape") {
+    top.close?.();
+    return;
+  }
+  // Tab cycles WITHIN the dialog. `aria-modal` tells assistive tech the page
+  // behind is inert; it does not stop Tab walking into it.
+  const box = top.dialog;
+  if (!box?.isConnected) return;
+  const doc = box.ownerDocument;
+  const els = focusablesIn(box);
+  const active = doc.activeElement;
+  if (els.length === 0) {
+    e.preventDefault();
+    box.focus();
+    return;
+  }
+  const first = els[0]!;
+  const last = els[els.length - 1]!;
+  const inside = active !== null && box.contains(active);
+  if (e.shiftKey && (!inside || active === first || active === box)) {
+    e.preventDefault();
+    last.focus();
+  } else if (!e.shiftKey && (!inside || active === last)) {
+    e.preventDefault();
+    first.focus();
+  }
+}
+
+/** @internal test seam — drop any modal left registered by a previous case.
+ *  A modal that outlives its test would keep answering Escape for the next
+ *  one, which is the bug the stack exists to prevent, one level up. */
+export function _resetModalStack(): void {
+  _modalStack.length = 0;
+  _modalKeyHandler = null;
+}
+
 /** A dialog with backdrop, Escape-to-close, backdrop-click-to-close, and the
  *  right ARIA — the modal/focus primitive apps otherwise re-roll per form. */
 export function Modal(props: ModalProps): VNode | null {
-  if (!props.open) return null;
   const { onClose, title, footer, children, dismissable = true, class: cls } =
     props;
 
-  // Escape-to-close, DOM-safe (no-op without a document — SSR/tests).
+  // Escape closes the TOPMOST open dialog, and only that one.
+  //
+  // Every open modal used to add its OWN document keydown listener, so one
+  // Escape ran all of them: a confirm dialog opened over a settings dialog
+  // took both away with one key, and the user landed two screens back from
+  // where they meant to be. A browser's own `<dialog>` closes the top of the
+  // stack; so does this.
+  //
+  // Registered per INSTANCE and read through a ref, never captured:
+  //
+  //   • `onMount` runs once, so a captured `onClose` was the FIRST render's.
+  //     Every arrow function in JSX is a new one, so a parent that re-rendered
+  //     had its later handler ignored.
+  //   • A closed modal is not unmounted — the component returns `null` and the
+  //     instance lives on — so `onCleanup` does not run when it closes. An
+  //     entry that unregistered only on unmount would go on claiming Escape
+  //     while invisible. The entry stays; what changes is whether it answers.
+  //
+  // The hooks therefore run BEFORE the `open` check, so hook order is the same
+  // on an open render and a closed one.
+  const live = useRef<ModalEntry>({ open: false });
+  const entry = live.current;
+  const wasOpen = entry.open;
+  entry.open = props.open;
+  entry.close = props.open && dismissable && onClose ? onClose : undefined;
+
+  // Focus, the part of "modal" a keyboard user actually feels: on open it moves
+  // INTO the dialog, Tab stays inside (the document handler above), and on
+  // close it goes back to whatever had it before — the button that opened the
+  // dialog, typically. Without the last step a keyboard user is dropped at the
+  // top of the document every time a dialog closes.
+  const focus = useRef<{ restore: HTMLElement | null; pending: boolean }>({
+    restore: null,
+    pending: false,
+  });
+  const restoreFocus = (): void => {
+    const target = focus.current.restore;
+    focus.current.restore = null;
+    focus.current.pending = false;
+    if (!target) return;
+    // After the commit that removes the dialog. Only when focus went down with
+    // it (it is back on <body>, or on a detached node): an `onClose` that moved
+    // focus somewhere on purpose keeps its choice.
+    queueMicrotask(() => {
+      const doc = target.ownerDocument;
+      const active = doc?.activeElement;
+      if (active && active !== doc.body && active.isConnected) return;
+      if (target.isConnected) target.focus?.();
+    });
+  };
+  if (props.open && !wasOpen) {
+    // Stack order is OPEN order. It was mount order, so a confirm dialog that
+    // mounted before the settings dialog it was opened over sat BELOW it, and
+    // Escape closed the settings dialog instead.
+    const i = _modalStack.indexOf(entry);
+    if (i >= 0 && i !== _modalStack.length - 1) {
+      _modalStack.splice(i, 1);
+      _modalStack.push(entry);
+    }
+    const doc = _getDocument();
+    if (doc) {
+      const had = doc.activeElement as HTMLElement | null;
+      // <body> "having focus" means nothing did — nothing to go back to.
+      focus.current.restore = had && had !== doc.body ? had : null;
+      focus.current.pending = true;
+    }
+  } else if (!props.open && wasOpen) {
+    restoreFocus();
+  }
+
   onMount(() => {
     const doc = _getDocument();
-    if (!dismissable || !onClose || !doc) return;
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") onClose();
-    };
-    doc.addEventListener("keydown", onKey);
-    onCleanup(() => doc.removeEventListener("keydown", onKey));
+    if (!doc) return; // SSR / no DOM — nothing to listen on
+    _modalStack.push(entry);
+    if (!_modalKeyHandler) {
+      _modalKeyHandler = onModalKey;
+      doc.addEventListener("keydown", _modalKeyHandler);
+    }
+    onCleanup(() => {
+      const i = _modalStack.indexOf(entry);
+      if (i >= 0) _modalStack.splice(i, 1);
+      if (_modalStack.length === 0 && _modalKeyHandler) {
+        doc.removeEventListener("keydown", _modalKeyHandler);
+        _modalKeyHandler = null;
+      }
+      // Unmounted while open is a close too.
+      if (entry.open) restoreFocus();
+    });
   });
+
+  if (!props.open) return null;
 
   const onBackdrop = dismissable && onClose
     ? (e: Event) => {
@@ -572,6 +758,26 @@ export function Modal(props: ModalProps): VNode | null {
         role: "dialog",
         "aria-modal": "true",
         ...(typeof title === "string" ? { "aria-label": title } : {}),
+        // Focusable from script only — the fallback target when the dialog
+        // holds nothing focusable, so focus still leaves the page behind.
+        tabIndex: -1,
+        ref: (el: HTMLElement | null) => {
+          entry.dialog = el;
+          if (!el || !focus.current.pending) return;
+          focus.current.pending = false;
+          // A ref fires as the element is CREATED, before it is in the
+          // document, and focus() on a detached node does nothing — so after
+          // this commit. Content that already took focus (its own onMount, an
+          // autofocus) keeps it.
+          queueMicrotask(() => {
+            if (
+              !el.isConnected || el.contains(el.ownerDocument.activeElement)
+            ) {
+              return;
+            }
+            (focusablesIn(el)[0] ?? el).focus();
+          });
+        },
       },
       title != null ? h("div", { class: "aio-modal__title" }, title) : null,
       h("div", { class: "aio-modal__body" }, children),
@@ -697,8 +903,20 @@ function pageWindow(page: number, pages: number, win: number): number[] {
  *  slice; this only reports the page the user wants. */
 export function Pagination(props: PaginationProps): VNode {
   const { page, pages, onPage, window: win = 5, class: cls } = props;
+  // Every target is clamped into the real range, and a button is disabled
+  // exactly when its target is the page already shown — so an enabled button
+  // always fires `onPage`. `page` out of range (the last row on page 9 was
+  // deleted and there are 3 pages now) used to leave "Previous" enabled with a
+  // target of 8, which `go` then refused: a button that did nothing, and no
+  // way back into range. A fractional `pages` (total / perPage without the
+  // ceil) counts its partial last page.
+  const last = Number.isFinite(pages) && pages > 0 ? Math.ceil(pages) : 0;
+  const clamp = (p: number) => Math.min(Math.max(p, 1), Math.max(last, 1));
+  const near = Number.isFinite(page) ? Math.round(page) : 1;
+  const prev = clamp(near - 1);
+  const next = clamp(near + 1);
   const go = (p: number) => {
-    if (p >= 1 && p <= pages && p !== page) onPage(p);
+    if (p !== page) onPage(p);
   };
   // Every pager button carries an accessible name. "‹" and "›" are pure
   // punctuation: a screen reader announces nothing, and the semantic surface
@@ -728,11 +946,11 @@ export function Pagination(props: PaginationProps): VNode {
       class: joinClass("aio-page", cls),
       "aria-label": "Pagination",
     },
-    btn("‹", page - 1, { disabled: page <= 1, aria: "Previous page" }),
-    ...pageWindow(page, pages, win).map((p) =>
+    btn("‹", prev, { disabled: prev === page, aria: "Previous page" }),
+    ...pageWindow(clamp(near), last, win).map((p) =>
       btn(String(p), p, { current: p === page, aria: `Page ${p}` })
     ),
-    btn("›", page + 1, { disabled: page >= pages, aria: "Next page" }),
+    btn("›", next, { disabled: next === page, aria: "Next page" }),
   );
 }
 
@@ -885,7 +1103,7 @@ function dismissToast(id: number): void {
 }
 
 /** Show a toast. Returns a dismiss function; auto-dismisses after `duration`
- *  ms (default 4000; pass 0 to keep it until dismissed). Call from anywhere —
+ *  ms (default 4000; pass 0 — or `Infinity` — to keep it until dismissed). Call from anywhere —
  *  event handlers, effects, after a method resolves. Render {@link ToastHost}
  *  once at your app root. */
 export function toast(
@@ -896,7 +1114,13 @@ export function toast(
   const variant = opts?.variant ?? "info";
   _toasts.set([..._toasts.peek(), { id, message, variant }]);
   const duration = opts?.duration ?? 4000;
-  if (duration > 0 && typeof setTimeout !== "undefined") {
+  // A timer delay is a signed 32-bit integer: `Infinity`, or anything past
+  // 2^31-1 ms (~24.8 days), overflows and fires after ~1ms — so the toast meant
+  // to stay forever vanished instantly. Anything that long IS "until
+  // dismissed", which is what it becomes.
+  if (
+    duration > 0 && duration <= 0x7fffffff && typeof setTimeout !== "undefined"
+  ) {
     _toastTimers.set(id, setTimeout(() => dismissToast(id), duration));
   }
   return () => dismissToast(id);

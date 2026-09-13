@@ -17,6 +17,78 @@ import type { Redactor } from "../diagnostics/redact.ts";
 import { runWithUser } from "./auth-context.ts";
 import type { AioUser } from "./aio-types.ts";
 import { log } from "../diagnostics/logger-api.ts";
+import { stringifyWithIssues } from "./persist-guard.ts";
+import type { PersistIssue } from "./persist-guard.ts";
+import { WORKER_PATCH_ACTION } from "../state/cell-compose-reduce.ts";
+
+/** The cell a `worker: true` cell's patch batch belongs to, when `type` is one.
+ *
+ *  A worker cell's method runs in its own isolate and never reaches the main
+ *  dispatch; only the patches it commits do, as `__aioWorkerPatch` with the
+ *  cell in the PAYLOAD. Every sink that decides by the `cell:` prefix of the
+ *  type — the journal filter, the timeline, the redactor — therefore saw a
+ *  type that belongs to no cell and dropped it as framework noise: a
+ *  `journal: true` app with a worker cell never even created its journal, and
+ *  a SIGKILL lost that cell's acked writes. This is the one place that reads
+ *  the owner off such an entry. */
+export function workerPatchCell(
+  type: string,
+  payload: unknown,
+): string | undefined {
+  if (type !== WORKER_PATCH_ACTION) return undefined;
+  const cell = (payload as { cell?: unknown } | null | undefined)?.cell;
+  return typeof cell === "string" && cell !== "" ? cell : undefined;
+}
+
+/** Must a worker patch batch lose its payload? Its ops ARE the values the
+ *  method stored, and no method name rides with them (the worker streams
+ *  patches, not calls) — so an exact `redactActions: ["vault:unlockWith"]`
+ *  cannot be matched against the batch. The redactor's CELL half answers it
+ *  instead: a cell with any redacted action has its state withheld, which is
+ *  the safe direction (a withheld batch is skipped at replay, and said). */
+function redactsWorkerPatch(
+  redact: Redactor,
+  type: string,
+  payload: unknown,
+): boolean {
+  const cell = workerPatchCell(type, payload);
+  return cell !== undefined && redact.redactsCell(cell);
+}
+
+/** The store row that holds a SYNC cell's journal watermark.
+ *
+ *  A `sync: true` cell is not in the KV snapshot — its durable record is the
+ *  CRDT snapshot a server-origin write is folded into, on its own clock (up to
+ *  500 ms after the write). So the app-wide watermark cannot say whether a sync
+ *  cell's journalled write is on disk: it is written with the KV snapshot, not
+ *  with the fold. Each sync cell keeps its own, written INSIDE the fold's
+ *  transaction (`ServerSyncHandler.setFoldWatermark`), so "the snapshot holds
+ *  up to seq N" is true exactly when that snapshot is. */
+export const syncJournalWatermarkKey = (appId: string, cell: string): string =>
+  `${appId}:__journal_wm:${cell}`;
+
+/** What a compaction dropped, recorded beside the journal (`<journal>.base`).
+ *
+ *  The store's watermark says what the DATABASE holds; the journal file alone
+ *  cannot say what it no longer holds. The two only disagree when the database
+ *  went BACK in time — `checkIntegrityOnBoot` restored `state.db.snapshot`, or a
+ *  file was copied over it — and then the tail after a hole was replayed onto
+ *  the older state as if nothing were missing: `withdrawAll()` re-reduced on a
+ *  balance of 50 recorded a withdrawal of 50 that never happened. `wm` is the
+ *  app-wide watermark the last compaction dropped up to, `cells` each sync
+ *  cell's. Written BEFORE the compacted journal replaces the old one, so it
+ *  never claims less was dropped than really was. */
+export type JournalBase = { wm: number; cells: Record<string, number> };
+
+/** The replay refusal a rolled-back database earns — see {@linkcode JournalBase}. */
+export type JournalGap = {
+  /** `"actions"` for the app-wide stream, else the sync cell's id. */
+  stream: string;
+  /** The journal no longer holds entries up to this seq. */
+  droppedThrough: number;
+  /** …while the database says it holds only up to this one. */
+  storeAt: number;
+};
 
 /** The store row that holds a journal's watermark.
  *
@@ -33,11 +105,59 @@ import { log } from "../diagnostics/logger-api.ts";
 export const journalWatermarkKey = (appId: string): string =>
   `${appId}:__journal_wm`;
 
+/** The journal line a time-travel jump writes (`goto`/`undo`/`redo`).
+ *
+ *  A jump assigns live state directly — no action runs — so it used to reach
+ *  NO durable sink: the journal tail after it described actions taken on the
+ *  jumped-to state, and boot replayed them onto the PRE-jump snapshot.
+ *  Measured: eight `inc(1)` (22, snapshotted), `goto` after the third (17),
+ *  `resume`, `inc(100)` (117), SIGKILL — the restart came back at 122, a state
+ *  the app never had. The line carries the persisted fields of every cell as
+ *  they are after the jump, so replay restores them in seq order exactly where
+ *  the jump happened. Journal lines are appended in commit order on one
+ *  thread, so no action can land between the jump and its line.
+ *
+ *  The method half starts with `__`, so every reader that skips
+ *  framework-internal actions (replay-test generation, `am replay`) skips it
+ *  without being taught a new type. */
+export const TT_RESTORE_TYPE = "aio:__timeTravel";
+
+/** The payload of a {@linkcode TT_RESTORE_TYPE} line. */
+export type TimeTravelRestore = {
+  /** The command that moved state (`goto`, `undo`, `redo`). */
+  cmd: string;
+  /** The history id, for `goto`. */
+  arg?: number;
+  /** Cell id → the persisted top-level fields after the jump. A field the cell
+   *  keeps out of the store (`persist: { exclude }`, `persist: "none"`) is not
+   *  written here either — the journal must not hold what the store refuses to. */
+  cells: Record<string, Record<string, unknown>>;
+};
+
+/** Where an action came from, as the journal records it.
+ *
+ *  `input` — dispatched from OUTSIDE the dispatch loop: a client, the trojan
+ *  API, server code, a schedule declared at boot. `effect` — dispatched while
+ *  an earlier action's effects were running, or later by something those
+ *  effects started: a timer it set, its async body, a `$do` — and what a
+ *  cell's `onInit` dispatches, which boot re-creates the same way. Replaying the
+ *  cause produces an `effect` action again, so `am replay` must not send it a
+ *  second time (a `later(4)` that schedules `inc(4)` replayed as +9, not +5).
+ *  Boot recovery re-REDUCES every line with effects dropped, so it needs both.
+ *  Absent on journals written before this field existed. */
+export type ActionCause = "input" | "effect";
+
 export type JournalEntry = {
   seq: number;
   type: string;
   payload?: unknown;
   ts: number;
+  /** See {@linkcode ActionCause}. */
+  cause?: ActionCause;
+  /** The `_callId` of the async call whose run dispatched this entry — see
+   *  `TimelineEntry.call`. What `am record --from` needs to tell overlapping
+   *  calls from sequential ones. */
+  call?: string;
   /** The originating action type, for a write-set commit (`cell:__setFoo`
    *  written by the async method `cell:foo`). Recorded so a reader — and the
    *  redactor — can attribute the entry to the method that produced it. */
@@ -70,15 +190,42 @@ export type Journal = {
       payload?: unknown;
       origin?: string;
       user?: AioUser;
+      cause?: ActionCause;
+      call?: string;
     },
     ts: number,
   ): number;
   /** All entries with seq > `after` (the persisted watermark), in order. */
   readSince(after: number): JournalEntry[];
+  /** What boot must replay: every entry past the watermark that GOVERNS it —
+   *  a tracked (sync) cell's own, else the app-wide one. */
+  readTail(): JournalEntry[];
   /** The persisted watermark — replay starts strictly after this seq. */
   watermark(): number;
+  /** The watermark that governs a top-level state key: a tracked cell's own,
+   *  else the app-wide one. Replay takes an entry's change to a key only past
+   *  it (see `replayJournal`). */
+  watermarkFor(key: string): number;
   /** Record that state up to `seq` is durably persisted; compacts the journal. */
   setWatermark(seq: number): void;
+  /** Declare the cells that carry their OWN watermark (sync cells — see
+   *  {@linkcode syncJournalWatermarkKey}), with what the store holds for each.
+   *  Their entries are compacted and replayed by that watermark only. */
+  trackCells(stored: Record<string, number>): void;
+  /** Record that `cell`'s own durable record holds its entries up to `seq`
+   *  (called after the fold that wrote it committed); compacts the journal. */
+  setCellWatermark(cell: string, seq: number): void;
+  /** The hole between this journal and a store that went back in time, or
+   *  null. Only meaningful once `trackCells` has run. */
+  gap(): JournalGap | null;
+  /** Move the journal (and its base) to `to`, and start a fresh one at the
+   *  store's watermarks. Throws when the journal cannot be moved. */
+  quarantine(to: string): void;
+  /** Accept the store's watermarks as the journal's base — for a gap with
+   *  nothing past it to replay. Throws when the base cannot be written. */
+  rebase(): void;
+  /** Where the journal lives. */
+  readonly path: string;
   /** The highest seq appended so far. */
   currentSeq(): number;
   /** Flush + release. */
@@ -135,13 +282,64 @@ export function replayJournal<S, A>(
   state: S,
   entries: JournalEntry[],
   reduce: (state: S, action: A) => { state: S },
+  /** The watermark that governs each top-level state key (`Journal.
+   *  watermarkFor`). An entry's change to a key is taken only when its seq is
+   *  past that key's watermark — the key's durable record already holds it
+   *  otherwise. It matters once two watermarks exist: a sync cell folds on its
+   *  own clock, so one entry can be in the KV snapshot and not in the sync
+   *  snapshot (or the reverse), and re-reducing it whole applied the part
+   *  already on disk twice. Absent ⇒ every change is taken. */
+  keyWatermark?: (key: string) => number,
 ): ReplayResult<S> {
   let s = state;
   let replayed = 0;
   const skipped: SkippedEntry[] = [];
+  /** `next` with every key whose watermark already covers `seq` put back. */
+  const admit = (prev: S, next: S, seq: number): S => {
+    if (!keyWatermark || prev === next) return next;
+    const p = prev as Record<string, unknown>;
+    const n = next as Record<string, unknown>;
+    let out: Record<string, unknown> | null = null;
+    for (const k of new Set([...Object.keys(p), ...Object.keys(n)])) {
+      if (p[k] === n[k] || seq > keyWatermark(k)) continue;
+      out ??= { ...n };
+      if (k in p) out[k] = p[k];
+      else delete out[k];
+    }
+    return (out ?? next) as S;
+  };
   for (const e of [...entries].sort((a, b) => a.seq - b.seq)) {
     if (isUnreplayable(e)) {
       skipped.push({ seq: e.seq, type: e.type, reason: "redacted" });
+      continue;
+    }
+    if (e.type === TT_RESTORE_TYPE) {
+      // Not an action: the state a time-travel jump put in place. Applied as
+      // the store applies a snapshot — each persisted field replaced, fields
+      // the store does not hold left as they are.
+      const cells = (e.payload as Partial<TimeTravelRestore> | undefined)
+        ?.cells;
+      if (!cells || typeof cells !== "object") {
+        skipped.push({
+          seq: e.seq,
+          type: e.type,
+          reason: "threw",
+          error: "time-travel line carries no state",
+        });
+        continue;
+      }
+      const next = { ...(s as Record<string, unknown>) };
+      for (const [cell, fields] of Object.entries(cells)) {
+        const cur = next[cell];
+        // A cell this build does not declare has no slice to restore into —
+        // inventing one would put an undeclared key into live state.
+        if (cur === null || typeof cur !== "object" || Array.isArray(cur)) {
+          continue;
+        }
+        next[cell] = { ...(cur as Record<string, unknown>), ...fields };
+      }
+      s = admit(s, next as S, e.seq);
+      replayed++;
       continue;
     }
     try {
@@ -149,10 +347,15 @@ export function replayJournal<S, A>(
       // for authorization, for "my rows only", for a per-caller quota) throws
       // or reduces WRONGLY when replayed as nobody — and a throw here used to
       // reject `aio.run()`, leaving an app that could never boot again.
-      s = runWithUser(
-        e.user,
-        () => reduce(s, { type: e.type, payload: e.payload } as A),
-      ).state;
+      const prev = s;
+      s = admit(
+        prev,
+        runWithUser(
+          e.user,
+          () => reduce(prev, { type: e.type, payload: e.payload } as A),
+        ).state,
+        e.seq,
+      );
       replayed++;
     } catch (err) {
       skipped.push({
@@ -178,7 +381,11 @@ export function replayJournal<S, A>(
  *  continuing loses exactly the torn entry (and, when the next append landed
  *  on its line with no newline between, the one fused to it) — never the
  *  tail. */
-export function parseJournal(text: string): JournalEntry[] {
+export function parseJournal(
+  text: string,
+  /** Internal: a second read of text a first read already reported on. */
+  opts: { quiet?: boolean } = {},
+): JournalEntry[] {
   let corrupt = 0;
   const out: JournalEntry[] = [];
   for (const line of text.split("\n")) {
@@ -190,7 +397,7 @@ export function parseJournal(text: string): JournalEntry[] {
       corrupt++;
     }
   }
-  if (corrupt > 0) {
+  if (corrupt > 0 && !opts.quiet) {
     log.warn(
       "journal",
       `journal: ${corrupt} torn line${corrupt === 1 ? "" : "s"} skipped (a ` +
@@ -200,6 +407,49 @@ export function parseJournal(text: string): JournalEntry[] {
     );
   }
   return out;
+}
+
+/** Action types already reported by {@linkcode warnLossyEntry} — once per
+ *  type per process: the same call shape repeats on every call. */
+const _lossyWarned = new Set<string>();
+
+/** Say — once per action type — that a journalled entry will not replay as
+ *  it ran.
+ *
+ *  Replay re-reduces the entry's payload as parsed back from JSON, so a
+ *  server-side call with arguments JSON cannot round-trip rebuilt a DIFFERENT
+ *  state from the one that was live: an `undefined` argument came back as
+ *  `null` (so the parameter's default did not apply), a Date as a string,
+ *  NaN as null, an undefined key vanished. Recovery reported only "recovered
+ *  6 actions". (A call arriving over the wire is unaffected — its arguments
+ *  were already JSON when the method ran.)
+ *
+ *  Observe-only, identical in dev and prod: refusing the append would turn a
+ *  mangled replay into a missing one. */
+function warnLossyEntry(type: string, issues: PersistIssue[]): void {
+  if (_lossyWarned.has(type)) return;
+  _lossyWarned.add(type);
+  const shown = issues.slice(0, 6).map((i) => {
+    const arg = /^payload\.args\.(\d+)(.*)$/.exec(i.path);
+    const where = arg
+      ? `argument ${Number(arg[1]) + 1}${arg[2] ? ` (${arg[2].slice(1)})` : ""}`
+      : i.path;
+    const becomes = arg && !arg[2] && i.kind === "undefined"
+      ? "null — so the parameter's default does NOT apply"
+      : i.becomes;
+    return `  • ${where}: ${i.kind} — on replay: ${becomes}`;
+  });
+  const more = issues.length > 6 ? `\n  …and ${issues.length - 6} more` : "";
+  log.warn(
+    "journal",
+    `journal: "${type}" was journalled with values JSON cannot round-trip, ` +
+      `so a crash-recovery replay would re-run it with DIFFERENT input and ` +
+      `rebuild a different state:\n${shown.join("\n")}${more}\n` +
+      `  fix: call it with JSON-shaped arguments — a Date as ` +
+      `\`.toISOString()\` or epoch ms, null (not undefined) for "no value", ` +
+      `an explicit value where a default was relied on, a Map/Set as an ` +
+      `object/array. Said once per action type.`,
+  );
 }
 
 export function createJournal(
@@ -262,6 +512,68 @@ export function createJournal(
   }
   if (wm > seq) seq = wm;
 
+  // ── Per-cell watermarks and the compaction base ─────────────────────────
+  const basePath = path + ".base";
+  /** Tracked (sync) cell → the seq its own durable record holds. */
+  const cellWm = new Map<string, number>();
+  const cellOf = (e: JournalEntry): string | undefined => {
+    const i = e.type.indexOf(":");
+    return i > 0 ? e.type.slice(0, i) : undefined;
+  };
+  /** The watermark an entry is compacted and replayed by. */
+  const governing = (e: JournalEntry): number => {
+    const c = cellOf(e);
+    return c !== undefined && cellWm.has(c) ? cellWm.get(c)! : wm;
+  };
+  /** The base on disk; null when there is none (a journal from before it
+   *  existed, or one never compacted), and null — said — when it is torn. */
+  const readBase = (): JournalBase | null => {
+    const text = readOr(basePath, "journal base");
+    if (text === null) return null;
+    try {
+      const b = JSON.parse(text) as Partial<JournalBase>;
+      const cells: Record<string, number> = {};
+      for (const [c, v] of Object.entries(b.cells ?? {})) {
+        if (typeof v === "number") cells[c] = v;
+      }
+      return { wm: typeof b.wm === "number" ? b.wm : 0, cells };
+    } catch (e) {
+      log.warn(
+        "journal",
+        `journal: the compaction base at ${basePath} is unreadable (${e}) — ` +
+          `a rolled-back database is checked by the journal's first seq instead`,
+      );
+      return null;
+    }
+  };
+  /** Record what the journal is about to stop holding. Atomic (tmp + rename)
+   *  and owner-only like the journal. Throws — the caller decides how loud. */
+  const writeBase = (): void => {
+    const tmp = basePath + ".tmp";
+    Deno.writeTextFileSync(
+      tmp,
+      JSON.stringify({ wm, cells: Object.fromEntries(cellWm) }),
+      { mode: 0o600 },
+    );
+    Deno.renameSync(tmp, basePath);
+  };
+  const openBase = readBase();
+  if (openBase) {
+    seq = Math.max(seq, openBase.wm, ...Object.values(openBase.cells));
+  }
+  // A journal starting from nothing drops nothing — its first append says so
+  // on disk, so the first-seq fallback (for journals written before the base
+  // existed) is never asked about a journal this build started. Only where a
+  // store owns the watermark: without one there is no rollback to detect.
+  let baseOwed = storeOwnsWatermark && openBase === null &&
+    !journalText?.trim();
+  /** The base, where the store can be rolled back; a no-op otherwise. */
+  const recordBase = (): void => {
+    if (!storeOwnsWatermark) return;
+    writeBase();
+    baseOwed = false;
+  };
+
   const enc = new TextEncoder();
   // Owner-only: the journal sits next to the database it recovers, and a
   // world-readable copy of recent action payloads is a leak in its own right.
@@ -285,36 +597,55 @@ export function createJournal(
     }
   }
 
-  return {
+  const api: Journal = {
     append(action, ts) {
       const s = ++seq;
       // The write-set of a redacted method carries the same secret as its
       // arguments, under a DIFFERENT type — `isRedactedAction` checks the
       // origin too so an exact pattern cannot plug one and leave the other.
-      const hide = isRedactedAction(redacted, action.type, action.origin);
-      writeLine(
-        JSON.stringify({
-          seq: s,
-          type: action.type,
-          payload: hide ? REDACTED : action.payload,
-          ts,
-          ...(action.origin !== undefined ? { origin: action.origin } : {}),
-          // The caller, so replay re-reduces under the identity the action
-          // actually had. Never a credential: `AioUser` is the resolved id and
-          // role, which the app's own state already holds. An app that hangs
-          // extra fields off it (a public key, a tenant) pays for them here in
-          // bytes — bounded, because the journal is compacted at every
-          // watermark and therefore only ever holds the persist debounce
-          // window.
-          ...(action.user !== undefined ? { user: action.user } : {}),
-          // The marker travels WITH the entry: replay must be able to refuse it
-          // without pattern-matching a sentinel string, and the file outlives
-          // the config that redacted it (a journal written under
-          // `redactActions` is still there after the option is removed).
-          ...(hide ? { redacted: true as const } : {}),
-        }) +
-          "\n",
-      );
+      const hide = isRedactedAction(redacted, action.type, action.origin) ||
+        redactsWorkerPatch(redacted, action.type, action.payload);
+      // One pass that both serializes the line and names every value JSON
+      // would bring back different (see `warnLossyEntry`). A value JSON
+      // refuses outright (a BigInt, a cycle) throws here with its path, as it
+      // always threw — the caller reports a refused append.
+      const { json, issues } = stringifyWithIssues({
+        seq: s,
+        type: action.type,
+        payload: hide ? REDACTED : action.payload,
+        ts,
+        ...(action.origin !== undefined ? { origin: action.origin } : {}),
+        // The caller, so replay re-reduces under the identity the action
+        // actually had. Never a credential: `AioUser` is the resolved id and
+        // role, which the app's own state already holds. An app that hangs
+        // extra fields off it (a public key, a tenant) pays for them here in
+        // bytes — bounded, because the journal is compacted at every
+        // watermark and therefore only ever holds the persist debounce
+        // window.
+        ...(action.user !== undefined ? { user: action.user } : {}),
+        ...(action.cause !== undefined ? { cause: action.cause } : {}),
+        ...(action.call !== undefined ? { call: action.call } : {}),
+        // The marker travels WITH the entry: replay must be able to refuse it
+        // without pattern-matching a sentinel string, and the file outlives
+        // the config that redacted it (a journal written under
+        // `redactActions` is still there after the option is removed).
+        ...(hide ? { redacted: true as const } : {}),
+      });
+      // A time-travel line is STATE, not call arguments: the persist path
+      // already names every value in it that JSON would change, and the
+      // advice below ("call it with JSON-shaped arguments") would be false.
+      if (issues.length > 0 && action.type !== TT_RESTORE_TYPE) {
+        warnLossyEntry(action.type, issues);
+      }
+      if (baseOwed) {
+        try {
+          recordBase();
+        } catch {
+          // aio-ok: the append below meets the same directory and reports a
+          // refusal loudly (PERSIST_ERROR); the next compaction writes it.
+        }
+      }
+      writeLine(json + "\n");
       return s;
     },
     readSince(after) {
@@ -379,6 +710,19 @@ export function createJournal(
           throw e;
         }
         const keep = parseJournal(text).filter((e) => e.seq > s);
+        // A tracked (sync) cell's entries go by ITS watermark: the KV snapshot
+        // that advanced `s` does not hold them, and dropping them here lost
+        // exactly the writes the fold had not reached yet.
+        if (cellWm.size > 0) {
+          keep.push(
+            ...parseJournal(text, { quiet: true }).filter((e) =>
+              e.seq <= s && e.seq > governing(e)
+            ),
+          );
+          keep.sort((a, b) => a.seq - b.seq);
+        }
+        // What is dropped is recorded BEFORE it is gone (see JournalBase).
+        recordBase();
         const tmp = path + ".tmp";
         // A leftover tmp from an earlier crash may exist with looser
         // permissions; `mode` only applies at CREATE time, so remove it first.
@@ -408,7 +752,79 @@ export function createJournal(
         );
       }
     },
+    readTail() {
+      return api.readSince(Math.min(wm, ...cellWm.values())).filter((e) =>
+        e.seq > governing(e)
+      );
+    },
+    watermarkFor: (key) => cellWm.get(key) ?? wm,
+    trackCells(stored) {
+      for (const [cell, at] of Object.entries(stored)) {
+        cellWm.set(cell, Math.max(cellWm.get(cell) ?? 0, at));
+        // Never re-issue a seq a fold already claims: a compacted journal can
+        // hold nothing that high, so its lines alone would restart below it
+        // and the next boot would read the new writes as already folded.
+        if (at > seq) seq = at;
+      }
+    },
+    setCellWatermark(cell, at) {
+      cellWm.set(cell, Math.max(cellWm.get(cell) ?? 0, at));
+      // Same compaction, same base — the app-wide watermark is unchanged.
+      api.setWatermark(wm);
+    },
+    gap() {
+      // Without a store there is nothing to roll back: the `.wm` side file
+      // lives beside the journal, not in the database.
+      if (!storeOwnsWatermark) return null;
+      const base = readBase();
+      if (base) {
+        if (base.wm > wm) {
+          return { stream: "actions", droppedThrough: base.wm, storeAt: wm };
+        }
+        for (const [cell, at] of Object.entries(base.cells)) {
+          // A cell this build no longer tracks (removed, or no longer
+          // `sync: true`) has no watermark to be behind.
+          const storeAt = cellWm.get(cell);
+          if (storeAt !== undefined && at > storeAt) {
+            return { stream: cell, droppedThrough: at, storeAt };
+          }
+        }
+        return null;
+      }
+      // No base: a journal written before it existed, where seqs are
+      // contiguous and only the app-wide stream exists. The first line it
+      // still holds is where its last compaction stopped.
+      const first = api.readSince(-Infinity)
+        .filter((e) => {
+          const c = cellOf(e);
+          return e.seq > 0 && (c === undefined || !cellWm.has(c));
+        })
+        .reduce((m, e) => Math.min(m, e.seq), Infinity);
+      return first !== Infinity && first > wm + 1
+        ? { stream: "actions", droppedThrough: first - 1, storeAt: wm }
+        : null;
+    },
+    quarantine(to) {
+      try {
+        Deno.renameSync(path, to);
+      } catch (e) {
+        // A base whose journal was compacted away entirely still names the
+        // hole; there is simply no journal to keep.
+        if (!(e instanceof Deno.errors.NotFound)) throw e;
+      }
+      try {
+        Deno.renameSync(basePath, to + ".base");
+      } catch (e) {
+        if (!(e instanceof Deno.errors.NotFound)) throw e;
+      }
+      // The next journal starts at what the store holds — so the hole just
+      // moved aside is not found again in a file that never had it.
+      recordBase();
+    },
+    rebase: () => recordBase(),
+    path,
     currentSeq: () => seq,
     close() {/* writes are synchronous — nothing buffered */},
   };
+  return api;
 }

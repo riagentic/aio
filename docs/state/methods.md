@@ -144,8 +144,10 @@ const id = await cart.addItem({ name: "Book", price: 12 })
 - **ARGUMENTS cross the same wire, and the same table applies to them.**
   `todo.due(new Date())` called from a browser reaches the method as an ISO
   **string**; called in a test (or from server code) it arrives as a `Date`,
-  because nothing crossed a wire. That difference is the one shape this project
-  treats as worse than a missing feature, so both halves are said out loud:
+  because nothing crossed a wire (sync and async methods alike: an in-process
+  function or class instance reaches either as itself). That difference is the
+  one shape this project treats as worse than a missing feature, so both halves
+  are said out loud:
 
   - A value JSON cannot carry at all — a `BigInt`, a circular structure —
     **refuses the call**, naming it: nothing is sent, nothing is queued, and the
@@ -279,9 +281,11 @@ one action. Each `await` boundary starts a new batch.
 > put a 1.3 GB tree walk in a cell method on the strength of that row, and the
 > CPU warning two paragraphs down did not read as being about it.
 >
-> Same idea for big arrays: `s.list.push(x)` emits one `add` patch, while
-> `s.list = [...s.list, x]` re-ships the whole list on every commit
-> ([delta](../persistence/delta.md#append-in-place-dont-replace)).
+> Same idea for big collections: `s.map[k] = v` ships one key, while
+> `s.map = { ...s.map, [k]: v }` re-ships the whole object on every commit (a
+> spread ARRAY is narrowed back to its adds, so `[...s.list, x]` costs what
+> `push` does —
+> [delta](../persistence/delta.md#arrays-and-objects-what-gets-re-sent)).
 >
 > `await` alone does **not** rescue CPU work: awaiting a function that computes
 > for 200ms blocks the isolate for 200ms. In dev, aio holds a reduce to one
@@ -416,6 +420,13 @@ The same applies to a captured array **element** after an index-moving mutator
 (`sort`, `splice`, `shift`, `reverse`, …) — the path `s.items[0]` would suddenly
 address a different element. (`push` never moves existing elements, so captured
 elements stay valid.)
+
+A **loop** over an array the method replaces mid-loop is not a stale capture:
+`for (const x of s.items.values()) s.items = s.items.filter(…)` finishes over
+the array it started on, exactly as in a sync method. Rows it hands out after
+the replacement are the old rows — read them freely; a write to one throws
+(`… came from a loop over an array this method REPLACED mid-loop …`), because
+whether it should land depends on whether the new array kept that row.
 
 The fix is always the same — copy what you need **before** overwriting:
 
@@ -1040,9 +1051,19 @@ than a hazard:
 - **Failures are never cached.** Caching one would make a single bad minute last
   the whole ttl, which is the opposite of what a ttl is for.
 
-An argument with no stable key — a function, a symbol, a cycle — means the call
-is simply not cached and not deduped. Treating two different calls as the same
-one is the failure a cache must not have.
+Only **plain data** has a key: strings, booleans, finite numbers, `null`,
+`undefined`, arrays and plain objects. Anything else — a function, a symbol, a
+cycle, a `Set`/`Map`/`Date`, a class instance, `NaN`/`±Infinity`/`-0`, an array
+with holes — means the call is simply not cached and not deduped (by `ttl` or by
+`"first"`). `JSON.stringify` would give `new Set([1,2])` and `new Set([3])` the
+same key; treating two different calls as the same one is the failure a cache
+must not have.
+
+Every caller owns what its `await` returned. A `ttl` hit and a `"first"` adopter
+each receive their **own copy** of the shared result, so one caller mutating it
+never changes what the next one is told. A result `structuredClone` would change
+— a class instance, a function, a client handle — is handed over by reference
+instead of being flattened into a lookalike.
 
 Both keys are checked at `cell()` time: an unknown method name, and a **sync**
 method (which runs to completion inside one dispatch, so a second call can never
@@ -1119,11 +1140,11 @@ methods: {
     return s.samples.length
   },
 
-  async run(s: State) {
+  async run(s: State & Partial<MethodDraftCalls>) {
     s.status = "running"
-    const n = s.$call.bench("cold")   // sees status === "running"
+    const n = s.$call!.bench("cold")  // sees status === "running"
     await load()
-    s.$call.bench("warm")             // same commit as everything above
+    s.$call!.bench("warm")            // same commit as everything above
     s.status = "done"
   },
 }
@@ -1134,8 +1155,8 @@ of each.
 
 ### Types
 
-`$call` is served at runtime on every draft, sync and async. To have the
-type-checker know about it, annotate the draft:
+`$call` is served at runtime on every draft, sync and async. The draft type a
+method receives does not declare it, so say so on the draft — with `Partial<>`:
 
 ```ts
 interface Calls {
@@ -1143,21 +1164,30 @@ interface Calls {
 }
 
 methods: {
-  bench(s: State, kind: string) { /* … */ },
-  async run(s: State & MethodDraftCalls<Calls>) {
-    const n: number = s.$call.bench("cold")
+  bench(s: State, kind: string) { return 0 },
+  async run(s: State & Partial<MethodDraftCalls<Calls>>) {
+    const n: number = s.$call!.bench("cold")
   },
 }
 ```
 
-The interface lists what you **call** — the methods without the draft parameter,
-because `$call` supplies it. Write it out rather than deriving it with
-`typeof methods`: that is circular inside the object literal the methods live in
-(TS7022). When the map is declared elsewhere,
-`MethodDraftCalls<MethodCalls<typeof helpers>>` derives it for you.
-
-With no type argument (`s: State & MethodDraftCalls`) every sibling name
-resolves and nothing is claimed about its arguments.
+- **`Partial<>` and `!` are both needed.** `s: State & MethodDraftCalls<Calls>`
+  without `Partial` does not compile (TS2322, "Property '$call' is missing"): a
+  method that REQUIRES a member the draft type does not declare is not a
+  `Method<State>`. It is the same shape as `Partial<MethodDraftMeta>`. A bare `s.$call`,
+  with no annotation, is TS2339.
+- **Or cast at the call**, leaving `s` un-annotated:
+  `(s as typeof s & MethodDraftCalls<Calls>).$call.bench("cold")`.
+- **The interface lists what you call** — the methods without the draft
+  parameter, because `$call` supplies it. Write it out rather than deriving it
+  with `typeof methods`: that is circular inside the object literal the methods
+  live in (TS7022). When the map is declared elsewhere,
+  `Partial<MethodDraftCalls<MethodCalls<typeof helpers>>>` derives it for you.
+- **With no type argument** (`s: State & Partial<MethodDraftCalls>`) every
+  sibling name resolves and nothing is claimed about its arguments.
+- **`State` is a `type` alias**, never an `interface` — an interface has no
+  index signature, so a cell refuses it and every field reads as `unknown` (see
+  [the traps in Cells](cells.md#cell-config)).
 
 ### What it refuses
 
@@ -1168,8 +1198,21 @@ resolves and nothing is claimed about its arguments.
 - **A name the cell does not have.** `s.$call.bnech()` says so and lists what is
   available, instead of `undefined is not a function`.
 - **A cycle.** `$call` runs the body inline, so `a → b → a` recurses rather than
-  queueing. After 32 nested calls it stops with a sentence about your two
-  methods rather than a stack trace through aio's proxy.
+  queueing. It stops with a sentence about your two methods rather than a stack
+  trace through aio's proxy, and names the chain (`a → b → a → …`). Two limits:
+  - **32 nested** sibling bodies on the stack at once — a sync cycle, or an
+    async one that recurses before its first `await`.
+  - **10 000 chained** calls across `await`s — one sibling reached from
+    another's body after an `await`, which is what makes an async cycle stop
+    instead of spinning forever. It is that high because the same shape is also
+    honest recursion: a paginated
+    `async fetchPage(s, p) { await io; …; await s.$call.fetchPage(p + 1) }` runs
+    every page. An infinite cycle that yields only to microtasks is refused
+    within ~40 ms; every link stays alive until the chain settles, so recursion
+    deeper than that belongs in a loop.
+
+  Parallel siblings (`await Promise.all(ids.map((id) => s.$call.fetchOne(id)))`)
+  are all one step below their caller, so a fan-out of any width counts as one.
 
 `$call` is not a dispatch: no action is journalled for the sibling, and
 `cancelOn`, `transaction` and access rules are the CALLER's. If you want the
@@ -1235,17 +1278,15 @@ counter.isPositive(); // reads state → true
 counter.increment.type; // → 'counter:increment'
 ```
 
-Before `aio.run()`, calling a method does **not** dispatch. In development it
-throws immediately with
-`[counter] increment() called before aio.run() — add
-this cell to aio.run({ cells: [...] })`;
-in production it logs the same message once and resolves with `void`. The
-intent: surface "I clicked and nothing happened, no error anywhere" as an
-immediate failure.
+Before `aio.run()`, calling a method does **not** dispatch — it throws,
+synchronously, in development and production alike:
+`[counter] increment() called before the cell's runtime is booted — add this cell to aio.run({ cells: [...] }), or boot it in a test with testCell/testUI/bootCells before calling its methods.`
+There is no runtime to dispatch to, so the only alternative is a write that
+silently vanishes — "I clicked and nothing happened, no error anywhere".
 
-To get the raw action object pre-binding (composition, tests, time-travel), use
-the internal catalog: `counter.__aio.actions.increment(5)` returns
-`{ type: "counter:increment", payload: { args: [5] } }`.
+To get the raw action object — before or after binding (composition, tests,
+`schedule.*`) — use the method's `.action()`: `counter.increment.action(5)`
+returns `{ type: "counter:increment", payload: { args: [5] } }`.
 
 ---
 
@@ -1322,21 +1363,30 @@ mutated; if you wanted to mutate the draft, do it before spreading.
 
 ### Effects and state references
 
-Sync methods can return schedule effects. Effect payloads can reference state
-values directly — aio clones effects inside `produce()` before Immer revokes the
-draft, so state references in effects work transparently:
+Effects run through `s.$do(...)` (see
+[Running effects](#running-effects-sdoeffect-)); a `return` is only ever a value
+for the caller. Effect payloads can reference state directly — `$do` snapshots
+any draft inside the effect at the moment it is captured, before Immer revokes
+the draft:
 
 ```ts
 methods: {
   snapshot(s) {
-    return { type: "backup:save", payload: { items: s.items } } // ✅ works
+    s.$do(schedule.after("backup", 1000, backup.save.action(s.items))); // ✅ s.items as of this line
+    s.items.push(next); // not in the scheduled payload
   },
 }
 ```
 
-If an effect contains non-cloneable values (functions, symbols, circular refs),
-aio logs a warning and keeps the original. Stick to plain serializable objects
-in effect payloads for best results.
+Returning `{ type: "backup:save", payload: { items: s.items } }` instead is not
+an effect: the caller's `await` resolves with that object and nothing is
+scheduled or dispatched.
+
+An effect whose payload cannot be cloned (a function, a class instance, a DOM
+node) never runs — keep effect payloads plain data. In dev and in tests
+(`__aioDev`) the `s.$do(...)` call itself throws, naming the effect, so the
+method's call rejects; in production the effect is **dropped** with an `ERROR`
+log naming the action and the value.
 
 ### Async batching and time-travel
 

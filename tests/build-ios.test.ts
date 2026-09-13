@@ -145,3 +145,64 @@ Deno.test("ios: the build writes a complete project on this host", async () => {
     await Deno.remove(root, { recursive: true }).catch(() => {});
   }
 });
+
+// ── A `$` in the title is a CHARACTER, not a replacement pattern ─────────
+//
+// `String.prototype.replaceAll` interprets `$$`, `$&`, `` $` `` and `$'`
+// inside a STRING replacement, and the value substituted here is the app's own
+// title. Measured before the fix:
+//
+//   "Cash $$ Register"  → CFBundleDisplayName "Cash $ Register"   (silent)
+//   "Cost $& Saver"     → "Cost {{APP_NAME}}amp; Saver"           ($& is the
+//                          matched text, i.e. the placeholder itself)
+//   "Cost $` Saver"     → 225 characters of the preceding file spliced in,
+//                          producing a project file that does not parse
+//
+// Android had the identical bug, and its Kotlin escape wrote `\$`, which FED
+// the pattern — so escaping made it worse. A function replacement is not a
+// pattern, which is the whole fix.
+Deno.test("ios: a title containing $ substitutions survives verbatim", () => {
+  for (
+    const title of [
+      "Cash $$ Register",
+      "Cost $& Saver",
+      "Cost $` Saver",
+      "Cost $' Saver",
+      "Plain $ Sign",
+    ]
+  ) {
+    const files = renderIosTemplate({
+      appName: title,
+      bundleId: "com.example.app",
+      versionName: "1.0.0",
+      versionCode: 1,
+      allowArbitraryLoads: false,
+    });
+    const plist = Object.entries(files).find(([k]) => k.endsWith(".plist"))
+      ?.[1];
+    assert(plist, "the template has an Info.plist");
+    assertStringIncludes(
+      plist,
+      plistText(title),
+      `the title was rewritten by its own $ pattern: ${title}`,
+    );
+    assert(
+      !plist.includes("{{APP_NAME}}"),
+      `the placeholder survived into the output for ${title}`,
+    );
+  }
+});
+
+Deno.test("ios: a version string containing $ survives too", () => {
+  // It comes from deno.json, which the framework does not police.
+  const files = renderIosTemplate({
+    appName: "App",
+    bundleId: "com.example.app",
+    versionName: "1.0.0-$&",
+    versionCode: 1,
+    allowArbitraryLoads: false,
+  });
+  // MARKETING_VERSION lives in the Xcode project file, not the plist.
+  const all = Object.values(files).join("\n");
+  assertStringIncludes(all, "1.0.0-$&");
+});

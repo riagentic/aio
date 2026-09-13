@@ -14,7 +14,8 @@ export const reports = cell("reports", {
   state: { status: "idle", rows: [] as Row[] },
   methods: {
     async build(s, raw: number[]) {
-      s.status = "building"; // commits + reaches clients immediately
+      s.status = "building";
+      await Promise.resolve(); // an await commits — "building" reaches clients now
       s.rows = crunch(raw); // seconds of CPU — on its own thread
       s.status = "done";
     },
@@ -30,18 +31,18 @@ do on the main isolate.
 
 ## What it changes, and what it doesn't
 
-|    |                                                                                                                                                                                                    |
-| -- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| ✅ | A method that blocks 10s delays **only this cell**. Measured: with the flag, five round trips to another cell during a 1.5s burn finish in milliseconds; without it, 1403ms.                       |
-| ✅ | State stays authoritative on the main isolate — the worker streams its Immer patches home, so **persistence, broadcast, `ui`/`persist` filters, time-travel and the wire protocol are unchanged**. |
-| ✅ | Writes before an `await` still reach clients immediately (the spinner pattern works).                                                                                                              |
-| ✅ | `serverUser()` / `serverRequest()` answer inside the worker — the ambient context is forwarded with every call.                                                                                    |
-| ✅ | Per-cell FIFO ordering is preserved; return values and thrown errors cross back to the caller.                                                                                                     |
-| ✅ | Shutdown terminates the thread instead of waiting for it — a wedged method can't hold the app hostage.                                                                                             |
-| ⚠️ | Args and return values must be **structured-cloneable** (plain data).                                                                                                                              |
-| ⚠️ | Module singletons are **per worker** — a module-scope DB connection or FFI handle gets its own instance in that thread.                                                                            |
-| ⚠️ | A postMessage + clone per dispatch: noise next to heavy work, ~10× a direct call for a trivial one.                                                                                                |
-| ❌ | It does **not** make the slow method faster. The caller waits exactly as long; everyone else stops waiting with them.                                                                              |
+|    |                                                                                                                                                                                                                                     |
+| -- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| ✅ | A method that blocks 10s delays **only this cell**. Measured: with the flag, five round trips to another cell during a 1.5s burn finish in milliseconds; without it, 1403ms.                                                        |
+| ✅ | State stays authoritative on the main isolate — the worker streams its Immer patches home, so **persistence, the journal, broadcast, `visible`/`persist` filters, time-travel, `am timeline` and the wire protocol are unchanged**. |
+| ✅ | Writes before an `await` still reach clients immediately (the spinner pattern works). Without an `await` between them, the write and the burn are one commit: `"building"` is never seen.                                           |
+| ✅ | `serverUser()` / `serverRequest()` answer inside the worker — the ambient context is forwarded with every call.                                                                                                                     |
+| ✅ | Per-cell FIFO ordering is preserved; return values and thrown errors cross back to the caller — an error keeps its `message`, `name` and string `code`.                                                                             |
+| ✅ | Shutdown terminates the thread instead of waiting for it — a wedged method can't hold the app hostage.                                                                                                                              |
+| ⚠️ | Args and return values must be **structured-cloneable** (plain data).                                                                                                                                                               |
+| ⚠️ | Module singletons are **per worker** — a module-scope DB connection or FFI handle gets its own instance in that thread.                                                                                                             |
+| ⚠️ | A postMessage + clone per dispatch: noise next to heavy work, ~10× a direct call for a trivial one.                                                                                                                                 |
+| ❌ | It does **not** make the slow method faster. The caller waits exactly as long; everyone else stops waiting with them.                                                                                                               |
 
 ## When to use it
 
@@ -84,8 +85,10 @@ thread.
 
 ## Peer cells are not readable from a worker
 
-A worker holds **only its own slice**. Reading another cell's field inside a
-worker cell's method throws, naming the cell and the way out:
+A worker holds **only its own slice** — and reads it live: `heavy.rows` inside
+`heavy`'s own method (a helper, or after an `await`) is the current value, as it
+is in-isolate. Reading another cell's field inside a worker cell's method
+throws, naming the cell and the way out:
 
 ```
 [aio] cell "heavy" runs in a worker and cannot read "accounts.list" — a worker
@@ -97,12 +100,24 @@ self-contained cell (the designated-thread idiom).
 
 Before this it returned the peer's _declared default_ forever — never-updated
 data with no error, which is exactly the failure mode this framework refuses to
-have. Calling a peer's method already threw (the unbound-runtime guard).
+have. Calling a cell's method — a peer's or its own — throws too (the
+unbound-runtime guard): nothing is bound inside a worker.
+
+Every harness refuses both, with the same words, even though it runs the cell
+in-isolate (`testCell`, `bootCells`, `testUI`, `testServer`): while a worker
+cell's method runs — its async body included — a read of another cell's state or
+a call to any cell's method throws exactly as the real thread does. Test code
+around the call, and a component that re-renders because of the method's commit,
+are main-isolate code and read freely.
+
+`cell.$pending("method")` on the main isolate counts a worker cell's async call
+for as long as the worker runs it — the same number an in-isolate run reports.
 
 ## What a worker cell cannot use
 
 These fail loudly at boot, with the reason and the fix — none of them can be
-honoured across a thread boundary:
+honoured across a thread boundary. Every test harness (`testCell`, `bootCells`,
+`testUI`, `testServer`) refuses them too, before the test body runs:
 
 | Config            | Why                                                                     | Instead                                      |
 | ----------------- | ----------------------------------------------------------------------- | -------------------------------------------- |
@@ -119,12 +134,13 @@ your app, so there is nothing to host a worker from. `testCell` and `testServer`
 therefore exercise the same method bodies in-process — fast and debuggable. It
 logs once.
 
-The **serialization** boundary is still reproduced there: arguments and return
-values are structured-cloned for exactly the cells that would have been hosted,
-so a function or a class instance fails in the test rather than in production.
-What is missing is **isolation** — in-isolate, the cell shares the test's module
-graph, so a module-scope cache, counter or handle is one instance where
-production has two.
+The **serialization** boundary is still reproduced there — in `testServer`,
+`bootCells`, `testUI` and `testCell` alike: arguments and return values (sync
+and async methods) are structured-cloned for exactly the cells that would have
+been hosted, so a function fails in the test rather than in production, and a
+class instance comes back a plain object in both. What is missing is
+**isolation** — in-isolate, the cell shares the test's module graph, so a
+module-scope cache, counter or handle is one instance where production has two.
 
 When that difference is the thing under test, name a real entry and get real
 workers:
@@ -148,14 +164,20 @@ isolate keeps ticking while a worker cell burns its thread.
 ## How it works
 
 1. `aio.run()` spawns one worker per flagged cell, with the **app's own entry**
-   as the worker's module and `aio-cell:<name>` as its worker name.
+   as the worker's module and `aio-cell:<name>@<appId>` as its worker name (the
+   appId rides along so the worker never re-derives the app's identity from its
+   working directory).
 2. That entry runs `aio.run()` again inside the worker, which recognises the
    name and binds only the hosted cell — no server, no persistence, no client.
 3. The main isolate seeds the worker with the authoritative slice (after
    persistence and migrations), then routes that cell's actions to it — **never
    through the main dispatch queue**, which is what makes the isolation real.
 4. Each commit's patches stream home and are applied through the normal dispatch
-   path, so everything downstream sees an ordinary state change.
+   path, so everything downstream sees an ordinary state change. With
+   `journal: true` each batch is journalled (and shown by `am timeline`) as
+   `__aioWorkerPatch`, attributed to the cell as `<cell>:__worker` — the batch
+   carries no method name, so a cell with any `redactActions` pattern has the
+   batch's values withheld.
 5. Effects that belong to the runtime (schedules, cross-cell dispatches) are
    executed on the main isolate; the cell's own async-method machinery runs in
    the worker.

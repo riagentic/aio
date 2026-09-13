@@ -11,7 +11,13 @@
 // (the case a hand-written `finally` keeps missing), and nobody hand-rolls the
 // child-coverage dir a second time.
 import { assert, assertEquals } from "@std/assert";
-import { childCoverageDir, tempDir } from "../src/testing/temp-dir.ts";
+import {
+  childCoverageDir,
+  dropTempDir,
+  tempDir,
+  tempDirSync,
+} from "../src/testing/temp-dir.ts";
+import { aioTestDir, aioTestRoot } from "../src/testing/test-strict.ts";
 
 const ROOT = new URL("..", import.meta.url).pathname;
 
@@ -48,6 +54,53 @@ Deno.test("temp-dir: a dir made by a FAILING test is gone when the process exits
     "gone",
     `${leaked} outlived the failing test process`,
   );
+});
+
+Deno.test("temp-dir: ONE root, the same one test-strict already used", async () => {
+  // Two deciders for "where does a test's scratch go": this module called
+  // itself the one decider and used `/tmp`, while `test-strict.ts` — which
+  // argues the case at length, because a test's scratch holds an `auth.db`,
+  // an `app.key` and TLS material under a world-writable parent — has always
+  // used `~/tmp/aio/` and honoured `AIO_TEST_ROOT`.
+  //
+  // The measured cost of the split was the gate going blind: `check-orphans`
+  // swept `/tmp/aio-*` only, so the other tree was ungated and had grown to
+  // 151 directories, 122 of them over a day old.
+  const root = aioTestRoot();
+  const d = await tempDir("one-root-");
+  try {
+    assert(
+      d.startsWith(root),
+      `tempDir() made ${d}, which is not under the test root ${root}`,
+    );
+    assertEquals(
+      aioTestDir("probe-").startsWith(root),
+      true,
+      "…and so does " +
+        "test-strict, which is the point: one root, one sweep, one ls",
+    );
+  } finally {
+    await dropTempDir(d);
+  }
+});
+
+Deno.test("temp-dir: AIO_TEST_ROOT moves BOTH, or it moves neither usefully", () => {
+  // A runner that points the root somewhere else must move every test
+  // directory, not half of them.
+  const prev = Deno.env.get("AIO_TEST_ROOT");
+  // The alternate root the registry is about to be pointed at, removed below.
+  // aio-ok: it must sit OUTSIDE the registry, or it is the thing under test.
+  const here = Deno.makeTempDirSync({ prefix: "aio-root-probe-" });
+  try {
+    Deno.env.set("AIO_TEST_ROOT", here);
+    assert(aioTestRoot().startsWith(here));
+    assert(tempDirSync("moved-").startsWith(here), "tempDir follows it too");
+    assert(aioTestDir("moved-").startsWith(here));
+  } finally {
+    if (prev === undefined) Deno.env.delete("AIO_TEST_ROOT");
+    else Deno.env.set("AIO_TEST_ROOT", prev);
+    Deno.removeSync(here, { recursive: true });
+  }
 });
 
 Deno.test("temp-dir: the child-coverage dir has exactly one definition", async () => {

@@ -1,4 +1,5 @@
 // src/sync/types.ts — Shared CRDT types
+import type { StatePatchOp } from "./state-patch.ts";
 
 /**
  * Hybrid Logical Clock: [physical_ms, counter, nodeId]
@@ -168,6 +169,22 @@ export interface SyncRequest {
   reqId?: number;
   cells: Record<string, { lastHlc: HLC | null; lastServerTs?: number }>;
   pendingOps: SyncOp[];
+  /** Cells to serve as a SNAPSHOT whatever the cursor says.
+   *
+   *  A cursor proves which ops a client was sent, not that folding them gave
+   *  the server's answer: a sync method that reads a clock or a random source
+   *  (`crypto.randomUUID()` in `add`) computes a different value on every
+   *  replica that replays it, and the client's state forks while its cursor
+   *  stays perfectly current. The engine detects that (it re-runs the reducer
+   *  on the same input) and asks for the server's state here. Optional: a
+   *  server built before the field ignores it, and the client's loud warning
+   *  is then the whole of the answer. */
+  resync?: string[];
+  /** This engine folds a pushed server-origin write sent as a PATCH
+   *  (`SyncResponse` mode `"push"`). A client built before it omits the field,
+   *  and the server then sends that socket the whole cell instead — the only
+   *  push shape it knows. */
+  pushPatch?: boolean;
 }
 
 /**
@@ -212,7 +229,43 @@ export type SyncResponse =
      *  the field; a client built before it ignores it (and stays divergent,
      *  which the server logs). */
     reset?: string[];
+    /** An UNSOLICITED snapshot: a server-origin write (an effect, cron, a
+     *  serverFn, `am dispatch`, an async method) committed to these cells, and
+     *  no op exists for a client to fold. `lastServerTs[cell]` is the position
+     *  the state was captured at, under the cell's lock — the same watermark a
+     *  catch-up snapshot carries. Pushed with `reqId: 0`, so a client built
+     *  before the field never takes it for the answer to its own catch-up. */
+    push?: boolean;
+  }
+  | {
+    /** A server-origin write pushed as a PATCH against the state last pushed
+     *  — see `PushPatch`. Always `push: true` and `reqId: 0`, and never a
+     *  `lastServerTs`: a client built before this mode ignores the mode and
+     *  would save that map as its cursor, sealing the write it did not apply.
+     *  Such a client is sent the whole cell instead (see
+     *  `SyncRequest.pushPatch`). */
+    mode: "push";
+    push: true;
+    reqId: 0;
+    ops: SyncOp[];
+    lowWater: Record<string, HLC>;
+    patch: Record<string, PushPatch>;
   };
+
+/** One cell's pushed server write, as a patch.
+ *  @internal Engine/framework wiring — not public API. */
+export interface PushPatch {
+  /** The position the state was captured at, under the cell's lock — the
+   *  same watermark a pushed or catch-up snapshot carries. */
+  ts: number;
+  /** The changed leaves, against the state the server last pushed
+   *  (`state-patch.ts`). */
+  set: StatePatchOp[];
+  /** `stateDigest` of the server's state at `ts`. The client applies `set`
+   *  to its confirmed state and installs the result only when it digests to
+   *  this; otherwise it re-syncs the cell. */
+  digest: string;
+}
 
 /** The `op-rejected` reason PREFIX for a change the server could no longer
  *  recognise as a resend.
@@ -266,6 +319,35 @@ const VALID_SYNC_KEYS: ReadonlySet<string> = new Set([
   "onRejected",
 ]);
 
+/** Every strategy `mergeField` actually implements.
+ *
+ *  The key check above exists because "a key nothing reads is a feature that
+ *  silently does not exist" — and the VALUE decides the merge, so a typo there
+ *  costs the same and was not checked at all. `merge: { count: "countre" }`
+ *  was accepted verbatim; `mergeField`'s switch has no default, so it returned
+ *  `undefined`, the engine's catch reported a raw
+ *  `TypeError: Cannot read properties of undefined (reading 'value')`, and the
+ *  field resolved last-write-wins — the exact failure this file's own comment
+ *  says the key check was written to prevent, applied to the half that decides
+ *  the answer. aio apps are transpiled, not type-checked, at runtime, so a
+ *  typo'd strategy ships.
+ *
+ *  The VALUE is checked; `identity` deliberately is NOT. A first version also
+ *  refused an `identity` for a field with no set/array strategy, reasoning
+ *  that nothing would read it — and `tests/local-first.test.ts` documents
+ *  `sync: { identity: { xs: "id" } }` on its own as a supported shape. A
+ *  refusal has to be right about what the framework accepts, not only about
+ *  what one reading of the code suggests; the full suite said so, which is
+ *  what it is for. */
+const VALID_MERGE_STRATEGIES: ReadonlySet<string> = new Set<MergeStrategy>([
+  "lww",
+  "counter",
+  "lww-per-key",
+  "set-add",
+  "set-remove",
+  "text",
+]);
+
 /** `sync: true` or a partial config → the complete one every consumer reads.
  *
  *  THE place a cell's sync options are resolved, and the place a misspelled one
@@ -286,6 +368,22 @@ export function normalizeSyncConfig(
         `sync: unknown option ${unknown.map((k) => `"${k}"`).join(", ")}. ` +
           `Valid keys: ${[...VALID_SYNC_KEYS].sort().join(", ")}.`,
       );
+    }
+    // …and the VALUES, which are what actually decide the merge.
+    const merge = raw.merge;
+    if (merge && typeof merge === "object") {
+      for (const [field, strategy] of Object.entries(merge)) {
+        if (!VALID_MERGE_STRATEGIES.has(strategy as string)) {
+          throw new Error(
+            `sync: merge["${field}"] is ${JSON.stringify(strategy)}, which ` +
+              `is not a merge strategy. Valid: ${
+                [...VALID_MERGE_STRATEGIES].sort().join(", ")
+              }. A strategy aio does not implement resolves the field ` +
+              `last-write-wins instead, and the symptom is lost data, later, ` +
+              `on someone else's machine.`,
+          );
+        }
+      }
     }
   }
   if (raw === true) {

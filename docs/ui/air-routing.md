@@ -7,9 +7,18 @@ Uses the History API — no page reloads.
 
 ## SPA Fallback
 
-The dev server automatically serves the app shell for any extensionless path
-that doesn't exist as a file (`/users`, `/users/42`, `/dashboard/settings`).
-Deep links just work without server configuration.
+The server (dev and prod alike) serves the app shell for any path that does not
+name a file: `/users`, `/users/42`, `/dashboard/settings`. Deep links just work
+without server configuration, including a route that shares its name with a
+project folder (`/docs`, `/settings/` — aio serves no directory listings or
+index files, so a directory answers with the shell) and a dotted last segment
+that is not a file type (`/u/john.doe`, `/blog/v1.2`). An existing file always
+wins over the route reading of its name, and a missing file with a file
+extension (`/lib/util.js`, `/export.csv`) is a `404`, never an HTML page.
+
+Server `routes:` and `<Route>` agree on the shape of a path: a trailing slash is
+the same path (`/api/get/` reaches the `/api/get` route), and `/x/*` matches
+`/x` with `*` = `""`.
 
 ---
 
@@ -97,7 +106,11 @@ function SaveButton() {
 }
 ```
 
-Relative paths resolve against `location.href`.
+Relative paths resolve against `location.href`. Navigating to the URL the page
+is already at replaces its history entry instead of pushing a duplicate — the
+browser's own rule for a same-URL navigation — so a `<Link>` to the current page
+never makes Back look dead. A different query or hash is a different URL and
+pushes.
 
 ---
 
@@ -109,7 +122,7 @@ Declarative route matching. Routes can be flat or nested into layout trees.
 
 ```tsx
 import { Route } from "aio/air";
-import { Nav, NotFound, Settings, UserDetail, UserList } from "./pages.tsx";
+import { Nav, Settings, UserDetail, UserList } from "./pages.tsx";
 
 const App = () => (
   <div>
@@ -117,10 +130,33 @@ const App = () => (
     <Route path="/users" element={<UserList />} />
     <Route path="/users/:id" element={<UserDetail />} />
     <Route path="/settings" element={<Settings />} />
-    <Route path="*" element={<NotFound />} />
   </div>
 );
 ```
+
+**Every `<Route>` decides on its own.** There is no `<Routes>`/`<Switch>`
+wrapper and no first-match rule: each one asks "does the current path match me?"
+and renders or does not. Two routes that both match both render.
+
+So `<Route path="*" element={<NotFound />} />` is NOT a 404 — `*` matches every
+path, so it renders on every page, underneath the page that matched. A 404 is a
+component that asks whether anything matched:
+
+```tsx
+import { useRoute } from "aio/air";
+import { NotFound } from "./pages.tsx";
+
+function NotFoundRoute() {
+  const users = useRoute("/users").matched;
+  const user = useRoute("/users/:id").matched;
+  const settings = useRoute("/settings").matched;
+  return users || user || settings ? null : <NotFound />;
+}
+// …then `<NotFoundRoute />` beside the routes above.
+```
+
+Nested layout routes below are the other way to get one screen at a time: a
+child only renders inside a parent that matched.
 
 **Nested layout routes:**
 
@@ -187,6 +223,8 @@ export const nav = (
 
 - `exact={true}` or `to="/"` -> exact match only
 - Default -> prefix match: `/users` is active on `/users` and `/users/42`
+- Paths are compared, not strings: a trailing slash, `?query` or `#hash` in `to`
+  is ignored, and `to="/about us"` is active at the encoded url `/about%20us`
 
 **LinkProps:**
 
@@ -234,11 +272,16 @@ Used by `<Route path>` and `useRoute(pattern)`:
 | `/users`              | `/users` or `/users/` exactly       | `{}`                     |
 | `/users/:id`          | `/users/42`                         | `{ id: '42' }`           |
 | `/a/:x/b/:y`          | `/a/foo/b/bar`                      | `{ x: 'foo', y: 'bar' }` |
+| `/files/*`            | `/files`, `/files/a/b`              | `{ '*': 'a/b' }` (`''`)  |
 | `*`                   | any path                            | `{ '*': '/the/path' }`   |
 | `/dashboard` (prefix) | `/dashboard`, `/dashboard/settings` | `{}`                     |
 
-Params are URL-decoded automatically. Routes with children use prefix matching;
-leaf routes use exact matching.
+Params are URL-decoded automatically, and static segments match the decoded url
+too — `<Route path="/café">` matches the browser's `/caf%C3%A9` (an escaped
+`%2F` inside a param stays one segment). `*` is a wildcard only as a whole
+segment; inside one (`/a*b`) it is a literal. Routes with children use prefix
+matching; leaf routes use exact matching. An `index` child renders wherever its
+parent's pattern matches exactly — params and a trailing slash included.
 
 ---
 
@@ -329,13 +372,16 @@ function Post({ id }: { id: string }) {
   switch or a modal — anything that mounts and unmounts — because the renderer
   already knows when that happens.
 - **On the server**, inside `renderToString`, nothing is written; the entries
-  are collected and `collectHead()` returns them as markup for your own
-  `<head>`, exactly like `collectCss()`:
+  are collected and `collectHead()` returns them as markup for your own `<head>`
+  — the same shape as `collectCss()`, except that `collectCss()` returns CSS
+  rather than markup and so needs a `<style>` around it:
 
 ```ts
 const body = renderToString(<App />); // sync — the head is known after it
-const html =
-  `<!doctype html><html><head>${collectHead()}${collectCss()}</head>` +
+const html = `<!doctype html><html><head>${collectHead()}` +
+  // collectHead() returns markup; collectCss() returns CSS, so it needs a
+  // <style> around it.
+  `<style>${collectCss()}</style></head>` +
   `<body><div id="app">${body}</div></body></html>`;
 ```
 

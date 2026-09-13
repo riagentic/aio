@@ -10,9 +10,10 @@ import {
 import {
   _attrNS,
   _classProp,
+  _clearDomProp,
   _controlDrifted,
-  _propAttr,
   _RESERVED_PROPS,
+  _selectValues,
   _writeProp,
 } from "./prop-write.ts";
 import { attrNameOf as _attrName } from "./ssr-utils.ts";
@@ -76,6 +77,11 @@ export function applyChildDependentProps(
   const raw = next.value;
   const rv = resolveSignalProp(raw);
   if (!_controlDrifted(el, "value", rv)) return;
+  if (Array.isArray(rv)) {
+    // `<select multiple value={[…]}>` — see `_selectValues`.
+    _selectValues(el as HTMLSelectElement, rv);
+    return;
+  }
   // deno-lint-ignore no-explicit-any
   (el as any).value = rv ?? "";
 }
@@ -135,14 +141,9 @@ export function applyProps(
         // losing its `value` prop reported `""` (and, on a hydrated page, the
         // stale server value), while a fresh render of the same model reported
         // `"on"`. The form then submitted a value the component no longer
-        // describes, with nothing in the DOM to show it. Drop the attribute the
-        // prop wrote. The property is reset FIRST and the attribute dropped
-        // after: on a checkbox the property write itself REFLECTS back into the
-        // attribute, so clearing them the other way round just puts it back.
-        // deno-lint-ignore no-explicit-any
-        (el as any)[k] = typeof (el as any)[k] === "boolean" ? false : "";
-        const attr = _propAttr(el.tagName.toLowerCase(), k);
-        if (attr) el.removeAttribute(attr);
+        // describes, with nothing in the DOM to show it. `_clearDomProp` is
+        // the one removal — `value={null}` takes it too.
+        _clearDomProp(el, k);
       } else {
         const ns = _attrNS(k);
         if (ns) el.removeAttributeNS(ns, k.slice(k.indexOf(":") + 1));

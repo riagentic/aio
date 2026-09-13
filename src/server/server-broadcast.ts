@@ -1,6 +1,7 @@
 // Broadcast subsystem — sends state updates to all connected WS clients
 // Handles throttling, patch compaction, backpressure, full-state fallback
 import { enc, encRaw } from "../protocol/envelope.ts";
+import { userMemoKey } from "./aio-run-helpers.ts";
 import { compactPatches } from "../state/patch-compact.ts";
 import { createCoalescer } from "./broadcast-coalescer.ts";
 
@@ -27,7 +28,8 @@ import type { VitalsSystem } from "../vitals/mod.ts";
 import type { AioUser } from "./aio.ts";
 import { log } from "../diagnostics/logger-api.ts";
 import { bytes } from "../diagnostics/fmt.ts";
-import { declaredBudgets, recordBudgetBreach } from "../state/budgets.ts";
+import { budgetsFor } from "../state/budgets.ts";
+import { rawStateControlAllowed } from "./server-auth.ts";
 
 /** Payload stats per client — tracked for vitals/trojan introspection */
 export type PayloadStats = Map<
@@ -110,6 +112,7 @@ export function createBroadcaster(deps: BroadcastDeps): Broadcaster {
     warnBigFullState(
       json,
       () => filterStateBySubs(getUIState(meta.user), meta.subscriptions),
+      getUIState, // this app's latch, not the process's
     );
   }
 
@@ -218,7 +221,25 @@ export function createBroadcaster(deps: BroadcastDeps): Broadcaster {
         const subs = meta.subscriptions
           ? [...meta.subscriptions].sort().join(",")
           : "*";
-        const key = `${JSON.stringify(meta.user ?? null)}|${subs}`;
+        // `userMemoKey`, not a bare `JSON.stringify(meta.user)`.
+        //
+        // This key is built for EVERY client on EVERY round, inside the
+        // round-wide try — so one user record `JSON.stringify` refuses took
+        // the whole round down, for every client, on every round after it.
+        // Measured: a `resolveUser` handing back an ORM row with a BigInt
+        // `orgId` (what `node:sqlite` returns past `Number` range, and what
+        // every postgres driver returns for `int8`) froze every connected UI
+        // permanently. Health went degraded after five rounds, so it was loud
+        // on the server and invisible in the browser.
+        //
+        // `userMemoKey` is the sibling reader of the same field, hardened for
+        // exactly this and carrying the argument in its own comment: "a cache
+        // miss costs time; a wrong cache hit costs someone else's data". It
+        // answers null for a user it cannot serialize, and then there is no
+        // cache — never a shared bucket.
+        const userKey = userMemoKey(meta.user);
+        if (userKey === null) return _getFilteredFullJson(meta, snapshot);
+        const key = `${userKey}|${subs}`;
         if (fullByView.has(key)) return fullByView.get(key);
         const json = _getFilteredFullJson(meta, snapshot);
         fullByView.set(key, json);
@@ -465,8 +486,10 @@ export function createBroadcaster(deps: BroadcastDeps): Broadcaster {
             `${backlogged} WebSocket client(s) are not draining their socket ` +
               `(worst: ${
                 bytes(worstBacklog)
-              } of unread state held on the server). Broadcasts to them are ` +
-              `skipped until they do; each gets full state when it resumes.`,
+              } of unread state held on the server). State rounds to them ` +
+              `are skipped until they do, and the first round after owes ` +
+              `them full state; a peer that would miss a sync op or other ` +
+              `raw frame is closed instead, so it reconnects and catches up.`,
           ),
         );
       } else if (connections.size > 0) {
@@ -488,6 +511,15 @@ export function createBroadcaster(deps: BroadcastDeps): Broadcaster {
           getUIState: getUIState as () => Record<string, unknown> | undefined,
         });
       }
+      // A round that COMPLETED ends the episode. `degraded()`'s contract is
+      // "call ok() on every success, not only the first", and this tracker
+      // only ever failed — so one transient throw (a BigInt in a patch, say)
+      // five times over the life of a process left the app reporting degraded
+      // forever, however many rounds succeeded after. The UDS twin has always
+      // done this (`if (failed.length === 0) _broadcastRound.ok()` in
+      // uds.ts); this is the transport that did not, and the asymmetry
+      // between the two is exactly what `uds.ts`'s header warns about.
+      _broadcastRound.ok();
     } catch (e) {
       // This catch wraps the ENTIRE flush loop — patch compaction, per-client
       // subscription filtering, cost metering, vitals. A throw anywhere in
@@ -520,6 +552,72 @@ export function createBroadcaster(deps: BroadcastDeps): Broadcaster {
   };
 
   const coalescer = createCoalescer<PatchEntry>(syncIntervalMs, flushBroadcast);
+
+  /** A client the freeze watchdog skipped is heard from again — pay what the
+   *  skipped rounds owe it NOW.
+   *
+   *  The frozen skip above marks `needsFull`, and only a later state-change
+   *  round honoured it. An idle app has no later round, so a recovered client
+   *  sat on stale state for as long as nothing changed: the r3 chaos hunt
+   *  measured a client on v=4 for 8 s+ after its heartbeat resumed while the
+   *  server held v=6, in dev and prod alike (a background tab, a laptop lid,
+   *  a GC pause over 2 s). Pinned by tests/frozen-client-recovery-resync.test.ts. */
+  function resyncRecovered(clientId: string): void {
+    let socket: WebSocket | undefined;
+    let meta: ClientMeta | undefined;
+    for (const [ws, m] of connections) {
+      if (m.id === clientId) {
+        socket = ws;
+        meta = m;
+        break;
+      }
+    }
+    if (!socket || !meta?.needsFull) return; // nothing was skipped for it
+    // Buffered patches FIRST, exactly as a connecting socket's snapshot does
+    // (server-ws `drainBeforeSnapshot`). A round in the buffer pays the debt
+    // itself (needsFull → whole state), and a snapshot sent AHEAD of those
+    // patches would have them applied on top of a state that already holds
+    // them.
+    coalescer.flushUrgent();
+    if (!meta.needsFull) return;
+    if (socket.readyState !== WebSocket.OPEN) return;
+    // Not draining either: the backlog skip keeps the debt for the next round
+    // rather than piling a whole state onto a socket that cannot take it.
+    if (socket.bufferedAmount > WS_BUFFER_HIGH_WATER) return;
+    const verdict: SnapshotVerdict = {
+      attempted: false,
+      failed: false,
+      err: undefined,
+    };
+    const json = _getFilteredFullJson(meta, verdict);
+    // A failure is recorded like any round's; a success is not an `ok()` for
+    // the whole broadcaster — one view building says nothing of the others.
+    if (verdict.failed) _stateSerialization.fail(verdict.err);
+    if (json === undefined) return; // still owed — the next round retries
+    if (!meta.lastFullJsonStale && json === meta.lastFullJson) {
+      meta.needsFull = false; // it already holds exactly this text
+      return;
+    }
+    _warnBigFullState(json, meta);
+    try {
+      socket.send(encRaw("state", json));
+    } catch {
+      return; // client disconnecting — the debt dies with the socket
+    }
+    meta.lastFullJson = json;
+    meta.lastFullJsonStale = false;
+    meta.needsFull = false;
+    meta.bpLastSentAt = Date.now();
+    vitalsSystem?.serverTransport.onClientStateSent(meta.id);
+    debug?.(
+      `broadcast: sending full state (${json.length}B) — client ${
+        meta.id.slice(0, 8)
+      } recovered from a freeze and its skipped rounds were lost`,
+    );
+  }
+  const _unsubscribeRecovered = vitalsSystem?.onClientRecovered?.(
+    resyncRecovered,
+  );
   // Same primitive as the patch stream, so TT can never grow a second throttle
   // with different semantics (the asymmetry broadcast-coalescer.ts exists to
   // prevent). Diagnostics pace slower than state: nobody is waiting on it.
@@ -569,6 +667,11 @@ export function createBroadcaster(deps: BroadcastDeps): Broadcaster {
       const ttData = enc("tt-state", getTTBroadcast());
       for (const [ws, meta] of connections) {
         if (ws.readyState !== WebSocket.OPEN) continue;
+        // The history is every user's action types and recorded error text.
+        // Under per-user auth it is operator telemetry, so admins only — the
+        // bar `tt-cmd` and the dev `diag` frame already answer to. It went to
+        // every socket, so bob's frames listed alice's actions.
+        if (meta.perUserAuth && !rawStateControlAllowed(meta.user)) continue;
         // The same two skips the STATE loop makes. This loop made neither, so
         // the one channel that carries the whole history each time was the one
         // channel that kept feeding a client that could not read it — a frozen
@@ -587,13 +690,59 @@ export function createBroadcaster(deps: BroadcastDeps): Broadcaster {
     }
   }
 
-  /** Send raw string message to all connected WS clients, optionally excluding one */
+  /** Send raw string message to all connected WS clients, optionally excluding one.
+   *
+   *  The same high-water check as the state loop and `flushTT` — this path
+   *  made none. It carries every sync `op` frame and every server-write push,
+   *  so a peer that upgraded and never read had each of them held for it on
+   *  the server's heap: the r3 chaos hunt measured a 111.9 MB backlog (28×
+   *  the mark) and RSS 501 → 643 MB on one `sync: true` cell, while health
+   *  said broadcasts to that peer were being skipped.
+   *
+   *  But a raw frame cannot merely be skipped the way a state round is. A
+   *  state round has its repair in-band (`needsFull`: the next round is whole
+   *  state). An op stream has none: a peer that misses op N and then gets
+   *  op N+1 moves its cursor past N and never asks for it again — silent,
+   *  permanent divergence. The repair a raw stream does have is the
+   *  reconnect (the handshake sends whole state; sync catch-up resumes from
+   *  the peer's own cursor), so the peer is CLOSED rather than fed a gap.
+   *  Pinned by tests/ws-raw-broadcast-backlog.test.ts. */
   function broadcastRaw(msg: string, exclude?: WebSocket): void {
-    for (const [ws] of connections) {
+    for (const [ws, meta] of connections) {
       if (ws === exclude) continue;
+      if (ws.readyState !== WebSocket.OPEN) continue;
+      if (ws.bufferedAmount > WS_BUFFER_HIGH_WATER) {
+        _closeNotDraining(ws, meta);
+        continue;
+      }
       try {
-        if (ws.readyState === WebSocket.OPEN) ws.send(msg);
+        ws.send(msg);
       } catch { /* ignore send errors */ }
+    }
+  }
+
+  /** Close a peer a raw frame could not be delivered to — see `broadcastRaw`.
+   *  1013 is "try again later": every aio client reconnects on any close
+   *  that is not its own, and the reason says why for anyone else's. Once
+   *  per socket by construction — it is no longer OPEN afterwards. */
+  /** Clients already told they missed a toast — see `broadcastUi`. */
+  const _toastDropWarned = new WeakSet<ClientMeta>();
+
+  function _closeNotDraining(ws: WebSocket, meta: ClientMeta): void {
+    const held = ws.bufferedAmount;
+    log.warn(
+      "ws",
+      `closing WebSocket client #${meta.index}: it is not draining its ` +
+        `socket (${
+          bytes(held)
+        } of unread frames held on the server). A sync op or other raw ` +
+        `frame cannot be skipped without leaving a gap, so it is closed ` +
+        `instead — it reconnects and catches up from where it was.`,
+    );
+    try {
+      ws.close(1013, "not draining: reconnect and resync");
+    } catch {
+      /* aio-ok: already closing — the send loop skips it either way */
     }
   }
 
@@ -603,14 +752,46 @@ export function createBroadcaster(deps: BroadcastDeps): Broadcaster {
    *  from `broadcastRaw`, which is the sync path and WS-only on purpose. */
   function broadcastUi(raw: string): number {
     let n = 0;
-    for (const [ws] of connections) {
+    let dropped: ClientMeta[] | undefined;
+    for (const [ws, meta] of connections) {
       try {
-        if (ws.readyState === WebSocket.OPEN) {
-          ws.send(raw);
-          n++;
+        if (ws.readyState !== WebSocket.OPEN) continue;
+        // The high-water check every other send loop here makes. This one
+        // made none, so a notification storm kept feeding a peer that had
+        // stopped reading. Unlike `broadcastRaw`, the frame is SKIPPED, not
+        // the peer closed: the only frame on this path is a `notify` toast —
+        // fire-and-forget UI with no state behind it, nothing later assumes it
+        // arrived, so missing it leaves no gap to repair. Closing a user's
+        // connection over a toast would be the disproportionate answer. Not
+        // silent: named below, and left out of the count the caller reports.
+        if (ws.bufferedAmount > WS_BUFFER_HIGH_WATER) {
+          (dropped ??= []).push(meta);
+          continue;
         }
+        ws.send(raw);
+        n++;
       } catch {
         // aio-ok: a socket mid-close; the count is what actually reached one
+      }
+    }
+    if (dropped) {
+      // Once per socket: a stuck peer during a burst would otherwise print a
+      // line per toast, burying the one that explains it.
+      const fresh = dropped.filter((m) => !_toastDropWarned.has(m));
+      for (const m of fresh) _toastDropWarned.add(m);
+      if (fresh.length > 0) {
+        log.warn(
+          "ws",
+          `notify: not shown on ${
+            fresh.map((m) => `client #${m.index}`).join(", ")
+          } — ${
+            fresh.length === 1 ? "it is" : "they are"
+          } not draining the socket (over ${
+            bytes(WS_BUFFER_HIGH_WATER)
+          } of unread frames held). A notification is dropped for such a ` +
+            `client rather than queued; its state catches up on its own. ` +
+            `(said once per client)`,
+        );
       }
     }
     const uds = deps.udsClientCount?.() ?? 0;
@@ -622,6 +803,7 @@ export function createBroadcaster(deps: BroadcastDeps): Broadcaster {
   }
 
   function shutdown(): void {
+    _unsubscribeRecovered?.();
     coalescer.dispose();
     ttCoalescer.dispose();
   }
@@ -718,22 +900,43 @@ export function attributeRound(
  *  blind on their transport, which is the same lens that hid `am cost`,
  *  `am status`, the pressure alarm and `aio_clients_connected`.
  *
- *  Once per cell per process: the size is a fact about the app's shape, not
- *  about this frame, and a line per broadcast is a line nobody reads. */
-const _warnedBigCells = new Set<string>();
-let _analyzedFrameLen = 0;
+ *  Once per cell per APP: the size is a fact about the app's shape, not about
+ *  this frame, and a line per broadcast is a line nobody reads. It was once per
+ *  cell per PROCESS, and a process can host several apps (library mode,
+ *  `testApps`): app A's warning about its `items` silenced app B's about a
+ *  different `items`, and A's 5 MB frame marked every smaller frame "already
+ *  analyzed" — B's 2 MB cell, over B's own budget, was never named at all.
+ *  `owner` is the app's identity (the WS broadcaster passes its app's
+ *  `getUIState`); a caller that passes none shares the process latch. */
+type BigStateLatch = { warned: Set<string>; analyzedLen: number };
+const _processLatch: BigStateLatch = { warned: new Set(), analyzedLen: 0 };
+const _latches = new WeakMap<object, BigStateLatch>();
 
-export function warnBigFullState(json: string, view: () => unknown): void {
+function _latchFor(owner: object | undefined): BigStateLatch {
+  if (owner === undefined) return _processLatch;
+  let l = _latches.get(owner);
+  if (!l) _latches.set(owner, l = { warned: new Set(), analyzedLen: 0 });
+  return l;
+}
+
+export function warnBigFullState(
+  json: string,
+  view: () => unknown,
+  owner?: object,
+): void {
+  const latch = _latchFor(owner);
+  // The owner's OWN budgets — a second app's `cellState` is not this app's limit.
+  const budgets = budgetsFor(owner);
   // `aio.run({ budgets: { cellState } })` replaces aio's own number. The
   // hard-coded 1 MiB is a guess that has to serve every app, and a field
   // report said plainly that an app declaring its own is strictly better
   // (report 2 §9.3) — a 4 MB table pushed once a minute is not the same problem
   // as 4 MB pushed per keystroke, and only the app knows which it is.
-  const limit = declaredBudgets().cellState ?? BROADCAST_FULL_WARN_BYTES;
+  const limit = budgets.declared().cellState ?? BROADCAST_FULL_WARN_BYTES;
   if (json.length <= limit) return;
-  if (json.length <= _analyzedFrameLen) return; // already analyzed this size
+  if (json.length <= latch.analyzedLen) return; // already analyzed this size
   try {
-    _analyzedFrameLen = json.length;
+    latch.analyzedLen = json.length;
     const ui = view();
     if (ui === null || typeof ui !== "object") return;
     const sizes = Object.entries(ui as Record<string, unknown>).map(
@@ -750,20 +953,18 @@ export function warnBigFullState(json: string, view: () => unknown): void {
     // assertable, and a log line cannot fail a CI step. No-op when nothing
     // was declared — aio's own default is a hint, not a commitment.
     for (const [cellName, n] of over) {
-      recordBudgetBreach("cellState", n, `cell "${cellName}"`);
+      budgets.record("cellState", n, `cell "${cellName}"`);
     }
     // No single cell over the line but the sum is → name the biggest one.
     const biggest = sizes.sort((a, b) => b[1] - a[1])[0];
     const offenders = over.length > 0 ? over : biggest ? [biggest] : [];
-    const fresh = offenders.filter(([cellName]) =>
-      !_warnedBigCells.has(cellName)
-    );
+    const fresh = offenders.filter(([cellName]) => !latch.warned.has(cellName));
     if (fresh.length === 0) return;
-    for (const [cellName] of fresh) _warnedBigCells.add(cellName);
+    for (const [cellName] of fresh) latch.warned.add(cellName);
     log.warn(
       `[aio] broadcast: a full-state frame is ${bytes(json.length)} — over ` +
         `the ${bytes(limit)} budget${
-          declaredBudgets().cellState !== undefined
+          budgets.declared().cellState !== undefined
             ? " you declared (aio.run({ budgets: { cellState } }))"
             : ""
         }. Largest cell(s): ${
@@ -774,9 +975,10 @@ export function warnBigFullState(json: string, view: () => unknown): void {
   } catch { /* observe-only */ }
 }
 
-/** @internal tests — the once-per-cell latch is process-global. */
+/** @internal tests — clears the shared latch (per-app latches die with their
+ *  app's `getUIState`). */
 // aio-ok: test seam — tests/big-state-warning-uds.test.ts clears the latch between cases
 export function _resetBigStateWarnings(): void {
-  _warnedBigCells.clear();
-  _analyzedFrameLen = 0;
+  _processLatch.warned.clear();
+  _processLatch.analyzedLen = 0;
 }

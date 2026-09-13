@@ -239,6 +239,22 @@ export interface VDomHooks {
   afterSubtree?(vnode: VNode): void;
   /** Called when a component function throws during execution (e.g., lazy pending). */
   abortComponent?(vnode: VNode, state: unknown): void;
+  /** Called after `abortComponent` for a render error (never `_LAZY_PENDING`).
+   *  `true` means the renderer contained it: the reconciler keeps `oldVnode`'s
+   *  committed output (or an empty slot when there is none) instead of
+   *  rethrowing. */
+  isolateComponentError?(
+    vnode: VNode,
+    oldVnode: VNode | null,
+    error: unknown,
+    state: unknown,
+  ): boolean;
+  /** For a NEW component whose throw `isolateComponentError` just contained:
+   *  what to show in its slot — the enclosing `<ErrorBoundary>`'s fallback for
+   *  `error`, or null when no boundary encloses it (the slot stays empty). */
+  containedFallback?(
+    error: unknown,
+  ): { fallback: VNode | string | number | null } | null;
   /** Called when a component VNode is removed from the tree. */
   unmountComponent(vnode: VNode): void;
 }

@@ -18,7 +18,7 @@
 import { join } from "@std/path";
 import { _redactCheckpointState } from "../diagnostics/checkpoint.ts";
 import { diagRecent } from "../diagnostics/diagnostic-bus.ts";
-import { noRedaction, type Redactor } from "../diagnostics/redact.ts";
+import { noRedaction, REDACTED, type Redactor } from "../diagnostics/redact.ts";
 import type { CellFieldFlags } from "./aio-types.ts";
 import type { TimelineEntry } from "./timeline.ts";
 import { type BuildFacts, buildFacts } from "./boot-facts.ts";
@@ -98,6 +98,14 @@ export const REPORT_LIMITS = {
   /** Bytes of serialized state before it is dropped rather than truncated —
    *  half a state tree is misleading in a way that no state is not. */
   stateBytes: 256 * 1024,
+  /** Bytes one timeline entry may carry. Past it, the entry keeps what it did
+   *  and which paths it touched, and its values are elided: a diff leaf is a
+   *  state value, and a 400 KB string written by one action is the same 400 KB
+   *  the state cap just refused. */
+  timelineEntryBytes: 16 * 1024,
+  /** Bytes of the whole timeline section. The oldest entries go first — a
+   *  maintainer reads toward the failure. */
+  timelineBytes: 256 * 1024,
 } as const;
 
 /** Everything a report is built FROM: the app's data dir, its identity and
@@ -190,6 +198,157 @@ function _applyDeclaredVisibility(
   return out;
 }
 
+/** Screen one timeline entry through the same `visible` flags as the state.
+ *
+ *  The timeline is state too — every diff leaf is a before/after VALUE, keyed
+ *  by the path it lives at — and it went out unscreened: a report whose notes
+ *  said "fields hidden from clients were omitted: w.secret" carried
+ *  `{ path: "w.secret", before: "", after: "TOPSECRET" }` a few lines further
+ *  down, and the call's own arguments beside it. A leaf under a hidden field
+ *  keeps its path (the action DID touch it — that is diagnostic) and loses its
+ *  values; a leaf that IS a whole cell loses the hidden keys inside it.
+ *
+ *  An action that wrote a hidden field very likely carried the value in its
+ *  arguments (`setSecret(value)`), so its payload is withheld too. A truncated
+ *  diff cannot say what it did not list, so while any field is hidden a
+ *  truncated entry's payload is withheld as well — the safe direction. An
+ *  ASYNC call's writes are not on its own entry at all; see
+ *  {@link _withholdAsyncCallPayloads}. */
+function _screenTimelineEntry(
+  e: TimelineEntry,
+  visible: CellFieldFlags,
+  anyHidden: boolean,
+): {
+  entry: TimelineEntry;
+  leaves: number;
+  payload: boolean;
+  /** The entry wrote (or may have written) a hidden field. */
+  touched: boolean;
+} {
+  const hidden = (cell: string, key: string): boolean =>
+    visible[cell]?.[key]?.ui === false;
+  const project = (cell: string, v: unknown): unknown => {
+    if (v === null || typeof v !== "object" || Array.isArray(v)) return v;
+    const flags = visible[cell];
+    if (!flags) return v;
+    const out: Record<string, unknown> = {};
+    for (const [k, x] of Object.entries(v as Record<string, unknown>)) {
+      if (flags[k]?.ui !== false) out[k] = x;
+    }
+    return out;
+  };
+  let leaves = 0;
+  let touched = false;
+  const diff = e.diff.map((d) => {
+    if (d.path === "…") {
+      if (anyHidden) touched = true;
+      return d;
+    }
+    const segs = d.segments ?? (d.path === "" ? [] : d.path.split("."));
+    if (segs.length === 0) {
+      // The whole state replaced at once — project every cell in it.
+      const whole = (v: unknown) =>
+        v !== null && typeof v === "object" && !Array.isArray(v)
+          ? Object.fromEntries(
+            Object.entries(v as Record<string, unknown>).map((
+              [c, x],
+            ) => [c, project(c, x)]),
+          )
+          : v;
+      if (!anyHidden) return d;
+      touched = true;
+      leaves++;
+      return { ...d, before: whole(d.before), after: whole(d.after) };
+    }
+    const cell = segs[0]!;
+    if (segs.length === 1) {
+      const before = project(cell, d.before);
+      const after = project(cell, d.after);
+      if (before === d.before && after === d.after) return d;
+      touched = true;
+      leaves++;
+      return { ...d, before, after };
+    }
+    if (!hidden(cell, segs[1]!)) return d;
+    touched = true;
+    leaves++;
+    return { ...d, before: REDACTED, after: REDACTED };
+  });
+  if (!touched) return { entry: e, leaves: 0, payload: false, touched };
+  const dropPayload = e.payload !== undefined && e.payload !== REDACTED;
+  return {
+    entry: { ...e, diff, ...(dropPayload ? { payload: REDACTED } : {}) },
+    leaves,
+    payload: dropPayload,
+    touched,
+  };
+}
+
+/** The `_callId` an async method's CALL entry carries, if any. */
+function _callIdOf(e: TimelineEntry): string | undefined {
+  const p = e.payload;
+  if (p === null || typeof p !== "object") return undefined;
+  const id = (p as { _callId?: unknown })._callId;
+  return typeof id === "string" ? id : undefined;
+}
+
+/** Withhold the arguments of async calls that wrote — or may yet write — a
+ *  hidden field.
+ *
+ *  `_screenTimelineEntry` judges an entry by its own diff, which is a SYNC
+ *  method's whole write set. An async method commits its writes later, as
+ *  `cell:__setFoo` entries naming the call (`call: <_callId>`), so the call
+ *  entry itself has `diff: []` and kept its arguments: a report that withheld
+ *  `w.token` everywhere else carried
+ *  `{"type":"w:setToken","payload":{"args":["TOPSECRET-XYZ"]},"diff":[]}`.
+ *
+ *  So the write set is gathered by `_callId`: any entry of the call's run that
+ *  touched a hidden field withholds the call's payload, whichever cell the
+ *  call belongs to. That is not enough on its own — a call still running when
+ *  the report is taken has not written the field YET, and the timeline records
+ *  no "this call is over" — so on a cell that declares a hidden field, the
+ *  payload of every entry whose writes cannot be seen whole is withheld: an
+ *  async call, and any entry with no diff to vouch for it. What stays is the
+ *  type, the diff and the `call` link, which say what happened. */
+function _withholdAsyncCallPayloads(
+  entries: TimelineEntry[],
+  touchedCalls: ReadonlySet<string>,
+  visible: CellFieldFlags,
+): { entries: TimelineEntry[]; payloads: number } {
+  const hiddenCell = (type: string): boolean => {
+    const at = type.indexOf(":");
+    const flags = at > 0 ? visible[type.slice(0, at)] : undefined;
+    return !!flags && Object.values(flags).some((f) => f.ui === false);
+  };
+  let payloads = 0;
+  const out = entries.map((e) => {
+    if (e.payload === undefined || e.payload === REDACTED) return e;
+    const id = _callIdOf(e);
+    const withhold = (id !== undefined && touchedCalls.has(id)) ||
+      (hiddenCell(e.type) && (id !== undefined || e.diff.length === 0));
+    if (!withhold) return e;
+    payloads++;
+    return { ...e, payload: REDACTED };
+  });
+  return { entries: out, payloads };
+}
+
+/** One entry within `timelineEntryBytes`: what happened and where stays, the
+ *  values go. `null` when even that does not fit. */
+function _capTimelineEntry(e: TimelineEntry): TimelineEntry | null {
+  const size = safeSize(e);
+  if (size <= REPORT_LIMITS.timelineEntryBytes) return e;
+  const note = `(elided — this entry was ${Math.round(size / 1024)}KB)`;
+  const slim: TimelineEntry = {
+    ...e,
+    ...(e.payload !== undefined ? { payload: note } : {}),
+    diff: e.diff.map((d) =>
+      d.path === "…" ? d : { ...d, before: note, after: note }
+    ),
+  };
+  return safeSize(slim) <= REPORT_LIMITS.timelineEntryBytes ? slim : null;
+}
+
 function safeSize(v: unknown): number {
   try {
     return JSON.stringify(v)?.length ?? 0;
@@ -280,8 +439,8 @@ export async function buildReport(
       // exactly as they are for a browser.
       const screened = _applyDeclaredVisibility(raw, src.visible, truncated);
       const safe = _redactCheckpointState(screened, redact);
-      if (redact.cells.size > 0) {
-        const withheld = src.cells.filter((c) => redact.cells.has(c));
+      if (redact.redactsAnyCell()) {
+        const withheld = src.cells.filter((c) => redact.redactsCell(c));
         if (withheld.length) report.redactedCells = withheld;
       }
       const size = safeSize(safe);
@@ -306,7 +465,75 @@ export async function buildReport(
       );
     }
     // Newest last: a maintainer reads toward the failure, not away from it.
-    if (all.length) report.timeline = all.slice(-REPORT_LIMITS.timelineEntries);
+    let kept = all.slice(-REPORT_LIMITS.timelineEntries);
+    // The same `visible` declaration the state went through — see
+    // `_screenTimelineEntry`. Absent ⇒ the state note above already says
+    // nothing was screened.
+    const visible = src.visible;
+    if (visible && Object.keys(visible).length > 0 && kept.length) {
+      const anyHidden = Object.values(visible).some((f) =>
+        Object.values(f).some((x) => x.ui === false)
+      );
+      let leaves = 0, payloads = 0;
+      const touchedCalls = new Set<string>();
+      kept = kept.map((e) => {
+        const r = _screenTimelineEntry(e, visible, anyHidden);
+        leaves += r.leaves;
+        if (r.payload) payloads++;
+        if (r.touched) {
+          if (e.call !== undefined) touchedCalls.add(e.call);
+          const own = _callIdOf(e);
+          if (own !== undefined) touchedCalls.add(own);
+        }
+        return r.entry;
+      });
+      if (anyHidden) {
+        const r = _withholdAsyncCallPayloads(kept, touchedCalls, visible);
+        kept = r.entries;
+        payloads += r.payloads;
+      }
+      if (leaves || payloads) {
+        truncated.push(
+          `timeline: values of fields hidden from clients were withheld ` +
+            `(${leaves} diff value${leaves === 1 ? "" : "s"}, ${payloads} ` +
+            `action payload${
+              payloads === 1 ? "" : "s"
+            } of actions that wrote ` +
+            `them or may have — an async call's writes land after it)`,
+        );
+      }
+    }
+    // Byte caps — the state cap meant nothing while the same values could
+    // ride in through the diffs (a 391 KB state was "omitted" from a 406 KB
+    // report).
+    let elided = 0, dropped = 0;
+    kept = kept.flatMap((e) => {
+      const c = _capTimelineEntry(e);
+      if (c !== e) c ? elided++ : dropped++;
+      return c ? [c] : [];
+    });
+    let bytes = safeSize(kept);
+    let oldest = 0;
+    while (kept.length && bytes > REPORT_LIMITS.timelineBytes) {
+      bytes -= safeSize(kept.shift()) + 1;
+      oldest++;
+    }
+    if (elided || dropped) {
+      truncated.push(
+        `timeline: ${elided} entr${elided === 1 ? "y" : "ies"} over ${
+          REPORT_LIMITS.timelineEntryBytes / 1024
+        }KB had their values elided` +
+          (dropped ? `, ${dropped} still too large were dropped` : ""),
+      );
+    }
+    if (oldest) {
+      truncated.push(
+        `timeline: the oldest ${oldest} entr${
+          oldest === 1 ? "y was" : "ies were"
+        } dropped to stay within ${REPORT_LIMITS.timelineBytes / 1024}KB`,
+      );
+    }
+    if (kept.length) report.timeline = kept;
   } catch (e) {
     truncated.push(`timeline could not be captured: ${e}`);
   }

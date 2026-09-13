@@ -174,9 +174,11 @@ first action queued after a disconnect logs a warning saying exactly that; for
 edits that must outlive a reload use a `sync` cell (CRDT ops are persisted and
 rebased on reconnect).
 
-Past 1000 queued actions the oldest is dropped and its caller's promise rejects
-immediately with the real reason. `isConnectionDegraded()` reports the queue
-passing 80% full.
+Past 1000 actions queued while offline the oldest is dropped and its caller's
+promise rejects immediately with the real reason. Calls already accepted —
+waiting on the send pacer when the connection dropped — are never evicted by
+that cap; they replay first. `isConnectionDegraded()` reports the queue passing
+80% full.
 
 **Traffic implication:** On reconnect, the queue flushes all pending actions at
 once. If you queued 100 actions during a 5-minute disconnect, all 100 dispatch
@@ -197,12 +199,35 @@ Default for all browser clients. Persistent bidirectional connection.
 Browser <-> WebSocket <-> Deno Server
 ```
 
-Rate limits (server-enforced):
+Rate limits (server-enforced, `wsLimits`):
 
 - 100 messages/sec per client
 - 5MB/s bandwidth per client
 - 1MB max message size
 - 100 max concurrent connections (configurable via `maxConnections`)
+
+The client paces itself to the budget the server advertises in its hello: every
+frame the page writes (method calls, `send()`, sync ops, `serverFn`, forwarded
+logs) leaves through one writer held to 80% of `messagesPerSec`. A burst —
+`Promise.all` over 1000 `cell.method()` calls — queues and resolves late, never
+refused. A frame the server still drops over a per-second budget is answered
+with `retryAfterMs`; the client holds that call and re-sends it (up to 8 times,
+then the caller gets the server's refusal). A frame refused for what it is (too
+large, not allowed, or bigger than the whole `bytesPerSec` — no re-send could
+ever fit) rejects at once, without holding the calls behind it; a refused frame
+is not charged to the byte window. A server whose `maxMessageBytes` exceeds its
+`bytesPerSec` says so at startup.
+
+A peer that ignores all of that — 50 dropped frames in a row — is closed with
+`1008` and its address refused (HTTP 429, `Retry-After`) for 5 s, doubling per
+repeat within 10 minutes up to 60 s. Both are logged on the server. The aio
+client reconnects with its normal backoff (≤ 8 s) once the block ends.
+
+The per-client budget is checked first; a frame it refuses is not counted
+against the server-wide fuse (`messagesPerSec` × clients, from 2 up to 50
+clients' worth). When that fuse trips, only a client that has sent more than its
+even share of it this second is refused (with `retryAfterMs`, never closed), so
+one flooding socket cannot starve the others at any budget.
 
 ### UDS + IPC (Electron)
 

@@ -6,7 +6,7 @@
 // `t.getState()` already exposes — so the split was an inconsistency, not a
 // design: the same line worked in testUI, bootCells and production, and threw in
 // the tool that presents itself as the unit-level one.
-import { assert, assertEquals } from "@std/assert";
+import { assertEquals } from "@std/assert";
 import { cell } from "../mod.ts";
 import { testCell } from "../src/cell-test.ts";
 import { bootCells } from "../src/testing/cell-test.ts";
@@ -60,5 +60,11 @@ Deno.test("testCell: selector binding is restored afterwards", async () => {
     ["a"],
     "bootCells binds its own selectors over the cell's declared initial state",
   );
-  assert(typeof sel.byId === "function");
+  // CALL it: `typeof sel.byId === "function"` was true even when the binding
+  // had leaked, which is the exact thing this test exists to catch.
+  assertEquals(
+    sel.byId("a")?.id,
+    "a",
+    "the parameterized selector is re-bound to THIS harness too",
+  );
 });

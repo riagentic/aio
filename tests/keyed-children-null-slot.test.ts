@@ -84,13 +84,14 @@ Deno.test({
     const { root, cleanup } = setup();
     const tick = signal(0);
     const warns = await warningsDuring(() => {
+      // In ONE list (an array expression): a literal unkeyed sibling beside
+      // keyed ones is positionally stable and no longer warns — see
+      // tests/mixed-keys-literal-siblings-around-list.test.tsx.
       mount(root, () =>
-        h(
-          "div",
-          null,
+        h("div", null, [
           h("span", { key: "cat" }, `Infectious${tick.get()}`),
           h("span", null, "no key here"),
-        ));
+        ]));
       tick.set(1);
     });
     assertEquals(

@@ -18,9 +18,20 @@ import {
   REDACTED,
 } from "../diagnostics/redact.ts";
 import type { Redactor } from "../diagnostics/redact.ts";
+import { workerPatchCell } from "./journal.ts";
 
 /** One changed leaf: a dotted path and its before/after values. */
-export type DiffEntry = { path: string; before: unknown; after: unknown };
+export type DiffEntry = {
+  path: string;
+  before: unknown;
+  after: unknown;
+  /** The path's keys, present ONLY when a key itself contains a `.` — the one
+   *  case where `path.split(".")` does not give them back. `{ "a.b": 1 }` and
+   *  `{ a: { b: 1 } }` both print `a.b`; a reader that folded diffs into state
+   *  by splitting wrote the first as the second, a state the app never had.
+   *  Fold with `d.segments ?? d.path.split(".")` (an empty path is the root). */
+  segments?: string[];
+};
 
 /** One recorded dispatch. `seq` matches the journal seq when journaling is on. */
 export type TimelineEntry = {
@@ -35,6 +46,26 @@ export type TimelineEntry = {
    *  responsible for it, so `am timeline` can show "the async method `foo`
    *  wrote this" instead of an opaque framework symbol. */
   origin?: string;
+  /** `"effect"` when an earlier action caused this one — a timer it armed,
+   *  its async body, a `$do` — or boot did (a cell's `onInit`; see
+   *  `ActionCause` in journal.ts). A replay that
+   *  re-runs the cause re-creates it, so a reader that replays must not send
+   *  it again. Absent for an input. */
+  cause?: "effect";
+  /** The `_callId` of the async call whose RUN dispatched this — its
+   *  write-sets, what its body dispatched, a call it made. The last entry
+   *  naming a call is where that call's recorded run ends, so a replay can
+   *  tell that a later call started before an earlier one was over (and start
+   *  them together, or a lost update the app really had cannot happen in the
+   *  replay). A run that leaves no trace after a later call began reads as
+   *  over: nothing it did after that point is recorded to reproduce. */
+  call?: string;
+  /** Set on an async method's CALL when the method later threw. The call
+   *  commits at call time and the failure arrives as a separate `__error`
+   *  frame that is not recorded, so without this a replay generated from the
+   *  timeline emitted a bare `await cell.method()` that rejects — the
+   *  generated test failed on the line that reproduced the run faithfully. */
+  threw?: true;
 };
 
 /** Safety caps so a pathological action (e.g. replacing a 10k-row array) can't
@@ -65,7 +96,16 @@ export function diffState(prev: unknown, next: unknown): DiffEntry[] {
   const out: DiffEntry[] = [];
   let truncated = false;
 
-  const walk = (a: unknown, b: unknown, path: string, depth: number): void => {
+  // The keys down to the current node, as one shared stack — copied only for
+  // the rare leaf whose path a `.` inside a key makes ambiguous.
+  const segs: string[] = [];
+  const walk = (
+    a: unknown,
+    b: unknown,
+    path: string,
+    dotted: boolean,
+    depth: number,
+  ): void => {
     if (a === b) return; // structural-sharing fast path — whole subtree unchanged
     if (out.length >= MAX_DIFF_ENTRIES) {
       truncated = true;
@@ -86,19 +126,26 @@ export function diffState(prev: unknown, next: unknown): DiffEntry[] {
           truncated = true;
           break;
         }
+        segs.push(k);
         walk(
           (a as Record<string, unknown>)[k],
           (b as Record<string, unknown>)[k],
           path ? `${path}.${k}` : k,
+          dotted || k.includes("."),
           depth + 1,
         );
+        segs.pop();
       }
       return;
     }
-    out.push({ path, before: a, after: b });
+    out.push(
+      dotted
+        ? { path, before: a, after: b, segments: [...segs] }
+        : { path, before: a, after: b },
+    );
   };
 
-  walk(prev, next, "", 0);
+  walk(prev, next, "", false, 0);
   if (truncated) {
     out.push({
       path: "…",
@@ -121,7 +168,15 @@ export type Timeline = {
     ts: number,
     /** Originating action type, for a write-set commit. Redaction honours it. */
     origin?: string,
+    /** `"effect"` for an action an earlier one caused. */
+    cause?: "input" | "effect",
+    /** The async call whose run dispatched it (see `TimelineEntry.call`). */
+    call?: string,
   ): void;
+  /** Mark the recorded async call with this `_callId` as having thrown.
+   *  Returns false when no retained entry carries it (rotated out, or never
+   *  recorded). */
+  markThrew(callId: string): boolean;
   /** Entries with seq > `after` (default all), newest last, capped at `limit`. */
   entries(after?: number, limit?: number): TimelineEntry[];
   /** Highest seq recorded (0 if empty) — for a self-sequencing counter. */
@@ -155,11 +210,24 @@ export function createTimeline(
 ): Timeline {
   let ring: TimelineEntry[] = [];
   let last = 0;
+  // `_callId` → the entry that call was recorded as. Kept apart from the
+  // payload, which the redactor may have replaced — a redacted call that threw
+  // still threw.
+  const byCallId = new Map<string, TimelineEntry>();
+  const callIdOf = (payload: unknown): string | undefined => {
+    const id = (payload as { _callId?: unknown } | null | undefined)?._callId;
+    return typeof id === "string" ? id : undefined;
+  };
 
   return {
-    record(seq, type, payload, prev, next, ts, origin) {
+    record(seq, type, payload, prev, next, ts, origin, cause, call) {
       last = Math.max(last, seq);
-      const hide = isRedactedAction(redact, type, origin);
+      // A worker cell's patch batch carries the values its method stored and
+      // no method name to match an exact pattern against — so it goes by the
+      // cell, the same answer the journal gives it (journal.ts).
+      const workerCell = workerPatchCell(type, payload);
+      const hide = isRedactedAction(redact, type, origin) ||
+        (workerCell !== undefined && redact.redactsCell(workerCell));
       const diff = diffState(prev, next);
       // A redacted CELL's values, not just a redacted ACTION's. `hide` was
       // decided per action, so the obvious companion method leaked what the
@@ -176,23 +244,45 @@ export function createTimeline(
       const hidePath = (path: string): boolean => {
         if (hide) return true;
         const dot = path.indexOf(".");
-        return redact.cells.has(dot === -1 ? path : path.slice(0, dot));
+        return redact.redactsCell(dot === -1 ? path : path.slice(0, dot));
       };
-      ring.push({
+      const entry: TimelineEntry = {
         seq,
         ts,
         type,
         ...(origin !== undefined ? { origin } : {}),
+        ...(cause === "effect" ? { cause } : {}),
+        ...(call !== undefined ? { call } : {}),
         payload: hide ? REDACTED : payload,
-        diff: redact.cells.size === 0 && !hide
+        diff: !redact.redactsAnyCell() && !hide
           ? diff
           : diff.map((d) =>
-            hidePath(d.path)
-              ? { path: d.path, before: REDACTED, after: REDACTED }
-              : d
+            hidePath(d.path) ? { ...d, before: REDACTED, after: REDACTED } : d
           ),
-      });
-      if (ring.length > cap) ring = ring.slice(ring.length - cap);
+      };
+      ring.push(entry);
+      const callId = callIdOf(payload);
+      if (callId !== undefined) byCallId.set(callId, entry);
+      if (ring.length > cap) {
+        const gone = ring.slice(0, ring.length - cap);
+        ring = ring.slice(ring.length - cap);
+        for (const e of gone) {
+          const id = callIdOf(e.payload);
+          if (id !== undefined && byCallId.get(id) === e) byCallId.delete(id);
+        }
+        // A redacted entry's payload no longer names its call — sweep by
+        // identity so the map never outlives the ring.
+        if (byCallId.size > cap) {
+          const live = new Set(ring);
+          for (const [id, e] of byCallId) if (!live.has(e)) byCallId.delete(id);
+        }
+      }
+    },
+    markThrew(callId) {
+      const e = byCallId.get(callId);
+      if (!e) return false;
+      e.threw = true;
+      return true;
     },
     entries(after = -Infinity, limit = Infinity) {
       const sel = ring.filter((e) => e.seq > after);
@@ -206,6 +296,7 @@ export function createTimeline(
     clear() {
       ring = [];
       last = 0;
+      byCallId.clear();
     },
     size() {
       return ring.length;

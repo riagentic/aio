@@ -12,7 +12,7 @@
  * artifacts that appear), not `deno compile`.
  */
 import { assert, assertEquals } from "@std/assert";
-import { join } from "@std/path";
+import { join, resolve } from "@std/path";
 import { buildAll, normalizeTargets } from "../src/build-all.ts";
 import { placedName, unsafeOutDir } from "../src/testing/internal.ts";
 import { slugify } from "../src/build/build-helpers.ts";
@@ -152,6 +152,26 @@ Deno.test("unsafeOutDir: refuses out pointing at ANY target's app dir", () => {
   assert(unsafeOutDir("/proj/apps/web", root, apps), "apps/web");
 });
 
+Deno.test("out-dir: an ABSOLUTE path is honoured, and then refused if it escapes", () => {
+  // `--out=/srv/release` used to be resolved as `join(root, "/srv/release")`,
+  // and `join()` swallows a later segment's leading separator — so it became
+  // `<root>/srv/release`, a directory INSIDE the project, which this guard
+  // then approved. The build summary printed the path with its leading slash
+  // stripped, so it read as the one that was asked for, and the artifact was
+  // nowhere near it. A RELATIVE escape was refused loudly the whole time, so
+  // the guard worked for one spelling and was bypassed by the other.
+  const root = "/proj";
+  // Resolution is what the orchestrator does with the flag; `resolve` honours
+  // an absolute path where `join` does not.
+  assertEquals(resolve(root, "/srv/release"), "/srv/release");
+  assertEquals(resolve(root, "release"), "/proj/release");
+  // …and an absolute path outside the project is then REFUSED, like any other
+  // escape.
+  assert(unsafeOutDir("/srv/release", root), "an absolute escape");
+  assert(unsafeOutDir("/tmp/aio-out", root), "even a temp dir");
+  assert(!unsafeOutDir("/proj/release", root), "inside the project is fine");
+});
+
 // ── end to end: the right module reaches the right build ────────────────────
 
 /** A stand-in for `build.ts`: records its argv, then creates the artifact the
@@ -167,8 +187,12 @@ await Deno.writeTextFile(
   { append: true },
 );
 const name = Deno.args.find((a) => a.startsWith("--name="))!.slice(7);
-const slug = name.toLowerCase().replace(/[^a-z0-9]+/g, "-")
-  .replace(/^-|-$/g, "") || "myapp";
+// A cli-client writes \`<slug>-client\`, as build-cli.ts does — the fleet
+// groups targets by the file they write, so a stub that gave every target the
+// bare name would invent collisions the real builder never has.
+const slug = (name.toLowerCase().replace(/[^a-z0-9]+/g, "-")
+  .replace(/^-|-$/g, "") || "myapp") +
+  (Deno.args.includes("--cli") && Deno.args.includes("--remote") ? "-client" : "");
 await Deno.writeTextFile(root + "/" + slug, "binary\\n");
 `;
 

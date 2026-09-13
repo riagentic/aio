@@ -7,11 +7,22 @@ import {
   camelToKebab as _camelToKebab,
   escapeAttr as _escapeAttr,
   escapeHtml as _escapeHtml,
+  RAW_TEXT_ELEMENTS,
+  rawTextContent,
   resolveClassName as _resolveClassName,
+  ssrCloseSelect,
+  ssrOpenSelect,
+  ssrOptionProps,
   styleValue as _styleValue,
   VOID_ELEMENTS,
 } from "./ssr-utils.ts";
-import { _classProp, _propAttr, _RESERVED_PROPS } from "./prop-write.ts";
+import { isDevMode } from "../state/dev-flag.ts";
+import {
+  _classProp,
+  _propAttr,
+  _RESERVED_PROPS,
+  _STRING_FALSE_ATTRS,
+} from "./prop-write.ts";
 import type { Signal } from "../state/signal.ts";
 import type { ComponentFn, VNode } from "./vdom-types.ts";
 import {
@@ -126,15 +137,24 @@ export function _renderPropsHtml(
     } else if (k === "style" && typeof v === "string") {
       if (v) html += ` style="${_escapeAttr(v)}"`;
     } else if (k === "style" && typeof v === "object" && v !== null) {
-      const pairs = Object.entries(v as Record<string, string>)
-        .filter(([_, sv]) => sv != null) // AIO-164: skip null/undefined values
-        .map(([sk, sv]) =>
-          `${_camelToKebab(sk)}:${_styleValue(sk, resolveSignalProp(sv))}`
-        )
+      // A declaration whose value resolves to "" is NO declaration — the rule
+      // `styleValue` defines and the client applies via `setProperty(k, "")`.
+      // Filtering the raw value (`!= null`, AIO-164) missed `false` and a
+      // signal that resolves to null, and emitted `display:false`.
+      const pairs = Object.entries(v as Record<string, unknown>)
+        .map(([sk, sv]) => [sk, _styleValue(sk, resolveSignalProp(sv))])
+        .filter(([_, sv]) => sv !== "")
+        .map(([sk, sv]) => `${_camelToKebab(sk!)}:${sv}`)
         .join(";");
       if (pairs) html += ` style="${_escapeAttr(pairs)}"`;
     } else if (_BOOL_ATTR_TAGS[name]?.has(tag ?? "")) {
       if (v) html += ` ${name}`;
+    } else if (v === false && _STRING_FALSE_ATTRS(name)) {
+      // `false` is a VALUE for `aria-*` and the enumerated attributes, not an
+      // absence — the same rule the client patcher applies, so the server does
+      // not hydrate into a different accessibility tree. See
+      // `_STRING_FALSE_ATTRS`.
+      html += ` ${attrNameOf(name)}="false"`;
     } else if (v !== false && v != null) {
       // AIO-187: render all non-boolean attrs with explicit value
       // (known boolean attrs like checked/disabled handled above)
@@ -203,6 +223,148 @@ export function _isSsrRendering(): boolean {
   return _ssrDepth > 0;
 }
 
+/** Mark a server render as in progress for a span that is NOT one synchronous
+ *  `renderToString` call.
+ *
+ *  `renderToStream` is an async generator, so it cannot use the try/finally
+ *  below; it never marked SSR at all, and everything that asks
+ *  `_isSsrRendering()` took the CLIENT branch for a streamed page. `useHead`
+ *  was the visible casualty: a streamed page shipped with no title, no
+ *  description and no canonical, silently in production and in dev with a
+ *  warning that blamed the author for calling `useHead` "outside a component
+ *  render" when they had done exactly the right thing. A nested
+ *  `renderToString` inside a stream also looked top-level, so it re-fired the
+ *  SSR start hook and wiped the head collected so far. */
+export function _enterSsr(): void {
+  _ssrDepth++;
+}
+
+/** End the span opened by {@linkcode _enterSsr}. */
+export function _exitSsr(): void {
+  if (_ssrDepth > 0) _ssrDepth--;
+}
+
+// ── SSR context scope ──────────────────────────────────────────────
+//
+// On the client a `<Provider>` writes its value into the component INSTANCE
+// that rendered it, and `useContext` walks `_instanceStack` for it. A server
+// render has neither — it calls component functions directly — so the Provider
+// wrote nowhere and every `useContext` answered the DEFAULT:
+// `renderToString(<C.Provider value="provided"><R/></C.Provider>)` shipped
+// "default", and a nested `<Route>` shipped an empty `<Outlet>` (the route
+// context is a context). Hydration then adopted markup the client does not
+// build.
+//
+// The scope is LEXICAL, threaded through the writers as a parameter, because
+// `renderToString` recursion is not the only shape: `renderToStream` is an
+// async generator, and two concurrent streams interleave at every `yield`, so a
+// module-global push/pop stack would hand one request the other's providers.
+// The only global is `_ssrCall` below, and it is set for the SYNCHRONOUS span
+// of one component call — no yield can happen inside it.
+
+/** The context values visible to a subtree of a server render: context id →
+ *  the value its nearest Provider was given. Null means none. */
+export type SsrContexts = ReadonlyMap<symbol, unknown> | null;
+
+/** The component call in progress: what it can see, and what it provided. */
+let _ssrCall: {
+  visible: SsrContexts;
+  provided: Map<symbol, unknown> | null;
+} | null = null;
+
+/** No Provider above — distinct from a Provider whose value is `undefined`. */
+export const _SSR_NO_CONTEXT: unique symbol = Symbol("aio.ssrNoContext");
+
+/** @internal The value a server render's scope holds for context `id`, or
+ *  `_SSR_NO_CONTEXT`. Null when no server component call is in progress — the
+ *  caller then asks the client instance stack. */
+export function _ssrContextValue(id: symbol): unknown {
+  if (!_ssrCall) return null;
+  const v = _ssrCall.visible;
+  return v !== null && v.has(id) ? v.get(id) : _SSR_NO_CONTEXT;
+}
+
+/** @internal Whether a server component call is in progress. */
+export function _inSsrCall(): boolean {
+  return _ssrCall !== null;
+}
+
+/** @internal A Provider rendering on the server records its value for its
+ *  children. False when no server component call is in progress. */
+export function _ssrProvide(id: symbol, value: unknown): boolean {
+  if (!_ssrCall) return false;
+  (_ssrCall.provided ??= new Map()).set(id, value);
+  return true;
+}
+
+/** @internal Run `fn` as a server render step that sees `visible`; returns its
+ *  result and the scope its output renders in (`visible` plus whatever a
+ *  Provider in `fn` provided). Shared by all three writers so there is one
+ *  rule for what a subtree of a server render can see. */
+export function _ssrScoped<T>(
+  visible: SsrContexts,
+  fn: () => T,
+): { out: T; scope: SsrContexts } {
+  const prev = _ssrCall;
+  const call = { visible, provided: null as Map<symbol, unknown> | null };
+  _ssrCall = call;
+  let out: T;
+  try {
+    out = fn();
+  } finally {
+    _ssrCall = prev;
+  }
+  const provided = call.provided;
+  if (provided === null) return { out, scope: visible };
+  const scope = new Map(visible ?? []);
+  for (const [k, v] of provided) scope.set(k, v);
+  return { out, scope };
+}
+
+/** @internal Call a component vnode for a server render in `visible`. */
+export function _ssrComponent(
+  vnode: VNode,
+  visible: SsrContexts,
+): { out: VNode | string | number | null; scope: SsrContexts } {
+  return _ssrScoped(visible, () =>
+    (vnode.tag as ComponentFn)({
+      ...vnode.props,
+      children: vnode.children.length > 0
+        ? vnode.children
+        : (vnode.props.children ?? vnode.children),
+    }));
+}
+
+/** Request state a server render SNAPSHOTS when it starts, by id.
+ *
+ *  A routed app renders the route in the module-level `routePath` signal,
+ *  which the request handler sets before rendering. `renderToString` renders
+ *  in one synchronous call, so the value it reads is the one just set.
+ *  `renderToStream` does not: it calls each component when its chunk is
+ *  pulled, so a second request that set `routePath` while the first stream was
+ *  still being written re-routed the FIRST response — measured, a stream
+ *  started at `/p/42` finished as the `/about` page. The router registers a
+ *  capture here; each top-level render reads it once into its root scope, and
+ *  every component call of that render sees its own snapshot. */
+const _ssrCaptures = new Map<symbol, () => unknown>();
+
+/** @internal Snapshot `read()` under `id` at the start of every top-level
+ *  server render (read back with `_ssrContextValue(id)`). */
+export function _registerSsrCapture(id: symbol, read: () => unknown): void {
+  _ssrCaptures.set(id, read);
+}
+
+/** @internal The scope a top-level writer starts in: the request snapshots
+ *  (see `_ssrCaptures`) — or, for a render nested inside a server component
+ *  call, what that call sees. */
+export function _ssrRootScope(): SsrContexts {
+  if (_ssrCall) return _ssrCall.visible;
+  if (_ssrCaptures.size === 0) return null;
+  const scope = new Map<symbol, unknown>();
+  for (const [id, read] of _ssrCaptures) scope.set(id, read());
+  return scope;
+}
+
 /** Render a VNode tree to an HTML string (no DOM required). */
 export function renderToString(
   vnode: VNode | string | number | null,
@@ -213,7 +375,7 @@ export function renderToString(
   if (isTopLevel && _onSsrStart) _onSsrStart();
   _ssrDepth++;
   try {
-    return _rts(vnode, { n: 0 });
+    return _rts(vnode, { n: 0 }, _ssrRootScope());
   } finally {
     _ssrDepth--;
   }
@@ -224,6 +386,7 @@ export function renderToString(
 function _rts(
   vnode: VNode | string | number | null,
   nodes: SsrNodes,
+  scope: SsrContexts,
 ): string {
   if (vnode == null) return "";
   if (typeof vnode === "string") {
@@ -242,12 +405,7 @@ function _rts(
 
   // Component — execute and render output
   if (typeof vnode.tag === "function") {
-    const rendered = (vnode.tag as ComponentFn)({
-      ...vnode.props,
-      children: vnode.children.length > 0
-        ? vnode.children
-        : (vnode.props.children ?? vnode.children),
-    });
+    const { out: rendered, scope: inner } = _ssrComponent(vnode, scope);
     // Nothing to render is still a POSITION, on the server exactly as on the
     // client: `renderToString(null)` returns "", which would ship markup one
     // node short of what the client builds — so hydration adopts the wrong
@@ -257,7 +415,7 @@ function _rts(
       nodes.n++;
       return "<!---->";
     }
-    return _rts(rendered, nodes);
+    return _rts(rendered, nodes, inner);
   }
 
   // Null placeholder — comment node in HTML (AIO-107)
@@ -284,15 +442,15 @@ function _rts(
       | null
       | undefined;
     try {
-      return _region(vnode, nodes);
+      return _region(vnode, nodes, scope);
     } catch (thrown) {
       if (thrown !== _LAZY_PENDING) throw thrown;
-      return _rts(fallback ?? null, nodes);
+      return _fallbackHtml(fallback, nodes, (v, n) => _rts(v, n, scope));
     }
   }
 
   // Fragment — render children
-  if (vnode.tag === Fragment) return _region(vnode, nodes);
+  if (vnode.tag === Fragment) return _region(vnode, nodes, scope);
 
   // ErrorBoundary — render children with error catching
   if (vnode.tag === ErrorBoundary) {
@@ -300,10 +458,11 @@ function _rts(
       | ((e: Error) => VNode | string | number | null)
       | undefined;
     try {
-      return _region(vnode, nodes);
+      return _region(vnode, nodes, scope);
     } catch (error) {
       if (!fallback) throw error;
-      return _rts(fallback(error as Error), nodes);
+      const fb = _ssrScoped(scope, () => fallback(error as Error));
+      return _fallbackHtml(fb.out, nodes, (v, n) => _rts(v, n, fb.scope));
     }
   }
 
@@ -311,33 +470,78 @@ function _rts(
   nodes.n++;
   const tag = vnode.tag as string;
   const selfClosing = VOID_ELEMENTS.has(tag);
-  let html = `<${tag}${_renderPropsHtml(vnode.props, tag)}`;
+  // An <option> inside a <select> whose value it matches gains `selected` —
+  // see `ssrOptionProps`. <select> itself has no `value` attribute, so
+  // nothing else could express the server's choice.
+  // The element's own `value` (or `defaultValue`), signal resolved — read
+  // ONCE and used twice: as the option's identity, and as the select's choice.
+  const ownValue = resolveSignalProp(
+    vnode.props.value ?? vnode.props.defaultValue,
+  );
+  const props = ssrOptionProps(tag, vnode.props, vnode.children, ownValue);
+  let html = `<${tag}${_renderPropsHtml(props, tag)}`;
 
   html += ">";
   if (selfClosing) return html;
 
   // Raw html owns the content (see _hasRawHtml); the children are not emitted.
   const areaText = _ssrTextareaText(vnode);
-  if (_hasRawHtml(vnode.props)) {
-    html += (vnode.props.dangerouslySetInnerHTML as { __html: string }).__html;
-  } else if (areaText !== null) {
-    html += areaText;
-  } else {
-    const inner: SsrNodes = { n: 0 };
-    for (const child of vnode.children) {
-      html += _rts(child, inner);
+  const inSelect = ssrOpenSelect(tag, ownValue);
+  try {
+    if (_hasRawHtml(vnode.props)) {
+      html += (vnode.props.dangerouslySetInnerHTML as { __html: string })
+        .__html;
+    } else if (areaText !== null) {
+      html += areaText;
+    } else if (RAW_TEXT_ELEMENTS.has(tag)) {
+      // <script>/<style> hold RAW text — see `rawTextContent`.
+      const inner: SsrNodes = { n: 0 };
+      for (const child of vnode.children) {
+        if (typeof child === "string" || typeof child === "number") {
+          inner.n++;
+          html += rawTextContent(tag, String(child), isDevMode());
+        } else {
+          html += _rts(child, inner, scope);
+        }
+      }
+    } else {
+      const inner: SsrNodes = { n: 0 };
+      for (const child of vnode.children) {
+        html += _rts(child, inner, scope);
+      }
     }
+  } finally {
+    // A Suspense boundary inside a <select> throws to signal "pending", and
+    // that throw is caught ABOVE this frame — without the finally the scope
+    // would stay open and mark options in a later, unrelated element.
+    ssrCloseSelect(inSelect);
   }
 
   html += `</${tag}>`;
   return html;
 }
 
+/** A boundary's fallback as markup. A fallback of nothing still holds the
+ *  boundary's slot — the client keeps a placeholder comment there
+ *  (`_fallbackSlot`), so the server emits that comment, or hydration would
+ *  claim the boundary's NEXT sibling for it. Shared by all three writers. */
+export function _fallbackHtml(
+  fallback: VNode | string | number | null | undefined,
+  nodes: SsrNodes,
+  write: (v: VNode | string | number, nodes: SsrNodes) => string,
+): string {
+  if (fallback == null) {
+    nodes.n++;
+    return _EMPTY_ANCHOR;
+  }
+  return write(fallback, nodes);
+}
+
 /** A container's children as one region (see `_regionHtml`). A region always
  *  occupies at least one node of its parent — its content or its anchor. */
-function _region(vnode: VNode, nodes: SsrNodes): string {
+function _region(vnode: VNode, nodes: SsrNodes, scope: SsrContexts): string {
   const inner: SsrNodes = { n: 0 };
-  const html = vnode.children.map((c) => _rts(c, inner)).join("");
+  const html = vnode.children.map((c) => _rts(c, inner, scope)).join("");
   nodes.n++;
   return _regionHtml(html, inner.n);
 }

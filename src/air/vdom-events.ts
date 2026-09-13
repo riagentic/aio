@@ -1,6 +1,7 @@
 // VDOM event delegation — single root listener per event type instead of per-element.
 // Non-bubbling events (focus, blur, scroll, etc.) remain per-element.
 
+import { _notifyContained } from "./hook-error.ts";
 import { batch } from "../state/signal.ts";
 
 // ── Delegated event set ────────────────────────────────────────────
@@ -208,6 +209,9 @@ export function _wrapHandler(
       batch(() => handler(e));
     } catch (err) {
       console.error(`[aio] event handler error (on${evt}):`, err);
+      // …and the harness, if one is listening. Contained is right for an app;
+      // reported as a PASS is not right for a test.
+      _notifyContained(`event handler (on${evt})`, err);
     }
   };
 }

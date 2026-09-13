@@ -52,6 +52,21 @@ export interface ServerConfig {
   resolveUser?: (token: string) => AioUser | null | Promise<AioUser | null>; // dynamic user resolution (AIO-171)
   sessionResolver?: (token: string) => AioUser | null; // AUTH-1 session tokens — consulted first
   authFlows?: import("./auth-flows.ts").AuthFlows; // AUTH-2 login endpoints (/__aio/auth/*)
+  /** Subscribe to anything that changes who an ALREADY-OPEN socket is: a
+   *  revoked session, a changed role, a deleted account.
+   *
+   *  It used to reach in through `authFlows.sessions.onRevoked`, and
+   *  `authFlows` is only built when BOTH a user store and a session store
+   *  exist — i.e. under `auth: true`. So `aio.run({ sessions: true })`, the
+   *  config `sessions.ts`'s own header documents, subscribed to nothing and
+   *  fell back to the 5-second sweep: measured, a revoked token kept its
+   *  socket open for 4.8s and took ten more frames of that user's private
+   *  state with it. And a ROLE change emitted nothing at all, under either
+   *  config, while three docstrings and `docs/auth/auth.md` said it "lands
+   *  here too".
+   *
+   *  One seam, wired by the caller to every source it has. @returns unsubscribe */
+  onIdentityChange?: (fn: () => void) => () => void;
   showStatus?: boolean; // show reconnection indicator (default: true)
   uiEntry?: string; // AIO-8.1: UI entry file relative to baseDir (default: App.tsx)
   viewport?: string | false; // AIO-423: <meta viewport> override (false = omit)
@@ -83,7 +98,7 @@ export interface ServerConfig {
   /** How many clients are on the UDS socket — the cost meter counts both
    *  transports, and a desktop app has all of its clients here. */
   udsClientCount?: () => number;
-  fullStateThreshold?: number; // 0-1: ratio of changed keys for delta vs full broadcast (default: 0.5)
+  fullStateThreshold?: number; // 0-1: byte ratio — patch JSON > this × full-state JSON → full broadcast (default: 0.5)
   maxConnections?: number; // max concurrent WebSocket clients (default: 100)
   wsLimits?: import("./aio-types.ts").WsLimits; // per-client WS rate/size limits (W6.6)
   syncIntervalMs?: number; // throttle state broadcasts: max 1 push per N ms (default: 50)
