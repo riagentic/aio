@@ -191,7 +191,12 @@ function rawServer(path: string) {
 /** Boots the REAL generated main.cjs under a stub Electron. */
 async function startMain(
   sockPath: string,
-  opts: { title?: string; httpSocketPath?: string; baseDir?: string } = {},
+  opts: {
+    title?: string;
+    httpSocketPath?: string;
+    baseDir?: string;
+    childWindows?: boolean;
+  } = {},
 ) {
   const dir = await Deno.makeTempDir({ prefix: "aio-emain-" });
   await Deno.mkdir(join(dir, "node_modules", "electron"), { recursive: true });
@@ -213,6 +218,7 @@ async function startMain(
     title: opts.title ?? "harness",
     httpSocketPath: opts.httpSocketPath,
     baseDir: opts.baseDir,
+    ...(opts.childWindows ? { meta: { childWindows: true } } : {}),
   });
   // FAIL LOUD, NEVER HANG. The generated program is a template literal
   // assembled from a dozen fragments, and one stray backslash or backtick in
@@ -424,8 +430,11 @@ async function withHarness(
     main: Awaited<ReturnType<typeof startMain>>,
     dir: string,
   ) => Promise<void>,
-  opts: { httpSocket?: boolean; baseDir?: (dir: string) => Promise<string> } =
-    {},
+  opts: {
+    httpSocket?: boolean;
+    baseDir?: (dir: string) => Promise<string>;
+    childWindows?: boolean;
+  } = {},
 ): Promise<void> {
   const dir = await Deno.makeTempDir({ prefix: "aio-esock-" });
   const sockPath = join(dir, "s.sock");
@@ -433,6 +442,7 @@ async function withHarness(
   const main = await startMain(sockPath, {
     httpSocketPath: opts.httpSocket ? join(dir, "http.sock") : undefined,
     baseDir: opts.baseDir ? await opts.baseDir(dir) : undefined,
+    childWindows: opts.childWindows,
   });
   try {
     await main.waitFor(() => srv.conns() > 0);
@@ -1527,4 +1537,62 @@ Deno.test({
       );
     });
   },
+});
+
+// ── openWindow: every guardrail that refuses says which one ────────────────
+//
+// The child-window handler returned silently on a bad URL, a preload outside
+// the app dir, a missing preload and a symlink escape: the app's click opened
+// no window and no line anywhere named the rule. Run the real generated main.
+Deno.test("electron main: openWindow refusals name the guardrail; a valid request opens", async () => {
+  let app = "";
+  await withHarness(async (_srv, main, dir) => {
+    await Deno.writeTextFile(join(dir, "outside.js"), "");
+    await Deno.symlink(join(dir, "outside.js"), join(app, "escape.js"));
+    const open = (arg: Record<string, unknown>) =>
+      main.cmd({ cmd: "ipc", channel: "__aio:openWindow", arg });
+    const said = () => main.stderr.join("") + main.stdout.join("");
+    const cases: [Record<string, unknown>, string][] = [
+      [
+        { url: "file:///etc/passwd", preload: join(app, "p.js") },
+        "only http/https",
+      ],
+      [{ url: "nope", preload: join(app, "p.js") }, "not a URL"],
+      [
+        { url: "https://x.test", preload: join(dir, "outside.js") },
+        "outside the app directory",
+      ],
+      [
+        { url: "https://x.test", preload: join(app, "missing.js") },
+        "does not exist",
+      ],
+      [
+        { url: "https://x.test", preload: join(app, "escape.js") },
+        "resolves outside",
+      ],
+    ];
+    for (const [arg, why] of cases) {
+      await open(arg);
+      await main.waitFor(() => said().includes(why));
+    }
+    assertEquals(
+      main.events.filter((e) =>
+        e.ev === "loadURL" && e.url === "https://x.test/"
+      ),
+      [],
+    );
+    await open({ url: "https://x.test", preload: join(app, "p.js") });
+    await main.waitFor(() =>
+      main.events.some((e) => e.ev === "loadURL" && e.url === "https://x.test/")
+    );
+  }, {
+    childWindows: true,
+    baseDir: async (dir) => {
+      app = await Deno.realPath(
+        await Deno.makeTempDir({ dir, prefix: "app-" }),
+      );
+      await Deno.writeTextFile(join(app, "p.js"), "");
+      return app;
+    },
+  });
 });

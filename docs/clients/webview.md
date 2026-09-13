@@ -94,6 +94,18 @@ things follow:
 - The guest **cannot reach your cells**. It runs in its own process with no
   preload, no `nodeIntegration` and no aio client — the only channel between you
   and it is the props above.
+- A guest **cannot get Node back**, whatever its tag says. Electron copies the
+  app window's `sandbox`, `contextIsolation` and `nodeIntegration: false` onto
+  every guest, so a hand-written
+  `<webview nodeintegration
+  webpreferences="sandbox=no">` still gets none of
+  them, and a `preload` on it runs sandboxed, with no `fs` (measured on Electron
+  44).
+- **Injecting a provider into a page** (a wallet connector, say) is
+  `__aioIPC.openWindow(url, { preload })`: a child window, not an inline guest,
+  gated by `childWindows`. The preload must live inside the app directory
+  (symlinks are resolved first), and the sandbox stays on unless you pass
+  `sandbox: false`. A refused request logs which rule it broke.
 
 ## See also
 

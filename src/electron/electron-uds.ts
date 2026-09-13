@@ -657,6 +657,10 @@ ${tmplRendererDiagnostics(true)}
   //     — logged loudly per window either way.
   const CHILD_WINDOWS = ${JSON.stringify(!!opts.meta?.childWindows)};
   const dappWindows = new Set();
+  // Every refusal SAYS which guardrail fired: a request that silently did
+  // nothing left the app author with a click that opened no window and no
+  // line anywhere naming the rule it broke.
+  const refuseWindow = (why) => console.warn('[aio:electron] openWindow refused — ' + why);
   ipcMain.on('__aio:openWindow', (_event, payload) => {
     try {
       if (!CHILD_WINDOWS) {
@@ -664,14 +668,22 @@ ${tmplRendererDiagnostics(true)}
         return;
       }
       const { url, preload } = payload || {};
-      const u = new URL(String(url));
-      if (u.protocol !== 'http:' && u.protocol !== 'https:') return;
+      let u;
+      try { u = new URL(String(url)); } catch { return refuseWindow('not a URL: ' + String(url)); }
+      if (u.protocol !== 'http:' && u.protocol !== 'https:') {
+        return refuseWindow('only http/https pages open in a child window, got ' + u.protocol);
+      }
       const root = fs.realpathSync(BASE_DIR || process.cwd());
       const pfx = root.endsWith(path.sep) ? root: root + path.sep;
       const p = path.resolve(String(preload || ''));
-      if (!p.startsWith(pfx) || !fs.existsSync(p)) return;
+      if (!p.startsWith(pfx)) {
+        return refuseWindow('preload ' + p + ' is outside the app directory ' + root);
+      }
+      if (!fs.existsSync(p)) return refuseWindow('preload ' + p + ' does not exist');
       // Symlink escape: judge the REAL file, not the link's address.
-      if (!fs.realpathSync(p).startsWith(pfx)) return;
+      if (!fs.realpathSync(p).startsWith(pfx)) {
+        return refuseWindow('preload ' + p + ' is a link that resolves outside the app directory');
+      }
       const sandbox = payload.sandbox === false ? false: true;
       console.warn('[aio:electron] openWindow → ' + u.href + (sandbox ? '': ' (sandbox DISABLED by app request)'));
       const child = new BrowserWindow({
@@ -688,7 +700,7 @@ ${tmplRendererDiagnostics(true)}
       child.on('closed', () => dappWindows.delete(child));
       child.setMenuBarVisibility(false);
       child.loadURL(u.href);
-    } catch { /* malformed request — ignore */ }
+    } catch (e) { refuseWindow(String(e && e.message || e)); }
   });
 
   ipcMain.on('__aio:send', (_event, json) => {
