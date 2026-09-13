@@ -20,6 +20,8 @@
 
 import { signal } from "../state/signal.ts";
 import { useRef } from "../air/aio-renderer.ts";
+import { _currentCollector } from "../air/renderer-state.ts";
+import { _nameHookSignal } from "../air/untracked-read.ts";
 import {
   getConnectedSignal,
   getReadySignal,
@@ -118,7 +120,18 @@ export function useLocal<T>(
   initial: T,
 ): UseLocalResult<T> {
   const ref = useRef<ReturnType<typeof signal<T>> | null>(null);
-  if (!ref.current) ref.current = signal(initial);
+  if (!ref.current) {
+    ref.current = signal(initial);
+    const c = _currentCollector;
+    if (c) {
+      _nameHookSignal(
+        ref.current,
+        "useLocal",
+        c._component,
+        (c.refIndex ?? 1) - 1,
+      );
+    }
+  }
   const sig = ref.current;
   const result = {
     get local(): T {

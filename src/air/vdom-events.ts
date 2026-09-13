@@ -200,11 +200,22 @@ export function _deleteWrapped(el: Element, evt: string): void {
  *  mouseleave, wheel, the composition events, every media event — threw into
  *  the browser with nothing naming it, and in a test the throw surfaced (if at
  *  all) as an unrelated failure somewhere later. Same wrapper, same rule. */
+/** How many AIR event handlers are running right now (nested dispatch counts
+ *  each). Read by the dev render-burst tripwire: a write made from a handler
+ *  is the fix that tripwire recommends, never the loop it hunts. */
+let _handlerDepth = 0;
+
+/** @internal Is an AIR event handler on the stack? */
+export function _inEventHandler(): boolean {
+  return _handlerDepth > 0;
+}
+
 export function _wrapHandler(
   handler: EventListener,
   evt: string,
 ): EventListener {
   return (e: Event) => {
+    _handlerDepth++;
     try {
       batch(() => handler(e));
     } catch (err) {
@@ -212,6 +223,8 @@ export function _wrapHandler(
       // …and the harness, if one is listening. Contained is right for an app;
       // reported as a PASS is not right for a test.
       _notifyContained(`event handler (on${evt})`, err);
+    } finally {
+      _handlerDepth--;
     }
   };
 }
