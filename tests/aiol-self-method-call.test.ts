@@ -1,15 +1,13 @@
-// The framework's subtlest trap, turned into a squiggle.
+// A cell calling its OWN method from inside a method — the one shape that
+// really bites, and only that one.
 //
-// `job.foo()` from inside `job.bar()` runs as its OWN transaction against
-// COMMITTED state, so it cannot see the write `bar` is mid-way through making.
-// Correct, documented, and invisible at the call site — a field report lost
-// real debugging time to it (choosing a file left the estimate empty) and ended
-// up carrying a standing warning in their CLAUDE.md plus a convention of plain
-// helper functions. A standing warning in a project doc is a lint rule nobody
-// wrote yet.
-//
-// The rule has to be conservative, or people learn to ignore it: the tests
-// below pin what must NOT fire as hard as what must.
+// MEASURED on a real server (and pinned below against `testServer`): a
+// self-call is queued behind the caller's commit, so a SYNC method's call sees
+// the write. An ASYNC method commits at its next `await`, so a call made after
+// a write and before any `await` starts first and reads the old value. The
+// rule fires exactly there — when the callee reads a field the caller has
+// just written — and the tests pin what must NOT fire as hard as what must:
+// an earlier version put five warnings on one real app, none of them a bug.
 import { assert, assertEquals } from "@std/assert";
 import { join } from "@std/path";
 import { buildContext } from "../aiol/context.ts";
@@ -34,15 +32,15 @@ async function issues(files: Record<string, string>) {
   }
 }
 
-Deno.test("aiol: a same-cell method call inside a method is flagged, with the fix", async () => {
+Deno.test("aiol: an async write, then a self-call that reads it, is flagged with the fix", async () => {
   const found = await issues({
     "src/job.ts": `import { cell } from "aio";
 export const job = cell("job", {
   state: { input: "", estimate: 0 },
   methods: {
-    setInput(s: { input: string }, p: string) {
+    async setInput(s: { input: string }, p: string) {
       s.input = p;
-      job.estimateSize();     // ← reads COMMITTED state: input is still ""
+      await job.estimateSize();     // ← starts before the write commits
     },
     estimateSize(s: { input: string; estimate: number }) {
       s.estimate = s.input.length;
@@ -53,15 +51,79 @@ export const job = cell("job", {
   });
   assertEquals(found.length, 1);
   assert(found[0]!.message.includes("job.estimateSize()"));
+  assert(found[0]!.message.includes("s.input"), "names the field it misses");
   assert(
-    found[0]!.message.includes("COMMITTED state"),
+    found[0]!.message.includes("commits at its next `await`"),
     "the message must explain WHY, not just point",
   );
-  assert(
-    found[0]!.message.includes("applyEstimateSize"),
-    "and name the shape of the fix — a plain helper both methods call",
-  );
+  assert(found[0]!.message.includes("applyEstimateSize"), "and name the fix");
   assertEquals(found[0]!.line, 7);
+});
+
+Deno.test("aiol: the same call in a SYNC method is not flagged — it sees the write", async () => {
+  const found = await issues({
+    "src/jobSync.ts": `import { cell } from "aio";
+export const jobSync = cell("jobSync", {
+  state: { input: "", estimate: 0 },
+  methods: {
+    setInput(s: { input: string }, p: string) {
+      s.input = p;
+      jobSync.estimateSize();
+    },
+    estimateSize(s: { input: string; estimate: number }) {
+      s.estimate = s.input.length;
+    },
+    addTwice() { jobSync.setInput("a"); jobSync.setInput("b"); },
+  },
+});
+`,
+  });
+  assertEquals(found, []);
+});
+
+Deno.test("aiol: the shapes of a real app that were false alarms stay silent", async () => {
+  // wallet report: a call in a `.catch` callback (runs after the commit), a write the
+  // callee never reads, a call from a nested `flush` closure, and a call that
+  // comes after an `await`.
+  const found = await issues({
+    "src/net.ts": `import { cell } from "aio";
+const runStart = async () => {};
+const tick = () => new Promise((r) => setTimeout(r, 1));
+export const net = cell("net", {
+  state: { status: "idle", busy: false, reason: "", listings: {} as Record<string, string[]>, items: [] as string[] },
+  methods: {
+    fail(s: { status: string }, why: string) { if (s.status !== "idle") s.status = why; },
+    start(s: { status: string }) {
+      s.status = "starting";
+      void runStart().catch((err) => {
+        net.fail(String(err));
+      });
+    },
+    async list(s: { busy: boolean; status: string }) {
+      try { await tick(); } finally { s.busy = false; }
+      await net.refreshOne("owner");
+    },
+    async refreshOne(s: { reason: string; listings: Record<string, string[]> }, owner: string) {
+      s.reason = "";
+      s.listings[owner] = [];
+    },
+    append(s: { items: string[] }, p: { items: string[] }) { s.items = [...s.items, ...p.items]; },
+    async scan(s: { status: string; items: string[] }) {
+      s.items = [];
+      const flush = () => { net.append({ items: ["x"] }); };
+      await tick();
+      flush();
+    },
+    async later(s: { status: string }) {
+      s.status = "go";
+      await tick();
+      await net.fail("late");
+    },
+  },
+});
+`,
+  });
+  assertEquals(found, []);
 });
 
 Deno.test("aiol: a call inside $do() is NOT flagged — effects run after commit", async () => {
