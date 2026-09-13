@@ -456,7 +456,11 @@ Deno.test("am pair: a running keyed app issues a fresh single-use PIN", async ()
   const body = await resp.json() as { pin: string; ttlSec: number };
   assert(/^\d{6}$/.test(body.pin), `six digits, got ${body.pin}`);
   assertEquals(body.ttlSec, 180);
-  assertEquals(currentPin(), body.pin, "the app now holds exactly this PIN");
+  assertEquals(
+    currentPin("the-key"),
+    body.pin,
+    "the app now holds exactly this PIN",
+  );
 
   // A second call REPLACES it — the point is regeneration without a restart.
   const again = await handleTrojan(
@@ -465,7 +469,8 @@ Deno.test("am pair: a running keyed app issues a fresh single-use PIN", async ()
     pairDeps("the-key"),
   )!;
   const body2 = await again.json() as { pin: string };
-  assertEquals(currentPin(), body2.pin);
+  assertEquals(currentPin("the-key"), body2.pin);
+  clearPairing();
   resetTrojanRateLimit(); // a direct call has no server shutdown to disarm it
 });
 
@@ -531,7 +536,9 @@ Deno.test("am: reaches the control plane of a key-gated app", async () => {
       // …and `am pair` mints a code on the live app, no restart.
       const p = await trojanPost(PORT, "pair", undefined, appId);
       assert(p.ok, `am pair must work: ${!p.ok && p.error}`);
-      assertEquals(currentPin(), (p.data as { pin: string }).pin);
+      // The PIN belongs to THIS app's key (pairing is per app).
+      const key = (await Deno.readTextFile(appKeyPath(appId))).trim();
+      assertEquals(currentPin(key), (p.data as { pin: string }).pin);
     } finally {
       _resetInstanceVerify();
       await app.close();

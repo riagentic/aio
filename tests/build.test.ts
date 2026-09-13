@@ -1,6 +1,6 @@
 import { assertEquals, assertRejects, assertStringIncludes } from "@std/assert";
 import { join } from "@std/path";
-import { tempDir } from "../src/testing/temp-dir.ts";
+import { dropTempDir, tempDir } from "../src/testing/temp-dir.ts";
 import {
   copyDir,
   formatMb,
@@ -67,7 +67,7 @@ Deno.test("slugify: already slugified passes through", () => {
 // magic, and the pair is deterministic in the name.
 
 Deno.test("writeDefaultIcon: writes a real SVG and a real PNG", async () => {
-  const dir = await Deno.makeTempDir();
+  const dir = await tempDir("aio-build-");
   try {
     await writeDefaultIcon(`${dir}/myapp`, "myapp");
     const svg = await Deno.readTextFile(`${dir}/myapp.svg`);
@@ -77,12 +77,12 @@ Deno.test("writeDefaultIcon: writes a real SVG and a real PNG", async () => {
     const png = await Deno.readFile(`${dir}/myapp.png`);
     assertEquals([...png.subarray(0, 4)], [0x89, 0x50, 0x4e, 0x47]);
   } finally {
-    await Deno.remove(dir, { recursive: true });
+    await dropTempDir(dir);
   }
 });
 
 Deno.test("writeDefaultIcon: deterministic in the name", async () => {
-  const dir = await Deno.makeTempDir();
+  const dir = await tempDir("aio-build-");
   try {
     await writeDefaultIcon(`${dir}/a`, "dashboard");
     await writeDefaultIcon(`${dir}/b`, "dashboard");
@@ -93,15 +93,15 @@ Deno.test("writeDefaultIcon: deterministic in the name", async () => {
     assertEquals(a, b, "same name → same icon, every build");
     assertEquals(a === c, false, "different apps must be tellable apart");
   } finally {
-    await Deno.remove(dir, { recursive: true });
+    await dropTempDir(dir);
   }
 });
 
 // ── copyDir ─────────────────────────────────────────────
 
 Deno.test("copyDir: copies files and subdirectories", async () => {
-  const src = await Deno.makeTempDir();
-  const dst = await Deno.makeTempDir();
+  const src = await tempDir("aio-build-");
+  const dst = await tempDir("aio-build-");
   const dstTarget = join(dst, "out");
   try {
     await Deno.writeTextFile(join(src, "a.txt"), "hello");
@@ -116,14 +116,14 @@ Deno.test("copyDir: copies files and subdirectories", async () => {
       "world",
     );
   } finally {
-    await Deno.remove(src, { recursive: true });
-    await Deno.remove(dst, { recursive: true });
+    await dropTempDir(src);
+    await dropTempDir(dst);
   }
 });
 
 Deno.test("copyDir: preserves symlinks", async () => {
-  const src = await Deno.makeTempDir();
-  const dst = await Deno.makeTempDir();
+  const src = await tempDir("aio-build-");
+  const dst = await tempDir("aio-build-");
   const dstTarget = join(dst, "out");
   try {
     await Deno.writeTextFile(join(src, "real.txt"), "data");
@@ -134,14 +134,14 @@ Deno.test("copyDir: preserves symlinks", async () => {
     const target = await Deno.readLink(join(dstTarget, "link.txt"));
     assertEquals(target, "real.txt");
   } finally {
-    await Deno.remove(src, { recursive: true });
-    await Deno.remove(dst, { recursive: true });
+    await dropTempDir(src);
+    await dropTempDir(dst);
   }
 });
 
 Deno.test("copyDir: preserves executable bit", async () => {
-  const src = await Deno.makeTempDir();
-  const dst = await Deno.makeTempDir();
+  const src = await tempDir("aio-build-");
+  const dst = await tempDir("aio-build-");
   const dstTarget = join(dst, "out");
   try {
     await Deno.writeTextFile(join(src, "run.sh"), "#!/bin/bash\necho hi");
@@ -152,8 +152,8 @@ Deno.test("copyDir: preserves executable bit", async () => {
     const info = await Deno.stat(join(dstTarget, "run.sh"));
     assertEquals((info.mode! & 0o111) !== 0, true);
   } finally {
-    await Deno.remove(src, { recursive: true });
-    await Deno.remove(dst, { recursive: true });
+    await dropTempDir(src);
+    await dropTempDir(dst);
   }
 });
 
@@ -220,7 +220,7 @@ Deno.test("build: --service + --compile does not conflict", async () => {
 Deno.test("build: bare --service is refused, not half-done", async () => {
   // A real (if empty) app: the framework's own deno.json is a JSR package
   // whose prerelease version the STRICT app-version rule refuses first.
-  const tmp = await Deno.makeTempDir();
+  const tmp = await tempDir("aio-build-");
   await Deno.writeTextFile(
     join(tmp, "deno.json"),
     JSON.stringify({ title: "svc", version: "0.1" }),
@@ -238,7 +238,7 @@ Deno.test("build: bare --service is refused, not half-done", async () => {
 // ── --name flag slugification ──────────────────────────────
 
 Deno.test("build: --name flag slugifies in output", async () => {
-  const tmp = await Deno.makeTempDir();
+  const tmp = await tempDir("aio-build-");
   try {
     await Deno.writeTextFile(
       join(tmp, "deno.json"),
@@ -250,7 +250,7 @@ Deno.test("build: --name flag slugifies in output", async () => {
     const { stdout } = await runBuild(["--cli", "--name=My App!"], tmp);
     assertEquals(stdout.includes("my-app"), true);
   } finally {
-    await Deno.remove(tmp, { recursive: true });
+    await dropTempDir(tmp);
   }
 });
 
@@ -260,7 +260,7 @@ Deno.test("build: --name flag slugifies in output", async () => {
 // (which slugifies the same fallback) produced `my-app` — two names for one
 // artifact, and a shell-hostile one at that.
 Deno.test("build: an untitled project in a spaced directory still slugifies its binary name", async () => {
-  const tmp = await Deno.makeTempDir();
+  const tmp = await tempDir("aio-build-");
   const dir = join(tmp, "My App");
   try {
     await Deno.mkdir(join(dir, "src"), { recursive: true });
@@ -276,14 +276,14 @@ Deno.test("build: an untitled project in a spaced directory still slugifies its 
       "never the raw directory name",
     );
   } finally {
-    await Deno.remove(tmp, { recursive: true });
+    await dropTempDir(tmp);
   }
 });
 
 // ── withDevExcluded: symlink restore after failed compile ──
 
 Deno.test("build: symlinks restored after failed --cli compile", async () => {
-  const tmp = await Deno.makeTempDir();
+  const tmp = await tempDir("aio-build-");
   try {
     // Minimal project: has src/app.ts but deno compile will fail (missing deps)
     await Deno.writeTextFile(
@@ -327,7 +327,7 @@ Deno.test("build: symlinks restored after failed --cli compile", async () => {
     assertEquals(after, before);
     assertEquals(stdout.includes("restored"), true);
   } finally {
-    await Deno.remove(tmp, { recursive: true });
+    await dropTempDir(tmp);
   }
 });
 
@@ -574,9 +574,10 @@ Deno.test("build-all: an artifact's name is the TARGET's, not the invocation's",
   assertEquals([...full].sort(), ["cli", "server"]);
   assertEquals(placedName("myapp", "browser", full), "myapp");
   assertEquals(placedName("myapp", "cli", full), "myapp-cli");
+  // A real collision's shape: two android targets both write `myapp.apk`.
   assertEquals(
-    placedName("myapp.apk", "android-client", new Set(["android-client"])),
-    "myapp-android-client.apk",
+    placedName("myapp.apk", "android-b", new Set(["android-b"])),
+    "myapp-android-b.apk",
   );
   // …and the name a SUBSET build produces is identical to the one the full
   // build produces, for every subset — the property that was broken. A target
@@ -655,7 +656,7 @@ Deno.test("build-all: --list exits 0 without building", async () => {
 import { assetIncludes } from "../src/build/build-compile.ts";
 
 Deno.test("assetIncludes: auto-discovers .wasm, honors compile.include, skips deps/build dirs", async () => {
-  const dir = await Deno.makeTempDir();
+  const dir = await tempDir("aio-build-");
   try {
     await Deno.mkdir(join(dir, "src"), { recursive: true });
     await Deno.mkdir(join(dir, "node_modules", "pkg"), { recursive: true });
@@ -692,7 +693,7 @@ Deno.test("assetIncludes: auto-discovers .wasm, honors compile.include, skips de
     // launch directory's deno.json makes it adopt an unrelated project's.
     assert(files.includes("deno.json"), "deno.json embedded");
   } finally {
-    await Deno.remove(dir, { recursive: true });
+    await dropTempDir(dir);
   }
 });
 
@@ -701,7 +702,7 @@ Deno.test("assetIncludes: auto-discovers .wasm, honors compile.include, skips de
 // shipped WITHOUT the asset it was told to carry and exit 0; the app then
 // failed in the user's hands. Refusing names the entry and the resolved path.
 Deno.test("assetIncludes: an out-of-project compile.include is REFUSED, not silently dropped", async () => {
-  const dir = await Deno.makeTempDir();
+  const dir = await tempDir("aio-build-");
   try {
     await Deno.mkdir(join(dir, "assets"), { recursive: true });
     await Deno.writeTextFile(join(dir, "assets", "model.bin"), "x");
@@ -737,13 +738,13 @@ Deno.test("assetIncludes: an out-of-project compile.include is REFUSED, not sile
     const inc = await assetIncludes(dir);
     assert(inc.includes("assets/model.bin"), "declared asset still embedded");
   } finally {
-    await Deno.remove(dir, { recursive: true });
+    await dropTempDir(dir);
   }
 });
 
 Deno.test("compile: WASM read via import.meta.url works ONLY when embedded (regression)", async () => {
-  const dir = await Deno.makeTempDir();
-  const runDir = await Deno.makeTempDir(); // run from a different cwd
+  const dir = await tempDir("aio-build-");
+  const runDir = await tempDir("aio-build-"); // run from a different cwd
   try {
     await Deno.mkdir(join(dir, "src"), { recursive: true });
     // minimal valid wasm module: magic ("\0asm") + version (1)
@@ -791,8 +792,8 @@ Deno.test("compile: WASM read via import.meta.url works ONLY when embedded (regr
     assert(await compile(includes, "fixed"), "fixed compiled");
     assertStringIncludes(await run("fixed"), "WASM_OK");
   } finally {
-    await Deno.remove(dir, { recursive: true });
-    await Deno.remove(runDir, { recursive: true });
+    await dropTempDir(dir);
+    await dropTempDir(runDir);
   }
 });
 
@@ -1152,7 +1153,9 @@ Deno.test("serviceExecFlags: headless service parses as a server-only server", (
   const flags = serviceExecFlags({ doRemote: false, doHeadless: true });
   const cli = parseCli(flags);
   assertEquals(cli.client, "server-only", "unit must select server-only mode");
-  assertEquals(cli.port, 3000);
+  // No invented port: `--port` outranks `aio.run({ port })`, so a default
+  // here overrode the app's own (tests/build-service-unit-port-and-quoting).
+  assertEquals(cli.port, undefined);
   assert(!flags.includes("--headless"), "--headless is not a runtime flag");
 });
 
@@ -1292,7 +1295,7 @@ Deno.test("writeServiceFile: a build with no $USER does NOT run the service as r
   // aio cannot know who should run the service, so it must not guess: the
   // placeholder fails the unit closed, which is the safe direction to be wrong.
   const { writeServiceFile } = await import("../src/build/build-compile.ts");
-  const dir = await Deno.makeTempDir({ prefix: "aio-unit-" });
+  const dir = await tempDir("aio-unit-");
   const prev = Deno.env.get("USER");
   try {
     Deno.env.delete("USER");
@@ -1315,7 +1318,7 @@ Deno.test("writeServiceFile: a build with no $USER does NOT run the service as r
   } finally {
     if (prev === undefined) Deno.env.delete("USER");
     else Deno.env.set("USER", prev);
-    await Deno.remove(dir, { recursive: true }).catch(() => {});
+    await dropTempDir(dir);
   }
 });
 
@@ -1342,13 +1345,13 @@ Deno.test("writeServiceFile: a cross-compiled server's unit names the artifact t
     assertStringIncludes(unit, `sudo cp svc-${foreign} /usr/local/bin/svc`);
     assertStringIncludes(unit, "ExecStart=/usr/local/bin/svc ");
   } finally {
-    await Deno.remove(dir, { recursive: true }).catch(() => {});
+    await dropTempDir(dir);
   }
 });
 
 Deno.test("writeServiceFile: the build user is LABELLED, never presented as a fact", async () => {
   const { writeServiceFile } = await import("../src/build/build-compile.ts");
-  const dir = await Deno.makeTempDir({ prefix: "aio-unit2-" });
+  const dir = await tempDir("aio-unit2-");
   const prev = Deno.env.get("USER");
   try {
     Deno.env.set("USER", "builder");
@@ -1370,13 +1373,13 @@ Deno.test("writeServiceFile: the build user is LABELLED, never presented as a fa
   } finally {
     if (prev === undefined) Deno.env.delete("USER");
     else Deno.env.set("USER", prev);
-    await Deno.remove(dir, { recursive: true }).catch(() => {});
+    await dropTempDir(dir);
   }
 });
 
 Deno.test("writeServiceFile: a title cannot inject systemd directives", async () => {
   const { writeServiceFile } = await import("../src/build/build-compile.ts");
-  const dir = await Deno.makeTempDir({ prefix: "aio-unit-" });
+  const dir = await tempDir("aio-unit-");
   const cwd = Deno.cwd();
   try {
     Deno.chdir(dir);
@@ -1408,7 +1411,7 @@ Deno.test("writeServiceFile: a title cannot inject systemd directives", async ()
     );
   } finally {
     Deno.chdir(cwd);
-    await Deno.remove(dir, { recursive: true }).catch(() => {});
+    await dropTempDir(dir);
   }
 });
 
@@ -1482,7 +1485,7 @@ Deno.test("android manifest: the template asks for the cleartext decision", () =
 // Dev == prod is load-bearing, so the convention IS the registration.
 
 Deno.test("assetIncludes: every *.server.ts is embedded without being declared", async () => {
-  const dir = await Deno.makeTempDir();
+  const dir = await tempDir("aio-build-");
   try {
     await Deno.mkdir(join(dir, "src", "cell"), { recursive: true });
     await Deno.mkdir(join(dir, "node_modules", "pkg"), { recursive: true });
@@ -1536,7 +1539,7 @@ Deno.test("assetIncludes: every *.server.ts is embedded without being declared",
     // Shape stays `--include <rel>` pairs.
     assertEquals(inc.filter((a) => a === "--include").length, files.length);
   } finally {
-    await Deno.remove(dir, { recursive: true }).catch(() => {});
+    await dropTempDir(dir);
   }
 });
 

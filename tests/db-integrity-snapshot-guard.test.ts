@@ -102,14 +102,20 @@ Deno.test("integrity: old quarantine copies are pruned to the most recent few", 
     });
     assertEquals(outcome.action, "quarantined");
 
-    const kept: string[] = [];
+    const all: string[] = [];
     for await (const e of Deno.readDir(dir)) {
-      if (e.name.includes(".corrupt-")) kept.push(e.name);
+      if (e.name.includes(".corrupt-")) all.push(e.name);
     }
+    // COPIES, not files. `moveSidecars` parks the crash-left `-wal`/`-shm`
+    // beside each quarantined database and all three share the prefix, so a
+    // file count counts one copy as up to three. This assertion used to count
+    // files and passed for exactly that reason: the prune kept three FILES,
+    // which over several real corruptions is one copy and its two sidecars.
+    const kept = all.filter((n) => !/-(?:wal|shm)$/.test(n));
     assertEquals(
       kept.length,
       QUARANTINE_KEEP,
-      `only the ${QUARANTINE_KEEP} newest are kept — saw ${kept.sort()}`,
+      `only the ${QUARANTINE_KEEP} newest are kept — saw ${all.sort()}`,
     );
     // The one this boot just made is among them, and the oldest is gone.
     assert(

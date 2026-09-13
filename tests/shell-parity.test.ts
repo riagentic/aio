@@ -161,8 +161,13 @@ Deno.test("WYSIDIWYSIP: android local shell head matches the prod shell head", (
       .replace('href="./style.css"', 'href="/style.css"')
       .replace(/\n\s*<meta name="aio:(width|height)"[^>]*>/g, "")
       .replace(/\n\s*<link rel="icon"[^>]*>/g, "")
+      // TWO disabled sheets now: `ui.theme` and `ui.layout` are orthogonal and
+      // the runtime learns both at the same moment, so the shell carries the
+      // full-layout variant and the no-layout one and enables whichever the
+      // config asked for. One sheet meant an APK always enabled the
+      // full-layout look for an app that had set `layout: false`.
       .replace(
-        /\n\s*<style media="not all" data-aio-theme-deferred>[\s\S]*?<\/style>/g,
+        /\n\s*<style media="not all" data-aio-theme-deferred(?:-nolayout)?>[\s\S]*?<\/style>/g,
         "",
       );
   assertEquals(

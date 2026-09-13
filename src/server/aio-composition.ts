@@ -6,6 +6,7 @@ import {
   type ComposedCells,
 } from "../state/cell.ts";
 import { isRefusableCredential, looksSecret } from "../state/secret-names.ts";
+import { forUserView } from "../state/cell-reactive.ts";
 import {
   applyCellFieldFilter,
   type CellPatchStrategy,
@@ -14,6 +15,7 @@ import {
 import type {
   Access,
   AccessUser,
+  CellDef,
   CellFieldFilter,
 } from "../state/cell-types.ts";
 import type { AioError, ReportErrorOpts } from "../diagnostics/error.ts";
@@ -21,6 +23,7 @@ import { reportError as reportAioError } from "../diagnostics/error.ts";
 import { log } from "../diagnostics/logger-api.ts";
 import { parseCli } from "./aio-cli.ts";
 import { isCompiled } from "./paths.ts";
+import { validateWorkerCells } from "./cell-worker-pool.ts";
 import { type PerfCheck, perfCheckOn } from "../state/dispatch.ts";
 import {
   applyCellDefaults,
@@ -133,6 +136,10 @@ function warnFieldFilters(composed: ComposedCells): void {
         if (key.includes(".")) {
           // Dot-paths: supported for exclude (deep removal, arrays traversed
           // element-wise); include stays a top-level allowlist.
+          // NOT dead: `cell()` throws on a dotted include, but an app-level
+          // `cellDefaults: { persist | visible: { include: ["a.b"] } }` is
+          // copied onto each cell by applyCellDefaults without that check, and
+          // this is the only place it is ever named.
           if (isInclude) {
             log.warn(
               "visibility",
@@ -170,8 +177,28 @@ function warnFieldFilters(composed: ComposedCells): void {
       const uiExcludes = ui && typeof ui === "object" && "exclude" in ui
         ? ui.exclude
         : [];
-      const deepExcludedHead = (key: string): boolean =>
-        uiExcludes.some((p) => p.startsWith(key + "."));
+      // …and the exclude has to actually REMOVE something secret-looking.
+      //
+      // This asked only whether SOME exclude path starts with `key + "."`,
+      // which made it a one-character escape hatch: `exclude:
+      // ["apiKey.whatever"]` or even `["password."]` skipped the credential
+      // check entirely — measured, both booted green with the credential
+      // broadcast to every client, and not even the soft warning fired,
+      // because the `continue` skips both tiers.
+      //
+      // Two conditions now. The excluded path must end at a segment that looks
+      // secret (so it removes the thing the check is about), and `key` itself
+      // must NOT be the credential — if `apiKey` IS the exposed field, no
+      // sub-path under it can help, because the value is the secret.
+      const deepExcludedHead = (key: string): boolean => {
+        if (looksSecret(key) || isRefusableCredential(key)) return false;
+        return uiExcludes.some((p) => {
+          if (!p.startsWith(key + ".")) return false;
+          const leaf = p.slice(p.lastIndexOf(".") + 1);
+          return leaf !== "" &&
+            (looksSecret(leaf) || isRefusableCredential(leaf));
+        });
+      };
       const isExposed = (key: string): boolean => {
         if (ui === "none") return false;
         if (!ui || ui === "all") return true;
@@ -385,12 +412,21 @@ export function composeCellsWiring(
   const cellReportOpts: ReportErrorOpts = { onError: input.onError };
   const perfEnabled = perfCheckOn(input.perfCheck);
 
+  const defOf = (entry: unknown) =>
+    (entry as { cell?: CellDef }).cell ?? (entry as CellDef);
+  // Worker cells are validated BEFORE the client-scoped ones are dropped. The
+  // pool validates only what reaches it, so `worker: true` + `scope: "client"`
+  // — a combination `validateWorkerCells` refuses by name — was filtered out
+  // below and booted without a word, while every harness (boot-refusals.ts)
+  // refused it. The app must refuse what its tests refuse.
+  validateWorkerCells(
+    input.cellEntries.map(defOf).filter((d) => d?.__aio?.worker === true),
+  );
+
   // AIO-5.1: client-scoped cells never register with the server store — one
   // `cells` array can hold both scopes; client cells are skipped here, not errored.
   const serverEntries = input.cellEntries.filter((entry) => {
-    const def =
-      (entry as { cell?: { __aio?: { scope?: string; id?: string } } })
-        .cell ?? (entry as { __aio?: { scope?: string; id?: string } });
+    const def = defOf(entry);
     if (def.__aio?.scope === "client") {
       log.debug(`skipping client-scoped cell '${def.__aio.id}' on server`);
       return false;
@@ -520,6 +556,20 @@ type UIStateResult = {
   cellFilterFields: Map<string, PatchFilterFields>;
 };
 
+/** `visible.forUser`'s decision for one cell and one client — `forUserView`
+ *  itself (the pure rule the harness's client view uses too, which also
+ *  observes a REJECTING async filter's Promise). Shared by the broadcast and
+ *  the headless render (server-surface.ts) so they cannot decide two ways. */
+export function decideForUser(
+  cellName: string,
+  forUser: NonNullable<UiEntry["forUser"]>,
+  structural: Record<string, unknown>,
+  user: AccessUser | undefined,
+  wholeCell = false,
+): { view: Record<string, unknown> } | { omit: string } {
+  return forUserView(cellName, forUser, structural, user, wholeCell);
+}
+
 /** Build getUIState from per-cell ui filters + patch strategy map (with memoization).
  *  Default resolution: cell.ui > cellDefaults.ui > "all".
  *  Every cell always gets a UiEntry; "all" exposes the full slice, "none" is filtered out. */
@@ -620,74 +670,27 @@ function buildUIStateGetter(composed: ComposedCells): UIStateResult {
       const result: Record<string, unknown> = { ...structural };
       for (const [cellName, entry] of cellUiEntries) {
         if (!entry.forUser || !result[cellName]) continue;
-        try {
-          const view = entry.forUser(
-            structuredClone(result[cellName] as Record<string, unknown>),
-            user as AccessUser | undefined,
-          );
-          // An ASYNC filter is the third sibling, and it was the only silent
-          // one. A Promise is an object and is not an array, so it sailed past
-          // the check below, landed in the UI state, and reached the wire as
-          // `{}` — every client seeing that cell EMPTY, for the life of the
-          // process, with nothing logged. Nothing leaked (JSON drops it), but
-          // "the cell is blank and no one will say why" is the outcome this
-          // project treats as worse than a crash. Filtering runs inside the
-          // broadcast, which cannot await, so there is no version of this that
-          // works: say which mistake it is, by name.
-          if (typeof (view as { then?: unknown } | null)?.then === "function") {
-            delete result[cellName];
-            log.error(
-              `[${cellName}] visible.forUser is ASYNC — it returned a Promise, ` +
-                `not a state object. Broadcast filtering cannot await, so the ` +
-                `Promise would reach every client as {}. Make the filter ` +
-                `synchronous (read what it needs from the state it is handed, ` +
-                `or precompute the value in a method) — omitting the cell for ` +
-                `this client (fail closed).`,
-            );
-            continue;
-          }
-          // Same rule as a throw: a filter that did not return a state object
-          // did not decide what this client may see. (A missing `return` in an
-          // arrow body with braces is the everyday way to land here.)
-          if (!view || typeof view !== "object" || Array.isArray(view)) {
-            delete result[cellName];
-            log.error(
-              `[${cellName}] visible.forUser returned ${
-                Array.isArray(view) ? "an array" : typeof view
-              }, not a state object — omitting the cell for this client (fail ` +
-                `closed). A per-user filter must return the slice the client may see.`,
-            );
-            continue;
-          }
-          result[cellName] = view;
-        } catch (e) {
-          // FAIL CLOSED. This used to leave `result[cellName]` at its
-          // PRE-forUser value and call that a "safe fallback" — but the
-          // structural filter is only a fallback when there IS one. With
-          // `ui: { forUser }` alone (the first-class shape) the structural
-          // filter is the WHOLE CELL, so one thrown TypeError — a missing
-          // field on a user record, `user === undefined` on a public/UDS
-          // connection, a null row — broadcast every user's data to whoever
-          // tripped it. A filter that cannot run has decided nothing; the only
-          // honest answer is to send nothing for that cell.
-          //
-          // Omitting is safe for EVERY shape: it is never more than what the
-          // filter would have returned. The client sees the cell disappear
-          // (loud) instead of seeing other people's rows (silent).
-          //
-          // server-broadcast.ts already drops a client's whole frame when
-          // getUIState throws; this is the same policy at cell granularity —
-          // one broken filter must not mute the rest of the app.
+        // FAIL CLOSED, by the one spelling of the rule (`forUserView`): a
+        // filter that throws, returns a Promise, or returns a non-object has
+        // decided nothing, so this client gets NOTHING for the cell — never
+        // the pre-filter value. With `visible: { forUser }` alone that value is
+        // the WHOLE CELL, so the old "structural fallback" broadcast every
+        // user's data to whoever tripped the throw. Omitting is never more
+        // than the filter would have returned, and one broken filter must not
+        // mute the rest of the app (server-broadcast.ts drops the whole frame
+        // only when getUIState itself throws).
+        const out = decideForUser(
+          cellName,
+          entry.forUser,
+          result[cellName] as Record<string, unknown>,
+          user as AccessUser | undefined,
+          entry.filter === "all",
+        );
+        if ("view" in out) {
+          result[cellName] = out.view;
+        } else {
           delete result[cellName];
-          log.error(
-            `[${cellName}] visible.forUser threw — omitting the cell for this ` +
-              `client (fail closed; nothing is sent for it)` +
-              (entry.filter === "all"
-                ? `. This cell has NO structural visible filter, so the pre-filter ` +
-                  `value is its ENTIRE state — it must never be sent.`
-                : "") +
-              `: ${e}`,
-          );
+          log.error(out.omit);
         }
       }
       return result;

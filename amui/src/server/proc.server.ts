@@ -143,13 +143,34 @@ async function registeredAt(dir: string): Promise<boolean> {
   return instances().some((i) => i.alive && i.cwd === dir);
 }
 
-/** The last `n` lines amui's launcher captured for `dir` — the only place a
- *  boot failure's reason exists (the app died before it could write its own
- *  logs). Empty when nothing was captured. */
+/** The reason a boot failed, out of the launcher's captured output — pure.
+ *
+ *  It was simply the last `n` lines, and the last lines of a crash are its
+ *  STACK: `error: Uncaught (in promise) AddrInUse: Address already in use`
+ *  followed by six `    at …` frames came out as six frames, and the one line
+ *  that said what happened was cut off above them. So: the lines that name an
+ *  error (`error:` / `TypeError:` and kin, an `ERROR` log level, `not found`,
+ *  `Uncaught`) win, the last `n` of them; failing that, the last `n` lines that
+ *  are not stack frames; failing that, the last `n` lines. */
+export function startFailureReason(text: string, n = 6): string {
+  const lines = logLinesOf(text);
+  const frame = /^\s+at\s/;
+  const named = lines.filter((l) =>
+    !frame.test(l) &&
+    (/error:|not found|uncaught/i.test(l) || /\bERROR\b/.test(l))
+  );
+  const prose = lines.filter((l) => !frame.test(l));
+  const pick = named.length ? named : prose.length ? prose : lines;
+  return pick.slice(-n).join(" · ").slice(0, 600);
+}
+
+/** Why the app amui launched from `dir` failed to boot — see
+ *  {@link startFailureReason}. The launcher's capture is the only place that
+ *  reason exists (the app died before it could write its own logs). Empty when
+ *  nothing was captured. */
 export async function startLogTail(dir: string, n = 6): Promise<string> {
   try {
-    const text = await Deno.readTextFile(startLogPath(dir));
-    return logLinesOf(text).slice(-n).join(" · ").slice(0, 600);
+    return startFailureReason(await Deno.readTextFile(startLogPath(dir)), n);
   } catch {
     return "";
   }

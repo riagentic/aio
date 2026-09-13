@@ -31,12 +31,16 @@ import { routeEffect } from "../state/route-effect.ts";
 import type { CellDef, Msg } from "../state/cell-types.ts";
 import {
   type AmbientContext,
-  CELL_WORKER_PREFIX,
   type FromWorker,
+  parseCellWorkerName,
   type ToWorker,
   WORKER_CLOSE_DRAIN_MS,
 } from "./cell-worker-protocol.ts";
-import { abortAllInflight, settlePending } from "../state/method-cancel.ts";
+import {
+  abortAllInflight,
+  notifyMethodCancel,
+  settlePending,
+} from "../state/method-cancel.ts";
 import {
   runWithRequest,
   runWithUser,
@@ -50,9 +54,9 @@ export function hostedCellName(): string | null {
   const name = typeof self !== "undefined"
     ? (self as { name?: string }).name
     : undefined;
-  return name && name.startsWith(CELL_WORKER_PREFIX)
-    ? name.slice(CELL_WORKER_PREFIX.length)
-    : null;
+  // The name also carries the owner's appId (`cellWorkerName`) — only the
+  // cell half is the hosted cell's id.
+  return parseCellWorkerName(name)?.cell ?? null;
 }
 
 const post = (msg: FromWorker): void => {
@@ -76,6 +80,25 @@ function reviveRequest(
   };
 }
 
+/** The refusal for a worker cell reading another cell's state. ONE text, so
+ *  the in-process harnesses (boot-refusals.ts), which run worker cells on the
+ *  main isolate, refuse the same read with the same words. */
+export function peerReadInWorkerMessage(
+  hosted: string,
+  name: string,
+  key: string,
+): string {
+  return `[aio] cell "${hosted}" runs in ${
+    context("a worker isolate").name
+  } and cannot read ` +
+    `"${name}.${key}" — a worker cell has ONLY its own state, so ` +
+    `this read would silently return ${name}'s declared default ` +
+    `forever. Pass the value in as a method argument, do the read ` +
+    `on the main isolate and hand the result over, or keep the ` +
+    `heavy work in one self-contained cell (the designated-thread ` +
+    `idiom). See docs/state/cell-workers.md.`;
+}
+
 /** Make every OTHER cell's state read throw inside this worker.
  *
  *  The trap this closes: a worker holds only its own
@@ -96,23 +119,39 @@ function isolatePeerCells(hosted: string): void {
       try {
         Object.defineProperty(def, key, {
           get() {
-            throw new Error(
-              `[aio] cell "${hosted}" runs in ${
-                context("a worker isolate").name
-              } and cannot read ` +
-                `"${name}.${key}" — a worker cell has ONLY its own state, so ` +
-                `this read would silently return ${name}'s declared default ` +
-                `forever. Pass the value in as a method argument, do the read ` +
-                `on the main isolate and hand the result over, or keep the ` +
-                `heavy work in one self-contained cell (the designated-thread ` +
-                `idiom). See docs/state/cell-workers.md.`,
-            );
+            throw new Error(peerReadInWorkerMessage(hosted, name, key));
           },
           enumerable: false,
           configurable: true,
         });
       } catch { /* non-configurable — leave it */ }
     }
+  }
+}
+
+/** Point the hosted cell's state getters at THIS isolate's live slice.
+ *
+ *  Nothing binds a cell inside a worker, so `own.n` in the hosted cell's own
+ *  method (a helper reading the cell object, or any read after an await) hit
+ *  the creation-time getter and returned the DECLARED DEFAULT: set n=42, read
+ *  0, forever, with no error — while every in-process harness, which binds the
+ *  cell on the main isolate, read 42. Only the state getters: calling a
+ *  method from inside stays refused (the unbound-runtime guard), as the
+ *  harnesses refuse it too. */
+function bindOwnStateReads(
+  def: CellDef,
+  getState: () => Record<string, unknown>,
+): void {
+  const name = def.__aio.id;
+  for (const key of Object.keys(def.__aio.state)) {
+    if (nameIsTaken(def, key)) continue;
+    Object.defineProperty(def, key, {
+      get() {
+        return (getState()[name] as Record<string, unknown>)[key];
+      },
+      enumerable: false,
+      configurable: true,
+    });
   }
 }
 
@@ -268,6 +307,7 @@ export function startCellWorkerHost(cell: CellDef): Promise<never> {
   const dispatch = createDispatch<Record<string, unknown>, Msg, Msg>(
     dispatchDeps,
   );
+  bindOwnStateReads(cell, () => state);
 
   self.onmessage = async (ev: MessageEvent<ToWorker>) => {
     const msg = ev.data;
@@ -297,6 +337,15 @@ export function startCellWorkerHost(cell: CellDef): Promise<never> {
         getState: () => state,
       });
       post({ t: "ready", cell: name });
+      return;
+    }
+    if (msg.t === "cancel") {
+      // A cancelOn trigger fired on the OTHER isolate. The registry is
+      // module-scoped, so main's sweep never reached this thread's
+      // controllers; this is the only thing that does. The worker composed
+      // the same cell def, so it holds the same trigger edge and resolves the
+      // target itself — one decider, not two.
+      notifyMethodCancel(msg.type);
       return;
     }
     if (msg.t === "close") {
@@ -352,6 +401,14 @@ export function startCellWorkerHost(cell: CellDef): Promise<never> {
         id,
         message: e instanceof Error ? e.message : String(e),
         stack: e instanceof Error ? e.stack : undefined,
+        // What a caller branches on. Structured clone would carry `name` for
+        // the built-in error classes only, and never an own `code`, so a
+        // `WalletLockedError`/`E_LOCKED` arrived as a plain `Error` in the app
+        // while every in-process harness handed the test the real one.
+        name: e instanceof Error ? e.name : undefined,
+        code: typeof (e as { code?: unknown } | null)?.code === "string"
+          ? (e as { code: string }).code
+          : undefined,
       });
     }
   };

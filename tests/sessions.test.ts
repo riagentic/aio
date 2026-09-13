@@ -1,7 +1,7 @@
 // AUTH-1 — session store: unit (issue/get/expiry/refresh/revoke, hashed at
 // rest) + e2e (a session token authenticates a real WS connection; revocation
 // cuts access; sessions alone activate per-user auth mode).
-import { assert, assertEquals } from "@std/assert";
+import { assert, assertEquals, assertThrows } from "@std/assert";
 import { openSessionStore } from "../src/server/sessions.ts";
 import { freePort } from "../src/testing/server-test.ts";
 
@@ -24,13 +24,37 @@ Deno.test("sessions: issue → get → refresh → revoke lifecycle", () => {
   s.close();
 });
 
-Deno.test("sessions: TTL expiry removes the session on read", () => {
+Deno.test("sessions: TTL expiry removes the session on read", async () => {
   const s = openSessionStore(":memory:");
-  const token = s.issue({ id: "u1", role: "user" }, { ttlMs: -1 }); // born dead
+  // A REAL expiry, not `ttlMs: -1`. A negative TTL is refused at the door now
+  // — it handed back a token that was already dead, which no caller can ever
+  // want and which hid the same class as `Infinity` (an immortal session) and
+  // `Number.MAX_SAFE_INTEGER` (a token whose every use throws). The property
+  // under test is "an expired session is gone on read", and a 1ms TTL tests it
+  // for real.
+  const token = s.issue({ id: "u1", role: "user" }, { ttlMs: 1 });
+  await new Promise((r) => setTimeout(r, 10));
   assertEquals(s.get(token), null, "expired session is gone");
   assert(!s.refresh(token), "expired session cannot be refreshed");
   assertEquals(s.count(), 0, "sweep removed it");
   s.close();
+});
+
+Deno.test("sessions: a TTL that cannot become an expiry is refused at issue", () => {
+  const s = openSessionStore(":memory:");
+  try {
+    for (const ttl of [-1, 0, NaN, Infinity, Number.MAX_SAFE_INTEGER]) {
+      assertThrows(
+        () => s.issue({ id: "u1", role: "user" }, { ttlMs: ttl }),
+        Error,
+        "cannot become an expiry",
+        `ttlMs ${ttl}`,
+      );
+    }
+    assertEquals(s.count(), 0, "and nothing was written");
+  } finally {
+    s.close();
+  }
 });
 
 Deno.test("sessions: revokeUser kills every session of that user only", () => {

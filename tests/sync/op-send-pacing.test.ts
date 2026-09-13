@@ -15,7 +15,7 @@
 // itself to it. Pacing is free here because the op is ALREADY durable before
 // it is ever sent — it is in the op buffer, and reconnect re-sends from there —
 // so the queue holds frames, never the only copy of a write.
-import { assertEquals } from "@std/assert";
+import { assert, assertEquals } from "@std/assert";
 import { createSyncEngine } from "../../src/sync/sync-engine.ts";
 import {
   createMemoryStorage,
@@ -26,13 +26,15 @@ import {
   parseProtoHello,
   rememberPeerHello,
 } from "../../src/protocol/protocol-version.ts";
+import { paceBudget } from "../../src/protocol/send-pacer.ts";
 
 const CELL = "seed";
 
-/** The server's default budget, and what the client should allow itself: 60%
- *  of it, because sending AT the ceiling races the server's own window edge. */
+/** The server's default budget, and what the client allows itself out of it:
+ *  `send-pacer.ts`'s token bucket — a `burst` at once, then `perSec` — so no
+ *  second of the server's clock sees more than `burst + perSec` (80%). */
 const SERVER_RATE = 100;
-const CLIENT_BUDGET = 60;
+const { burst: BURST, perSec: PER_SEC } = paceBudget(SERVER_RATE);
 
 function makeEngine() {
   const sent: string[] = [];
@@ -63,16 +65,18 @@ Deno.test("sync pacing: a 120-op burst does not exceed the advertised budget", a
   const { engine, sent } = makeEngine();
 
   const N = 120;
+  const started = Date.now();
   for (let n = 0; n < N; n++) {
     await engine.handleLocalAction(CELL, "add", { n });
   }
 
-  // The whole point: the burst did NOT go out as 120 frames in one window.
-  assertEquals(
-    sent.length,
-    CLIENT_BUDGET,
-    `the burst sent ${sent.length} frames in one window against a budget of ` +
-      `${CLIENT_BUDGET} — this is the shape the server closes the socket for`,
+  // The whole point: the burst did NOT go out as 120 frames at once — only
+  // the bucket's burst, plus what it refilled while the loop ran.
+  const allowed = Math.floor(BURST + PER_SEC * (Date.now() - started) / 1000);
+  assert(
+    sent.length <= allowed && sent.length < N,
+    `the burst sent ${sent.length} frames at once against a bucket that ` +
+      `allows ${allowed} — this is the shape the server closes the socket for`,
   );
 
   // And nothing is lost: the rest drains, in order, once the window rolls.

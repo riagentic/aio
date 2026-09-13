@@ -242,6 +242,9 @@ Deno.test("am flags: `am shot --pose` reaches the command, not the gate", () => 
 // One list now, read by both the help and the refusal.
 Deno.test("am help: create's flag list is the one create accepts", () => {
   const block = helpBlock(HELP_TEXT, "create")!;
+  // CREATE_FLAGS is imported: an empty one would make the loop below check
+  // nothing, and this test exists BECAUSE the help and the refusal drifted.
+  assert(CREATE_FLAGS.length > 0, "create accepts flags, and they are listed");
   for (const f of CREATE_FLAGS) assertStringIncludes(block, f);
   // the question a reader actually arrives with
   assertStringIncludes(block, "electron");

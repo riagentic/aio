@@ -3,6 +3,7 @@
 // commands (against a fake control-port HTTP server). These are the CLI's
 // user-facing behaviors; the HTTP seam (trojanGet/Post, httpGet) is exercised
 // for real — only the aio server behind it is canned.
+import { VERSION } from "../src/server/aio-cli.ts";
 import {
   assert,
   assertEquals,
@@ -1257,7 +1258,10 @@ Deno.test("am delegates to a path-pinned checkout's am (toolchain coherence)", a
     const p2 = await run({ AIO_AM_NO_DELEGATE: "1" });
     const out2 = new TextDecoder().decode(p2.stdout);
     assert(!out2.includes("PINNED-AM"), `no delegation: ${out2}`);
-    assert(out2.includes("1.0.0"), `real am version: ${out2}`);
+    assert(
+      out2.includes(`"version":"${VERSION}"`),
+      `real am version: ${out2}`,
+    );
   } finally {
     await Deno.remove(fw, { recursive: true }).catch(() => {});
     await Deno.remove(app, { recursive: true }).catch(() => {});

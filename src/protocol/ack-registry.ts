@@ -60,6 +60,14 @@ export type AckRegistry = {
   /** True when `cid` is registered and its frame has been written (in flight).
    *  Tests and transports use it to tell "queued" from "sent". */
   isWritten(cid: string): boolean;
+  /** The frame for `cid` was written and the server REFUSED it before running
+   *  anything (a rate budget, with a retry hint): its fate is known again —
+   *  not applied — so it goes back to "queued". The clock stops and a
+   *  disconnect no longer settles it; `armTimer` restarts both when the frame
+   *  is written again. Without this, a call waiting to be re-sent was
+   *  rejected as "connection lost" by a close and then re-sent from the
+   *  offline queue anyway — one intent, a rejection AND an application. */
+  unwrite(cid: string): void;
   /** Settle with the method's transported return value (undefined for void). */
   resolve(cid: string, value?: unknown): boolean;
   /** Settle as a failure — the server refused, or the transport gave up. */
@@ -171,6 +179,15 @@ export function createAckRegistry(
     },
     isWritten(cid) {
       return pending.get(cid)?.written === true;
+    },
+    unwrite(cid) {
+      const entry = pending.get(cid);
+      if (!entry) return;
+      entry.written = false;
+      if (entry.timer !== undefined) {
+        clearTimeout(entry.timer);
+        entry.timer = undefined;
+      }
     },
     resolve(cid, value) {
       const entry = pending.get(cid);

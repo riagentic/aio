@@ -71,6 +71,54 @@ Deno.test("the fallback is the caller's, the transform is not", () => {
   assertEquals(slugify("My App", "unused"), "my-app");
 });
 
+Deno.test("two DIFFERENT names are never one app", () => {
+  // The slug drops every character outside [a-z0-9], and for a non-ASCII name
+  // that is most of it: "Über" and "Ber" both became `ber`, and two apps named
+  // entirely in CJK or Cyrillic both became the bare fallback. One data
+  // directory, one single-instance lock (so the second refuses to start), one
+  // UDS socket, one state.db — and, per this file's own header, one cookie,
+  // which is a credential crossing between apps.
+  const distinct = [
+    "Über",
+    "Ber",
+    "café",
+    "cafe",
+    "日本語アプリ",
+    "Приложение",
+    "naïve-app",
+    "naive-app",
+  ];
+  const slugs = distinct.map((n) => slugify(n));
+  assertEquals(
+    new Set(slugs).size,
+    distinct.length,
+    `two different app names share one identity: ${
+      distinct.map((n, i) => `${n} → ${slugs[i]}`).join(" · ")
+    }`,
+  );
+  // …and the cookie follows the slug, so it is distinct too.
+  assertEquals(
+    new Set(distinct.map((n) => keyCookieNameFor(n))).size,
+    distinct.length,
+  );
+});
+
+Deno.test("an ASCII name is untouched by the non-ASCII rule", () => {
+  // The disambiguation is deliberately narrow: only a name carrying a
+  // character this alphabet cannot spell gets a hash, so every existing
+  // ASCII id — which is all of them in practice — keeps the directory, lock
+  // and cookie it already has.
+  for (const n of NAMES) {
+    if (/[^\x00-\x7F]/.test(n)) continue;
+    assertEquals(
+      slugify(n),
+      n.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "") ||
+        "aio-app",
+      `${JSON.stringify(n)} must reduce exactly as it always did`,
+    );
+  }
+});
+
 Deno.test("two names that differ only in punctuation are ONE app", () => {
   // Not a defect — a consequence, and one worth stating: the slug is the
   // identity, so `my-app`, `my_app` and `my.app` are the same app everywhere,

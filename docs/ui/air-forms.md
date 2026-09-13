@@ -108,8 +108,9 @@ const form = useForm(
 );
 
 if (form.validate()) {
-  // `parsed()` is the schema's OUTPUT: `age` is a number here.
-  await api.signup(form.parsed() as z.infer<typeof Signup>);
+  // `parsed()` is the schema's OUTPUT: `age` is a number here. The `!` is
+  // for the type only — see "parsed() is separate" below.
+  await api.signup(form.parsed!() as z.infer<typeof Signup>);
 }
 ```
 
@@ -127,7 +128,10 @@ Three things worth knowing:
   whose schema coerces to a number would have a `values()` that says `string`
   and holds a number. `parsed()` returns `unknown`, so the one cast sits where
   you already know the answer. It is `null` when there is no schema or the
-  values do not parse.
+  values do not parse. Every form `useForm` returns has it, but `FormState`
+  declares it optional (so a hand-built `FormState` in a test still compiles),
+  which is why the call is written `form.parsed!()` — plain `form.parsed()` is
+  `TS2722: Cannot invoke an object which is possibly 'undefined'`.
 
 The schema must be **synchronous**: `validate()`, `values()` and `valid` are,
 and `valid` is read during render. An async schema throws by name rather than

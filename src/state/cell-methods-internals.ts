@@ -2,7 +2,7 @@
 
 import { isScheduleEffect, type ScheduleEffect } from "./schedule.ts";
 import { trackCall, trackPending } from "./method-cancel.ts";
-import { markInflight } from "./dispatch.ts";
+import { _isTTPausedRefusal, markInflight } from "./dispatch.ts";
 import { isOwnEffect, type OwnEffect } from "./own.ts";
 import { isNotifyEffect } from "./notify.ts";
 import type { AsyncMethod, Method, Mutation, SyncMethod } from "./cell-impl.ts";
@@ -29,11 +29,16 @@ import { current, type Draft, isDraft } from "immer";
 import { type AioError, createAioError } from "../diagnostics/error.ts";
 import { log } from "../diagnostics/logger-api.ts";
 import { refuseRetired, removalOf, removalsAreFatal } from "./removals-core.ts";
-import { buildCallTable, withUnknownCallRefusal } from "./cell-call.ts";
+import {
+  buildCallTable,
+  unwrapCallView,
+  withUnknownCallRefusal,
+} from "./cell-call.ts";
 import { type ArgSpec, validateMethodArgs } from "./arg-schema.ts";
 import {
   beginPolicyCall,
   type ConcurrencyMode,
+  createPolicyStore,
   setQueueTail,
 } from "./method-policy.ts";
 
@@ -109,6 +114,44 @@ function detachDrafts(v: unknown): unknown {
     if (outObj !== null) outObj[k] = m;
   }
   return outObj ?? v;
+}
+
+/** Dev/test: refuse, at the `$do` call, an effect the effect seam cannot copy.
+ *
+ *  Every effect is structured-cloned on its way out of the reduce
+ *  (cell-compose-reduce.ts `cloneEffects`), and one that cannot be — a
+ *  function or a class instance in a scheduled action's payload — is logged
+ *  at ERROR and DROPPED there. That is the right PROD answer (shipping a
+ *  corrupted payload is worse), but it happens after the method has returned:
+ *  the call resolved, the timer was never armed, and a test asserting on
+ *  state stayed green. Tests are the strictest environment, so under
+ *  `__aioDev` the same clone runs HERE, in the method's own stack, and the
+ *  call fails naming the effect. Category (b): dev throws where prod degrades;
+ *  the value handed on is unchanged either way. */
+function refuseUncloneableEffect<T>(
+  cellName: string,
+  methodKey: string,
+  eff: T,
+): T {
+  if ((globalThis as Record<string, unknown>).__aioDev !== true) return eff;
+  try {
+    structuredClone(eff);
+  } catch (e) {
+    const o = (eff ?? {}) as Record<string, unknown>;
+    const named = [o.type, o.kind, o.id]
+      .filter((x) => typeof x === "string")
+      .join(" ");
+    throw new Error(
+      `[${cellName}] ${methodKey}(): s.$do(...) effect "${named || "?"}" ` +
+        `cannot be structured-cloned, so it would be DROPPED when it leaves ` +
+        `the method (prod logs and drops it; dev and tests refuse it here). ` +
+        `Effects — and a scheduled action's payload — must be plain data: no ` +
+        `functions, class instances or DOM nodes. Original: ${
+          e instanceof Error ? e.message : String(e)
+        }`,
+    );
+  }
+  return eff;
 }
 
 /** Validate + self-resolve one `$do` argument — the shared gate for the sync
@@ -329,7 +372,10 @@ function _warnShortCall(
       `field is simply gone rather than failing. Pass them ` +
       `(\`payload.args\`), or — if the method fills its own in — give the ` +
       `parameter a default in the SIGNATURE (\`${key}(s, x = 0)\`), which is ` +
-      `what makes its optionality visible here. Said once per method and count.`,
+      `what makes its optionality visible here. A \`?\` alone does not make a ` +
+      `parameter optional here — TypeScript erases it, so \`${key}(s, x?: T)\` ` +
+      `still counts \`x\`; give it a default (\`= undefined\`). ` +
+      `Said once per method and count.`,
   );
 }
 
@@ -415,8 +461,12 @@ export function buildMethodsReducer(
       refuseReturnedEffects(prefix, key);
       return [
         ...captured,
-        detachDrafts(
-          toDoneEffect(prefix, key, result, hasMethod, knownMethods),
+        refuseUncloneableEffect(
+          prefix,
+          key,
+          detachDrafts(
+            toDoneEffect(prefix, key, result, hasMethod, knownMethods),
+          ),
         ) as Effect,
       ];
     }
@@ -428,7 +478,11 @@ export function buildMethodsReducer(
       return [
         ...captured,
         ...result.map((e) =>
-          detachDrafts(toDoneEffect(prefix, key, e, hasMethod, knownMethods))
+          refuseUncloneableEffect(
+            prefix,
+            key,
+            detachDrafts(toDoneEffect(prefix, key, e, hasMethod, knownMethods)),
+          )
         ),
       ] as (Msg | ScheduleEffect | OwnEffect)[];
     }
@@ -484,8 +538,12 @@ export function buildMethodsReducer(
       }
       for (const e of effects) {
         captured.push(
-          detachDrafts(
-            toDoneEffect(prefix, key, e, hasMethod, knownMethods),
+          refuseUncloneableEffect(
+            prefix,
+            key,
+            detachDrafts(
+              toDoneEffect(prefix, key, e, hasMethod, knownMethods),
+            ),
           ) as Effect,
         );
       }
@@ -501,21 +559,29 @@ export function buildMethodsReducer(
     // the wrapper, the wrapper needs the table), and a box says that in the
     // type instead of leaving a variable that looks reassignable.
     const box: { draft: unknown } = { draft: undefined };
-    const callTable = withUnknownCallRefusal(
-      prefix,
-      key,
-      buildCallTable(prefix, key, methods, () => box.draft, true),
-    );
+    // Built on the first `s.$call` read, not per dispatch: the chain tables
+    // behind it (cell-call.ts `ChainLink`) cost ~1.2 KB a call, measured with
+    // v8 `total_allocated_bytes` over 10k `counter.increment` reduces (9.97 KB
+    // eager → 8.73 KB lazy), and a method that never says `$call` paid it on
+    // every dispatch. Memoized, so `s.$call === s.$call` still holds.
+    let callTable: Record<string, (...args: unknown[]) => unknown> | undefined;
+    const callFns = () =>
+      callTable ??= withUnknownCallRefusal(
+        prefix,
+        key,
+        buildCallTable(prefix, key, methods, () => box.draft, true),
+      );
     box.draft = s !== null && typeof s === "object"
-      ? withDraftDo(s, doFn, callTable)
+      ? withDraftDo(s, doFn, callFns)
       : s;
     let result: unknown = fn(
       box.draft as Parameters<SyncMethod<Record<string, unknown>>>[0],
       ...args,
     );
     // `return s` must hand back the real draft, not the wrapper (snapshotReturn
-    // relies on isDraft).
-    if (result === box.draft) result = s;
+    // relies on isDraft) — also when `s` came back from a sibling, which was
+    // handed its own chain view of the same draft (see cell-call.ts).
+    if (unwrapCallView(result) === box.draft) result = s;
     return classify(key, result, captured);
   };
   return (
@@ -625,6 +691,8 @@ export function buildMethodsExecutor(
     | Record<string, (app: ScopedApp, payload: unknown) => void | Promise<void>>
     | undefined,
 ): CellExecuteFn {
+  // `concurrency` / `ttl` bookkeeping, owned by THIS cell — see PolicyStore.
+  const policyStore = createPolicyStore();
   // Per-cell serialize mutex:
   // this cell's transactional ASYNC methods run one at a time, so two of them
   // can't interleave a read-modify-write. A promise chain; the NEXT method
@@ -668,6 +736,8 @@ export function buildMethodsExecutor(
   const onConflict =
     (typeof txConfig === "object" ? txConfig?.conflict : undefined) ?? "abort";
   let serializeTail: Promise<unknown> = Promise.resolve();
+  /** Methods already told that time travel paused them mid-flight. */
+  const ttPausedWarned = new Set<string>();
 
   return (app: ScopedApp, effect: Msg): void => {
     // Handle async method execution
@@ -718,17 +788,28 @@ export function buildMethodsExecutor(
         _args,
         policyMode,
         policyTtl,
+        policyStore,
       );
       if (decision.kind === "adopt") {
         // A `first` dedup or a `ttl` hit. The caller ADOPTS the other call's
         // outcome — resolving it with `undefined` instead is the first-wins
         // bug the report shipped.
-        decision.outcome.then((o) =>
-          resolveCall(
-            _callId,
-            o.value,
-            o.error === undefined ? undefined : o.error as Error,
-          )
+        decision.outcome.then(
+          (o) =>
+            resolveCall(
+              _callId,
+              o.value,
+              o.error === undefined ? undefined : o.error as Error,
+            ),
+          // Whatever goes wrong between the runner's outcome and this caller
+          // is THIS caller's rejection — never an unhandled one, which takes
+          // the process down and leaves the adopter waiting forever.
+          (e: unknown) =>
+            resolveCall(
+              _callId,
+              undefined,
+              e instanceof Error ? e : new Error(String(e)),
+            ),
         );
         return;
       }
@@ -899,6 +980,9 @@ export function buildMethodsExecutor(
             const muts = batcher.pending().slice();
             const pre = app.getState() as Record<string, unknown>;
             batcher.flush();
+            // What the method scheduled so far is published with what it
+            // wrote so far — the same boundary.
+            publishTxEffects();
             if (watch) {
               // Everything up to here was just validated and published —
               // re-baseline so the NEXT validation covers only what this
@@ -928,12 +1012,49 @@ export function buildMethodsExecutor(
           }
           : undefined;
         const live = () => app.getState() as Record<string, unknown>;
-        // `s.$do(effect, ...)` — the effect channel (alpha52). Dispatched
-        // IMMEDIATELY (not buffered to method return): the effect rides the
-        // cell's `__effects` bridge in the same tick, so an `own.set` factory
-        // is consumed while its token is fresh — the parked-factory registry
-        // only carries the deprecated return path now. Validation and self()
-        // resolution are the same gate the sync collector uses.
+        // `s.$do(effect, ...)` — the effect channel (alpha52). Outside a
+        // transaction it is dispatched IMMEDIATELY (not buffered to method
+        // return): the effect rides the cell's `__effects` bridge in the same
+        // tick, so an `own.set` factory is consumed while its token is fresh.
+        // Inside one it is held with the write-set — see `txEffects`; a held
+        // `own.set` whose transaction aborts leaves its factory to the parked
+        // registry's stale sweep, exactly as a sync method that throws after
+        // `own.set` does. Validation and self() resolution are the same gate
+        // the sync collector uses, at the call either way.
+        const sendEffects = (resolved: unknown[]): void => {
+          if (resolved.length === 0) return;
+          app.dispatch(markInflight({
+            type: `${prefix}:__effects`,
+            payload: { effects: resolved },
+            _source: "Effect",
+          }) as Msg);
+        };
+        // A TRANSACTION's effects belong to its write-set. The spec's abort
+        // (docs/state/transactional-methods.md §4) discards W on a throw, a
+        // TX_CONFLICT or a cancel — and the effects used to go out anyway, the
+        // moment `$do` was called: a withdrawal refused as a conflict still
+        // sent its receipt, and a superseded `cancelOn: "self"` call still
+        // scheduled its follow-up, while the cancel path's own comment said
+        // "no effects". They are held here and published with the writes (at
+        // return, or at `s.$commit()`), and dropped with them. Validation still
+        // happens at the `$do` call, so a bad effect throws in the method's own
+        // stack. A NON-transactional method is unchanged: its writes commit
+        // incrementally, and its effects go out immediately.
+        let txEffects: unknown[] = [];
+        const publishTxEffects = (): void => {
+          const out = txEffects;
+          txEffects = [];
+          sendEffects(out);
+        };
+        const dropTxEffects = (): void => {
+          if (txEffects.length === 0) return;
+          log.debug(
+            "cell",
+            `${name} ${_method}(): ${txEffects.length} buffered effect(s) ` +
+              `discarded with the aborted transaction`,
+          );
+          txEffects = [];
+        };
         const doDispatch = (...effects: unknown[]) => {
           if (effects.length === 0) {
             throw new Error(
@@ -945,19 +1066,23 @@ export function buildMethodsExecutor(
             // materializeValue: a payload referencing the live proxy
             // (`payload: { args: [s.items] }`) becomes plain data — a Proxy
             // would be refused by structuredClone at the effect-clone seam.
-            materializeValue(toDoneEffect(
+            refuseUncloneableEffect(
               name,
               _method,
-              e,
-              (m) => typeof methods[m] === "function",
-              () => Object.keys(methods),
-            ))
+              materializeValue(toDoneEffect(
+                name,
+                _method,
+                e,
+                (m) => typeof methods[m] === "function",
+                () => Object.keys(methods),
+              )),
+            )
           );
-          app.dispatch(markInflight({
-            type: `${prefix}:__effects`,
-            payload: { effects: resolved },
-            _source: "Effect",
-          }) as Msg);
+          if (transactional) {
+            txEffects.push(...resolved);
+            return;
+          }
+          sendEffects(resolved);
         };
         // `s.$live` — the sanctioned way out of snapshot isolation: same
         // batcher (so writes still commit atomically), unwatched reads (they
@@ -980,6 +1105,9 @@ export function buildMethodsExecutor(
             undefined,
             undefined,
             doDispatch,
+            // And `s.$live.$call` — the same draft read another way, so the
+            // same siblings; it was `undefined` in a transaction only.
+            callTable,
           );
         // `s.$call.sibling(...)` — same draft, same commit, no second
         // dispatch. Bound lazily for the same reason as the sync side.
@@ -1033,6 +1161,7 @@ export function buildMethodsExecutor(
             if (transactional && controller.signal.aborted) {
               const dropped = batcher.pending().length;
               batcher.discard();
+              dropTxEffects();
               if (dropped > 0) {
                 log.debug(
                   "cell",
@@ -1072,6 +1201,7 @@ export function buildMethodsExecutor(
             // whole point of holding the tracking open past the body.
             if (transactional && controller.signal.aborted) {
               batcher.discard();
+              dropTxEffects();
               await batcher.settled(); // same reason as the branch above
               settlePolicy({ value: undefined });
               resolveCall(_callId, undefined);
@@ -1088,6 +1218,9 @@ export function buildMethodsExecutor(
             // .catch below, which rejects the caller and reports the error —
             // identical in dev, prod and every test harness.
             await batcher.settled();
+            // The write-set is in and accepted — only now do the effects the
+            // transaction scheduled go out (see `txEffects`).
+            if (transactional) publishTxEffects();
             // SEAL HERE, not in the trailing `.finally`.
             //
             // The write-set is in and accepted; from this instant a write
@@ -1121,13 +1254,17 @@ export function buildMethodsExecutor(
               // it resolve here (same gate as $do), so they stay loud.
               refuseReturnedEffects(name, _method);
               const resolved = retEffects.map((e) =>
-                materializeValue(toDoneEffect(
+                refuseUncloneableEffect(
                   name,
                   _method,
-                  e,
-                  (m) => typeof methods[m] === "function",
-                  () => Object.keys(methods),
-                ))
+                  materializeValue(toDoneEffect(
+                    name,
+                    _method,
+                    e,
+                    (m) => typeof methods[m] === "function",
+                    () => Object.keys(methods),
+                  )),
+                )
               );
               app.dispatch(markInflight({
                 type: `${prefix}:__effects`,
@@ -1167,7 +1304,10 @@ export function buildMethodsExecutor(
           .catch((e: Error) => {
             // Transactional abort: a throw/cancel discards the whole
             // buffered write-set — no partial commit.
-            if (transactional) batcher.discard();
+            if (transactional) {
+              batcher.discard();
+              dropTxEffects();
+            }
             // Same instant, the failing way out: the call is over, so the
             // view is sealed before its caller hears about it.
             batcher.close();
@@ -1176,7 +1316,25 @@ export function buildMethodsExecutor(
             const _onError = (app as Record<string, unknown>)._onError as
               | ((err: AioError) => void)
               | undefined;
-            if (_onError) {
+            if (_isTTPausedRefusal(e)) {
+              // The developer paused time travel while this method was still
+              // running — not an app failure, so not an ERROR (and not an
+              // error diagnostic, which feedback auto-capture would file as a
+              // bug report). Its caller is still rejected and the writes stay
+              // dropped: time travel's semantics are unchanged, only what is
+              // SAID about them. Once per method; the door already says once
+              // per action type that each write was not applied.
+              const m = `${prefix}:${_method}`;
+              if (!ttPausedWarned.has(m)) {
+                ttPausedWarned.add(m);
+                log.warn(
+                  `time travel was paused while ${m}() was running — its ` +
+                    `in-flight writes were dropped, not applied, and its ` +
+                    `caller was rejected. Resume time travel and run ${m}() ` +
+                    `again (further pauses of this method are not repeated).`,
+                );
+              }
+            } else if (_onError) {
               _onError(createAioError("EFFECT_ASYNC_ERROR", e, {
                 cellName: name,
                 actionType: `${prefix}:${_method}`,
@@ -1186,7 +1344,10 @@ export function buildMethodsExecutor(
             }
             app.dispatch(markInflight({
               type: `${prefix}:__error`,
-              payload: { _method, error: String(e) },
+              // `_callId` names WHICH call failed, so a sink that recorded
+              // the call (the timeline) can mark it — `_method` alone matches
+              // every call of the method.
+              payload: { _method, error: String(e), _callId },
               _source: "Effect",
             }) as Msg);
           })
@@ -1224,7 +1385,7 @@ export function buildMethodsExecutor(
         // chaining the transactional serialize mutex uses, because it is the
         // same operation and a second implementation could only drift from it.
         const next = decision.after.then(runOnce, runOnce);
-        setQueueTail(prefix, _method, next);
+        setQueueTail(prefix, _method, next, policyStore);
         trackPending(next, prefix, appScope);
       } else {
         trackPending(runOnce(), prefix, appScope);

@@ -1,5 +1,13 @@
 # Building an aio app without a human in the loop
 
+> **One command instead of this page:** `am agent` prints all of aio on one page
+> — the four rules that protect the user's machine, the model, building a new
+> app from `am create` to a shipped binary, the full API, every `am` verb,
+> testing, debugging — straight into your context, with nothing to open.
+> `am agent --task=<slug>` for one section (deeper ones too: `loop`, `run`,
+> `auth`, `sync`, `api`, `pitfalls`…), `--list` for the index. This page is the
+> long form of its driving loop.
+
 Five verbs. If you read one page before starting, read this one.
 
 Three field reports finished a whole build and only then discovered `am expect`,
@@ -48,7 +56,8 @@ already contains the fresh surface, so you rarely need a second read.
 ## Write tests you did not write by hand
 
 ```sh
-am record tests/repro.test.ts --from=journal   # a bootCells replay test
+am record tests/repro.test.ts   # a bootCells replay test of what the RUNNING app dispatched
+                                # (its timeline); a stopped app: its crash journal
 ```
 
 And in-process, with no server and no DOM: `testCell` for a cell,

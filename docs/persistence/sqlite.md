@@ -328,18 +328,25 @@ unread.dispose();
 await db.close();
 ```
 
-`reactiveDB` is exported from both `aio/db` and `aio/server` (the same
-function). It wraps any `DB` — `createDB()`, or `app.db` inside a running app.
+`reactiveDB` is exported from `aio/server` (a server-only runtime value —
+`aio/db` carries only its `ReactiveDB`/`ReactiveQuery` types). It wraps any `DB`
+— `createDB()`, or `app.db` inside a running app.
 
 ### What invalidates what
 
 Change detection is **by table**, parsed out of the SQL:
 
-- a query's `tables` are the names after `FROM` and `JOIN`, lowercased
+- a query's `tables` are the names after `FROM` and `JOIN`, lowercased — every
+  table of a comma join (`FROM folders, mail`), the table half of `main.mail`,
+  and any quoting (`"mail"`, `[mail]`, `` `mail` ``)
 - a write's tables are the names after `INSERT INTO`, `UPDATE`, `DELETE FROM`,
-  `REPLACE INTO`
+  `REPLACE INTO` (conflict clauses and a leading `WITH …` included)
 - a write invalidates every live query whose `tables` intersect it; unrelated
   tables never fire
+- a write sent through `query()` (`INSERT … RETURNING`) invalidates exactly like
+  `execute()`
+- a live query whose `FROM` names no table the parser can read (a bare non-ASCII
+  name) warns once — it would otherwise never refresh
 
 Transactions:
 
@@ -505,7 +512,20 @@ await app.db!.transaction(async (tx) => {
 ```
 
 **Write lock:** concurrent `db.execute()` calls queue behind the callback.
-**Nested transactions** throw immediately — use SQLite savepoints if needed.
+**Nested transactions** throw immediately — aio has no savepoint API; pass the
+callback's `tx` down to the helper instead of opening a second transaction. Only
+code still _inside_ the callback counts as nested: a timer or promise it started
+that runs after the callback finished may open its own transaction.
+
+Inside the callback, use `tx.execute` / `tx.query`. A `db.execute()` (or a
+writing `db.query()`) there queues behind the transaction it is called from, so
+awaiting it never finishes — aio warns once when it sees one.
+
+**Isolation with `readers: 0` (the default).** Every `query()` runs on the
+writer connection, so a `db.query()` from _outside_ the callback, issued while
+the callback is open, sees the transaction's uncommitted rows. Reader workers
+(`readers: 1` or more, file databases only) are separate connections and see
+committed data only.
 
 ### Batch form
 

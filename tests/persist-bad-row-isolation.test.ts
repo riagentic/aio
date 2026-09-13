@@ -13,6 +13,14 @@
 // batch is rebuilt and rejected on EVERY debounce window, and from the first bad
 // row onward NOTHING the app writes — no cell, no other table, no session — ever
 // reaches disk again.
+//
+// Since a refused table HOLDS ITS CELL (1b1b90ff8), "costs exactly that table"
+// has two halves, and both are pinned here in the mode the real boot runs —
+// with `tableBindings`, which name the cell a table belongs to: the owning
+// cell's snapshot stays at the last value that landed WITH its rows (never a
+// counter describing rows that are not there), and every other cell keeps
+// persisting. Without the bindings a table name is read as its own root key,
+// a mode no booted app uses, so the hold was never exercised.
 
 import { assert, assertEquals, assertMatch } from "@std/assert";
 // @ts-ignore node:sqlite types unavailable when an old @types/node shadows them
@@ -79,7 +87,7 @@ async function makeManager() {
   await initSchema(rec.db, schema);
   await rec.db.execute(SKV_SCHEMA);
 
-  const state = { notes: { items: [] as Row[], n: 0 } };
+  const state = { notes: { items: [] as Row[], n: 0 }, other: { m: 0 } };
   const errors: unknown[] = [];
   const p = createPersistenceManager({
     appId: "bad-row-probe",
@@ -97,30 +105,38 @@ async function makeManager() {
     getTableState: () => ({ notes_items: state.notes.items }),
     asyncDb: rec.db,
     dbSchema: schema,
+    tableBindings: [{ table: "notes_items", path: ["notes", "items"] }],
     kvDb: sqliteKv(rec.db),
     getReportOpts: () => ({ onError: (e: unknown) => errors.push(e) }),
   } as Any);
   return { p, rec, state, errors };
 }
 
-const snapshotN = async (db: DB): Promise<number | null> => {
+const snapshot = async (db: DB): Promise<Any> => {
   const kv = (await db.query<{ v: string }>(
     "SELECT v FROM aio_kv WHERE k = 'bad-row-probe'",
   )).rows;
-  return kv[0] ? (JSON.parse(kv[0].v) as Any).notes.n as number : null;
+  return kv[0] ? JSON.parse(kv[0].v) : null;
 };
+const snapshotN = async (db: DB): Promise<number | null> =>
+  (await snapshot(db))?.notes?.n ?? null;
+const snapshotM = async (db: DB): Promise<number | null> =>
+  (await snapshot(db))?.other?.m ?? null;
 
-Deno.test("persist: a row SQLite refuses does not stop the state snapshot", async () => {
+Deno.test("persist: a row SQLite refuses holds its own cell, and every other cell still persists", async () => {
   const { p, rec, state, errors } = await makeManager();
   try {
     // A good window first, so there is something to lose.
     state.notes = { items: [{ id: 1, v: "ok" }], n: 1 };
+    state.other = { m: 1 };
     await p.flushPersist();
     assertEquals(await snapshotN(rec.db), 1, "precondition: the good window");
+    assertEquals(await snapshotM(rec.db), 1, "precondition: the other cell");
 
     // Now a row SQLite will reject: NULL in a NOT NULL column. Everything ELSE
     // in this window is fine and must still be saved.
     state.notes = { items: [{ id: 1, v: "ok" }, { id: 2, v: null }], n: 2 };
+    state.other = { m: 2 };
     await p.flushPersist();
 
     const said = errors.map((e) => String((e as Error)?.cause ?? e)).join("\n");
@@ -131,20 +147,32 @@ Deno.test("persist: a row SQLite refuses does not stop the state snapshot", asyn
         `reported: ${said}`,
     );
     assertEquals(
-      await snapshotN(rec.db),
+      await snapshotM(rec.db),
       2,
-      "one bad row costs its own table — the app's state snapshot must still " +
-        "be written. Sharing a transaction with the tables means a single " +
-        "unwritable row stops EVERY cell from ever persisting again.",
+      "one bad row costs its own cell — every OTHER cell's snapshot must " +
+        "still be written. Sharing a transaction with the tables meant a " +
+        "single unwritable row stopped every cell from ever persisting again.",
+    );
+    assertEquals(
+      await snapshotN(rec.db),
+      1,
+      "the refused table's own cell HOLDS at the last value that landed with " +
+        "its rows — a snapshot of n=2 beside a table without row 2 is a torn " +
+        "cell at the next boot",
     );
 
     // And the app keeps saving after that, window after window.
-    state.notes = { items: [{ id: 1, v: "ok" }, { id: 2, v: null }], n: 3 };
+    state.other = { m: 3 };
     await p.flushPersist();
     assertEquals(
-      await snapshotN(rec.db),
+      await snapshotM(rec.db),
       3,
-      "and it keeps saving while the bad row is still there",
+      "and the other cell keeps saving while the bad row is still there",
+    );
+    assertEquals(
+      await snapshotN(rec.db),
+      1,
+      "while the bad row stays, so does the hold",
     );
 
     // The table itself is untouched and consistent — never half-applied.
@@ -209,6 +237,7 @@ Deno.test("persist: two rows whose pk differs only in TYPE are named, not sent t
     getTableState: () => ({ notes_items: state.notes.items }),
     asyncDb: rec.db,
     dbSchema: schema,
+    tableBindings: [{ table: "notes_items", path: ["notes", "items"] }],
     kvDb: sqliteKv(rec.db),
     getReportOpts: () => ({ onError: (e: Error) => errors.push(e) }),
   } as Any);

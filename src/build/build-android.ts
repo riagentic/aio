@@ -141,17 +141,8 @@ export async function buildAndroid(cfg: BuildConfig): Promise<void> {
     );
     Deno.exit(1);
   }
-  const appNameKotlin = (appTitle ?? binaryName)
-    // deno-lint-ignore no-control-regex
-    .replace(/[\x00-\x1f\x7f]/g, "")
-    .replace(/\\/g, "\\\\")
-    .replace(/\$/g, "\\$")
-    .replace(/"/g, '\\"');
-  const appNameXml = (appTitle ?? binaryName)
-    .replace(/&/g, "&amp;")
-    .replace(/</g, "&lt;")
-    .replace(/>/g, "&gt;")
-    .replace(/"/g, "&quot;");
+  const appNameKotlin = _appNameKotlin(appTitle ?? binaryName);
+  const appNameXml = _appNameXml(appTitle ?? binaryName);
 
   // Check for user icon — from THE app-dir decider (cfg.appDir)
   const { icon: iconPath, misplaced: misplacedIcon } = await resolveAppIcon(
@@ -179,25 +170,25 @@ export async function buildAndroid(cfg: BuildConfig): Promise<void> {
     "settings.gradle.kts",
     "app/src/main/AndroidManifest.xml",
   ];
+  // `_fillTemplate` — every substitution is a function, never a string; see
+  // its own comment for what a `$` in a title used to do here.
   for (const f of templateFiles) {
     const path = join(androidDir, f);
-    let content = await Deno.readTextFile(path);
-    content = content.replaceAll("{{APPLICATION_ID}}", applicationId);
-    content = content.replaceAll("{{VERSION_CODE}}", String(appVersion.code));
-    content = content.replaceAll("{{VERSION_NAME}}", appVersion.name);
-    content = content.replaceAll(
-      "{{APP_NAME}}",
-      xmlFiles.has(f) ? appNameXml : appNameKotlin,
+    const content = await Deno.readTextFile(path);
+    await Deno.writeTextFile(
+      path,
+      _fillTemplate(content, {
+        "{{APPLICATION_ID}}": applicationId,
+        "{{VERSION_CODE}}": String(appVersion.code),
+        "{{VERSION_NAME}}": appVersion.name,
+        "{{APP_NAME}}": xmlFiles.has(f) ? appNameXml : appNameKotlin,
+        "{{ICON_ATTR}}": 'android:icon="@mipmap/ic_launcher"',
+        "{{CLEARTEXT_ATTR}}": _cleartextAttr({
+          devUrl: cfg.androidDevUrl,
+          remote: doRemote,
+        }),
+      }),
     );
-    content = content.replaceAll(
-      "{{ICON_ATTR}}",
-      'android:icon="@mipmap/ic_launcher"',
-    );
-    content = content.replaceAll(
-      "{{CLEARTEXT_ATTR}}",
-      _cleartextAttr({ devUrl: cfg.androidDevUrl, remote: doRemote }),
-    );
-    await Deno.writeTextFile(path, content);
   }
 
   // Pin Gradle to the resolved JDK so its toolchain resolver can't wander off to
@@ -422,7 +413,7 @@ async function _writeLocalAssets(
   console.log(
     `${NOTE} the packaged shell is built before aio.run() runs — ` +
       "ui.head, ui.viewport and ui.showStatus cannot reach it " +
-      "(ui.theme and ui.lang do, applied at boot). " +
+      "(ui.theme, ui.layout, ui.dir and ui.lang do, applied at boot). " +
       "Use --android --remote if your app depends on them.",
   );
   await Deno.copyFile(join(dist, BUNDLE_JS), join(assetsDir, BUNDLE_JS));
@@ -459,6 +450,78 @@ async function _writeLocalAssets(
  *  Its own name gives it its own applicationId too, so it also installs
  *  alongside the real app instead of replacing it. Same reasoning for the
  *  remote client, which is a different program from the local app. */
+/** The app's title, safe to paste into a Kotlin string literal.
+ *
+ *  @internal Exported so it can be tested without a toolchain. */
+export function _appNameKotlin(title: string): string {
+  return title
+    // deno-lint-ignore no-control-regex
+    .replace(/[\x00-\x1f\x7f]/g, "")
+    .replace(/\\/g, "\\\\")
+    .replace(/\$/g, "\\$")
+    .replace(/"/g, '\\"');
+}
+
+/** The app's title, safe to paste into an XML attribute.
+ *
+ *  It strips control characters too, exactly as the Kotlin spelling does. They
+ *  are not legal XML at any escape, so a title carrying a BEL, a VT or a NUL
+ *  produced an `AndroidManifest.xml` that is not well-formed — "not
+ *  well-formed (invalid token)" from the parser, with nothing naming the
+ *  title. Two deciders for one fact, four lines apart, and only one of them
+ *  knew. (The iOS side's `plistText` already stripped them.)
+ *
+ *  U+FFFE and U+FFFF are not XML characters either (same parser error).
+ *
+ *  And an XML-safe value is not yet an ANDROID-safe one: aapt2 reads the
+ *  attribute as a string resource. Measured with aapt2 36 (`dump xmltree`):
+ *  `back\slash` became the label `backslash` (a backslash starts an escape,
+ *  `\u0041` became `A`), and a title starting with `?` or `@` is a resource
+ *  REFERENCE — `?quest` failed the link with "resource attr/quest not found".
+ *  Both are escaped with a backslash, the resource syntax for a literal.
+ *  Quotes and apostrophes survive an attribute verbatim, so they only get the
+ *  XML escape.
+ *
+ *  @internal Exported so it can be tested without a toolchain. */
+export function _appNameXml(title: string): string {
+  return title
+    // deno-lint-ignore no-control-regex
+    .replace(/[\x00-\x1f\x7f\uFFFE\uFFFF]/g, "")
+    .replace(/\\/g, "\\\\")
+    .replace(/^[?@]/, "\\$&")
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;");
+}
+
+/** Fill a generated project file's `{{TOKEN}}`s.
+ *
+ *  EVERY replacement is a FUNCTION, not a string, and that is the whole point
+ *  of this existing. `String.prototype.replaceAll` interprets `$$`, `$&`,
+ *  `` $` `` and `$'` inside a STRING replacement — and the value substituted
+ *  here is the app's own title. Measured:
+ *
+ *      "Cash $$ Register"  → android:label="Cash $ Register"   (silent)
+ *      "Cost $& Saver"     → "Cost {{APP_NAME}}amp; Saver"
+ *      "Cost $` Saver"     → 225 characters of the preceding file spliced in,
+ *                            and a manifest that does not parse
+ *
+ *  The Kotlin escape writes `\$`, which FED the pattern — so escaping made it
+ *  worse rather than better. A function replacement is not a pattern.
+ *
+ *  @internal Exported so it can be tested without a toolchain. */
+export function _fillTemplate(
+  content: string,
+  subs: Record<string, string>,
+): string {
+  let out = content;
+  for (const [token, value] of Object.entries(subs)) {
+    out = out.replaceAll(token, () => value);
+  }
+  return out;
+}
+
 export function apkLabel(
   cfg: { binaryName: string; doRemote: boolean; androidDevUrl?: string },
 ): string {

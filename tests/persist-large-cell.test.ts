@@ -7,6 +7,7 @@ import { join } from "@std/path";
 import { createPersistenceManager } from "../src/server/persistence.ts";
 import { SKV_SCHEMA, sqliteKv } from "../src/server/skv-sqlite.ts";
 import { createDB } from "../src/server-entry.ts";
+import { tempDir } from "../src/testing/temp-dir.ts";
 import type { Log } from "../src/diagnostics/logger.ts";
 
 type LogEntry = { level: string; msg: string };
@@ -87,5 +88,79 @@ Deno.test("persist single: a 200KB blob persists to SQLite (no phantom KV limit)
   } finally {
     await db.close();
     await Deno.remove(dir, { recursive: true });
+  }
+});
+
+// ── the hard limit is LOUD, not a claim that the write failed ────────────────
+//
+// Past `PERSIST_CELL_HARD_BYTES` the guard logs an error on every flush and
+// writes the state anyway — its own message says so: "The write is NOT dropped
+// (state is never lost)". It then set `_cycleError`, which is the DURABILITY
+// VERDICT: `flushPersist()` rethrows it, the `persist` trojan route answers
+// 500 with it, `/__aio/health` reports it, and a clean shutdown logs "the
+// FINAL persist was refused — state since the last successful write is NOT on
+// disk". All for data that is on disk, forever, on every cycle.
+//
+// `_reportPersistError`'s own comment names this exact mistake and the fix
+// (`{ fatal: false }`) — for the wire-fidelity path. The size guard is the
+// other half of the same pair, and it had not been done.
+Deno.test("persist: an over-limit cell is written, and the durability verdict stays clean", async () => {
+  const { PERSIST_CELL_HARD_BYTES } = await import(
+    "../src/server/persistence.ts"
+  );
+  const dir = await tempDir("aio-persist-hardlimit-");
+  const db = createDB(join(dir, "kv.db"));
+  await db.execute(SKV_SCHEMA);
+  const kv = sqliteKv(db);
+  const logs: LogEntry[] = [];
+  const reported: unknown[] = [];
+  const state = {
+    big: { blob: "x".repeat(PERSIST_CELL_HARD_BYTES + 16) },
+    small: { n: 1 },
+  };
+  const mgr = createPersistenceManager({
+    kvDb: kv,
+    asyncDb: null,
+    dbSchema: undefined,
+    persistKey: "app-state",
+    persistMode: "multi",
+    persistMs: 5,
+    getState: () => state,
+    getDBState: (s) => s,
+    log: makeLog(logs),
+    getReportOpts: () => ({ onError: (e: unknown) => reported.push(e) }),
+    appId: "hard-limit",
+  });
+  try {
+    await mgr.flushPersist();
+
+    // 1. The bytes really are on disk — that is what makes the verdict a lie.
+    const stored = await kv.getMulti<Record<string, unknown>>("app-state");
+    assertEquals(
+      (stored?.big as { blob: string }).blob.length,
+      PERSIST_CELL_HARD_BYTES + 16,
+      "the over-limit cell must still be written",
+    );
+    assertEquals(stored?.small, { n: 1 }, "and so must its neighbours");
+
+    // 2. It is still LOUD — the point of the guard is that nobody misses it.
+    assertEquals(
+      logs.filter((l) => l.level === "error" && l.msg.includes("hard limit"))
+        .length >= 1,
+      true,
+      `the hard limit must still be reported: ${JSON.stringify(logs)}`,
+    );
+    assertEquals(reported.length >= 1, true, "and still reach onError");
+
+    // 3. …but the DURABILITY verdict says the write happened, because it did.
+    assertEquals(
+      mgr.lastCycleError(),
+      null,
+      "`am persist` would answer 500 and shutdown would say state is NOT on " +
+        "disk, for data that is: " + String(mgr.lastCycleError()?.message),
+    );
+  } finally {
+    await db.close().catch(() => {});
+    await Deno.remove(dir, { recursive: true }).catch(() => {});
   }
 });

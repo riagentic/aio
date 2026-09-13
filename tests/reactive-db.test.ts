@@ -2,21 +2,18 @@
 // through the wrapper touches a table it reads.
 import { assert, assertEquals } from "@std/assert";
 import { createDB } from "../src/db/async-db.ts";
-import { reactiveDB, tablesIn } from "../src/db/reactive.ts";
+import { reactiveDB } from "../src/db/reactive.ts";
+import { readTablesIn, writeTablesIn } from "../src/db/sql-shape.ts";
 
-const READ = /\b(?:from|join)\s+["'`]?([A-Za-z_]\w*)/gi;
-const WRITE =
-  /\b(?:insert\s+into|update|delete\s+from|replace\s+into)\s+["'`]?([A-Za-z_]\w*)/gi;
-
-Deno.test("tablesIn: parses read + write tables (case-insensitive, aliases)", () => {
-  assertEquals([...tablesIn("SELECT * FROM Items i JOIN tags t", READ)], [
+Deno.test("sql-shape: parses read + write tables (case-insensitive, aliases)", () => {
+  assertEquals([...readTablesIn("SELECT * FROM Items i JOIN tags t").tables], [
     "items",
     "tags",
   ]);
-  assertEquals([...tablesIn("INSERT INTO Items(a) VALUES(1)", WRITE)], [
+  assertEquals([...writeTablesIn("INSERT INTO Items(a) VALUES(1)")], [
     "items",
   ]);
-  assertEquals([...tablesIn("DELETE FROM tags WHERE x=1", WRITE)], ["tags"]);
+  assertEquals([...writeTablesIn("DELETE FROM tags WHERE x=1")], ["tags"]);
 });
 
 Deno.test("reactive select: re-emits when a write hits its table", async () => {

@@ -32,16 +32,19 @@ function Editor() {
     <form t="NewContact" onSubmit={submit} style={row}>
       <input
         placeholder="Name"
+        aria-label="Name"
         value={name}
         onInput={(e) => setName((e.target as HTMLInputElement).value)}
       />
       <input
         placeholder="Email"
+        aria-label="Email"
         value={email}
         onInput={(e) => setEmail((e.target as HTMLInputElement).value)}
       />
       <input
         placeholder="Note"
+        aria-label="Note"
         value={note}
         onInput={(e) => setNote((e.target as HTMLInputElement).value)}
       />
@@ -136,7 +139,7 @@ export default function App() {
         fontFamily: "system-ui, sans-serif",
       }}
     >
-      <h1 style={{ color: "#00a6cc" }}>Contacts</h1>
+      <h1 style={{ color: "#007d9c" }}>Contacts</h1>
       <Editor />
       <div t="Contacts">
         {list.map((c: Contact) => <Row key={c.id} c={c} />)}

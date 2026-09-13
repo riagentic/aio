@@ -7,6 +7,7 @@ import {
   SERVER_ONLY_SPECS,
 } from "./server-only-specs.ts";
 import { ESBUILD_SPEC } from "../build/esbuild-shared.ts";
+import { hasDesktopSession } from "./open-external.ts";
 
 import { join } from "@std/path";
 import {
@@ -313,12 +314,14 @@ export async function lint(
       try {
         // electron package exists but dist/ missing → scripts not approved
         await Deno.stat(join(Deno.cwd(), "node_modules", "electron"));
-        r.hint.push(
-          "electron installed but its binary is missing (postinstall skipped) — " +
-            "run `deno task install:electron`, or " +
-            "`deno task dev --client=electron` / " +
-            "`deno task build --targets=electron` (they auto-install)",
-        );
+        // WARN, and only what the code will really do (report 9b §5). It was
+        // an INFO hint saying `deno task dev --client=electron` auto-installs
+        // — printed BY that very command, on a machine with no display, which
+        // never launches a window and so never reaches the install
+        // (findElectronBin runs only at window launch). The binary was still
+        // missing when the run was killed, and the hint had named the command
+        // that just failed to install it.
+        r.warn.push(electronBinaryMissingLine(hasDesktopSession()));
       } catch {
         // aio-ok: this stat only distinguishes "installed but no binary" from
         // "not installed"; the not-installed case is reported by electron.ts
@@ -328,6 +331,24 @@ export async function lint(
   }
 
   return r;
+}
+
+/** The "electron package present, binary absent" boot line. Dev auto-installs
+ *  the runtime when it LAUNCHES the window (electron-spawn.ts
+ *  `findElectronBin`), so whether this run will install it depends on whether
+ *  a window can launch at all. Pure — the session is passed in. */
+export function electronBinaryMissingLine(desktopSession: boolean): string {
+  const head =
+    "electron installed but its binary is missing (postinstall skipped) — ";
+  return desktopSession
+    ? head +
+      "this run auto-installs it when it launches the window (first run " +
+      "downloads ~100MB); to do it up front: `deno task install:electron`"
+    : head +
+      "and this machine has no desktop session (no DISPLAY/WAYLAND_DISPLAY), " +
+      "so no window launches and NOTHING auto-installs it this run. Install " +
+      "it with `deno task install:electron` (or `deno task build " +
+      "--targets=electron`, which installs it too)";
 }
 
 /** Formats lint results — compact when clean, detailed when issues found */

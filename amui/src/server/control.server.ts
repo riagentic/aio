@@ -11,7 +11,7 @@
 // dynamic form of the import — is what makes the bundler externalize a module,
 // so every hop out of amui into aio's server internals goes through here.
 export { httpGet, trojanGet, trojanPost } from "../../../src/am/am-http.ts";
-export { envelopePayload } from "../../../src/am/am-cmd-state.ts";
+export { envelopeJsonPayload } from "../../../src/am/am-cmd-state.ts";
 export {
   instances,
   isProcessAlive,

@@ -42,7 +42,7 @@ import { justified as okMarker } from "../src/diagnostics/ok-marker.ts";
  *  Only ever edit this DOWNWARD. To lower it, convert calls to
  *  `tempDir()`/`tempDirSync()` and drop the matching `Deno.remove` from the
  *  happy path (the exit sweep is the net, `dropTempDir` the polite version). */
-const CEILING = 789;
+const CEILING = 784;
 
 const ROOT = new URL("../tests/", import.meta.url).pathname;
 

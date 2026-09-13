@@ -1,4 +1,4 @@
-import { assertEquals } from "@std/assert";
+import { assert, assertEquals } from "@std/assert";
 import {
   copyDir,
   findJdk,
@@ -38,20 +38,20 @@ async function withEnv<T>(
 }
 
 Deno.test("resolveSdk: ANDROID_HOME points at the SDK dir", async () => {
-  const root = await Deno.makeTempDir();
+  const root = await tempDir("aio-buildhelp-");
   try {
     await fakeSdk(root);
     await withEnv({ ANDROID_HOME: root, ANDROID_SDK_ROOT: "" }, () => {
       assertEquals(resolveSdk(), root);
     });
   } finally {
-    await Deno.remove(root, { recursive: true });
+    await dropTempDir(root);
   }
 });
 
 Deno.test("resolveSdk: ANDROID_HOME points at the PARENT (…/Sdk subdir)", async () => {
   // The reported bug: ANDROID_HOME=~/Android, SDK actually in ~/Android/Sdk.
-  const root = await Deno.makeTempDir();
+  const root = await tempDir("aio-buildhelp-");
   const sdk = join(root, "Sdk");
   try {
     await fakeSdk(sdk);
@@ -59,7 +59,7 @@ Deno.test("resolveSdk: ANDROID_HOME points at the PARENT (…/Sdk subdir)", asyn
       assertEquals(resolveSdk(), sdk);
     });
   } finally {
-    await Deno.remove(root, { recursive: true });
+    await dropTempDir(root);
   }
 });
 
@@ -68,7 +68,7 @@ Deno.test("resolveSdk: ANDROID_HOME points at the PARENT (…/Sdk subdir)", asyn
 /** Make a temp dir with a fake `bin/javac` that reports `javac <version>` AND
  *  "compiles" (`javac Foo.java` → touches Foo.class) — findJdk compile-verifies. */
 async function stubJdk(version: string): Promise<string> {
-  const home = await Deno.makeTempDir();
+  const home = await tempDir("aio-buildhelp-");
   await Deno.mkdir(join(home, "bin"));
   const javac = join(home, "bin", "javac");
   await Deno.writeTextFile(
@@ -100,7 +100,7 @@ Deno.test("findJdk: picks an in-range JAVA_HOME (javac 21)", async () => {
   try {
     await withJavaHome(home, () => assertEquals(findJdk().home, home));
   } finally {
-    await Deno.remove(home, { recursive: true });
+    await dropTempDir(home);
   }
 });
 
@@ -114,20 +114,20 @@ Deno.test("findJdk: never picks a too-new JDK (javac 25)", async () => {
       assertEquals(r.newestFound >= 25, true); // but it was seen (diagnostic)
     });
   } finally {
-    await Deno.remove(home, { recursive: true });
+    await dropTempDir(home);
   }
 });
 
 Deno.test("findJdk: ignores a JAVA_HOME whose javac is missing", async () => {
   // A JRE-only JAVA_HOME (no bin/javac) must not be accepted as a JDK.
-  const home = await Deno.makeTempDir(); // empty — no bin/javac
+  const home = await tempDir("aio-buildhelp-"); // empty — no bin/javac
   try {
     await withJavaHome(home, () => {
       // May still find a real system JDK, but never the javac-less temp dir.
       assertEquals(findJdk().home === home, false);
     });
   } finally {
-    await Deno.remove(home, { recursive: true });
+    await dropTempDir(home);
   }
 });
 
@@ -161,8 +161,18 @@ Deno.test("slugify: all special chars returns myapp", () => {
   assertEquals(slugify("!!!"), "myapp");
 });
 
-Deno.test("slugify: unicode stripped", () => {
-  assertEquals(slugify("café"), "caf");
+Deno.test("slugify: a unicode name is disambiguated, not collapsed", () => {
+  // It used to strip the letter and return `caf`, which made "café" and
+  // "cafe" — and "Über" and "Ber", and any two apps named in CJK — ONE
+  // identity: one data directory, one lock, one UDS socket, one binary name
+  // and one shared-key cookie. A name carrying a character this alphabet
+  // cannot spell now keeps a short hash of the original.
+  const cafe = slugify("café");
+  assert(cafe.startsWith("caf-"), `kept the spellable part: ${cafe}`);
+  assert(cafe !== slugify("cafe"), "…and is not the ASCII spelling");
+  assertEquals(slugify("café"), cafe, "stable across calls");
+  // An ASCII name is untouched.
+  assertEquals(slugify("My App"), "my-app");
 });
 
 // ── formatMb ──
@@ -186,7 +196,7 @@ Deno.test("formatMb: small bytes", () => {
 // ── writeDefaultIcon ──
 
 Deno.test("writeDefaultIcon: writes an SVG and a PNG side by side", async () => {
-  const dir = await Deno.makeTempDir();
+  const dir = await tempDir("aio-buildhelp-");
   try {
     await writeDefaultIcon(join(dir, "myapp"), "zebra");
     const svg = await Deno.readTextFile(join(dir, "myapp.svg"));
@@ -196,15 +206,15 @@ Deno.test("writeDefaultIcon: writes an SVG and a PNG side by side", async () => 
     // "it wrote a file" is not the assertion that matters.
     assertEquals([...png.subarray(0, 4)], [0x89, 0x50, 0x4e, 0x47]);
   } finally {
-    await Deno.remove(dir, { recursive: true });
+    await dropTempDir(dir);
   }
 });
 
 // ── copyDir ──
 
 Deno.test("copyDir: copies files recursively", async () => {
-  const src = await Deno.makeTempDir();
-  const dst = await Deno.makeTempDir();
+  const src = await tempDir("aio-buildhelp-");
+  const dst = await tempDir("aio-buildhelp-");
   const dstCopy = join(dst, "copy");
   try {
     await Deno.writeTextFile(join(src, "a.txt"), "hello");
@@ -217,8 +227,8 @@ Deno.test("copyDir: copies files recursively", async () => {
       "world",
     );
   } finally {
-    await Deno.remove(src, { recursive: true });
-    await Deno.remove(dst, { recursive: true });
+    await dropTempDir(src);
+    await dropTempDir(dst);
   }
 });
 

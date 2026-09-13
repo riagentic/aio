@@ -164,18 +164,22 @@ h("ul", null, items.map((i) => h("li", { key: i.id }, i.name)));
 
 ## Components & VDOM
 
-| Function         | Signature                              | Description                |
-| ---------------- | -------------------------------------- | -------------------------- |
-| `h`              | `h(tag, props, ...children): VNode`    | Create virtual node        |
-| `Fragment`       | `<>...</>`                             | Wrapper-less children      |
-| `ErrorBoundary`  | `<ErrorBoundary fallback={fn}>`        | Error catcher              |
-| `Portal`         | `<Portal target={node}>`               | External DOM node          |
-| `Suspense`       | `<Suspense fallback={node}>`           | Loading fallback for lazy  |
-| `Show`           | `<Show when={val} fallback={...}>`     | Conditional render         |
-| `lazy`           | `lazy(loader): ComponentFn`            | Code-split component       |
-| `Defer`          | `<Defer trigger="viewport" load={fn}>` | Trigger-based lazy loading |
-| `renderToString` | `renderToString(vnode): string`        | Sync SSR                   |
-| `renderToStream` | `renderToStream(vnode): AsyncGen`      | Streaming SSR              |
+| Function         | Signature                               | Description                |
+| ---------------- | --------------------------------------- | -------------------------- |
+| `h`              | `h(tag, props, ...children): VNode`     | Create virtual node        |
+| `Fragment`       | `<>...</>`                              | Wrapper-less children      |
+| `ErrorBoundary`  | `h(ErrorBoundary, { fallback: fn }, …)` | Error catcher              |
+| `Portal`         | `h(Portal, { target: node }, …)`        | External DOM node          |
+| `Suspense`       | `h(Suspense, { fallback: node }, …)`    | Loading fallback for lazy  |
+| `Show`           | `<Show when={val} fallback={...}>`      | Conditional render         |
+| `lazy`           | `lazy(loader): ComponentFn`             | Code-split component       |
+| `Defer`          | `<Defer trigger="viewport" load={fn}>`  | Trigger-based lazy loading |
+| `renderToString` | `renderToString(vnode): string`         | Sync SSR                   |
+| `renderToStream` | `renderToStream(vnode): AsyncGen`       | Streaming SSR              |
+
+`ErrorBoundary`, `Portal` and `Suspense` are markers (symbols), not functions,
+so `<ErrorBoundary …>` in TSX fails `deno check` with TS2604 — write them with
+`h(…)` as above.
 
 ## Hooks (inside component body)
 

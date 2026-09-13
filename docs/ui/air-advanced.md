@@ -204,9 +204,31 @@ const html = renderToString(
 );
 ```
 
+**A routed app** renders the route in `routePath` — set it from the request
+before rendering. `<Route>`, `useRoute` and `<Link>` need no runtime on the
+server, and context Providers (the route context, your own) reach their children
+exactly as they do in the browser:
+
+```tsx
+import { collectHead, renderToString, routePath } from "aio/air";
+import App from "./App.tsx";
+
+Deno.serve((req) => {
+  routePath.set(new URL(req.url).pathname);
+  const body = renderToString(<App />);
+  return new Response(
+    `<!doctype html><head>${collectHead()}</head><body>${body}</body>`,
+    { headers: { "content-type": "text/html; charset=utf-8" } },
+  );
+});
+```
+
 ### renderToStream()
 
-Streaming SSR -- yields HTML chunks as an async generator:
+Streaming SSR -- yields HTML chunks as an async generator. The route
+(`routePath` / `routeSearch`) is read once, when the stream starts, so a
+response keeps its own request's route even while another request sets the
+signals before this stream has finished:
 
 ```tsx
 import { renderToStream } from "aio/air";

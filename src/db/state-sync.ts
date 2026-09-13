@@ -334,6 +334,14 @@ const _bindable = (v: unknown): boolean =>
   v instanceof Uint8Array ||
   (typeof v === "number" && !Number.isNaN(v));
 
+/** Can this integer survive the round trip through `node:sqlite`, which reads
+ *  a 64-bit INTEGER back as a JavaScript number? */
+const _safeInteger = (v: number | bigint): boolean =>
+  typeof v === "bigint"
+    ? v <= BigInt(Number.MAX_SAFE_INTEGER) &&
+      v >= BigInt(Number.MIN_SAFE_INTEGER)
+    : !Number.isInteger(v) || Number.isSafeInteger(v);
+
 /** The declared SQL type a value of this JS type will be COERCED into by
  *  column affinity, or null when it lands unchanged. SQLite does not reject a
  *  number in a TEXT column — it converts it, and `42` reads back as the string
@@ -472,6 +480,55 @@ function checkRow(
         }, which SQLite cannot store. Columns hold null, numbers, strings, ` +
           `bigints or bytes — convert it first (a Date → \`.toISOString()\`, ` +
           `an object → \`JSON.stringify\`), or use an explicit null.`,
+      );
+    }
+    // Text `node:sqlite` cannot hand back unchanged. A NUL cuts the string
+    // there on read ("nul\0after" loads as "nul") and a lone surrogate is
+    // replaced with U+FFFD — so state and the table disagree, and the next
+    // boot adopts the damaged copy. Nothing failed, so nothing said so;
+    // refused like the other values SQLite cannot round-trip.
+    if (typeof v === "string") {
+      const nul = v.indexOf("\u0000");
+      if (nul !== -1 || !v.isWellFormed()) {
+        throw new Error(
+          `db: table "${name}" row #${i} column "${col}" holds a string ` +
+            (nul !== -1
+              ? `with a NUL character (at index ${nul})`
+              : `with a lone UTF-16 surrogate (not well-formed Unicode)`) +
+            `, which SQLite reads back altered — ` +
+            (nul !== -1
+              ? `cut off at the NUL`
+              : `the surrogate replaced with U+FFFD`) +
+            ` — so the next boot would load a different value. Clean it ` +
+            `before it reaches state (\`v.replaceAll("\\0", "")\`, ` +
+            `\`v.toWellFormed()\`), or store \`JSON.stringify(v)\`, which ` +
+            `escapes both.`,
+        );
+      }
+    }
+    // A magnitude the READ side can never load. SQLite stores 64-bit
+    // integers; `node:sqlite` hands them back as JavaScript numbers, so one
+    // row beyond ±2^53 makes EVERY read of this table fail — the app runs
+    // happily for the rest of its life and then never boots again,
+    // recoverable only by hand-editing the database. `loadTables` says all of
+    // that, at the moment it is too late; the write side said nothing at all.
+    //
+    // Refused, like any other value SQLite cannot round-trip: lamport slots,
+    // satoshi totals, nanosecond timestamps and snowflake ids are all past
+    // 2^53 and all ordinary in state, so this is a shape a real app reaches.
+    const _t = def.columns[col]!.sqlType.toUpperCase();
+    if (
+      (_t.includes("INT")) &&
+      (typeof v === "number" || typeof v === "bigint") &&
+      !_safeInteger(v)
+    ) {
+      throw new Error(
+        `db: table "${name}" row #${i} column "${col}" holds ${v}, which is ` +
+          `beyond ±2^53. SQLite INTEGERs are 64-bit but read back as ` +
+          `JavaScript numbers, so ONE such row makes every read of "${name}" ` +
+          `fail — this app would boot fine today and refuse to start after ` +
+          `the next restart. Store it as TEXT (or split it), or keep it in ` +
+          `cell state outside the table.`,
       );
     }
     const coerced = affinityMismatch(def.columns[col]!.sqlType, v);

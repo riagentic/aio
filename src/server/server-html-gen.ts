@@ -211,9 +211,15 @@ function headContent(
   // like the way to ask quietly did not. `box-sizing: border-box` on `*` is a
   // real layout change to a page that assumed content-box; an app porting an
   // existing stylesheet needs a switch that is actually off.
+  // MARKED for the same reason `data-aio-theme-base` is: a packaged shell is
+  // written before `aio.run()` exists, so it emits this and the standalone
+  // runtime takes it away at boot when the app turns out to have asked for
+  // `theme: "none"`. Without the marker the APK applied
+  // `*{box-sizing:border-box}` to the one app whose whole reason for saying
+  // "none" was that it must not.
   const baseStyle = theme === "none"
     ? ""
-    : `\n  <style>*,*::before,*::after{box-sizing:border-box}body{margin:0}</style>`;
+    : `\n  <style data-aio-box-base>*,*::before,*::after{box-sizing:border-box}body{margin:0}</style>`;
   // The default look (ui.theme). Inlined rather than linked: it is small, it
   // must not cost a round trip before first paint, and the android shell has
   // no server to fetch it from — one emission point, every target.
@@ -250,7 +256,15 @@ function headContent(
     : theme === "full" || (theme === "auto" && !hasCSS)
     ? visual(themeName || title)
     : appThemeTokensCss(themeName || title);
-  const themeStyle = themeCss === null ? "" : `\n  <style>${themeCss}</style>`;
+  // MARKED, so the standalone runtime can take it away again. A packaged
+  // shell is written before `aio.run()` exists, so it cannot know the app
+  // asked for `theme: "none"` — and this sheet is always-on, carrying
+  // `*{box-sizing:border-box}` and `body{margin:0}` to the one app that said
+  // "no aio CSS on the page at all… not even the two-rule box-model baseline".
+  // `_applyShellUi` removes it at boot when that is what was asked for.
+  const themeStyle = themeCss === null
+    ? ""
+    : `\n  <style data-aio-theme-base>${themeCss}</style>`;
   // The android half of `ui.theme`. A packaged APK's shell is written at BUILD
   // time, before `aio.run()` exists, so the build cannot know whether the app
   // opted in — and shipping the default meant a scaffolded android app (whose
@@ -259,11 +273,21 @@ function headContent(
   // DISABLED (`media="not all"` parses and applies nothing), and the standalone
   // runtime — which does receive the config — enables it at boot. No flash: the
   // page starts in the state an app that never asked for a theme wants.
+  // TWO deferred sheets, because `ui.theme` and `ui.layout` are orthogonal
+  // and the runtime learns both at the same moment. The build cannot read
+  // either from code, so a single sheet meant the APK always enabled the
+  // full-layout variant: an app that set `{ theme: "full", layout: false }`
+  // got its own layout under `deno task dev` and the framework's
+  // `.row`/`.stack`/`.grid`/`.muted` inside its own APK.
   const deferredTheme = deferTheme && themeCss !== null
     ? `\n  <style media="not all" data-aio-theme-deferred>${
       // The deferred sheet must be the one the runtime would have emitted, or
       // an APK enables a page shell the app declined at config time.
-      visual(themeName || title)}</style>`
+      appThemeCss(
+        themeName || title,
+      )}</style>\n  <style media="not all" data-aio-theme-deferred-nolayout>${
+      appThemeBaseCss(themeName || title)
+    }</style>`
     : "";
   const cssLink = hasCSS
     ? `\n  <link rel="stylesheet" href="${assetBase}style.css">`
@@ -387,9 +411,19 @@ export function generateHTML(o: HtmlShellOptions): string {
     o.layout,
   );
 
+  // `o.dir` was DECLARED on this options type, PASSED by `server-static.ts`,
+  // and then dropped right here — both generators were called with `lang`
+  // alone. So `ui.dir: "rtl"` reached no target at all: dev, prod and the
+  // packaged Electron shell all served `<html lang="ar">` with no `dir`, and
+  // only `androidLocalHTML` ever called the two-argument `htmlOpen` — which
+  // the Android build then never passed a `dir` to either. `htmlOpen`'s own
+  // comment says "one attribute flips the whole default UI — that is the
+  // entire point of having spent the CSS that way", and
+  // `tests/rtl-logical-css.test.ts` checks the stylesheets for physical
+  // properties without ever rendering a shell.
   const html = o.prod
-    ? prodHTML(head, o.lang)
-    : aioDevHTML(head, o.importMap, o.uiEntry ?? UI_ENTRY, o.lang);
+    ? prodHTML(head, o.lang, o.dir)
+    : aioDevHTML(head, o.importMap, o.uiEntry ?? UI_ENTRY, o.lang, o.dir);
   return o.nonce ? withScriptNonce(html, o.nonce) : html;
 }
 
@@ -478,9 +512,9 @@ ${head}
 }
 
 /** Prod: app.js bundles React + useAio + user code, exports mount() */
-function prodHTML(head: string, lang?: string): string {
+function prodHTML(head: string, lang?: string, dir?: UiDir): string {
   return `<!DOCTYPE html>
-${htmlOpen(lang)}
+${htmlOpen(lang, dir)}
 <head>
 ${head}
 </head>
@@ -500,6 +534,7 @@ function aioDevHTML(
   importMap: string,
   uiEntry = UI_ENTRY,
   lang?: string,
+  dir?: UiDir,
 ): string {
   const entry = _safeUiEntry(uiEntry);
   // The client's dev flag. Every dev-only tripwire in the isomorphic core —
@@ -509,7 +544,7 @@ function aioDevHTML(
   // PERMISSIVE environment aio has, and its bugs surfaced later, in a test or
   // in production. It is set before any module loads, and never in prod.
   return `<!DOCTYPE html>
-${htmlOpen(lang)}
+${htmlOpen(lang, dir)}
 <head>
 ${head}
 </head>

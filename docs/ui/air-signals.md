@@ -98,22 +98,22 @@ function Sidebar() {
 
 **Signal\<T\> interface:**
 
-| Member                        | Description                                                     |
-| ----------------------------- | --------------------------------------------------------------- |
-| `.value`                      | Read with automatic dependency tracking                         |
-| `.get()`                      | The same tracked read, as a method — mirrors `.set()`           |
-| `.peek()`                     | Read without tracking (use in event handlers)                   |
-| `.set(next)`                  | Write and notify. No-op for equal values — see "Equality" above |
-| `.set(next, { force: true })` | Bypass equality checks and always notify                        |
-| `.set(prev => v)`             | Updater form — receives current value                           |
-| `.subscribe(fn)`              | Manual subscriber, returns unsubscribe fn                       |
+| Member                        | Description                                                                                |
+| ----------------------------- | ------------------------------------------------------------------------------------------ |
+| `.value`                      | Read with automatic dependency tracking                                                    |
+| `.get()`                      | The same tracked read, as a method — mirrors `.set()`                                      |
+| `.peek()`                     | Read without tracking (use in event handlers)                                              |
+| `.set(next)`                  | Write and notify. No-op for equal values — see "Equality" above                            |
+| `.set(next, { force: true })` | Bypass equality checks and always notify                                                   |
+| `.update(prev => v)`          | Updater form — receives the current value. `.set` has none: `.set(fn)` stores the function |
+| `.subscribe(fn)`              | Manual subscriber, returns unsubscribe fn                                                  |
+| `._name`                      | Optional debug name (pass as 2nd arg to signal)                                            |
 
 > **Legacy idiom — delete on sight:** older code reads `void sig.value` in a
 > parent component "so children re-render". Child subscriptions have been
 > independent of parents since AIO-7.5 — the read is dead weight (and an extra
 > parent re-render). Components subscribe by reading `.value` in their own
-> render; nothing else is needed. | `._name` | Optional debug name (pass as 2nd
-> arg to signal) |
+> render; nothing else is needed.
 
 **Dev mode** (`localStorage.AIO_DEV = '1'` or `aio.config.dev = true`):
 

@@ -266,7 +266,8 @@ tabs auto-reconnect via WebSocket. The server sends a boot ID on each WS connect
 — if the browser detects a different boot ID on reconnect, it triggers
 `location.reload()` to pick up fresh JS. No stale code in memory after restarts.
 
-Additionally, browser open is delayed 1.5s on startup. If an existing tab
+Additionally, when `--open` is passed the browser open is delayed 1.5s on
+startup. Without `--open` aio opens nothing at all. If an existing tab
 reconnects within that window (common on fast restarts), no duplicate tab is
 opened.
 

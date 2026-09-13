@@ -44,7 +44,12 @@ export function plistText(s: string): string {
   let out = "";
   for (const ch of s) {
     const c = ch.codePointAt(0)!;
-    if ((c < 0x20 && c !== 0x09 && c !== 0x0a && c !== 0x0d) || c === 0x7f) {
+    // U+FFFE/U+FFFF are not XML characters at any escape — a plist carrying
+    // one does not parse.
+    if (
+      (c < 0x20 && c !== 0x09 && c !== 0x0a && c !== 0x0d) || c === 0x7f ||
+      c === 0xfffe || c === 0xffff
+    ) {
       continue;
     }
     out += ch;
@@ -64,22 +69,32 @@ export function renderIosTemplate(facts: {
    *  it. A baked-in https server keeps ATS strict. */
   allowArbitraryLoads: boolean;
 }): Record<string, string> {
+  // EVERY replacement is a FUNCTION, not a string. `replaceAll` interprets
+  // `$$`, `$&`, `` $` `` and `$'` inside a STRING replacement, and the value
+  // here is the app's own title: `"Cash $$ Register"` silently lost a `$`,
+  // `"Cost $& Saver"` substituted the placeholder itself, and
+  // `` "Cost $` Saver" `` spliced the preceding file content into
+  // CFBundleDisplayName. A function replacement is not a pattern. Applied to
+  // all six, because a version string comes from deno.json.
+  const lit = (v: string) => () => v;
   const out: Record<string, string> = {};
   for (const [rel, content] of Object.entries(IOS_TEMPLATE)) {
     out[rel] = content
-      .replaceAll("{{APP_NAME}}", plistText(facts.appName))
-      .replaceAll("{{BUNDLE_ID}}", facts.bundleId)
-      .replaceAll("{{VERSION_NAME}}", facts.versionName)
-      .replaceAll("{{VERSION_CODE}}", String(facts.versionCode))
+      .replaceAll("{{APP_NAME}}", lit(plistText(facts.appName)))
+      .replaceAll("{{BUNDLE_ID}}", lit(facts.bundleId))
+      .replaceAll("{{VERSION_NAME}}", lit(facts.versionName))
+      .replaceAll("{{VERSION_CODE}}", lit(String(facts.versionCode)))
       .replaceAll(
         "{{ATS_ARBITRARY}}",
-        facts.allowArbitraryLoads ? "true" : "false",
+        lit(facts.allowArbitraryLoads ? "true" : "false"),
       )
       .replaceAll(
         "{{ATS_COMMENT}}",
-        facts.allowArbitraryLoads
-          ? "No server is baked in, so any address the user types must be reachable."
-          : "The baked-in server is https, so only local networking is opened.",
+        lit(
+          facts.allowArbitraryLoads
+            ? "No server is baked in, so any address the user types must be reachable."
+            : "The baked-in server is https, so only local networking is opened.",
+        ),
       );
   }
   return out;

@@ -13,6 +13,12 @@
 
 import { createContext, onMount, useContext } from "./aio-renderer.ts";
 import {
+  _isSsrRendering,
+  _registerSsrCapture,
+  _SSR_NO_CONTEXT,
+  _ssrContextValue,
+} from "./vdom-ssr.ts";
+import {
   type ComponentFn,
   Fragment,
   h,
@@ -20,6 +26,8 @@ import {
   type VNode,
 } from "./vdom.ts";
 import {
+  _appHref,
+  _normalizeRoutePath,
   type LinkProps,
   matchPath,
   navigate,
@@ -50,7 +58,43 @@ export function _setRouterBoot(fn: (() => void) | null): void {
   _boot = fn;
 }
 
+/** The installed boot hook — read by a TRANSIENT renderer (the headless mount
+ *  behind `am surface` / `am preview`) so it can put back exactly what it
+ *  replaced for the length of one render. */
+export function _getRouterBoot(): (() => void) | null {
+  return _boot;
+}
+
+// ── The route a server render sees ────────────────────────────────
+
+type _RouteNow = { path: string; search: URLSearchParams };
+const _SSR_ROUTE = Symbol("aio.ssrRoute");
+// Snapshotted when a server render starts, so a stream keeps the route of the
+// request that started it (see `_registerSsrCapture`).
+_registerSsrCapture(
+  _SSR_ROUTE,
+  (): _RouteNow => ({ path: routePath.peek(), search: routeSearch.peek() }),
+);
+
+/** The render's route snapshot on the server; null everywhere else. */
+function _ssrRoute(): _RouteNow | null {
+  const ssr = _ssrContextValue(_SSR_ROUTE);
+  return ssr !== null && ssr !== _SSR_NO_CONTEXT ? ssr as _RouteNow : null;
+}
+
+/** The current path — the auto-tracked signal on the client. */
+function _pathNow(): string {
+  return _ssrRoute()?.path ?? routePath.value;
+}
+
 function bootRuntime(): void {
+  // A server render has no runtime to boot and needs none: the route is the
+  // `routePath` the request handler set, and the page is a string. The browser
+  // hook is `ensureConnected`, which threw "page has no HTTP origin and no IPC
+  // bridge" from inside `renderToString` — so every app with a `<Route>` or a
+  // `useRoute` failed to server-render at all, the case docs/ui/air-advanced.md
+  // shows. `useHead` asks the same question for the same reason.
+  if (_isSsrRendering()) return;
   if (!_boot) {
     // Never silent: a router rendered outside any runtime entry is a wiring
     // bug, not a state the app can run in.
@@ -115,8 +159,9 @@ export function useRoute<
   P extends Record<string, string> = Record<string, string>,
 >(pattern?: string): RouteState<P> {
   bootRuntime();
-  const path = routePath.value; // auto-tracked signal read
-  const search = routeSearch.value;
+  const ssr = _ssrRoute();
+  const path = ssr?.path ?? routePath.value; // auto-tracked signal read
+  const search = ssr?.search ?? routeSearch.value;
   if (!pattern) return { path, params: {} as P, search, matched: true };
   const params = matchPath(pattern, path);
   return {
@@ -153,15 +198,16 @@ export function Route(
   { path, index, element, children }: RouteProps,
 ): VNode | null {
   bootRuntime();
-  const currentPath = routePath.value; // auto-tracked signal read
+  const currentPath = _pathNow(); // auto-tracked signal read
   const { basePath, params: parentParams } = useContext(_RouteCtx);
 
   if (index) {
-    const base = basePath || "/";
-    const match = currentPath === base ||
-      currentPath === base.replace(/\/$/, "") ||
-      base === "/" && currentPath === "/";
-    if (!match) return null;
+    // `basePath` is the parent's PATTERN, not a concrete path — compared as a
+    // string, an index under `/users/:id` waited for the url to literally be
+    // "/users/:id" and never rendered, and one under `/dash` stayed empty at
+    // `/dash/`. The parent matched through `matchPath`; its default child has
+    // to ask the same question, exactly.
+    if (!matchPath(basePath || "/", currentPath, true)) return null;
     return (element ?? null) as VNode | null;
   }
 
@@ -215,10 +261,15 @@ export function Link(
   { to, replace: rep, exact, activeClass, activeStyle, children, ...rest }:
     LinkProps,
 ): VNode {
-  const path = routePath.value; // auto-tracked signal read
-  const isActive = (exact || to === "/")
-    ? path === to
-    : path === to || path.startsWith(to + "/");
+  // Compared as PATHS, not strings: `routePath` is the browser's encoded
+  // pathname and `to` is what the author wrote, so `to="/about us"` (url
+  // `/about%20us`), `to="/users/"`, `to="/users?tab=1"` and `to="/users#top"`
+  // were never active on the very page they point at.
+  const path = _normalizeRoutePath(_pathNow()); // auto-tracked signal read
+  const target = _normalizeRoutePath(to);
+  const isActive = (exact || target === "/")
+    ? path === target
+    : path === target || path.startsWith(target + "/");
   // A click this router must NOT take over. Every one of these is a gesture the
   // browser already handles correctly, and intercepting it replaces the user's
   // intent with an in-page route change:
@@ -266,7 +317,8 @@ export function Link(
     : rest.style;
   return h("a", {
     ...rest,
-    href: to,
+    // Under the route base, as `navigate` resolves it (`_appHref`).
+    href: _appHref(to),
     onClick: handleClick,
     className: cls,
     style: sty,

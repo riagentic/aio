@@ -131,24 +131,6 @@ export function resolveBudgets(b: Budgets | undefined): ResolvedBudgets {
   return out;
 }
 
-let _budgets: ResolvedBudgets = {};
-
-/** Set the process's declared budgets. Called once at boot, replaced per app. */
-export function setBudgets(b: ResolvedBudgets): void {
-  _budgets = b;
-}
-
-/** The declared budgets, or an empty object when the app declared none. */
-export function declaredBudgets(): ResolvedBudgets {
-  return _budgets;
-}
-
-/** Clear them — teardown, and between tests. */
-export function resetBudgets(): void {
-  _budgets = {};
-  _breaches.clear();
-}
-
 /** One budget that was exceeded, with the worst reading seen. */
 export type BudgetBreach = {
   budget: keyof ResolvedBudgets;
@@ -157,69 +139,118 @@ export type BudgetBreach = {
   detail?: string;
 };
 
-const _breaches = new Map<string, BudgetBreach>();
+/** ONE APP's declared budgets and the breaches recorded against them.
+ *
+ *  A process can host several apps (library mode, `testApps`), and this was one
+ *  module-level object: the last boot's `setBudgets` replaced everyone's limits
+ *  and every app recorded into, and reported from, the same ledger. So app B's
+ *  `cellState: "1KB"` made app A's `/health` "degraded" over A's own cell — a
+ *  budget A never declared — and B reported a breach on a cell B did not have.
+ *  Each boot now takes its own: `setBudgets` returns it. */
+export type BudgetLedger = {
+  /** The declared budgets, or an empty object when the app declared none. */
+  declared(): ResolvedBudgets;
+  /** Record that a declared budget was exceeded.
+   *
+   *  WHY THIS IS KEPT AND NOT ONLY LOGGED. A warning is for a person watching
+   *  a dev server; a budget is a limit an app committed to, and the report
+   *  asked for one that FAILS (report 2 §9.3). A log line cannot fail
+   *  anything. This ledger is what `/health` reports, so a test or a CI step
+   *  can assert on it — and it keeps the WORST reading rather than the latest,
+   *  because "it went over once" is the fact, and a later healthy sample must
+   *  not erase it.
+   *
+   *  Silently ignored when nothing was declared: aio's own defaults are hints,
+   *  not commitments, and reporting them as breaches would make `/health`
+   *  degraded on apps that never opted in. */
+  record(
+    budget: keyof ResolvedBudgets,
+    measured: number,
+    detail?: string,
+  ): void;
+  /** The budget verdict for `/health`, or `null` when the app declared none.
+   *
+   *  `null` rather than `{ ok: true }`: an app with no budgets has not passed
+   *  them, it has not made any, and a green field for a promise nobody made
+   *  reads as assurance. */
+  report(): { ok: boolean; breaches: BudgetBreach[] } | null;
+  /** Measure every cell's serialized size against a declared `cellState`
+   *  budget.
+   *
+   *  Called from `/health`, because that is where the question is asked and
+   *  the cost is therefore opt-in — zero when no budget is declared, and one
+   *  `JSON.stringify` per cell when someone actually asks.
+   *
+   *  The broadcaster samples the same fact on its own path, and that is not
+   *  two deciders: the LIMIT and the verdict live here, and those are two
+   *  sampling points feeding one ledger. It matters that both exist — the
+   *  broadcaster sees the cost that is actually paid (state is pushed to every
+   *  client on change), and this one sees an app with no client connected,
+   *  which would otherwise report a budget it had never once measured. */
+  measureCellStates(state: unknown): void;
+};
 
-/** Record that a declared budget was exceeded.
- *
- *  WHY THIS IS KEPT AND NOT ONLY LOGGED. A warning is for a person watching a
- *  dev server; a budget is a limit an app committed to, and the report asked
- *  for one that FAILS (report 2 §9.3). A log line cannot fail anything. This
- *  ledger is what `/health` reports, so a test or a CI step can assert on it —
- *  and it keeps the WORST reading rather than the latest, because "it went
- *  over once" is the fact, and a later healthy sample must not erase it.
- *
- *  Silently ignored when nothing was declared: aio's own defaults are hints,
- *  not commitments, and reporting them as breaches would make `/health`
- *  degraded on apps that never opted in. */
-export function recordBudgetBreach(
-  budget: keyof ResolvedBudgets,
-  measured: number,
-  detail?: string,
-): void {
-  const limit = _budgets[budget];
-  if (limit === undefined || measured <= limit) return;
-  const prev = _breaches.get(budget);
-  if (prev && prev.worst >= measured) return;
-  _breaches.set(budget, { budget, limit, worst: measured, detail });
+/** A ledger for `budgets` — a fresh, empty breach record. @internal */
+export function createBudgetLedger(budgets: ResolvedBudgets): BudgetLedger {
+  const breaches = new Map<string, BudgetBreach>();
+  const record: BudgetLedger["record"] = (budget, measured, detail) => {
+    const limit = budgets[budget];
+    if (limit === undefined || measured <= limit) return;
+    const prev = breaches.get(budget);
+    if (prev && prev.worst >= measured) return;
+    breaches.set(budget, { budget, limit, worst: measured, detail });
+  };
+  return {
+    declared: () => budgets,
+    record,
+    report: () =>
+      Object.keys(budgets).length === 0
+        ? null
+        : { ok: breaches.size === 0, breaches: [...breaches.values()] },
+    measureCellStates: (state) => {
+      if (budgets.cellState === undefined) return;
+      if (state === null || typeof state !== "object") return;
+      for (
+        const [name, slice] of Object.entries(state as Record<string, unknown>)
+      ) {
+        let n = 0;
+        try {
+          n = JSON.stringify(slice)?.length ?? 0;
+        } catch {
+          continue; // aio-ok: an unserializable slice is never broadcast either
+        }
+        record("cellState", n, `cell "${name}"`);
+      }
+    },
+  };
 }
 
-/** The budget verdict for `/health`, or `null` when the app declared none.
- *
- *  `null` rather than `{ ok: true }`: an app with no budgets has not passed
- *  them, it has not made any, and a green field for a promise nobody made
- *  reads as assurance. */
-export function budgetReport():
-  | { ok: boolean; breaches: BudgetBreach[] }
-  | null {
-  if (Object.keys(_budgets).length === 0) return null;
-  const breaches = [..._breaches.values()];
-  return { ok: breaches.length === 0, breaches };
+let _current: BudgetLedger = createBudgetLedger({});
+
+/** The ledger an app's server hands its broadcaster, keyed by the same
+ *  identity `warnBigFullState` already latches on (the app's `getUIState`). */
+const _byOwner = new WeakMap<object, BudgetLedger>();
+
+/** Tie `owner` (an app's `getUIState`) to that app's ledger. @internal */
+export function _bindBudgetOwner(owner: object, ledger: BudgetLedger): void {
+  _byOwner.set(owner, ledger);
 }
 
-/** Measure every cell's serialized size against a declared `cellState` budget.
- *
- *  Called from `/health`, because that is where the question is asked and the
- *  cost is therefore opt-in — zero when no budget is declared, and one
- *  `JSON.stringify` per cell when someone actually asks.
- *
- *  The broadcaster samples the same fact on its own path, and that is not two
- *  deciders: the LIMIT and the verdict live here, and those are two sampling
- *  points feeding one ledger. It matters that both exist — the broadcaster
- *  sees the cost that is actually paid (state is pushed to every client on
- *  change), and this one sees an app with no client connected, which would
- *  otherwise report a budget it had never once measured. */
-export function measureCellStates(state: unknown): void {
-  if (_budgets.cellState === undefined) return;
-  if (state === null || typeof state !== "object") return;
-  for (
-    const [name, slice] of Object.entries(state as Record<string, unknown>)
-  ) {
-    let n = 0;
-    try {
-      n = JSON.stringify(slice)?.length ?? 0;
-    } catch {
-      continue; // aio-ok: an unserializable slice is never broadcast either
-    }
-    recordBudgetBreach("cellState", n, `cell "${name}"`);
-  }
+/** `owner`'s ledger; the latest boot's when `owner` is absent or unbound —
+ *  read synchronously inside a boot, right after its `setBudgets`, that is the
+ *  booting app's. @internal */
+export function budgetsFor(owner?: object): BudgetLedger {
+  return (owner && _byOwner.get(owner)) ?? _current;
+}
+
+/** Set the declared budgets for the app booting now, and return ITS ledger —
+ *  the one that app's health, broadcaster and pressure monitor must hold. */
+export function setBudgets(b: ResolvedBudgets): BudgetLedger {
+  return _current = createBudgetLedger(b);
+}
+
+/** Clear them — teardown, and between tests. A running app keeps the ledger
+ *  its boot took. */
+export function resetBudgets(): void {
+  _current = createBudgetLedger({});
 }

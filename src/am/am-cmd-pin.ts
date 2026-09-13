@@ -30,7 +30,7 @@ import {
   stack,
 } from "./am-output.ts";
 import { resolveAioRoot, withoutAioFlag } from "./am-cmd-link.ts";
-import { basename, join, relative, resolve } from "@std/path";
+import { basename, relative, resolve } from "@std/path";
 import {
   compareVersions,
   currentLink,
@@ -65,8 +65,9 @@ import {
   type RemovalHit,
   removalMessage,
   removalsInDenoJson,
-  removalsInSource,
+  removalsInFile,
 } from "../state/removals.ts";
+import { appSourceFiles } from "./app-source-scope.ts";
 
 export type PinInfo = {
   /** What deno.json asks for (null = unpinned, i.e. "whatever is installed"). */
@@ -240,6 +241,37 @@ export function blockerLines(b: Blocker): string {
   }`;
 }
 
+/** Hits per top-level directory, most first (`"."` = a file at the app root).
+ *  Pure. */
+export function blockerDirCounts(
+  blockers: readonly Blocker[],
+): [string, number][] {
+  const counts = new Map<string, number>();
+  for (const b of blockers) {
+    const path = b.where.replace(/:\d+$/, "").replaceAll("\\", "/");
+    const slash = path.indexOf("/");
+    const dir = slash < 0 ? "." : path.slice(0, slash + 1);
+    counts.set(dir, (counts.get(dir) ?? 0) + 1);
+  }
+  return [...counts].sort((a, b) => b[1] - a[1]);
+}
+
+/** The refusal `am pin` prints. The count per top-level directory LEADS: 66
+ *  findings are a wall, "64 of these are under examples/" is a decision
+ *  (report 9 §2c). Pure. */
+export function pinRefusal(ref: string, blocking: readonly Blocker[]): string {
+  const byDir = blockerDirCounts(blocking)
+    .map(([dir, n]) => `${dir} ${n}`)
+    .join(" · ");
+  return `${ref} would break this app — ${blocking.length} removed API(s) ` +
+    `still in use (by directory: ${byDir}):\n` +
+    `${blocking.map(blockerLines).join("\n")}\n` +
+    `  Migrate them, pin a version that still runs them, or re-run with ` +
+    `--force to pin anyway. A directory that is not this app's code is ` +
+    `skipped once deno.json \`exclude\` / \`fmt.exclude\` or .gitignore ` +
+    `says so.`;
+}
+
 /** Does `ref` still accept an API whose last supporting release was `lastGood`?
  *  A ref we cannot order (`main`, `main-<sha>`, a path pin) is the tip by
  *  definition — treat it as newer, never as "probably fine". */
@@ -249,33 +281,6 @@ function stillAccepts(ref: string, lastGood: string): boolean {
   if (!good) return true; // an unorderable row cannot block anything
   if (!target) return false; // main / path pin — ahead of every release
   return compareVersions(target, good) <= 0;
-}
-
-/** Walk the app's own sources — never the framework, deps, or build output. */
-async function* appSources(dir: string): AsyncGenerator<string> {
-  const SKIP = new Set([
-    "dep",
-    "node_modules",
-    "dist",
-    ".git",
-    "coverage",
-    "build",
-  ]);
-  const walk = async function* (d: string): AsyncGenerator<string> {
-    let entries: Deno.DirEntry[];
-    try {
-      entries = [...await Array.fromAsync(Deno.readDir(d))];
-    } catch {
-      return; // unreadable dir — not this command's problem to report
-    }
-    for (const e of entries) {
-      if (e.name.startsWith(".") || SKIP.has(e.name)) continue;
-      const p = join(d, e.name);
-      if (e.isDirectory) yield* walk(p);
-      else if (/\.tsx?$/.test(e.name)) yield p;
-    }
-  };
-  yield* walk(dir);
 }
 
 /**
@@ -323,7 +328,11 @@ export async function preflight(
   } catch {
     // no deno.json, or not JSON — the normal flow reports that properly
   }
-  for await (const file of appSources(appDir)) {
+  // The app's own source: never the framework, deps or build output, and never
+  // a path the app itself declares is not its code (deno.json `exclude` /
+  // `fmt.exclude`, `.gitignore`) — a vendored copy of two other projects under
+  // `examples/` gave 64 of one refusal's 66 false findings (report 9 §2b).
+  for await (const file of appSourceFiles(appDir)) {
     let text: string;
     try {
       text = await Deno.readTextFile(file);
@@ -331,8 +340,10 @@ export async function preflight(
       continue;
     }
     // Every source file: a removed API shape (a type alias, an argument
-    // order) lives anywhere, not only beside a `cell(` call.
-    for (const hit of removalsInSource(text)) {
+    // order) lives anywhere, not only beside a `cell(` call. A cell-CONFIG key
+    // counts only inside a cell config literal — `removalsInFile`, not the
+    // block-shaped `removalsInSource` (report 9 §2a).
+    for (const hit of removalsInFile(text)) {
       if (stillAccepts(ref, hit.removal.lastGood)) continue;
       const rel = relative(appDir, file);
       blocking.push({
@@ -472,13 +483,7 @@ export async function cmdPin(
       );
     }
     if (blocking.length) {
-      outError(
-        `${ref} would break this app — ${blocking.length} removed API(s) ` +
-          `still in use:\n${blocking.map(blockerLines).join("\n")}\n` +
-          `  Migrate them, pin a version that still runs them, or re-run with ` +
-          `--force to pin anyway.`,
-        mode,
-      );
+      outError(pinRefusal(ref, blocking), mode);
       Deno.exit(1);
     }
   }

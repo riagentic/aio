@@ -18,12 +18,16 @@ import { cell, composeCells } from "../mod.ts";
 import { testCell } from "../src/cell-test.ts";
 import { isFrozenWriteError } from "../src/state/immutable.ts";
 
+// The object the AUTHOR wrote, held on to: `deep.__aio.state` is not it — that
+// is `freezeInitial`'s canonical clone, deep-frozen in dev by design, and
+// importing the framework makes a source run dev (`__aioDev`, aio-boot.ts).
+const DECLARED = {
+  n: 0,
+  obj: { a: 1, nested: { b: 2 } },
+  list: [{ id: "x" }] as { id: string }[],
+};
 const deep = cell("frozen-init", {
-  state: {
-    n: 0,
-    obj: { a: 1, nested: { b: 2 } },
-    list: [{ id: "x" }] as { id: string }[],
-  },
+  state: DECLARED,
   methods: {
     bump(s) {
       s.n++;
@@ -63,7 +67,11 @@ Deno.test("initial state: freezing it does not alias the DECLARATION", () => {
   // process — a second test, a worker — would inherit a frozen declaration and
   // the first mutation anywhere would throw for no reason the author can see.
   composeCells([deep]);
-  const declared = deep.__aio.state as { obj: { a: number } };
+  const declared = DECLARED;
+  assert(
+    (deep.__aio.state as unknown) !== declared,
+    "the cell keeps a clone, never the author's object",
+  );
   assert(
     !Object.isFrozen(declared),
     "composing a cell must not freeze the object the author wrote",

@@ -107,6 +107,18 @@
             "cd4c2b619920db14"
           ]
         },
+        "AirEvent": {
+          "kind": "typeAlias",
+          "sig": "8f42e0e209205a30",
+          "members": {
+            "typeParams": "req:1ce163372c20b817",
+            "currentTarget": "req:19e6cc795a98aca0",
+            "target": "req:fe0a5de5c75f058c"
+          },
+          "sigs": [
+            "8f42e0e209205a30"
+          ]
+        },
         "ArgSchemas": {
           "kind": "typeAlias",
           "sig": "5206cf17205645a5",
@@ -541,7 +553,7 @@
         },
         "ComposedCells": {
           "kind": "typeAlias",
-          "sig": "76c4ea372e59a95b",
+          "sig": "b041f6321e1b02a4",
           "members": {
             "appId": "req:2fb40568533c1a6d",
             "initialState": "req:43c27b1501a10616",
@@ -551,6 +563,8 @@
             "cellNames": "req:6941c580c10685fb",
             "initAll": "req:4496d51d93bc30b4",
             "destroyAll": "req:4496d51d93bc30b4",
+            "initAllExcept": "opt:be54abf0ef77d6d2",
+            "destroyAllExcept": "opt:be54abf0ef77d6d2",
             "registry": "req:object",
             "registry.enable": "req:82014ecb95af1b5b",
             "registry.disable": "req:82014ecb95af1b5b",
@@ -561,7 +575,7 @@
             "lastBreakdown": "opt:ab7dc8883ae66212"
           },
           "sigs": [
-            "76c4ea372e59a95b"
+            "b041f6321e1b02a4"
           ]
         },
         "ConcurrencyMode": {
@@ -1806,7 +1820,7 @@
         },
         "UserStore": {
           "kind": "interface",
-          "sig": "6c7d2236349f9de5",
+          "sig": "aeaf40324e2b0d47",
           "members": {
             "create": "req:841f1aca2d7123c7",
             "verify": "req:32e671eb8fd1690f",
@@ -1824,12 +1838,13 @@
             "enableTotp": "req:2fd25a6888708b4a",
             "disableTotp": "req:2fd25a6888708b4a",
             "totpSecret": "req:9c0af504252d5e4a",
+            "onUserChanged": "opt:500877ba711d5aab",
             "issueToken": "req:7797009481be96e1",
             "consumeToken": "req:04f0670f4a573078",
             "close": "req:d831502f3c16c146"
           },
           "sigs": [
-            "6c7d2236349f9de5"
+            "aeaf40324e2b0d47"
           ]
         },
         "verifyTotp": {
@@ -6618,7 +6633,7 @@
         },
         "TestUIOptions": {
           "kind": "interface",
-          "sig": "949bbdb405dcb02b",
+          "sig": "1164e2920034ab2e",
           "members": {
             "document": "opt:42a1ada9bcefe9fc",
             "cells": "opt:8748a872b06260ec",
@@ -6626,6 +6641,7 @@
             "settleIterations": "opt:f6522636230fa080",
             "cellDefaults": "opt:5579067fdd9b6907",
             "localFirst": "opt:0ecca0fe3beba89b",
+            "allowContainedErrors": "opt:0ecca0fe3beba89b",
             "perfBudget": "opt:9e79be3eb393cc04",
             "seed": "opt:1c5bc26d06f3d95e",
             "user": "opt:c5817ece372e4982",
@@ -6636,7 +6652,7 @@
             "viewport.height": "req:f6522636230fa080"
           },
           "sigs": [
-            "949bbdb405dcb02b"
+            "1164e2920034ab2e"
           ]
         },
         "TestWorkerMode": {
@@ -7956,6 +7972,10 @@
           "sig": "verb"
         },
         "am add": {
+          "kind": "verb",
+          "sig": "verb"
+        },
+        "am agent": {
           "kind": "verb",
           "sig": "verb"
         },

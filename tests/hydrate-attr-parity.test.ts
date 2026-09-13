@@ -25,7 +25,13 @@
 import { assert, assertEquals } from "@std/assert";
 import { Window } from "happy-dom";
 import { closeWindow } from "../src/testing/close-window.ts";
-import { h, renderToString, setDevMode, type VNode } from "../src/air/vdom.ts";
+import {
+  h,
+  renderToString,
+  setDevMode,
+  type VChild,
+  type VNode,
+} from "../src/air/vdom.ts";
 import {
   _setDocument,
   _unmount,
@@ -62,8 +68,11 @@ function devWarnings(fn: () => void): string[] {
   return out;
 }
 
-/** Every prop shape whose server spelling and client spelling could drift. */
-const CASES: Array<[string, Record<string, unknown>]> = [
+/** Every prop shape whose server spelling and client spelling could drift.
+ *  A third element is the element's CHILDREN, for the shapes whose spelling
+ *  depends on them — `<select value>` says which option is chosen by putting
+ *  `selected` on that option, so it cannot be tested as a lone element. */
+const CASES: Array<[string, Record<string, unknown>, VChild[]?]> = [
   ["div", { style: "color:red" }],
   ["div", { style: { color: "red", marginTop: 4 } }],
   ["div", { style: { opacity: 0.5, zIndex: 3 } }],
@@ -97,13 +106,32 @@ const CASES: Array<[string, Record<string, unknown>]> = [
   ["label", { htmlFor: "z" }],
   ["svg", { viewBox: "0 0 1 1" }],
   ["circle", { strokeWidth: 2, stopColor: "red" }],
+  // SSR puts `selected` on the matching option; mount sets `select.value`.
+  // The two spellings of one fact, which is exactly what this file is for.
+  ["select", { value: "fr" }, [
+    h("option", { value: "en" }, "English"),
+    h("option", { value: "fr" }, "French"),
+  ]],
+  ["select", { value: "nope" }, [h("option", { value: "en" }, "English")]],
+  ["select", {}, [h("option", { value: "en" }, "English")]],
+  ["select", { multiple: true, value: ["en"] }, [
+    h("option", { value: "en" }, "English"),
+    h("option", { value: "fr" }, "French"),
+  ]],
+  ["select", { value: "German" }, [
+    h("option", null, "English"),
+    h("option", null, "German"),
+  ]],
+  // …and the raw-text elements, whose SSR text is NOT escaped.
+  ["style", {}, [".a > .b { color: red }"]],
+  ["script", {}, ["if (a < b) { x() }"]],
 ];
 
 Deno.test("hydrate: matching server markup produces NO divergence warning", async () => {
   const { doc, cleanup } = env();
   try {
-    for (const [tag, props] of CASES) {
-      const App = () => h(tag, { ...props }) as VNode;
+    for (const [tag, props, children] of CASES) {
+      const App = () => h(tag, { ...props }, ...(children ?? [])) as VNode;
       const host = doc.createElement("main");
       doc.body.appendChild(host);
       host.innerHTML = renderToString(h(App, null));

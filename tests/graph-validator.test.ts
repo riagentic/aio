@@ -784,11 +784,13 @@ Deno.test("validateGraph: a missing mapping in a module reached ONLY via dynamic
     );
     const result = await validateGraph(dir + "/App.tsx", {}, mockTranspile);
     assertEquals(result.valid, true, JSON.stringify(result.errors));
-    const e = result.errors.find((e) => e.file.endsWith("x.server.ts"));
-    assert(e, "still reported, quietly");
-    assertEquals(e!.category, "server-only-api");
-    assertEquals(e!.deferred, true);
-    assertStringIncludes(e!.message, "some-server-package");
+    // Not reported at all now: a dynamically imported `*.server.ts` is where
+    // the client graph ends (the builder marks it external), so nothing in it
+    // is judged by the browser map (tests/am-check-server-file-boundary.test.ts).
+    assertEquals(
+      result.errors.filter((e) => e.file.endsWith("x.server.ts")),
+      [],
+    );
   } finally {
     await dropTempDir(dir);
   }

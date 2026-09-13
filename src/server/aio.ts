@@ -14,7 +14,7 @@ import {
 } from "./app-files.ts";
 import { readLocalPinSync } from "./deno-json.ts";
 import { createShutdownOrchestrator, registerRuntime } from "./shutdown.ts";
-import { _registerAuthStore } from "./auth-context.ts";
+import { _registerAuthStore, serverUser } from "./auth-context.ts";
 import type { ServerHandle } from "./server-types.ts";
 import type { UDSHandle } from "./uds.ts";
 import {
@@ -30,7 +30,9 @@ import {
   undo,
 } from "../diagnostics/time-travel.ts";
 import { createScheduleManager } from "../state/schedule.ts";
-import { createOwnManager, isOwnEffect } from "../state/own.ts";
+import { createOwnManager } from "../state/own.ts";
+import { routeEffect } from "../state/route-effect.ts";
+import { notifyCrossUserGate, showNotifyEffect } from "./aio-dispatch.ts";
 import { getLogger, log, setLogger } from "../diagnostics/logger-api.ts";
 import type { LogSink } from "../diagnostics/logger-types.ts";
 import { timeTravelEnabled } from "../diagnostics/types.ts";
@@ -42,7 +44,16 @@ import {
 
 // Phase modules — extracted _run() logic
 import { bootStorage, isDevBoot, replaySyncOps } from "./aio-boot.ts";
-import { replayJournal } from "./journal.ts";
+import {
+  type ActionCause,
+  type JournalGap,
+  replayJournal,
+  syncJournalWatermarkKey,
+  type TimeTravelRestore,
+  TT_RESTORE_TYPE,
+  workerPatchCell,
+} from "./journal.ts";
+import { AsyncLocalStorage } from "node:async_hooks";
 import { createTimeline } from "./timeline.ts";
 import { makeRedactor } from "../diagnostics/redact.ts";
 import { degraded } from "../diagnostics/degraded.ts";
@@ -50,7 +61,7 @@ import { actionOrigin, isWriteSetAction } from "../diagnostics/action-kind.ts";
 import { setupDispatch } from "./aio-dispatch.ts";
 import { hostedCellName, startCellWorkerHost } from "./cell-worker-host.ts";
 import { createCellWorkerPool } from "./cell-worker-pool.ts";
-import { isScheduleEffect } from "../state/schedule.ts";
+
 import { validateSchedules } from "../state/schedule.ts";
 import {
   currentHeapLimitBytes,
@@ -102,16 +113,29 @@ import {
 
 // Cells-based API modules
 import { composeCellsWiring } from "./aio-composition.ts";
-import { _setCallTimeouts } from "../state/cell-impl.ts";
+import {
+  _cloneAcrossWorkerBoundary,
+  _mapCallResult,
+  _setCallTimeouts,
+} from "../state/cell-impl.ts";
 import {
   buildLegacyConfig,
   filterCellsByIsolate,
   initLogger,
+  runAsApp,
   wrapAppWithCells,
 } from "./aio-cells-bridge.ts";
 import { getRegisteredCells } from "../state/cell-reactive.ts";
-import { createUpdatesCell } from "../state/updates-cell.ts";
-import { createFeedbackCell } from "../state/feedback-cell.ts";
+import {
+  _releaseUpdatesClaim,
+  _updatesForApp,
+  type UpdatesSlot,
+} from "../state/updates-cell.ts";
+import {
+  _feedbackForApp,
+  _releaseFeedbackClaim,
+  type FeedbackSlot,
+} from "../state/feedback-cell.ts";
 import { createCostMeter } from "../vitals/cost-meter.ts";
 
 // CLI + path resolution
@@ -119,6 +143,7 @@ import {
   cdpPort,
   declareAppFlags,
   electronOnlyFlagRefusal,
+  envDefaultPort,
   parseCli,
   printHelp,
   VERSION,
@@ -605,7 +630,16 @@ async function run<S extends Record<string, unknown>>(
   // deno-lint-ignore no-explicit-any
 ): Promise<AioApp<S, any>>;
 // deno-lint-ignore no-explicit-any
-async function run(a?: any, b?: any): Promise<AioApp<any, any>> {
+function run(a?: any, b?: any): Promise<AioApp<any, any>> {
+  // AS ITS APP: every line, diagnostic and `degraded()` failure this boot —
+  // and every handler, socket and timer it starts — belongs to this app, not
+  // to whichever app in the process booted last (`runAsApp`). Before its
+  // logger exists the app is console-only.
+  return runAsApp(() => _runAsApp(a, b));
+}
+
+// deno-lint-ignore no-explicit-any
+async function _runAsApp(a?: any, b?: any): Promise<AioApp<any, any>> {
   // ── the app's OWN flags join the vocabulary before argv is ever read ──
   //
   // This used to happen at the end of config composition, ~120 lines below —
@@ -736,8 +770,21 @@ async function run(a?: any, b?: any): Promise<AioApp<any, any>> {
     fc = {
       ...fc,
       routes: Object.keys(_plugins.routes).length
-        // App last: an app route with the same pattern wins, deliberately.
-        ? { ..._plugins.routes, ...(fc.routes ?? {}) }
+        // App FIRST, in insertion order, and a plugin entry only for a key the
+        // app did not write. The matcher tries patterns in insertion order, and
+        // `{ ...plugins, ...app }` put every plugin pattern ahead of the app's
+        // (a key keeps its FIRST position even when a later spread overwrites
+        // its value) — so a plugin's `/*` or `/files/:name` answered the app's
+        // own `/files/*` and `/api/:thing`. An app route with the same key
+        // still wins outright, as before.
+        ? {
+          ...(fc.routes ?? {}),
+          ...Object.fromEntries(
+            Object.entries(_plugins.routes).filter(([k]) =>
+              !Object.hasOwn(fc.routes ?? {}, k)
+            ),
+          ),
+        }
         : fc.routes,
       schedules: _plugins.schedules.length
         ? [..._plugins.schedules, ...(fc.schedules ?? [])]
@@ -847,6 +894,10 @@ async function run(a?: any, b?: any): Promise<AioApp<any, any>> {
   const appRef = {
     current: null as AioApp<Record<string, unknown>, unknown> | null,
   };
+  // …and the builtin-cell slots, whose process-slot CLAIM the `finally` gives
+  // back once this boot has bound them or refused (see `_feedbackForApp`).
+  let _updatesSlot: UpdatesSlot | undefined;
+  let _feedbackSlot: FeedbackSlot | undefined;
   try {
     // Configuring `updates` registers the built-in cell — BEFORE the registry
     // is read below, because a cell that registers afterwards is never composed
@@ -871,10 +922,17 @@ async function run(a?: any, b?: any): Promise<AioApp<any, any>> {
     // never run for the app's whole life, green in every test and every
     // `deno task dev`, because the config that reaches this branch only
     // exists in a released build.
-    const _builtins = [
-      fc.updates ? createUpdatesCell() : undefined,
-      fc.feedback ? createFeedbackCell() : undefined,
-    ].filter((c): c is NonNullable<typeof c> => c !== undefined);
+    //
+    // PER APP. The cell a single-app process gets is the one `aio/updates` /
+    // `aio/feedback` export; a SECOND app in the same process used to be handed
+    // that same, already-bound cell and refused to boot ("[updates] already
+    // bound — use a factory"), a factory no app can write for a cell aio owns.
+    // `_updatesForApp` gives it a cell (and a runtime slot) of its own.
+    _updatesSlot = fc.updates ? _updatesForApp() : undefined;
+    _feedbackSlot = fc.feedback ? _feedbackForApp() : undefined;
+    const _builtins = [_updatesSlot?.cell, _feedbackSlot?.cell].filter(
+      (c): c is NonNullable<typeof c> => c !== undefined,
+    );
 
     // Isolate filter
     const cliIsolate = parseCli().isolate;
@@ -1190,6 +1248,10 @@ async function run(a?: any, b?: any): Promise<AioApp<any, any>> {
       appRef,
     });
 
+    // Which cells `startUpdates`/`startFeedback` wire, handed to the boot by
+    // the config object's identity rather than as a config KEY (which every
+    // layer of validation would have to learn about).
+    _appSlots.set(config, { updates: _updatesSlot, feedback: _feedbackSlot });
     const app = await _run(composed.initialState, config);
     appRef.current = app;
 
@@ -1198,8 +1260,8 @@ async function run(a?: any, b?: any): Promise<AioApp<any, any>> {
 
     // Cells are bound — the update check can now call cell methods. Armed in
     // _run, fired here, because dispatching before binding throws.
-    beginUpdates();
-    beginFeedback();
+    beginUpdates(_updatesSlot);
+    beginFeedback(_feedbackSlot);
 
     // AIO-418: fire the user's onStart NOW — after the callable cell
     // method surface is bound — so seeding via a cell method (members.seed())
@@ -1250,6 +1312,9 @@ async function run(a?: any, b?: any): Promise<AioApp<any, any>> {
       );
     }
     throw e;
+  } finally {
+    _releaseUpdatesClaim(_updatesSlot);
+    _releaseFeedbackClaim(_feedbackSlot);
   }
 }
 
@@ -1299,6 +1364,13 @@ function createBootUndo(): BootUndo {
  *  case), and by the op sanitizer as an interval left behind by every test
  *  that asserts a refusal. Each step registers its undo as it starts, and a
  *  throw runs them in reverse — dev and prod alike. */
+/** The per-app `updates` / `feedback` slots `run()` chose, keyed by the
+ *  config it hands `_run`. */
+const _appSlots = new WeakMap<
+  object,
+  { updates?: UpdatesSlot; feedback?: FeedbackSlot }
+>();
+
 async function _run<S, A, E>(
   initialState: S,
   config: AioConfig<S, A, E>,
@@ -1466,23 +1538,35 @@ async function _runPhases<S, A, E>(
       app: await _appVersion(),
     });
   }
-  // THE port chain, in one place, with `am` reading the same three rungs
+  // THE port chain, in one place, with `am` reading the same four rungs
   // (`declaredPort`): `--port` (operator, this run) > `AIO_PORT` (operator, no
   // command line to hang a flag on — a service unit, a container, a compiled
-  // binary) > `aio.run({ port })` (the author) > the runtime picks a free one.
+  // binary) > `aio.run({ port })` (the author) > `AIO_DEFAULT_PORT` (a
+  // supervisor's "a stable port, unless the app declares one" — the generated
+  // systemd unit) > the runtime picks a free one.
   //
   // deno.json is deliberately NOT a rung: it carries identity and build only
   // (see `_warnMisplacedDenoJson`, which WARNS that a top-level `port` there is
   // inert). `am` used to read it anyway, so a key the runtime told you it was
   // ignoring silently decided where `am` aimed.
   const _envPort = envPort();
-  const port = cli.port ?? _envPort ?? config.port ?? await findFreePort();
+  // `AIO_DEFAULT_PORT=0` is "pick a free one" — saying nothing, so no rung.
+  const _defaultPort = envDefaultPort() || undefined;
+  const port = cli.port ?? _envPort ?? config.port ?? _defaultPort ??
+    await findFreePort();
+  // The default rung fills only the slot a free port would: it is not a port
+  // anyone NAMED, so it never opts a local Electron app out of zero ports.
+  const _portFromDefaultRung = cli.port === undefined &&
+    _envPort === undefined && config.port === undefined &&
+    _defaultPort !== undefined;
   const portFrom: Provenance = cli.port
     ? "flag"
     : _envPort !== undefined
     ? "env"
     : config.port
     ? "config"
+    : _portFromDefaultRung
+    ? "env"
     : "default"; // …i.e. picked by findFreePort — worth saying, since a port
   // that changes between runs is otherwise a mystery.
 
@@ -1639,7 +1723,9 @@ async function _runPhases<S, A, E>(
   // them, so an unreadable value fails the boot rather than silently falling
   // back to aio's own number (report 2 §9.3). A budget that did not parse is a
   // limit nobody declared and nobody can see.
-  setBudgets(resolveBudgets(config.budgets));
+  // THIS app's ledger, handed to its own health route and broadcaster — a
+  // second app in the process takes another (see `BudgetLedger`).
+  const _budgetLedger = setBudgets(resolveBudgets(config.budgets));
 
   // One redaction predicate for every place an action is recorded — the
   // journal (disk), the timeline (`am timeline`) and the action log. Built
@@ -1887,19 +1973,277 @@ async function _runPhases<S, A, E>(
     );
   }
 
+  /** The replayed state, with every field the store does not hold put back
+   *  to what boot restored it as.
+   *
+   *  Replay re-runs the actions after the last snapshot, and those actions
+   *  write fields the app keeps OUT of the store (`persist: { exclude }`,
+   *  `persist: "none"`) as readily as any other. So a field that comes back at
+   *  its default after a clean restart came back holding its pre-crash value
+   *  after a SIGKILL — `setCache(4242)` replayed — and the app's own
+   *  declaration of what survives a restart depended on HOW it stopped. The
+   *  restored value is the one a clean restart gives: the declared default, or
+   *  whatever the app's `onRestore` derived it as.
+   *
+   *  Read from the persist FILTER, dot paths included — the same value the
+   *  store's getter applies. It used to read the top-level `_cellFields`
+   *  flags, and a nested exclude leaves its top-level key "persisted", so
+   *  `exclude: ["meta.cache"]` came back `0` after a clean stop and `4242`
+   *  after a SIGKILL. */
+  function _keepUnpersistedFields(restored: S, replayed: S): S {
+    const filters = config._cellPersist;
+    if (!filters || replayed === restored) return replayed;
+    const from = restored as Record<string, unknown>;
+    let out: Record<string, unknown> | null = null;
+    for (const [cell, filter] of Object.entries(filters)) {
+      if (filter === "all") continue;
+      const was = from[cell];
+      const now = (replayed as Record<string, unknown>)[cell];
+      if (!_isRecord(was) || !_isRecord(now) || now === was) continue;
+      const slice = _unpersistedFromBoot(filter, was, now);
+      if (slice !== now) {
+        out ??= { ...(replayed as Record<string, unknown>) };
+        out[cell] = slice;
+      }
+    }
+    return (out ?? replayed) as S;
+  }
+
+  function _isRecord(v: unknown): v is Record<string, unknown> {
+    return v !== null && typeof v === "object" && !Array.isArray(v);
+  }
+
+  /** One cell's replayed slice with what `filter` keeps out of the store put
+   *  back to its boot value (or removed, where boot had none). Identity is
+   *  kept when nothing differs. */
+  function _unpersistedFromBoot(
+    filter: import("../state/cell-types.ts").CellFieldFilter,
+    was: Record<string, unknown>,
+    now: Record<string, unknown>,
+  ): Record<string, unknown> {
+    if (filter === "all") return now;
+    if (filter === "none") return was;
+    let slice = now;
+    const revert = (key: string) => {
+      if (slice[key] === was[key] && (key in slice) === (key in was)) return;
+      if (slice === now) slice = { ...now };
+      if (key in was) slice[key] = was[key];
+      else delete slice[key];
+    };
+    if ("include" in filter) {
+      // Top level only — `persist.include` refuses dot paths at definition.
+      const kept = new Set(filter.include);
+      for (const key of new Set([...Object.keys(now), ...Object.keys(was)])) {
+        if (!kept.has(key)) revert(key);
+      }
+      return slice;
+    }
+    for (const path of filter.exclude) {
+      if (!path.includes(".")) revert(path);
+      else {
+        slice = _restoreExcluded(slice, was, path.split(".")) as Record<
+          string,
+          unknown
+        >;
+      }
+    }
+    return slice;
+  }
+
+  /** The mirror of `deepExclude` (state/state-filter.ts), walking the same
+   *  shape the same way: where the store's projection REMOVES the field at
+   *  `segs` from `now`, this puts boot's value there instead. Arrays pair
+   *  element by index; a head the object does not have is a records-by-id
+   *  container whose every value is walked — unless boot HAS that head, in
+   *  which case a replayed action deleted the field, and a clean restart
+   *  would fill boot's value back in (restore merges over the declared
+   *  shape), so this does too. Clones only along the changed path. */
+  function _restoreExcluded(
+    now: unknown,
+    was: unknown,
+    segs: string[],
+  ): unknown {
+    if (segs.length === 0 || now === null || typeof now !== "object") {
+      return now;
+    }
+    if (Array.isArray(now)) {
+      let changed = false;
+      const out = now.map((el, i) => {
+        const next = _restoreExcluded(
+          el,
+          Array.isArray(was) ? was[i] : undefined,
+          segs,
+        );
+        if (next !== el) changed = true;
+        return next;
+      });
+      return changed ? out : now;
+    }
+    const obj = now as Record<string, unknown>;
+    const base = _isRecord(was) ? was : undefined;
+    const head = segs[0]!;
+    if (head in obj || (base && head in base)) {
+      if (segs.length === 1) {
+        if (!base || !(head in base)) {
+          const { [head]: _dropped, ...kept } = obj;
+          return kept;
+        }
+        return obj[head] === base[head] && head in obj
+          ? now
+          : { ...obj, [head]: base[head] };
+      }
+      if (!(head in obj)) return now; // no branch to restore under
+      const child = _restoreExcluded(obj[head], base?.[head], segs.slice(1));
+      return child === obj[head] ? now : { ...obj, [head]: child };
+    }
+    let touched = false;
+    const mapped: Record<string, unknown> = {};
+    for (const [k, v] of Object.entries(obj)) {
+      const next = v !== null && typeof v === "object"
+        ? _restoreExcluded(v, base?.[k], segs)
+        : v;
+      if (next !== v) touched = true;
+      mapped[k] = next;
+    }
+    return touched ? mapped : now;
+  }
+
+  /** Refuse a journal replay across a hole (see `JournalGap`), keep the
+   *  journal, and say where both halves of the evidence went. Boot goes on:
+   *  the database is consistent on its own, and the integrity check already
+   *  said it is older. Replaying nothing is the one answer that invents
+   *  nothing. */
+  async function _refuseJournalAcrossGap(
+    j: NonNullable<typeof journal>,
+    gap: JournalGap,
+  ): Promise<void> {
+    const { integrityRecoveries } = await import("./db-integrity.ts");
+    // The recovery this journal belongs with: its own database (`<db>.journal`)
+    // or the one in its directory (`<data>/state.db` beside `<data>/journal`).
+    const recoveries = [...integrityRecoveries()];
+    const recovery = (recoveries.find(([db]) => j.path === `${db}.journal`) ??
+      recoveries.find(([db]) => dirname(db) === dirname(j.path)))?.[1];
+    const stamp = new Date().toISOString().replace(/[:.]/g, "-");
+    const to = recovery?.quarantinedTo
+      ? `${recovery.quarantinedTo}.journal`
+      : `${j.path}.gap-${stamp}`;
+    const why = recovery?.restoredFrom
+      ? `checkIntegrityOnBoot restored ${recovery.restoredFrom}; the damaged ` +
+        `database is kept at ${recovery.quarantinedTo}`
+      : recovery?.quarantinedTo
+      ? `checkIntegrityOnBoot started it EMPTY; the damaged database is kept ` +
+        `at ${recovery.quarantinedTo}`
+      : `it was restored from a snapshot or a backup, or replaced`;
+    const stream = gap.stream === "actions"
+      ? "the app's actions"
+      : `sync cell "${gap.stream}"`;
+    let kept: string;
+    try {
+      j.quarantine(to);
+      kept = `The journal is kept at ${to} (with ${to}.base)`;
+    } catch (e) {
+      kept = `The journal could NOT be moved aside (${e}) and is still at ` +
+        `${j.path} — copy it away before the first snapshot compacts it`;
+    }
+    const msg =
+      `journal: REFUSED to replay ${j.path} — the database holds ${stream} ` +
+      `only up to seq ${gap.storeAt}, but the journal had already dropped ` +
+      `everything up to seq ${gap.droppedThrough}: the database went back in ` +
+      `time (${why}). Replaying the tail across that hole would re-run ` +
+      `actions on a state they never ran on and record history that never ` +
+      `happened, so nothing was replayed and the app boots on the database ` +
+      `as it is. ${kept}.`;
+    reportAioError(
+      createAioError("PERSIST_ERROR", new Error(msg), {
+        ...(gap.stream !== "actions" ? { cellName: gap.stream } : {}),
+      }),
+      _reportOpts,
+    );
+  }
+
   // Journal recovery: replay the actions committed AFTER the last
   // snapshot (the debounce window a SIGKILL/power-cut would otherwise lose) on
   // top of the restored state — after sync-ops so cross-cell reads see recovered
   // sync state. State transitions only; effects are never re-run.
+  //
+  // Sync cells journal their server-origin writes too (see `_syncJournal` in
+  // the afterAction hook) — each by its OWN watermark, recorded inside the
+  // fold that makes the write durable, so a write the fold already holds is
+  // not applied a second time.
+  const _syncJournal = journal !== null && syncCellIds.length > 0 &&
+    !!syncHandler?.setFoldWatermark && !!kvDb?.planSet;
   if (journal) {
-    const tail = journal.readSince(journal.watermark());
+    if (_syncJournal) {
+      const stored: Record<string, number> = {};
+      for (const c of syncCellIds) {
+        const key = syncJournalWatermarkKey(appId, c);
+        const at = await kvDb!.get<number>(key);
+        if (typeof at === "number") {
+          stored[c] = at;
+          continue;
+        }
+        // First boot with this cell journalled by its own watermark. Every line
+        // the journal already holds for it was written while the app-wide
+        // watermark governed it — the cell was not `sync: true`, or not
+        // journalled — so the KV snapshot holds exactly those up to that mark.
+        // Recorded BEFORE any write can be journalled under the new rule.
+        stored[c] = journal.watermark();
+        await kvDb!.set(key, stored[c]);
+      }
+      journal.trackCells(stored);
+      syncHandler!.setFoldWatermark!({
+        capture: () => journal.currentSeq(),
+        plan: (c, at) => kvDb!.planSet!(syncJournalWatermarkKey(appId, c), at),
+        folded: (c, at) => journal.setCellWatermark(c, at),
+      });
+    }
+    // A database that went BACK in time — `checkIntegrityOnBoot` restored its
+    // snapshot, or a file was copied over it — is older than the journal's
+    // tail, with a hole between the two. Replaying across the hole re-ran
+    // actions on a state they never ran on: `withdrawAll()` after three
+    // deposits, replayed onto the restored balance of 50, recorded a
+    // withdrawal of 50 that never happened. Refused, loudly, and the journal
+    // is kept — beside the damaged database when there is one.
+    let gap = journal.gap();
+    // Nothing past the store's watermarks: the hole has nothing after it to
+    // invent history with (a clean stop compacts the journal empty before a
+    // backup is put back). The base moves back to the store instead — left
+    // ahead of it, the next crash would refuse a tail this boot writes.
+    if (gap && journal.readTail().length === 0) {
+      try {
+        journal.rebase();
+      } catch (e) {
+        log.warn(
+          `journal: could not record ${journal.path}.base (${e}) — the ` +
+            `database is older than the journal's last compaction, and until ` +
+            `this succeeds a crash makes the next boot refuse to replay`,
+        );
+      }
+      gap = null;
+    }
+    if (gap) await _refuseJournalAcrossGap(journal, gap);
+    const tail = gap ? [] : journal.readTail();
     if (tail.length > 0) {
+      const before = state;
       const replay = replayJournal(
         state,
         tail,
         config.reduce as (s: S, a: A) => { state: S },
+        (key) => journal.watermarkFor(key),
       );
-      state = replay.state;
+      state = _keepUnpersistedFields(state, replay.state);
+      // A sync cell's replayed writes are live again but in no snapshot, and
+      // no fold is pending for them: fold now, or a client catching up is
+      // served a history without them and a second crash depends on the
+      // journal alone.
+      if (_syncJournal) {
+        for (const c of syncCellIds) {
+          if (
+            (before as Record<string, unknown>)[c] !==
+              (state as Record<string, unknown>)[c]
+          ) syncHandler!.noteServerWrite(c);
+        }
+      }
       if (replay.replayed > 0) {
         log.info(
           `journal: recovered ${
@@ -2059,10 +2403,12 @@ async function _runPhases<S, A, E>(
     if (tt === prev) return;
     const restored = stateAt(tt);
     if (restored !== null) {
+      const before = state;
       state = restored;
       // A worker cell's copy would otherwise keep mutating the state we just
       // discarded — re-seed it from the restored slice.
       _reseedWorkerCells();
+      if (restored !== before) _recordTimeTravel(cmd, arg, before, restored);
     }
     log.debug(
       `time-travel: ${cmd}${
@@ -2072,6 +2418,52 @@ async function _runPhases<S, A, E>(
     server.broadcastTT();
     server.broadcast();
     udsCtrl.broadcastFull();
+  }
+
+  /** Make a time-travel jump as durable as the actions around it.
+   *
+   *  A jump assigns `state` directly — no action — so it reached no sink at
+   *  all: the journal tail after it held actions taken on the jumped-to state,
+   *  and a crash replayed them onto the PRE-jump snapshot (22 + inc(100) = 122
+   *  for an app that was at 117). It is journalled here as the state it put in
+   *  place, in the same synchronous turn as the assignment, so no action can
+   *  land between the two. No persist is scheduled: time travel deliberately
+   *  does not write a historical state to the snapshot on its own (the first
+   *  action after `resume` does, and that snapshot compacts the line away).
+   *  Crash and clean stop now agree — both come back at the jumped-to state
+   *  when the process ends paused there. The timeline records it too:
+   *  its diffs are the only description of how state got where it is, and a
+   *  change missing from them cannot be folded back into the real state. */
+  function _recordTimeTravel(
+    cmd: string,
+    arg: number | undefined,
+    before: S,
+    after: S,
+  ): void {
+    const ts = Date.now();
+    const ttPayload = { cmd, ...(arg !== undefined ? { arg } : {}) };
+    let seq: number;
+    if (journal) {
+      const cells: TimeTravelRestore["cells"] = {};
+      const fields = config._cellFields;
+      for (
+        const [cell, slice] of Object.entries(after as Record<string, unknown>)
+      ) {
+        // A sync cell recovers from its own op-log, never from the journal.
+        if (_syncCellSet.has(cell)) continue;
+        if (slice === null || typeof slice !== "object") continue;
+        const flags = fields?.[cell];
+        const kept: Record<string, unknown> = {};
+        for (const [k, v] of Object.entries(slice)) {
+          if (flags?.[k]?.persisted === false) continue;
+          kept[k] = v;
+        }
+        cells[cell] = kept;
+      }
+      const restore: TimeTravelRestore = { ...ttPayload, cells };
+      seq = _journalAppend({ type: TT_RESTORE_TYPE, payload: restore }, ts);
+    } else seq = timeline.lastSeq() + 1;
+    timeline.record(seq, TT_RESTORE_TYPE, ttPayload, before, after, ts);
   }
 
   // Every committed, state-changing, non-sync action feeds two sinks:
@@ -2086,8 +2478,85 @@ async function _runPhases<S, A, E>(
     | undefined;
   const _syncCellSet = new Set(syncCellIds);
   const timeline = createTimeline(500, redact);
+  // Which journalled actions an earlier action CAUSED — see `ActionCause`.
+  //
+  // `am replay` re-dispatches a journal range against a live app, and the
+  // app's own machinery re-creates everything a replayed action causes: its
+  // async body's write-sets, the timer it arms, what its `$do` dispatches. A
+  // journal that could not tell those apart made replay send them twice —
+  // `later(4)` (which schedules `inc(4)`) replayed as +9 with `4, 4` in the
+  // history, and an async method's write-set row halted the run outright.
+  //
+  // Recorded by provenance, not guessed from `_source`: a schedule's tick and
+  // a server-code call both arrive with no `_source`, and a bound async call
+  // from server code carries "Effect" while being an input. The scope is
+  // entered around effect execution and inherits into every callback started
+  // inside it (AsyncLocalStorage), and the door marks an action by identity —
+  // the action object reaches `afterAction` unchanged.
+  const _effectScope = new AsyncLocalStorage<true>();
+  const _effectBorn = new WeakSet<object>();
+  const _causeOf = (action: A): ActionCause =>
+    action !== null && typeof action === "object" &&
+      _effectBorn.has(action as object)
+      ? "effect"
+      : "input";
+  // WHICH async call's run an action belongs to — its `_callId`.
+  //
+  // `am record` replayed every call one `await` after the other. Two calls
+  // that overlapped live (both read `n` before either wrote it) lost an update
+  // the replay could never lose, so the generated test reached a state the app
+  // never had. The generator can only start them together if it knows a later
+  // call began before an earlier one's run was over, and nothing recorded
+  // which run a write-set came from — two `__setRaceRead` rows look the same.
+  //
+  // Same mechanism as the effect scope: entered around `cell:__exec` (the
+  // async body starts inside it, so its write-sets, direct dispatches and
+  // nested calls inherit it), and read at the door. Left OUTSIDE it: a timer or
+  // resource the run arms (it fires on its own clock, not as part of the call),
+  // and every other effect — the drain loop runs effects in whichever context
+  // started it, which may be a different call's.
+  //
+  // Left with `run(undefined, …)`, never `exit(…)`: measured on Deno 2.9,
+  // `exit` clears the store for the synchronous part only — a timer or promise
+  // started inside it still sees the call, so every tick a method armed was
+  // attributed to the call that armed it.
+  const _callScope = new AsyncLocalStorage<string | undefined>();
+  const _outsideCall = <T>(fn: () => T): T => _callScope.run(undefined, fn);
+  const _callBorn = new WeakMap<object, string>();
+  // A call made from inside another call's run (`await peer.slow()`) is part of
+  // the OUTER call: the outer one is not over until it is. Keyed by the inner
+  // call's id from the door until its `__exec` runs; capped, because a call
+  // refused before it executes never gets here to be removed.
+  const _nestedCall = new Map<string, string>();
+  const _callOf = (action: A): string | undefined =>
+    action !== null && typeof action === "object"
+      ? _callBorn.get(action as object)
+      : undefined;
+  const _inCallScope = <T>(effect: unknown, fn: () => T): T => {
+    const ef = effect as
+      | { type?: unknown; payload?: { _callId?: unknown } }
+      | null
+      | undefined;
+    const id = typeof ef?.type === "string" && ef.type.endsWith(":__exec")
+      ? ef.payload?._callId
+      : undefined;
+    if (typeof id !== "string") return _outsideCall(fn);
+    const root = _nestedCall.get(id) ?? id;
+    _nestedCall.delete(id);
+    return _callScope.run(root, fn);
+  };
   const afterActionHook = (prev: S, next: S, action: A): void => {
     _diagAfterAction?.(prev, next, action);
+    // An async method's failure is its own frame, `cell:__error`, which is
+    // not recorded (and usually changes nothing, so it would stop at the
+    // no-op check below). Its CALL was recorded at call time — say on that
+    // entry that it threw, before anything else can return.
+    const errType = (action as { type?: unknown }).type;
+    if (typeof errType === "string" && errType.endsWith(":__error")) {
+      const callId = (action as { payload?: { _callId?: unknown } }).payload
+        ?._callId;
+      if (typeof callId === "string") timeline.markThrew(callId);
+    }
     if (prev === next) return; // no-op action — nothing to record
     const t = (action as { type?: string }).type ?? "";
     const ci = t.indexOf(":");
@@ -2103,6 +2572,30 @@ async function _runPhases<S, A, E>(
       if (method.startsWith("__") && !method.startsWith("__set")) return;
       if (!(action as { _syncOp?: boolean })._syncOp) {
         syncHandler?.noteServerWrite(cell);
+        // …and the fold is up to 500 ms away, while the caller was acked NOW.
+        // A SIGKILL inside that window lost every acked write in it — all 36
+        // of them in a 300 ms burst — under the one option that exists to
+        // prevent exactly that. So `journal: true` journals it like any other
+        // write, by the cell's own watermark (see `_syncJournal`), and boot
+        // replays it after the op-log restore. A refused append closes the
+        // window by folding now (the fold noted just above is what it flushes).
+        if (_syncJournal) {
+          const payload = (action as { payload?: unknown }).payload;
+          _journalAppend(
+            {
+              type: t,
+              payload,
+              origin: isWriteSetAction(t)
+                ? actionOrigin(t, payload)
+                : undefined,
+              user: (action as { _user?: AioUser })._user,
+              cause: _causeOf(action),
+              call: _callOf(action),
+            },
+            Date.now(),
+            () => syncHandler!.flushServerWrites(),
+          );
+        }
       }
       return;
     }
@@ -2130,22 +2623,42 @@ async function _runPhases<S, A, E>(
     // are lifecycle, and replaying `__init` would reset a cell to its initial
     // state ON TOP of the restored snapshot — recovery that destroys data.
     // `__exec`/`__error` carry machine transitions, not the app's writes.
+    //
+    // A `worker: true` cell's commits are the other exception. Its method runs
+    // in the worker and never reaches this hook; only the patches it commits
+    // do, as `__aioWorkerPatch` — a type with no `cell:` prefix, so it read as
+    // framework noise and a worker cell reached NO sink: a `journal: true` app
+    // never created its journal file and lost acked writes to a SIGKILL, and
+    // `am timeline` never showed the cell. The patch batch is that cell's
+    // write-set; it is recorded under the type that really ran (replay applies
+    // it exactly as the live reduce did) and attributed to the cell.
     const isWriteSet = isWriteSetAction(t);
-    if (method.startsWith("__") && !isWriteSet) return;
     const payload = (action as { payload?: unknown }).payload;
+    const workerCell = workerPatchCell(t, payload);
+    if (method.startsWith("__") && !isWriteSet && workerCell === undefined) {
+      return;
+    }
     // Who wrote it — from the ONE decider (diagnostics/action-kind.ts), which
     // the action log and the logger resolve the same fact with. It was computed
     // here by hand and again in the diagnostics sink, and the redactor depends
     // on it: an exact `redactActions` pattern matches the CALL, so a sink whose
     // copy of this drifts leaks the same secret under the write-set's type.
-    const origin = isWriteSet ? actionOrigin(t, payload) : undefined;
+    const origin = isWriteSet
+      ? actionOrigin(t, payload)
+      : workerCell !== undefined
+      ? `${workerCell}:__worker`
+      : undefined;
     const ts = Date.now();
+    const cause = _causeOf(action);
+    const call = _callOf(action);
     const seq = journal
       ? _journalAppend({
         type: t,
         payload,
         origin,
         user: (action as { _user?: AioUser })._user,
+        cause,
+        call,
       }, ts)
       : timeline.lastSeq() + 1;
     // `cell({ diagnostics: false })` covers `am timeline` too. A key by that
@@ -2155,8 +2668,9 @@ async function _runPhases<S, A, E>(
     // AFTER the journal append, never instead of it: `journal: true` is a
     // durability promise, and dropping a cell's committed actions from the
     // replay log would be data loss dressed as a privacy feature.
-    if (!isDiagnosticsOptOut(t)) {
-      timeline.record(seq, t, payload, prev, next, ts, origin);
+    // By the origin when there is one: a worker batch's type names no cell.
+    if (!isDiagnosticsOptOut(origin ?? t)) {
+      timeline.record(seq, t, payload, prev, next, ts, origin, cause, call);
     }
   };
   // The journal append is NOT an observe-only hook — it is the durability
@@ -2192,6 +2706,10 @@ async function _runPhases<S, A, E>(
   function _journalAppend(
     entry: Parameters<NonNullable<typeof journal>["append"]>[0],
     ts: number,
+    // What makes this write durable without its journal line: the persist
+    // flush for a KV cell, the fold for a sync cell (whose state the KV
+    // snapshot does not hold, so a persist flush would close nothing).
+    compensate: () => Promise<void> = () => persistence.flushPersist(),
   ): number {
     try {
       const seq = journal!.append(entry, ts);
@@ -2210,7 +2728,7 @@ async function _runPhases<S, A, E>(
         // is what `am persist` and `/__aio/health` answer with. So a
         // rejection HERE is a broken contract, not a refused write, and the
         // one thing it must not be is silent.
-        persistence.flushPersist().catch((err) => {
+        compensate().catch((err) => {
           log.error(
             `journal: the compensating flush itself threw — ${err}. The ` +
               `verdict is still lastCycleError(); ask \`am persist\`.`,
@@ -2225,9 +2743,16 @@ async function _runPhases<S, A, E>(
     }
   }
 
-  const dispatch = setupDispatch<S, A, E>({
+  // One per app, shared by the dispatch loop and the worker pool's effect
+  // router below — see `notifyCrossUserGate`.
+  const _notifyCrossUser = notifyCrossUserGate((m) => log.warn("aio", m));
+  const _dispatchCore = setupDispatch<S, A, E>({
     reduce,
-    execute,
+    // Effects run inside the effect scope, so everything they dispatch — now,
+    // or later from a timer, a promise or an async body they started — is
+    // recorded as `cause: "effect"` (see `_effectScope`).
+    execute: (app, e) =>
+      _effectScope.run(true, () => _inCallScope(e, () => execute(app, e))),
     beforeReduce: config.beforeReduce,
     onAction,
     onEffect,
@@ -2241,8 +2766,19 @@ async function _runPhases<S, A, E>(
       broadcastTT: () => server.broadcastTT(),
       broadcastUi: (raw) => server.broadcastUi?.(raw) ?? 0,
     }),
-    scheduleManager,
-    ownManager,
+    // A timer a method arms and a process it owns dispatch LATER, from their
+    // own callbacks — which inherit the scope they were created in.
+    scheduleManager: {
+      handle: (e) =>
+        _effectScope.run(
+          true,
+          () => _outsideCall(() => scheduleManager.handle(e)),
+        ),
+    },
+    ownManager: {
+      handle: (e) =>
+        _effectScope.run(true, () => _outsideCall(() => ownManager.handle(e))),
+    },
     schedulePersist: (p) => schedulePersist(p),
     getTT: () => tt,
     setTT: (t) => {
@@ -2269,10 +2805,37 @@ async function _runPhases<S, A, E>(
     effectTimeout: config.effectTimeoutMs,
     reduceBreakdown: config._reduceBreakdown,
     ttSkipActions,
+    notifyCrossUser: _notifyCrossUser,
     afterAction: afterActionHook,
     log,
     debug: VERBOSE,
   });
+  // THE one door every dispatch passes — client, trojan, server code, a
+  // schedule, an effect. Whether the effect scope is active is decided HERE,
+  // at the call, because by the time the action is reduced the drain loop is
+  // running in whichever context started it. Same function in every other
+  // respect: the core's own members (`close`, `drain`, …) are carried over.
+  const dispatch = Object.assign((action: A) => {
+    if (
+      _effectScope.getStore() === true && action !== null &&
+      typeof action === "object"
+    ) {
+      _effectBorn.add(action as object);
+    }
+    const call = _callScope.getStore();
+    if (call !== undefined && action !== null && typeof action === "object") {
+      _callBorn.set(action as object, call);
+      const inner = (action as { payload?: { _callId?: unknown } }).payload
+        ?._callId;
+      if (typeof inner === "string" && inner !== call) {
+        if (_nestedCall.size >= 1024) {
+          _nestedCall.delete(_nestedCall.keys().next().value!);
+        }
+        _nestedCall.set(inner, call);
+      }
+    }
+    return _dispatchCore(action);
+  }, _dispatchCore) as typeof _dispatchCore;
   bootUndo.push("close dispatch", () => dispatch.close());
   // ONE ceiling for "how long may this async method run" — the effect side and
   // the `await cell.method()` side resolve from the same numbers. They used to
@@ -2385,15 +2948,30 @@ async function _runPhases<S, A, E>(
   }
   const _workerEntry = config._workerEntry ?? Deno.mainModule;
   const _hostWorkers = !config.libraryMode || config._workerEntry !== undefined;
+  // Worker-cell calls in flight with a signed-in user in scope — the worker
+  // half of `notifyCrossUserGate`. A worker's notify reaches `runEffect` as
+  // plain data with no caller attached, so "raised inside a user's call" is
+  // read off the calls in flight: a worker posts a call's effects BEFORE its
+  // `done` (cell-worker-host.ts), so a user call's notify always lands inside
+  // that call's window here. The one imprecision is conservative — a
+  // user-less notify landing while some user's worker call is also in flight
+  // counts too — and it can only ever produce the once-per-app notice, never
+  // suppress it.
+  let _workerUserCalls = 0;
   const workerPool = createCellWorkerPool({
     // The SAME resolved value the main isolate uses and the boot line
     // prints — one decider, so a worker cell is never freeze-checked more
     // loosely than a local one.
     freezeState: freezeEnabled,
-    cells:
-      (_hostWorkers ? config._workerCells ?? [] : []) as unknown as Parameters<
-        typeof createCellWorkerPool
-      >[0]["cells"],
+    // EVERY worker cell, hosted or not: the pool refuses what a thread
+    // boundary cannot honour (selectors, sync, listensTo, a machine) before it
+    // decides whether to host. It used to be handed `[]` under libraryMode, so
+    // `testServer` booted a `worker: true` + `selectors` cell that the real
+    // app refused to start.
+    cells: (config._workerCells ?? []) as unknown as Parameters<
+      typeof createCellWorkerPool
+    >[0]["cells"],
+    host: _hostWorkers,
     entry: _workerEntry,
     prod,
     getSlice: (cell) =>
@@ -2402,25 +2980,43 @@ async function _runPhases<S, A, E>(
         unknown
       >,
     dispatch: (a) => dispatch(a as unknown as A),
+    // The SAME identity `composeCells` was given (aio-composition.ts), so the
+    // pool scopes the cancel registry exactly as the composed reduce does.
+    appId,
     // An effect handed back by a worker executes HERE, where the runtime lives.
     // A schedule effect is NOT an action — dispatching it would do nothing at
     // all, and the schedule would silently never fire.
-    runEffect: (effect) => {
-      if (isScheduleEffect(effect)) {
-        scheduleManager.handle(effect);
-        return;
-      }
-      // Same class, and it was live: `__own` fell through to `dispatch` as an
-      // action type no cell answers, so an own effect from a worker vanished
-      // without a log. Worker cells now hold their resources in their own
-      // isolate (cell-worker-host.ts), so nothing should arrive here — and if
-      // anything ever does, the own manager says so out loud instead.
-      if (isOwnEffect(effect)) {
-        ownManager.handle(effect);
-        return;
-      }
-      void dispatch(effect as unknown as A); // cross-cell action
-    },
+    // Inside the effect scope, like a main-isolate effect: what it dispatches
+    // or schedules is `cause: "effect"` (see `_effectScope`).
+    runEffect: (effect) =>
+      _effectScope.run(true, () =>
+        // ONE exhaustive classifier, the same one the dispatch loop and the
+        // worker host use — a new framework effect kind is a compile error here
+        // rather than something this router silently treats as an app action
+        // (see route-effect.ts). This site hand-wrote the chain, and the kind it
+        // had never been taught about was `notify`: a `notify()` from a worker
+        // cell was posted home correctly and then dispatched here as an action
+        // type no cell answers, so the notification simply never appeared.
+        // `__own` had been exactly the same bug one kind earlier.
+        routeEffect<unknown>(effect, {
+          schedule: (e) => scheduleManager.handle(e),
+          // Worker cells hold their resources in their own isolate
+          // (cell-worker-host.ts), so nothing should arrive here — and if
+          // anything ever does, the own manager says so out loud.
+          own: (e) => ownManager.handle(e),
+          // The clients live on this isolate; same semantics as a notify from a
+          // main-isolate cell, because it is the same function.
+          notify: (e) =>
+            _notifyCrossUser(
+              showNotifyEffect(
+                e,
+                server?.broadcastUi,
+                (m) => log.warn("aio", m),
+              ),
+              _workerUserCalls > 0,
+            ),
+          app: (e) => void dispatch(e as unknown as A), // cross-cell action
+        })),
   });
   bootUndo.push("workers", () => workerPool.close());
   /** Cells that WOULD run in a worker but are running in this isolate because a
@@ -2460,25 +3056,9 @@ async function _runPhases<S, A, E>(
    *  moves the failure to the run that can still act on it.
    *
    *  Scoped precisely to cells that WOULD have been hosted: an app with no
-   *  worker cells pays nothing, and production never reaches this at all. */
-  const _cloneAcrossWorkerBoundary = (
-    value: unknown,
-    what: string,
-    cellId: string,
-  ): unknown => {
-    try {
-      return structuredClone(value);
-    } catch (e) {
-      throw new Error(
-        `cell "${cellId}" is a worker cell, and its ${what} cannot cross a ` +
-          `worker boundary: ${e instanceof Error ? e.message : String(e)}.\n` +
-          `In this test it runs in-isolate, so a reference would have worked ` +
-          `— in production it is reached by postMessage and this throws. ` +
-          `Pass plain data (no functions, class instances, or live cell ` +
-          `proxies); \`{ ...obj }\` off a proxy is already materialised.`,
-      );
-    }
-  };
+   *  worker cells pays nothing, and production never reaches this at all.
+   *  The clone itself is `_cloneAcrossWorkerBoundary` (cell-impl.ts), shared
+   *  with the in-process harnesses so every test boundary says the same. */
   const _workerBoundaryDispatch: typeof dispatch = ((a: A) => {
     const type = (a as unknown as { type?: unknown })?.type;
     if (typeof type !== "string") return dispatch(a);
@@ -2486,6 +3066,20 @@ async function _runPhases<S, A, E>(
     const cellId = i === -1 ? type : type.slice(0, i);
     if (!_inIsolateWorkerCells.has(cellId)) return dispatch(a);
     const sent = _cloneAcrossWorkerBoundary(a, "action payload", cellId) as A;
+    // An ASYNC method answers through its registered call, not through this
+    // dispatch's promise (that one resolves `undefined` once the method is
+    // queued) — so its return value is cloned where the call settles.
+    const callId = (sent as unknown as { payload?: { _callId?: unknown } })
+      .payload?._callId;
+    if (typeof callId === "string") {
+      _mapCallResult(
+        callId,
+        (v) =>
+          v === undefined
+            ? v
+            : _cloneAcrossWorkerBoundary(v, "return value", cellId),
+      );
+    }
     const out = dispatch(sent);
     return Promise.resolve(out).then((v) =>
       v === undefined
@@ -2494,10 +3088,23 @@ async function _runPhases<S, A, E>(
     );
   }) as typeof dispatch;
 
+  const _routed = workerPool.route((a) => dispatch(a as unknown as A));
+  type _RoutedMsg = Parameters<typeof _routed>[0];
   const appDispatch = workerPool.size > 0
-    ? (workerPool.route(
-      (a) => dispatch(a as unknown as A),
-    ) as unknown as typeof dispatch)
+    ? (((a: _RoutedMsg) => {
+      // A worker call with a user in scope opens a window for its notify —
+      // see `_workerUserCalls`. The same "user in scope" the worker's method
+      // itself runs under (the ambient user it is handed), or the stamped one.
+      const user = serverUser() ?? (a as { _user?: unknown })._user;
+      if (!user || !workerPool.owns(a)) return _routed(a);
+      // Counted AFTER the call is posted, so a synchronous throw cannot leave
+      // the window open forever; the worker's effects arrive by message, later.
+      const out = Promise.resolve(_routed(a));
+      _workerUserCalls++;
+      const done = () => void _workerUserCalls--;
+      out.then(done, done);
+      return out;
+    }) as unknown as typeof dispatch)
     : _inIsolateWorkerCells.size > 0
     ? _workerBoundaryDispatch
     : dispatch;
@@ -2524,8 +3131,7 @@ async function _runPhases<S, A, E>(
       const failed = persistence.lastCycleError();
       if (failed) {
         log.error(
-          `shutdown: the FINAL persist was refused — state since the last ` +
-            `successful write is NOT on disk. ${failed.message}`,
+          `shutdown: the FINAL persist was refused — ${failed.message}`,
         );
       } else if (shouldPersist) {
         // A clean verdict from the HANDLE is not a fact about the disk. Delete
@@ -2635,8 +3241,16 @@ async function _runPhases<S, A, E>(
   const app = buildAppObject<S, A>({
     dispatch: appDispatch,
     getState: () => state,
+    // Only a snapshot load replaces state through here. Journalled as the
+    // state it put in place, in the same turn, exactly like a time-travel
+    // jump: the load only SCHEDULES a persist, so an action acked on the
+    // loaded state and a crash inside the debounce replayed that action onto
+    // the PRE-load database (5, load 1000, deposit(1), SIGKILL → 6).
+    // tests/journal-snapshot-load-crash.test.ts.
     setState: (s) => {
+      const before = state;
       state = s;
+      if (s !== before) _recordTimeTravel("snapshot", undefined, before, s);
     },
     port,
     asyncDb,
@@ -2747,7 +3361,7 @@ async function _runPhases<S, A, E>(
     appId,
     appVersion: await _appVersion(),
     port,
-    portRequested: portFrom !== "default",
+    portRequested: portFrom !== "default" && !_portFromDefaultRung,
     prod,
     distDir,
     electronDistDir,
@@ -2762,6 +3376,21 @@ async function _runPhases<S, A, E>(
     users,
     resolveUser: _resolveUser,
     sessionResolver,
+    // Every source of "this socket's user is not who it was" the boot has.
+    // Built from the STORES, not from `authFlows` — `authFlows` exists only
+    // under `auth: true`, which left `sessions: true` on the 5-second sweep
+    // (measured: 4.8s and ten more frames of private state after a revoke).
+    // A role change had no source at all; `onUserChanged` is the new one.
+    onIdentityChange: (sessionStore || userStore)
+      ? (fn: () => void) => {
+        const offs: (() => void)[] = [];
+        if (sessionStore) offs.push(sessionStore.onRevoked(fn));
+        if (userStore?.onUserChanged) offs.push(userStore.onUserChanged(fn));
+        return () => {
+          for (const off of offs) off();
+        };
+      }
+      : undefined,
     // AUTH-2/3: login-flow deps — aio-server adds the TLS-aware `secure` flag.
     authFlows: userStore && sessionStore
       ? {
@@ -2838,6 +3467,7 @@ async function _runPhases<S, A, E>(
     },
     // The SAME value, read by `/__aio/health` — one verdict, every door.
     lastPersistError: () => persistence.lastCycleError(),
+    budgets: _budgetLedger,
     shouldPersist,
     scheduleManager,
     // Cell id → method names — trojan `cells` route (amui run-method buttons).
@@ -2873,6 +3503,18 @@ async function _runPhases<S, A, E>(
   (app as { port?: number }).port = livePort;
   udsHandle = transport.udsHandle;
   udsRef.current = udsHandle;
+  // What this app ACTUALLY listens on — the one decider for every line that
+  // names it. `app.port` above stays the number it has always been (a surface
+  // fact), but a zero-port app binds no TCP port at all, and the logger's
+  // `started` line printed that number anyway: `started cells=c port=49725`
+  // for an app whose only listener is a socket. Internal, like `_releaseCells`.
+  const _tcpPort = transport.httpSocketPath || transport.skipHttp
+    ? undefined
+    : livePort;
+  (app as { _listening?: unknown })._listening = {
+    port: _tcpPort,
+    socketPath: udsHandle?.socketPath,
+  };
 
   // `asyncDb` is optional; bind it once so the narrowing survives into the
   // callback that takes the pre-migration backup.
@@ -2892,7 +3534,30 @@ async function _runPhases<S, A, E>(
       flag: cli.channel,
       local: {
         schema: PERSIST_SCHEMA_VERSION,
-        cells: migrationSummary?.stored ?? {},
+        // What this install's data IS by the time anyone can press "install":
+        // the version on disk where there was one at boot, and the version
+        // THIS run writes for every cell that had none. `stored` alone is the
+        // boot-time snapshot, which is EMPTY on a fresh install — so for the
+        // whole first run the gate saw "nothing on disk to protect" and
+        // offered a release that cannot read the v1 data the run had just
+        // written (boot 1: offer; boot 2, same data: blocked). A stored
+        // version still wins where it exists: until this run rewrites that
+        // cell, the older version is what is on disk, and the gate must
+        // judge the data that is actually there.
+        // `migrationSummary` is not even built on a fresh install (there is
+        // nothing to migrate), so the declared versions come from the config.
+        // Version 0 is "unversioned" — no promise, nothing to judge — and a
+        // `persist: "none"` cell writes nothing to protect.
+        cells: {
+          ...(shouldPersist
+            ? Object.fromEntries(
+              Object.entries(config._cellVersions ?? {}).filter(([id, v]) =>
+                v > 0 && (config._persistingCellIds?.includes(id) ?? true)
+              ),
+            )
+            : {}),
+          ...(migrationSummary?.stored ?? {}),
+        },
       },
       exposed: expose,
       log,
@@ -2900,6 +3565,7 @@ async function _runPhases<S, A, E>(
       snapshot: _snapshotDb,
       shutdown: () => _shutdownRuntime().catch(() => {}),
       prompt: ttyPrompt(),
+      slot: _appSlots.get(config)?.updates,
     })
     : undefined;
 
@@ -2910,6 +3576,7 @@ async function _runPhases<S, A, E>(
       feedback: config.feedback,
       log,
       redact,
+      slot: _appSlots.get(config)?.feedback,
       sources: {
         appId,
         appVersion: await _appVersion(),
@@ -2953,9 +3620,7 @@ async function _runPhases<S, A, E>(
       // decided — so a zero-port app announced a number it never bound, and
       // anyone who tried it got a refused connection. `sourced()` drops an
       // undefined value, and the socket is named on its own line instead.
-      port: transport.httpSocketPath || transport.skipHttp
-        ? { value: undefined as unknown as number, from: portFrom }
-        : { value: livePort, from: portFrom },
+      port: { value: _tcpPort as number, from: portFrom },
       entry: {
         // What is RUNNING, read from the process — not what a config said
         // should run. Those differ exactly when someone is confused.
@@ -3035,7 +3700,14 @@ async function _runPhases<S, A, E>(
     server,
     udsHandle,
     app,
-    onStart,
+    // `onStart` here is the cells bridge's: it runs every cell's `onInit`
+    // (the app's own `onStart` fires later, from `aio.run`). Boot re-creates
+    // what `onInit` dispatches — every harness runs it too — so it is caused,
+    // like a timer a method arms. Recorded as an input, `am record` emitted
+    // the call AND `bootCells` ran `onInit`: applied twice.
+    onStart: onStart &&
+      ((a: Parameters<typeof onStart>[0]) =>
+        _effectScope.run(true, () => onStart(a))),
     fatalOnStart: config.fatalOnStart,
     scheduleManager,
     schedules: config.schedules,
@@ -3073,6 +3745,11 @@ async function _runPhases<S, A, E>(
       chrome: ui.chrome,
       theme: ui.theme,
       layout: ui.layout,
+      // …and `dir` is the key it lost NEXT, after the five the comment above
+      // was written about. The lifecycle's `ui` shape is a `Pick<UiConfig>`
+      // now, so a key it names and this object omits is a compile error
+      // rather than a config that reaches no target.
+      dir: ui.dir,
       lang: ui.lang,
       tray: ui.tray,
     },

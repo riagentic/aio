@@ -5,9 +5,10 @@
 
 import { readDenoJson } from "../server/deno-json.ts";
 import { KILL_POLL_MS } from "../server/single-instance-lock.ts";
-import { dirname, join } from "@std/path";
-import { isUnder, projectRoot } from "./am-project.ts";
-import { appDirs } from "../server/app-dirs.ts";
+import { dirname, join, resolve } from "@std/path";
+import { cwdIsProject, isUnder, projectRoot } from "./am-project.ts";
+import { appDirs, appHome, appsDirEnv } from "../server/app-dirs.ts";
+import { homedir } from "../server/paths.ts";
 import {
   DEFAULT_BACKUP_KEEP,
   rotateFile,
@@ -39,6 +40,13 @@ import {
 import { EXIT_WAIT_MS } from "../server/shutdown-budget.ts";
 import { HEY } from "../diagnostics/fmt.ts";
 import { VERSION } from "../server/aio-cli.ts";
+import {
+  amIsInteractive,
+  displayChoice,
+  planDisplay,
+  readDisplayFlag,
+  validDisplayChoice,
+} from "./am-display.ts";
 import {
   block,
   count,
@@ -432,6 +440,26 @@ export async function cmdStart(
 ): Promise<void> {
   const mode = detectMode(flags);
 
+  // `start` forwards its surplus flags to the app, so the per-verb flag gate
+  // never sees this one — and a `--display=` we cannot read must be refused
+  // here rather than falling through to `auto`. Silently ignoring the one
+  // flag whose entire job is "keep off my desktop" is the worst failure
+  // available to it: the caller believes they asked, and the window opens on
+  // the human's screen anyway.
+  {
+    const raw = readDisplayFlag(args) ??
+      (Deno.env.get("AIO_AM_DISPLAY") || null);
+    if (raw !== null && !validDisplayChoice(raw)) {
+      outError(
+        `--display=${raw} is not a display choice`,
+        mode,
+        "auto (contain only a non-interactive launch) · isolated · " +
+          "current (change nothing) · :N (a display you manage)",
+      );
+      Deno.exit(1);
+    }
+  }
+
   // A project can be more than one app. When it says so — labelled build
   // targets with their own entries — `am start` means the PROJECT and
   // `am start <label>` means one component of it. Ordinary repos never take
@@ -582,10 +610,16 @@ export async function cmdStart(
 
   // Pass through any extra args (--port, --verbose, --transport, --client
   // etc.). Re-inject --port if it was consumed by the global flag parser.
-  const passthrough = args.filter((a) => a.startsWith("--"));
+  // `--display=` is AM's (where the window goes), not the app's. `start` is a
+  // PASSTHROUGH verb, so anything left here reaches the child as one of its
+  // own flags — an app that does not know `--display` would refuse to boot.
+  const passthrough = args.filter((a) =>
+    a.startsWith("--") && !a.startsWith("--display=")
+  );
   // A GUI client on a headless box hangs forever (electron never returns) —
   // fail FAST with the fix instead (a field report). The
   // effective client is the --client override, else the app's declared target.
+  let gui = false;
   {
     const clientArg = passthrough.find((a) => a.startsWith("--client="))
       ?.slice(9);
@@ -598,7 +632,7 @@ export async function cmdStart(
         effective = dj.client;
       } catch { /* no deno.json client — framework default applies */ }
     }
-    const gui = effective === "electron" || effective === "client";
+    gui = effective === "electron" || effective === "client";
     const headless = Deno.build.os === "linux" &&
       !Deno.env.get("DISPLAY") && !Deno.env.get("WAYLAND_DISPLAY");
     if (gui && headless) {
@@ -637,8 +671,35 @@ export async function cmdStart(
   const logFile = stdoutLogPath(appId);
   await prepareStdoutLog(logFile, passthrough);
   const spec = detachedSpawnSpec(Deno.build.os, denoArgs, logFile);
+  // Where the window goes, and whether the app may open a tab in the human's
+  // browser. `{}` unless something is actually being contained, so a human at
+  // a terminal gets byte-for-byte the launch they got before (am-display.ts).
+  const plan = planDisplay({
+    choice: displayChoice(
+      readDisplayFlag(args),
+      Deno.env.get("AIO_AM_DISPLAY"),
+    ),
+    gui,
+    interactive: amIsInteractive(),
+  });
+  if (plan.note) {
+    // The level is part of the message, not decoration: "note:" is what
+    // happened, "warning:" is "this did not work and your desktop is about to
+    // be used". tests/every-message-has-a-level pins that every CLI
+    // diagnostic says which.
+    console.error(
+      plan.level === "warn"
+        ? `am: warning: ${plan.note}`
+        : `am: note: ${plan.note}`,
+    );
+  }
   const proc = new Deno.Command(spec.cmd, {
     args: spec.args,
+    // Inherited PLUS the containment decision. Spread, never replaced: the
+    // child needs PATH, HOME and the user's own environment to boot at all.
+    ...(Object.keys(plan.env).length > 0
+      ? { env: { ...Deno.env.toObject(), ...plan.env } }
+      : {}),
     // THE cwd the launch record above claims — the same value, not a second
     // decision. Without it the child inherited am's OWN cwd: `cd src && am
     // start` recorded `cwd: <root>` in launch.json and the lock (which `am
@@ -884,7 +945,7 @@ export const waitedAt = (
  *  with different AIO_APPS_DIR genuinely search different directories and the
  *  message was true in both while explaining neither. */
 export function noLockMessage(appId: string): string {
-  const apps = Deno.env.get("AIO_APPS_DIR");
+  const apps = appsDirEnv(); // the value lockDir() scoped by, not the raw one
   // What IS running, said HERE. The message already pointed at `am instances`,
   // and a pointer costs a round trip at the exact moment someone is looking at
   // "not running" for an app they can see in their own browser (report 5 §6:
@@ -1117,7 +1178,33 @@ export function instancesInProject(
   appId = thisProjectAppId(),
 ): InstanceInfo[] {
   return instances()
-    .filter((i) => (i.cwd && isUnder(root, i.cwd)) || i.appId === appId)
+    .filter((i) => launchedIn(root, i.cwd) || i.appId === appId)
+    .sort((a, b) => a.appId < b.appId ? -1 : a.appId > b.appId ? 1 : 0);
+}
+
+/** Was an instance launched from THIS project — under `root`, with no other
+ *  project in between?
+ *
+ *  "Under the root" alone was the test, and a project can hold projects. A
+ *  stray `~/deno.json` makes `~` a project root, so `am stop --all` run from
+ *  `~/Downloads` (no app there) resolved to `~` and stopped every app of every
+ *  checkout beneath it — the outage `--all` is scoped to prevent, one level up.
+ *  An instance belongs to the NEAREST project above where it was launched,
+ *  which is `projectRoot`'s own rule, so a compiled app started from
+ *  `dist/<app>/` (no deno.json of its own) is still its project's. */
+function launchedIn(root: string, cwd: string | undefined): boolean {
+  return !!cwd && isUnder(root, cwd) &&
+    resolve(projectRoot(cwd)) === resolve(root);
+}
+
+/** Instances launched under `root` from inside a DIFFERENT project nested in
+ *  it — the ones `stop --all` leaves alone, named so leaving them is said. */
+export function instancesInNestedProjects(
+  root = projectRoot(),
+): { appId: string; project: string }[] {
+  return instances()
+    .filter((i) => !!i.cwd && isUnder(root, i.cwd) && !launchedIn(root, i.cwd))
+    .map((i) => ({ appId: i.appId, project: projectRoot(i.cwd!) }))
     .sort((a, b) => a.appId < b.appId ? -1 : a.appId > b.appId ? 1 : 0);
 }
 
@@ -1283,8 +1370,42 @@ export async function cmdStop(
       );
       Deno.exit(1);
     }
+    // "This project" needs a project. Outside one, `projectRoot()` falls back
+    // to the cwd itself — so `am stop --all` from `~` scoped to `~` and
+    // stopped every app of every project checked out beneath it, while help
+    // and `am agent` both promise "every app OF THIS PROJECT". Refused, and
+    // the refusal names the two ways to say what was meant.
+    if (!cwdIsProject()) {
+      outError(
+        `--all stops every app of THIS project, and ${Deno.cwd()} is not ` +
+          "inside one (no deno.json here or above) — cd into the project " +
+          "first, or name one app: am stop --app=<appId>",
+        mode,
+      );
+      Deno.exit(1);
+    }
     const root = projectRoot();
     const running = instancesInProject(root);
+    const nested = instancesInNestedProjects(root);
+    const nestedList = nested.map((n) => `${n.appId} (${n.project})`)
+      .join(", ");
+    if (running.length === 0 && nested.length > 0) {
+      // Not "nothing running": apps ARE running below here, and a reader who
+      // meant them needs to hear why they were not stopped.
+      outError(
+        `--all stops every app of THIS project (${root}), and none is ` +
+          `running — the ${nested.length} app(s) running below it belong to ` +
+          `other projects: ${nestedList}. cd into that project first, or ` +
+          `name one app: am stop --app=<appId>`,
+        mode,
+      );
+      Deno.exit(1);
+    }
+    if (nested.length > 0) {
+      console.error(
+        `[am] note: left running — other projects below ${root}: ${nestedList}`,
+      );
+    }
     if (running.length === 0) {
       out(
         mode === "pretty"
@@ -1965,6 +2086,46 @@ export function instanceAioMismatch(v: string | undefined): boolean {
   return v !== undefined && v !== VERSION;
 }
 
+/** One shell word: bare when it needs no quoting, else single-quoted. */
+function shellWord(s: string): string {
+  return /^[\w@%+=:,./-]+$/.test(s) ? s : `'${s.replaceAll("'", `'\\''`)}'`;
+}
+
+/** The command that stops exactly THIS instance — scope included.
+ *
+ *  `am instances` lists one lock scope: the default, or the one `--instance` /
+ *  `AIO_APPS_DIR` selected, and within it every data home an app id runs
+ *  from. `stopWith` used to be `am stop --app=<id>` whatever the scope, so
+ *  `am instances --instance=agent1 --json` printed a command that, run as
+ *  written, looked in the DEFAULT scope — and stopped the human's copy of the
+ *  same app instead of the agent's, or found nothing. The command has to carry
+ *  every part of the address the list was read with:
+ *   - the scope: `--instance=<name>` when that is what set it, otherwise the
+ *     `AIO_APPS_DIR=<dir>` it came from (a variable, so it prefixes);
+ *   - the home: `--home=<dir>` when the instance runs from anything but the
+ *     scope's default home for its id — two boots of one id are two locks.
+ *
+ *  Pure over its inputs: `defaultHome` is `appHome(appId)` in the listing's
+ *  scope, passed in so the test does not need to move the process env. */
+export function stopCommandFor(
+  inst: { appId: string; home?: string },
+  scope: { instance?: string; appsDir?: string; defaultHome: string },
+): string {
+  const parts = ["am", "stop", `--app=${inst.appId}`];
+  let prefix = "";
+  if (scope.appsDir) {
+    const fromInstance = scope.instance !== undefined &&
+      resolve(scope.appsDir) ===
+        resolve(join(homedir(), ".aio-instances", scope.instance));
+    if (fromInstance) parts.push(`--instance=${scope.instance}`);
+    else prefix = `AIO_APPS_DIR=${shellWord(scope.appsDir)} `;
+  }
+  if (inst.home && resolve(inst.home) !== resolve(scope.defaultHome)) {
+    parts.push(`--home=${shellWord(inst.home)}`);
+  }
+  return prefix + parts.join(" ");
+}
+
 export function cmdInstances(_args: string[], flags: GlobalFlags): void {
   const mode = detectMode(flags);
   const all = instances();
@@ -2035,6 +2196,24 @@ export function cmdInstances(_args: string[], flags: GlobalFlags): void {
             } an aio that is not ${VERSION}`,
           )
           : ""),
+      // This list is MACHINE-WIDE, and that is the fact people act on
+      // wrongly. Someone who came here to end an app now has a list that
+      // includes other people's work — and the habit that follows is a
+      // process-table match, which takes all of them down. So when there is
+      // more than one, the safe spelling is offered right here, next to the
+      // list that tempts the unsafe one.
+      all.length > 1
+        ? hints([[
+          stopCommandFor({ appId: "<APP>" }, {
+            instance: flags.instance,
+            appsDir: appsDirEnv(),
+            defaultHome: "",
+          }),
+          "stops ONE of these — this list is every aio app in this scope " +
+          "(apps started with --instance or AIO_APPS_DIR list only under " +
+          "the same flag)",
+        ]])
+        : "",
       long ? "" : hints([["am instances --long", "sockets, homes and cwds"]]),
     ));
   } else {
@@ -2047,6 +2226,18 @@ export function cmdInstances(_args: string[], flags: GlobalFlags): void {
         transport: inst.socketPath ? "uds" : "ws",
         ...(inst.socketPath ? { socketPath: inst.socketPath } : {}),
         uptime: Math.round((Date.now() - inst.startedAt) / 1000),
+        // The command that ends THIS app and nothing else, spelled out.
+        //
+        // A hint is for the pretty branch and an agent is always on the JSON
+        // one, so the advice never reached the reader who needed it most —
+        // the one whose next move, after listing every aio process on the
+        // box, is to match them by name and kill them all. Naming the safe
+        // command inline costs a field and removes the guess.
+        stopWith: stopCommandFor(inst, {
+          instance: flags.instance,
+          appsDir: appsDirEnv(),
+          defaultHome: appHome(inst.appId),
+        }),
         // The DevTools port, when the app was started with `--cdp`.
         //
         // The lock has recorded it since `am shot` needed it; nothing reported

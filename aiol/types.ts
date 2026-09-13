@@ -91,6 +91,10 @@ export type CellInfo = {
   actionNames: string[];
 };
 
+/** A code directory outside the scan that the app itself excludes, and the
+ *  declaration that says so (report 9 §4). */
+export type ExcludedDir = { dir: string; by: string };
+
 export type LintContext = {
   projectDir: string;
   denoJson: DenoJsonConfig | null;
@@ -106,6 +110,17 @@ export type LintContext = {
   skipped: { path: string; reason: string }[];
   /** Top-level directories that hold `.ts`/`.tsx` outside the scanned roots. */
   unscannedDirs: string[];
+  /** …and the ones among them the app declares are NOT its code (deno.json
+   *  `exclude` / `fmt.exclude`, `.gitignore`) — answered, never hinted.
+   *  Optional so a hand-built context stays valid. */
+  excludedDirs?: ExcludedDir[];
+  /** Files under `tests/` that are NOT test files — fixtures, helpers, shared
+   *  factories. They are read and then dropped: no app-code check runs on them
+   *  (sweeping tests into the app-code set trades one class of false positive
+   *  for another), and they are not tests either. Stated rather than assumed,
+   *  because `checkScanCoverage` exists so "I found nothing" and "I looked at
+   *  nothing" never print the same thing. */
+  testHelpers: string[];
   /** False for a project that does not CONSUME aio (the framework repo itself,
    *  a tool, a library). App-shaped rules must not fire there — see
    *  `looksLikeApp`. */

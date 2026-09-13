@@ -23,11 +23,17 @@ export interface OidcConfig {
   /** Confidential-client secret; omit for a pure-PKCE public client. */
   clientSecret?: string;
   /** Map verified ID-token claims → role for NEW users (default "user").
-   *  Existing users keep their stored role — promotions happen server-side. */
+   *  Existing users keep their stored role — promotions happen server-side.
+   *
+   *  `claims.email` is present here ONLY when the provider asserted
+   *  `email_verified: true`. An unverified email is a string the account
+   *  holder typed, so a role granted from it is a role anyone could claim.
+   *  A `role` that throws refuses the login (401) and logs why. */
   role?: (claims: Record<string, unknown>) => string;
 }
 
 interface Discovery {
+  issuer?: string;
   authorization_endpoint: string;
   token_endpoint: string;
   jwks_uri: string;
@@ -46,6 +52,9 @@ const b64urlDecode = (s: string): Uint8Array => {
 const CACHE_MS = 3_600_000;
 const _discovery = new Map<string, { d: Discovery; at: number }>();
 const _jwks = new Map<string, { keys: JsonWebKey[]; at: number }>();
+/** Issuers already reported — once per process, not once per login. */
+const _issuerMissingWarned = new Set<string>();
+const _unverifiedEmailWarned = new Set<string>();
 
 async function discover(issuer: string): Promise<Discovery> {
   const hit = _discovery.get(issuer);
@@ -56,6 +65,31 @@ async function discover(issuer: string): Promise<Discovery> {
   const d = await resp.json() as Discovery;
   if (!d.authorization_endpoint || !d.token_endpoint || !d.jwks_uri) {
     throw new Error("oidc discovery incomplete");
+  }
+  // OIDC Discovery §4.3: the document's `issuer` MUST be the issuer it was
+  // fetched for, or it is not used. The endpoints it names (token, JWKS) are
+  // trusted on its word, so a document that describes some OTHER issuer —
+  // a mix-up, a misrouted proxy, a multi-tenant template like Entra's
+  // `{tenantid}` — must be refused here, where the reason can be named, and
+  // not surface later as an unexplained `oidc_bad_iss` on every login.
+  const want = issuer.replace(/\/$/, "");
+  if (typeof d.issuer === "string") {
+    if (d.issuer.replace(/\/$/, "") !== want) {
+      throw new Error(
+        `oidc discovery issuer mismatch: configured "${want}", the provider's ` +
+          `document at ${url} says "${d.issuer}" — set auth.oidc.issuer to ` +
+          `the issuer the provider actually uses`,
+      );
+    }
+  } else if (!_issuerMissingWarned.has(want)) {
+    // REQUIRED by the spec, but a provider that omits it worked before this
+    // check existed — say so instead of breaking its logins.
+    _issuerMissingWarned.add(want);
+    log.warn(
+      `[aio] auth: oidc discovery document for "${want}" has no \`issuer\` — ` +
+        `it cannot be checked against the configured issuer (OIDC Discovery ` +
+        `requires it). The ID token's \`iss\` is still verified.`,
+    );
   }
   _discovery.set(issuer, { d, at: Date.now() });
   return d;
@@ -88,6 +122,8 @@ async function jwksKeys(jwksUri: string): Promise<JsonWebKey[]> {
 export function _resetOidcCaches(): void {
   _discovery.clear();
   _jwks.clear();
+  _issuerMissingWarned.clear();
+  _unverifiedEmailWarned.clear();
 }
 
 /** Verify an RS256 ID token against the issuer's JWKS. Returns claims. */
@@ -138,6 +174,16 @@ export async function verifyIdToken(
     ? aud.includes(cfg.clientId)
     : aud === cfg.clientId;
   if (!audOk) throw new Error("oidc_bad_aud");
+  // OIDC Core §3.1.3.7: a present `azp` MUST be this client — a token issued
+  // to ANOTHER client that merely lists us among its audiences is that
+  // client's token. And a token with several audiences SHOULD carry `azp`:
+  // without it nothing says which of them the token was issued to.
+  if (claims.azp !== undefined && claims.azp !== cfg.clientId) {
+    throw new Error("oidc_bad_azp");
+  }
+  if (Array.isArray(aud) && aud.length > 1 && claims.azp === undefined) {
+    throw new Error("oidc_azp_required");
+  }
   if (typeof claims.exp !== "number" || claims.exp * 1000 < Date.now()) {
     throw new Error("oidc_expired");
   }
@@ -374,7 +420,34 @@ export async function oidcCallback(
     log.warn(`[aio] auth: oidc subject too long for an account id`);
     return new Response("invalid id_token", { status: 401 });
   }
-  const email = typeof claims.email === "string" ? claims.email : undefined;
+  // AN EMAIL IS ONLY AN IDENTITY WHEN THE PROVIDER VOUCHES FOR IT.
+  //
+  // Every provider lets an account holder type an address; `email_verified`
+  // is the provider saying it proved the address belongs to them. This used
+  // to ignore it: the account was marked verified, an existing account's
+  // email was overwritten, and `role(claims)` saw the address — so the
+  // documented `claims.email === "boss@corp.com" ? "admin" : "user"` made
+  // anyone who typed that address at the provider an admin. Strictly `true`
+  // (the claim is a JSON boolean); anything else is unverified, and an
+  // unverified address is neither stored, nor verified, nor shown to `role`.
+  const emailVerified = claims.email_verified === true;
+  const claimedEmail = typeof claims.email === "string"
+    ? claims.email
+    : undefined;
+  const email = emailVerified ? claimedEmail : undefined;
+  if (claimedEmail !== undefined && !emailVerified) {
+    const iss = deps.cfg.issuer;
+    if (!_unverifiedEmailWarned.has(iss)) {
+      _unverifiedEmailWarned.add(iss);
+      log.warn(
+        `[aio] auth: oidc provider "${iss}" sent an email without ` +
+          `email_verified: true (got ${
+            JSON.stringify(claims.email_verified)
+          }) — the address is ignored: not stored, not marked verified, and ` +
+          `removed from the claims auth.oidc.role sees. Said once per issuer.`,
+      );
+    }
+  }
   let user: AioUser;
   const existing = deps.users.get(id);
   // A local account that merely SHARES the sub is a different account, and
@@ -400,12 +473,25 @@ export async function oidcCallback(
       deps.users.setEmail(id, email);
     }
   } else {
-    const role = deps.cfg.role?.(claims) ?? "user";
+    let role: string;
+    try {
+      const { email: _unverified, ...rest } = claims;
+      role = deps.cfg.role?.(emailVerified ? claims : rest) ?? "user";
+    } catch (e) {
+      log.warn(
+        `[aio] auth: oidc login refused for "${id}" — auth.oidc.role threw: ${e}` +
+          (claimedEmail !== undefined && !emailVerified
+            ? ` (claims.email was removed because the provider did not ` +
+              `verify it)`
+            : ""),
+      );
+      return new Response("invalid id_token", { status: 401 });
+    }
     // External identity — random unusable password (never password-verifiable).
     const rnd = b64url(crypto.getRandomValues(new Uint8Array(24)));
     try {
       const rec = await deps.users.create(id, rnd, { role, email });
-      deps.users.markVerified(id); // provider vouched for the email
+      if (email !== undefined) deps.users.markVerified(id); // provider vouched for it
       user = { id: rec.id, role: rec.role };
     } catch (e) {
       // The id rules (length, no invisible characters) are the store's, and a

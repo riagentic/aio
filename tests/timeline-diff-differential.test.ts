@@ -27,7 +27,7 @@
 
 import { assert, assertEquals } from "@std/assert";
 import { produce } from "immer";
-import { diffState } from "../src/server/timeline.ts";
+import { type DiffEntry, diffState } from "../src/server/timeline.ts";
 import { stringifyWithIssues } from "../src/server/persist-guard.ts";
 import { fuzzEnvInt } from "./fuzz-seed.ts";
 
@@ -71,6 +71,10 @@ function genValue(rnd: () => number, depth: number): unknown {
   const n = Math.floor(rnd() * 4);
   const o: Record<string, unknown> = {};
   for (let i = 0; i < n; i++) o[`k${i}`] = genValue(rnd, depth + 1);
+  // A key with a `.` in it next to the nesting it prints identically to —
+  // `{ "k0.k1": … }` beside `{ k0: { k1: … } }`. A fold that splits the path
+  // string writes one as the other.
+  if (rnd() < 0.3) o["k0.k1"] = genValue(rnd, depth + 1);
   return o;
 }
 
@@ -121,7 +125,10 @@ function mutate(
     if (r < 0.45 && ks.length > 0) {
       node[ks[Math.floor(rnd() * ks.length)] as string] = genValue(rnd, 3);
     } else if (r < 0.8) {
-      node[`n${Math.floor(rnd() * 5)}`] = genValue(rnd, 3);
+      node[rnd() < 0.25 ? "n0.n1" : `n${Math.floor(rnd() * 5)}`] = genValue(
+        rnd,
+        3,
+      );
     } else if (ks.length > 0) {
       delete node[ks[Math.floor(rnd() * ks.length)] as string];
     } else {
@@ -137,11 +144,12 @@ const deepEq = (a: unknown, b: unknown) =>
  *  change, the result IS `next`. */
 function applyDiff(
   prev: Record<string, unknown>,
-  diff: { path: string; before: unknown; after: unknown }[],
+  diff: DiffEntry[],
 ): unknown {
   const out = structuredClone(prev) as Any;
   for (const d of diff) {
-    const parts = d.path === "" ? [] : d.path.split(".");
+    // The documented fold: `segments` when a key carries a `.`, else the path.
+    const parts = d.segments ?? (d.path === "" ? [] : d.path.split("."));
     if (parts.length === 0) return d.after;
     let node: Any = out;
     for (let i = 0; i < parts.length - 1; i++) {

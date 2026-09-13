@@ -147,10 +147,17 @@ export function createCellFromMethods<
     }
   }
 
-  // Callable-name registry (methods only — the one style, D1); state-key
-  // collision check below reads it.
+  // Callable-name registry — methods AND selectors, both of which flatten onto
+  // the cell object; the state-key collision check below reads it. Selectors
+  // used to be missing here, so `state: { count }` + `selectors: { count }`
+  // passed cell() and died at boot with a bare "Cannot set property count of
+  // #<Object> which has only a getter" — naming neither the cell nor the fix —
+  // while docs/state/cells.md promised a throw at cell().
   const allNames = new Map<string, string>();
   for (const n of methodNames) allNames.set(n, "method");
+  for (const n of Object.keys(config.selectors ?? {})) {
+    if (!allNames.has(n)) allNames.set(n, "selector");
+  }
 
   // AIO-6.1: a state key colliding with any callable is a definition-time error —
   // the callable wins on the cell object, so `cell.key` in a component would return
@@ -381,6 +388,42 @@ export function createCellFromMethods<
           `[cell:${name}] ttl: { ${mk}: ${
             JSON.stringify(ms)
           } } must be a positive number of milliseconds.`,
+        );
+      }
+    }
+  }
+
+  // `args` names methods as well, and a typo there is the worst of the four:
+  // the rules for `setAge` written under `setage` never run, so the boundary
+  // the app believes is guarded takes any value — silently, with no hit or miss
+  // to notice. Same refusal as its siblings (cancelOn/long/concurrency/ttl).
+  const argsCfg = config.args as Record<string, unknown> | undefined;
+  if (argsCfg !== undefined) {
+    if (
+      argsCfg === null || typeof argsCfg !== "object" || Array.isArray(argsCfg)
+    ) {
+      throw new Error(
+        `[cell:${name}] args must be an object of per-method rule lists — ` +
+          `{ setAge: [schema] } — got ${
+            Array.isArray(argsCfg) ? "an array" : JSON.stringify(argsCfg)
+          }.`,
+      );
+    }
+    for (const [mk, specs] of Object.entries(argsCfg)) {
+      if (typeof methods[mk] !== "function") {
+        throw new Error(
+          `[cell:${name}] args names "${mk}", which is not a method of this ` +
+            `cell — its rules would never run. Methods: ${
+              methodNames.join(", ") || "(none)"
+            }.`,
+        );
+      }
+      if (!Array.isArray(specs)) {
+        throw new Error(
+          `[cell:${name}] args: { ${mk}: … } must be a POSITIONAL list of ` +
+            `rules — [schema, (v) => true | "why", null] — got ${
+              specs === null ? "null" : typeof specs
+            }.`,
         );
       }
     }

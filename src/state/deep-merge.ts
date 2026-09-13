@@ -81,6 +81,8 @@ type MergeCtx = {
   nodes: number;
   /** Paths where the node budget stopped the merge. */
   overBudget: string[];
+  /** Paths where a stored `null` gave way to a declared object. */
+  nullHealed: string[];
 };
 
 // Uses `initial` as the structural template: any key in initial is guaranteed to exist
@@ -118,12 +120,42 @@ export function deepMerge(
     cycles: [],
     nodes: 0,
     overBudget: [],
+    nullHealed: [],
   };
   const result = merge(initial, persisted, depth, ctx, "$");
   if (ctx.truncated.length > 0) reportTruncation(ctx.truncated);
   if (ctx.cycles.length > 0) reportCycles(ctx.cycles);
   if (ctx.overBudget.length > 0) reportBudget(ctx.overBudget);
+  if (ctx.nullHealed.length > 0) reportNullHealed(ctx.nullHealed);
   return result;
+}
+
+/** A stored `null` under a field declared as an object restores as the
+ *  declared default. That is the documented rule, but the `null` was data —
+ *  usually written by the app's own method (`s.profile = null` on sign-out) —
+ *  and it came back as a default object with nothing said, and was then
+ *  written over. A declared ARRAY or primitive keeps its stored `null`, so the
+ *  two shapes also disagree; this names the path and the one-line way to keep
+ *  the value. */
+function reportNullHealed(paths: string[]): void {
+  const shown = paths.slice(0, 3).join(", ");
+  const more = paths.length > 3 ? ` (+${paths.length - 3} more)` : "";
+  const msg = `restore replaced a stored null with the declared default at ` +
+    `${shown}${more} — the field is declared as an object, and a declared ` +
+    `object does not take a stored null (a declared array or primitive ` +
+    `does). The next write stores the default, so the null is gone. If ` +
+    `null is a value this field legitimately holds, declare it that way ` +
+    `(\`profile: null as Profile | null\`) and fill the default in code.`;
+  log.warn("restore", msg);
+  diagEmit({
+    type: "restore-null-healed",
+    severity: "warning",
+    source: "deep-merge",
+    message: msg,
+    detail: { paths: paths.slice(0, 20), count: paths.length },
+    hint:
+      "A declared object never restores a stored null — declare the field as `null as T | null`.",
+  });
 }
 
 /** The depth cap is a stack guard, so it may not be silent: the subtrees below
@@ -264,7 +296,11 @@ function merge(
     if (isPlainObject(iv) && isPlainObject(pv)) {
       setOwn(result, key, merge(iv, pv, depth + 1, ctx, step(path, key)));
     } else if (pv === null && isPlainObject(iv)) {
-      // persisted null can't wipe schema object → keep initial
+      // persisted null can't wipe schema object → keep initial. Documented
+      // (docs/persistence/auto-persist.md), and it stays — but it replaces
+      // data the app itself wrote (`s.profile = null`) with the declared
+      // default, and the next write makes that permanent, so it is SAID.
+      ctx.nullHealed.push(step(path, key));
     } else if (isPlainObject(iv) && Array.isArray(pv)) {
       // persisted array can't replace schema object → keep initial
     } else if (Array.isArray(iv) && isPlainObject(pv)) {

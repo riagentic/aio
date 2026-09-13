@@ -45,7 +45,29 @@ export function deepExclude(value: unknown, segs: string[]): unknown {
   }
   const obj = value as Record<string, unknown>;
   const head = segs[0]!;
-  if (!(head in obj)) return value;
+  if (!(head in obj)) {
+    // A CONTAINER, not a miss. An array of records is traversed element-wise
+    // above; a records-BY-ID map — the most ordinary state shape there is —
+    // was not, so `exclude: ["accounts.secret"]` removed the field from
+    // `accounts: [{secret}]` and removed NOTHING from
+    // `accounts: { alice: { secret } }`. No warning fired either, because the
+    // head segment IS a real top-level field; the value was broadcast to every
+    // client with nothing said. The documented example ("accounts.encSecKey")
+    // reads as if it covers both.
+    //
+    // Descending only when the key is ABSENT keeps the literal reading first:
+    // for `a.b` where `a` really has a `b`, `a.b` is still what is removed.
+    let touched = false;
+    const mapped: Record<string, unknown> = {};
+    for (const [k, v] of Object.entries(obj)) {
+      const next = v !== null && typeof v === "object"
+        ? deepExclude(v, segs)
+        : v;
+      if (next !== v) touched = true;
+      mapped[k] = next;
+    }
+    return touched ? mapped : value;
+  }
   if (segs.length === 1) {
     const { [head]: _dropped, ...kept } = obj;
     return kept;
@@ -190,9 +212,22 @@ export function uiKeyVisibility(
   return { hidden: false };
 }
 
-/** Match an Immer patch path against a deep-exclude path. Numeric op-path
- *  segments (array indices) are skipped — the exclude path names fields, not
- *  positions. */
+/** Match an Immer patch path against a deep-exclude path. Op-path segments
+ *  that are CONTAINER KEYS are skipped — the exclude path names fields, not
+ *  positions or record ids.
+ *
+ *  It used to skip numeric segments only, so it and `deepExclude` disagreed
+ *  about a records-BY-ID map: measured, `exclude: ["accounts.secret"]` DROPPED
+ *  the patch at `accounts.7.secret` and SENT the one at
+ *  `accounts.alice.secret`. For a numeric-keyed map the developer watching a
+ *  live app saw the field frozen and concluded it was hidden — while it
+ *  arrived in full on every connect and every full-state resync.
+ *
+ *  A segment is skippable only AFTER one has matched, which is what keeps this
+ *  from over-matching: `exclude: ["a.b"]` still ignores a patch at
+ *  `["x","y","a","b"]`, because nothing has matched at the point `x` is seen.
+ *  Within a path that HAS started matching, skipping can only ever hide more
+ *  — the safe direction for a privacy filter. */
 function matchDeepPath(
   opPath: (string | number)[],
   segs: string[],
@@ -207,7 +242,14 @@ function matchDeepPath(
       i++;
       continue;
     }
-    if (String(seg) !== segs[j]) return { kind: "none" };
+    if (String(seg) !== segs[j]) {
+      // A record id inside a container we have already entered.
+      if (j > 0) {
+        i++;
+        continue;
+      }
+      return { kind: "none" };
+    }
     i++;
     j++;
   }

@@ -88,6 +88,26 @@ const EXTRA_ON_BROWSER: Record<string, string> = {
   own: "the `aio` specifier maps here — owned-resource effect creators",
   notify: "the `aio` specifier maps here — desktop-notification effect creator",
   schedule: "the `aio` specifier maps here — browser schedule stub",
+  self: "the `aio` specifier maps here — self-action descriptor a cell " +
+    "module uses in schedule.* (report 9b §3; tests/browser-air-mod-parity)",
+  // The rest of that class — mod.ts names a cell module or a component imports
+  // from "aio" in the docs' own examples; each refused the browser bundle
+  // until it shipped here. Bundled one by one in
+  // tests/browser-bundle-self-export.test.ts.
+  call: "the `aio` specifier maps here — inter-cell call timeout/retry",
+  until: "the `aio` specifier maps here — async-method helper",
+  race: "the `aio` specifier maps here — async-method helper",
+  sleep: "the `aio` specifier maps here — async-method helper",
+  UntilTimeoutError: "the `aio` specifier maps here — until()'s error",
+  errorCode: "the `aio` specifier maps here — reads a call error's code",
+  createSelector: "the `aio` specifier maps here — memoized selector",
+  authClient: "the `aio` specifier maps here — client auth API",
+  createAuthClient: "the `aio` specifier maps here — client auth API factory",
+  degraded: "the `aio` specifier maps here — best-effort escalation",
+  degradedReport: "the `aio` specifier maps here — degraded() report",
+  serverImport:
+    "the `aio` specifier maps here — stubbable *.server.ts import a cell " +
+    "method makes (the cell module is in the client graph)",
   serverFn: "the `aio` specifier maps here — serverFn client proxy",
   serverFns: "the `aio` specifier maps here — serverFn definition passthrough",
   log: "the `aio` specifier maps here — no-op logger shim for shared modules",

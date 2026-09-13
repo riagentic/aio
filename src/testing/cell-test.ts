@@ -21,9 +21,17 @@ import { _resetHead } from "../air/head.ts";
 import { routeEffect } from "../state/route-effect.ts";
 import { assertionFailure, formatCellState } from "./test-format.ts";
 import { frozenWriteMessage, isFrozenWriteError } from "../state/immutable.ts";
-import { _armTestStrict, _watchUnobservedCalls } from "./test-strict.ts";
+import {
+  _abandonedCallsWarning,
+  _armTestStrict,
+  _DISPOSE_DRAIN_MS,
+  _observedCall,
+  _watchUnobservedCalls,
+} from "./test-strict.ts";
 // Server-touching, so NOT in test-strict.ts — see boot-refusals.ts.
 import {
+  _callAcrossWorkerBoundary,
+  _isolateWorkerCellsInProcess,
   _refuseUnsafeCells,
   type HarnessBootOptions,
 } from "./boot-refusals.ts";
@@ -399,6 +407,17 @@ export function testCell(
     _resetAioRuntime();
     _resetHead();
 
+    // Every boot refusal a real `aio.run()` performs, BEFORE anything runs.
+    // `bootCells` and `testUI` have called this for a while; `testCell` — the
+    // harness CLAUDE.md names first and the docs push hardest ("always
+    // dispatch-test cell methods") — did not. So a cell holding a credential
+    // the UI can see, or a `sync: true` cell that hides state from clients,
+    // passed its whole test file and was REFUSED the moment the app actually
+    // started. A test environment more lenient than production manufactures
+    // green-test-broken-prod, and this one was lenient about the two
+    // refusals that exist for security.
+    _refuseUnsafeCells([f]);
+
     // Compose a single-cell system
     const composed = composeCells([f]);
     const machine = f.__aio.machine;
@@ -572,10 +591,7 @@ export function testCell(
     for (const key of f.__aio.actionKeys) {
       const creator = (f.__aio.actions as Record<string, unknown>)[key];
       if (typeof creator !== "function") continue;
-      // deno-lint-ignore no-explicit-any
-      (send as Record<string, (...args: any[]) => Promise<unknown>>)[key] = (
-        ...args: unknown[]
-      ) => {
+      const direct = (args: unknown[]): Promise<unknown> => {
         const msg = (creator as (...a: unknown[]) => Msg)(...args);
         if (!asyncMethods.has(key)) {
           // Sync method: dispatch runs the reducer now; resolve with its
@@ -585,6 +601,13 @@ export function testCell(
           // caller's promise), so a harness that throws instead forces every
           // validation test to be written differently from the code it covers
           // (`assertThrows` here, `assertRejects` in the app).
+          //
+          // And an UN-awaited one that threw goes through the same
+          // observed-or-raised ledger as an async call (below). A bare
+          // `Promise.reject(e)` failed the test too, but as an uncaught
+          // rejection that names no test and cancels every later test in the
+          // file — while `testUI`/`bootCells` ledger the same call and fail
+          // that one test, by name.
           try {
             return Promise.resolve(dispatch(msg));
           } catch (e) {
@@ -622,20 +645,27 @@ export function testCell(
               return vals[vals.length - 1];
             },
           );
+        return started;
+      };
+      const worker = f.__aio.worker === true;
+      // deno-lint-ignore no-explicit-any
+      (send as Record<string, (...args: any[]) => Promise<unknown>>)[key] = (
+        ...args: unknown[]
+      ) => {
+        // A worker cell's arguments and return value cross the boundary a
+        // real worker puts there — see `_callAcrossWorkerBoundary`.
+        const result = (worker
+          ? _callAcrossWorkerBoundary(f.__aio.id, args, (a) =>
+            direct(a))
+          : direct(args)) as Promise<unknown>;
         // Fire-and-forget parity: an un-awaited failing call must not blow up
         // the test run as an unhandled rejection (production logs it too) —
         // but it must not vanish either. Whether the test ever LOOKED at this
         // call decides which: attaching a handler (await, .then, .catch,
         // Promise.all) counts as looking.
         let observed = false;
-        started.catch((err) => unobserved.push({ err, seen: () => observed }));
-        const mark = <T>(v: T): T => (observed = true, v);
-        return {
-          then: (onF, onR) => mark(started).then(onF, onR),
-          catch: (onR) => mark(started).catch(onR),
-          finally: (onC) => mark(started).finally(onC),
-          [Symbol.toStringTag]: "Promise",
-        } as Promise<unknown>;
+        result.catch((err) => unobserved.push({ err, seen: () => observed }));
+        return _observedCall(result, () => observed = true);
       };
     }
 
@@ -655,6 +685,9 @@ export function testCell(
       if (creator) attachMeta(dispatcher, creator);
       (f as Record<string, unknown>)[key] = dispatcher;
     }
+    // A worker cell refuses a peer read and a method call, as its real thread
+    // does (boot-refusals.ts). Undone with the selectors, below.
+    const unisolate = _isolateWorkerCellsInProcess([f]);
 
     const ctx: TestContext = {
       init: (seed?: Record<string, unknown>) => {
@@ -950,6 +983,7 @@ export function testCell(
       raiseUnobserved();
       raiseUnrunFrameworkEffect();
     } finally {
+      unisolate();
       // Cells are module singletons: leave the def exactly as it was found, so
       // a later `bootCells`/`testUI` in the same file binds its own selectors.
       for (const restore of restoreSelectors) restore();
@@ -1040,7 +1074,11 @@ export async function bootCells(
   // ledger `testCell` keeps, so the same app code cannot pass one harness and
   // fail the other (see test-strict.ts). Installed after the boot, because it
   // wraps the bound methods the boot just installed.
-  const ledger = _watchUnobservedCalls(cells);
+  // What a real worker refuses — a peer read, any method call — refused in
+  // process too. BEFORE the ledger, so the ledger wraps it and its restore
+  // (identity-checked) runs first at teardown.
+  const unisolate = _isolateWorkerCellsInProcess(cells);
+  const ledger = _watchUnobservedCalls(cells, _callAcrossWorkerBoundary);
   /** Drain until nothing is in flight.
    *
    *  Microtask ticks alone were not enough, and `advance()` is where that
@@ -1063,6 +1101,13 @@ export async function bootCells(
     let lastKeys = "";
     let stableRounds = 0;
     for (let round = 0; round < ROUNDS; round++) {
+      // Fire the timers ALREADY DUE — a `schedule.next` / `after(id, 0)` is
+      // "right after the current method returns", and a real server runs it
+      // within milliseconds. Here it waited for `advance()`, so `settle()`
+      // returned "quiet" with work queued. Later timers stay the test's to
+      // drive (see testUI's settle for the same rule).
+      const due = standalone._fireDueSchedules();
+      if (due) await due;
       for (let i = 0; i < 10; i++) await Promise.resolve();
       const pending = _pendingCallPromises();
       if (pending.length === 0) {
@@ -1074,10 +1119,13 @@ export async function bootCells(
       const keys = _inflightMethodKeys().slice().sort().join(",");
       stableRounds = keys === lastKeys ? stableRounds + 1 : 0;
       lastKeys = keys;
+      // The wake timer is cleared when the calls win the race: left armed, it
+      // outlives `settle()` and a sanitized `Deno.test` reports it as a leak.
+      let wake: ReturnType<typeof setTimeout> | undefined;
       await Promise.race([
         Promise.allSettled(pending),
-        new Promise((r) => setTimeout(r, 5)),
-      ]);
+        new Promise((r) => wake = setTimeout(r, 5)),
+      ]).finally(() => clearTimeout(wake));
     }
     // Budget exhausted. Two very different things look the same here, and
     // conflating them is what made the old silent `return` dangerous:
@@ -1132,14 +1180,50 @@ export async function bootCells(
     );
   };
   const dispose = () => {
+    // CAPTURE the unobserved failure FIRST. `restore()` ends with
+    // `entries.length = 0`, so a `raise()` after it always found an empty
+    // ledger — the hard gate this comment used to describe could not fire at
+    // all, and `using h = await bootCells([c]); c.failingMethod();` (the
+    // ordinary fire-and-forget shape, with no `settle()`) passed green. But
+    // the raise cannot come first either: a throw there would skip the
+    // teardown below and leak the patched globals into the next test. So:
+    // take the error, tear down completely, then throw.
+    let unobserved: unknown;
+    let failed = false;
+    try {
+      ledger.raise();
+    } catch (e) {
+      unobserved = e;
+      failed = true;
+    }
+    // What a SYNCHRONOUS dispose cannot know. A call made just before it has
+    // not settled yet — an async method is at least a microtask from done,
+    // and the reset below orphans it (its promise never settles again), so a
+    // failure inside it is invisible from here. `[Symbol.asyncDispose]` (the
+    // `await using` spelling) waits for those first; this one can only say
+    // it could not — and make a sync method's already-happened rejection
+    // fail loud instead of landing in a ledger nobody reads.
+    const abandoned = ledger.abandon();
+    if (abandoned.length > 0 && !failed) {
+      console.warn(_abandonedCallsWarning("bootCells", abandoned, "h"));
+    }
     ledger.restore();
+    unisolate();
     standalone._resetState();
     // The process-global half — without this a hung call sits in `_pending`
     // for the rest of the process and every later settle() burns its whole
     // budget on it (see the boot note above).
     _resetAioRuntime();
     _resetHead();
-    ledger.raise();
+    if (failed) throw unobserved;
+  };
+  /** `await using h = await bootCells(…)` — the teardown that CAN wait. A
+   *  failing call fired just before teardown used to pass: `dispose()` looked
+   *  at the ledger before the rejection had landed in it. So this waits
+   *  (bounded) for every call nobody observed, then runs the same teardown. */
+  const asyncDispose = async () => {
+    await ledger.drain(_DISPOSE_DRAIN_MS);
+    dispose();
   };
   return {
     async advance(ms: number) {
@@ -1149,7 +1233,11 @@ export async function bootCells(
     settle,
     dispose,
     [Symbol.dispose]: dispose,
-  };
+    // Not declared on `BootHandle` (the public surface is frozen), and not
+    // needed there: `await using` accepts a Disposable at the type level and
+    // prefers `Symbol.asyncDispose` at runtime.
+    [Symbol.asyncDispose]: asyncDispose,
+  } as BootHandle;
 }
 
 // Semantic UI testing — first-class, selector-free (see

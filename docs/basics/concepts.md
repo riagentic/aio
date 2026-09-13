@@ -93,15 +93,20 @@ methods: {
 
 ## Concept 3: Selectors
 
-Derived state, memoized automatically.
+Derived state — a pure function of the cell's state, read like a method.
 
 ```ts
+import { createSelector } from "aio";
+
 const counter = cell('counter', {
   state: { count: 0 },
   methods: { ... },
   selectors: {
-    doubled(s) { return s.count * 2 },
-    expensive(s) { return heavyComputation(s.count) }, // only runs when s.count changes
+    doubled(s) { return s.count * 2 },                  // runs on every read
+    expensive: createSelector(
+      (s) => s.count,                                   // inputs: cheap reads
+      (count) => heavyComputation(count),               // only runs when s.count changes
+    ),
   }
 })
 
@@ -109,6 +114,13 @@ counter.doubled()   // 0
 ```
 
 The `s` is scoped to the cell -- use `s.count`, not `s.counter.count`.
+
+A plain selector is **not memoized**: it runs each time it is read, which for a
+cheap derivation is the right trade. Wrap an expensive one in `createSelector`:
+its input selectors still run on every read — so a component reading it still
+subscribes, and a hidden field still refuses — and the expensive last function
+runs again only when an input changes (by `===`). A change to another field of
+the same cell does not re-run it.
 
 ### Selectors with cross-cell dependencies
 

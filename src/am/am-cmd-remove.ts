@@ -41,7 +41,7 @@ import { instances } from "../server/single-instance-lock.ts";
 import { readRecord } from "../server/install-record.ts";
 import { readPending } from "../server/updates-apply.ts";
 import { cmdUpdate } from "./am-cmd-meta.ts";
-import { appNameError } from "./am-utils.ts";
+import { appNameError, reservedAppNameError } from "./am-utils.ts";
 
 /** Deleting an app's DATA is the one step with no way back — `~/.<appId>/`
  *  holds state, logs, keys and user files, and no reinstall returns them. So
@@ -116,6 +116,31 @@ export async function isAioInstall(name: string): Promise<boolean> {
   return await exists(join(p.dir, "versions"));
 }
 
+/** Does `home` carry what an aio app writes into its data directory?
+ *
+ *  `am remove <name> --data --force` deleted `appDirs(name).home` on the
+ *  strength of the NAME alone — and for a name like `ssh` that is `~/.ssh`
+ *  (measured: gone, exit 0). The program side has needed evidence since
+ *  `isAioInstall`; the data side, the unrecoverable one, needed none. The
+ *  evidence is aio's own layout: the files a booted app writes under `data/`
+ *  (`state.db`, `meta.json`, `auth.db`, `app.key`), the `launch.json` beside
+ *  it, or its `logs/app.log`. `~/.ssh`, `~/.gnupg`, `~/.config` hold none of them. */
+export async function isAioDataDir(home: string): Promise<boolean> {
+  for (
+    const rel of [
+      join("data", "state.db"),
+      join("data", "meta.json"),
+      join("data", "auth.db"),
+      join("data", "app.key"),
+      "launch.json",
+      join("logs", "app.log"),
+    ]
+  ) {
+    if (await exists(join(home, rel))) return true;
+  }
+  return false;
+}
+
 /** Every path an install created, and whether it is there. Pure enough to
  *  print before anything is deleted. */
 export async function installedFootprint(name: string): Promise<
@@ -169,7 +194,27 @@ export async function cmdRemove(
   const footprint = await installedFootprint(name);
   const present = footprint.filter((f) => f.present);
   const dataDir = appDirs(name).home;
-  const hasData = await exists(dataDir);
+  const dirThere = await exists(dataDir);
+  // "Has data" means has AIO data. A directory at `~/.<name>` that aio did not
+  // write is never offered for deletion, and never deleted — not with
+  // `--force` either, because `--force` confirms a delete of the app's data,
+  // and this is not the app's data. See `isAioDataDir`.
+  const hasData = dirThere && await isAioDataDir(dataDir);
+  if (flags.data && dirThere) {
+    const reserved = reservedAppNameError(name, "am remove --data");
+    const foreign = !hasData
+      ? `refusing to delete ${dataDir}: it is not an aio app's data ` +
+        `directory (no data/state.db, data/meta.json, data/auth.db, ` +
+        `data/app.key, launch.json or logs/app.log) — --force does not ` +
+        `override this.\n` +
+        `  If it really is ${name}'s data, delete it by hand after checking ` +
+        `what is in it.`
+      : null;
+    if (reserved || foreign) {
+      outError(reserved ?? foreign!, mode);
+      Deno.exit(1);
+    }
+  }
 
   if (present.length === 0 && !(flags.data && hasData)) {
     outError(

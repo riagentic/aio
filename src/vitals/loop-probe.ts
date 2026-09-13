@@ -78,6 +78,8 @@ export function createLoopProbe(thresholds: VitalThresholds): LoopProbeAPI {
   let p95Dirty = false; // window changed since p95ReduceTime was computed
   let circuitBreakers: string[] = [];
   let firstDegradedAt: number | null = null;
+  /** When this probe started watching (creation, or the last `reset()`). */
+  let observedSince = Date.now();
 
   function pruneTimestamps(now: number): void {
     const cutoff = now - DRAIN_WINDOW_MS;
@@ -86,13 +88,23 @@ export function createLoopProbe(thresholds: VitalThresholds): LoopProbeAPI {
     }
   }
 
+  /** Actions per second over the drain window.
+   *
+   *  Divided by how long the probe has been WATCHING inside the window, not by
+   *  the age of the oldest action in it. The oldest action marks when the
+   *  burst began, not when observation did: five actions in one burst, read
+   *  a moment later, divided by a span of milliseconds and reported hundreds
+   *  per second for a loop that had drained five actions in five seconds. An
+   *  idle stretch before a burst is part of the window, and it counts.
+   *
+   *  Floored at one second, so the first second of a probe's life reports the
+   *  actions it saw rather than extrapolating a few milliseconds into a rate. */
   function computeDrainRate(): number {
     const now = Date.now();
     pruneTimestamps(now);
-    if (actionTimestamps.length < 2) return actionTimestamps.length;
-    const span = (now - actionTimestamps[0]!) / 1000;
-    if (span <= 0) return actionTimestamps.length;
-    return actionTimestamps.length / span;
+    if (actionTimestamps.length === 0) return 0;
+    const watchedMs = Math.min(DRAIN_WINDOW_MS, now - observedSince);
+    return actionTimestamps.length / Math.max(watchedMs / 1000, 1);
   }
 
   const STATUS_RANK: Record<VitalStatus, number> = {
@@ -226,6 +238,7 @@ export function createLoopProbe(thresholds: VitalThresholds): LoopProbeAPI {
   function reset(): void {
     reduceTimes = [];
     actionTimestamps = [];
+    observedSince = Date.now();
     queueDepth = 0;
     effectBacklog = 0;
     lastReduceTime = 0;

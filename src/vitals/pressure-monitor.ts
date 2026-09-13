@@ -5,7 +5,7 @@
 import type { DiagEvent } from "./types.ts";
 import { DIAG_THROTTLE_MS, formatDiagEvent } from "./diag-formatter.ts";
 import { log } from "../diagnostics/logger-api.ts";
-import { recordBudgetBreach } from "../state/budgets.ts";
+import { type BudgetLedger, budgetsFor } from "../state/budgets.ts";
 
 /** Above this many live throttle keys, sweep the expired ones (they are
  *  keyed per client, so the set grows with connections, not with code). */
@@ -21,6 +21,9 @@ export type PressureMonitorConfig = {
   bandwidthThreshold?: number; // bytes/sec per client — warn when lifetime avg exceeds (default: 1MB/s)
   onDiagnostic?: (event: DiagEvent) => void;
   onConsole?: (lines: string[]) => void;
+  /** The ledger breaches of a DECLARED budget are recorded in — the owning
+   *  app's. Absent ⇒ the latest boot's, taken at creation. */
+  budgets?: BudgetLedger;
 };
 
 /** Pressure monitor API — tracks broadcast payload sizes and per-client bandwidth. */
@@ -39,6 +42,7 @@ export function createPressureMonitor(
   config: PressureMonitorConfig,
 ): PressureMonitorAPI {
   const payloadThreshold = config.payloadThreshold ?? DEFAULT_PAYLOAD_THRESHOLD;
+  const budgets = config.budgets ?? budgetsFor();
   const rateThreshold = config.rateThreshold ?? DEFAULT_RATE_THRESHOLD;
   const bandwidthThreshold = config.bandwidthThreshold ??
     DEFAULT_BANDWIDTH_THRESHOLD;
@@ -143,7 +147,7 @@ export function createPressureMonitor(
     if (bytes >= payloadThreshold) {
       // A declared `budgets.payload` is a commitment, so it is recorded for
       // `/health` as well as logged. No-op when the threshold is aio's own.
-      recordBudgetBreach("payload", bytes, `client ${clientId}`);
+      budgets.record("payload", bytes, `client ${clientId}`);
       const kb = (bytes / 1024).toFixed(0);
       emit({
         kind: "pressure",
@@ -198,7 +202,7 @@ export function createPressureMonitor(
     const rate = _broadcastCount;
     _broadcastCount = 0;
     if (rate >= rateThreshold) {
-      recordBudgetBreach("broadcastRate", rate);
+      budgets.record("broadcastRate", rate);
       _peakRate = Math.max(_peakRate, rate);
       if (_overSince === 0) {
         _overSince = Date.now();

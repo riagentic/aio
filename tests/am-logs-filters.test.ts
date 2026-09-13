@@ -110,3 +110,54 @@ Deno.test("am logs: an unparseable header passes every filter", () => {
     );
   }
 });
+
+// ── The line that is not a line ───────────────────────────────────────────
+//
+// Every log file ends in a newline, so `split("\n")` hands back a trailing
+// "" — and `LOG_EVENT_CONT` needs two spaces or a box-drawing character, so
+// "" can never continue the event above it and always became an event of its
+// own. `logEventMatches` then answers TRUE for any event whose head it cannot
+// parse (deliberate: a stack frame or a raw write must survive a filter), so
+// that phantom passed every STRUCTURED filter. On a freshly started app with
+// no errors and no warnings:
+//
+//   am logs --level=error --json  →  {"total":1,"shown":1,"lines":[""]}
+//   am logs --tag=nosuchtag --json →  {"total":1,"shown":1,"lines":[""]}
+//   am errors --json               →  {"errors":[],…}     ← and disagreed
+//
+// `am logs --level=error --json | jq .total` is the natural health probe, and
+// the reason `--level`/`--tag` exist at all; it could never read 0. The
+// substring `--filter` path escaped it only by luck (`"".includes(x)` is
+// false).
+Deno.test("am logs: a trailing newline is not an event", () => {
+  const file = LOG.join("\n") + "\n";
+  const evs = groupLogEvents(file.split("\n"));
+  assertEquals(
+    evs.length,
+    5,
+    "five real events — the error keeps its stack frame, and the file's " +
+      "terminating newline is not a sixth",
+  );
+  assert(evs.every((e) => e.some((l) => l.length > 0)));
+});
+
+Deno.test("am logs: a structured filter matching nothing reports nothing", () => {
+  const evs = groupLogEvents((LOG.join("\n") + "\n").split("\n"));
+  for (const f of [{ level: "error" }, { tag: "nosuchtag" }] as const) {
+    // `error` DOES match one real event here; `nosuchtag` matches none. What
+    // must never happen is an extra, contentless match on top.
+    const kept = evs.filter((e) => logEventMatches(e, f));
+    assert(
+      kept.every((e) => e.some((l) => l.length > 0)),
+      `a contentless event passed ${JSON.stringify(f)}`,
+    );
+  }
+  const none = evs.filter((e) => logEventMatches(e, { tag: "nosuchtag" }));
+  assertEquals(none.length, 0, "no tag matches, so no events — not one");
+});
+
+Deno.test("am logs: a file of only blank lines has no events", () => {
+  assertEquals(groupLogEvents("\n\n\n".split("\n")), []);
+  assertEquals(groupLogEvents([""]), []);
+  assertEquals(groupLogEvents([]), []);
+});

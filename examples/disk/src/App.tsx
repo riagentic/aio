@@ -49,6 +49,7 @@ function Row({ entry, largest }: { entry: Entry; largest: number }) {
         </div>
       </div>
       <div style={{ textAlign: "right", fontVariantNumeric: "tabular-nums" }}>
+        {entry.partial ? "≥ " : ""}
         {human(entry.bytes)}
       </div>
       <button type="button" t="reveal" onClick={() => disk.reveal(entry.path)}>
@@ -102,7 +103,7 @@ export default function App() {
         fontFamily: "system-ui, sans-serif",
       }}
     >
-      <h1 style={{ color: "#00a6cc" }}>Disk</h1>
+      <h1 style={{ color: "#007d9c" }}>Disk</h1>
 
       <Trail />
 
@@ -114,8 +115,18 @@ export default function App() {
       )}
       {!disk.scanning && disk.partial && (
         <p t="partial" style={{ color: "#a70" }}>
-          stopped at this scan's budget — the sizes below are a floor, not a
-          total. Rescan to continue.
+          {disk.hasMore
+            ? `stopped at this scan's budget after ${disk.entries.length} folders — more remain.`
+            : "a folder marked ≥ ran out of time: its size is a floor, not a total — open it to size it on its own."}
+          {disk.hasMore && (
+            <button
+              type="button"
+              t="more"
+              onClick={() => disk.more()}
+            >
+              Scan more
+            </button>
+          )}
         </p>
       )}
 

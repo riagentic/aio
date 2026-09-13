@@ -63,11 +63,26 @@ rather than as "this app has no such data".
 This is the rule, not a setting: a report that ignored the redaction list would
 be the leak the list exists to prevent.
 
+A cell's own `visible` declaration screens the report the same way it screens a
+browser — in `state` and in the **timeline**. A diff entry under a hidden field
+keeps its path (the action did touch it) and loses its before/after values, and
+the payload of an action that wrote a hidden field is withheld too, since its
+arguments usually carry the value. An async method's writes land after its call,
+as `__set…` entries naming it, so its call is judged by those; on a cell with a
+hidden field every async call's arguments are withheld, because a call still
+running when the report is taken has not written the field yet.
+
+The report is the surface that leaves the machine. `am timeline` and the
+`/__aio/trojan/timeline` route are the local, dev-only operator view — like
+`/__aio/trojan/state`, they show values unscreened by `visible`, and honour
+`redactActions` only.
+
 ## Everything is capped
 
 A report nobody can attach to an issue helps nobody:
 
-- timeline: newest 100 entries
+- timeline: newest 100 entries, 256 KB in all (oldest dropped first); an entry
+  over 16 KB keeps its type and paths with its values elided
 - diagnostics: newest 50
 - logs: last 200 lines
 - state: **dropped** above 256 KB rather than truncated — half a state tree

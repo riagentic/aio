@@ -225,6 +225,18 @@ const VIOLATIONS: Case[] = [
     }),
     expect: "was NOT read",
   },
+  {
+    // A helper under tests/ is READ and then dropped: no app-code rule runs
+    // on it, and it is not a test either. Correct — but it used to be silent,
+    // so a fixture holding a credential was unreported with nothing to say it
+    // had been passed over.
+    name: "a helper under tests/ that no rule examines",
+    files: app({
+      "tests/helpers/seed.ts":
+        `export const seedPassword = "hunter2hunter2";\n`,
+    }),
+    expect: "helpers, not tests",
+  },
   // config
   {
     name: "no deno.json",
@@ -1072,6 +1084,19 @@ await aio.run({ perfBudget: { methods: { "models:scan": { timeout: 0 } } } });
     expect: "server-only symbols moved",
   },
   {
+    // NOT the first `aio` import. `const [m] = codeMatches(…)` took match #0,
+    // and this rule's whole target population is cell files — where the first
+    // `aio` import is `{ cell }`, which holds no server-only symbol. So the
+    // rule bailed before it reached the line it exists to report.
+    name: "a server-only symbol in the SECOND aio import",
+    files: app({
+      "src/s.ts": `import { cell } from "aio";\n` +
+        `import { createDB } from "aio";\n` +
+        `export const d = [cell, createDB];\n`,
+    }),
+    expect: "server-only symbols moved",
+  },
+  {
     name: "dynamic import('aio') of a server-only symbol",
     files: app({
       "src/s.ts":
@@ -1359,6 +1384,35 @@ await aio.run({ perfBudget: { methods: { "models:scan": { timeout: 0 } } } });
     expect: "stores `s` itself in a module-level binding",
   },
   {
+    // `let first = 0, saved = null;` — only the FIRST declarator used to be
+    // read as a module binding, so `saved = s` escaped unreported.
+    name: "a live draft parked in the SECOND name of a comma declaration",
+    files: app({
+      "src/cell.ts":
+        `import { cell } from "aio";\nlet first = 0, saved: unknown = null;\n` +
+        cellFile(
+          "counter",
+          `{ state: { count: 0 }, methods: { keep(s) { saved = s; } } }`,
+        )
+          .replace('import { cell } from "aio";\n', "") +
+        "export { first, saved };\n",
+    }),
+    expect: "stores `s` itself in a module-level binding",
+  },
+  {
+    // No semicolons: the arrow's expression body used to run on into the next
+    // statement, blanking the I/O on it as if it were inside the callback.
+    name: "sync I/O on the line after a semicolon-free local arrow",
+    files: app({
+      "src/cell.ts": cellFile(
+        "counter",
+        `{ state: { count: 0, t: "" }, methods: {\n  load(s) {\n    const double = (x: number) => x * 2\n    s.t = Deno.readTextFileSync("x")\n    s.count = double(1)\n  },\n} }`,
+      ),
+    }),
+    expect:
+      "is a SYNC method (the reducer) and calls `Deno.readTextFileSync()`",
+  },
+  {
     name: "fetch in a sync method",
     files: app({
       "src/cell.ts": cellFile(
@@ -1399,6 +1453,24 @@ await aio.run({ perfBudget: { methods: { "models:scan": { timeout: 0 } } } });
         `import { toasts } from "./toasts.ts";\n` +
         `export const notes = cell("notes", { state: { items: [] as string[] }, sync: true, ` +
         `methods: { add(s, t: string) { s.items = [...s.items, t]; toasts.add("added"); } } });\n`,
+    }),
+    expect: "REPLAYS on the client",
+  },
+  {
+    // The OTHER half of the same predicate. It ran against the MASKED cell
+    // config, where `codeText` has blanked the string body — so it was
+    // testing `scope: "      "` and could never match, and the rule fired for
+    // `sync: true` cells and never for client-scoped ones, in a check whose
+    // whole subject is "this reducer also runs on the client".
+    name: "a client-scoped reducer dispatching to another cell",
+    files: app({
+      "src/toasts2.ts": `import { cell } from "aio";\n` +
+        `export const toasts2 = cell("toasts2", { state: { items: [] as string[] }, ` +
+        `methods: { add(s, t: string) { s.items = [...s.items, t]; } } });\n`,
+      "src/cell.ts": `import { cell } from "aio";\n` +
+        `import { toasts2 } from "./toasts2.ts";\n` +
+        `export const notes = cell("notes", { state: { items: [] as string[] }, scope: "client", ` +
+        `methods: { add(s, t: string) { s.items = [...s.items, t]; toasts2.add("added"); } } });\n`,
     }),
     expect: "REPLAYS on the client",
   },
@@ -1690,6 +1762,38 @@ const LEGAL: Clean[] = [
       ),
       "src/io.server.ts":
         `export const read = async () => (await Deno.readTextFile("/tmp/x")).length;\n`,
+    }),
+  },
+  {
+    // No semicolons: the callback search on `cache.set(id, 1)` ran past its
+    // `)` and the newline and found the `s.$do` arrow on the NEXT statement.
+    name: "a semicolon-free call followed by s.$do(() => s…) stores nothing",
+    forbid: "stores a callback that reads",
+    files: app({
+      "src/cell.ts": `import { cell } from "aio"\nconst cache = new Map()\n` +
+        `export const counter = cell("counter", { state: { count: 0 }, methods: {\n` +
+        `  add(s, id: string) {\n    cache.set(id, 1)\n    s.$do(() => console.log(s.count))\n  },\n} })\n`,
+    }),
+  },
+  {
+    name: "a local const that shadows a module binding is not an escape",
+    forbid: "stores `s` itself",
+    files: app({
+      "src/cell.ts":
+        `import { cell } from "aio";\nlet saved: unknown = null;\n` +
+        `export const counter = cell("counter", { state: { count: 0 }, methods: {\n` +
+        `  bump(s) { const saved = s; saved.count++; },\n} });\nexport { saved };\n`,
+    }),
+  },
+  {
+    // The boot refusal skips a cell with visible.forUser entirely.
+    name: "a credential-named field behind visible.forUser boots, so no lint",
+    forbid: "named like a credential",
+    files: app({
+      "src/cell.ts": cellFile(
+        "counter",
+        `{ state: { password: "", count: 0 }, visible: { forUser: (s) => ({ count: s.count }) }, methods: {} }`,
+      ),
     }),
   },
   {

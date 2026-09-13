@@ -46,12 +46,27 @@ import { homedir } from "./paths.ts";
 /** The directory that owns every app home — `AIO_APPS_DIR`, else `homedir()`.
  *  The containment check `am remove --data` runs before it deletes anything. */
 export function appsRoot(): string {
-  return Deno.env.get("AIO_APPS_DIR") ?? homedir();
+  return appsDirEnv() ?? homedir();
+}
+
+/** `AIO_APPS_DIR`, as ONE absolute, normalized path — or undefined when unset.
+ *
+ *  The raw value was used as typed, so two spellings of one directory were two
+ *  directories: `AIO_APPS_DIR=demo/../apps` and `AIO_APPS_DIR=apps` (or its
+ *  absolute form) put the same app's data in the same place — `join` happens
+ *  to normalize — but everything keyed on the STRING disagreed: the lock and
+ *  socket directory is named after it, so `am` in one shell could not find the
+ *  app another shell had started, and `appsRoot()` (the containment `am remove
+ *  --data` checks) was a `..`-laden path. A relative value also meant "relative
+ *  to whichever cwd asked". Every reader goes through here. */
+export function appsDirEnv(): string | undefined {
+  const raw = Deno.env.get("AIO_APPS_DIR");
+  return raw ? resolve(raw) : undefined;
 }
 
 export function appHome(appId: string, configured?: string): string {
   if (configured) return configured;
-  const root = Deno.env.get("AIO_APPS_DIR");
+  const root = appsDirEnv();
   if (root) return join(root, appId);
   return join(homedir(), `.${appId}`);
 }
@@ -270,11 +285,177 @@ export function resolveAppDirs(opts: {
   baseDir?: string;
 }): AppDirs {
   const { appId, appDir, libraryMode, baseDir } = opts;
-  return appDirs(
-    appId,
-    appDir ??
-      (libraryMode ? join(resolve(baseDir ?? Deno.cwd()), ".aio") : undefined),
-  );
+  const configured = appDir ??
+    (libraryMode ? join(resolve(baseDir ?? Deno.cwd()), ".aio") : undefined);
+  const dirs = appDirs(appId, configured);
+  // Only a DERIVED home is checked: an `appDir` is a path somebody wrote down
+  // on purpose, while `~/.<appId>` is a path the app's NAME picked for it.
+  if (configured === undefined) {
+    // Foreign first: when the directory exists, naming what is in it is the
+    // more convincing sentence. The reserved check covers the one it misses.
+    const refusal = foreignAppHomeError(appId, dirs.home) ??
+      reservedAppHomeError(appId, dirs.home);
+    if (refusal) throw new Error(refusal);
+  }
+  return dirs;
+}
+
+/** App names whose home would be somebody else's directory.
+ *
+ *  An app's data lives at `~/.<appId>`, so the NAME picks a directory in the
+ *  user's home. `am create aio` was accepted — and `~/.aio` is the framework's
+ *  own machine directory (the local CA in `ca/`, release keys in `keys/`), so
+ *  the app's first boot wrote its state beside the CA, and `am remove aio
+ *  --data` would take both. `am create ssh` is the same shape with `~/.ssh`.
+ *  The list is the dot-directories a machine is known to have for something
+ *  else; a new app refusing one of them costs a rename, while accepting one
+ *  mixes an app's deletable data into a directory that is not deletable. */
+export const RESERVED_APP_NAMES: ReadonlySet<string> = new Set([
+  "aio",
+  "ssh",
+  "gnupg",
+  "config",
+  "local",
+  "cache",
+  "pki",
+  "docker",
+  "kube",
+  "aws",
+  "azure",
+  "gcloud",
+  "mozilla",
+  "thunderbird",
+  "deno",
+  "npm",
+  "cargo",
+  "rustup",
+  "git",
+  "vscode",
+  "password-store",
+]);
+
+/** `null` when a DERIVED home may be `appId`'s, else the boot refusal for a
+ *  reserved name.
+ *
+ *  `foreignAppHomeError` catches a reserved directory that already holds
+ *  another program's files. It cannot catch one that does not exist YET:
+ *  `aio.run({ appId: "kube" })` on a machine without kubectl created
+ *  `~/.kube` and put `data/state.db` in it — and the first `kubectl config`
+ *  then writes the cluster credentials beside the app's deletable data. `am
+ *  create kube` has refused the name all along; the boot now agrees with it.
+ *
+ *  Only `~/.<name>` is reserved: under `AIO_APPS_DIR` the home is
+ *  `<root>/<name>`, which is nobody else's. An EXISTING app is never refused —
+ *  but "existing" means BOTH `data/` and `logs/` (every boot creates the pair
+ *  before it writes anything), not any one of aio's entry names: `~/.config`
+ *  or `~/.cache` holding a folder called `app` or `cache` is ordinary. */
+export function reservedAppHomeError(
+  appId: string,
+  home: string,
+): string | null {
+  if (!RESERVED_APP_NAMES.has(appId.toLowerCase())) return null;
+  if (appsDirEnv() !== undefined) return null;
+  let homeDir: string;
+  try {
+    homeDir = homedir();
+  } catch {
+    return null; // no $HOME: appHome() already failed louder than this could
+  }
+  if (resolve(home) !== join(resolve(homeDir), `.${appId}`)) return null;
+  const isDir = (p: string) => {
+    try {
+      return Deno.statSync(p).isDirectory;
+    } catch {
+      return false;
+    }
+  };
+  if (isDir(join(home, "data")) && isDir(join(home, "logs"))) return null;
+  return `app "${appId}" would keep its data in ${home}, and that name is ` +
+    `reserved: the directory belongs to ${
+      appId.toLowerCase() === "aio"
+        ? "aio itself (the machine CA and release keys)"
+        : "another program"
+    }, whether or not it exists yet. Booting would put the state database, ` +
+    `keys and logs where that program keeps its own files, so it is ` +
+    `refused.\n` +
+    `  fix: give the app its own id — aio.run({ appId: "<name>" }) or ` +
+    `"appId" in deno.json — or name its folder with aio.run({ appDir })`;
+}
+
+/** Every name aio itself puts directly under an app home — `AppDirs` plus
+ *  `am backup`'s `backups/`. A home holding any of them has been an aio app's. */
+const AIO_HOME_ENTRIES: ReadonlySet<string> = new Set([
+  "data",
+  "logs",
+  "cache",
+  "app",
+  "backups",
+  "launch.json",
+]);
+
+/** Files a desktop drops into ANY folder a person opens — Finder's view state,
+ *  Explorer's thumbnails and folder settings, Dolphin's. Lowercased: Windows
+ *  and macOS names are case-insensitive. They say someone looked at the
+ *  directory, not that another program keeps its files there: `mkdir
+ *  ~/apps/notes`, a glance in Finder, and the app's first boot was refused as
+ *  "not an aio app's: it holds .DS_Store". */
+const OS_FOLDER_LITTER: ReadonlySet<string> = new Set([
+  ".ds_store",
+  "._.ds_store",
+  ".localized",
+  "thumbs.db",
+  "ehthumbs.db",
+  "desktop.ini",
+  ".directory",
+]);
+
+/** `null` when `home` may be `appId`'s, else the boot refusal — cause and fix.
+ *
+ *  The home is derived from the NAME (`~/.<appId>`, or `$AIO_APPS_DIR/<appId>`),
+ *  so the name can pick a directory that already belongs to something else.
+ *  An app with appId `ssh` booted into `~/.ssh` and wrote `data/state.db`, the
+ *  control key and `logs/` beside `authorized_keys`, without a word — `am
+ *  create` refuses that name, but a hand-written `aio.run({ appId: "ssh" })`,
+ *  or an app with no appId inferring one from its deno.json, never passes
+ *  through `am create`.
+ *
+ *  So the check is structural rather than a list of names: a home that already
+ *  exists and holds entries, none of which aio writes, is another program's
+ *  directory whatever it is called (`~/.ssh`, `~/.gnupg`, `~/.vim`,
+ *  `/var/lib/dpkg`). An EXISTING app is never refused — every boot creates
+ *  `data/` and `logs/` before anything else is written — and neither is a
+ *  missing or empty home, where "empty" ignores {@link OS_FOLDER_LITTER}.
+ *  Unreadable is not evidence either way: the create step that follows
+ *  reports what actually failed. */
+export function foreignAppHomeError(
+  appId: string,
+  home: string,
+): string | null {
+  let entries: string[];
+  try {
+    if (!Deno.statSync(home).isDirectory) {
+      return `app "${appId}" would keep its data in ${home}, but that path ` +
+        `is a FILE, not an aio app's directory.\n` +
+        `  fix: give the app its own id — aio.run({ appId: "<name>" }) or ` +
+        `"appId" in deno.json — or name its folder with aio.run({ appDir })`;
+    }
+    entries = [...Deno.readDirSync(home)]
+      .map((e) => e.name)
+      .filter((n) => !OS_FOLDER_LITTER.has(n.toLowerCase()));
+  } catch {
+    return null; // absent (the normal first boot), or unreadable
+  }
+  if (entries.length === 0) return null;
+  if (entries.some((n) => AIO_HOME_ENTRIES.has(n))) return null;
+  const shown = entries.sort().slice(0, 3).join(", ") +
+    (entries.length > 3 ? `, …${entries.length - 3} more` : "");
+  return `app "${appId}" would keep its data in ${home}, but that directory ` +
+    `already exists and is not an aio app's: it holds ${shown}, and none of ` +
+    `aio's data/, logs/ or launch.json. Booting would write the state ` +
+    `database, keys and logs in among another program's files, so it is ` +
+    `refused.\n` +
+    `  fix: give the app its own id — aio.run({ appId: "<name>" }) or ` +
+    `"appId" in deno.json — or name its folder with aio.run({ appDir })`;
 }
 
 /** Create the directories an app needs, each locked to its owner.

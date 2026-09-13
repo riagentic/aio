@@ -99,6 +99,28 @@ export function buildRegistry(
     cellLastAction.delete(id);
   }
 
+  /** ONE decider for `cells.status(name)` and `health()[i].status`.
+   *
+   *  Both read `__aio_status`, a field only the removed `machine` API ever
+   *  wrote — so since its removal `status()` was `undefined` for every cell
+   *  and every health row had no status, while docs/state/lifecycle.md showed
+   *  `'idle' | 'saving' | 'error'`. What the type promises (`CellStatus.status`)
+   *  is the cell's OWN `status` field, the guard-line state machine
+   *  (`if (s.status !== "idle") return`) that replaced `machine` — so that is
+   *  what is read, when it is a string. A DISABLED cell says so, from both
+   *  entry points: health reported `"active"` beside `enabled: false` once,
+   *  two fields of the same row disagreeing about whether the framework had
+   *  just killed it, and `status()` must not disagree with `health()` either. */
+  function statusOf(
+    name: string,
+    state: Record<string, unknown>,
+  ): string | undefined {
+    if (disabledCells.has(name)) return "disabled";
+    const fs = state[name] as Record<string, unknown> | undefined;
+    const own = fs !== null && typeof fs === "object" ? fs.status : undefined;
+    return typeof own === "string" ? own : undefined;
+  }
+
   const registry: Registry = {
     enable: (
       name: string,
@@ -161,7 +183,14 @@ export function buildRegistry(
         return;
       }
       if (f) {
-        clearCell(f.__aio.id);
+        // The ERROR COUNT survives a disable. `clearCell` wipes it, and the
+        // breaker disables a cell BECAUSE of those errors — so the one moment
+        // an operator most needs the number was the moment it went to zero.
+        // Measured after a trip: `enabled: false` beside `errors: 0`, and
+        // `aio_cell_errors_total` — declared `# TYPE counter` — reset to 0,
+        // which is the counter-reset defect `server-metrics.ts` documents as
+        // fixed for the broadcast counters.
+        cellLastAction.delete(f.__aio.id);
         if (onCellDisable) onCellDisable(f.__aio.id);
       }
     },
@@ -171,19 +200,16 @@ export function buildRegistry(
     status: (
       name: string,
       state: Record<string, unknown>,
-    ): string | undefined => {
-      const fs = state[name] as Record<string, unknown> | undefined;
-      return fs?.__aio_status as string | undefined;
-    },
+    ): string | undefined => statusOf(name, state),
 
     health: (state: Record<string, unknown>): CellStatus[] => {
       return cells.map((f) => {
-        const fs = state[f.__aio.id] as Record<string, unknown> | undefined;
         const last = cellLastAction.get(f.__aio.id);
+        const off = disabledCells.has(f.__aio.id);
         return {
           name: f.__aio.id,
-          status: fs?.__aio_status as string | undefined,
-          enabled: !disabledCells.has(f.__aio.id),
+          status: statusOf(f.__aio.id, state),
+          enabled: !off,
           errors: (cellErrors.get(f.__aio.id) ?? []).length,
           lastAction: last?.type,
           lastActionAt: last?.at,
@@ -212,8 +238,16 @@ export function initAll(
   app: { dispatch: (a: Msg) => void; getState: () => unknown },
   reportError: ((err: AioError) => void) | undefined,
   countCellError: (name: string) => void,
+  /** Cells another ISOLATE owns. A `worker: true` cell composes on both sides
+   *  — main routes to it, the worker runs it — and both sides used to walk
+   *  this loop, so its `onInit` ran TWICE, on two threads. Measured: an
+   *  `onInit` that opens a device, seeds a table or starts a watcher did it
+   *  twice, once in each isolate, and the in-isolate harness could never see
+   *  it because there is no second isolate there. */
+  skip?: (cellId: string) => boolean,
 ): void {
   for (const f of cells) {
+    if (skip?.(f.__aio.id)) continue;
     app.dispatch(tagSource({ type: f.__aio.initType, payload: {} }, "System"));
     if (f.__aio.onInit) {
       const scopedApp: ScopedApp & { _onError?: (err: AioError) => void } = {
@@ -246,9 +280,12 @@ export function destroyAll(
   reportError: ((err: AioError) => void) | undefined,
   countCellError: (name: string) => void,
   clearCell: (id: string) => void,
+  /** Cells another isolate owns — see the note on `initAll`'s `skip`. */
+  skip?: (cellId: string) => boolean,
 ): void {
   for (let i = cells.length - 1; i >= 0; i--) {
     const f = cells[i]!;
+    if (skip?.(f.__aio.id)) continue;
     if (f.__aio.onDestroy) {
       const scopedApp: ScopedApp & { _onError?: (err: AioError) => void } = {
         _onError: reportError,

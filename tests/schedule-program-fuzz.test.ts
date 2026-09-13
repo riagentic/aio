@@ -153,6 +153,9 @@ function runReal(p: Program): Ev[] {
       for (const d of due) d.settle();
       await flush();
     }
+    // Ticks still slow at the end hold their call-ceiling timers; stopping the
+    // manager must clear them (the op sanitizer fails the test otherwise).
+    mgr.cancelAll();
     return evs;
   })() as unknown as Ev[];
 }

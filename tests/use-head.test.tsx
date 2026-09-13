@@ -8,6 +8,7 @@
 // warns), and one SSR render's head does not leak into the next.
 import { assert, assertEquals, assertStringIncludes } from "@std/assert";
 import { collectHead, renderToString, useHead } from "../src/air.ts";
+import { renderToStream } from "../src/air/ssr-stream.ts";
 import { _resetHead } from "../src/air/head.ts";
 import { signal } from "../src/state/signal.ts";
 import { testUI } from "../src/cell-test.ts";
@@ -177,4 +178,109 @@ Deno.test("useHead: outside a component render it is dropped, loudly in dev", ()
     warned[0]!,
     "useHead() called outside a component render",
   );
+});
+
+// ── A layout that re-renders must not take the page's head with it ────────
+//
+// `useHead` registers its cleanup in the component BODY, and a body cleanup
+// runs before every re-render as well as on unmount. Entries lived in a Map
+// keyed by instance and merged in INSERTION order, so a re-render deleted the
+// entry and re-added it — moving that owner to the end, where "later wins"
+// handed it the title. A layout re-rendering for a reason of its own (a theme
+// signal, an unread count) silently took the title, the description and the
+// canonical away from the page inside it, and kept them. SSR, one pass
+// outside-in, got it right, so the app disagreed with itself across
+// hydration.
+const unread = signal(0);
+
+function CountingLayout({ children }: { children?: unknown }) {
+  useHead({
+    title: "Layout",
+    meta: [{ name: "description", content: "layout desc" }],
+  });
+  return (
+    <div class="layout">
+      <span class="badge">{String(unread())}</span>
+      {children}
+    </div>
+  );
+}
+
+function PageWithHead() {
+  useHead({
+    title: "Page",
+    meta: [{ name: "description", content: "page desc" }],
+  });
+  return <p>page</p>;
+}
+
+function NestedApp() {
+  return (
+    <CountingLayout>
+      <PageWithHead />
+    </CountingLayout>
+  );
+}
+
+Deno.test("useHead: a layout re-render does not steal the page's head", async () => {
+  _resetHead();
+  unread.set(0);
+  await using ui = await testUI(NestedApp);
+  const doc = (globalThis as { document?: Document }).document!;
+  const desc = () =>
+    doc.head.querySelector('meta[name="description"]')?.getAttribute("content");
+  assertEquals(doc.title, "Page", "the innermost owner wins on mount");
+  assertEquals(desc(), "page desc");
+
+  // Only the LAYOUT re-renders: its own signal changed, the page's did not.
+  unread.set(1);
+  await ui.settle();
+  assertEquals(doc.title, "Page", "and still wins after the layout re-renders");
+  assertEquals(desc(), "page desc");
+
+  unread.set(2);
+  await ui.settle();
+  assertEquals(doc.title, "Page", "however many times it re-renders");
+});
+
+// ── The streamed page gets a head too ─────────────────────────────────────
+//
+// `_isSsrRendering()` was set only by `renderToString`. `renderToStream` is an
+// async generator, so it never marked SSR at all and `useHead` took the
+// CLIENT branch: a streamed page shipped with no title, no description and no
+// canonical — silently in production, and in dev with a warning that told the
+// author they had called `useHead` outside a component render when they had
+// not.
+Deno.test("useHead: renderToStream collects the head, like renderToString", async () => {
+  _resetHead();
+  let streamed = "";
+  const { renderToStream } = await import("../src/air/ssr-stream.ts");
+  const warn = console.warn;
+  const warnings: string[] = [];
+  console.warn = (...a: unknown[]) => void warnings.push(a.join(" "));
+  try {
+    for await (const chunk of renderToStream(<Post />)) streamed += chunk;
+  } finally {
+    console.warn = warn;
+  }
+  const head = collectHead();
+  assertStringIncludes(streamed, "<article>milk</article>");
+  assertStringIncludes(head, "<title>Milk — Notes</title>");
+  assertStringIncludes(head, 'content="the milk note"');
+  assertStringIncludes(head, 'href="https://notes.example/p/milk"');
+  assertEquals(warnings, [], "and it does not accuse the author of anything");
+
+  // The two renderers agree, which is the actual contract.
+  _resetHead();
+  renderToString(<Post />);
+  assertEquals(collectHead(), head);
+});
+
+Deno.test("useHead: a stream leaves SSR mode when it ends", async () => {
+  _resetHead();
+  for await (const _ of renderToStream(<Post />)) { /* drain */ }
+  // If the depth counter leaked, the next CLIENT render would take the SSR
+  // branch and write nothing to the document.
+  const { _isSsrRendering } = await import("../src/air/vdom-ssr.ts");
+  assert(!_isSsrRendering(), "SSR depth must be back to zero after a stream");
 });

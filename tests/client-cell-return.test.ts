@@ -138,7 +138,8 @@ Deno.test("client cell: returning an effect is refused, not silently dropped", (
 Deno.test("client cell: the effect twin agrees with the real guards", () => {
   const real = [
     schedule.after("a", 1, { type: "x" }),
-    schedule.every("b", 1, { type: "x" }),
+    // A REAL effect: the builder refuses a sub-floor period (<10ms) itself.
+    schedule.every("b", 10, { type: "x" }),
     own.set("c", () => {}),
     own.dispose("c"),
   ];

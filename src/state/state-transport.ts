@@ -193,8 +193,28 @@ export function send(action: { type: string; payload?: any }): boolean {
   const json = encodeAction(tagged);
 
   if (_transport) {
-    _transport.send(json);
-    return true;
+    try {
+      _transport.send(json);
+      return true;
+    } catch (e) {
+      // A socket can report OPEN and still refuse a write — a send buffer that
+      // is full, a connection closing underneath, `InvalidStateError` for a
+      // socket still in CONNECTING. The cell-method path
+      // (`browser-air-transport.ts`) queues for exactly this failure; this
+      // door threw instead, so the action was GONE: not queued, not acked, not
+      // retried. The throw surfaced inside whatever called it — for an
+      // Electron tray click that is a shell bridge callback, where nothing
+      // catches it — and `tray-actions.ts` says this path "dispatches it
+      // through the SAME door every button uses — acks, validation, the
+      // offline queue, all of it". This is the door; it queues now.
+      _offlineQueue.push(tagged);
+      log.warn(
+        `the transport refused a write while reporting connected (${
+          e instanceof Error ? e.message : String(e)
+        }) — "${action.type}" was QUEUED and replays on reconnect.`,
+      );
+      return true;
+    }
   }
   // Queue for later — the drop policy + diagnostics live in the shared queue.
   _offlineQueue.push(tagged);

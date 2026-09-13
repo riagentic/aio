@@ -25,7 +25,7 @@ import { appDirs, installRoot } from "./server/app-dirs.ts";
 import { BUILD_VERSION_ENV } from "./server/app-version.ts";
 import { forwardedToFleet, targetForFlags, TARGETS } from "./build-all.ts";
 import { keepInDistStaging } from "./build/dist-staging.ts";
-import { slugify } from "./server/single-instance-lock.ts";
+import { appIdFromConfig, slugify } from "./server/single-instance-lock.ts";
 import { ensureEmbeddedBundle, runBundle } from "./build/build-bundle.ts";
 import { buildClient } from "./build/build-client.ts";
 import { buildCli } from "./build/build-cli.ts";
@@ -263,7 +263,17 @@ if (import.meta.main) {
   }
   if (Deno.args.includes("--print-app-tmpdir")) {
     const cfg = await loadBuildConfig();
-    console.log(appDirs(slugify(cfg.binaryName)).app);
+    // The binary name is the app's id only when deno.json names no identity:
+    // a compiled binary resolves its embedded deno.json FIRST
+    // (`resolveAppId`), so `--name=relay` in a project titled `spapp` builds a
+    // binary called `relay` that runs as `spapp`. Answering with the binary
+    // name pointed the launcher at a directory the app never uses.
+    const declared = appIdFromConfig(
+      (await readDenoJson(cfg.root))?.config as
+        | { appId?: string; title?: string; name?: string }
+        | undefined,
+    );
+    console.log(appDirs(declared ?? slugify(cfg.binaryName)).app);
     Deno.exit(0);
   }
   // ── ONE BUILD PATH ──────────────────────────────────────────────────

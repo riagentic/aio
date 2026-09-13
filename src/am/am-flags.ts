@@ -87,7 +87,16 @@ export const VERB_FLAGS: Readonly<Record<string, readonly string[]>> = {
   status: [],
   instances: [],
   // State
-  state: [],
+  //
+  // `--watch` is DOCUMENTED (`am help`: "state <path> --watch    A line per
+  // CHANGE, not per poll — the loop you were about to write") and IMPLEMENTED
+  // (`am-cmd-state.ts` reads it, and has a whole comment about accepting it on
+  // either side of the path). It was simply absent here, so the central gate
+  // killed the command before it ran. The two tests around this table pin
+  // "every gated verb refuses --zzz" and "every verb appears" — neither can
+  // see a flag the COMMAND implements and the table omits. That direction is
+  // gated now too (tests/am-help-flags-are-accepted.test.ts).
+  state: ["--watch"],
   expect: [],
   record: ["--from"],
   timeline: ["--from"],
@@ -112,7 +121,19 @@ export const VERB_FLAGS: Readonly<Record<string, readonly string[]>> = {
   where: [],
   // `--pose` is NOT here: cmdShot refuses it by name with a better message,
   // and this list is what "shot takes:" prints. See RECOGNISED_NOT_OFFERED.
-  shot: ["--full", "--out"],
+  shot: [
+    "--full",
+    "--out",
+    // The visual-regression half of `shot`, advertised in `am help` and fully
+    // implemented in `am-cmd-shot.ts` — and unreachable from the CLI, because
+    // the gate refused all five before the command ran. `--update`/`--check`
+    // ARE the feature; without them `shot` is a screenshot button.
+    "--selector",
+    "--update",
+    "--check",
+    "--threshold",
+    "--max-diff",
+  ],
   eval: ["--window"],
   sql: [],
   tables: [],
@@ -155,6 +176,10 @@ export const VERB_FLAGS: Readonly<Record<string, readonly string[]>> = {
   version: [],
   trust: [],
   help: [],
+  // `--task=<slug>` one section, `--list` the section index. Gated (not
+  // passthrough) so a mistyped slug is refused with the real list rather
+  // than silently printing the whole brief.
+  agent: ["--task", "--list"],
 };
 
 /** The flag name in `--name=value` / `--name`. Non-flags return null, and so
@@ -202,6 +227,74 @@ export function unknownFlags(
     bad.push(name);
   }
   return bad;
+}
+
+/** Global flags only SOME verbs read — flag → the gated verbs that act on it.
+ *
+ *  `parseGlobalFlags` consumes every flag in {@linkcode GLOBAL_FLAGS} after
+ *  any verb, so the unknown-flag gate passes them all — and a verb that never
+ *  reads one did the default thing without a word: `am actions --lines=1`
+ *  printed the whole history, `am timeline --filter=zzzz` filtered nothing,
+ *  `am timeline --follow` returned at once, `am status --all` answered for
+ *  one app, `am sql --lines=1` ran unlimited. Each looks like a working flag
+ *  and is not.
+ *
+ *  The flags listed here are the ones whose meaning belongs to particular
+ *  verbs. Not listed (and so still accepted everywhere) are the flags that
+ *  really are cross-cutting (`--app --port --home --json --quiet --help
+ *  --wait --timeout --client-index --entry --force`) and the two that
+ *  steer a LAUNCH (`--no-wait --transport`), which a stop-then-start script
+ *  passes to its whole sequence. PASSTHROUGH verbs are never judged. */
+export const SCOPED_GLOBAL_FLAGS: Readonly<Record<string, readonly string[]>> =
+  {
+    "--all": ["stop", "help"],
+    "--filter": ["logs"],
+    "--follow": ["logs"],
+    "--lines": ["logs", "errors", "timeline", "actions"],
+    "--stale": ["kill"],
+    "--tables": ["sql"],
+    "--print": ["open"],
+    "--long": ["instances"],
+    "--ui": ["state"],
+    "--as-server": ["dispatch"],
+    "--body": ["dispatch"],
+    "--args": ["dispatch"],
+    "--data": ["remove"],
+  };
+
+/** The warning for a global flag this verb does not read, or null. Pure — the
+ *  caller prints it to stderr and runs the verb anyway (the flag was always
+ *  accepted, so refusing it now would break a working script).
+ *
+ *  `argv` is the RAW command line (`Deno.args`), not the leftover arguments
+ *  `unknownFlagError` reads: `parseGlobalFlags` has already consumed every
+ *  global flag out of those, which is exactly why this was invisible. */
+export function misplacedFlagError(
+  command: string,
+  argv: readonly string[],
+): string | null {
+  if (command in PASSTHROUGH || !(command in VERB_FLAGS)) return null;
+  const short: Record<string, string> = { "-f": "--follow", "-l": "--long" };
+  const bad: string[] = [];
+  for (const a of argv) {
+    if (a === "--") break;
+    const name = short[a] ?? flagName(a);
+    if (name === null) continue;
+    const readers = SCOPED_GLOBAL_FLAGS[name];
+    if (readers && !readers.includes(command) && !bad.includes(name)) {
+      bad.push(name);
+    }
+  }
+  if (bad.length === 0) return null;
+  return `am ${command}: ${bad.join(", ")} ${
+    bad.length === 1 ? "does" : "do"
+  } nothing for ${command} — ignored\n` +
+    bad.map((b) =>
+      `  ${b} is read by: ${
+        SCOPED_GLOBAL_FLAGS[b]!.map((v) => `am ${v}`).join(", ")
+      }`
+    ).join("\n") +
+    `\n  am help ${command}`;
 }
 
 /** Levenshtein distance, capped — for the did-you-mean only. */

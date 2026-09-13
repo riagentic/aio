@@ -15,11 +15,16 @@
 import { assert, assertEquals } from "@std/assert";
 import {
   _resetContrastAudit,
+  _setContrastCascadeProbe,
   auditContrast,
   canAuditContrast,
   over,
   parseRgb,
 } from "../src/air/contrast-audit.ts";
+import {
+  brokenCascadeProof,
+  contrastCascadeNotice,
+} from "../src/air/contrast-cascade.ts";
 import { setDevModeOverride } from "../src/state/dev-flag.ts";
 import { closeWindow } from "../src/testing/close-window.ts";
 
@@ -225,14 +230,67 @@ Deno.test("contrast: parseRgb accepts what an engine computes, and only that", (
   assertEquals(parseRgb("#0f1629"), { r: 15, g: 22, b: 41, a: 1 });
   assertEquals(parseRgb("#eee"), { r: 238, g: 238, b: 238, a: 1 });
   assertEquals(parseRgb("#00000080")!.a, 128 / 255);
-  // Never guessed: a keyword, a var(), a malformed hex or an empty string is
-  // "unknown", and an unknown colour must skip the element rather than be
-  // assumed black.
+  // hsl()/hsla() too, because the KIT writes one: `<Avatar>` colours its
+  // circle `hsl(${hueFor(name)}, 55%, 45%)`. A real browser normalises that
+  // to `rgb()` in a computed style; happy-dom hands back what was authored,
+  // and `testUI` runs on happy-dom — so the environment this project calls
+  // the strictest was the one that could not read it.
+  assertEquals(parseRgb("hsl(0,100%,50%)"), { r: 255, g: 0, b: 0, a: 1 });
+  assertEquals(parseRgb("hsl(275, 55%, 45%)"), {
+    r: 125,
+    g: 52,
+    b: 178,
+    a: 1,
+  });
+  assertEquals(parseRgb("hsla(120, 100%, 25%, 0.5)"), {
+    r: 0,
+    g: 128,
+    b: 0,
+    a: 0.5,
+  });
+  assertEquals(parseRgb("hsl(120deg 100% 25%)"), { r: 0, g: 128, b: 0, a: 1 });
+  // Never guessed: a named colour, a var(), a malformed hex, a colour space
+  // this does not read or an empty string is "unknown", and an unknown colour
+  // must skip the element rather than be assumed anything.
   for (
-    const bad of ["", "transparent", "#12345", "var(--x)", "hsl(1 2% 3%)"]
+    const bad of ["", "transparent", "#12345", "var(--x)", "rebeccapurple"]
   ) {
     assertEquals(parseRgb(bad), null, bad);
   }
+  assertEquals(parseRgb("oklch(.5 .2 300)"), null);
+});
+
+Deno.test("contrast: a background it CANNOT READ is not a white background", async () => {
+  // `parseRgb` answered null for "transparent" and for "I cannot read this"
+  // alike, so the climb walked straight past an opaque panel and landed on
+  // the white page fallback — and reported white-on-white, 1.00:1, in the
+  // framework's loudest dev channel, on markup the app author did not write.
+  // Measured on one colour in three spellings: rgb() silent, hsl() and the
+  // named form each a false alarm.
+  const unreadable = await inHappyDom(
+    ".root{background:rebeccapurple}.lab{color:#ffffff;font-size:14px}",
+    `<div class="root"><span class="lab">readable in any browser</span></div>`,
+  );
+  assertEquals(
+    unreadable.findings,
+    0,
+    `a background it cannot read must be skipped, not assumed white: ${
+      unreadable.warns.join(" | ")
+    }`,
+  );
+  // …and the audit is not deaf: a REAL violation on a background it CAN read
+  // still fires.
+  const real = await inHappyDom(
+    ".root{background:#ffffff}.lab{color:#eeeeee;font-size:14px}",
+    `<div class="root"><span class="lab">unreadable for real</span></div>`,
+  );
+  assert(real.findings > 0, "the audit must still report a real violation");
+  // …including one written in hsl(), which it can read now.
+  const viaHsl = await inHappyDom(
+    ".root{background:hsl(0,0%,100%)}.lab{color:hsl(0,0%,93%);font-size:14px}",
+    `<div class="root"><span class="lab">unreadable, in hsl</span></div>`,
+  );
+  assert(viaHsl.findings > 0, "hsl() is read, so a violation in it is found");
 });
 
 // ── The instrument, against a REAL engine ────────────────────────────────
@@ -291,4 +349,195 @@ Deno.test("contrast: over() composites alpha the way a compositor does", () => {
     over({ r: 255, g: 255, b: 255, a: 0.5 }, { r: 0, g: 0, b: 0, a: 1 }),
     { r: 127.5, g: 127.5, b: 127.5, a: 1 },
   );
+});
+
+// ── Report 9 §1: a cascade that is not a browser's ───────────────────────
+//
+// The walk stands down where the engine applies rules that do not match. The
+// testUI half lives in `contrast-audit-untrusted-cascade.test.ts`; these pin
+// that the proof CANNOT fire on a browser-faithful engine, which is the half a
+// happy-dom test cannot show.
+
+/** A style rule as a CSSOM engine exposes it. */
+function rule(selectorText: string, decls: Record<string, string>) {
+  const props = Object.keys(decls);
+  return {
+    constructor: { name: "CSSStyleRule" },
+    selectorText,
+    style: Object.assign({ ...props }, {
+      length: props.length,
+      getPropertyValue: (p: string) => decls[p] ?? "",
+    }),
+  };
+}
+function group(name: string, rules: unknown[]) {
+  return { constructor: { name }, cssRules: rules };
+}
+
+/** A document whose root matches `rootMatches` and computes `computedRoot` —
+ *  the answers a real browser gives, written out by hand per case. */
+function browserDoc(
+  rules: unknown[],
+  rootMatches: (sel: string) => boolean,
+  computedRoot: Record<string, string>,
+  inline: Record<string, string> = {},
+) {
+  const html = {
+    tagName: "HTML",
+    matches: rootMatches,
+    style: { getPropertyValue: (p: string) => inline[p] ?? "" },
+  };
+  const win = {
+    getComputedStyle: (e: unknown) => ({
+      getPropertyValue: (p: string) => e === html ? computedRoot[p] ?? "" : "",
+    }),
+  };
+  const doc = {
+    defaultView: win,
+    documentElement: html,
+    styleSheets: [{ cssRules: rules }],
+  };
+  const el = { ownerDocument: doc, tagName: "DIV" } as unknown as Element;
+  return el;
+}
+const onlyRoot = (sel: string) => sel === ":root";
+
+Deno.test("contrast cascade: a browser's answer to two palettes is not a proof", () => {
+  _setContrastCascadeProbe(contrastCascadeNotice);
+  const el = browserDoc(
+    [
+      rule(":root", { "--accent": "#e07a58" }),
+      rule(':root[data-palette="contrast"]', { "--accent": "#4a5b78" }),
+    ],
+    onlyRoot,
+    { "--accent": "#e07a58" }, // the matching rule won, as it must
+  );
+  assertEquals(brokenCascadeProof(el), null);
+  assert(canAuditContrast(el), "a real browser keeps its audit");
+});
+
+Deno.test("contrast cascade: the engine that applied the non-matching palette is caught", () => {
+  _setContrastCascadeProbe(contrastCascadeNotice);
+  const el = browserDoc(
+    [
+      rule(":root", { "--accent": "#e07a58" }),
+      rule(':root[data-palette="contrast"]', { "--accent": "#4a5b78" }),
+    ],
+    onlyRoot,
+    { "--accent": "#4a5b78" },
+  );
+  assertEquals(brokenCascadeProof(el), {
+    prop: "--accent",
+    value: "#4a5b78",
+    selector: ':root[data-palette="contrast"]',
+  });
+  assertEquals(canAuditContrast(el), false);
+});
+
+Deno.test("contrast cascade: every legitimate coincidence stays 'trustworthy'", () => {
+  const contrastLast = rule('[data-palette="contrast"]', { "--x": "#000" });
+  // The matching value goes through var() — its text is not its value.
+  assertEquals(
+    brokenCascadeProof(browserDoc(
+      [rule(":root", { "--x": "var(--y)", "--y": "#000" }), contrastLast],
+      onlyRoot,
+      { "--x": "#000", "--y": "#000" },
+    )),
+    null,
+    "var() indirection",
+  );
+  // The matching value that won sits under @media — the scan cannot know
+  // whether it applies, so it does not claim.
+  assertEquals(
+    brokenCascadeProof(browserDoc(
+      [
+        rule(":root", { "--x": "#fff" }),
+        group("CSSMediaRule", [rule(":root", { "--x": "#000" })]),
+        contrastLast,
+      ],
+      onlyRoot,
+      { "--x": "#000" },
+    )),
+    null,
+    "@media",
+  );
+  // An inline declaration on the root wins over every sheet.
+  assertEquals(
+    brokenCascadeProof(browserDoc(
+      [rule(":root", { "--x": "#fff" }), contrastLast],
+      onlyRoot,
+      { "--x": "#000" },
+      { "--x": "#000" },
+    )),
+    null,
+    "inline style",
+  );
+  // A registered property has an initial value no declaration shows.
+  assertEquals(
+    brokenCascadeProof(browserDoc(
+      [
+        { constructor: { name: "CSSPropertyRule" }, name: "--x" },
+        rule(":root", { "--x": "#fff" }),
+        contrastLast,
+      ],
+      onlyRoot,
+      { "--x": "#000" },
+    )),
+    null,
+    "@property",
+  );
+  // A sheet it cannot read may hold the declaration that won.
+  const el = browserDoc(
+    [rule(":root", { "--x": "#fff" }), contrastLast],
+    onlyRoot,
+    { "--x": "#000" },
+  );
+  const doc = (el as unknown as { ownerDocument: { styleSheets: unknown[] } })
+    .ownerDocument;
+  doc.styleSheets.push({
+    get cssRules(): never {
+      throw new DOMException("cross-origin", "SecurityError");
+    },
+  });
+  assertEquals(brokenCascadeProof(el), null, "cross-origin sheet");
+  // …and `@layer` changes order, not applicability, so it still proves.
+  assert(
+    brokenCascadeProof(browserDoc(
+      [
+        group("CSSLayerBlockRule", [rule(":root", { "--x": "#fff" })]),
+        contrastLast,
+      ],
+      onlyRoot,
+      { "--x": "#000" },
+    )) !== null,
+    "@layer",
+  );
+});
+
+Deno.test("contrast cascade: in a real happy-dom window the walk stands down once, loudly", async () => {
+  // What `testUI`/`testComponent` install on every mount.
+  _setContrastCascadeProbe(contrastCascadeNotice);
+  _resetContrastAudit({ cascadeNotice: true });
+  const css = ":root{--ink:#eeeeee;--bg:#111111}" +
+    ':root[data-palette="light"]{--ink:#111111;--bg:#ffffff}' +
+    ':root[data-palette="print"]{--ink:#ffffff;--bg:#ffffff}' +
+    ".root{background-color:var(--bg);color:var(--ink)}";
+  const first = await inHappyDom(css, `<div class="root"><span>x</span></div>`);
+  assertEquals(first.findings, 0, first.warns.join("\n"));
+  assertEquals(first.warns.length, 1, first.warns.join("\n"));
+  assert(
+    first.warns[0]!.includes("colours could not be resolved here"),
+    first.warns[0],
+  );
+  // Said once: the same engine answers the same way on the next pass.
+  const again = await inHappyDom(css, `<div class="root"><span>x</span></div>`);
+  assertEquals(again.warns, []);
+  // A single palette leaves nothing to disprove, and the walk still measures.
+  const single = await inHappyDom(
+    ":root{--ink:#eeeeee;--bg:#ffffff}" +
+      ".root{background-color:var(--bg);color:var(--ink)}",
+    `<div class="root"><span>x</span></div>`,
+  );
+  assertEquals(single.findings, 1, single.warns.join("\n"));
+  _setContrastCascadeProbe(null);
 });

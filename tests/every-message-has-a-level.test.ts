@@ -215,6 +215,10 @@ Deno.test("output: no logger call is buried in generated code", async () => {
       if (!text.includes("log.") || !text.includes("`")) continue;
       for (const [start, end] of templateSpans(text)) {
         const seg = text.slice(start, end);
+        // A template that imports `log` from "aio" itself (an app snippet
+        // `am agent` prints and its truth test runs) has a `log` wherever it
+        // executes — that is the one shape this rule cannot be about.
+        if (/import\s*\{[^}]*\blog\b[^}]*\}\s*from\s*"aio"/.test(seg)) continue;
         if (/(?<![\w.])log\.(warn|error|info|debug|trace)\s*\(/.test(seg)) {
           offenders.push(
             `${path.slice(REPO.length + 1)}:${

@@ -6,6 +6,10 @@
 
 import { aio } from "../server/aio.ts";
 import { _armTestStrict } from "./test-strict.ts";
+import {
+  _isolateWorkerCellsInProcess,
+  _refuseWorkerCells,
+} from "./boot-refusals.ts";
 import { testDisplayEnv } from "./test-display.ts";
 import { dropTempDir, tempDir } from "./temp-dir.ts";
 import type { AioApp, CellsConfig } from "../server/aio-types.ts";
@@ -150,6 +154,11 @@ export async function testServer<S = unknown>(
   // Before anything is allocated — a misconfigured harness must not leave a
   // temp directory behind on its way to throwing.
   const workerEntryUrl = resolveWorkerMode(config);
+  // `aio.run()` validates the worker cells it gets — after it has dropped the
+  // client-scoped ones, so `worker: true` + `scope: "client"` is caught here.
+  _refuseWorkerCells(
+    (config.cells ?? []).map((e) => ("__aio" in e ? e : e.cell)),
+  );
   // Harness-only keys: they must not reach aio.run(), which rejects an unknown
   // config key by design.
   const { workers: _w, workerEntry: _we, ...runConfig } = config;
@@ -176,9 +185,18 @@ export async function testServer<S = unknown>(
     if (madeDir) await dropTempDir(baseDir);
     throw e;
   }
+  // In-isolate worker cells refuse what their real thread refuses (a peer
+  // read, any method call) — see boot-refusals.ts. Real workers need nothing.
+  const unisolate = workerEntryUrl
+    ? () => {}
+    : _isolateWorkerCellsInProcess(config.cells ?? []);
   const url = `http://127.0.0.1:${port}`;
   const close = async () => {
-    await app.close();
+    try {
+      await app.close();
+    } finally {
+      unisolate();
+    }
     if (madeDir) {
       // The logger is a process-wide singleton pointed at THIS app's baseDir.
       // Deleting the directory under it leaves every later write failing into a

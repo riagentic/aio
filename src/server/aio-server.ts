@@ -31,7 +31,11 @@ import {
 import { cellAccessAllowed } from "./server-auth.ts";
 import type { Access } from "../state/cell-types.ts";
 import { createAioError } from "../diagnostics/error.ts";
-import { budgetReport, measureCellStates } from "../state/budgets.ts";
+import {
+  _bindBudgetOwner,
+  type BudgetLedger,
+  budgetsFor,
+} from "../state/budgets.ts";
 
 /** The slice of `AioConfig` the transport layer reads — HOP 2 of the config
  *  bridge (`aio.run({…})` → `setupTransport`).
@@ -121,6 +125,9 @@ export interface ServerSetupDeps<S, A> {
   /** AUTH-2: login-flow deps (users/sessions stores + policy) — the TLS-aware
    *  `secure` cookie flag is added here, where the cert is resolved. */
   authFlows?: Omit<import("./auth-flows.ts").AuthFlows, "secure">;
+  /** Every source of "this socket's user is not who it was" — see the field of
+   *  the same name on `ServerConfig`. Passed straight through. */
+  onIdentityChange?: (fn: () => void) => () => void;
   cliCert?: string;
   cliKey?: string;
   /** `--no-tls`: serve `--expose` over plain HTTP/WS. Everything downstream is
@@ -194,6 +201,9 @@ export interface ServerSetupDeps<S, A> {
    *  on the very cell that was not reaching disk, so an uptime monitor stayed
    *  green through unbounded data loss. The same value `am persist` reads. */
   lastPersistError?: () => Error | null;
+  /** THIS app's declared budgets and breach ledger (`setBudgets` at boot).
+   *  Absent ⇒ the latest boot's — a caller with no app of its own. */
+  budgets?: BudgetLedger;
   shouldPersist: boolean;
   // Schedule + DB
   scheduleManager: { active: () => string[] };
@@ -356,6 +366,7 @@ export async function setupTransport<S, A>(
     resolveUser,
     sessionResolver,
     authFlows,
+    onIdentityChange,
     cliCert,
     cliKey,
     cliNoTls,
@@ -384,6 +395,22 @@ export async function setupTransport<S, A>(
     clientCounter,
     log,
   } = deps;
+
+  // Per APP, not per process. Uptime read `globalThis.__aioStartedAt`, which
+  // every boot overwrites — a second app starting reset the first app's
+  // `/health` uptime to 0. The budget ledger is this app's for the same reason
+  // (`BudgetLedger`), and the broadcasters' `getUIState` below is the identity
+  // `warnBigFullState` records breaches under, so each is bound to it.
+  const _startedAt = Date.now();
+  const _budgets = deps.budgets ?? budgetsFor();
+  const _measureAndReportBudgets = () => {
+    _budgets.measureCellStates(getState());
+    return _budgets.report();
+  };
+  const _wsUIState = (user?: AioUser) => getUIState(getState(), user);
+  const _udsUIState = () => getUIState(getState());
+  _bindBudgetOwner(_wsUIState, _budgets);
+  _bindBudgetOwner(_udsUIState, _budgets);
 
   // THE bind-address decider, resolved once: the operator's flag wins over the
   // author's config, and the expose-derived default fills in. Everything that
@@ -586,9 +613,13 @@ export async function setupTransport<S, A>(
         }
       }
     }
-    const tagged = user
-      ? { ...(action as Record<string, unknown>), _user: user }
-      : action;
+    // Tag IN PLACE, never a copy: the transport looks its refusal up by the
+    // frame object it parsed (`_dispatchRefusal(parsed)`), so a copy recorded
+    // every per-user refusal (unknown cell, validate, disabled cell) against an
+    // object nobody asked about, and the caller was acked `ok`. The action is
+    // always a freshly parsed network object, already sanitized in place.
+    if (user) (action as Record<string, unknown>)._user = user;
+    const tagged = action;
     // Return-value transport: an ASYNC method carries `_callId`; the executor
     // resolves that id with the method's RETURN value when it completes.
     // Register the call and return THAT promise, so an awaiting caller
@@ -610,8 +641,21 @@ export async function setupTransport<S, A>(
     const asyncMethods = deps.cellAsyncMethods ?? {};
     const cellId = type.includes(":") ? type.slice(0, type.indexOf(":")) : "";
     const methodName = type.slice(cellId.length + 1);
+    // `Object.hasOwn`, not a bare index — `cellId` is the client's half of
+    // `action.type`, and a plain object answers for the whole prototype
+    // chain. `{"t":"action","d":{"type":"constructor:inc"}}` resolved to
+    // `Function`, `?? []` did not fire (a function is not nullish), and
+    // `.includes` threw a TypeError out of THIS function: no ack was ever
+    // sent, so the caller's `await cell.method()` hung to its ceiling, and
+    // the throw was swallowed into `degraded("ws:message")`, which escalates
+    // after five. Six unauthenticated frames — a default app is public,
+    // `--expose` included — permanently marked `/__aio/health` as degraded,
+    // which is what a readiness probe, a load balancer and `am` all read.
+    // `cell()` already refuses `constructor`/`prototype`/`__proto__` as cell
+    // NAMES; the dispatch-side lookup is the other half of that guard.
     if (
-      cellId && (asyncMethods[cellId] ?? []).includes(methodName)
+      cellId && Object.hasOwn(asyncMethods, cellId) &&
+      (asyncMethods[cellId] ?? []).includes(methodName)
     ) {
       const pl = (tagged as { payload?: Record<string, unknown> }).payload;
       const stamped = { ...(pl ?? {}), _callId: crypto.randomUUID() };
@@ -686,7 +730,7 @@ export async function setupTransport<S, A>(
       costMeter,
       width: ui.width,
       height: ui.height,
-      getUIState: (user?: AioUser) => getUIState(getState(), user),
+      getUIState: _wsUIState,
       dispatch: dispatchNetwork,
       // The SERVER-origin path, for `am dispatch --as-server` — the operator
       // escape hatch for a cell whose `access` rule (correctly) refuses every
@@ -712,6 +756,7 @@ export async function setupTransport<S, A>(
       users,
       resolveUser,
       sessionResolver,
+      onIdentityChange,
       authFlows: authFlows
         ? { ...authFlows, secure: !!tlsCert?.cert }
         : undefined,
@@ -778,15 +823,11 @@ export async function setupTransport<S, A>(
       getHealth: () => {
         const composed = (globalThis as Record<string, unknown>)
           .__aioCells as ComposedCells | undefined;
-        const uptime = Math.round(
-          (Date.now() -
-            ((globalThis as Record<string, unknown>).__aioStartedAt as number ??
-              Date.now())) / 1000,
-        );
+        const uptime = Math.round((Date.now() - _startedAt) / 1000);
         // ONE document, built once. This used to be two near-identical object
         // literals (with and without `cells`), which is how a signal added to
         // the health endpoint reaches one caller and not the other.
-        const cellsHealth = composed
+        const cellsHealth: Record<string, unknown> | null = composed
           ? Object.fromEntries(
             composed.registry.health(getState() as Record<string, unknown>)
               .map((fs) => [fs.name, {
@@ -818,8 +859,7 @@ export async function setupTransport<S, A>(
         // client connected never broadcasts, and would otherwise report a
         // budget it had never once measured. Costs nothing when none is
         // declared.
-        measureCellStates(getState());
-        const budgets = budgetReport();
+        const budgets = _measureAndReportBudgets();
         const persistErr = deps.lastPersistError?.() ?? null;
         const persist = persistErr
           ? {
@@ -830,9 +870,19 @@ export async function setupTransport<S, A>(
             error: String(persistErr.message ?? persistErr).split("\n")[0],
           }
           : { ok: true };
+        // A cell the framework DISABLED is a degraded app. The verdict read
+        // degraded trackers, persist and budgets — never `enabled` — so a
+        // circuit-breaker trip left the one field a monitor alerts on saying
+        // "healthy" while the cell it had just killed sat in the same
+        // response. Three surfaces, one fact, two answers.
+        const disabledCells = cellsHealth
+          ? Object.entries(cellsHealth).filter(([, c]) =>
+            (c as { enabled?: boolean }).enabled === false
+          ).map(([n]) => n)
+          : [];
         return {
           status: dead.length > 0 || clientDead.length > 0 || persistErr ||
-              budgets?.ok === false
+              budgets?.ok === false || disabledCells.length > 0
             ? "degraded"
             : "healthy",
           version: VERSION,
@@ -934,7 +984,7 @@ export async function setupTransport<S, A>(
     const socketPath = resolveSocketPath(appId);
     uds = createUDSListener(
       socketPath,
-      () => getUIState(getState()),
+      _udsUIState,
       (action) => dispatchNetwork(action),
       (msg: string) => log.debug(msg),
       clientCounter,

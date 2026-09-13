@@ -19,7 +19,7 @@
 // db suite green. The third is the one that needed a test most — the guard
 // looked correct while comparing raw JS values, which is exactly the mistake
 // it was written to catch.
-import { assertThrows } from "@std/assert";
+import { assertEquals, assertThrows } from "@std/assert";
 import { planTables } from "../src/db/state-sync.ts";
 import { integer, pk, table, text } from "../src/server/sql.ts";
 import type { TableDef } from "../src/server/sql.ts";
@@ -94,4 +94,68 @@ Deno.test("db rows: distinct pks still plan cleanly", () => {
   if (stmts.length !== 3) {
     throw new Error(`expected 3 inserts, got ${stmts.length}`);
   }
+});
+
+// ── an integer the READ side can never load back ────────────────────────────
+//
+// SQLite stores 64-bit integers; `node:sqlite` hands them back as JavaScript
+// numbers. So one row beyond ±2^53 makes EVERY read of that table fail —
+// `loadTables` says exactly that, in detail, at boot. The write side said
+// nothing: the value was accepted with no error, the app ran happily for the
+// rest of its life, and the NEXT restart refused to boot, recoverable only by
+// hand-editing the database.
+//
+// Measured before the fix: `add({ amount: 2 ** 60 })` reported no error, the
+// row landed, and the second boot answered
+//   db: reading table "rows" failed on column "amount" — Value is too large
+//   to be represented as a JavaScript number: 1152921504606846976
+//
+// Lamport slots, satoshi totals, nanosecond timestamps and snowflake ids are
+// all past 2^53 and all ordinary in state, so this is a shape a real app
+// reaches by accident.
+Deno.test("db rows: an integer beyond ±2^53 is refused at WRITE, not at the next boot", () => {
+  assertThrows(
+    () => plan([{ id: 1, title: "big", n: 2 ** 60 }]),
+    Error,
+    "beyond ±2^53",
+  );
+  assertThrows(
+    () => plan([{ id: 1, title: "neg", n: -(2 ** 60) }]),
+    Error,
+    "beyond ±2^53",
+  );
+  // A bigint is bindable, and breaks the read exactly the same way.
+  assertThrows(
+    () => plan([{ id: 1, title: "big", n: 1152921504606846976n }]),
+    Error,
+    "beyond ±2^53",
+  );
+  // The message must say what to do instead — this is the one chance to say it.
+  assertThrows(
+    () => plan([{ id: 1, title: "big", n: 2 ** 60 }]),
+    Error,
+    "Store it as TEXT",
+  );
+});
+
+Deno.test("db rows: ordinary integers, and the boundary itself, still pass", () => {
+  // Everything a real app actually stores, including both ends of the safe
+  // range — a guard that refused MAX_SAFE_INTEGER would be its own defect.
+  const out = plan([
+    { id: 1, title: "zero", n: 0 },
+    { id: 2, title: "neg", n: -42 },
+    { id: 3, title: "ms", n: 1789000000000 },
+    { id: 4, title: "max", n: Number.MAX_SAFE_INTEGER },
+    { id: 5, title: "min", n: Number.MIN_SAFE_INTEGER },
+    { id: 6, title: "bigint", n: 9007199254740991n },
+    // …and a REAL in an INT-affinity column is not an integer question.
+    { id: 7, title: "fraction", n: 1.5 },
+  ]);
+  // Seven rows in, seven statements out: the guard let every one through
+  // rather than quietly planning fewer than it was given.
+  assertEquals(
+    out.length,
+    7,
+    `every ordinary row must still be planned, got ${out.length}`,
+  );
 });

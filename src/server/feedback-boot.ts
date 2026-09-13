@@ -6,16 +6,22 @@
 // the same contents, the same redaction and the same caps as one somebody
 // typed, because a maintainer should not have two formats to read.
 import type { Log } from "../diagnostics/logger-api.ts";
-import { diagSubscribe } from "../diagnostics/diagnostic-bus.ts";
+import {
+  _diagEventScope,
+  _diagScopeNow,
+  diagSubscribe,
+} from "../diagnostics/diagnostic-bus.ts";
 import type { Redactor } from "../diagnostics/redact.ts";
 // Type-only: the cell module self-registers on import, so the VALUE import
 // happens dynamically in startFeedback — an app that never configured feedback
 // must not carry a feedback cell.
 import type {
   FeedbackRuntime,
+  FeedbackSlot,
   SubmittedReport,
 } from "../state/feedback-cell.ts";
 import {
+  _installFeedbackRuntimeIn,
   createFeedbackCell,
   installFeedbackRuntime,
 } from "../state/feedback-cell.ts";
@@ -95,6 +101,9 @@ export type StartFeedbackDeps = {
   sources: ReportSources;
   log: Log;
   redact?: Redactor;
+  /** Which app's `feedback` cell and runtime this is (`_feedbackForApp`).
+   *  Absent ⇒ the process slot. */
+  slot?: FeedbackSlot;
 };
 
 export type StartedFeedback = ResolvedFeedback & { stop: () => void };
@@ -145,13 +154,20 @@ export function _createSeenKeys(limit: number = _SEEN_LIMIT): {
 // could not finish module evaluation otherwise) and the `async` stayed behind,
 // leaving a function that promised to be awaited for no reason. Callers already
 // `await` it, which is unchanged either way.
-let _pendingBegin: (() => void) | null = null;
+//
+// Armed PER SLOT. It was one module-level slot, so two apps booting at once
+// overwrote each other's: the first `beginFeedback()` fired the SECOND app's
+// `refresh()` (before that app had bound its cell) and the second fired
+// nothing — one app's `feedback.enabled` stayed false for its whole life.
+// `null` is the key of a caller that passed no slot (the process cell).
+const _pendingBegin = new Map<FeedbackSlot | null, () => void>();
 
-/** Fire the boot-time `refresh()` armed by `startFeedback` — after cells are
- *  bound, never before (dispatching before binding throws). */
-export function beginFeedback(): void {
-  const begin = _pendingBegin;
-  _pendingBegin = null;
+/** Fire the boot-time `refresh()` armed by `startFeedback` for `slot` — after
+ *  its cells are bound, never before (dispatching before binding throws). */
+export function beginFeedback(slot?: FeedbackSlot): void {
+  const key = slot ?? null;
+  const begin = _pendingBegin.get(key);
+  _pendingBegin.delete(key);
   begin?.();
 }
 
@@ -215,15 +231,17 @@ export function startFeedback(deps: StartFeedbackDeps): StartedFeedback {
 
   // Static — see the note in updates-boot.ts: a dynamic import from inside the
   // call an app top-level-awaits can leave module evaluation unable to finish.
-  installFeedbackRuntime(runtime);
+  if (deps.slot) _installFeedbackRuntimeIn(deps.slot, runtime);
+  else installFeedbackRuntime(runtime);
   // The cell learns it is configured through one `refresh()` — which cannot
   // run HERE (methods bind after the server is up); armed now, fired by
   // `beginFeedback()` once binding is done. Same shape as `beginUpdates`.
-  _pendingBegin = () => {
-    void createFeedbackCell().refresh().catch((e) =>
+  const beginKey = deps.slot ?? null;
+  _pendingBegin.set(beginKey, () => {
+    void (deps.slot?.cell ?? createFeedbackCell()).refresh().catch((e) =>
       log.warn("feedback", `refresh at boot failed: ${e}`)
     );
-  };
+  });
 
   // Automatic capture. Deduped by message so one repeating fault produces one
   // report, not one per occurrence.
@@ -232,9 +250,17 @@ export function startFeedback(deps: StartFeedbackDeps): StartedFeedback {
   const seen = _createSeenKeys();
   let unsubscribe: (() => void) | null = null;
 
+  // THIS app's events only. The bus is one per process, and a second app's
+  // crash was filed here — titled with its error, carrying THIS app's state.
+  // `startFeedback` runs inside the app's boot, so the scope now is the app's;
+  // an event emitted outside any app has no scope and stays everyone's.
+  const ownScope = _diagScopeNow();
+
   if (cfg.auto) {
     unsubscribe = diagSubscribe((event) => {
       if (String(event.severity) !== "error") return;
+      const from = _diagEventScope(event);
+      if (from !== undefined && from !== ownScope) return;
       const key = `${event.type}:${String(event.message).slice(0, 200)}`;
       if (seen.has(key)) return;
       seen.add(key); // bounded — see _createSeenKeys
@@ -264,6 +290,7 @@ export function startFeedback(deps: StartFeedbackDeps): StartedFeedback {
     stop: () => {
       unsubscribe?.();
       unsubscribe = null;
+      _pendingBegin.delete(beginKey);
     },
   };
 }

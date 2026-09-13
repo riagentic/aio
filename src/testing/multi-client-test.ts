@@ -30,6 +30,7 @@
 import { dec } from "../protocol/envelope.ts";
 import { connectCli } from "../server/cli-client.ts";
 import type { CliApp } from "../server/cli-client.ts";
+import { composeCellsWiring } from "../server/aio-composition.ts";
 import { _armTestStrict } from "./test-strict.ts";
 import { testServer, type TestServerConfig } from "./server-test.ts";
 
@@ -173,7 +174,8 @@ export interface TestMultiClient {
   clients: TestClient[];
   /** Server-authoritative state — the truth every client should converge on. */
   serverState<T = Record<string, unknown>>(cell?: string): T;
-  /** Wait until every client's state deep-equals the server's.
+  /** Wait until every client's state deep-equals the server's — as the
+   *  server sends it, through the cells' visibility filters.
    *  Throws naming the first divergent client and cell, so a failure says which
    *  surface fell behind rather than "timeout". */
   converged(opts?: { timeoutMs?: number }): Promise<void>;
@@ -454,6 +456,23 @@ export async function testMultiClient(
     return (cell === undefined ? s : s[cell]) as T;
   };
 
+  /** What the server SENDS a client — its state through the same visibility
+   *  filters the broadcast applies (`visible.include/exclude`, dot paths,
+   *  `"none"`), composed once from the cells this app booted with, exactly as
+   *  `aio.run()` composes them. Every client here is anonymous, so the view is
+   *  the no-user one. `converged()` used to compare each client with the RAW
+   *  server slice, and a cell with a field-level `exclude` could never match:
+   *  the harness failed an app that had converged perfectly. */
+  const { autoGetUIState } = composeCellsWiring({
+    cellEntries: config.cells ?? [],
+    cellDefaults: config.cellDefaults,
+    localFirst: config.localFirst,
+  });
+  const sentState = (): Record<string, unknown> =>
+    (autoGetUIState
+      ? autoGetUIState(srv.app.getState())
+      : srv.app.getState()) as Record<string, unknown>;
+
   const converged = async (
     opts?: { timeoutMs?: number; settleMs?: number },
   ): Promise<void> => {
@@ -484,18 +503,19 @@ export async function testMultiClient(
         await sleep(5);
         continue;
       }
-      const server = srv.app.getState() as Record<string, unknown>;
+      const server = sentState();
       let allMatch = true;
       for (const c of clients) {
         const mine = c.fullState();
-        // A client legitimately holds a SUBSET (ui.exclude, per-user filtering),
-        // so compare the cells it actually has rather than the whole object.
+        // Against the FILTERED view, per cell the client holds: a cell that
+        // `visible: "none"` hides is absent from both, and a subscription can
+        // narrow a client to fewer cells than the server sends.
         for (const cell of Object.keys(mine)) {
           if (canon(mine[cell]) !== canon(server[cell])) {
             allMatch = false;
             lastDiff = `client ${c.index}, cell "${cell}":\n` +
               `  client: ${canon(mine[cell]).slice(0, 300)}\n` +
-              `  server: ${canon(server[cell]).slice(0, 300)}`;
+              `  server (as sent): ${canon(server[cell]).slice(0, 300)}`;
             break;
           }
         }

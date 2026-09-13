@@ -11,6 +11,10 @@ export function compareHLC(a: HLC, b: HLC): number {
   return a[2] < b[2] ? -1 : a[2] > b[2] ? 1 : 0;
 }
 
+/** The largest HLC counter a clock will follow from a peer — see `receive`.
+ *  @internal */
+export const MAX_HLC_COUNTER = 2 ** 31;
+
 /**
  * Mutable hybrid logical clock instance bound to a node ID.
 
@@ -62,6 +66,19 @@ export function createHLC(
       // causal ordering for all subsequent ops. `isDriftExceeded` was dead
       // code; wiring it here closes the documented drift-tolerance contract.
       if (this.isDriftExceeded(remote)) {
+        return;
+      }
+      // …and a counter no real clock can reach. Following one poisons the
+      // clock for the whole drift window, and past 2^53 it stops ticking at
+      // all: `counter++` on 1e300 is 1e300, so every HLC this node issues
+      // until the wall clock passes the remote's is IDENTICAL — ordering by
+      // HLC becomes ordering by nothing. A counter only grows within one
+      // millisecond (or while a peer's clock is ahead, at most `maxDrift`), so
+      // a legitimate one is nowhere near this bound.
+      if (
+        !Number.isFinite(remote[0]) || !Number.isSafeInteger(remote[1]) ||
+        remote[1] < 0 || remote[1] > MAX_HLC_COUNTER
+      ) {
         return;
       }
       const now = wallClock();

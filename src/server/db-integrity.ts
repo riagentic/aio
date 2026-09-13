@@ -24,6 +24,7 @@
 // Nothing here is automatic-and-silent: each branch reports what it did to the
 // user's data and where the old bytes went.
 
+import { basename, dirname } from "@std/path";
 import type { DB } from "../db/types.ts";
 import { createDB } from "../db/async-db.ts";
 
@@ -44,6 +45,23 @@ export interface IntegrityOutcome {
   /** The snapshot restored from, when one was. */
   restoredFrom?: string;
   problems?: string[];
+}
+
+/** What this process's integrity checks did, by database path — only the
+ *  recoveries (`restored` / `quarantined`).
+ *
+ *  The journal replay runs later in boot and must know that the database it
+ *  replays onto is not the one the journal was written against: a restored
+ *  snapshot is OLDER than the journal's tail, and replaying across that hole
+ *  invents history (see `JournalGap` in journal.ts). The replay detects the
+ *  hole from the watermarks alone; this is how its refusal can name the
+ *  damaged copy it belongs with instead of a bare "the database went back in
+ *  time". */
+const _recoveries = new Map<string, IntegrityOutcome>();
+
+/** Every recovery made in this process, keyed by database path. */
+export function integrityRecoveries(): ReadonlyMap<string, IntegrityOutcome> {
+  return _recoveries;
 }
 
 /** The conventional snapshot path for a database file. */
@@ -198,12 +216,14 @@ export async function checkAndRecover(opts: {
             `not in it; the damaged original is at ${quarantine}`,
         );
         await pruneQuarantine(opts.dbPath, opts.log, fs);
-        return {
+        const restored: IntegrityOutcome = {
           action: "restored",
           quarantinedTo: quarantine,
           restoredFrom: snapshot,
           problems,
         };
+        _recoveries.set(opts.dbPath, restored);
+        return restored;
       }
     }
   } catch (e) {
@@ -221,7 +241,13 @@ export async function checkAndRecover(opts: {
       `is something to come back to.`,
   );
   await pruneQuarantine(opts.dbPath, opts.log, fs);
-  return { action: "quarantined", quarantinedTo: quarantine, problems };
+  const emptied: IntegrityOutcome = {
+    action: "quarantined",
+    quarantinedTo: quarantine,
+    problems,
+  };
+  _recoveries.set(opts.dbPath, emptied);
+  return emptied;
 }
 
 /** `quick_check` a snapshot file without disturbing anything: opened readonly,
@@ -251,22 +277,41 @@ async function pruneQuarantine(
   fs: { remove: (p: string) => Promise<void> },
 ): Promise<void> {
   try {
-    const sep = dbPath.lastIndexOf("/");
-    const dir = sep > 0 ? dbPath.slice(0, sep) : ".";
-    const base = dbPath.slice(sep + 1) + ".corrupt-";
-    const found: string[] = [];
+    // `dirname`/`basename`, not a split on "/": a Windows path has no "/", so
+    // the split named the CWD as the db's folder and pruned the wrong files.
+    const dir = dirname(dbPath);
+    const base = basename(dbPath) + ".corrupt-";
+    // Group by COPY, not by file. `moveSidecars` deliberately parks the
+    // crash-left `-wal`/`-shm` beside each quarantined database, and all three
+    // start with the same prefix — so counting files counted one copy as up to
+    // three and `slice(0, n - 3)` kept the newest three FILES. Measured over
+    // four successive corruptions: exactly ONE database copy survived, and the
+    // log line said by name that three generations were kept. The copies it
+    // deleted were the older ones, which are the ones a recovery tool wants,
+    // and this module's header promises the file is "QUARANTINED, never
+    // deleted … so a human (or a real recovery tool) still has every byte".
+    const byCopy = new Map<string, string[]>();
     for await (const e of Deno.readDir(dir)) {
-      if (e.isFile && e.name.startsWith(base)) found.push(e.name);
+      if (!e.isFile || !e.name.startsWith(base)) continue;
+      const rest = e.name.slice(base.length);
+      // `<ts>`, `<ts>-wal`, `<ts>-shm` — the stamp is the copy's identity. A
+      // journal the boot replay refused to run across the restore is parked
+      // beside the copy it belongs with (`<ts>.journal`, `<ts>.journal.base`),
+      // and goes with it.
+      const stamp = rest.replace(/(?:-wal|-shm|\.journal(?:\.base)?)$/, "");
+      const files = byCopy.get(stamp);
+      if (files) files.push(e.name);
+      else byCopy.set(stamp, [e.name]);
     }
     // The suffix is an ISO timestamp, so lexical order IS chronological order.
-    const stale = found.sort().slice(
-      0,
-      Math.max(0, found.length - QUARANTINE_KEEP),
-    );
-    for (const name of stale) {
-      await fs.remove(`${dir}/${name}`);
+    const stamps = [...byCopy.keys()].sort();
+    const stale = stamps.slice(0, Math.max(0, stamps.length - QUARANTINE_KEEP));
+    for (const stamp of stale) {
+      for (const name of byCopy.get(stamp)!) {
+        await fs.remove(`${dir}/${name}`);
+      }
       log.warn(
-        `db: removed an old quarantined copy ${name} — the ` +
+        `db: removed an old quarantined copy ${base}${stamp} — the ` +
           `${QUARANTINE_KEEP} most recent are kept. Copy one aside if you ` +
           `still want it.`,
       );

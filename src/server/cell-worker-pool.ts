@@ -12,8 +12,13 @@ import type { WirePatch as Patch } from "../protocol/patch-ops.ts";
 import type { CellDef, Msg } from "../state/cell-types.ts";
 import { WORKER_PATCH_ACTION } from "../state/cell-compose-reduce.ts";
 import { markInflight } from "../state/dispatch.ts";
+import {
+  _cancelTargetPrefixes,
+  notifyMethodCancel,
+} from "../state/method-cancel.ts";
 import { type CellWorker, createCellWorker } from "./cell-worker.ts";
 import { log } from "../diagnostics/logger-api.ts";
+import { bumpPending } from "../protocol/pending-calls.ts";
 
 /** Refuse at boot what the thread boundary can't honour. Every one of these is
  *  a silent-wrong-behavior trap if allowed through, so they fail loudly with the
@@ -99,12 +104,27 @@ export function createCellWorkerPool(opts: {
   /** Execute an effect a worker handed back: schedules go to the main
    *  isolate's scheduler, cross-cell actions are dispatched. */
   runEffect: (effect: Msg) => void;
+  /** The owning app's identity, as `composeCells` was given it. Scopes the
+   *  cancel registry the same way the composed reduce does — `""` is the
+   *  wildcard the registry already treats as "app unknown". */
+  appId?: string;
+  /** Whether this boot hosts workers at all (default true). `false` under
+   *  libraryMode without a worker entry: the cells run in-isolate, and are
+   *  still VALIDATED here — a harness must refuse what the app refuses. */
+  host?: boolean;
 }): CellWorkerPool {
-  const { cells, entry, prod, freezeState, getSlice, dispatch, runEffect } =
-    opts;
-  if (cells.length === 0) return EMPTY_POOL;
-
+  const {
+    cells,
+    entry,
+    prod,
+    freezeState,
+    getSlice,
+    dispatch,
+    runEffect,
+  } = opts;
+  const appId = opts.appId ?? "";
   validateWorkerCells(cells);
+  if (cells.length === 0 || opts.host === false) return EMPTY_POOL;
 
   if (!entry || !entry.startsWith("file:")) {
     // An entry that is not a local module can't be re-imported as a worker.
@@ -136,6 +156,9 @@ export function createCellWorkerPool(opts: {
         entry,
         prod,
         freezeState,
+        // `""` (app unknown) is no identity to hand over — the worker then
+        // resolves as it always did.
+        ...(appId ? { appId } : {}),
         initialState: () => getSlice(name),
         applyPatches: (cell: string, ops: Patch[]) => {
           // In-flight (dispatch.ts INFLIGHT): these ARE a method's writes
@@ -168,12 +191,73 @@ export function createCellWorkerPool(opts: {
     `cell workers: ${[...byCell.keys()].join(", ")} (own thread each)`,
   );
 
+  // ── cancelOn across the thread ───────────────────────────────────────────
+  //
+  // The cancel registry (`src/state/method-cancel.ts`) is module-scoped, so
+  // each isolate holds its own copy and `notifyMethodCancel` can only abort
+  // controllers that live in the isolate that ran the reduce. That leaves two
+  // holes, and this pool is the one place that can see both:
+  //
+  //   main → worker: a PEER cell's action reduces on main and fires main's
+  //     registry, where the worker cell's AbortController does not exist. So
+  //     `cancelOn: { slow: [peer.stop] }` on a `worker: true` cell was inert
+  //     in production. Forward the trigger; the worker fires its own registry.
+  //
+  //   worker → main: `route` hands a worker-cell action straight to its
+  //     thread and NEVER touches the main dispatch, so main's reduce — the
+  //     only caller of `notifyMethodCancel` there — never runs for it. A main
+  //     cell's method listing a worker cell's action as its trigger was inert
+  //     the same way, in the other direction.
+  //
+  // Both are invisible to the in-isolate harness, which has one registry and
+  // so happens to hold the trigger and the controller in the same map.
+  const forwardCancel = (action: Msg, owner: CellWorker | undefined): void => {
+    const type = action?.type;
+    if (typeof type !== "string") return;
+    const targets = _cancelTargetPrefixes(type, appId);
+    if (targets.length === 0) return;
+    for (const prefix of targets) {
+      const w = byCell.get(prefix);
+      // The owner already fires its own registry when it reduces the action.
+      if (w && w !== owner) w.cancel(type);
+    }
+    // A worker-cell action bypasses the main queue entirely, so nothing on
+    // this isolate would otherwise sweep for it.
+    if (owner) notifyMethodCancel(type, appId);
+  };
+
+  // ── `cell.$pending(m)` for a worker cell ────────────────────────────────
+  //
+  // The count is bumped by the executor that RUNS the method (`trackCall`),
+  // and for a worker cell that executor lives in the other isolate — so on
+  // the main isolate, where every component and every `await` reads it,
+  // `heavy.$pending("scan")` said 0 for the whole of a running call. In
+  // process (every harness) the same read said 1. Count the call here, around
+  // the hop, for exactly the methods the executor would count: async ones.
+  // The transport settles when the worker reports the method DONE, so the
+  // count spans the method, not the postMessage.
+  const asyncTypes = new Set(
+    cells.flatMap((f) =>
+      [...(f.__aio.asyncMethods ?? [])].map((m) => `${f.__aio.id}:${m}`)
+    ),
+  );
+  const counted = (type: string, p: Promise<unknown>): Promise<unknown> => {
+    if (!asyncTypes.has(type)) return p;
+    bumpPending(type, 1);
+    const release = () => void bumpPending(type, -1);
+    p.then(release, release);
+    return p;
+  };
+
   return {
     size: byCell.size,
     owns: (action) => ownerOf(action) !== undefined,
     route: (dispatchFn) => (action: Msg) => {
       const owner = ownerOf(action);
-      return owner ? owner.call(action) : dispatchFn(action);
+      forwardCancel(action, owner);
+      return owner
+        ? counted(action.type, owner.call(action))
+        : dispatchFn(action);
     },
     ready: async () => {
       await Promise.all([...byCell.values()].map((w) => w.ready()));

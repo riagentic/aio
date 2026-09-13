@@ -422,12 +422,12 @@ Deno.test("auth e2e: OIDC login — discovery, PKCE, RS256 JWKS verify, session"
     assertEquals(cb.status, 302);
     assertEquals(cb.headers.get("location"), "/");
     const cookie = cb.headers.get("set-cookie") ?? "";
-    assertStringIncludes(cookie, "aio_session=");
+    assert(/aio_session_[^=]+=/.test(cookie), cookie);
     await cb.body?.cancel();
     assertEquals(seenTokenReq[0]!.code, "authcode-1");
     assert(seenTokenReq[0]!.code_verifier, "PKCE verifier was sent");
 
-    const token = /aio_session=([^;]+)/.exec(cookie)![1]!;
+    const token = /aio_session_[^=]+=([^;]+)/.exec(cookie)![1]!;
     const me = await (await fetch(`${BASE}/__aio/auth/me`, {
       headers: { authorization: `Bearer ${token}` },
     })).json();
@@ -491,9 +491,8 @@ Deno.test("auth e2e: OIDC login — discovery, PKCE, RS256 JWKS verify, session"
         expected,
         `redirect=${redirect}`,
       );
-      assertStringIncludes(
-        cbr.headers.get("set-cookie") ?? "",
-        "aio_session=",
+      assert(
+        /aio_session_[^=]+=/.test(cbr.headers.get("set-cookie") ?? ""),
         `redirect=${redirect}: session cookie delivered`,
       );
       await cbr.body?.cancel();

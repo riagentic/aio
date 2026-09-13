@@ -145,7 +145,14 @@ async poll(s) {
 
 That needs a field, a reset in a `finally`, and if the work throws between the
 two the flag stays `true` and the poll is dead until a restart. The scheduler
-already knows when a dispatch settles, so it clears on rejection as well.
+owns the guard instead, and it clears on a throw as well.
+
+"In flight" means the **method**, not the dispatch: an async tick holds the
+guard until its body has returned or thrown — the same moment
+`await cell.poll()` resolves — not merely until its first `await`. If the tick
+outlives its call ceiling (30 s unless the method is `long` or has a
+`perfBudget` timeout), the guard is released with a warning naming the id,
+because the scheduler can no longer tell when it ends.
 
 A tick that never settles at all (an `await` that hangs — a fetch with no
 timeout) still stops the poller, because that is what the option asks for. It is
@@ -164,8 +171,9 @@ nothing to overlap.
 > `after`, `at` and `cron` all arm long deadlines with 24-hour re-checks and
 > warn once when they do. `every` is the exception: an interval has no deadline
 > to re-check, and `setInterval` would truncate it to a 1ms hot loop, so an
-> `every` past 24.85 days is **refused** — at config time and at the call site.
-> A monthly cadence is `cron` (`"0 9 1 * *"`). Timers still do not survive a
+> `every` past 24.85 days is **refused** — at config time and at the call site
+> (`schedule.every(...)` itself throws, so the method that wrote it fails). A
+> monthly cadence is `cron` (`"0 9 1 * *"`). Timers still do not survive a
 > restart — if the deadline must, persist it and re-arm on boot.
 
 ### `schedule.at(id, isoTime, action)` — one-shot at absolute time
@@ -213,8 +221,9 @@ s.$do(schedule.cron("daily-report", "0 8 * * 1-5", reports.generate.action()));
 the next leap day, up to eight years out across a century boundary — the
 scheduler searches that far and keeps the schedule armed in between.
 
-**Impossible patterns are refused at the call site**, with the reason:
-`0 0 30 2 *` throws
+**Impossible patterns are refused at the call site** — `schedule.cron(...)`
+itself throws, inside the method that wrote it, so that call fails — with the
+reason: `0 0 30 2 *` throws
 `"0 0 30 2 *" can never fire — day-of-month 30 does not
 exist in month 2`. A
 pattern that can never match a calendar day is a typo, and a typo should fail
@@ -229,9 +238,10 @@ shutting down — the schedule stops instead of re-arming into the drain.
 A one-shot `after` whose delay grows exponentially with `attempt`:
 `base * factor^attempt`, capped at `max` (`factor` defaults to 2). Track the
 attempt counter in state — reset it on success, bump it on failure. The action
-is the 3rd argument, same as after/every (alpha52 — the old
-`(id, attempt, opts, action)` order is detected by shape and still accepted,
-with a one-time hint).
+is the 3rd argument, same as after/every. The old `(id, attempt, opts, action)`
+order was REMOVED in alpha70: dev and every test throw by name, production logs
+the removal line and degrades. `aiol
+--safe-fix` rewrites it.
 
 `max` is optional; omitted, it caps at the timer ceiling (~24.85 days). Give it
 a real value — `60_000` is the usual one — or a runaway `attempt` counter buys
@@ -251,9 +261,10 @@ s.$do(schedule.backoff(
 The first-class polling loop: constant `every` interval while healthy (`attempt`
 = 0), backing off by `factor^attempt` (capped at `max`) while failing. Re-issue
 it each cycle with the current attempt — the delay self-adjusts, no hand-rolled
-after-chain or backoff clock in state. (alpha52: the option key is `factor`; the
-old `backoff` key still works with a hint, and `aiol --safe-fix` renames it. The
-action moved to the 3rd argument, old order accepted with a hint.)
+after-chain or backoff clock in state. The option key is `factor` and the action
+is the 3rd argument; the old `backoff` key and the old argument order were both
+REMOVED in alpha70 — dev and every test throw by name, production logs the
+removal line and degrades. `aiol --safe-fix` renames and reorders them.
 
 ```ts
 methods: {
@@ -446,8 +457,17 @@ methods: {
 `ui.advance(ms)` / `handle.advance(ms)` moves time forward and fires everything
 that comes due — `after`, `every` (including `skipIfRunning`), `at` and `cron`
 alike. Only the clock is swapped, so every rule production enforces is enforced
-in the test too: an `every` under 10 ms, an `after` under 1 ms and an id outside
+in the test too: an `every` under 10 ms, a negative `after` and an id outside
 `/^[\w\-:.]+$/` are refused in the harness exactly as they are in the app.
+
+Every `schedule.*` builder checks its own arguments — the id, the duration
+(`after`/`every`), the time (`at`) and the pattern (`cron`) — and throws where
+it is called. A typo inside a method therefore fails **that call** (`await`,
+`am
+dispatch` and a test all see the error), instead of the method succeeding
+and the schedule failing later as an effect error with no line of yours in it. A
+time in the past is not a typo: `at` accepts it and the scheduler warns when it
+would be armed.
 
 ```ts
 await using h = await bootCells([prices]);

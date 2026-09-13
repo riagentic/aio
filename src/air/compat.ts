@@ -174,15 +174,39 @@ export function useEffect(
 // ── useCallback ────────────────────────────────────────────────────
 
 /**
- * React-compatible `useCallback`. Identity shim — AIR components are
- * auto-optimized, so this is safe to remove after migration.
+ * React-compatible `useCallback` — a STABLE identity across renders, which is
+ * the thing it is for.
+ *
+ * It used to return `fn` unchanged, on the reasoning that AIR auto-optimizes
+ * rendering so a memoized callback buys nothing. That is true of RENDERING and
+ * false of IDENTITY, and identity is what a deps array compares. `useEffect`
+ * on this same surface promises "Deps are honored (React semantics)" and
+ * compares with `Object.is`, so a fresh arrow every render was a CHANGED dep
+ * every render. Measured:
+ *
+ *   useEffect(fn, [useCallback(cb, [])])  over 1 mount + 3 re-renders
+ *     React: subscribe 1, unsubscribe 0
+ *     aio:   subscribe 4, unsubscribe 3
+ *
+ * …and the canonical fetch-on-mount shape — `useEffect(() => { setN(...) },
+ * [load])` with `load` a `useCallback` — became an unbounded render loop
+ * instead of running once. The compat layer exists so React code "compiles and
+ * runs"; the single most common React idiom silently did neither.
+ *
+ * It is `useMemo(() => fn, deps)`, which is exactly what React's is.
+ *
+ * The parameter keeps its `_deps` name: the public surface is FROZEN and
+ * `check:api` reads the signature verbatim, so renaming it — even to the same
+ * type in the same position — is a refused change. It is read now; the
+ * underscore is history, not a claim.
  */
 export function useCallback<T>(fn: T, _deps?: unknown[]): T {
   _hint(
     "useCallback",
-    "[aio] useCallback() is unnecessary in AIR — components are auto-optimized. Safe to remove.",
+    "[aio] useCallback() is a migration shim — prefer a plain function, or " +
+      "computed() for a cached derivation.",
   );
-  return fn;
+  return useMemo(() => fn, _deps);
 }
 
 // ── useMemo ────────────────────────────────────────────────────────
@@ -197,10 +221,20 @@ export function useMemo<T>(fn: () => T, _deps?: unknown[]): T {
     "[aio] useMemo() is unnecessary in AIR — use computed() for cached derivations. Safe to remove.",
   );
   const ref = useRef<{ deps: unknown[] | undefined; value: T } | null>(null);
+  // LENGTH first. An element-wise compare judges a SHRINKING deps array
+  // unchanged whenever its surviving prefix matches, so `useMemo(fn, [...ids])`
+  // with one id removed kept the old value: measured, deps `[0,1,2]` → `[0,1]`
+  // returned 3 and never recomputed. That is a wrong VALUE rendered to the
+  // page, not a missed optimisation. Its twin `useEffect` in this same file
+  // already compares lengths — two deciders for one question, and this was the
+  // half that had not been done.
+  const prev = ref.current?.deps;
   if (
     ref.current === null ||
     !_deps ||
-    !_deps.every((d, i) => d === ref.current?.deps?.[i])
+    !prev ||
+    prev.length !== _deps.length ||
+    !_deps.every((d, i) => d === prev[i])
   ) {
     ref.current = { deps: _deps, value: fn() };
   }

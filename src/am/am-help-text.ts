@@ -60,7 +60,15 @@ export const CREATE_FLAGS: readonly string[] = [
   "--force",
 ];
 
-export const HELP_TEXT = `Onboard:
+export const HELP_TEXT = `If you are an AI agent, start here:
+  agent                   THE BRIEF — how aio works, the verbs, and the four
+                          rules that protect the user (never kill apps by
+                          process match, never open windows on their desktop,
+                          never script around am, learn before editing). One
+                          command, no docs to open.
+                          --task=<slug> for one section, --list for the index.
+
+Onboard:
   create <name> [flags]   Scaffold a new aio app (runnable + buildable), in
                           ./<name> — there is no --dir, cd first. Flags:
                             ${
@@ -126,6 +134,14 @@ Process (singleton — one instance per app identity):
                           scoped to instances whose cwd is under this project
                           root, so another project's app is never touched
                           (am instances is machine-wide, this is not).
+  start --display=<what>  WHERE THE WINDOW GOES. Default \`auto\`: a launch with
+                          no human on the terminal (an agent, a script) opens
+                          its window on a nested X display instead of yours and
+                          cannot stack tabs in your browser — it stays up on
+                          purpose, close it yourself. \`isolated\` always,
+                          \`current\` never (the pre-\`--display\` behaviour, for
+                          both halves), \`:N\` a display you manage.
+                          AIO_AM_DISPLAY=<what> sets it machine-wide.
   kill                    End it now, no asking (SIGTERM + drop the lock)
   kill --stale            Reap ORPHANS — processes still SERVING with no lock
                           to account for them. That is the one that answers
@@ -138,16 +154,19 @@ Process (singleton — one instance per app identity):
                           1=stopped, 2=transitional). With components: one line
                           each, and the same three codes read over the whole
                           project — 0 every one up, 1 every one down, 2 partial.
-  instances               List all running aio apps on this machine
+  instances               List running aio apps in THIS scope — an instance or
+                          AIO_APPS_DIR scope lists only its own apps
 
 State:
   state [path] [--wait=N]  State query (dot-path, [*] wildcard, {pick})
-  state <path> --watch    A line per CHANGE, not per poll — the loop you were
-                          about to write with \`until\`. --wait=N sets the interval
+  state <path> --watch    POLLS (every --wait=N s, default 2) and prints only
+                          when the value differs from the last poll — the loop
+                          you were about to write with \`until\`. A change
+                          undone within one interval is not seen
   state --ui [user]       Server-side UI-state projection (was \`am ui\`; for
                           live client UI use: surface)
   expect <path> <op> [v]  ASSERT / TEST / verify state (eq/ne/gt/lt/contains/exists…);\n                          e2e; --wait=N — the check to reach for instead of\n                          piping \`am state\` through a parser
-  record [out] --from=J   GENERATE A TEST — writes a bootCells replay test from\n                          a journal, so a bug you reproduced becomes a test
+  record [out] [--from=J] GENERATE A TEST — writes a bootCells replay test from\n                          the RUNNING app's timeline, so a bug you reproduced\n                          becomes a test (app stopped: its crash journal;\n                          --from=J: that journal file)
   dispatch <cell:method> [a b …]  Call a method with POSITIONAL args (setHost "1.2.3.4")
   dispatch … --as-server  Dispatch past the cell access gate — the operator
                           door for a "public read, server-only write" cell.
@@ -258,8 +277,10 @@ Inspect:
   sql --tables            List SQLite tables
   tables                  The same list under its own name (= sql --tables)
   schedules               Active scheduled effects
-  logs [filter]           Tail app log (--client for client.log) (--filter --lines --follow)
-                          A filter is a substring, e.g. "am logs error"
+  logs [filter]           Tail app log; a filter is a substring, e.g. "am logs error"
+                          (--client --filter --lines --follow --level --tag --since)
+                          --lines=N counts EVENTS; --json .matched is the
+                          health-check count (.total keeps unreadable lines)
                           keeps error events
   errors                  What went wrong: the build error (if any) first,
                           then the tail of error.log (--lines=N)
@@ -326,8 +347,9 @@ Other:
 
 Driving an app with no human in the loop (agents, CI, scripts): ASSERT with
         expect, DRIVE with dispatch, READ the UI with surface, DEBUG with
-        timeline, REPRODUCE with replay. Start at docs/AGENTS.md — three field
-        reports finished a whole build before finding these.
+        timeline, REPRODUCE with replay. Run "am agent" for all of it at once
+        (docs/AGENTS.md is the long form) — three field reports finished a
+        whole build before finding these verbs.
 
 --json: machine-readable output for EVERY command — the scripting interface
         (errors included; a non-zero exit still means failed)
@@ -339,6 +361,6 @@ Flags: --app=X  --port=N  --entry=<path>  --wait[=N]  --no-wait  --json  --quiet
         second boot); AIO_APPS_DIR is the env-level equivalent
 --timeout: ms to wait for a live client (surface/trigger; default 8000)
 --entry: override entry point (default: deno.json "entry" > src/app.ts)
---wait: start/stop block until complete (default 10s/5s) — start does this by
+--wait: start/stop block until complete (start 10s, stop 11s) — start does this by
         default; --no-wait returns the moment the child is spawned.
         state polls every Ns.`;

@@ -9,19 +9,21 @@ name, so the table cannot fall behind the code.
 
 ## Running an app
 
-| Variable             | Read by          | Effect                                                                                                                                                                           |
-| -------------------- | ---------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `AIO_PORT`           | boot             | Port to serve on. `--port` wins over it; both win over `port:` in config                                                                                                         |
-| `AIO_HOME`           | installers, `am` | Where aio itself lives (checkout or install root)                                                                                                                                |
-| `AIO_APPS_DIR`       | app dirs         | Root for every app's data directory — the one switch that moves all of them (see [where files live](../persistence/where-files-live.md))                                         |
-| `AIO_INSTALL_ROOT`   | installs         | Where an installed app lives (`am installed` lists them). Default `~/app/<name>/`                                                                                                |
-| `AIO_TEST_ROOT`      | tests            | Root for every directory the test harnesses create. Default `~/tmp/aio/`, mode 0700 — user space, not `/tmp`: a test's scratch holds an `auth.db`, an `app.key` and TLS material |
-| `AIO_VERSIONS_DIR`   | framework pin    | Where pinned aio versions are kept                                                                                                                                               |
-| `AIO_UPDATE_CHANNEL` | update check     | Follow a different channel than the one stamped into the artifact                                                                                                                |
-| `AIO_PARENT_PID`     | Electron child   | The pid the window must not outlive — set by the launcher, not by hand                                                                                                           |
-| `AIO_NO_OPEN=1`      | `open-external`  | Never open a browser or a file manager. For any harness that must not spawn a UI                                                                                                 |
-| `AIO_DISCOVERY_PORT` | discovery        | UDP port apps broadcast and answer discovery probes on — server and client must match. Default `8099` (see [the Electron client](../clients/electron.md))                        |
-| `AIO_SUPERVISED=1`   | restart decision | "You are supervised: exit, do not spawn your own successor" — the generated systemd unit sets it (see [updates](../deploy/updates.md))                                           |
+| Variable             | Read by          | Effect                                                                                                                                                                                                      |
+| -------------------- | ---------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `AIO_PORT`           | boot             | Port to serve on. `--port` wins over it; both win over `port:` in config                                                                                                                                    |
+| `AIO_DEFAULT_PORT`   | boot             | Port to serve on when nothing else names one — below `--port`, `AIO_PORT` and `port:` in config, instead of a random free port. The generated systemd unit sets it to `3000`                                |
+| `AIO_HOME`           | installers, `am` | Where aio itself lives (checkout or install root)                                                                                                                                                           |
+| `AIO_APPS_DIR`       | app dirs         | Root for every app's data directory — the one switch that moves all of them (see [where files live](../persistence/where-files-live.md))                                                                    |
+| `AIO_INSTALL_ROOT`   | installs         | Where an installed app lives (`am installed` lists them). Default `~/app/<name>/`                                                                                                                           |
+| `AIO_TEST_ROOT`      | tests            | Root for every directory the test harnesses create. Default `~/tmp/aio/`, mode 0700 — user space, not `/tmp`: a test's scratch holds an `auth.db`, an `app.key` and TLS material                            |
+| `AIO_VERSIONS_DIR`   | framework pin    | Where pinned aio versions are kept                                                                                                                                                                          |
+| `AIO_UPDATE_CHANNEL` | update check     | Follow a different channel than the one stamped into the artifact                                                                                                                                           |
+| `AIO_PARENT_PID`     | Electron child   | The pid the window must not outlive — set by the launcher, not by hand                                                                                                                                      |
+| `AIO_NO_OPEN=1`      | `open-external`  | Never open a browser or a file manager. For any harness that must not spawn a UI                                                                                                                            |
+| `AIO_AM_DISPLAY`     | `am start`       | Where a started app's window goes when `--display=` is not given: `auto` (default — no human on the terminal → a nested display, tabs suppressed), `isolated`, `current`, or `:N`. Anything else is refused |
+| `AIO_DISCOVERY_PORT` | discovery        | UDP port apps broadcast and answer discovery probes on — server and client must match. Default `8099` (see [the Electron client](../clients/electron.md))                                                   |
+| `AIO_SUPERVISED=1`   | restart decision | "You are supervised: exit, do not spawn your own successor" — the generated systemd unit sets it (see [updates](../deploy/updates.md))                                                                      |
 
 ## Building
 

@@ -1,7 +1,9 @@
 // Streaming SSR — async generator that yields HTML chunks.
 
-import type { ComponentFn, VNode } from "./vdom.ts";
+import type { VNode } from "./vdom.ts";
 import {
+  _enterSsr,
+  _exitSsr,
   _invokeSsrStartHook,
   _SignalText,
   _sigText,
@@ -13,13 +15,28 @@ import {
 import type { Signal } from "../state/signal.ts";
 import { _hasRawHtml } from "./vdom-types.ts";
 import { _notANode } from "./vdom-create.ts";
-import { escapeHtml as _escapeHtml, VOID_ELEMENTS } from "./ssr-utils.ts";
+import {
+  escapeHtml as _escapeHtml,
+  RAW_TEXT_ELEMENTS,
+  rawTextContent,
+  ssrCloseSelect,
+  ssrOpenSelect,
+  ssrOptionProps,
+  VOID_ELEMENTS,
+} from "./ssr-utils.ts";
+import { isDevMode } from "../state/dev-flag.ts";
+import { resolveSignalProp } from "./signal-binding.ts";
 // The attribute rule and the empty-region rule are shared with renderToString
 // — see _renderPropsHtml and _regionHtml.
 import {
+  _fallbackHtml,
   _regionHtml,
   _renderPropsHtml as _renderProps,
+  _ssrComponent,
+  _ssrRootScope,
+  _ssrScoped,
   _ssrTextareaText,
+  type SsrContexts,
   type SsrNodes,
 } from "./vdom-ssr.ts";
 
@@ -29,7 +46,8 @@ const _LAZY_PENDING = Symbol.for("aio.LazyPending");
  *  nodes the markup stands for (see `_regionHtml`). */
 function _renderSync(
   vnode: VNode | string | number | null,
-  nodes: SsrNodes = { n: 0 },
+  nodes: SsrNodes,
+  scope: SsrContexts,
 ): string {
   if (vnode == null) return "";
   if (typeof vnode === "string") {
@@ -43,12 +61,7 @@ function _renderSync(
   const bad = _notANode(vnode);
   if (bad) throw new Error(bad);
   if (typeof vnode.tag === "function") {
-    const rendered = (vnode.tag as ComponentFn)({
-      ...vnode.props,
-      children: vnode.children.length > 0
-        ? vnode.children
-        : (vnode.props.children ?? vnode.children),
-    });
+    const { out: rendered, scope: inner } = _ssrComponent(vnode, scope);
     // Nothing to render is still a POSITION — identical to renderToString, or
     // the stream and the string renderer ship different markup for the same
     // tree (the differential gate catches exactly that). See nullSlot().
@@ -56,7 +69,7 @@ function _renderSync(
       nodes.n++;
       return "<!---->";
     }
-    return _renderSync(rendered, nodes);
+    return _renderSync(rendered, nodes, inner);
   }
   if (vnode.tag === Portal) return "";
   if (vnode.tag === Symbol.for("aio.Null")) {
@@ -75,48 +88,82 @@ function _renderSync(
       | null
       | undefined;
     try {
-      return _regionSync(vnode, nodes);
+      return _regionSync(vnode, nodes, scope);
     } catch (thrown) {
       if (thrown !== _LAZY_PENDING) throw thrown;
-      return _renderSync(fallback ?? null, nodes);
+      return _fallbackHtml(
+        fallback,
+        nodes,
+        (v, n) => _renderSync(v, n, scope),
+      );
     }
   }
   // AIO-195 parity with createDom/renderToString: an empty Fragment holds
   // its slot with a comment anchor. Streamed HTML that omits it hydrates
   // into a Fragment with no position (see vdom-ssr.ts).
-  if (vnode.tag === Fragment) return _regionSync(vnode, nodes);
+  if (vnode.tag === Fragment) return _regionSync(vnode, nodes, scope);
   if (vnode.tag === ErrorBoundary) {
     const fallback = vnode.props.fallback as
       | ((e: Error) => VNode | string | number | null)
       | undefined;
     try {
-      return _regionSync(vnode, nodes);
+      return _regionSync(vnode, nodes, scope);
     } catch (error) {
       if (!fallback) throw error;
-      return _renderSync(fallback(error as Error), nodes);
+      const fb = _ssrScoped(scope, () => fallback(error as Error));
+      return _fallbackHtml(
+        fb.out,
+        nodes,
+        (v, n) => _renderSync(v, n, fb.scope),
+      );
     }
   }
   // Element
   nodes.n++;
   const tag = vnode.tag as string;
   const selfClosing = VOID_ELEMENTS.has(tag);
-  let html = `<${tag}${_renderProps(vnode.props, tag)}>`;
+  const ownValue = resolveSignalProp(
+    vnode.props.value ?? vnode.props.defaultValue,
+  );
+  const props = ssrOptionProps(tag, vnode.props, vnode.children, ownValue);
+  let html = `<${tag}${_renderProps(props, tag)}>`;
   if (selfClosing) return html;
   const areaText = _ssrTextareaText(vnode);
-  if (_hasRawHtml(vnode.props)) {
-    html += (vnode.props.dangerouslySetInnerHTML as { __html: string }).__html;
-  } else if (areaText !== null) html += areaText;
-  else {
-    const inner: SsrNodes = { n: 0 };
-    for (const child of vnode.children) html += _renderSync(child, inner);
+  const inSelect = ssrOpenSelect(tag, ownValue);
+  try {
+    if (_hasRawHtml(vnode.props)) {
+      html += (vnode.props.dangerouslySetInnerHTML as { __html: string })
+        .__html;
+    } else if (areaText !== null) html += areaText;
+    else if (RAW_TEXT_ELEMENTS.has(tag)) {
+      const inner: SsrNodes = { n: 0 };
+      for (const child of vnode.children) {
+        html += typeof child === "string" || typeof child === "number"
+          ? (inner.n++, rawTextContent(tag, String(child), isDevMode()))
+          : _renderSync(child, inner, scope);
+      }
+    } else {
+      const inner: SsrNodes = { n: 0 };
+      for (const child of vnode.children) {
+        html += _renderSync(child, inner, scope);
+      }
+    }
+  } finally {
+    ssrCloseSelect(inSelect);
   }
   html += `</${tag}>`;
   return html;
 }
 
-function _regionSync(vnode: VNode, nodes: SsrNodes): string {
+function _regionSync(
+  vnode: VNode,
+  nodes: SsrNodes,
+  scope: SsrContexts,
+): string {
   const inner: SsrNodes = { n: 0 };
-  const html = vnode.children.map((c) => _renderSync(c, inner)).join("");
+  const html = vnode.children.map((c) => _renderSync(c, inner, scope)).join(
+    "",
+  );
   nodes.n++;
   return _regionHtml(html, inner.n);
 }
@@ -131,7 +178,15 @@ export async function* renderToStream(
 ): AsyncGenerator<string, void, unknown> {
   // AIO-191: reset SSR ID counter so concurrent requests get unique IDs
   _invokeSsrStartHook();
-  yield* _stream(vnode);
+  // …and SAY that a server render is in progress, for the whole stream. Every
+  // hook that asks `_isSsrRendering()` took the client branch here, because
+  // only `renderToString` had ever set the flag — see `_enterSsr`.
+  _enterSsr();
+  try {
+    yield* _stream(vnode, _ssrRootScope());
+  } finally {
+    _exitSsr();
+  }
 }
 
 /** Buffer a region's children: the chunks, and how many nodes they stand for
@@ -139,11 +194,12 @@ export async function* renderToStream(
  *  nothing (see `_regionHtml`), so it cannot stream child-by-child. */
 async function _bufferRegion(
   vnode: VNode,
+  scope: SsrContexts,
 ): Promise<{ chunks: string[]; nodes: number }> {
   const chunks: string[] = [];
   let nodes = 0;
   for (const child of vnode.children) {
-    const gen = _stream(child);
+    const gen = _stream(child, scope);
     for (;;) {
       const r = await gen.next();
       if (r.done) {
@@ -160,6 +216,7 @@ async function _bufferRegion(
  *  number of DOM nodes the yielded markup stands for (see `_regionHtml`). */
 async function* _stream(
   vnode: VNode | string | number | null,
+  scope: SsrContexts,
 ): AsyncGenerator<string, number, unknown> {
   if (vnode == null) return 0;
   if (typeof vnode === "string") {
@@ -177,18 +234,13 @@ async function* _stream(
   if (typeof vnode.tag === "function") {
     // A throw here — a lazy's `_LAZY_PENDING` included — propagates to the
     // enclosing Suspense/ErrorBoundary, which buffers exactly for that.
-    const rendered = (vnode.tag as ComponentFn)({
-      ...vnode.props,
-      children: vnode.children.length > 0
-        ? vnode.children
-        : (vnode.props.children ?? vnode.children),
-    });
+    const { out: rendered, scope: inner } = _ssrComponent(vnode, scope);
     if (rendered == null) {
       // Same rule as the sync path above and as renderToString.
       yield "<!---->";
       return 1;
     }
-    return yield* _stream(rendered);
+    return yield* _stream(rendered, inner);
   }
 
   // Portal — skip
@@ -217,11 +269,15 @@ async function* _stream(
       | undefined;
     let region: { chunks: string[]; nodes: number };
     try {
-      region = await _bufferRegion(vnode);
+      region = await _bufferRegion(vnode, scope);
     } catch (thrown) {
       if (thrown !== _LAZY_PENDING) throw thrown;
       const nodes: SsrNodes = { n: 0 };
-      const html = _renderSync(fallback ?? null, nodes);
+      const html = _fallbackHtml(
+        fallback,
+        nodes,
+        (v, n) => _renderSync(v, n, scope),
+      );
       if (html !== "") yield html;
       return nodes.n;
     }
@@ -236,7 +292,7 @@ async function* _stream(
     // Buffered, not streamed child-by-child: an empty Fragment must emit its
     // comment anchor (AIO-195 parity), which is only knowable once every child
     // has produced nothing.
-    yield* _yieldRegion(await _bufferRegion(vnode));
+    yield* _yieldRegion(await _bufferRegion(vnode, scope));
     return 1;
   }
 
@@ -248,11 +304,16 @@ async function* _stream(
       | undefined;
     let region: { chunks: string[]; nodes: number };
     try {
-      region = await _bufferRegion(vnode);
+      region = await _bufferRegion(vnode, scope);
     } catch (error) {
       if (!fallback) throw error;
       const nodes: SsrNodes = { n: 0 };
-      const html = _renderSync(fallback(error as Error), nodes);
+      const fb = _ssrScoped(scope, () => fallback(error as Error));
+      const html = _fallbackHtml(
+        fb.out,
+        nodes,
+        (v, n) => _renderSync(v, n, fb.scope),
+      );
       if (html !== "") yield html;
       return nodes.n;
     }
@@ -263,13 +324,32 @@ async function* _stream(
   // Element — yield opening tag, children, closing tag
   const tag = vnode.tag as string;
   const selfClosing = VOID_ELEMENTS.has(tag);
-  yield `<${tag}${_renderProps(vnode.props, tag)}>`;
+  const ownValue = resolveSignalProp(
+    vnode.props.value ?? vnode.props.defaultValue,
+  );
+  yield `<${tag}${
+    _renderProps(
+      ssrOptionProps(tag, vnode.props, vnode.children, ownValue),
+      tag,
+    )
+  }>`;
   if (selfClosing) return 1;
   const areaText = _ssrTextareaText(vnode);
-  if (_hasRawHtml(vnode.props)) {
-    yield (vnode.props.dangerouslySetInnerHTML as { __html: string }).__html;
-  } else if (areaText !== null) yield areaText;
-  else for (const child of vnode.children) yield* _stream(child);
+  const inSelect = ssrOpenSelect(tag, ownValue);
+  try {
+    if (_hasRawHtml(vnode.props)) {
+      yield (vnode.props.dangerouslySetInnerHTML as { __html: string }).__html;
+    } else if (areaText !== null) yield areaText;
+    else if (RAW_TEXT_ELEMENTS.has(tag)) {
+      for (const child of vnode.children) {
+        if (typeof child === "string" || typeof child === "number") {
+          yield rawTextContent(tag, String(child), isDevMode());
+        } else yield* _stream(child, scope);
+      }
+    } else for (const child of vnode.children) yield* _stream(child, scope);
+  } finally {
+    ssrCloseSelect(inSelect);
+  }
   yield `</${tag}>`;
   return 1;
 }

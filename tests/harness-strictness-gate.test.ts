@@ -169,3 +169,85 @@ Deno.test("arming actually enables the strict behaviour it promises", async () =
     app.dispose();
   }
 });
+
+// ── …and arming is only HALF of "strictest environment" ──────────────────
+//
+// `_armTestStrict()` turns on the dev tripwires. `_refuseUnsafeCells()` is the
+// other half: the boot refusals a real `aio.run()` performs before it serves
+// anything, both of which exist for security — a field the UI can see that
+// looks like a credential, and a `sync: true` cell that hides state from the
+// clients it replays on.
+//
+// `bootCells` and `testUI` called it. `testCell` — the harness CLAUDE.md names
+// first, and the one the docs push hardest ("always dispatch-test cell
+// methods") — did not, so a cell the app REFUSES TO START WITH passed its
+// whole test file. `boot-refusals.ts`'s own header describes that bug being
+// fixed; it was fixed in two harnesses of three.
+//
+// Behavioural, like the arming gate above: a cell that must be refused is fed
+// to each harness and the refusal has to arrive.
+const G2 = globalThis as Record<string, unknown>;
+
+/** A cell every boot refusal must reject: an `apiKey` the UI can read. */
+async function leakyCell() {
+  const { cell } = await import("../src/state/cell-create.ts");
+  return cell(`leaky_${Math.random().toString(36).slice(2, 8)}`, {
+    state: { apiKey: "sk-live-secret", n: 0 },
+    methods: {
+      bump(s: { n: number }) {
+        s.n++;
+      },
+    },
+  });
+}
+
+/** Did `fn` refuse, and did it say SECURITY? */
+async function refuses(fn: () => unknown): Promise<string> {
+  try {
+    await Promise.resolve(fn());
+    return "";
+  } catch (e) {
+    return e instanceof Error ? e.message : String(e);
+  }
+}
+
+Deno.test("bootCells refuses a cell aio.run() would refuse", async () => {
+  const { bootCells } = await import("../src/cell-test.ts") as Record<
+    string,
+    // deno-lint-ignore no-explicit-any
+    any
+  >;
+  const c = await leakyCell();
+  const msg = await refuses(() => bootCells([c]));
+  assert(
+    msg.includes("SECURITY"),
+    `bootCells accepted it: ${msg || "(no throw)"}`,
+  );
+});
+
+Deno.test("testCell refuses a cell aio.run() would refuse", async () => {
+  // `testCell` declares its own `Deno.test`, so the refusal surfaces when THAT
+  // test runs, not at declaration time. Drive the refusal directly instead —
+  // the same call `testCell` now makes, on the same input.
+  const { _refuseUnsafeCells } = await import(
+    "../src/testing/boot-refusals.ts"
+  );
+  const c = await leakyCell();
+  const msg = await refuses(() => _refuseUnsafeCells([c]));
+  assert(
+    msg.includes("SECURITY"),
+    `the refusal did not fire: ${msg || "(none)"}`,
+  );
+
+  // …and that `testCell` really calls it, on the path a test takes.
+  const src = await Deno.readTextFile(
+    new URL("../src/testing/cell-test.ts", import.meta.url).pathname,
+  );
+  const body = src.slice(src.indexOf("export function testCell("));
+  assert(
+    body.slice(0, body.indexOf("const composed = composeCells([f])"))
+      .includes("_refuseUnsafeCells([f])"),
+    "testCell must run the boot refusals BEFORE it composes the cell",
+  );
+  void G2;
+});

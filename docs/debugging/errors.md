@@ -75,7 +75,7 @@ In prod mode, errors are compact one-liners:
 | `ACCESS_DENIED`      | Access      | The cell's `access:` rule (or a serverFn's `{ access }`) refused this caller                                      |
 | `ACTION_REFUSED`     | Dispatch    | The action reached the server and applied nothing (unknown method, unbooted or disabled cell, `validate` refusal) |
 | `QUEUE_OVERFLOW`     | Dispatch    | Dispatch queue exceeded 10,000 entries                                                                            |
-| `DISPATCH_LOOP`      | Dispatch    | 1,000 iterations detected -- dispatch recovers after draining                                                     |
+| `DISPATCH_LOOP`      | Dispatch    | 10,000 iterations detected -- dispatch recovers after draining                                                    |
 | `DISPATCH_CLOSED`    | Dispatch    | Action dispatched after close() -- dropped, not applied                                                           |
 | `DISPATCH_DRAINING`  | Dispatch    | Action dispatched while the app is closing -- new input refused; in-flight writes still land                      |
 | `DISPATCH_ABORTED`   | Dispatch    | Drain loop threw outside every guard -- queued actions dropped                                                    |
@@ -476,8 +476,11 @@ connected clients:
 ```
 
 A client's records are dropped when it disconnects — health reflects only live
-signal. (The browser's own console and diagnostics overlay still report locally,
-on the spot.)
+signal. They are a client's CLAIM: any connected client can send one, so each
+report is attributed in the server log to the client (and user) that made it,
+and a count or start time no client could truthfully have is not stored as fact.
+(The browser's own console and diagnostics overlay still report locally, on the
+spot.)
 
 ## `TypeError: Cannot assign to read only property` in dev
 

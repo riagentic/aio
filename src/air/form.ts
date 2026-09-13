@@ -252,11 +252,37 @@ export function useForm<T extends Record<string, unknown>>(
     const debounceMs = cfg.debounceMs ?? 0;
     let debounceTimer: ReturnType<typeof setTimeout> | undefined;
     let asyncVersion = 0;
+    /** The value whose async verdict is already SETTLED, and whether one is.
+     *
+     *  `validate()` calls `touch()` on every field and then, on the very next
+     *  line, treats `f.validating` as invalid — so it failed on the flag it
+     *  had just set, and `form.validate()` returned false for a form whose
+     *  rules all pass. It stayed false: the second call after everything had
+     *  settled restarted the same rules on the same unchanged value and
+     *  failed again. `docs/ui/air-forms.md` documents submit as
+     *  `if (form.validate()) …`, so a form with ANY async rule could never be
+     *  submitted through the documented path, while `form.valid` said true.
+     *
+     *  So a re-run for a value whose verdict is already in is not a re-run.
+     *  A CHANGED value still re-validates, an in-flight run is still
+     *  superseded by a newer one, and `reset()` clears the memo. */
+    let settledFor: { v: unknown; err: string | null } | null = null;
 
     const runAsyncValidation = (v: unknown) => {
       if (asyncRules.length === 0) return;
       const syncErr = validate(v);
       if (syncErr) {
+        settledFor = null;
+        validatingSig.set(false);
+        return;
+      }
+      // Already answered for exactly this value — RESTORE the answer. Not
+      // merely "return": `touch()` re-runs the SYNC rules first and writes
+      // their verdict, which is `null` for a field whose only rules are
+      // async — so an early return here would have cleared a real async error
+      // and reported the form valid.
+      if (settledFor && Object.is(settledFor.v, v)) {
+        errorSig.set(settledFor.err);
         validatingSig.set(false);
         return;
       }
@@ -270,12 +296,14 @@ export function useForm<T extends Record<string, unknown>>(
             if (version !== asyncVersion) return;
             if (err) {
               errorSig.set(err);
+              settledFor = { v, err };
               validatingSig.set(false);
               return;
             }
           }
           if (version !== asyncVersion) return;
           errorSig.set(null);
+          settledFor = { v, err: null };
           validatingSig.set(false);
         } catch (e) {
           if (version !== asyncVersion) return;
@@ -327,6 +355,7 @@ export function useForm<T extends Record<string, unknown>>(
         dirtySig.set(false);
         touchedSig.set(false);
         validatingSig.set(false);
+        settledFor = null;
         asyncVersion++;
         if (debounceTimer) clearTimeout(debounceTimer);
       },

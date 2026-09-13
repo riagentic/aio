@@ -6,10 +6,11 @@
 import { dirname, join, resolve } from "@std/path";
 import { privateDirRefusal, selfUid } from "./dir-permissions.ts";
 import { connectLocal } from "./local-listen.ts";
-import { appDirs, appHome } from "./app-dirs.ts";
+import { appDirs, appHome, appsDirEnv } from "./app-dirs.ts";
 import { log } from "../diagnostics/logger-api.ts";
 import { EXIT_WAIT_MS } from "./shutdown-budget.ts";
 import { readDenoJsonSync } from "./deno-json.ts";
+import { inheritedWorkerAppId } from "./cell-worker-protocol.ts";
 
 /** How long a lock may sit at `status:"starting"` before anyone — the next
  *  launch's zombie probe, `am start` — may treat "its listener does not answer"
@@ -117,8 +118,45 @@ export type SingletonMode = boolean;
  *  The FALLBACK stays a caller's choice, because it genuinely is one: a lock
  *  with no id is `aio-app`, a nameless binary is `myapp`, a cookie is `app`. */
 export function slugify(s: string, fallback = "aio-app"): string {
-  return s.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "") ||
+  const base =
+    s.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "") ||
     fallback;
+  // A NON-ASCII name is not a name this can spell, and dropping the letters
+  // silently made DIFFERENT apps into ONE. Measured: "Über" and "Ber" both
+  // became `ber`, and two apps named entirely in CJK or Cyrillic both became
+  // the bare fallback — one `~/.<id>` data directory, one single-instance
+  // lock (so the second refuses to start), one UDS socket, one `state.db`,
+  // and one shared-key cookie. This function's own header calls that last one
+  // "a credential crossing between apps".
+  //
+  // So a name with a character this alphabet cannot carry gets a short hash
+  // of the ORIGINAL. Deliberately narrow: only NON-ASCII input is treated as
+  // lossy, so every pure-ASCII id — which is all of them in practice, and
+  // every id `cell()` would accept — is byte-identical to before. ASCII
+  // punctuation stays a separator, as it always was.
+  return _hasNonAscii(s) ? `${base}-${_shortHash(s)}` : base;
+}
+
+/** Does `s` carry a character this alphabet cannot spell?
+ *
+ *  By code point, not by regex: the range that says it (`[^\x00-\x7F]`)
+ *  trips `no-control-regex`, and widening it to printable ASCII would make a
+ *  tab or a newline "lossy" too — changing the id of a name that reduces
+ *  perfectly well today. */
+function _hasNonAscii(s: string): boolean {
+  for (const ch of s) if (ch.codePointAt(0)! > 0x7f) return true;
+  return false;
+}
+
+/** FNV-1a, 32-bit, base36. Short, stable across runs and platforms, and
+ *  dependency-free — it only has to tell two app names apart. */
+function _shortHash(s: string): string {
+  let h = 0x811c9dc5;
+  for (let i = 0; i < s.length; i++) {
+    h ^= s.charCodeAt(i);
+    h = Math.imul(h, 0x01000193) >>> 0;
+  }
+  return h.toString(36);
 }
 
 /** The identity fields of a project's `deno.json`, in the ONE order that decides
@@ -160,6 +198,16 @@ function _embeddedDenoJson(): unknown {
 /** Resolve app ID — explicit `appId` wins; otherwise inferred. */
 export function resolveAppId(appId?: string): string {
   if (appId) return slugify(appId);
+  // A `worker: true` cell's thread re-runs the app's entry, and its
+  // `aio.run()` asks for the identity again. It must get the OWNER's answer,
+  // not a fresh inference: `Deno.mainModule` is undefined inside a worker, so
+  // neither the embedded deno.json nor the entry directory below is visible
+  // there, and all that is left is the CWD — the one source a compiled binary
+  // must never take its identity from. Measured: a compiled app with no
+  // explicit appId crashed at boot when launched from `/`, and from another
+  // project's directory its worker took that project's identity.
+  const inherited = inheritedWorkerAppId();
+  if (inherited) return inherited;
   // Compiled binaries: NEVER read the cwd's deno.json — the binary may be
   // launched from an unrelated project and must not adopt ITS identity
   // (locks, KV paths). The VFS path carries the binary name — stable per
@@ -235,7 +283,12 @@ export function lockDir(): string {
   // "already running", and its `am` silently reached the production instance
   // (a field report). Must-not-survive-reboot still holds — the
   // base stays $XDG_RUNTIME_DIR//tmp either way.
-  const appsRoot = Deno.env.get("AIO_APPS_DIR") ?? "";
+  //
+  // Normalized (`appsDirEnv`), because the dir is named after the STRING:
+  // `AIO_APPS_DIR=demo/../apps` for the app and `AIO_APPS_DIR=apps` for `am`
+  // are one data root, and were two lock dirs — `am` said "not running" about
+  // an app whose data it could see.
+  const appsRoot = appsDirEnv() ?? "";
   if (_lockDir && _lockDirKey === appsRoot) return _lockDir;
   const base = Deno.build.os === "windows"
     ? (Deno.env.get("TEMP") ?? Deno.env.get("TMP") ?? "C:\\Temp")
@@ -344,7 +397,7 @@ function _chooseLockDir(base: string, scope: string): string {
  *  forever. Non-recursive on purpose: another app's lock or a live watcher
  *  sentinel makes the rmdir fail, which is the right answer. */
 export function pruneLockDir(): void {
-  if (!_lockDir || !Deno.env.get("AIO_APPS_DIR")) return;
+  if (!_lockDir || !appsDirEnv()) return;
   try {
     Deno.removeSync(_lockDir);
     // The path is still right; only the directory is gone. Forget the cached
@@ -740,21 +793,51 @@ export class AppLock {
     const release = () => {
       for (const lock of [...AppLock._live]) lock.release();
     };
-    const markStopping = () => {
+    const markStopping = (signal: "SIGINT" | "SIGTERM") => {
+      // SIGTERM gets a line in the log; SIGINT does not.
+      //
+      // That split is the whole point. SIGINT is a human at a terminal
+      // pressing Ctrl-C on an app they are watching — they know what they
+      // did. SIGTERM arrives from somewhere else, and the somewhere that
+      // costs people their afternoon is a process-table match: every aio app
+      // runs as `deno run … <entry>.ts`, so `pkill -f app.ts` ends ALL of
+      // them — the sender's app, the ones it did not start, and the human's
+      // own long-running work.
+      //
+      // Stated as a fact with the narrower command beside it, never as an
+      // accusation: `am stop`'s own fallback reaches here too, when an app
+      // has stopped answering the graceful door, and so does a service
+      // manager. Every one of those readers is better off knowing the
+      // spelling that ends one app.
+      //
+      // Observe-only, identical in dev and prod: the shutdown that follows is
+      // byte-for-byte the one that happened before this line existed.
+      if (signal === "SIGTERM") {
+        for (const lock of AppLock._live) {
+          log.warn(
+            `SIGTERM — shutting down. "am stop --app=${lock.appId}" stops ` +
+              `this app alone; a process match (pkill -f …) ends EVERY aio ` +
+              `app on this machine, not just this one.`,
+          );
+          break; // one line per process, not one per lock held in it
+        }
+      }
       for (const lock of [...AppLock._live]) {
         lock.update({ status: "stopping" });
       }
     };
+    const onInt = () => markStopping("SIGINT");
+    const onTerm = () => markStopping("SIGTERM");
     try {
       addEventListener("unload", release);
     } catch { /* skip if listener limit */ }
     try {
-      AppLock._sigintHandler = markStopping;
-      Deno.addSignalListener("SIGINT", markStopping);
+      AppLock._sigintHandler = onInt;
+      Deno.addSignalListener("SIGINT", onInt);
     } catch { /* unsupported on windows */ }
     try {
-      AppLock._sigtermHandler = markStopping;
-      Deno.addSignalListener("SIGTERM", markStopping);
+      AppLock._sigtermHandler = onTerm;
+      Deno.addSignalListener("SIGTERM", onTerm);
     } catch { /* unsupported on windows */ }
   }
 

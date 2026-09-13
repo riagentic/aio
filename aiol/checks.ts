@@ -2859,24 +2859,36 @@ export const checkUpgrade: Checker = (ctx) => {
     // template literal — an `import { createDB } from "aio"` in a scaffolder's
     // template is a line of the GENERATED app, and --safe-fix was rewriting it.
     const code = file.content;
-    const [m] = codeMatches(
+    // EVERY `aio` import, not just the first. `const [m] = …` took match #0,
+    // and this rule's entire target population is cell files — where the
+    // first `aio` import is `import { cell } from "aio"`, which holds no
+    // server-only symbol. So the rule bailed before it ever reached the line
+    // it exists to report, and a file that imported `cell` above `createDB`
+    // was silently clean.
+    const hits = codeMatches(
       code,
       /(?:^|\n)\s*import\s*\{([^}]*)\}\s*from\s*["']aio["']/g,
-    );
-    if (!m || !SERVER_ONLY.test(m[1]!)) continue;
+    ).filter((m) => SERVER_ONLY.test(m[1]!));
+    if (hits.length === 0) continue;
     found++;
-    report(
-      "warn",
-      "upgrade",
-      `${file.relative}: server-only symbols moved to the \`aio/server\` entry ` +
-        `(alpha37) — importing them from "aio" no longer resolves`,
-      {
-        file: file.relative,
-        line: code.slice(0, m.index).split("\n").length,
-        fix: 'import { createDB } from "aio/server"',
-        safeFix: fix.fixServerEntryImport(file.path),
-      },
-    );
+    for (const m of hits) {
+      report(
+        "warn",
+        "upgrade",
+        `${file.relative}: server-only symbols moved to the \`aio/server\` ` +
+          `entry (alpha37) — importing them from "aio" no longer resolves`,
+        {
+          file: file.relative,
+          // `(?:^|\n)` CONSUMES the newline, so `m.index` points at it and
+          // the slice is one line short for every match after the first —
+          // `checkAlpha52Surface` already carries this correction.
+          line: code.slice(0, m.index).split("\n").length +
+            (m.index === 0 ? 0 : 1),
+          fix: 'import { createDB } from "aio/server"',
+          safeFix: fix.fixServerEntryImport(file.path),
+        },
+      );
+    }
   }
 
   // The DYNAMIC variant of the same migration: the lazy
@@ -2992,12 +3004,13 @@ export const checkPostAwaitRead: Checker = (ctx) => {
       continue;
     }
     const code = codeText(file.content);
+    const codeLines = code.split("\n");
     for (const m of code.matchAll(callRe)) {
       const cellVar = m[1]!;
       if (!cellNames.has(cellVar)) continue;
       const line = code.slice(0, m.index).split("\n").length;
       // Look at the next few lines only — same logical step.
-      const after = code.split("\n").slice(line, line + 4).join("\n");
+      const after = codeLines.slice(line, line + 4).join("\n");
       // `\b` before the lookahead is load-bearing: without it `\w+` simply
       // backtracks one character, so `counter.increment(2)` matched as a read
       // of `counter.incremen` — a following method CALL reported as a stale
@@ -3005,10 +3018,24 @@ export const checkPostAwaitRead: Checker = (ctx) => {
       const read = new RegExp(`\\b${cellVar}\\s*\\.\\s*(\\w+)\\b(?!\\s*\\()`)
         .exec(after);
       if (!read) continue;
+      // Anchored at the READ — the line the finding is about, and the line a
+      // reader puts a marker on. It was the `await` (report 9 §3).
+      const readLine = line + 1 +
+        after.slice(0, read.index).split("\n").length - 1;
+      // Discharged like its sibling (a draft read after an await): `// aio-ok`
+      // or `// aiol-ok` on the read, the comment above it, or on/above the
+      // awaited call — a pair has two ends, and a marker at either is the same
+      // decision. A dev script that IS the server process has no bridge
+      // between the write and the read, and this rule honoured no marker at
+      // all, in six placements (report 9 §3).
+      if (
+        isSuppressed(file.lines, readLine - 1) ||
+        isSuppressed(file.lines, line - 1)
+      ) continue;
       report(
         "hint",
         "patterns",
-        `${file.relative}:${line} — reads \`${cellVar}.${
+        `${file.relative}:${readLine} — reads \`${cellVar}.${
           read[1]
         }\` right after ` +
           `\`await ${cellVar}.${
@@ -3016,8 +3043,9 @@ export const checkPostAwaitRead: Checker = (ctx) => {
           }()\`. On a browser client the patch may not ` +
           `have arrived yet, so this can read the PREVIOUS value. Use the ` +
           `method's return value (it crosses the bridge), or re-read after the ` +
-          `next render.`,
-        { file: file.relative, line },
+          `next render; suppress a deliberate read (a server-side script has ` +
+          `no bridge) with \`// aio-ok\` on this line or the comment line above`,
+        { file: file.relative, line: readLine },
       );
       break; // one hint per file — the pattern repeats
     }
@@ -4166,6 +4194,9 @@ type _StaticVisibility = {
   mode: "all" | "none" | "include" | "exclude";
   fields: string[]; // include or exclude list (dot-paths kept)
   publicFields: string[];
+  /** `visible.forUser` is declared — a per-user view the runtime cannot
+   *  judge statically either, so its credential refusal skips the cell. */
+  forUser?: boolean;
 };
 
 function _strings(list: string): string[] {
@@ -4202,15 +4233,28 @@ function _staticVisibility(
         const cfg = raw.slice(at, close + 1);
         const pub = /\bpublicFields\s*:\s*\[([^\]]*)\]/.exec(cfg);
         const publicFields = pub ? _strings(pub[1]!) : [];
+        // Read off the MASKED text, so a `forUser` in a comment or string is
+        // not a declaration. `forUser: (s) => …` and `forUser(s) { … }` both.
+        const forUser = /\bforUser\s*[:(]/.test(stripped.slice(at, close + 1));
         const inc = /\binclude\s*:\s*\[([^\]]*)\]/.exec(cfg);
         if (inc) {
-          return { mode: "include", fields: _strings(inc[1]!), publicFields };
+          return {
+            mode: "include",
+            fields: _strings(inc[1]!),
+            publicFields,
+            forUser,
+          };
         }
         const exc = /\bexclude\s*:\s*\[([^\]]*)\]/.exec(cfg);
         if (exc) {
-          return { mode: "exclude", fields: _strings(exc[1]!), publicFields };
+          return {
+            mode: "exclude",
+            fields: _strings(exc[1]!),
+            publicFields,
+            forUser,
+          };
         }
-        return { ...none, publicFields };
+        return { ...none, publicFields, forUser };
       }
       const lit = /^["'`](all|none)["'`]/.exec(raw.slice(at));
       if (lit?.[1] === "none") return { ...none, mode: "none" };
@@ -4255,8 +4299,25 @@ function _members(
   > = [];
   // Includes the opening `{` so the first member has its `[,{]` lead-in.
   const body = stripped.slice(open, end);
-  const re =
-    /[,{]\s*(?:(async)\s+)?(?:\*\s*)?([$\w]+)\s*(?::\s*(async\s*)?)?\(([^)]*)\)\s*(?:=>\s*)?\{/g;
+  // The lead-in tolerates a COMMENT between the delimiter and the member.
+  //
+  // `codeText` blanks a comment's CONTENT and leaves its `//` (and `/*`/`*/`)
+  // delimiters standing, so `,\n  //  …\n  method(` had two slashes where
+  // `\s*` needed whitespace — and the member was simply not found. Four rules
+  // that `docs/testing/linter.md` documents as ERRORS then reported nothing
+  // for it: a sync method reading a `visible`-hidden field, a live draft
+  // escaping the method, I/O in a sync method, and a sync replay effect.
+  // Measured on two projects differing by ONE comment line: the flagged
+  // version reported the error, the commented version reported [] — and a
+  // JSDoc block, or even a trailing `// bump` on the PREVIOUS line, did the
+  // same. Every real cell has doc comments, so in a commented codebase all
+  // four gates were off while the page advertised them as enforced.
+  const LEAD = "[,{](?:\\s|\\/\\/|\\/\\*|\\*\\/)*";
+  const re = new RegExp(
+    LEAD +
+      "(?:(async)\\s+)?(?:\\*\\s*)?([$\\w]+)\\s*(?::\\s*(async\\s*)?)?\\(([^)]*)\\)\\s*(?:=>\\s*)?\\{",
+    "g",
+  );
   for (const m of body.matchAll(re)) {
     // Depth-1 members only (depth counted AFTER the lead-in delimiter).
     let depth = 0;
@@ -4722,11 +4783,21 @@ export const checkSyncReplayEffects: Checker = (ctx) => {
     const span = _cellConfigSpan(code, cell.line);
     if (!span) continue;
     const lit = code.slice(span[0], span[1] + 1);
+    // The `scope` half reads the RAW slice, not the masked one. `codeText`
+    // blanks string BODIES (length-preserving, so the offsets still line up),
+    // and the thing this predicate needs is a string body — against the
+    // masked copy it was testing `scope: "      "` and could never match. The
+    // rule therefore fired for `sync: true` cells and NEVER for
+    // `scope: "client"` ones, in a check whose whole subject is "this reducer
+    // also runs on the client". Its declared twin
+    // `checkSyncMethodHiddenReads` runs the same predicate against raw text
+    // and works, so the "one rule for one fact" note below was false.
+    const rawLit = cell.file.content.slice(span[0], span[1] + 1);
     // Exactly the predicate checkSyncMethodHiddenReads uses for "this reducer
     // also runs on the client" — one rule for one fact.
     const replays =
       (/\bsync\s*:/.test(lit) && !/\bsync\s*:\s*false\b/.test(lit)) ||
-      /\bscope\s*:\s*["'`]client["'`]/.test(lit);
+      /\bscope\s*:\s*["'`]client["'`]/.test(rawLit);
     if (!replays) continue;
     const meth = _blockOf(code, span[0], span[1], "methods");
     if (!meth) continue;
@@ -4836,12 +4907,23 @@ export const checkCredentialFieldName: Checker = (ctx) => {
       }
       checked++;
       const vis = _staticVisibility(raw, code, open, end);
-      const { top, leaves } = _hiddenOf(vis, info.stateKeys);
-      const deepHeads = new Set(
-        [...leaves.values()].map((p) => p.split(".")[0]!),
-      );
+      // The runtime refusal (`warnFieldFilters` in
+      // src/server/aio-composition.ts) skips a cell with `visible.forUser`
+      // outright: the per-user view decides what each client sees, and no
+      // static reading of it is possible. Reporting it anyway was an ERROR
+      // (exit 1) on an app that boots.
+      if (vis.forUser) continue;
+      const { top } = _hiddenOf(vis, info.stateKeys);
+      // NO deep-exclude escape for the credential itself. This used to skip
+      // any key with SOME dot-path exclude under it, so `exclude:
+      // ["apiKey.whatever"]` or `["password."]` silenced the lint while the
+      // boot REFUSED — the runtime's `deepExcludedHead` returns false for a
+      // key that is itself a credential (the value IS the secret; no sub-path
+      // under it can hide it), and every key this rule reports is one. A deep
+      // exclude only ever excuses a CONTAINER, and a container is never named
+      // like a credential, so it never reaches this filter.
       const bad = info.stateKeys.filter((k) =>
-        !top.has(k) && !deepHeads.has(k) && !vis.publicFields.includes(k) &&
+        !top.has(k) && !vis.publicFields.includes(k) &&
         isRefusableCredential(k)
       );
       if (bad.length === 0) continue;
@@ -4986,6 +5068,7 @@ export const checkEmptyStateCollection: Checker = (ctx) => {
 
 export const checkScanCoverage: Checker = (ctx) => {
   const { sourceFiles, skipped, unscannedDirs, projectDir, report, pass } = ctx;
+  const { testHelpers } = ctx;
 
   for (const s of skipped) {
     report(
@@ -4998,6 +5081,29 @@ export const checkScanCoverage: Checker = (ctx) => {
         fix:
           "Split it, or generate it into a directory aiol does not scan, so the " +
           "silence is deliberate rather than accidental",
+      },
+    );
+  }
+
+  // ONE line, at hint level, for the test-helper files. They used to be
+  // invisible — collected, dropped, and never mentioned — so a helper under
+  // `tests/` holding a hard-coded credential went unreported with nothing to
+  // say it had been passed over. They are not `skipped` entries: those are
+  // files aiol COULD NOT read, which is a warning; this is a deliberate,
+  // correct omission, and reporting nineteen of them as warnings in a healthy
+  // repo is the cries-wolf failure this file argues against elsewhere.
+  if (testHelpers.length > 0) {
+    report(
+      "hint",
+      "scan",
+      `${testHelpers.length} file(s) under tests/ are helpers, not tests ` +
+        `(${testHelpers.slice(0, 3).join(", ")}${
+          testHelpers.length > 3 ? ", …" : ""
+        }) — no app-code check runs on them, so aiol is silent about what is ` +
+        `in them`,
+      {
+        fix: "Move anything that must be linted under src/ — a fixture that " +
+          "holds a credential or reads Deno.env is unreviewed here",
       },
     );
   }
@@ -5026,6 +5132,14 @@ export const checkScanCoverage: Checker = (ctx) => {
     return;
   }
 
+  // A directory the app declares is not its code is ANSWERED: the app said
+  // so, and "move it under src/" is the one thing that must not happen to a
+  // vendored copy of another project (report 9 §4). Said as a pass line, so
+  // the coverage stays stated rather than silently narrowed.
+  for (const { dir, by } of ctx.excludedDirs ?? []) {
+    pass(`${dir}/ not read — not this app's code (${by})`);
+  }
+
   if (unscannedDirs.length > 0) {
     report(
       "hint",
@@ -5038,7 +5152,10 @@ export const checkScanCoverage: Checker = (ctx) => {
       {
         fix:
           "Move shipped code under src/ (or build/dev code under scripts/ or " +
-          "tools/) so it is checked; nothing in those directories is.",
+          "tools/) so it is checked; nothing in those directories is. A " +
+          "directory that is not this app's code (vendored, kept for " +
+          "reference) is answered by listing it in deno.json `exclude` or " +
+          "`fmt.exclude`, or in .gitignore.",
       },
     );
   }
@@ -5384,18 +5501,159 @@ function _cellConfigSpan(
   return close === -1 ? null : [open, close];
 }
 
-/** Column-0 `let|var|const` names (+ `globalThis`) — the module's own scope. */
+/** Column-0 `let|var|const` names (+ `globalThis`) — the module's own scope.
+ *
+ *  EVERY declarator, not the first: `let first = 0, saved = null;` used to
+ *  yield only `first`, so `saved = s` in a method was invisible to the rule. */
 function _moduleBindings(code: string): string[] {
   const out = new Set<string>(["globalThis"]);
-  for (
-    const m of code.matchAll(/^(?:export\s+)?(?:let|var|const)\s+([$\w]+)/gm)
-  ) out.add(m[1]!);
+  for (const m of code.matchAll(/^(?:export\s+)?(?:let|var|const)\s+/gm)) {
+    for (const name of _declaredNames(code, m.index! + m[0].length)) {
+      out.add(name);
+    }
+  }
   return [...out];
+}
+
+/** The names a `let|var|const` declaration list starting at `from` (just past
+ *  the keyword) binds — each depth-0 declarator's identifier, and the bound
+ *  identifiers of a destructuring pattern (`{ a, b: c = 1 }` → a, c). */
+function _declaredNames(code: string, from: number): string[] {
+  const out: string[] = [];
+  let i = from;
+  for (;;) {
+    while (i < code.length && /\s/.test(code[i]!)) i++;
+    const ch = code[i];
+    if (ch === "{" || ch === "[") {
+      const close = _bracketClose(code, i);
+      if (close === -1) return out;
+      const pat = code.slice(i + 1, close);
+      // A bound name is an identifier NOT followed by `:` (that is a key) and
+      // not preceded by `=` (that is a default value's start).
+      for (
+        const n of pat.matchAll(
+          /(?<![=.$\w]\s*)\b([A-Za-z_$][$\w]*)\b(?!\s*:)/g,
+        )
+      ) {
+        out.push(n[1]!);
+      }
+      i = close + 1;
+    } else {
+      const id = /^[A-Za-z_$][$\w]*/.exec(code.slice(i));
+      if (!id) return out;
+      out.push(id[0]);
+      i += id[0].length;
+    }
+    // Skip the declarator's type and initializer, to the depth-0 `,` that
+    // starts the next one or the end of the statement.
+    let d = 0;
+    for (; i < code.length; i++) {
+      const c = code[i]!;
+      if ("({[".includes(c)) d++;
+      else if (")}]".includes(c)) {
+        if (d === 0) return out;
+        d--;
+      } else if (d === 0 && c === ";") return out;
+      else if (d === 0 && c === "\n" && _asiEndsStatement(code, i)) return out;
+      else if (d === 0 && c === ",") break;
+    }
+    if (i >= code.length) return out;
+    i++; // past the `,`
+  }
+}
+
+/** Offset of the bracket closing the `{`/`[`/`(` at `open` (any bracket kind
+ *  counts toward depth), or -1. */
+function _bracketClose(code: string, open: number): number {
+  let d = 0;
+  for (let i = open; i < code.length; i++) {
+    const c = code[i]!;
+    if ("({[".includes(c)) d++;
+    else if (")}]".includes(c) && --d === 0) return i;
+  }
+  return -1;
+}
+
+/** Does the newline at `nl` end the statement (automatic semicolon insertion)?
+ *
+ *  Code written without semicolons ends a statement at a newline, and every
+ *  scan here that stopped only at `;` read straight through into the NEXT
+ *  statement: an arrow's expression body swallowed the line after it, and a
+ *  callback search on one line found an arrow on the next. The rule is the
+ *  language's, approximated on masked text: the statement CONTINUES when the
+ *  line ends in an operator (or `=>`) or the next line starts with one (`.`,
+ *  `?.`, `+`, `(`, `[`, a template); otherwise it ends. `codeText` leaves a
+ *  comment's delimiters standing, so a trailing `//` is not an operator. */
+function _asiEndsStatement(code: string, nl: number): boolean {
+  const lineStart = code.lastIndexOf("\n", nl - 1) + 1;
+  const before = code.slice(lineStart, nl)
+    .replace(/\/\/\s*$/, "").replace(/\/\*\s*\*\/\s*$/, "").trimEnd();
+  const prev = before.slice(-1);
+  if (prev === "") {
+    // A blank (or comment-only) line: decide by what precedes it.
+    return lineStart === 0 ? true : _asiEndsStatement(code, lineStart - 1);
+  }
+  if (!_endsInOperand(before) && /[=+\-*/%&|^!?:,.<>~({[]/.test(prev)) {
+    return false;
+  }
+  let j = nl + 1;
+  for (;;) {
+    while (j < code.length && /[ \t\r\n]/.test(code[j]!)) j++;
+    if (code.startsWith("//", j) && /^\/\/\s*(\n|$)/.test(code.slice(j))) {
+      j += 2;
+      continue;
+    }
+    if (code.startsWith("/*", j)) {
+      const end = code.indexOf("*/", j + 2);
+      if (end === -1) return true;
+      j = end + 2;
+      continue;
+    }
+    break;
+  }
+  const next = code.slice(j, j + 12);
+  if (next === "") return true;
+  // `++`/`--` can never be POSTFIX across a line break (a restricted
+  // production), so a line starting with one starts the next statement.
+  if (/^(?:\+\+|--)/.test(next)) return true;
+  if (/^[.?:+\-*/%&|^=<>,([`]/.test(next)) return false;
+  if (/^(?:instanceof|in|as|satisfies)\b/.test(next)) return false;
+  return true;
+}
+
+/** Does the (masked, comment-stripped) line end in a complete OPERAND whose
+ *  last character is nonetheless an operator's? Judged by that character
+ *  alone, each of these read as "continues on the next line" and swallowed the
+ *  following statement — `const nextId = () => seq++⏎s.t = readSync()` hid the
+ *  I/O that the same code with semicolons reported:
+ *  - postfix `x++` / `x--` (after an identifier, `)` or `]`);
+ *  - TypeScript's non-null `x!` (no space before it: a prefix `!` at the end
+ *    of a line has nothing to apply to);
+ *  - a regex literal's closing `/` (its body is masked to spaces, and nothing
+ *    else masks to `/ +/`: `a / / b` is not an expression, `//` a comment);
+ *  - a generic's closing `>` (`x as Array<T>`), balanced back to a `<` glued to
+ *    a type name — a comparison is written `a < b`, and `=>` is never one. */
+function _endsInOperand(line: string): boolean {
+  if (/[\w$)\]]\s*(?:\+\+|--)$/.test(line)) return true;
+  if (/[\w$)\]]!$/.test(line)) return true;
+  if (/\/ +\/$/.test(line)) return true;
+  if (line.endsWith(">") && !line.endsWith("=>")) {
+    let depth = 0;
+    for (let i = line.length - 1; i >= 0; i--) {
+      const c = line[i]!;
+      if (c === ">") depth++;
+      else if (c === "<") {
+        if (--depth === 0) return i > 0 && /[\w$]/.test(line[i - 1]!);
+      } else if (!/[\w$\s,.|&[\]]/.test(c)) return false;
+    }
+  }
+  return false;
 }
 
 /** The extent of a function literal starting at `at` (its `=>` or `function`
  *  keyword): block body → balanced `}`; expression body → the depth-0 `,`,
- *  `;` or closing bracket. Returns the body text. */
+ *  `;`, closing bracket, or statement-ending newline (code written without
+ *  semicolons). Returns the body text. */
 function _fnLiteralBody(code: string, at: number): string {
   const rest = code.slice(at);
   const brace = /^(?:=>|function\b[^{]*)\s*\{/.exec(rest);
@@ -5412,8 +5670,54 @@ function _fnLiteralBody(code: string, at: number): string {
       if (d === 0) return code.slice(at, i);
       d--;
     } else if ((ch === "," || ch === ";") && d === 0) return code.slice(at, i);
+    else if (ch === "\n" && d === 0 && _asiEndsStatement(code, i)) {
+      return code.slice(at, i);
+    }
   }
   return rest;
+}
+
+/** Where the expression a sink receives ends, scanning from `from`: inside a
+ *  call's parentheses (`inCall`) that is the closing `)`; after an `=` it is
+ *  the depth-0 `;`, `,`, closing bracket, or statement-ending newline. */
+function _sinkExprEnd(code: string, from: number, inCall: boolean): number {
+  let d = 0;
+  for (let i = from; i < code.length; i++) {
+    const ch = code[i]!;
+    if ("({[".includes(ch)) d++;
+    else if (")}]".includes(ch)) {
+      if (d === 0) return i;
+      d--;
+    } else if (d === 0 && !inCall) {
+      if (ch === ";" || ch === ",") return i;
+      if (ch === "\n" && _asiEndsStatement(code, i)) return i;
+    }
+  }
+  return code.length;
+}
+
+/** Names a method binds itself — its parameters and every `let|var|const`
+ *  in its body. Block scoping is not modelled: a name declared anywhere in the
+ *  method counts as local throughout it. */
+function _localNames(
+  code: string,
+  bodyStart: number,
+  body: string,
+): Set<string> {
+  const out = new Set<string>();
+  const head = /\(([^()]*)\)\s*(?::[^{=]*)?(?:=>\s*)?$/.exec(
+    code.slice(Math.max(0, bodyStart - 400), bodyStart),
+  );
+  if (head) {
+    for (const part of head[1]!.split(",")) {
+      const id = /^\s*(?:\.\.\.)?([A-Za-z_$][$\w]*)/.exec(part);
+      if (id) out.add(id[1]!);
+    }
+  }
+  for (const m of body.matchAll(/(?<![$\w.])(?:let|var|const)\s+/g)) {
+    for (const n of _declaredNames(body, m.index! + m[0].length)) out.add(n);
+  }
+  return out;
 }
 
 export const checkProxyEscape: Checker = (ctx) => {
@@ -5428,11 +5732,17 @@ export const checkProxyEscape: Checker = (ctx) => {
     if (!span) continue;
     const meth = _blockOf(code, span[0], span[1], "methods");
     if (!meth) continue;
-    const X = `(?:${bindings.map((b) => b.replace(/\$/g, "\\$")).join("|")})`;
     for (const fn of _members(code, meth[0], meth[1])) {
       const P = fn.param;
       if (!P) continue;
       checked++;
+      // A name the method declares itself SHADOWS the module binding:
+      // `const saved = s` beside a module-level `saved` is a local, and
+      // reporting it sent people to "fix" code that was already right.
+      const local = _localNames(code, fn.start, fn.body);
+      const visible = bindings.filter((b) => !local.has(b));
+      if (visible.length === 0) continue;
+      const X = `(?:${visible.map((b) => b.replace(/\$/g, "\\$")).join("|")})`;
       const p = P.replace(/\$/g, "\\$");
       const sink = `\\b${X}(?:\\.[$\\w]+|\\[[^\\]]*\\])*\\s*`;
       const hits: Array<{ at: number; how: string }> = [];
@@ -5451,9 +5761,15 @@ export const checkProxyEscape: Checker = (ctx) => {
       );
       for (const m of fn.body.matchAll(cb)) {
         const from = m.index! + m[0].length;
+        // Only the expression the sink RECEIVES: the call's own arguments, or
+        // the assigned value up to the end of its statement. A 400-character
+        // window that stopped only at `;` crossed a `)` and a newline, so
+        // `cache.set(id, 1)⏎ s.$do(() => s.n)` reported the `$do` callback as
+        // stored in `cache`.
+        const end = _sinkExprEnd(fn.body, from, m[0].endsWith("("));
         const lit =
           /^[^;{}]*?((?:async\s*)?(?:\([^)]*\)|[$\w]+)\s*=>|\bfunction\b)/
-            .exec(fn.body.slice(from, from + 400));
+            .exec(fn.body.slice(from, end));
         if (!lit) continue;
         const kw = lit[1]!;
         const litAt = from + lit.index + lit[0].length -

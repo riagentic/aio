@@ -15,6 +15,27 @@ deno task am <command> [args] [--flags]
 Output auto-detects: terminal -> pretty text, piped -> JSON. Override with
 `--json` or `--quiet`.
 
+## If you are an AI agent (`am agent`)
+
+```sh
+am agent                # the whole brief
+am agent --list         # the sections
+am agent --task=rules   # one of them
+```
+
+One command, no page to find. It prints the contract for working on an aio app:
+what a cell is, which verb answers which question, and the habits that cost the
+human on the other end something — ending apps by process match
+(`pkill -f app.ts` matches EVERY aio app on the machine, not just yours),
+opening windows on their desktop, and scripting around `am` for answers a verb
+already has.
+
+It prints as text even into a pipe, because the text is the payload; `--json`
+gives the sections addressable. `am create` writes an `AGENTS.md` into every new
+app that points here — and a one-line `CLAUDE.md` importing it, because Claude
+Code loads that file and not `AGENTS.md` — so an agent that never opens a doc
+still finds it.
+
 ## Building a cloned aio app (`am fix`)
 
 A freshly cloned aio app usually **won't build yet** — the framework link,
@@ -103,15 +124,16 @@ Changing a pin reads the app's own source first, through the framework's removal
 registry, and refuses a move that would break it:
 
 ```
-✗ v1.0.0-alpha42 would break this app — 1 removed API(s) still in use:
-  src/cell/a field report.ts:61
+✗ v1.0.0-alpha42 would break this app — 1 removed API(s) still in use (by directory: src/ 1):
+  src/cell/app.ts:61
     | machine: { initial: "idle", states: { idle: {} } },
     cell config key 'machine:' was removed in alpha27 — guards are a guard line
     — `if (s.status !== "idle") return;`. Migrate: docs/upgrade/restructure.md
     — or run it unchanged on the version it was written for:
     `am pin v1.0.0-alpha26 && am fix`.
   Migrate them, pin a version that still runs them, or re-run with --force to
-  pin anyway.
+  pin anyway. A directory that is not this app's code is skipped once deno.json
+  `exclude` / `fmt.exclude` or .gitignore says so.
 ```
 
 The pin does not change; nothing is written. `--force` pins anyway — the check
@@ -123,6 +145,21 @@ own upgrade fixture, not a config it boots with: it is printed as a warning with
 the same quoted line, and the pin proceeds. Moving **backward** to a version
 that still accepts the old spelling is silent, and `main` (or a path pin) counts
 as the tip, so it is checked like the newest release.
+
+A removed **cell-config key** (`execute:`, `machine:`, `actions:`,
+`generators:`…) counts only inside a cell config literal: a `cell(…)` argument
+list, or an object bound to a name that a `cell(…)` call receives
+(`cell("c", config)`, `{ ...base }`). Those are ordinary English words, and a
+plain object key elsewhere — a tool-name alias table, a record of scope labels —
+is not a hit.
+
+The scan reads **the app's own source**: never `dep/`, `node_modules/`, `dist/`,
+`build/`, `coverage/`, `target/` or a dot-directory, and never a path the app
+declares is not its code — deno.json `exclude`, deno.json `fmt.exclude`, or
+`.gitignore`. A vendored copy of another project kept for reference is answered
+by listing it there; `am migrate` and `aiol` read the same declaration. The
+refusal leads with the count per top-level directory, so a wall of findings from
+one place reads as the decision it is.
 
 Advised, never changed for you: `deno.json` config (`jsx`/`jsxImportSource`/
 `nodeModulesDir`), a missing `appId` in `aio.run()`, a Deno version below the
@@ -165,15 +202,16 @@ to `deno.json` as a dev convenience.
 
 ## Global flags
 
-| Flag           | Effect                                                                                                                                                     |
-| -------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `--app=X`      | Target a specific app by ID (default: from `deno.json` `appId`)                                                                                            |
-| `--port=N`     | Target a specific TCP port. Normally unneeded: `am` reads the port — or the socket — from the app's lock file (see "Which transport")                      |
-| `--wait[=N]`   | start/stop: block until complete (default 10s / 9s — stop waits out the runtime's whole graceful budget before SIGKILL). state: poll every Ns (default 2s) |
-| `--json`       | Force JSON output                                                                                                                                          |
-| `--quiet`      | Suppress output (exit code only)                                                                                                                           |
-| `--home=DIR`   | Target the instance of the app running from data home `DIR` — an isolated second boot (`appDir`) beside the user's own. `AIO_APPS_DIR` is the env form     |
-| `--timeout=MS` | `surface`/`trigger`: how long to wait for the live client (default 8000; must exceed the server's own 5000 ms client wait)                                 |
+| Flag           | Effect                                                                                                                                                                                                                  |
+| -------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `--app=X`      | Target a specific app by ID (default: from `deno.json` `appId`)                                                                                                                                                         |
+| `--port=N`     | Target a specific TCP port. Normally unneeded: `am` reads the port — or the socket — from the app's lock file (see "Which transport")                                                                                   |
+| `--wait[=N]`   | `start` blocks by DEFAULT (10s; `--no-wait` opts out). `stop` returns at once unless given `--wait`, whose default is 11s — the graceful budget of 8s plus the exit watchdog's slack. state: poll every Ns (default 2s) |
+| `--no-wait`    | `start` only: return as soon as the child is spawned, before it has picked a port. The old default, kept for a script that genuinely wants the spawn                                                                    |
+| `--json`       | Force JSON output                                                                                                                                                                                                       |
+| `--quiet`      | Suppress output (exit code only)                                                                                                                                                                                        |
+| `--home=DIR`   | Target the instance of the app running from data home `DIR` — an isolated second boot (`appDir`) beside the user's own. `AIO_APPS_DIR` is the env form                                                                  |
+| `--timeout=MS` | `surface`/`trigger`: how long to wait for the live client (default 8000; must exceed the server's own 5000 ms client wait)                                                                                              |
 
 ## Reaching an app that has auth (`control.key`)
 
@@ -272,11 +310,16 @@ rather than built some other way.
 
 ```sh
 deno task am start                # start app (kills zombies, refuses if running)
-deno task am start --wait         # start and block until healthy (default 10s timeout)
+deno task am start                # starts AND WAITS until healthy (10s) — the default
+deno task am start --no-wait      # return as soon as it is spawned (no port yet)
 deno task am start --wait=30      # start with 30s timeout
 deno task am start --port=9000    # start on specific port
 deno task am stop                 # graceful shutdown — exit 1 if state did NOT reach disk
-deno task am stop --wait          # stop and block until dead (default 9s — the graceful budget)
+deno task am stop --wait          # stop and block until dead (default 11s)
+deno task am stop --all           # every app OF THIS PROJECT (refused outside one —
+                                  # no deno.json above the cwd means no project; an
+                                  # app launched inside a NESTED project is that
+                                  # project's, and is named and left running)
 deno task am kill                 # end it now, no asking (SIGTERM + drop the lock)
 deno task am kill --stale         # reap ORPHANS — processes still serving with no
                                   # lock: the ones that answer `am state` with old
@@ -292,8 +335,20 @@ In a repo that declares COMPONENTS (below), `start`, `stop`, `restart` and
 
 Exit codes: `started` -> 0, `stopped` -> 1, `starting`/`stopping` -> 2.
 
-`start` and `stop` return immediately by default — use `--wait[=N]` to block
-until the action completes. `restart` always waits for stop internally, then
+A global flag given to a verb that does not read it is warned about on stderr
+and ignored — the verb still runs, with its own exit code — and the warning
+names the verbs that do read it (`am timeline --follow` → "--follow does nothing
+for timeline — ignored", "--follow is read by: am logs"):
+`--all --filter --follow --lines --stale --tables --print --long --ui
+--as-server --body --args --data`.
+The cross-cutting ones
+(`--app --port
+--home --json --quiet --wait --timeout --client-index --entry --force`)
+and the launch flags (`--no-wait --transport`) are accepted everywhere. `--`
+ends am's options: what follows is an argument, never a flag.
+
+`start` WAITS by default (`--no-wait` opts out); `stop` returns immediately
+unless you pass `--wait[=N]`. `restart` always waits for stop internally, then
 spawns and returns immediately. `stop` tries graceful shutdown via trojan API,
 falls back to SIGTERM, escalates to SIGKILL after timeout. Kill sequence:
 SIGTERM -> wait 2s -> SIGKILL.
@@ -395,7 +450,7 @@ filter turns "I could not read that" into "nothing happened".
 ## Instance discovery
 
 ```sh
-deno task am instances            # list all running aio apps on this machine
+deno task am instances            # list running aio apps in this scope (--instance / AIO_APPS_DIR list separately)
 deno task am instances --json     # JSON output
 deno task am discover             # find exposed aio apps on the LAN (UDP broadcast; --timeout=ms)
 ```
@@ -452,7 +507,13 @@ deno task am state counter --wait=5         # poll every 5s
 deno task am state --ui                     # UI state (cell-level ui filtered)
 deno task am state --ui alice               # UI state for specific user
 deno task am expect counter.count gt 3      # assert on state (eq/ne/gt/lt/contains/exists…); e2e; --wait=N
+deno task am expect draft absent            # the one op that passes on a missing path
 ```
+
+`am expect` FAILS on a path that is not there, for every op except `absent`
+(`exists` fails too, by meaning) — a typo in the path is never a PASS. A
+comparison op needs exactly one value; `exists`/`absent` take none. Quote a
+value with spaces.
 
 Path syntax: `fleet[0].stats.pnl` for traversal, `{id,name}` for field picking,
 `[*]` for wildcard over arrays. `am state` = raw server state. `am state --ui` =
@@ -494,8 +555,8 @@ deno task am dispatch BulkUpdate items='[1,2]'               # payload { items: 
 # Raw envelope
 deno task am dispatch --body='{"type":"conn:setHost","payload":{"args":["192.168.1.9"]}}'
 
-deno task am actions                       # last 20 actions from history
-deno task am actions 50                    # last 50 actions
+deno task am actions                       # the time-travel history (the whole window)
+deno task am actions 50                    # the newest 50 (= --lines=50; adds shown/total)
 ```
 
 A cell method is called with POSITIONAL arguments. Bare values (no `=`) become
@@ -503,6 +564,11 @@ those arguments, and `--args='[…]'` is the same list written as JSON — the
 spelling to reach for when a value contains `=` or must keep its exact type.
 Values without `--args` are auto-parsed: numbers, booleans, `null`, JSON
 arrays/objects, else strings.
+
+A positional is `key=value` only when the key is a property name (`host=h`,
+`_id=3`): `"https://example.com/?q=1"` is one string argument, not a key called
+`https://example.com/?q`. Everything after `--` is an argument too, however it
+is spelled — `am dispatch notes:add -- --draft` passes `"--draft"`.
 
 `key=value` pairs are collected into ONE object: after a `cell:method` type they
 become the method's single object argument (`configure({host, port})`), and for
@@ -536,9 +602,12 @@ deno task am timeline --from=<data>/journal  # offline, from a durable journal f
 deno task am timetravel undo|redo           # step back/forward
 deno task am timetravel goto <id>          # jump to one entry (the id `am actions` lists)
 deno task am timetravel pause|resume        # freeze/unfreeze state
+#   an undo at the oldest entry (or redo at the newest) moves nothing: the reply
+#   stays ok (exit 0) and says so — "moved": false plus a "note" in --json
 deno task am replay 5..12                   # re-dispatch journal seq 5..12 for repro
 deno task am replay 5..12 --dry             # show what would replay, dispatch nothing
-deno task am record flow.test.ts --from=J   # turn a journal into a bootCells test
+deno task am record flow.test.ts            # what the running app dispatched → a bootCells test
+deno task am record flow.test.ts --from=J   # …the same, from a journal file
 ```
 
 - **`am timeline`** reads a live, always-on in-memory ring on the running app —
@@ -552,14 +621,42 @@ deno task am record flow.test.ts --from=J   # turn a journal into a bootCells te
   time-travel
   ([how it works](../persistence/how-it-works.md#concurrency--safety)), so an
   undo reaches disk with the next persist cycle (`am persist` forces one), never
-  on its own.
+  on its own. Under `journal: true` a jump is journalled as the state it put in
+  place, so a crash after it — paused there, or after `resume` and more actions
+  — recovers the state the app actually had, never the pre-jump snapshot with
+  the later actions replayed on top. It shows in `am timeline` as
+  `time travel: goto N (state restored)`.
 - **`am replay <range>`** re-dispatches a journal range against the running app,
   in order, stopping at the first failure — deterministic repro for the "froze
   in the client but the test passed" class. Point it at a fresh instance to
-  reproduce a captured session. `--dry` lists the range without dispatching.
+  reproduce a captured session. `--dry` lists the range without dispatching,
+  counting exactly what the real run sends. It sends **inputs only**: each
+  journal line records its `cause`, and a line an earlier action caused — the
+  inc a `later()` timer fires, an async method's `__set…` write-set, what a
+  cell's `onInit` dispatched at boot — is not sent, because its cause re-creates
+  it (both outputs list them, with why). A tick of the app's `schedules:` is an
+  input. Where such lines fell between two inputs, the recorded gap is kept (up
+  to 5 s) so the timer lands where it did. A journal written before `cause` was
+  recorded says so: its caused lines cannot be told apart and may apply twice.
+- **`am record [out.test.ts]`** writes a `bootCells` test that re-calls, in
+  order, every method the **running** app dispatched since boot — its live
+  timeline (the last 500 dispatches; a full ring is warned about, since the
+  flow's start may have rotated out). Reproduce the bug, then record. A
+  `redactActions` call appears as a commented gap rather than a call with
+  invented arguments, and a `diagnostics: false` cell is not in the timeline. An
+  async call that threw in the run is emitted as `assertRejects(…)`, and an
+  action another one caused (or a cell's `onInit` did) is not called — its cause
+  re-creates it, with `h.advance(ms)` walking the virtual clock through the
+  recorded gaps so a scheduled one fires. Calls that overlapped live — a later
+  one started before an earlier async call's run left its last write — are
+  started together in one `Promise.all`, so a race the app really had (a lost
+  update) happens in the test too. With the app stopped it reads the journal
+  instead — which holds only what no snapshot had yet taken, i.e. a crashed
+  run's tail.
 
-Range forms: `N` (one seq), `N..M` (inclusive), or omit for all. Both read
-`<data>/journal` by default; override with `--from=<path>`.
+Range forms: `N` (one seq), `N..M` (inclusive), or omit for all. `am replay`
+reads `<data>/journal` by default; `am replay`, `am record` and `am timeline`
+all take `--from=<path>` for a journal file.
 
 **`sync: true` cells are not in this history.** Their changes are durable in the
 CRDT op-log rather than the dispatch journal, so the timeline and replay do not
@@ -636,6 +733,8 @@ am uninstall              # remove am (your aio apps are untouched)
 am installed              # list installed apps, with version + where each came from
 am upgrade <app>          # rebuild and reinstall an installed APP from its recorded source
 am remove <app> [--data]  # uninstall one — the PROGRAM; --data also deletes ~/.<app>/
+                          # (only when it is an aio data dir — data/state.db, data/meta.json,
+                          #  launch.json… — never another program's ~/.<name>, --force or not)
 am theme adopt            # take aio's stylesheet INTO this app (src/aio-theme.css) — yours from then on
 am publish [--key=K]      # build, sign and lay out the channel directory an update client fetches
 ```
@@ -708,6 +807,12 @@ for how to read each column.
 **files** — including `auth.db`, the app key and the TLS material, which are not
 cell state and which a state snapshot therefore doesn't contain.
 
+`am create <name>` looks first: when the new app's home
+(`$AIO_APPS_DIR/<appId>`, else `~/.<appId>`) already exists — an earlier app
+with the same id — it says so, with that data's aio version and date from
+`meta.json`, because the first `deno task dev` boots on it. `--json` carries it
+as `existingData` (null when the home is fresh).
+
 ```sh
 am data                      # every path this app uses + sizes, by tier
 am data --json               # machine-readable
@@ -767,6 +872,20 @@ per-connection **counter**, not a position: it starts wherever the server's
 count is (in dev, index 0 is usually the reload socket, which has no UI), and
 one page reload moves it. Pass one only to pick among several open clients, and
 read the current numbers from `am clients` first.
+
+**No client connected?** `am surface` (no index) then falls back to a
+**server-side render** and says so in a `note:` line on stderr;
+`am surface server` asks for one directly. Dev only: the server imports the
+app's UI entry in-process, mounts it in a throwaway DOM against the LIVE cells,
+and reads them the way a client does — a field hidden by `visible` is hidden
+here too. It is an inspection, not a client: it has no layout (so `--rects` is
+refused), and `am trigger` still needs a connected client. The server imports
+the UI **once** and keeps that import, so after you edit `App.tsx` (or a
+component under its directory) the render shows the UI as it was. When a UI
+source file is newer than the import, the answer says so: a
+`note: this server-side render is STALE — <file> changed …` line on stderr, and
+a `stale: { file, changedAt, importedAt, note }` field on each top-level node of
+the `--json` answer. Open a client for the current UI.
 
 `type` APPENDS to the field's current value (a user typing into a field that
 already has one); `setValue` clears first, then types — use it to drive a form,
@@ -1022,7 +1141,10 @@ it says in one line.
 Each finding names the file and line, the retired spelling, the one-line fix,
 and the upgrade guide with the full recipe. Renames are marked `[fixable]` —
 `aiol --safe-fix` rewrites those. A hit under `tests/` is marked as a probable
-fixture rather than treated as work, the same call `am pin` makes.
+fixture rather than treated as work, the same call `am pin` makes. It reads the
+same source `am pin` does — cell-config keys only inside a cell config literal,
+and nothing the app excludes in deno.json `exclude` / `fmt.exclude` or
+`.gitignore`.
 
 It exits 1 when anything is found, so it works as a CI step. `--from` narrows
 the registry to what was removed AFTER that release; omitted, it reads the app's
@@ -1054,7 +1176,11 @@ nothing in the app needs to know.
 It is not a new isolation mechanism: it resolves to
 `AIO_APPS_DIR=~/.aio-instances/<name>`, which aio already scopes the data root
 **and** the lock/socket directory by. An explicit `AIO_APPS_DIR` wins — it is
-the more specific instruction.
+the more specific instruction — and `am` says so on stderr
+(`--instance=agent1 is ignored — AIO_APPS_DIR is set …`) rather than letting the
+flag do nothing in silence. `am instances --json` prints each row's `stopWith`
+with the scope it was listed in (`--instance=<name>`, `AIO_APPS_DIR=<dir>`,
+`--home=<dir>`), so the command reaches that copy and not the default one.
 
 ## Reporting findings about aio (`am feedback`)
 
@@ -1153,10 +1279,15 @@ Card
   Card:act  <button>  Go
 ```
 
-The app does not need to be running: this renders the module directly. It is the
+The app does not need to be running: this renders the module directly, with the
+cells it imports reading their declared state (selectors work; a method called
+during the render refuses, since nothing runs) and the route at `/`. It is the
 same renderer `am surface` uses and prints the same `Component:Element` paths
 `am trigger` takes, so what you read here is what you would address there.
 
+- The file is found the way your shell means it: relative to the current
+  directory first, then the project root, then the app directory (so
+  `src/Card.tsx` and `Card.tsx` both work from the project root).
 - `--export=Name` picks a named export; without it, the default export.
 - `--props=` is a JSON **object**. A number or an array is refused rather than
   spread into nothing, because a component rendering with every prop `undefined`
@@ -1247,27 +1378,28 @@ as "not running". Two instances of one id from two homes is a real ambiguity;
 ### Control (POST)
 
 All POST endpoints require the `X-AIO: 1` header (CSRF protection). All return
-JSON. Auth is inherited — tokens required when `--expose` is active.
+JSON. Auth is inherited — tokens required when `--expose` is active. `$PORT` is
+the app's own port (`am instances` prints it — there is no fixed default).
 
 ```sh
 # Dispatch action
-curl -X POST localhost:8000/__aio/trojan/dispatch \
+curl -X POST localhost:$PORT/__aio/trojan/dispatch \
   -H 'X-AIO: 1' -H 'Content-Type: application/json' \
   -d '{"type":"INCREMENT","payload":{"by":1}}'
 
 # Force persist
-curl -X POST localhost:8000/__aio/trojan/persist -H 'X-AIO: 1'
+curl -X POST localhost:$PORT/__aio/trojan/persist -H 'X-AIO: 1'
 
 # Time-travel (dev only)
-curl -X POST localhost:8000/__aio/trojan/tt -H 'X-AIO: 1' -d '{"cmd":"undo"}'
-curl -X POST localhost:8000/__aio/trojan/tt -H 'X-AIO: 1' -d '{"cmd":"goto","arg":3}'
+curl -X POST localhost:$PORT/__aio/trojan/tt -H 'X-AIO: 1' -d '{"cmd":"undo"}'
+curl -X POST localhost:$PORT/__aio/trojan/tt -H 'X-AIO: 1' -d '{"cmd":"goto","arg":3}'
 
 # SQL query (read-only)
-curl -X POST localhost:8000/__aio/trojan/sql -H 'X-AIO: 1' \
+curl -X POST localhost:$PORT/__aio/trojan/sql -H 'X-AIO: 1' \
   -d '{"query":"SELECT * FROM users LIMIT 10"}'
 
 # Drive the client UI — by semantic PATH, not a CSS selector
-curl -X POST localhost:8000/__aio/trojan/trigger/0 \
+curl -X POST localhost:$PORT/__aio/trojan/trigger/0 \
   -H 'X-AIO: 1' -H 'Content-Type: application/json' \
   -d '{"path":"SubmitButton","action":"click"}'
 ```

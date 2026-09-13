@@ -27,6 +27,7 @@ import {
   verifyShipManifest,
 } from "../src/build/ship.ts";
 import { notRunnableExit } from "../src/testing/internal.ts";
+import { dropTempDir, tempDir } from "../src/testing/temp-dir.ts";
 import type { DataContract, ShipManifest } from "../src/build/ship.ts";
 import { manifestUrl } from "../src/server/updates-core.ts";
 
@@ -258,7 +259,7 @@ Deno.test("ship manifest: a forged signature fails verification", async () => {
 });
 
 Deno.test("shipApp: one command → binary + source → signed ship.json (batteries-included)", async () => {
-  const dir = await Deno.makeTempDir();
+  const dir = await tempDir("aio-ship-");
   try {
     const binaryPath = dir + "/app.bin";
     await Deno.writeFile(binaryPath, elf("COMPILED-BINARY-BYTES"));
@@ -304,7 +305,7 @@ Deno.test("shipApp: one command → binary + source → signed ship.json (batter
     const binary = await Deno.readFile(binaryPath);
     assertEquals((await verifyShipManifest(binary, written)).ok, true);
   } finally {
-    await Deno.remove(dir, { recursive: true });
+    await dropTempDir(dir);
   }
 });
 
@@ -314,7 +315,7 @@ Deno.test("shipApp: one command → binary + source → signed ship.json (batter
 // (sources in `apps/web/`), `ship` signed a least-privilege claim it never
 // measured: every capability false, `run: (no perms)`, `version 0.0.0`.
 Deno.test("shipApp: scans THE app dir (from the entry) and refuses an unmeasured claim", async () => {
-  const dir = await Deno.makeTempDir({ prefix: "aio-ship-nested-" });
+  const dir = await tempDir("aio-ship-nested-");
   const cwd = Deno.cwd();
   try {
     await Deno.writeTextFile(
@@ -367,7 +368,7 @@ Deno.test("shipApp: scans THE app dir (from the entry) and refuses an unmeasured
     );
   } finally {
     Deno.chdir(cwd);
-    await Deno.remove(dir, { recursive: true });
+    await dropTempDir(dir);
   }
 });
 
@@ -811,7 +812,7 @@ Deno.test("unsigned refusal names a fix that exists", async () => {
 });
 
 Deno.test("shipApp: an unknown --target is refused, not cast into the manifest", async () => {
-  const dir = await Deno.makeTempDir({ prefix: "aio-ship-target-" });
+  const dir = await tempDir("aio-ship-target-");
   try {
     const binaryPath = join(dir, "app.bin");
     await Deno.writeFile(binaryPath, elf("BIN"));
@@ -830,6 +831,9 @@ Deno.test("shipApp: an unknown --target is refused, not cast into the manifest",
       Error,
       "unknown target",
     );
+    // UPDATE_TARGETS is imported: empty would make this loop check nothing,
+    // and the point of the test is that the refusal LISTS them.
+    assert(UPDATE_TARGETS.length > 0, "there are targets to name");
     for (const t of UPDATE_TARGETS) assert(err.message.includes(t), t);
     // A real target still ships.
     const m = await shipApp({
@@ -842,12 +846,12 @@ Deno.test("shipApp: an unknown --target is refused, not cast into the manifest",
     });
     assertEquals(m.target, "appimage");
   } finally {
-    await Deno.remove(dir, { recursive: true });
+    await dropTempDir(dir);
   }
 });
 
 Deno.test("shipApp: refuses an unsafe channel at the PUBLISHER, not at every user", async () => {
-  const dir = await Deno.makeTempDir({ prefix: "aio-ship-channel-" });
+  const dir = await tempDir("aio-ship-channel-");
   try {
     const binaryPath = join(dir, "app.bin");
     await Deno.writeFile(binaryPath, elf("BIN"));
@@ -866,7 +870,7 @@ Deno.test("shipApp: refuses an unsafe channel at the PUBLISHER, not at every use
       "not a safe identifier",
     );
   } finally {
-    await Deno.remove(dir, { recursive: true });
+    await dropTempDir(dir);
   }
 });
 
@@ -884,7 +888,7 @@ Deno.test("manifestFileName: one spelling, shared with the URL the client reques
 });
 
 Deno.test("shipApp: writes the manifest under the name the CLIENT fetches", async () => {
-  const dir = await Deno.makeTempDir({ prefix: "aio-ship-names-" });
+  const dir = await tempDir("aio-ship-names-");
   try {
     const binaryPath = join(dir, "app.bin");
     await Deno.writeFile(binaryPath, elf("COMPILED"));
@@ -914,7 +918,7 @@ Deno.test("shipApp: writes the manifest under the name the CLIENT fetches", asyn
       m.sha256,
     );
   } finally {
-    await Deno.remove(dir, { recursive: true });
+    await dropTempDir(dir);
   }
 });
 
@@ -950,7 +954,7 @@ Deno.test("publishInstructions: the copy lines name the file the client asks for
 async function contractFixture(): Promise<
   { dir: string; script: string; entry: string }
 > {
-  const dir = await Deno.makeTempDir({ prefix: "aio-contract-" });
+  const dir = await tempDir("aio-contract-");
   const repo = new URL("../", import.meta.url).pathname;
   const entry = join(dir, "app.ts");
   await Deno.writeTextFile(
@@ -1008,7 +1012,7 @@ Deno.test({
         `boot lines must survive on stderr:\n${stderr}`,
       );
     } finally {
-      await Deno.remove(dir, { recursive: true });
+      await dropTempDir(dir);
     }
   },
 });
@@ -1028,13 +1032,13 @@ Deno.test({
       });
       assertEquals(m.data?.cells.notes, { version: 3, migratesFrom: 1 });
     } finally {
-      await Deno.remove(dir, { recursive: true });
+      await dropTempDir(dir);
     }
   },
 });
 
 Deno.test("shipApp: an unreadable data contract FAILS the publish", async () => {
-  const dir = await Deno.makeTempDir({ prefix: "aio-ship-nodata-" });
+  const dir = await tempDir("aio-ship-nodata-");
   try {
     const binaryPath = join(dir, "app.bin");
     // A program that RUNS and fails on its own terms — which is the case this
@@ -1072,12 +1076,12 @@ Deno.test("shipApp: an unreadable data contract FAILS the publish", async () => 
     });
     assertEquals(m.data, undefined);
   } finally {
-    await Deno.remove(dir, { recursive: true });
+    await dropTempDir(dir);
   }
 });
 
 Deno.test("shipApp: --data with log lines in it names the file, not a stack", async () => {
-  const dir = await Deno.makeTempDir({ prefix: "aio-ship-dataflag-" });
+  const dir = await tempDir("aio-ship-dataflag-");
   try {
     const binaryPath = join(dir, "app.bin");
     await Deno.writeFile(binaryPath, elf("COMPILED"));
@@ -1109,7 +1113,7 @@ Deno.test("shipApp: --data with log lines in it names the file, not a stack", as
     assert(err.message.includes(dataPath), err.message);
     assert(err.message.includes("--aio-data-contract"), err.message);
   } finally {
-    await Deno.remove(dir, { recursive: true });
+    await dropTempDir(dir);
   }
 });
 
@@ -1118,7 +1122,7 @@ Deno.test("shipApp: --data with log lines in it names the file, not a stack", as
 // `shipApp` writes MUST be that same id, read through the same decider. A file
 // name ("notes-cli", "notes.AppImage") would refuse its own updates.
 Deno.test("shipApp: the release name is the app's appId, not the file name", async () => {
-  const dir = await Deno.makeTempDir({ prefix: "aio-ship-name-" });
+  const dir = await tempDir("aio-ship-name-");
   const cwd = Deno.cwd();
   try {
     await Deno.writeTextFile(
@@ -1147,7 +1151,7 @@ Deno.test("shipApp: the release name is the app's appId, not the file name", asy
     assert(claims.ok, claims.reason);
   } finally {
     Deno.chdir(cwd);
-    await Deno.remove(dir, { recursive: true });
+    await dropTempDir(dir);
   }
 });
 
@@ -1185,6 +1189,10 @@ async function runShip(
 Deno.test({
   name: "ship keygen: never writes a private key inside a git work tree",
   fn: async () => {
+    // The registry's root (aioTestRoot()) can itself sit inside a git work
+    // tree (e.g. a dotfiles-managed home tmp dir) — this test asserts about
+    // being OUTSIDE one, so it must stay raw.
+    // aio-ok(temp-dirs): must not be under a git work tree — see above.
     const dir = await Deno.makeTempDir({ prefix: "aio-keygen-" });
     const home = join(dir, "home");
     const repo = join(dir, "repo");
@@ -1237,13 +1245,16 @@ Deno.test({
       assert((JSON.parse(piped.stdout) as { privateKey: unknown }).privateKey);
       assert(piped.stderr.includes("PRIVATE"), piped.stderr);
     } finally {
-      await Deno.remove(dir, { recursive: true });
+      await dropTempDir(dir);
     }
   },
 });
 
 Deno.test("gitWorkTreeOf: finds the tree from a nested path, .git file or dir", async () => {
   const { gitWorkTreeOf } = await import("../src/testing/internal.ts");
+  // Asserts "no .git yet" — must start OUTSIDE any git work tree, which the
+  // registry's root (aioTestRoot()) is not guaranteed to be.
+  // aio-ok(temp-dirs): must not be under a git work tree — see above.
   const dir = await Deno.makeTempDir({ prefix: "aio-worktree-" });
   try {
     const repo = join(dir, "repo");
@@ -1254,7 +1265,7 @@ Deno.test("gitWorkTreeOf: finds the tree from a nested path, .git file or dir", 
     await Deno.writeTextFile(join(repo, ".git"), "gitdir: /elsewhere\n");
     assertEquals(gitWorkTreeOf(deep), repo);
   } finally {
-    await Deno.remove(dir, { recursive: true });
+    await dropTempDir(dir);
   }
 });
 
@@ -1339,7 +1350,7 @@ Deno.test("ship: a real keypair still loads unchanged", async () => {
 });
 
 Deno.test("ship: the CLI refuses a bad key BEFORE it hashes or signs anything", async () => {
-  const dir = await Deno.makeTempDir({ prefix: "ship-key-" });
+  const dir = await tempDir("ship-key-");
   try {
     // Exactly what the docs' `ship keygen > release-key.json` produced.
     await Deno.writeTextFile(
@@ -1396,7 +1407,7 @@ Deno.test("ship: the CLI refuses a bad key BEFORE it hashes or signs anything", 
       "a refused ship must not write a manifest",
     );
   } finally {
-    await Deno.remove(dir, { recursive: true }).catch(() => {});
+    await dropTempDir(dir);
   }
 });
 
@@ -1476,7 +1487,7 @@ Deno.test("ship: 'did not run' and 'ran, no contract' are different failures", (
 });
 
 Deno.test("ship: the not-runnable refusal does NOT offer --no-data", async () => {
-  const dir = await Deno.makeTempDir({ prefix: "ship-broken-" });
+  const dir = await tempDir("ship-broken-");
   try {
     await Deno.writeTextFile(
       join(dir, "deno.json"),
@@ -1532,12 +1543,12 @@ Deno.test("ship: the not-runnable refusal does NOT offer --no-data", async () =>
       `the CLI must print its own refusal, not an unhandled rejection:\n${out}`,
     );
   } finally {
-    await Deno.remove(dir, { recursive: true }).catch(() => {});
+    await dropTempDir(dir);
   }
 });
 
 Deno.test("ship: a program that RAN and failed keeps --data= and --no-data", async () => {
-  const dir = await Deno.makeTempDir({ prefix: "ship-ranfail-" });
+  const dir = await tempDir("ship-ranfail-");
   try {
     await Deno.writeTextFile(
       join(dir, "deno.json"),
@@ -1576,7 +1587,7 @@ Deno.test("ship: a program that RAN and failed keeps --data= and --no-data", asy
     // …and the hatch now names WHEN it is the right one.
     assertStringIncludes(out, "CROSS-COMPILED");
   } finally {
-    await Deno.remove(dir, { recursive: true }).catch(() => {});
+    await dropTempDir(dir);
   }
 });
 
@@ -1608,7 +1619,7 @@ Deno.test("ship: artifactFormat recognises every shape aio publishes, and nothin
 });
 
 Deno.test("ship: --no-data cannot publish a file that is not an artifact", async () => {
-  const dir = await Deno.makeTempDir({ prefix: "ship-fmt-" });
+  const dir = await tempDir("ship-fmt-");
   try {
     await Deno.writeTextFile(
       join(dir, "deno.json"),
@@ -1654,6 +1665,6 @@ Deno.test("ship: --no-data cannot publish a file that is not an artifact", async
       "nothing may be written for a file that is not an artifact",
     );
   } finally {
-    await Deno.remove(dir, { recursive: true }).catch(() => {});
+    await dropTempDir(dir);
   }
 });

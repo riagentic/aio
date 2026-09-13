@@ -197,7 +197,14 @@ The rule is unlayered, so it beats the generated theme (which lives in
 `@layer aio`) without anyone writing `!important`.
 
 Rendering with `renderToString`? There is no document to inject into on the
-server, so put `collectCss()` in your own `<head>`.
+server, so put `collectCss()` in your own `<head>` — inside a `<style>`:
+
+```ts
+`<head><style>${collectCss()}</style></head>`;
+```
+
+It returns CSS (`.aio-x{color:red}`), not markup. Bare in a `<head>` a browser
+treats it as text and applies none of it.
 
 **`aiol` catches the case that actually bites**: the same class defined in two
 places, disagreeing about the same property.

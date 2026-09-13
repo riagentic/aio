@@ -8,6 +8,34 @@ import { settlesCalls } from "../protocol/ack-registry.ts";
 import { nameIsTaken } from "./cell-helpers.ts";
 import { pendingSignal } from "./pending.ts";
 
+/** The raw creators of cells an app has composed and is initialising, but has
+ *  not bound yet. Keyed by the creator (`__aio.actions[key]`), which is unique
+ *  to one def, so the guard below can tell "this cell is in no app" from "this
+ *  cell's app is running its `__init`s". The two need opposite advice: the
+ *  first is fixed by listing the cell, the second is a call made too early by
+ *  an app that already lists it — telling that app to list it sent the reader
+ *  away from the actual problem. */
+const _booting = new WeakSet<object>();
+
+/** Mark `cells` as initialising for the duration of `fn` (their `__init`
+ *  dispatches and `onInit`s). Internal to the boot path. */
+export function _whileCellsBoot<T>(cells: readonly CellDef[], fn: () => T): T {
+  const raws: object[] = [];
+  for (const f of cells) {
+    for (const raw of Object.values(f.__aio.actions ?? {})) {
+      if (typeof raw === "function" && !_booting.has(raw)) {
+        _booting.add(raw);
+        raws.push(raw);
+      }
+    }
+  }
+  try {
+    return fn();
+  } finally {
+    for (const raw of raws) _booting.delete(raw);
+  }
+}
+
 /** Wrap a raw action creator with a guard for the pre-binding state. Calling a
  *  method before the runtime is booted ALWAYS throws (dev + prod) — a pre-boot
  *  dispatch has nowhere to go, so silently no-op'ing it would lose the write.
@@ -25,6 +53,17 @@ export function makeUnboundGuard(
   // dispatching method replaces this guard, so only the never-legitimate
   // pre-boot path is affected.
   const guarded = (() => {
+    if (_booting.has(raw as object)) {
+      throw new Error(
+        `[${cellName}] ${key}() called while the app is still booting — the ` +
+          `cell IS in aio.run({ cells }), but methods are bound only after ` +
+          `every cell's \`__init\` has run, and this call came from code ` +
+          `running during it (a hook seeing a \`:__init\` action, or an ` +
+          `onInit). Defer the call: skip \`:__init\` actions in the hook and ` +
+          `make it on the first real action, or make it from onStart, which ` +
+          `runs after binding.`,
+      );
+    }
     throw new Error(
       `[${cellName}] ${key}() called before the cell's runtime is booted — ` +
         `add this cell to aio.run({ cells: [...] }), or boot it in a test with ` +
@@ -160,11 +199,19 @@ export function bindCell(
         // was settled by NOBODY and every async bound method rejected at the
         // call ceiling with "stopped waiting", 30s after the method had
         // already finished. Successes and failures alike.
+        //
+        // And no `_source: "Effect"` on it. That stamp is LOCAL provenance (a
+        // call made by server code); over a wire it is a claim the receiver
+        // cannot trust, so `sanitizeClientAction` strips it, re-stamps "UI",
+        // and warns "client sent trusted field(s) _source" — once per
+        // `await cell.asyncMethod()` from connectCli/connectCliUDS, naming
+        // aio's own client as a forger. The server's outcome is unchanged
+        // (it always re-stamps); only the false alarm goes. `_callId` stays:
+        // the server discards it quietly for the same reason.
         if (settlesCalls(dispatch)) {
           const remote = dispatch({
             ...action,
             payload: { args, _callId: callId },
-            _source: "Effect" as const,
           });
           remote.catch(() => {});
           return remote;

@@ -189,13 +189,30 @@ Callback refs receive `null` when the element is removed.
 
 Style diffing is incremental — only changed properties are updated.
 
-### `false` removes an attribute
+In a style object, `null`, `undefined`, `false` and `true` mean "no declaration"
+— `style={{ display: hidden && "none" }}` removes `display` when `hidden` is
+false, on the client and in SSR alike. Numbers get `px` except for unitless
+properties (`opacity`, `zIndex`, `lineHeight`, `flexGrow`, … and their
+vendor-prefixed forms such as `WebkitLineClamp`). Custom properties are written
+verbatim, case included (`{ "--rowGap": "4px" }` sets `--rowGap`), and
+`msTransform` becomes `-ms-transform`.
 
-`false` is treated as "no attribute", including for `aria-*` and `data-*`:
-`<button aria-pressed={false}>` renders `<button>`, not `aria-pressed="false"`
-(React writes the string for `aria-*`). Pass the string when the false state is
-meaningful — `aria-pressed={pressed ? "true" : "false"}` — and note that `""`
-and `0` are values, so they are kept.
+`<select multiple value={["en", "de"]}>` selects every option whose value is in
+the array.
+
+### `false` removes an attribute — except where `"false"` is a value
+
+`false` is treated as "no attribute" for ordinary attributes and `data-*`:
+`<div data-open={false}>` renders `<div>`. `""` and `0` are values, so they are
+kept.
+
+`aria-*` and the enumerated attributes (`draggable`, `spellCheck`,
+`contentEditable`) are the exception, as in React: there `"false"` is a
+meaningful value, not an absence, so `<button aria-pressed={false}>` renders
+`<button aria-pressed="false">`. An absent `aria-pressed` means "not a toggle
+button at all" and an absent `aria-expanded` means "not expandable", so
+`aria-expanded={open}` stays correct when `open` is false. To remove one of
+these, pass `undefined` or `null`.
 
 ### Reactive styles
 
@@ -244,6 +261,20 @@ Event handlers use `on` + event name (camelCase), same as React:
 
 > **Note:** AIR uses native DOM events, not React synthetic events. Use
 > `onInput` instead of `onChange` for text inputs.
+
+A handler written out of line takes `AirEvent<Element, Event>` — the native
+event with `currentTarget` typed as the element — and imports it from `"aio"`,
+beside `JSX`:
+
+```tsx
+import type { AirEvent, JSX } from "aio";
+
+function Done(props: { onDone(done: boolean): void }): JSX.Element {
+  const onToggle = (e: AirEvent<HTMLInputElement, Event>) =>
+    props.onDone(e.currentTarget.checked);
+  return <input type="checkbox" aria-label="Done" onChange={onToggle} />;
+}
+```
 
 ---
 

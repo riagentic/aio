@@ -43,6 +43,12 @@ export const DENO_JSON_READ_KEYS = new Set<string>([
   "entry",
   "build",
   "version",
+  // A BUILD fact: it tells `compile` which directories to embed in the
+  // binary, and `build-compile.ts` reads it from here. The SERVER takes its
+  // mounts from `aio.run({ assets })` instead — so this key is not misplaced,
+  // and scolding it sent the `--template=assets` scaffold chasing a warning
+  // about the one line that was right.
+  "assets",
   // Deno's own
   "name",
   "exports",
@@ -268,6 +274,7 @@ export const VALID_AIO_CONFIG_KEYS = new Set<string>([
   "_cellAsyncMethods",
   "_cellMethodArity",
   "_cellFields",
+  "_cellPersist",
   "_cellMigrations",
   "_cellRestores",
   "_cellVersions",
@@ -434,7 +441,7 @@ export const CONFIG_DOCS: Record<string, [string, string]> = {
   ],
   fullStateThreshold: [
     "0.5",
-    "ratio of changed keys that triggers full state broadcast",
+    "patch JSON bytes / full-state JSON bytes above which the full state is sent",
   ],
   routes: [
     "",
@@ -1422,7 +1429,48 @@ export function configConflicts(
     }
   }
 
-  // ── 11. two session TTLs, and each is read by a different half ───────
+  // ── 11. a TTL that cannot be a timestamp ─────────────────────────────
+  //
+  // `now + ttlMs` is written straight into an INTEGER column and read back as
+  // a JavaScript number. A TTL past the safe range makes the WRITE succeed and
+  // every READ throw — so the app booted with no complaint, `/signup` answered
+  // `201` with a real-looking token, and then every single use of that token
+  // was a `500` (HTTP) or a silent refusal (WebSocket):
+  //
+  //   RangeError: Value is too large to be represented as a JavaScript
+  //   number: 9008988486003180
+  //
+  // `Infinity` was worse in the other direction: it issued an IMMORTAL session
+  // that no sweep can ever expire, and put `Max-Age=Infinity` in the cookie.
+  // A negative TTL answered `201` with a token that was already dead. Every
+  // one of these is "a config validated only when it FIRES".
+  for (
+    const [where, raw] of [
+      ["sessions.ttlMs", obj(cfg.sessions)?.ttlMs],
+      ["auth.ttlMs", obj(cfg.auth)?.ttlMs],
+    ] as const
+  ) {
+    if (raw === undefined) continue;
+    const ttl = typeof raw === "number" ? raw : NaN;
+    const MAX_TTL = 100 * 365 * 24 * 60 * 60_000; // a century, generously
+    if (!Number.isFinite(ttl) || ttl <= 0 || ttl > MAX_TTL) {
+      out.push({
+        level: "error",
+        keys: [where],
+        what:
+          `${where} is ${
+            typeof raw === "number" ? String(raw) : JSON.stringify(raw)
+          }, which cannot become an expiry: a session's ` +
+          `expiry is stored as \`now + ttlMs\`, and this app would boot, ` +
+          `issue tokens, and then fail every request that presents one`,
+        fix: `use a positive number of milliseconds under a century — e.g. ` +
+          `${7 * 24 * 60 * 60_000} for a week`,
+        doc: "docs/auth/auth.md",
+      });
+    }
+  }
+
+  // ── 12. two session TTLs, and each is read by a different half ───────
   const sessions = obj(cfg.sessions);
   if (sessions?.ttlMs !== undefined && auth?.ttlMs !== undefined) {
     out.push({

@@ -12,6 +12,10 @@ import { assert } from "@std/assert";
 
 Deno.test("aio/air exports isConnectionDegraded (docs tell users to call it)", async () => {
   const air = await import("../src/air.ts");
+  // The export check is the first half of this test and the lines below CALL
+  // it; failing here gives the reader the docs-pages message instead of a
+  // TypeError two lines later.
+  // aio-ok: vacuous — the lines below call it, see above.
   assert(
     typeof air.isConnectionDegraded === "function",
     "docs/persistence/offline.md and docs/clients/browser.md both tell the " +

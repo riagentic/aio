@@ -24,10 +24,10 @@ import {
 } from "./sql.ts";
 import { deepMerge } from "../state/deep-merge.ts";
 import { isCompiled, resolveKvPath } from "./paths.ts";
-import { parseCli } from "./aio-cli.ts";
+import { prodRequested } from "./aio-cli.ts";
 import { SYNC_VERSION_UNKNOWN } from "../sync/compact.ts";
-import { dirname, resolve, SEPARATOR } from "@std/path";
-import { appDirs } from "./app-dirs.ts";
+import { dirname, join, resolve, SEPARATOR } from "@std/path";
+import { appDirs, appsDirEnv } from "./app-dirs.ts";
 import {
   AioError,
   createAioError,
@@ -94,9 +94,43 @@ export function getSyncReplayContext(db: DB): SyncReplayContext | undefined {
 
 /** The ONE dev/prod decider for the boot replay: the same signal composition
  *  uses for its security refusals — a source run without `--prod` is dev, a
- *  compiled binary or `--prod` is prod. */
+ *  compiled binary or `--prod` is prod. (`prodRequested` is what
+ *  `parseCli().prod` reads too; it is used directly because the stamp below
+ *  runs at import, before the app's own flags are declared.) */
 export function isDevBoot(): boolean {
-  return !parseCli().prod && !isCompiled();
+  return !prodRequested() && !isCompiled();
+}
+
+// ── `__aioDev` for the SERVER process ──────────────────────────────────────
+//
+// `__aioDev` is THE dev flag every isomorphic gate reads (`isDevMode`,
+// `removalsAreFatal`, the dev freeze, the hidden-field guard, `own.set`'s
+// replace warning…). The browser shell stamped it, the worker host copied it,
+// the test harness armed it — and the dev SERVER never set it. So every
+// "dev throws / dev warns" gate ran as prod in `deno task dev`: a retired
+// `cell({ ui })` or `aio.run({ appVersion })` logged and booted "started"
+// while the upgrade guide said dev refuses, and a method reading the flag got
+// "undefined".
+//
+// Stamped HERE, at import, rather than in `aio.run`: `cell()` runs when the
+// app's cell modules are imported — before `aio.run` is ever called — and it
+// is where the cell-config retirements and the dev freeze of declared state
+// fire. Every cell module imports `cell` from this graph, so this line has run
+// before the first `cell()` does.
+//
+// Decided by `isDevBoot` — the same decider the boot uses for everything else,
+// so dev here IS dev there. Only ever set to true, and only when nothing set
+// it first: a harness, a worker that inherited the owner's flag, or a test
+// that deliberately holds it off keeps its value. An unreadable environment
+// (`isCompiled` reads $APPIMAGE) leaves it unset; `aio.run` needs that
+// permission anyway and says so itself.
+{
+  const g = globalThis as Record<string, unknown>;
+  if (g.__aioDev === undefined) {
+    try {
+      if (isDevBoot()) g.__aioDev = true;
+    } catch { /* no --allow-env: see above */ }
+  }
 }
 
 /** `{ state, effects }` (the composed reducer) → state; a bare state passes. */
@@ -979,7 +1013,11 @@ export async function bootStorage<S>(
   // before anything writes to it. When the file was quarantined (and possibly
   // replaced from a snapshot) the handle is dead — reopen on what is there
   // now, which may be the restored snapshot or an empty database.
+  // The file persistence actually opened — the drift refusal prints THIS, not
+  // a re-derivation that could disagree with it.
+  let openedDbPath: string | undefined;
   const openAppDb = async (dbPath: string): Promise<DB> => {
+    openedDbPath = dbPath;
     // The file's directory is aio's to create, like the data dir it defaults
     // to. `--db-path=/srv/app/data/state.db` into a directory that did not
     // exist yet failed as "unable to open database file" with advice to fix
@@ -1347,6 +1385,7 @@ export async function bootStorage<S>(
           persistedVersions,
           log,
           persistedSnapshot,
+          initialState as Record<string, unknown>,
         );
       } catch (e) {
         // A failed migration refuses to boot (nothing is written, so the
@@ -1407,7 +1446,15 @@ export async function bootStorage<S>(
         d.issue === "unknown-field" || d.issue === "type-changed"
       );
       if (isDevBoot() && structural.length > 0) {
-        throw new Error(shapeDriftRefusal(structural, summary));
+        const dirs = appDirs(appId, cfg.appDir);
+        const appsDir = appsDirEnv();
+        throw new Error(shapeDriftRefusal(structural, summary, {
+          dataDir: dirs.data,
+          dbPath: openedDbPath ?? dirs.stateDb,
+          appsDir: appsDir && dirs.home === join(appsDir, appId)
+            ? appsDir
+            : undefined,
+        }));
       }
       log.warn(summary);
     }
@@ -1639,7 +1686,19 @@ export async function bootStorage<S>(
     persistMode,
     persistMs: persistDebounceMs,
     getState,
-    getDBState: kvGetDBState as (s: Record<string, unknown>) => unknown,
+    // Dev (observe-only): say at WRITE time what the next boot will not
+    // restore — see `restoreDropWatcher`.
+    getDBState: isDevBoot()
+      ? withRestoreDropWatch(
+        kvGetDBState as (s: Record<string, unknown>) => unknown,
+        restoreDropWatcher(
+          initialState as Record<string, unknown>,
+          new Set((migrations?.report ?? []).map((r) => r.cell)),
+          (msg) => log.warn(msg),
+        ),
+        (msg) => log.warn(msg),
+      )
+      : kvGetDBState as (s: Record<string, unknown>) => unknown,
     log,
     getReportOpts,
     syncCells: syncCellIds.length > 0 ? new Set(syncCellIds) : undefined,
@@ -2057,6 +2116,128 @@ export function newFieldsSummary(added: ShapeAdditionEntry[]): string {
     `removing one is not — that is the "shape drift" line.)`;
 }
 
+/** A persisted-document getter that also shows each document to `watch`. The
+ *  watcher is observe-only: a throw inside it is swallowed with a note, so a
+ *  diagnostic can never become the reason a write did not happen. */
+function withRestoreDropWatch(
+  get: (s: Record<string, unknown>) => unknown,
+  watch: (doc: unknown) => void,
+  warn: (msg: string) => void,
+): (s: Record<string, unknown>) => unknown {
+  return (s) => {
+    const doc = get(s);
+    try {
+      watch(doc);
+    } catch (e) {
+      warn(`persist (dev): the restore-drop check itself threw — ${e}`);
+    }
+    return doc;
+  };
+}
+
+/** Dev only: name — once per path — a value this app WRITES that the next
+ *  boot will not restore.
+ *
+ *  A method that adds a key to a declared non-empty object (`opts: { a: 1 }`,
+ *  then `s.opts.b = 3`) or changes a field's type persisted it faithfully, and
+ *  nothing was said until the NEXT boot: dev refused to start over it, and
+ *  production restored without it and wrote that back, so it was gone. The
+ *  same `detectShapeDrift` the boot check runs, pointed at the document being
+ *  written instead of the one being read, says it while the code that wrote
+ *  it is still on screen.
+ *
+ *  Only cells whose slice changed since the last write are walked, and the
+ *  walk is the boot check's (depth- and count-capped). `skip` holds cells a
+ *  migration handled this boot — a downgrade deliberately carries fields this
+ *  build does not declare. */
+export function restoreDropWatcher(
+  initial: Record<string, unknown>,
+  skip: ReadonlySet<string>,
+  warn: (msg: string) => void,
+): (doc: unknown) => void {
+  const lastSlice = new Map<string, unknown>();
+  const said = new Set<string>();
+  return (doc) => {
+    if (!_isObj(doc)) return;
+    const changed: Record<string, unknown> = {};
+    for (const [cell, slice] of Object.entries(doc)) {
+      if (skip.has(cell) || !(cell in initial)) continue;
+      if (lastSlice.get(cell) === slice) continue;
+      lastSlice.set(cell, slice);
+      changed[cell] = slice;
+    }
+    // A `null` over a declared object is not drift to the boot check (`T |
+    // null` is ordinary), but restore does not keep it — see
+    // `reportNullHealed` in deep-merge.ts. Said here, where it is written.
+    const nulls: string[] = [];
+    const walkNulls = (decl: unknown, stor: unknown, at: string, depth = 0) => {
+      if (!_isObj(decl) || !_isObj(stor) || depth > 8) return;
+      if (Object.keys(decl).length === 0) return; // an open record: keys are data
+      for (const k of Object.keys(stor)) {
+        if (nulls.length >= 20 || !Object.hasOwn(decl, k)) continue;
+        if (stor[k] === null && _isObj(decl[k])) nulls.push(`${at}.${k}`);
+        else walkNulls(decl[k], stor[k], `${at}.${k}`, depth + 1);
+      }
+    };
+    for (const [cell, slice] of Object.entries(changed)) {
+      walkNulls(initial[cell], slice, cell);
+    }
+    for (const where of nulls) {
+      if (said.has(where)) continue;
+      said.add(where);
+      warn(
+        `persist (dev): ${where} is being written as null but is declared as ` +
+          `an object in the cell's \`state:\` — the next boot restores the ` +
+          `declared default instead of the null (a declared object never ` +
+          `takes a stored null). If null is a value it holds, declare it ` +
+          `\`null as T | null\`.`,
+      );
+    }
+    for (const d of detectShapeDrift(initial, changed)) {
+      if (d.issue !== "unknown-field" && d.issue !== "type-changed") continue;
+      // An undeclared key holding `undefined` loses nothing: JSON never
+      // stores the key, so the next boot reads it absent — `undefined`, the
+      // value that was written. The boot check never sees it either, so
+      // "dev refuses to boot over it … declare a default" was advice about a
+      // refusal that cannot happen (`clear() { s.meta = { a: 2, b: undefined } }`).
+      if (d.issue === "unknown-field" && d.storedType === "undefined") continue;
+      const where = d.path ? `${d.cell}.${d.path}` : d.cell;
+      if (said.has(where)) continue;
+      said.add(where);
+      const dot = where.lastIndexOf(".");
+      const parent = dot > 0 ? where.slice(where.indexOf(".") + 1, dot) : "";
+      // A DECLARED key written as `undefined` does come back different — the
+      // key is dropped, so restore puts the declared default back — but again
+      // nothing is stored for dev to refuse over, so it gets its own sentence.
+      if (d.storedType === "undefined") {
+        warn(
+          `persist (dev): ${where} is being written as undefined, which JSON ` +
+            `does not store — the key is dropped, so the next boot restores ` +
+            `the declared ${d.declaredType} default instead. For "no value" ` +
+            `write null (declare it \`null as T | null\`).`,
+        );
+        continue;
+      }
+      warn(
+        d.issue === "unknown-field"
+          ? `persist (dev): ${where} (${d.storedType}) is being written but is ` +
+            `not declared in the cell's \`state:\` — the next boot will NOT ` +
+            `restore it (dev refuses to boot over it; production boots without ` +
+            `it and its next write deletes it). Declare it with a default` +
+            `${
+              parent
+                ? `, or declare \`${parent}\` as \`{}\` if its keys are data`
+                : ""
+            }.`
+          : `persist (dev): ${where} is being written as ${d.storedType} but ` +
+            `is declared ${d.declaredType} in the cell's \`state:\` — the next ` +
+            `boot restores the declared default instead (dev refuses to boot ` +
+            `over it). Keep the declared type, or change the declaration.`,
+      );
+    }
+  };
+}
+
 /** One teachable line summarizing all shape drift found at boot.
  *  Seed erasure is reported separately — same detector, different remedy. */
 export function shapeDriftSummary(drift: ShapeDriftEntry[]): string {
@@ -2100,17 +2281,29 @@ export function shapeDriftSummary(drift: ShapeDriftEntry[]): string {
     : "";
   lines.push(
     `shape drift: ${drift.length} stored field(s) no longer match the ` +
-      `declared shape — ${
-        show.join(", ")
-      }${more}. A rename/removal without a ` +
-      // Probed 2026-08-05: the stored value survives, but NOT via deepMerge —
-      // deepMerge drops the undeclared field from LIVE state (a narrowed boot
-      // really does see only the declared shape). Persistence is what keeps it
-      // on disk. Right outcome, wrong mechanism named, and the mechanism is
-      // what someone reads to predict the NEXT case.
-      `version bump keeps the stale value on disk (persistence preserves it; ` +
-      `live state does not carry it). Bump the ` +
-      `cell's version + add onMigrate to transform it, or clear the stored data.`,
+      `declared shape — ${show.join(", ")}${more}. ` +
+      // This used to say the stale value stays on disk ("persistence
+      // preserves it"). Measured: it does not. Restore drops an undeclared
+      // field from live state and puts the DECLARED default back over a
+      // changed type, and the first write after boot — which happens on boot,
+      // before any method runs — stores exactly that. A warning promising the
+      // data was safe is how the one copy of it was lost without anyone
+      // looking.
+      (drift.some((d) => d.issue !== "unknown-cell")
+        ? `Those stored fields are NOT restored — live state drops an ` +
+          `undeclared field and takes the declared default for a changed ` +
+          `type — and the next write replaces them on disk too, so they are ` +
+          `gone after this boot. If the app still writes the field, declare ` +
+          `it in \`state:\` (or declare the object as \`{}\`, an open ` +
+          `record). If it was renamed, bump the cell's version + add ` +
+          `onMigrate to carry it over, before this build writes.`
+        : "") +
+      (drift.some((d) => d.issue === "unknown-cell")
+        ? `${
+          drift.some((d) => d.issue !== "unknown-cell") ? " " : ""
+        }A stored cell no longer declared is kept on disk verbatim, but is ` +
+          `not in live state — declare the cell again, or clear its data.`
+        : ""),
   );
   return lines.join("\n");
 }
@@ -2120,6 +2313,7 @@ export function shapeDriftSummary(drift: ShapeDriftEntry[]): string {
 export function shapeDriftRefusal(
   structural: ShapeDriftEntry[],
   summary: string,
+  store?: DriftStore,
 ): string {
   const byCell = new Map<string, string[]>();
   for (const d of structural) {
@@ -2140,9 +2334,51 @@ export function shapeDriftRefusal(
     `them:\n${cells.join("\n")}\n` +
     `fix: bump the cell's \`version\` and add \`onMigrate\` to transform ` +
     `the stored slice — or, if the field is not meant to persist at all, ` +
-    `exclude it (\`persist: { exclude: [...] }\`). In production this is a ` +
-    `warning and the stale shape is loaded; dev refuses so it is fixed ` +
-    `before it ships.\n(${summary})`
+    `exclude it (\`persist: { exclude: [...] }\`); if the app writes it on ` +
+    `purpose, declare it in \`state:\`. In production this is a ` +
+    `warning and those stored values are dropped by the first write; dev ` +
+    `refuses so it is fixed before it ships.\n` +
+    (store ? driftStoreLines(store) : "") +
+    `(${summary})`
+  );
+}
+
+/** Where the drifted data actually lives — the paths THIS boot opened. */
+export type DriftStore = {
+  /** The app's `data/` directory (appDirs(appId).data) — the backup unit. */
+  dataDir: string;
+  /** The SQLite file persistence read from (differs under `dbPath`). */
+  dbPath: string;
+  /** `AIO_APPS_DIR` when it placed the home, so an `am` run in a shell
+   *  without it (which resolves `~/.<appId>`) is not a surprise. */
+  appsDir?: string;
+};
+
+/** The refusal's "where, and the way out" lines (report 9b §2). The message
+ *  named the cell, the key and the fix, and then "clear the stored data" with
+ *  no path: the boot banner's `data` row would have answered it, but the
+ *  refusal comes first, so the banner never prints. An agent spent six
+ *  minutes in whole-disk `find` for a directory `appHome()` already knew.
+ *  The path printed is the one opened, never re-derived. */
+function driftStoreLines(store: DriftStore): string {
+  const q = (p: string) => /^[\w./~:@+-]+$/.test(p) ? p : JSON.stringify(p);
+  const inData = resolve(store.dbPath).startsWith(
+    resolve(store.dataDir) + SEPARATOR,
+  );
+  const env = store.appsDir
+    ? ` (placed by AIO_APPS_DIR=${store.appsDir} ` +
+      `— run \`am\` with the same AIO_APPS_DIR)`
+    : "";
+  return (
+    `data: ${store.dataDir}${env} — \`am data\` lists every path\n` +
+    (inData ? "" : `db: ${store.dbPath} (dbPath — outside the data dir)\n`) +
+    `start fresh (DISCARDS the stored state): \`am backup\`, then ` +
+    (inData
+      ? `\`rm -r ${q(store.dataDir)}\``
+      : `\`rm ${q(store.dbPath)} ${q(store.dbPath + "-wal")} ${
+        q(store.dbPath + "-shm")
+      }\``) +
+    `\n`
   );
 }
 
@@ -2189,6 +2425,9 @@ export function applyCellMigrations(
   /** The RAW stored snapshot (pre-deepMerge) — lets a downgrade keep the
    *  fields the merge narrowed away. Omitted ⇒ no re-attachment. */
   storedSnapshot?: Record<string, unknown>,
+  /** The declared `initialState` — onMigrate's result is narrowed to it.
+   *  Omitted ⇒ the result is taken as-is (the pure unit tests). */
+  initialState?: Record<string, unknown>,
 ): MigrationReport {
   const report: MigrationReport = [];
   for (const [cellId, info] of cellMigrations) {
@@ -2251,7 +2490,36 @@ export function applyCellMigrations(
           const input = _isObj(stored)
             ? reattachUndeclared(cellState, stored)
             : cellState;
-          stateObj[cellId] = info.onMigrate(input, persisted);
+          const migrated = info.onMigrate(input, persisted);
+          // The hook was HANDED the undeclared stored keys (so a rename can
+          // read the old field) — whatever it leaves behind is not this
+          // build's shape. Kept, it rode into the next write and the FOLLOWING
+          // boot refused over "shape drift" the migration had just handled.
+          // Narrow with the SAME merge the restore runs, so this boot's state
+          // is exactly what the next boot will restore.
+          const declared = initialState?.[cellId];
+          if (_isObj(declared) && _isObj(migrated)) {
+            const dropped = detectShapeDrift(
+              { [cellId]: declared },
+              { [cellId]: migrated },
+            ).filter((d) =>
+              d.issue === "unknown-field" || d.issue === "type-changed"
+            );
+            if (dropped.length) {
+              log.warn(
+                `migrate: ${cellId} onMigrate (v${persisted} → ` +
+                  `v${info.version}) left ${dropped.length} field(s) this ` +
+                  `build does not declare — ${
+                    dropped.map((d) => d.path).join(", ")
+                  } — dropped from state, and from disk at the first write. ` +
+                  `The migration owned this version, so that is taken as ` +
+                  `meant; declare a field in \`state:\` to keep it.`,
+              );
+            }
+            stateObj[cellId] = deepMerge(declared, migrated);
+          } else {
+            stateObj[cellId] = migrated;
+          }
           log.info(`migrate: ${cellId} v${persisted} → v${info.version}`);
           report.push({
             cell: cellId,

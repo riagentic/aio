@@ -6,7 +6,6 @@ import {
   _clearClientDegraded,
   _recordClientDegraded,
   degraded,
-  type DegradedChange,
 } from "../diagnostics/degraded.ts";
 import {
   makeServerRequest,
@@ -30,7 +29,7 @@ import { CLIENT_REPLY_TIMEOUT_MS, clientReplyTimeoutError } from "./uds.ts";
 import { log } from "../diagnostics/logger-api.ts";
 import { INFLIGHT } from "../state/dispatch.ts";
 import { parseTTCommand } from "../diagnostics/time-travel.ts";
-import { allowlistAdmits, rawStateControlAllowed } from "./server-auth.ts";
+import { originVerdict, rawStateControlAllowed } from "./server-auth.ts";
 import type { ClientLogEntry } from "../air/dom-inspector-types.ts";
 import type { VitalsSystem } from "../vitals/mod.ts";
 import { VERSION } from "./aio-cli.ts";
@@ -43,6 +42,7 @@ import {
 import { count } from "../diagnostics/fmt.ts";
 import { flushAllUrgent } from "./broadcast-coalescer.ts";
 import { WS_BUFFER_HIGH_WATER, wsWriteBacklog } from "./write-backlog.ts";
+import { userMemoKey } from "./aio-run-helpers.ts";
 
 /** A whole state is about to be sent to ONE client outside the broadcast
  *  loop (connect, `subs`, `resync`). It will be serialized from the CURRENT
@@ -90,10 +90,37 @@ const BP_RECOVERY_PINGS = 3; // consecutive low-staleness pings before stepping 
 /** Consecutive drop threshold before client is flagged as abusive (H3/H4 fix). */
 const CONSECUTIVE_DROP_THRESHOLD = 50;
 
-/** How long (ms) an abusive client key stays denylisted after forced close.
+/** The LONGEST an abusive client key stays denylisted after a forced close.
  *  Plugs F-4: per-socket strike counters get reset on reconnect, so an IP
- *  can amplify throughput by cycling connections. Denylist survives reconnects. */
+ *  can amplify throughput by cycling connections. Denylist survives reconnects.
+ *
+ *  A ceiling, not the sentence. Every block used to be the full minute, from
+ *  the first strike — and the key is an ADDRESS, so one tab's burst (or one
+ *  noisy tab behind an office NAT) locked every page from that address out
+ *  for sixty seconds. The first strike is short; a key that keeps coming back
+ *  doubles it, up to this. See `abuseBlockMs`. */
 const ABUSE_DENYLIST_MS = 60_000;
+/** The first strike's block. Long enough that a reconnect loop gains nothing
+ *  (it is fifty times the one-second window it was trying to reset). */
+const ABUSE_BLOCK_BASE_MS = 5_000;
+/** A key with no strike for this long starts over at the first one. */
+const ABUSE_STRIKE_MEMORY_MS = 10 * 60_000;
+
+/** How long strike `n` (1-based) blocks a key: 5 s, 10 s, 20 s, 40 s, then
+ *  60 s for every strike after. Pure and exported so the schedule is pinned by
+ *  a test rather than by reading the constants. */
+export function abuseBlockMs(strike: number): number {
+  const n = Math.max(1, Math.floor(strike));
+  return Math.min(ABUSE_DENYLIST_MS, ABUSE_BLOCK_BASE_MS * 2 ** (n - 1));
+}
+
+/** How long a sender should wait before a frame dropped by a one-second
+ *  window is taken again: the rest of that window, plus margin for the
+ *  reset timer firing late. */
+function retryAfter(windowStart: number | undefined): number {
+  const elapsed = windowStart === undefined ? 0 : Date.now() - windowStart;
+  return Math.max(0, 1000 - elapsed) + 100;
+}
 
 /** THE framework-internal action gate — defined in protocol/ (one spelling
  *  for every door, the sync validator included), re-exported here for the
@@ -101,6 +128,7 @@ const ABUSE_DENYLIST_MS = 60_000;
 export { _isFrameworkInternalActionType } from "../protocol/action-gate.ts";
 import { _isFrameworkInternalActionType } from "../protocol/action-gate.ts";
 import { _dispatchRefusal } from "./action-ack.ts";
+import { guardHookResult } from "./aio-dispatch.ts";
 
 /** Strip client-set trusted provenance off a network action, loudly, and
  *  re-stamp it as what it IS: client input. ONE decider for all three network
@@ -201,6 +229,11 @@ export type ClientMeta = {
   clientType: ClientType;
   isElectron: boolean;
   user?: AioUser;
+  /** The server this socket belongs to authenticates INDIVIDUALS (`WsDeps.
+   *  perUserAuth`). Carried per socket so a sender that only holds the
+   *  connection map — the broadcaster's `tt-state` flush — applies the same
+   *  admin bar as `tt-cmd` without a second copy of the auth mode. */
+  perUserAuth?: boolean;
   lastFullJson?: string;
   /** True when `lastFullJson` is only a SIZE memo and no longer describes what
    *  the client holds — a patch moved the client on without re-serializing.
@@ -217,6 +250,9 @@ export type ClientMeta = {
   msgCount: number;
   bytesThisSec: number;
   msgResetTimer?: ReturnType<typeof setTimeout>;
+  /** When the current one-second budget window opened — what a dropped
+   *  frame's `retryAfterMs` is measured from. */
+  msgWindowStart?: number;
   typeDetectTimer?: ReturnType<typeof setTimeout>;
   bpMultiplier: number;
   bpConsecutiveLow: number;
@@ -238,8 +274,12 @@ export type ClientMeta = {
   /** The SESSION token this socket authenticated with, when it authenticated
    *  with one. A socket outlives the credential that opened it, so the token
    *  is kept and re-checked — see `_revalidate`. Absent for anonymous sockets
-   *  and for static `users:`/`resolveUser` tokens, which nothing can revoke. */
+   *  and for `users:`/`resolveUser` tokens (see `resolverToken`). */
   sessionToken?: string;
+  /** The `users:`/`resolveUser` token this socket authenticated with — a JWT,
+   *  an API key. Revocable too (the key is deleted from a table, the JWT
+   *  expires), so it is re-resolved by the sweep; see `_revalidateResolved`. */
+  resolverToken?: string;
 };
 
 /** Dependencies injected from server.ts closure */
@@ -299,6 +339,11 @@ export interface WsDeps {
    *  (revoked, kicked, password-rotated, expired). Supplied whenever a session
    *  store exists. See `_revalidate` for why a socket must ask again. */
   revalidateSession?: (token: string) => AioUser | null;
+  /** Re-run `users:`/`resolveUser` for a token → its CURRENT user, or null
+   *  when the app no longer accepts it. May be async (a DB, a JWKS). */
+  revalidateToken?: (
+    token: string,
+  ) => AioUser | null | Promise<AioUser | null>;
 }
 
 /** Returned by createWsManager — the WS subsystem's public API */
@@ -308,6 +353,7 @@ export interface WsManager {
     user?: AioUser,
     clientKey?: string,
     sessionToken?: string,
+    resolverToken?: string,
   ) => Response;
   connections: Map<WebSocket, ClientMeta>;
   payloadStats: Map<
@@ -337,6 +383,17 @@ export function createWsManager(deps: WsDeps): WsManager {
   const wsMaxMessage = deps.wsLimits?.maxMessageBytes ?? WS_MAX_MESSAGE;
   const wsRateLimit = deps.wsLimits?.messagesPerSec ?? WS_RATE_LIMIT;
   const wsBytesPerSec = deps.wsLimits?.bytesPerSec ?? WS_BYTES_PER_SEC;
+  // Said at startup, not discovered per frame: a frame between the two limits
+  // passes the size check and can then never fit a second's byte budget, so
+  // the larger `maxMessageBytes` is a promise this server refuses every time.
+  if (wsMaxMessage > wsBytesPerSec) {
+    log.warn(
+      "ws",
+      `wsLimits: maxMessageBytes (${wsMaxMessage}) is larger than bytesPerSec ` +
+        `(${wsBytesPerSec}) — a frame between the two is always refused; ` +
+        `raise bytesPerSec to at least maxMessageBytes`,
+    );
+  }
 
   // Global rolling-window message counter — protects against distributed
   // clients each staying under the per-socket limit while flooding the server.
@@ -396,6 +453,54 @@ export function createWsManager(deps: WsDeps): WsManager {
    *  the frame, and must not turn an oversized frame into work. */
   const _CID_SCAN = 64 * 1024;
   const _CID_RE = /"cid":"([A-Za-z0-9._:-]{1,64})"/;
+  /** …and a scan is the FALLBACK, not the answer. A regex finds the first
+   *  `"cid"` anywhere in the frame — including one the app itself put in its
+   *  own payload, which is where an outbox row's correlation id naturally
+   *  lives. The envelope's real cid is appended AFTER `payload` in every frame
+   *  this client emits (`{...action, cid}`), so the app's won. Measured: a
+   *  `chat:send` carrying `{ cid: "row-7f3a", image: … }` over the size limit
+   *  was refused, the ack came back addressed to `row-7f3a`, and the awaiting
+   *  call was never settled at all. Worse, if that string happens to name a
+   *  live call, an UNRELATED `await cell.method()` is rejected with a failure
+   *  belonging to a different frame. A parse cannot make that mistake. */
+  const _CID_PARSE_MAX = 256 * 1024;
+  /** The kind of frame this cid belongs to, so the refusal is answered on the
+   *  channel its CALLER is listening on. A `serverFn` waits for `sfnr`; the
+   *  ack registry it was answered on is a different map, so the promise stayed
+   *  pending to its full 30s ceiling and then said the function "may still be
+   *  running" — it never ran. */
+  const _droppedCall = (
+    data: unknown,
+  ): { cid: string; kind: string } | null => {
+    if (typeof data !== "string") return null;
+    // STRUCTURAL first: `d.cid` is the envelope's own, whatever the app's
+    // payload happens to be called.
+    if (data.length <= _CID_PARSE_MAX) {
+      try {
+        const f = JSON.parse(data) as {
+          t?: unknown;
+          d?: { cid?: unknown } | null;
+          cid?: unknown;
+        };
+        const d = f?.d;
+        const cid = typeof d?.cid === "string"
+          ? d.cid
+          : typeof f?.cid === "string"
+          ? f.cid
+          : null;
+        // Parsed cleanly and carried no envelope cid — that IS the answer;
+        // falling back to the scan here is how the app's payload field got
+        // picked up in the first place.
+        return cid && cid.length <= 64
+          ? { cid, kind: typeof f?.t === "string" ? f.t : "" }
+          : null;
+      } catch {
+        /* aio-ok: not JSON, or truncated — the scan is the fallback */
+      }
+    }
+    const cid = _droppedCid(data);
+    return cid ? { cid, kind: "" } : null;
+  };
   const _droppedCid = (data: unknown): string | null => {
     if (typeof data !== "string") return null;
     // The BUDGET is bounded, not the frame. A length cap on the input meant
@@ -405,9 +510,11 @@ export function createWsManager(deps: WsDeps): WsManager {
     // fuzzing the door: 26 of 27 malformed frames settled, and the 1 MB one
     // did not. A cid rides beside `type` inside `d`, so it is near one end or
     // the other; scan both ends and stay O(128 KB) whatever arrives.
+    // The END first: the envelope's cid is appended after the action's own
+    // fields, so when only a scan is possible the tail is the better guess.
     if (data.length <= _CID_SCAN * 2) return _CID_RE.exec(data)?.[1] ?? null;
-    return _CID_RE.exec(data.slice(0, _CID_SCAN))?.[1] ??
-      _CID_RE.exec(data.slice(-_CID_SCAN))?.[1] ?? null;
+    return _CID_RE.exec(data.slice(-_CID_SCAN))?.[1] ??
+      _CID_RE.exec(data.slice(0, _CID_SCAN))?.[1] ?? null;
   };
 
   /** Refuse a frame AND settle the call it was carrying. The diag explains the
@@ -417,9 +524,29 @@ export function createWsManager(deps: WsDeps): WsManager {
     socket: WebSocket,
     data: unknown,
     message: string,
+    /** Set when the frame was refused against a budget that reopens by
+     *  itself — the ack then says when a re-send will be taken
+     *  (`AckPayload.retryAfterMs`), and a client that can re-send holds the
+     *  call instead of failing it. */
+    retryAfterMs?: number,
   ): void => {
-    const cid = _droppedCid(data);
-    if (cid) _sendAckErr(socket, cid, new Error(message));
+    const call = _droppedCall(data);
+    if (!call) return;
+    if (call.kind === "sfn") {
+      // A serverFn caller waits on `sfnr`, never on `ack`.
+      try {
+        socket.send(
+          enc("sfnr", { cid: call.cid, ok: false, error: message }),
+        );
+      } catch { /* aio-ok: the client is gone; nothing left to settle */ }
+      return;
+    }
+    _sendAckErr(
+      socket,
+      call.cid,
+      new Error(message),
+      retryAfterMs === undefined ? undefined : { retryAfterMs },
+    );
   };
 
   const refuseFrameWithCall = (
@@ -428,16 +555,47 @@ export function createWsManager(deps: WsDeps): WsManager {
     kind: string,
     message: string,
     hint: string,
+    retryAfterMs?: number,
   ): void => {
     refuse(socket, kind, message, hint);
-    settleDroppedCall(socket, data, message);
+    settleDroppedCall(socket, data, message, retryAfterMs);
   };
 
   /** One "fuse tripped" line per window, not one per dropped frame. */
   let _globalFuseReported = false;
   let _globalRateTimer: ReturnType<typeof setTimeout> | undefined;
+  let _globalWindowStart: number | undefined;
+  /** Frames each client put into the global fuse THIS window — what "more
+   *  than its even share" is measured against. Cleared with the counter, so
+   *  a closed socket's entry lives at most one second. */
+  const _fuseShare = new Map<ClientMeta, number>();
 
   const connections = new Map<WebSocket, ClientMeta>();
+
+  /** Run `onConnect` / `onDisconnect` — observe-only, so a failure is reported
+   *  and never breaks the socket's lifecycle, WHICHEVER way it fails. The
+   *  try/catch alone saw only a sync throw: an `async` hook that rejected
+   *  escaped as an unhandled rejection, which the crash handler logs while the
+   *  app runs and which ends the process during shutdown, when every socket
+   *  disconnects at once. (`composeHooks` guards the same way once plugins are
+   *  installed; with only the app's own hook, this is the guard.) A failed
+   *  `onConnect` used to be a DEBUG line — invisible at the default level. */
+  const _runConnHook = (
+    name: "onConnect" | "onDisconnect",
+    hook: (user?: AioUser) => void,
+    user: AioUser | undefined,
+  ): void => {
+    const failed = (e: unknown) =>
+      log.warn(
+        "ws",
+        `hook ${name} failed: ${e instanceof Error ? e.message : String(e)}`,
+      );
+    try {
+      guardHookResult(hook(user), failed);
+    } catch (e) {
+      failed(e);
+    }
+  };
 
   // ── Session revocation reaches live sockets ────────────────────────────────
   // `meta.user` used to be resolved ONCE, at upgrade, and never again: logging
@@ -461,13 +619,15 @@ export function createWsManager(deps: WsDeps): WsManager {
   let _sessionSweep: ReturnType<typeof setInterval> | undefined;
 
   /** True when the socket may keep going. Closes + reaps it when its session
-   *  is gone. Sockets without a session token (anonymous, static `users:`
-   *  tokens, shared key) are never in question — nothing can revoke those. */
+   *  is gone. Sockets without a session token are not this function's
+   *  question: anonymous and shared-key sockets have no per-user credential,
+   *  and `users:`/`resolveUser` tokens are re-checked by the sweep instead
+   *  (`_revalidateResolved` — the hook may be async, so never per frame). */
   function _revalidate(socket: WebSocket, meta: ClientMeta): boolean {
     if (!meta.sessionToken || !deps.revalidateSession) return true;
     const fresh = deps.revalidateSession(meta.sessionToken);
     if (fresh) {
-      meta.user = fresh; // a role change lands here too, not just revocation
+      _adoptUser(socket, meta, fresh); // a role change lands here too
       return true;
     }
     deps.debug(
@@ -484,11 +644,228 @@ export function createWsManager(deps: WsDeps): WsManager {
     return false;
   }
 
+  /** Close + reap one socket whose credential the app stopped accepting. */
+  function _closeRevoked(socket: WebSocket, meta: ClientMeta, why: string) {
+    deps.debug(
+      `ws: closing ${meta.id.slice(0, 8)} — ${why} (user=${
+        meta.user?.id ?? "anon"
+      })`,
+    );
+    meta.resolverToken = undefined; // one close, not one per sweep
+    try {
+      socket.close(1008, "credential revoked");
+    } catch { /* already closing */ }
+    connections.delete(socket);
+    _clearTimers(meta);
+  }
+
+  // ── …and so does revocation of a `resolveUser` / `users:` token ────────────
+  // Only session-store tokens used to be re-checked, on the stated grounds
+  // that "nothing can revoke" the others. Everything can: an API key is deleted
+  // from its table, a JWT expires, an entry leaves the `users` map. Measured:
+  // a socket opened with `?token=key-1` kept receiving `forUser` private state
+  // for 8 more seconds of broadcasts after `resolveUser` started returning
+  // null for key-1 — and would have kept it for as long as it stayed open,
+  // while the same key already answered 401 over HTTP.
+  //
+  // Sweep only, never per frame: the hook may be async and may hit a database
+  // or a JWKS endpoint, so it runs off the hot path, ONCE per distinct token
+  // per round (a thousand sockets on one key are one call), and a round never
+  // starts while the previous one is still waiting.
+  //
+  // A hook that THROWS fails CLOSED for the sockets on that token: the socket
+  // is no more trusted than a fresh request with the same credential, and the
+  // client's reconnect gets exactly the verdict a new handshake gets. Said out
+  // loud, once per round — a resolver outage is the operator's to see.
+  /** How long ONE `resolveUser` re-check may hold up its round. */
+  const RESOLVER_CHECK_TIMEOUT_MS = 3_000;
+  /** Distinct tokens re-checked at once. */
+  const RESOLVER_CHECK_CONCURRENCY = 8;
+  let _resolverRound: Promise<void> | null = null;
+  /** Tokens whose re-check is still out — it outlived its round's timeout.
+   *  Never called again until it answers: one pending call per token, not one
+   *  more per round piling up behind a hook that never returns. */
+  const _resolverPending = new Set<string>();
+
+  // The round is a bounded POOL, not a loop. It used to await each token in
+  // turn, so ONE hook that never settles (a stalled JWKS fetch, a pool with no
+  // free connection) held the round open forever — and `_resolverRound` kept
+  // every later round from starting. Measured: a second token revoked while a
+  // first one's check hung was still open 20 s later, and so was a third one
+  // opened after that, while the same revocation without the hang closed in
+  // ~5 s. A slow-but-healthy hook cost the same shape linearly: 60 tokens ×
+  // 150 ms was a 9 s round on a 5 s sweep.
+  //
+  // A check that outlives RESOLVER_CHECK_TIMEOUT_MS stops holding its round,
+  // and its verdict is still APPLIED whenever it lands. Until then its sockets
+  // stay open on their last verdict: unlike a throw (an answer — "I cannot
+  // vouch for this", fail closed), a timeout is no answer at all, and closing
+  // every socket whenever the resolver is merely slow turns one slow
+  // dependency into a reconnect storm aimed at that same dependency. Said out
+  // loud every round it lasts.
+  function _revalidateResolved(): void {
+    const verify = deps.revalidateToken;
+    if (!verify || _resolverRound) return;
+    const byToken = new Map<string, Array<[WebSocket, ClientMeta]>>();
+    for (const entry of connections) {
+      const tok = entry[1].resolverToken;
+      if (!tok) continue;
+      const list = byToken.get(tok);
+      if (list) list.push(entry);
+      else byToken.set(tok, [entry]);
+    }
+    if (byToken.size === 0) return;
+    _resolverRound = (async () => {
+      let threw = 0;
+      let lastErr: unknown;
+      let timedOut = 0;
+      let stillOut = 0;
+      let roundOver = false;
+
+      const check = async (
+        tok: string,
+        sockets: Array<[WebSocket, ClientMeta]>,
+      ): Promise<void> => {
+        _resolverPending.add(tok);
+        let fresh: AioUser | null;
+        let failed = false;
+        try {
+          fresh = await verify(tok);
+        } catch (e) {
+          failed = true;
+          fresh = null;
+          if (roundOver) {
+            // Its round already reported; this verdict is new news.
+            log.warn(
+              "ws",
+              `resolveUser threw (after timing out) while re-checking a live ` +
+                `token — its sockets were closed (fail closed). Error: ${e}`,
+            );
+          } else {
+            threw++;
+            lastErr = e;
+          }
+        } finally {
+          _resolverPending.delete(tok);
+        }
+        for (const [socket, meta] of sockets) {
+          // Closed (or re-keyed) while the hook was out.
+          if (!connections.has(socket) || meta.resolverToken !== tok) continue;
+          if (fresh) _adoptUser(socket, meta, fresh); // a role change too
+          else {
+            _closeRevoked(
+              socket,
+              meta,
+              failed ? "resolveUser threw" : "token no longer accepted",
+            );
+          }
+        }
+      };
+
+      const queue = [...byToken];
+      const worker = async (): Promise<void> => {
+        for (let next = queue.shift(); next; next = queue.shift()) {
+          const [tok, sockets] = next;
+          if (_resolverPending.has(tok)) {
+            stillOut++;
+            continue;
+          }
+          let timer: ReturnType<typeof setTimeout> | undefined;
+          const late = await Promise.race([
+            check(tok, sockets).then(() => false),
+            new Promise<boolean>((r) => {
+              timer = setTimeout(() => r(true), RESOLVER_CHECK_TIMEOUT_MS);
+            }),
+          ]);
+          clearTimeout(timer);
+          if (late) timedOut++;
+        }
+      };
+      await Promise.all(
+        Array.from(
+          { length: Math.min(RESOLVER_CHECK_CONCURRENCY, queue.length) },
+          worker,
+        ),
+      );
+      roundOver = true;
+      if (threw > 0) {
+        log.warn(
+          "ws",
+          `resolveUser threw while re-checking ${threw} live token(s) — ` +
+            `their sockets were closed (fail closed). Last error: ${lastErr}`,
+        );
+      }
+      if (timedOut + stillOut > 0) {
+        log.warn(
+          "ws",
+          `resolveUser did not answer within ${RESOLVER_CHECK_TIMEOUT_MS} ms ` +
+            `while re-checking ${timedOut + stillOut} live token(s)` +
+            (stillOut > 0 ? ` (${stillOut} still waiting from earlier)` : "") +
+            ` — their sockets stay open on their last verdict until it does, ` +
+            `so a token revoked meanwhile is NOT closed yet. The other ` +
+            `tokens were re-checked. Look at what the hook is waiting on.`,
+        );
+      }
+    })().finally(() => {
+      _resolverRound = null;
+    });
+  }
+
+  /** A re-check answered with a user: adopt it, and when it is a DIFFERENT
+   *  user (a role change, a claim edit), send this socket its view again.
+   *
+   *  `meta.user` used to be updated and nothing else. Every later broadcast
+   *  reads it, so the view was right from the next state change on — but only
+   *  then: measured, a socket demoted from admin to user kept showing the
+   *  admin-only slice with no frame sent at all for as long as the app sat
+   *  idle, and a promoted one never saw what it had just been granted. The
+   *  demotion is the one that matters: the UI keeps DISPLAYING data the app
+   *  already decided this identity may not see. */
+  function _adoptUser(
+    socket: WebSocket,
+    meta: ClientMeta,
+    fresh: AioUser,
+  ): void {
+    const prev = meta.user;
+    meta.user = fresh;
+    const a = userMemoKey(prev), b = userMemoKey(fresh);
+    // An unserializable record cannot be compared whole; its id and role are
+    // what a view is decided on in practice. Never "assume changed" there —
+    // `_revalidate` runs on every inbound frame, and a full view per frame
+    // is a cost, not a safeguard.
+    const same = a !== null && b !== null
+      ? a === b
+      : prev?.id === fresh.id && prev?.role === fresh.role;
+    if (same) return;
+    deps.debug(
+      `ws: ${meta.id.slice(0, 8)} user changed (${prev?.id ?? "anon"}/${
+        prev?.role ?? "-"
+      } → ${fresh.id}/${fresh.role ?? "-"}) — re-sending its view`,
+    );
+    // Same ordering rule as every other out-of-loop snapshot.
+    drainBeforeSnapshot();
+    try {
+      const msg = JSON.stringify(
+        filterStateBySubs(deps.getUIState(meta.user), meta.subscriptions),
+      );
+      if (!meta.lastFullJsonStale && msg === meta.lastFullJson) return;
+      socket.send(encRaw("state", msg));
+      meta.lastFullJson = msg;
+      meta.lastFullJsonStale = false;
+      meta.needsFull = false;
+      meta.bpLastSentAt = Date.now();
+    } catch (err) {
+      log.warn("ws", `state re-send after a user change failed — ${err}`);
+    }
+  }
+
   function sweepSessions(): void {
     let live = 0;
     for (const [socket, meta] of connections) {
       if (_revalidate(socket, meta) && meta.sessionToken) live++;
+      else if (meta.resolverToken && deps.revalidateToken) live++;
     }
+    _revalidateResolved();
     // Nothing left to watch — stop polling until the next session socket
     // arrives (`handleWs` restarts it). A timer that outlives its reason is
     // how "cheap" becomes "always on".
@@ -499,7 +876,8 @@ export function createWsManager(deps: WsDeps): WsManager {
   }
 
   function _startSessionSweep(): void {
-    if (_sessionSweep || !deps.revalidateSession) return;
+    if (_sessionSweep) return;
+    if (!deps.revalidateSession && !deps.revalidateToken) return;
     _sessionSweep = setInterval(sweepSessions, SESSION_SWEEP_MS);
     // Never a reason to keep the process alive on its own.
     Deno.unrefTimer?.(_sessionSweep as unknown as number);
@@ -517,21 +895,52 @@ export function createWsManager(deps: WsDeps): WsManager {
 
   // F-4: IP/client-key denylist with TTL. Survives socket reconnects so
   // abusive clients can't reset their strike count by opening new connections.
-  const abuseDenylist = new Map<string, number>(); // key → expiresAt (epoch ms)
+  /** key → its block and its strike history. An entry outlives its block by
+   *  `ABUSE_STRIKE_MEMORY_MS`, which is what lets a repeat offender's next
+   *  block be longer than its first. */
+  type AbuseEntry = {
+    /** Blocked until (epoch ms). */
+    until: number;
+    strikes: number;
+    lastStrike: number;
+    /** A refused handshake has been logged for THIS block. */
+    reported: boolean;
+  };
+  const abuseDenylist = new Map<string, AbuseEntry>();
   /** Ceiling on distinct denylisted keys — see `_addToDenylist`. */
   const ABUSE_DENYLIST_MAX_KEYS = 10_000;
-  function _isDenied(key: string | undefined): boolean {
-    if (!key) return false;
-    const expiresAt = abuseDenylist.get(key);
-    if (expiresAt === undefined) return false;
-    if (Date.now() > expiresAt) {
+  const _abuseExpired = (e: AbuseEntry, now: number) =>
+    now > e.until && now - e.lastStrike > ABUSE_STRIKE_MEMORY_MS;
+  /** The block on `key` still has this many ms to run, or 0. */
+  function _deniedFor(key: string | undefined): number {
+    if (!key) return 0;
+    const entry = abuseDenylist.get(key);
+    if (entry === undefined) return 0;
+    const now = Date.now();
+    if (_abuseExpired(entry, now)) {
       abuseDenylist.delete(key);
-      return false;
+      return 0;
     }
-    return true;
+    if (now > entry.until) return 0;
+    // Said ONCE per block, at warn: a refused handshake used to be a debug
+    // line, so an app locked out of its own server looked, from the server
+    // side, like nobody was trying to connect.
+    if (!entry.reported) {
+      entry.reported = true;
+      log.warn(
+        "ws",
+        `ws: refusing connections from ${key} for another ${
+          Math.ceil((entry.until - now) / 1000)
+        }s (rate-limit block, strike ${entry.strikes}) — answered 429`,
+      );
+    }
+    return entry.until - now;
   }
-  function _addToDenylist(key: string | undefined): void {
-    if (!key) return;
+  /** Block `key`; returns the block's length and which strike this is. */
+  function _addToDenylist(
+    key: string | undefined,
+  ): { ms: number; strike: number } {
+    if (!key) return { ms: 0, strike: 0 };
     const now = Date.now();
     // BOUNDED, because every entry is remote-fed. Entries were removed only
     // when the SAME key came back and found itself expired — an attacker
@@ -540,8 +949,8 @@ export function createWsManager(deps: WsDeps): WsManager {
     // (still full) drop the oldest: insertion order is age order, and the
     // oldest strikes are the ones nearest expiry anyway.
     if (abuseDenylist.size >= ABUSE_DENYLIST_MAX_KEYS) {
-      for (const [k, exp] of abuseDenylist) {
-        if (now > exp) abuseDenylist.delete(k);
+      for (const [k, e] of abuseDenylist) {
+        if (_abuseExpired(e, now)) abuseDenylist.delete(k);
       }
       const target = Math.floor(ABUSE_DENYLIST_MAX_KEYS * 0.9);
       for (const k of abuseDenylist.keys()) {
@@ -549,7 +958,19 @@ export function createWsManager(deps: WsDeps): WsManager {
         abuseDenylist.delete(k);
       }
     }
-    abuseDenylist.set(key, now + ABUSE_DENYLIST_MS);
+    const prev = abuseDenylist.get(key);
+    const strike = prev && !_abuseExpired(prev, now) ? prev.strikes + 1 : 1;
+    const ms = abuseBlockMs(strike);
+    // Re-inserted, so insertion order stays age-of-last-strike order for the
+    // eviction above.
+    abuseDenylist.delete(key);
+    abuseDenylist.set(key, {
+      until: now + ms,
+      strikes: strike,
+      lastStrike: now,
+      reported: false,
+    });
+    return { ms, strike };
   }
 
   // Derive request kind from the outgoing command envelope for the dedup key
@@ -567,12 +988,21 @@ export function createWsManager(deps: WsDeps): WsManager {
     user?: AioUser,
     clientKey?: string,
     sessionToken?: string,
+    resolverToken?: string,
   ): Response {
     // F-4: reject denylisted clients at handshake so reconnect loops can't
     // reset per-socket abuse counters.
-    if (_isDenied(clientKey)) {
-      deps.debug(`ws: rejected denylisted client ${clientKey}`);
-      return new Response("Too Many Requests", { status: 429 });
+    const deniedMs = _deniedFor(clientKey);
+    if (deniedMs > 0) {
+      return new Response(
+        `Too Many Requests — this address is blocked for another ${
+          Math.ceil(deniedMs / 1000)
+        }s for exceeding the per-connection message budget`,
+        {
+          status: 429,
+          headers: { "retry-after": String(Math.ceil(deniedMs / 1000)) },
+        },
+      );
     }
     // CSWSH defense — always validate Origin header. Browsers attach Origin to
     // every cross-origin WebSocket upgrade; same-origin tools (curl, internal
@@ -591,53 +1021,27 @@ export function createWsManager(deps: WsDeps): WsManager {
       return new Response("Forbidden", { status: 403 });
     }
     if (origin) {
-      try {
-        const u = new URL(origin);
-        const h = u.hostname;
-        // Configured trust — read by the SAME decider the Host check uses.
-        // This was `Array.includes()` on the raw entries, so an entry with a
-        // capital letter, a stray space, a `host:port` spelling or a full
-        // origin admitted the page over HTTP and refused its socket: the app
-        // loaded and then could not connect, which reads as a network fault
-        // rather than a config one.
-        const isAllowed = allowlistAdmits(deps.allowedOrigins, {
-          hostname: h,
-          hostPort: u.host,
-          origin,
-        });
-        // a page this very server served has Origin === our Host header
-        const hostHeader = req.headers.get("host");
-        // Same host AND same scheme. `Host` carries no scheme, so the
-        // server's own transport is what the origin must match: an https app
-        // is not same-origin with an http page of the same name.
-        const schemeOk = u.protocol === (deps.secure ? "https:" : "http:");
-        const isOwnHost = hostHeader !== null && u.host === hostHeader &&
-          schemeOk;
-        // A SUBMITTED origin cannot certify itself. This used to exempt ANY
-        // loopback hostname — so `Origin: http://localhost:1234` walked past
-        // the gate unconditionally, under `--expose` included. A port is not
-        // part of a "site", so `SameSite=Strict` sends the session cookie to
-        // every loopback port: any other local dev server or tool UI could
-        // open an authenticated socket as the victim and dispatch (CSWSH).
-        // The app's own page is covered by `isOwnHost` (the client builds the
-        // WS URL from `location.host`); anything else is a deliberate
-        // `allowedOrigins` entry.
-        if (!isAllowed && !isOwnHost) {
-          deps.debug(
-            `ws: rejected origin ${origin} — not this server's own origin ` +
-              `(${deps.secure ? "https" : "http"}://${
-                hostHeader ?? "no Host header"
-              })${
-                !schemeOk && hostHeader !== null && u.host === hostHeader
-                  ? ` — the host matches but the SCHEME does not; this server ` +
-                    `speaks ${deps.secure ? "https" : "http"}`
-                  : ""
-              }; add it to allowedOrigins if it is meant to connect`,
-          );
-          return new Response("Forbidden", { status: 403 });
-        }
-      } catch {
-        return new Response("Bad Request", { status: 400 });
+      // THE Origin decider (server-auth.ts `originVerdict`) — the one the HTTP
+      // CSRF gate reads. This was a hand-kept inline copy of it: the same
+      // own-origin + scheme + `allowedOrigins` rules, spelled twice, so a fix
+      // to one (the full-origin allowlist match, `aio://app` for aio's own
+      // Electron shell) had to be remembered for the other. 400 is an Origin
+      // that does not parse (`null` included), 403 a foreign one.
+      const verdict = originVerdict(origin, {
+        hostHeader: req.headers.get("host"),
+        secure: deps.secure === true,
+        allowedOrigins: deps.allowedOrigins,
+      });
+      if (verdict) {
+        deps.debug(
+          `ws: rejected — ${verdict.reason}` +
+            (verdict.status === 403
+              ? "; add it to allowedOrigins if it is meant to connect"
+              : ""),
+        );
+        return verdict.status === 400
+          ? new Response("Bad Request", { status: 400 })
+          : new Response("Forbidden", { status: 403 });
       }
     }
 
@@ -750,6 +1154,7 @@ export function createWsManager(deps: WsDeps): WsManager {
       clientType: "unknown",
       isElectron,
       user,
+      perUserAuth: deps.perUserAuth === true,
       msgCount: 0,
       bytesThisSec: 0,
       bpMultiplier: 1,
@@ -761,6 +1166,7 @@ export function createWsManager(deps: WsDeps): WsManager {
       clientKey,
       request,
       sessionToken,
+      resolverToken,
     };
 
     socket.onerror = (e) => {
@@ -789,11 +1195,7 @@ export function createWsManager(deps: WsDeps): WsManager {
       _recheckBacklog();
       if (!meta.disconnected && deps.onDisconnect) {
         meta.disconnected = true;
-        try {
-          deps.onDisconnect(meta.user);
-        } catch (err) {
-          log.warn("ws", `hook onDisconnect: ${err}`);
-        }
+        _runConnHook("onDisconnect", deps.onDisconnect, meta.user);
       }
     };
 
@@ -807,7 +1209,7 @@ export function createWsManager(deps: WsDeps): WsManager {
       // vitals-ping — a peer that upgrades and then says nothing at all is
       // exactly the one the watchdog exists for. See transport-probe.ts.
       deps.vitalsSystem?.serverTransport.onClientConnected(meta.id);
-      if (sessionToken) _startSessionSweep();
+      if (sessionToken || resolverToken) _startSessionSweep();
       meta.typeDetectTimer = setTimeout(() => {
         meta.typeDetectTimer = undefined;
         if (meta.clientType === "unknown") {
@@ -821,23 +1223,23 @@ export function createWsManager(deps: WsDeps): WsManager {
           user?.id ?? "anon"
         } (${connections.size} total)`,
       );
-      if (deps.onConnect) {
-        try {
-          deps.onConnect(meta.user);
-        } catch (e) {
-          deps.debug(`hook onConnect: ${e}`);
-        }
-      }
+      if (deps.onConnect) _runConnHook("onConnect", deps.onConnect, meta.user);
       // A3: version handshake — server speaks first, before any state.
       // `rate` rides along so the client can PACE itself: the inbound budget
       // used to be a number only this side knew, and the only way to learn it
-      // was to cross it and be disconnected. Spread rather than passed to
-      // protoHello(), whose signature is public and frozen.
+      // was to cross it and be disconnected. `maxMessageBytes` for the same
+      // reason: the sync engine's reconnect flush sizes its frames to it. Spread
+      // rather than passed to protoHello(), whose signature is public and
+      // frozen.
       try {
         socket.send(
           enc("proto", {
             ...protoHello(VERSION, deps.appVersion),
-            rate: wsRateLimit,
+            // At most what a client's `parseProtoHello` accepts: a client
+            // built before it clamped DISCARDS a larger rate and paces at
+            // the 100/sec fallback instead.
+            rate: Math.min(wsRateLimit, 1_000_000),
+            maxMessageBytes: wsMaxMessage,
           }),
         );
       } catch { /* socket closing during onopen (AIO-155) */ }
@@ -846,6 +1248,11 @@ export function createWsManager(deps: WsDeps): WsManager {
         const msg = JSON.stringify(uiState);
         socket.send(encRaw("state", msg));
         meta.lastFullJson = msg;
+        // A client that DID get its initial state ends the episode. Without
+        // this, five failures spread over the whole life of the process left
+        // the app reporting degraded forever, however many clients connected
+        // successfully afterwards — see the same fix on `ws:message` below.
+        degraded("ws:initial-state").ok();
       } catch (e) {
         // The client is now connected and holds NO state — a blank UI, for
         // this client, forever (nothing re-sends a missed initial frame). At
@@ -853,7 +1260,13 @@ export function createWsManager(deps: WsDeps): WsManager {
         // server believed it had served a client it had not.
         degraded("ws:initial-state").fail(e);
       }
-      if (deps.getTTBroadcast) {
+      // The whole action log — every user's action types and error text — so
+      // under per-user auth it is admin-only, like the `tt-cmd` it drives and
+      // the broadcaster's flush (server-broadcast.ts `flushTT`).
+      if (
+        deps.getTTBroadcast &&
+        !(meta.perUserAuth && !rawStateControlAllowed(meta.user))
+      ) {
         try {
           socket.send(enc("tt-state", deps.getTTBroadcast()));
         } catch (e) {
@@ -873,6 +1286,14 @@ export function createWsManager(deps: WsDeps): WsManager {
     socket.onmessage = (e) => {
       try {
         _handleMessage(socket, meta, e);
+        // …and SAY SO. `degraded()`'s contract is "call ok() on every
+        // success, not only the first", and this call site only ever called
+        // `fail`. So any transient throw in here — not just the one the
+        // `Object.hasOwn` guard above now prevents — left the app reporting
+        // `degraded` for the rest of the process's life: twenty good
+        // dispatches and a brand-new client did not clear it. A false alarm
+        // that outlives its cause is worse than no alarm.
+        degraded("ws:message").ok();
       } catch (err) {
         // "malformed message" is a GUESS about whose fault this is, and it was
         // made at `debug`: a genuine bug in server message handling looked
@@ -898,11 +1319,7 @@ export function createWsManager(deps: WsDeps): WsManager {
       _recheckBacklog();
       if (!meta.disconnected && deps.onDisconnect) {
         meta.disconnected = true;
-        try {
-          deps.onDisconnect(meta.user);
-        } catch (e) {
-          log.warn("ws", `hook onDisconnect: ${e}`);
-        }
+        _runConnHook("onDisconnect", deps.onDisconnect, meta.user);
       }
     };
     return response;
@@ -990,6 +1407,7 @@ export function createWsManager(deps: WsDeps): WsManager {
     // Rate limiting — per-second counter (original behavior)
     meta.msgCount++;
     if (!meta.msgResetTimer) {
+      meta.msgWindowStart = Date.now();
       meta.msgResetTimer = setTimeout(() => {
         meta.msgCount = 0;
         meta.bytesThisSec = 0;
@@ -999,14 +1417,97 @@ export function createWsManager(deps: WsDeps): WsManager {
 
     // Reset global rolling-window counter once per second (lazy)
     if (!_globalRateTimer) {
+      _globalWindowStart = Date.now();
       _globalRateTimer = setTimeout(() => {
         _totalMsgsThisSec = 0;
         _globalFuseReported = false;
+        _fuseShare.clear();
         _globalRateTimer = undefined;
       }, 1000);
     }
 
+    // H3/H4 fix: track consecutive drops for abuse detection (backpressure deadlock prevention)
+    if (meta.msgCount > wsRateLimit) {
+      meta.consecutiveDrops++;
+      const dropMsg = `this frame was dropped: this connection is over its ` +
+        `budget of ${wsRateLimit} messages/sec`;
+      // EVERY dropped frame is answered, with when a re-send will be taken —
+      // the threshold frame included. It used to close the socket without a
+      // word, so that one caller learned nothing but "connection lost", which
+      // reads as "may have applied". It did not; the server decided before
+      // parsing it. aio's own client paces to the hello's `rate` and holds a
+      // call answered this way until the window reopens.
+      settleDroppedCall(
+        socket,
+        e.data,
+        dropMsg,
+        retryAfter(meta.msgWindowStart),
+      );
+      if (meta.consecutiveDrops >= CONSECUTIVE_DROP_THRESHOLD) {
+        // F-4: block this client-key at handshake so reconnect loops can't
+        // reset the strike counter — for a time proportionate to how often
+        // this key has done it (`abuseBlockMs`), not a flat minute.
+        const block = _addToDenylist(meta.clientKey);
+        const msg =
+          `ws: client ${
+            meta.id.slice(0, 8)
+          } flagged — ${meta.consecutiveDrops} consecutive drops over its ` +
+          `${wsRateLimit} msg/sec budget; closed${
+            block.ms > 0
+              ? ` and ${meta.clientKey} blocked for ${block.ms / 1000}s ` +
+                `(strike ${block.strike}; a repeat within ` +
+                `${ABUSE_STRIKE_MEMORY_MS / 60_000} min doubles it, up to ` +
+                `${ABUSE_DENYLIST_MS / 1000}s)`
+              : ""
+          }`;
+        log.error("ws", msg);
+        writeClientLog(meta.index, {
+          level: "error",
+          msg,
+          ts: Date.now(),
+          source: "server-ws",
+        });
+        try {
+          socket.close(1008, "Rate limit exceeded");
+        } catch { /* already closed */ }
+        return;
+      }
+      // The drops BEFORE the threshold used to be silent on both ends — the
+      // client sends fire-and-forget, so its message simply vanished. It now
+      // learns on the first one, while it still has a socket to hear on.
+      //
+      // ONE EXPLANATION PER RUN, ONE SETTLEMENT PER CALL. The diag is
+      // deliberately once — a tripped budget drops many frames and many
+      // identical lines bury the one that explains it. The ack (above) is NOT:
+      // each dropped frame is a DIFFERENT `await cell.method()`, and a caller
+      // the server has already decided against must not wait out its ceiling
+      // to be told the fate is unknown. Measured with both halves once-only:
+      // two of four dropped callers still hung for the full 8s and were told
+      // the call "may still be running (its writes can commit later)".
+      if (meta.consecutiveDrops === 1) {
+        refuse(
+          socket,
+          "rate",
+          dropMsg,
+          `raise it with aio.run({ wsLimits: { messagesPerSec: N } }), or ` +
+            `batch — ${CONSECUTIVE_DROP_THRESHOLD} in a row closes the socket`,
+        );
+      }
+      return;
+    }
+
     // Global rate-limit fuse: rolling window counter on WsManager itself.
+    //
+    // AFTER the per-client check, and fed only by frames that passed it. It
+    // used to run first and count every frame, so at a small budget one
+    // flooding socket filled it before its own budget was ever consulted: at
+    // `messagesPerSec: 10` (a fuse of 20 for two clients) the fuse ate the
+    // flood, recorded no strike, the flooder's first in-budget frame of each
+    // new second reset the ten strikes it did collect — so the 50-in-a-row
+    // close never came — and every frame from the OTHER client was refused
+    // "the server is over its total frame budget" for as long as the flood
+    // lasted (0 of 23 applied). A frame already refused per-client costs the
+    // server nothing more, and that client is on its way to being closed.
     //
     // The ceiling SCALES with the number of connected sockets. It used to be a
     // flat `wsRateLimit * 2` — 200 msg/sec for the whole server by default —
@@ -1020,6 +1521,8 @@ export function createWsManager(deps: WsDeps): WsManager {
     // there are several of them. The floor keeps the single-client case exactly
     // as strict as before.
     _totalMsgsThisSec++;
+    const share = (_fuseShare.get(meta) ?? 0) + 1;
+    _fuseShare.set(meta, share);
     // …and it is still a CEILING: linear growth with no upper bound would mean
     // no global limit at all (100 clients at 99 msg/s each is 9,900 under a
     // linear cap), which is the very case this fuse was written for. So it
@@ -1027,89 +1530,59 @@ export function createWsManager(deps: WsDeps): WsManager {
     // of budget in aggregate, whatever the connection count.
     const globalCap = wsRateLimit *
       Math.min(50, Math.max(2, connections.size));
+    // A tripped fuse refuses only the clients that took MORE than an even
+    // split of it this second. Per-client windows do not line up with this
+    // one, so a socket just inside its own budget can still land two windows'
+    // worth here — enough, beside one other client, to fill the fuse alone
+    // and starve that client again. Refusing by share means a client that
+    // stays inside `globalCap / clients` (aio's own paced clients hold 80% of
+    // their budget, and the split is the whole budget up to 50 clients) is
+    // never refused because of a neighbour. Still a bound: once tripped, each
+    // client keeps at most the larger of its share at the trip and the split,
+    // which sums to at most twice the cap. None of this is a strike — N
+    // honest clients filling the fuse between them are told `retryAfterMs`,
+    // never closed.
+    const fairShare = globalCap / Math.max(1, connections.size);
     if (_totalMsgsThisSec > globalCap) {
-      // Once per window, not once per dropped FRAME: a tripped fuse drops
-      // thousands, and thousands of identical lines is how the one line that
-      // explains an outage gets lost.
-      if (!_globalFuseReported) {
-        _globalFuseReported = true;
-        const msg =
-          `ws: global rate limit exceeded (${_totalMsgsThisSec} msg/sec over ` +
-          `${
-            count(connections.size, "client")
-          }, cap ${globalCap}) — dropping frames ` +
-          `until the next second`;
-        log.error("ws", msg);
-        writeClientLog(meta.index, {
-          level: "error",
-          msg,
-          ts: Date.now(),
-          source: "server-ws",
-        });
-      }
-      // Told to the sender EVERY time, unlike the log line: the fuse is
-      // server-wide, so this client may be an innocent bystander and has no
-      // other way to learn its frame is gone.
-      refuseFrameWithCall(
-        socket,
-        e.data,
-        "global-rate",
-        `this frame was dropped: the server is over its total frame budget ` +
-          `(${globalCap}/sec across ${count(connections.size, "client")})`,
-        `this is a server-wide fuse, so another client may be the cause; ` +
-          `aio.run({ wsLimits: { messagesPerSec: N } }) raises both the ` +
-          `per-client budget and this ceiling`,
-      );
-      return;
-    }
-
-    // H3/H4 fix: track consecutive drops for abuse detection (backpressure deadlock prevention)
-    if (meta.msgCount > wsRateLimit) {
-      meta.consecutiveDrops++;
-      if (meta.consecutiveDrops >= CONSECUTIVE_DROP_THRESHOLD) {
-        const msg = `ws: client ${
-          meta.id.slice(0, 8)
-        } flagged — ${meta.consecutiveDrops} consecutive drops`;
-        log.error("ws", msg);
-        writeClientLog(meta.index, {
-          level: "error",
-          msg,
-          ts: Date.now(),
-          source: "server-ws",
-        });
-        // F-4: block this client-key at handshake for ABUSE_DENYLIST_MS
-        // so reconnect loops can't reset the strike counter.
-        _addToDenylist(meta.clientKey);
-        try {
-          socket.close(1008, "Rate limit exceeded");
-        } catch { /* already closed */ }
+      if (share > fairShare) {
+        // Once per window, not once per dropped FRAME: a tripped fuse drops
+        // thousands, and thousands of identical lines is how the one line that
+        // explains an outage gets lost.
+        if (!_globalFuseReported) {
+          _globalFuseReported = true;
+          const msg =
+            `ws: global rate limit exceeded (${_totalMsgsThisSec} msg/sec over ` +
+            `${
+              count(connections.size, "client")
+            }, cap ${globalCap}) — dropping frames from clients over ` +
+            `${Math.floor(fairShare)} this second until the next one`;
+          log.error("ws", msg);
+          writeClientLog(meta.index, {
+            level: "error",
+            msg,
+            ts: Date.now(),
+            source: "server-ws",
+          });
+        }
+        // Told to the sender EVERY time, unlike the log line: the fuse is
+        // server-wide, so the sender cannot tell it from its own budget and has
+        // no other way to learn its frame is gone.
+        refuseFrameWithCall(
+          socket,
+          e.data,
+          "global-rate",
+          `this frame was dropped: the server is over its total frame budget ` +
+            `(${globalCap}/sec across ${
+              count(connections.size, "client")
+            }) and this connection has sent more than its even share ` +
+            `(${Math.floor(fairShare)}) of it this second`,
+          `this is a server-wide fuse, so other clients share the cause; ` +
+            `aio.run({ wsLimits: { messagesPerSec: N } }) raises both the ` +
+            `per-client budget and this ceiling`,
+          retryAfter(_globalWindowStart),
+        );
         return;
       }
-      // The drops BEFORE the threshold used to be silent on both ends — the
-      // client sends fire-and-forget, so its message simply vanished. It now
-      // learns on the first one, while it still has a socket to hear on.
-      //
-      // ONE EXPLANATION PER RUN, ONE SETTLEMENT PER CALL. The diag is
-      // deliberately once — a tripped budget drops many frames and many
-      // identical lines bury the one that explains it. The ack is NOT: each
-      // dropped frame is a DIFFERENT `await cell.method()`, and a caller the
-      // server has already decided against must not wait out its ceiling to be
-      // told the fate is unknown. Measured with both halves once-only: two of
-      // four dropped callers still hung for the full 8s and were told the call
-      // "may still be running (its writes can commit later)".
-      const dropMsg = `this frame was dropped: this connection is over its ` +
-        `budget of ${wsRateLimit} messages/sec`;
-      if (meta.consecutiveDrops === 1) {
-        refuse(
-          socket,
-          "rate",
-          dropMsg,
-          `raise it with aio.run({ wsLimits: { messagesPerSec: N } }), or ` +
-            `batch — ${CONSECUTIVE_DROP_THRESHOLD} in a row closes the socket`,
-        );
-      }
-      settleDroppedCall(socket, e.data, dropMsg);
-      return;
     }
 
     // Reset consecutive drop counter on successful message
@@ -1161,10 +1634,44 @@ export function createWsManager(deps: WsDeps): WsManager {
       );
       return;
     }
-    meta.bytesThisSec += e.data.length;
-    if (meta.bytesThisSec > wsBytesPerSec) {
+    // A frame bigger than the WHOLE per-second byte budget can never be taken,
+    // however long its sender waits — so it is refused for good, with no
+    // `retryAfterMs`. It used to be told "retry": aio's client held its entire
+    // pacer and re-sent it 8 times, and every other call on that socket waited
+    // behind it (a 1.5 MB put against 1 MB/s: rejected after 8.8 s, an
+    // unrelated `inc()` answered after 9.9 s, 17 server errors).
+    if (e.data.length > wsBytesPerSec) {
+      const msg = `ws: frame of ${
+        (e.data.length / 1_000_000).toFixed(1)
+      }MB from ${meta.id.slice(0, 8)} is over the whole byte budget (${
+        (wsBytesPerSec / 1_000_000).toFixed(1)
+      }MB/s), dropped`;
+      log.error("ws", msg);
+      writeClientLog(meta.index, {
+        level: "error",
+        msg,
+        ts: Date.now(),
+        source: "server-ws",
+      });
+      refuseFrameWithCall(
+        socket,
+        e.data,
+        "byte-rate",
+        `this frame was dropped: ${e.data.length} bytes is more than this ` +
+          `connection's whole byte budget (${wsBytesPerSec} bytes/sec), so ` +
+          `no re-send can pass`,
+        `raise it with aio.run({ wsLimits: { bytesPerSec: N } }) to at least ` +
+          `maxMessageBytes — a photo is base64'd and JSON-wrapped on the way ` +
+          `here, so it arrives about 1.35x its size on disk`,
+      );
+      return;
+    }
+    // NOT charged when refused: a dropped frame cost the server nothing, and
+    // counting it refused every frame behind it for the rest of the window
+    // (the 100-byte `inc()` above was refused with the 1.5 MB put, each time).
+    if (meta.bytesThisSec + e.data.length > wsBytesPerSec) {
       const msg = `ws: byte rate exceeded for ${meta.id.slice(0, 8)} (${
-        (meta.bytesThisSec / 1_000_000).toFixed(1)
+        ((meta.bytesThisSec + e.data.length) / 1_000_000).toFixed(1)
       }MB/s)`;
       log.error("ws", msg);
       writeClientLog(meta.index, {
@@ -1183,9 +1690,11 @@ export function createWsManager(deps: WsDeps): WsManager {
         `raise it with aio.run({ wsLimits: { bytesPerSec: N } }) — a photo is ` +
           `base64'd and JSON-wrapped on the way here, so it arrives about ` +
           `1.35x its size on disk`,
+        retryAfter(meta.msgWindowStart),
       );
       return;
     }
+    meta.bytesThisSec += e.data.length;
 
     // v2 envelope demux (B4b): every frame is {v:2, t, d} — one decode,
     // one switch. A legacy v1 hello (`__proto:{...}`) is answered with the
@@ -1222,25 +1731,18 @@ export function createWsManager(deps: WsDeps): WsManager {
           } catch { /* malformed */ }
         }
         return;
-      case "cdiag": {
+      case "cdiag":
         // A client's degraded() escalation — recorded so /__aio/health can
-        // name a browser subsystem that is failing forever. Values are capped
-        // inside _recordClientDegraded; malformed frames are dropped.
-        const d = frame.d as DegradedChange | undefined;
-        if (
-          d && typeof d.name === "string" && d.name.length > 0 &&
-          (d.kind === "down" || d.kind === "up")
-        ) {
-          _recordClientDegraded(meta.id, {
-            name: d.name,
-            kind: d.kind,
-            failures: typeof d.failures === "number" ? d.failures : 0,
-            since: typeof d.since === "number" ? d.since : Date.now(),
-            lastError: typeof d.lastError === "string" ? d.lastError : "",
-          });
-        }
+        // name a browser subsystem that is failing forever. It is a CLIENT's
+        // claim: `_recordClientDegraded` is the one definition (shared with
+        // uds.ts) that drops malformed frames, refuses numbers no client can
+        // truthfully have, and names this socket and user in the server log.
+        _recordClientDegraded(meta.id, frame.d, {
+          transport: "ws",
+          index: meta.index,
+          user: meta.user?.id,
+        });
         return;
-      }
       case "ui-surface-result":
         _resolvePending(meta, "surface", frame.d);
         return;
@@ -1478,7 +1980,12 @@ export function createWsManager(deps: WsDeps): WsManager {
 
   /** Send a failure ack — the awaited method rejected, or was refused,
    *  server-side. */
-  function _sendAckErr(socket: WebSocket, cid: string, err: unknown): void {
+  function _sendAckErr(
+    socket: WebSocket,
+    cid: string,
+    err: unknown,
+    extra?: { retryAfterMs: number },
+  ): void {
     try {
       if (socket.readyState === WebSocket.OPEN) {
         // `errorFields`, not `String(err)`: it sends the message WITHOUT the
@@ -1487,7 +1994,9 @@ export function createWsManager(deps: WsDeps): WsManager {
         // the failure CODE alongside it — the only way an app can tell an
         // access denial from its own method throwing without regexing a
         // sentence the semver policy refuses to freeze.
-        socket.send(enc("ack", { cid, ok: false, ...errorFields(err) }));
+        socket.send(
+          enc("ack", { cid, ok: false, ...errorFields(err), ...extra }),
+        );
       }
     } catch { /* client gone */ }
   }
@@ -1591,6 +2100,25 @@ export function createWsManager(deps: WsDeps): WsManager {
     const subs = parseSubs(rawSubs);
     if (subs === undefined) {
       log.warn("ws", "bad subs frame");
+      // TELL the client. `parseSubs` refuses the set WHOLE rather than
+      // truncating it, on the reasoning that "a client that believes it is
+      // subscribed to something it is not gets a UI that silently stops
+      // updating" — and then the refusal went nowhere, producing exactly
+      // that. The client recorded the refused set as accepted (its own write
+      // succeeded), never re-sent it, and every cell outside its PREVIOUS,
+      // narrower subscription stopped updating for the life of the
+      // connection: loud on the server, invisible in the browser.
+      //
+      // `diag` is the channel this file already uses for a refused frame.
+      refuse(
+        socket,
+        "subs",
+        "this page's subscription set was refused by the server",
+        "The server kept your PREVIOUS subscription, so cells outside it " +
+          "would have stopped updating. Falling back to receiving " +
+          "everything. Subscribe to cells or short paths " +
+          '("todos", "todos.items"), or send ["*"] deliberately.',
+      );
       return;
     }
     // Under the OLD subscriptions — the buffered patches describe the base
@@ -1764,6 +2292,7 @@ export function createWsManager(deps: WsDeps): WsManager {
       clearTimeout(_globalRateTimer);
       _globalRateTimer = undefined;
     }
+    _fuseShare.clear();
     if (_sessionSweep) {
       clearInterval(_sessionSweep);
       _sessionSweep = undefined;

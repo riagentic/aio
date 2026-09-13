@@ -2,8 +2,8 @@
 // Used by vdom.ts to create per-prop effects when Signal values are passed as props.
 
 import { effect } from "../state/signal.ts";
-import type { Signal } from "../state/signal.ts";
-import { styleValue } from "./ssr-utils.ts";
+import type { Computed, Signal } from "../state/signal.ts";
+import { camelToKebab, styleValue } from "./ssr-utils.ts";
 // The prop→DOM rule is shared with `applyProps`. It used to be copied here, and
 // the copy had no `attrNameOf` mapping and no `k in el` guard: `strokeWidth`
 // landed as a literal attribute SVG ignores, and `disabled` on a non-form
@@ -16,20 +16,31 @@ import {
   _writeProp,
 } from "./prop-write.ts";
 
-/** Check if a value is a Signal (duck-typing: _subscribers + set + peek).
+/** Check if a value is a reactive READ — a Signal or a Computed (duck-typing:
+ *  `_subscribers` + `peek`).
  *
  *  `"function"` is accepted alongside `"object"` because a signal IS callable
  *  (`count()` is the same tracked read as `count.value`) — and `typeof` says
  *  "function" for a callable object. This is THE decider for "is this a
  *  signal": every prop binding, child binding and hydration check routes
  *  through it, so an `"object"`-only test would silently reclassify every
- *  signal in the renderer at once. */
-export function isSignal(v: unknown): v is Signal<unknown> {
+ *  signal in the renderer at once.
+ *
+ *  No `set` requirement. Every consumer here only READS (`.value` in a binding
+ *  effect, `.peek()` for SSR and the first paint), and a `computed` answers
+ *  both — but it has no `set`, so requiring one sent a computed down the
+ *  plain-value path: as a child it died with "A component returned a
+ *  function… did you return the component itself", naming the wrong mistake,
+ *  and as a prop it was written as the literal text `[object Function]`, on
+ *  the client and in SSR alike, with nothing said. The one writer
+ *  (`createContext`'s Provider) only ever holds signals it created itself. */
+export function isSignal(
+  v: unknown,
+): v is Signal<unknown> | Computed<unknown> {
   return (
     v !== null &&
     (typeof v === "object" || typeof v === "function") &&
     "_subscribers" in (v as Record<string, unknown>) &&
-    "set" in (v as Record<string, unknown>) &&
     "peek" in (v as Record<string, unknown>)
   );
 }
@@ -70,7 +81,11 @@ export function bindSignalProps(
       for (const [sk, sv] of Object.entries(v as Record<string, unknown>)) {
         if (isSignal(sv)) {
           const sig = sv as Signal<unknown>;
-          const styleProp = sk.replace(/[A-Z]/g, (m) => "-" + m.toLowerCase());
+          // The SAME name rule as the static path (`camelToKebab`): an inline
+          // camel→kebab here lowercased a `--rowGap` custom property (they are
+          // case-sensitive, so the declaration named a different variable)
+          // and turned `msTransform` into `ms-transform`, which no engine reads.
+          const styleProp = camelToKebab(sk);
           const dispose = effect(() => {
             const val = sig.value;
             el.style.setProperty(
