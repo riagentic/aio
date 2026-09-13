@@ -592,14 +592,14 @@ const VIOLATIONS: Case[] = [
     expect: "has worker: true and",
   },
   {
-    // The nested same-cell call: write, then call, and the callee runs its own
-    // transaction against committed state — so it reads the value from BEFORE.
-    name: "cell method calling its own cell's method after a write",
+    // An ASYNC method writes, then calls its own cell before any `await`: the
+    // call starts before the write commits, so the callee reads the old value.
+    name: "async cell method calling its own cell's method after a write",
     files: app({
       "src/cell.ts":
-        `import { cell } from "aio";\nexport const counter = cell("counter", {\n  state: { count: 0, label: "" },\n  methods: {\n    set(s: { count: number; label: string }, n: number) {\n      s.count = n;\n      counter.relabel();\n    },\n    relabel(s: { count: number; label: string }) { s.label = String(s.count); },\n  },\n});\n`,
+        `import { cell } from "aio";\nexport const counter = cell("counter", {\n  state: { count: 0, label: "" },\n  methods: {\n    async set(s: { count: number; label: string }, n: number) {\n      s.count = n;\n      await counter.relabel();\n    },\n    relabel(s: { count: number; label: string }) { s.label = String(s.count); },\n  },\n});\n`,
     }),
-    expect: "own method",
+    expect: "commits at its next `await`",
   },
   // performance
   {
@@ -1309,18 +1309,6 @@ await aio.run({ perfBudget: { methods: { "models:scan": { timeout: 0 } } } });
         `import { schedule } from "aio/schedule";\nexport const x = schedule;\n`,
     }),
     expect: "was DELETED in",
-  },
-  {
-    // Two self-calls in one method, with NO draft write in the caller — the
-    // shape `writesDraftBefore` cannot see. `addTwice()` reads like "add two"
-    // and adds one: the calls are queued, so the second runs against the state
-    // committed before the first.
-    name: "two same-cell method calls queued inside one method",
-    files: app({
-      "src/queue.ts":
-        `import { cell } from "aio";\nexport const queue = cell("queue", {\n  state: { items: [] as string[] },\n  methods: {\n    add(s: { items: string[] }, t = "x") { s.items.push(t); },\n    addTwice() { queue.add("a"); queue.add("b"); },\n  },\n});\n`,
-    }),
-    expect: "queued",
   },
   {
     // `state: { items: [] }` infers never[], and every USE of it fails —

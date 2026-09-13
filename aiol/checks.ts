@@ -3076,20 +3076,19 @@ export const checkPostAwaitRead: Checker = (ctx) => {
 // 17b. A CELL CALLING ITS OWN METHOD FROM INSIDE A METHOD
 // ══════════════════════════════════════════════════════════════════════
 //
-// `job.foo()` from inside `job.bar()` runs as its OWN transaction against
-// COMMITTED state, so it cannot see the write `bar` is halfway through making.
-// The behaviour is correct and documented — and invisible at the call site,
-// which is the definition of a trap. A field report lost real debugging time to
-// it (choosing a file left the estimate empty), and their CLAUDE.md now carries
-// a standing warning plus a convention of plain helper functions. A standing
-// warning in a project doc is a lint rule that was never written.
+// MEASURED (testServer, bootCells): a call to the cell's own method is queued
+// and starts after the caller's pending writes are committed — EXCEPT in one
+// shape. An ASYNC method commits at its next `await`, so a same-cell call made
+// after a write and before any `await` starts first and reads the value from
+// before that write:
 //
-// Conservative by construction, because a false positive here would push people
-// to distrust the linter:
-//   • only inside the `cell(...)` literal that DECLARES the method,
-//   • only a call to one of THAT cell's own methods,
-//   • never inside `$do(...)` — an effect runs after the commit, where calling
-//     your own method is the documented, correct thing to do.
+//   async release(s) { s.busy = false; await job.refresh(); }  // refresh sees busy: true
+//
+// Everything else is correct and must stay silent — a sync method's self-call
+// (`addTwice() { n.add(); n.add() }` adds both), a call inside a callback or
+// `$do(...)` (it runs after the commit), a call after an `await`, and a callee
+// that never reads the field that was written. An earlier version flagged
+// those too: five warnings on one real 657-file app, none of them a bug.
 
 /** The span of the `cell(` call declared at `declLine` (1-based), as
  *  [start, end] offsets into `code`, or null when it cannot be located.
@@ -3144,39 +3143,101 @@ function doSpans(code: string): Array<[number, number]> {
   return out;
 }
 
-/** Does the enclosing method write to its draft BEFORE offset `at`?
- *
- *  The window starts at the nearest method header — every cell method takes the
- *  draft as its first parameter (`name(s, …)` / `async name(_s, …)`), which is
- *  a reliable anchor without parsing. A write is an assignment, a compound
- *  assignment, an increment, or a mutating call on a draft field
- *  (`s.list.push(...)`). */
-function writesDraftBefore(code: string, at: number): boolean {
-  // The window starts at the INNERMOST enclosing function, whatever its
-  // parameter list. Anchoring only on `(s` headers meant a method that takes
-  // NO draft (`addTwice() { … }`) walked past its own header and inherited the
-  // PREVIOUS method's body — so `s.items.push(t)` in the method above counted
-  // as "this method already wrote", and the queued-calls case below could
-  // never be reached.
-  const start = enclosingMethodStart(code, at);
-  if (start < 0) return false;
-  const body = code.slice(start, at);
-  return /\bs\s*\.\s*[\w$]+\s*(?:=[^=]|\+=|-=|\*=|\/=|\?\?=|\|\|=|&&=|\+\+|--|\.\s*(?:push|pop|shift|unshift|splice|sort|reverse|set|delete|add|clear)\s*\()/
-    .test(body) || /Object\s*\.\s*assign\s*\(\s*s\b/.test(body);
+/** Index of the bracket closing the one at `open`, or -1. */
+function closingBracket(code: string, open: number): number {
+  const pairs: Record<string, string> = { "(": ")", "{": "}", "[": "]" };
+  const want: string[] = [];
+  for (let i = open; i < code.length; i++) {
+    const ch = code[i]!;
+    if (pairs[ch]) want.push(pairs[ch]!);
+    else if (ch === want[want.length - 1]) {
+      want.pop();
+      if (want.length === 0) return i;
+    }
+  }
+  return -1;
 }
 
-/** Offset just after the header of the innermost function enclosing `at`
- *  (`name(…) {`, `async name(…) {`), or -1. Used to group self-calls by the
- *  method they are written in. Deliberately matches any parameter list — the
- *  method that queues two calls is often the one that takes NO draft at all. */
-function enclosingMethodStart(code: string, at: number): number {
-  const before = code.slice(0, at);
-  const header =
-    /(?:^|[\n{,;)])[ \t]*(?:async\s+)?(?:\*\s*)?[A-Za-z_$][\w$]*\s*\([^)]*\)\s*\{/g;
-  let start = -1;
-  for (const m of before.matchAll(header)) start = m.index + m[0].length;
-  return start;
+type MethodSpan = {
+  name: string;
+  isAsync: boolean;
+  /** The draft parameter's name (`s`), or null for a method that takes none. */
+  draft: string | null;
+  /** Offsets of the body's `{` and `}`. */
+  body: [number, number];
+};
+
+/** The cell's methods written in shorthand form (`name(s) {` /
+ *  `async name(s) {`), located by their real names inside the cell literal —
+ *  so `if (x) {` or `catch (e) {` is never mistaken for a method header. */
+function methodSpans(
+  code: string,
+  span: [number, number],
+  names: string[],
+): MethodSpan[] {
+  const out: MethodSpan[] = [];
+  const header = new RegExp(
+    `(?<![.\\w$])(async\\s+)?(${names.join("|")})\\s*\\(`,
+    "g",
+  );
+  header.lastIndex = span[0];
+  for (let m; (m = header.exec(code)) && m.index < span[1];) {
+    if (out.some((o) => m!.index > o.body[0] && m!.index < o.body[1])) continue;
+    const open = m.index + m[0].length - 1;
+    const close = closingBracket(code, open);
+    const rest = close < 0
+      ? null
+      : /^\s*(?::[^{;=]*)?\{/.exec(code.slice(close + 1));
+    if (!rest) continue;
+    const bodyOpen = close + rest[0].length;
+    const bodyClose = closingBracket(code, bodyOpen);
+    if (bodyClose < 0) continue;
+    out.push({
+      name: m[2]!,
+      isAsync: !!m[1],
+      draft: /^\s*([A-Za-z_$][\w$]*)/.exec(code.slice(open + 1, close))?.[1] ??
+        null,
+      body: [bodyOpen, bodyClose],
+    });
+    header.lastIndex = bodyClose;
+  }
+  return out;
 }
+
+/** Is offset `at` inside a function nested in the body that opens at `from` —
+ *  an arrow (`.catch(() => job.fail())`, `const flush = () => { … }`) or a
+ *  `function`? Such a call runs later, after the caller has committed. */
+function inNestedFunction(code: string, from: number, at: number): boolean {
+  const frames: boolean[] = [false]; // per open bracket: is it a function body?
+  let exprArrows: number[] = []; // frame depths holding an expression-bodied arrow
+  let braceIsFunction = false;
+  for (let i = from + 1; i < at; i++) {
+    const ch = code[i]!;
+    if (ch === "=" && code[i + 1] === ">") {
+      const next = /\S/.exec(code.slice(i + 2));
+      if (next?.[0] === "{") braceIsFunction = true;
+      else exprArrows.push(frames.length);
+      i++;
+    } else if (
+      ch === "f" && /^function\b/.test(code.slice(i, i + 9)) &&
+      !/[\w$]/.test(code[i - 1] ?? "")
+    ) {
+      braceIsFunction = true;
+    } else if (ch === "{" || ch === "(" || ch === "[") {
+      frames.push(ch === "{" && braceIsFunction);
+      if (ch === "{") braceIsFunction = false;
+    } else if (ch === "}" || ch === ")" || ch === "]") {
+      frames.pop();
+      exprArrows = exprArrows.filter((d) => d <= frames.length);
+    } else if (ch === ";" || ch === ",") {
+      exprArrows = exprArrows.filter((d) => d < frames.length);
+    }
+  }
+  return frames.some(Boolean) || exprArrows.length > 0;
+}
+
+const DRAFT_WRITE =
+  "\\s*\\.\\s*([\\w$]+)\\s*(?:=(?!=)|\\+=|-=|\\*=|\\/=|\\?\\?=|\\|\\|=|&&=|\\+\\+|--|\\.\\s*(?:push|pop|shift|unshift|splice|sort|reverse|set|delete|add|clear)\\s*\\()";
 
 export const checkSelfMethodCall: Checker = (ctx) => {
   const { cells, report } = ctx;
@@ -3194,80 +3255,68 @@ export const checkSelfMethodCall: Checker = (ctx) => {
     const varName = bind[1]!;
     const span = cellLiteralSpan(code, c.line);
     if (!span) continue;
-    const skip = doSpans(code);
+    const methods = methodSpans(code, span, c.methodNames);
+    const byName = new Map(methods.map((m) => [m.name, m]));
 
     // `(?<![.\w$])` is load-bearing: without it `s.contacts.push(...)` — a
     // STATE FIELD that happens to share the cell's name — reads as a call on
-    // the cell binding. It flagged three lines of `examples/contacts`, which is
-    // exactly the kind of false positive that teaches people to ignore a rule.
+    // the cell binding.
     const call = new RegExp(
       `(?<![.\\w$])${varName}\\s*\\.\\s*(${c.methodNames.join("|")})\\s*\\(`,
       "g",
     );
-    // Candidate self-calls inside the cell literal, grouped by the method they
-    // are written in — two in ONE method is its own trap (see below).
-    const hits: Array<{ at: number; method: string; owner: number }> = [];
-    for (const m of code.matchAll(call)) {
-      const at = m.index;
-      if (at < span[0] || at > span[1]) continue; // outside the cell literal
-      if (skip.some(([s, e]) => at > s && at < e)) continue; // inside $do()
-      hits.push({ at, method: m[1]!, owner: enclosingMethodStart(code, at) });
-    }
-    const perMethod = new Map<number, number>();
-    for (const h of hits) {
-      perMethod.set(h.owner, (perMethod.get(h.owner) ?? 0) + 1);
-    }
-
-    for (const { at, method, owner } of hits) {
-      // TWO self-calls in one method body: the SECOND one is the trap even
-      // when the caller never touched its own draft. Calls are queued, so the
-      // second runs against state committed before the first — `addTwice() {
-      // notes.add(); notes.add() }` returns `{"ok":true}` and adds one item,
-      // with zero diagnostics. `writesDraftBefore` cannot see this: there is
-      // no draft write to see.
-      const queued = (perMethod.get(owner) ?? 0) > 1 && owner >= 0;
-      // …otherwise only when the caller has ALREADY WRITTEN to its draft. That
-      // is the other half of the trap: the nested call runs against committed
-      // state and cannot see that write. With no prior write and only ONE call
-      // there is nothing to miss — `examples/disk`'s `up()` awaiting
-      // `disk.open(parent)` is a deliberate supersession, and flagging it would
-      // be flagging the documented answer.
-      if (!queued && !writesDraftBefore(code, at)) continue;
-      const line = code.slice(0, at).split("\n").length;
-      if (isSuppressed(c.file.lines, line - 1)) continue;
-      if (queued && !writesDraftBefore(code, at)) {
+    for (const caller of methods) {
+      if (!caller.isAsync || !caller.draft) continue;
+      const [open, close] = caller.body;
+      for (const m of code.slice(open, close).matchAll(call)) {
+        const at = open + m.index;
+        if (inNestedFunction(code, open, at)) continue;
+        const callee = byName.get(m[1]!);
+        if (!callee?.draft) continue;
+        // The writes still pending at the call: those after the last `await`
+        // (the one prefixing this very call is not a commit point before it).
+        const before = code.slice(open + 1, at).replace(/\bawait\s*$/, "");
+        const lastAwait = Math.max(
+          -1,
+          ...[...before.matchAll(/\bawait\b/g)].map((a) => a.index),
+        );
+        const pending = before.slice(lastAwait + 1);
+        const written = new Set(
+          [...pending.matchAll(
+            new RegExp(`(?<![.\\w$])${caller.draft}${DRAFT_WRITE}`, "g"),
+          )]
+            .map((w) => w[1]!),
+        );
+        if (written.size === 0) continue;
+        const calleeBody = code.slice(callee.body[0], callee.body[1]);
+        const read = [...written].find((f) =>
+          new RegExp(
+            `(?<![.\\w$])${callee.draft}\\s*\\.\\s*${
+              f.replace(/\$/g, "\\$")
+            }\\b(?!\\s*=(?!=))`,
+          ).test(calleeBody)
+        );
+        if (!read) continue;
+        const line = code.slice(0, at).split("\n").length;
+        if (isSuppressed(c.file.lines, line - 1)) continue;
         report(
           "warn",
           "patterns",
-          `${c.file.relative}:${line} — \`${varName}.${method}()\` is one of ` +
-            `${perMethod.get(owner)} calls to ${c.name}'s OWN methods in a ` +
-            `single method. Each one is queued and runs as its own ` +
-            `transaction against COMMITTED state, so the second sees the ` +
-            `state from before the first — the method returns ` +
-            `\`{"ok":true}\` having done a fraction of what it reads like. ` +
-            `Do the work once in a plain function the method calls directly ` +
-            `(\`apply${
-              method.charAt(0).toUpperCase() + method.slice(1)
-            }(s, …)\`), taking the draft \`s\` — or dispatch each call from ` +
-            `an effect (\`s.$do(...)\`), which runs after the commit.`,
-          { file: c.file.relative, line, manual: "extract a plain helper" },
+          `${c.file.relative}:${line} — \`${varName}.${callee.name}()\` reads ` +
+            `\`${callee.draft}.${read}\`, which ${caller.name} wrote just ` +
+            `before the call. An async method commits at its next \`await\`, ` +
+            `and this call starts first — so ${callee.name} sees the value ` +
+            `from before the write. Pass the value as an argument, share a ` +
+            `plain function both methods call (\`apply${
+              callee.name.charAt(0).toUpperCase() + callee.name.slice(1)
+            }(s, …)\`), or make the call after an \`await\`.`,
+          {
+            file: c.file.relative,
+            line,
+            manual: "pass the value or share a helper",
+          },
         );
-        continue;
       }
-      report(
-        "warn",
-        "patterns",
-        `${c.file.relative}:${line} — \`${varName}.${method}()\` is called from inside ` +
-          `${c.name}'s own method. A nested same-cell call runs as its OWN ` +
-          `transaction against COMMITTED state, so it cannot see the write ` +
-          `this method is halfway through making — the value it reads is the ` +
-          `one from before. Extract the shared work into a plain function ` +
-          `both methods call (\`apply${
-            method.charAt(0).toUpperCase() + method.slice(1)
-          }(s, …)\`), or dispatch it from an effect (\`s.$do(...)\`), which ` +
-          `runs after the commit.`,
-        { file: c.file.relative, line, manual: "extract a plain helper" },
-      );
     }
   }
 };

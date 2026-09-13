@@ -547,13 +547,34 @@ export function testCell(
       }
     }
 
+    // A call to this cell's own method made WHILE a reducer runs
+    // (`addTwice() { notes.add("a"); notes.add("b") }`) is queued, as the
+    // production dispatch loop queues it: it starts after the current action
+    // has committed. Running it inline let the outer commit overwrite the
+    // nested one — `addTwice` added nothing here and both items on a server.
+    let reducing = 0;
+    let sending = 0;
+    const queuedCalls: (() => void)[] = [];
+    const drainQueuedCalls = (): void => {
+      while (reducing === 0 && queuedCalls.length > 0) queuedCalls.shift()!();
+    };
+
     function dispatch(action: Msg): unknown {
-      const result = composed.reduce(state, action);
+      reducing++;
+      let result: ReturnType<typeof composed.reduce>;
+      try {
+        result = composed.reduce(state, action);
+      } finally {
+        reducing--;
+      }
       state = { ...result.state };
       lastEffects = result.effects;
       for (const e of result.effects) {
         if (isFrameworkEffect(e)) emittedFramework.push(e);
       }
+      // A send drains after it has read its own trigger effects (below);
+      // any other dispatch (an async method's batched write) drains here.
+      if (sending === 0) drainQueuedCalls();
       // AIO-427: surface the sync method's transported return value.
       return (result as { ret?: unknown }).ret;
     }
@@ -592,6 +613,22 @@ export function testCell(
       const creator = (f.__aio.actions as Record<string, unknown>)[key];
       if (typeof creator !== "function") continue;
       const direct = (args: unknown[]): Promise<unknown> => {
+        if (reducing > 0) {
+          return new Promise((resolve, reject) =>
+            queuedCalls.push(() => void direct(args).then(resolve, reject))
+          );
+        }
+        sending++;
+        let out: Promise<unknown>;
+        try {
+          out = run(args);
+        } finally {
+          sending--;
+        }
+        if (sending === 0) drainQueuedCalls();
+        return out;
+      };
+      const run = (args: unknown[]): Promise<unknown> => {
         const msg = (creator as (...a: unknown[]) => Msg)(...args);
         if (!asyncMethods.has(key)) {
           // Sync method: dispatch runs the reducer now; resolve with its
