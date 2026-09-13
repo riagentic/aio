@@ -86,6 +86,11 @@ export interface ComponentInstance {
    *  and read on demand by `src/air/devtools-tree.ts`, never pushed. */
   _dtRenders?: number;
   _dtLastMs?: number;
+  /** The discard epoch when this instance's current subtree began building —
+   *  a different number once it is built means something under it threw, so
+   *  its output is swept for boundaries that discarded work
+   *  (`_sweepDiscarded`). @internal */
+  _sweepEpoch?: number;
 }
 
 export interface RootState {
@@ -115,8 +120,12 @@ export interface RootState {
    *  Drained by `_flushAfterRender`, which every commit path already calls and
    *  which `afterRender` was already correct on. */
   pendingMounts?: PendingMount[];
-  /** Per-root counter for useId() — deterministic across renders. */
+  /** Per-root counter for useId() while `_ssrIds` — the server's sequence. */
   _idCounter: number;
+  /** True only during `hydrate()`'s pass over server markup: useId() then
+   *  continues this root's SSR sequence so ids match. Otherwise ids come from
+   *  the document-wide client sequence. */
+  _ssrIds?: boolean;
   /** AIO-209: cycle detection counts — persists across yield boundaries. */
   _renderCounts: Map<ComponentInstance, number>;
 }
@@ -153,6 +162,10 @@ export interface HookState {
   effectCollected: (() => void)[] | null;
   parentDom: Node;
   isSvg: boolean;
+  /** The collector the body ran against — the instance on a re-render, a
+   *  fresh one on a first render. `abortComponent` releases a fresh one's
+   *  unmount-only holds, since that render never gets an instance. */
+  collector?: LifecycleCollector;
 }
 
 export interface LifecycleCollector {
@@ -167,6 +180,10 @@ export interface LifecycleCollector {
    *  accepts any return value, so this type is honest about the contract. */
   mountCallbacks: (() => void)[];
   cleanupCallbacks: (() => void)[];
+  /** Unmount-only cleanups registered DURING the body (`_onUnmount`). On a
+   *  first render they move to the instance; a render that throws first runs
+   *  them at once. */
+  mountCleanupCallbacks?: (() => void)[];
   // deno-lint-ignore no-explicit-any
   contexts?: Map<symbol, any>;
   // deno-lint-ignore no-explicit-any

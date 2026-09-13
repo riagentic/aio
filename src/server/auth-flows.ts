@@ -22,7 +22,11 @@
 // URLs. CSRF: SameSite=Strict + an Origin same-host check on every POST.
 // Failed logins burn the AUTH-1 per-IP budget AND the per-account lockout.
 
-import type { UserStore } from "./auth-users.ts";
+import {
+  accountLockoutOf,
+  totpReplayOf,
+  type UserStore,
+} from "./auth-users.ts";
 import { declaresOverLimit, readBounded } from "./read-body.ts";
 import type { SessionStore } from "./sessions.ts";
 import {
@@ -31,10 +35,12 @@ import {
   chargeAuthWork,
   chargeSignup,
   recordAuthFail,
+  refundAuthWork,
   SESSION_COOKIE,
+  sessionCookieFrom,
   sessionTokenFromCookie,
 } from "./server-auth.ts";
-import { generateTotpSecret, totpUri, verifyTotp } from "./auth-totp.ts";
+import { _acceptTotpStep, generateTotpSecret, totpUri } from "./auth-totp.ts";
 import {
   isExternalId,
   oidcCallback,
@@ -76,6 +82,9 @@ export interface AuthFlows {
   totp?: boolean;
   /** OIDC provider — enables /oidc/start + /oidc/callback. */
   oidc?: OidcConfig;
+  /** The session cookie's name — `sessionCookieNameFor(appId)`, filled in by
+   *  the server. Absent → the legacy shared `aio_session`. */
+  cookieName?: string;
 }
 
 /** Every auth response is identity-bearing (a user, a session token, a
@@ -107,8 +116,9 @@ const cookieHeader = (
   token: string,
   maxAgeS: number,
   secure: boolean,
+  name: string = SESSION_COOKIE,
 ): string =>
-  `${SESSION_COOKIE}=${token}; Path=/; HttpOnly; SameSite=Strict` +
+  `${name}=${token}; Path=/; HttpOnly; SameSite=Strict` +
   `; Max-Age=${maxAgeS}${secure ? "; Secure" : ""}`;
 
 /** CSRF floor for the POST flows: when a browser sends an Origin, its host
@@ -126,7 +136,68 @@ const sameOrigin = (req: Request): boolean => {
   }
 };
 
+/** The raw value under the legacy shared cookie name, if any. */
+const parseLegacy = (req: Request): string | null =>
+  sessionCookieFrom(req)?.token ?? null;
+
 const MAIL_OFF = json.bind(null, 501, { error: "mail_not_configured" });
+
+let _noTotpLockoutWarned = false;
+/** A `UserStore` that did not come from `openUserStore` has no lockout this
+ *  module can reach — say so once instead of quietly running second factors
+ *  on the per-IP budget alone. */
+function _warnNoTotpLockout(): void {
+  if (_noTotpLockoutWarned) return;
+  _noTotpLockoutWarned = true;
+  log.warn(
+    "[aio] auth: this user store has no per-account lockout reachable from " +
+      "the TOTP step (it was not opened by openUserStore) — wrong second-" +
+      "factor codes are throttled per IP only.",
+  );
+}
+
+/** The tail of each account's TOTP-check queue, per store (two apps in one
+ *  process are two stores, and one's queue must not delay the other's). */
+const _totpQueues = new WeakMap<UserStore, Map<string, Promise<void>>>();
+
+/** Run `fn` after every earlier TOTP check for this account has settled —
+ *  see the `totp` route for why. Keyed the way the store keys the lockout
+ *  (NFC + trim), so two spellings of one id cannot open two parallel lanes.
+ *  An entry is dropped once its queue drains: no per-account residue. */
+function _oneTotpCheckAtATime<T>(
+  store: UserStore,
+  subject: string,
+  fn: () => Promise<T>,
+): Promise<T> {
+  let queues = _totpQueues.get(store);
+  if (!queues) _totpQueues.set(store, queues = new Map());
+  const key = subject.normalize("NFC").trim();
+  const run = (queues.get(key) ?? Promise.resolve()).then(fn);
+  const tail = run.then(() => {}, () => {});
+  queues.set(key, tail);
+  void tail.then(() => {
+    if (queues.get(key) === tail) queues.delete(key);
+  });
+  return run;
+}
+
+/** Check a TOTP code and SPEND it — one code, one use, across restarts too.
+ *
+ *  `verifyTotp` refuses a replay from memory only, so a code used just before
+ *  the process restarted was accepted once more right after it, inside its
+ *  90-second window. The accepted step is therefore also compare-and-set on
+ *  the account row (`totpReplayOf`); a store that is not ours keeps the
+ *  in-memory guard alone. */
+async function _spendTotpCode(
+  store: UserStore,
+  subject: string,
+  secret: string,
+  code: string,
+): Promise<boolean> {
+  const step = await _acceptTotpStep(secret, code);
+  if (step === false) return false;
+  return totpReplayOf(store)?.accept(subject, step) ?? true;
+}
 
 /** Handle /__aio/auth/* — returns null for any other path. */
 export async function handleAuthFlow(
@@ -138,18 +209,39 @@ export async function handleAuthFlow(
   if (!url.pathname.startsWith("/__aio/auth/")) return null;
   const route = `${req.method} ${url.pathname.slice("/__aio/auth/".length)}`;
   const maxAgeS = Math.floor((cfg.ttlMs ?? 30 * 24 * 3_600_000) / 1000);
+  const cookieName = cfg.cookieName ?? SESSION_COOKIE;
   const sessionCookie = (token: string): string =>
-    cookieHeader(token, maxAgeS, cfg.secure);
+    cookieHeader(token, maxAgeS, cfg.secure, cookieName);
+  /** The legacy shared-name cookie, when it holds a session THIS app issued.
+   *
+   *  Only then may this app clear it. Any other value under `aio_session` may
+   *  be a different app's login on the same host (cookies ignore the port),
+   *  and clearing it would log that app out — the cross-app bug the per-app
+   *  name exists to end. A session token is 256-bit random, so "our store
+   *  knows it" is proof it is ours. */
+  const ownLegacySession = (): string | null => {
+    if (cookieName === SESSION_COOKIE) return null;
+    const old = parseLegacy(req);
+    return old && cfg.sessions.get(old) ? old : null;
+  };
+  const clearLegacy = (): string => cookieHeader("", 0, cfg.secure);
   const issueSession = (user: AioUser, status = 200): Response => {
     const token = cfg.sessions.issue(user, { ttlMs: cfg.ttlMs });
-    return json(
+    const r = json(
       status,
       { user: { id: user.id, role: user.role }, token },
       cfg.cookie ? { "Set-Cookie": sessionCookie(token) } : undefined,
     );
+    // Retire this browser's pre-upgrade cookie once the per-app one exists:
+    // left in place, it would outlive a later logout of the new session and
+    // quietly sign the browser back in through the fallback read.
+    if (cfg.cookie && ownLegacySession()) {
+      r.headers.append("Set-Cookie", clearLegacy());
+    }
+    return r;
   };
   const bearer = (): string | null =>
-    bearerToken(req) ?? sessionTokenFromCookie(req);
+    bearerToken(req) ?? sessionTokenFromCookie(req, cookieName);
   /** Session-authed caller, or null. */
   const caller = (): AioUser | null => {
     const t = bearer();
@@ -187,6 +279,15 @@ export async function handleAuthFlow(
     });
   }
   if (cfg.oidc && route === "GET oidc/start") {
+    // BUDGETED, like every other pre-credential route. This one returned
+    // before the POST-only charge below, so it was the single unmetered door
+    // in the auth surface — and it INSERTS a one-shot `state` token per call.
+    // Measured: 500 unauthenticated GETs in 591ms (≈850/s), 500 resident rows
+    // with a 10-minute TTL, and a WAL growing ~8 MB/s in the same SQLite file
+    // that holds users and sessions, from one connection.
+    if (!chargeAuthWork(clientKey)) {
+      return json(429, { error: "too_many_attempts" });
+    }
     return await oidcStart(req, {
       cfg: cfg.oidc,
       users: cfg.users,
@@ -322,6 +423,16 @@ export async function handleAuthFlow(
         }
         return json(401, { error: "invalid_credentials" });
       }
+      // The password was RIGHT — give the work unit back. `docs/auth/auth.md`:
+      // "Successful requests never consume budget… A request that presents a
+      // valid credential is served regardless of the budget." Without this it
+      // was 30 correct logins a minute and then `429` for everyone, and behind
+      // the reverse proxy those docs prescribe without `trustProxyHeader`
+      // every client shares one bucket — so a team of more than 30 people
+      // signing in within a minute took the whole app's login offline from
+      // purely legitimate traffic. That is the outage `chargeAuthWork` exists
+      // to prevent, arriving from the other direction.
+      refundAuthWork(clientKey);
       const rec = cfg.users.get(id);
       if (cfg.requireVerified && rec && !rec.verified) {
         return json(403, { error: "email_unverified" });
@@ -359,25 +470,65 @@ export async function handleAuthFlow(
       // One-shot: a wrong code burns the pending token — back to login.
       const stored = cfg.users.consumeToken("totp", pending);
       if (!stored) return json(401, { error: "pending_expired" });
-      const secret = cfg.users.totpSecret(stored.subject);
-      if (!secret?.enabled || !(await verifyTotp(secret.secret, code))) {
-        recordAuthFail(clientKey, `totp failed for id=${stored.subject}`);
-        if (authFailBudgetExceeded(clientKey)) {
-          return json(429, { error: "too_many_attempts" });
+      // THE SAME per-account lockout the password feeds. The per-IP budget
+      // below is sidestepped by rotating addresses, and a second factor is
+      // exactly what stands between a LEAKED password and a session — so a
+      // wrong code must count against the account, and a locked account must
+      // not have its codes checked at all (a pending token minted before the
+      // lock would otherwise keep guessing through it).
+      const lockout = accountLockoutOf(cfg.users);
+      if (!lockout) _warnNoTotpLockout();
+      // ONE CHECK AT A TIME PER ACCOUNT: lock check → verify → count is a
+      // read-then-await-then-write, and every request that passed the check
+      // before the first failure was COUNTED went on to have its code checked.
+      // Measured: 60 pending tokens (one password, 60 logins) fired at once
+      // → 60 × `401 invalid_code`, sixty codes tried against a lockout that
+      // allows five; sequentially the same 60 got five tries and a lock.
+      // Serialized, a burst is exactly the sequential case. Not a reservation
+      // (count first, refund on success): the fifth reservation would lock
+      // the account and burn its pending tokens before a CORRECT fifth code
+      // was even read — a lock warning for an owner who then signs in. A
+      // TOTP check is one HMAC, so the queue costs a legitimate user nothing.
+      return await _oneTotpCheckAtATime(cfg.users, stored.subject, async () => {
+        if (lockout?.locked(stored.subject)) {
+          return json(423, { error: "account_locked" });
         }
-        return json(401, { error: "invalid_code" });
-      }
-      const rec = cfg.users.get(stored.subject);
-      if (!rec) return json(401, { error: "invalid_code" });
-      return issueSession({ id: rec.id, role: rec.role });
+        const secret = cfg.users.totpSecret(stored.subject);
+        if (
+          !secret?.enabled ||
+          !(await _spendTotpCode(
+            cfg.users,
+            stored.subject,
+            secret.secret,
+            code,
+          ))
+        ) {
+          recordAuthFail(clientKey, `totp failed for id=${stored.subject}`);
+          lockout?.fail(stored.subject);
+          if (authFailBudgetExceeded(clientKey)) {
+            return json(429, { error: "too_many_attempts" });
+          }
+          return json(401, { error: "invalid_code" });
+        }
+        const rec = cfg.users.get(stored.subject);
+        if (!rec) return json(401, { error: "invalid_code" });
+        lockout?.clear(rec.id);
+        return issueSession({ id: rec.id, role: rec.role });
+      });
     }
 
     case "logout": {
       const token = bearer();
+      const legacy = ownLegacySession();
       if (token) cfg.sessions.revoke(token);
-      return json(200, { ok: true }, {
-        "Set-Cookie": cookieHeader("", 0, cfg.secure), // clear
+      // This browser's pre-upgrade session ends with it — otherwise the
+      // fallback read would sign it straight back in on the next request.
+      if (legacy) cfg.sessions.revoke(legacy);
+      const r = json(200, { ok: true }, {
+        "Set-Cookie": cookieHeader("", 0, cfg.secure, cookieName), // clear
       });
+      if (legacy) r.headers.append("Set-Cookie", clearLegacy());
+      return r;
     }
 
     case "password": {
@@ -583,7 +734,7 @@ export async function handleAuthFlow(
         }
         return json(401, { error: "invalid_credentials" });
       }
-      if (!(await verifyTotp(staged.secret, code))) {
+      if (!(await _spendTotpCode(cfg.users, user.id, staged.secret, code))) {
         return json(401, { error: "invalid_code" });
       }
       cfg.users.enableTotp(user.id);
@@ -603,9 +754,20 @@ export async function handleAuthFlow(
       const password = str(b?.password);
       if (!password) return json(400, { error: "password_required" });
       const ok = await cfg.users.verify(user.id, password);
-      if (ok !== null && ok !== "locked") {
-        cfg.users.disableTotp(user.id);
-        return json(200, { ok: true });
+      // A LOCKED account is not a wrong password. Every sibling route answers
+      // `423 account_locked` for it; this one answered `401
+      // invalid_credentials` AND recorded another auth failure against a
+      // person who typed the right thing — in the middle of a lost-device
+      // recovery, which is when this route is used.
+      if (ok === "locked") return json(423, { error: "account_locked" });
+      if (ok !== null) {
+        // The STORE's verdict, not a fixed `true`. `auth-users.ts` says it
+        // scoped `disableTotp` precisely to stop `am auth totp <id> off`
+        // "telling an operator 'second factor cleared' for an account that
+        // never had one, in the middle of a lost-device recovery". The store
+        // learned that; this route threw the answer away and always said ok.
+        const cleared = cfg.users.disableTotp(user.id);
+        return json(200, { ok: true, cleared });
       }
       recordAuthFail(clientKey, `totp disable failed for id=${user.id}`);
       return json(401, { error: "invalid_credentials" });

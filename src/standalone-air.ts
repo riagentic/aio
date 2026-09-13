@@ -26,7 +26,9 @@ import { createOwnManager, type OwnEffect } from "./state/own.ts";
 import { routeEffect } from "./state/route-effect.ts";
 import { Listeners } from "./state/listeners.ts";
 import { signal } from "./state/signal.ts";
+import { _setCallTimeouts } from "./state/cell-impl.ts";
 import { bindCell, bindCellReactive, type CellDef } from "./state/cell.ts";
+import { _whileCellsBoot, makeUnboundGuard } from "./state/cell-catalog.ts";
 import { composeCells } from "./state/cell-compose.ts";
 import {
   _resetCellBindings,
@@ -400,9 +402,54 @@ export function _useVirtualSchedules(): void {
   _wantVirtual = true;
 }
 
+/** Put the real `Date` back — set while the virtual clock is ahead of it. */
+let _undoVirtualDate: (() => void) | null = null;
+
+/** ONE clock for app code and the scheduler, while virtual time is on.
+ *
+ *  The scheduler's clock moved only on `advance`; `Date.now()` in the app did
+ *  not move at all. So after `h.advance(10_000)`, a method scheduling
+ *  `schedule.at(new Date(Date.now() + 5000))` was refused as FIVE SECONDS IN
+ *  THE PAST, cron computed its next run from a time the app never saw, and a
+ *  TTL checked against `Date.now()` never expired however far a test advanced.
+ *  Against a real server all three simply work.
+ *
+ *  So while the clock is ahead, `Date.now()`, `new Date()` and `Date()` read
+ *  real time plus the virtual time advanced — exactly what the scheduler reads
+ *  (`createVirtualTimers({ wall })`). Time still FLOWS between advances, so a
+ *  deadline loop in the harness or the app cannot freeze. Everything else on
+ *  `Date` (`parse`, `UTC`, the prototype, `instanceof`) is the real one: a
+ *  Proxy, not a subclass, so a Date made before the swap is still a `Date`.
+ *  Installed on the first advance and removed on reset; `performance.now()`
+ *  is not touched — it measures, it does not tell the time. */
+function _installVirtualDate(skew: () => number): () => void {
+  const Real = globalThis.Date;
+  const now = () => Real.now() + skew();
+  const Virtual: DateConstructor = new Proxy(Real, {
+    construct(target, args, newTarget) {
+      return Reflect.construct(
+        target,
+        args.length === 0 ? [now()] : args,
+        newTarget === Virtual ? target : newTarget,
+      );
+    },
+    apply: () => new Real(now()).toString(),
+    get: (target, prop) => prop === "now" ? now : Reflect.get(target, prop),
+  });
+  globalThis.Date = Virtual;
+  return () => {
+    if (globalThis.Date === Virtual) globalThis.Date = Real;
+  };
+}
+
 function _scheduler(): ReturnType<typeof createScheduleManager> {
   if (!_sched) {
-    _clock = _wantVirtual ? createVirtualTimers() : null;
+    // The wall clock as it is NOW — a previous clock's swap is undone by
+    // `_resetSchedules` before a new one is ever made.
+    const Real = globalThis.Date;
+    _clock = _wantVirtual
+      ? createVirtualTimers(Real.now(), { wall: () => Real.now() })
+      : null;
     _sched = createScheduleManager(
       // The manager AWAITS this to know when a tick settles (skipIfRunning)
       // and to see a rejection — so hand back the dispatch promise itself.
@@ -418,7 +465,24 @@ function _scheduler(): ReturnType<typeof createScheduleManager> {
  *  `after` once, `every`/`cron` re-arming, exactly as production would, with
  *  microtasks draining between fires the way a real turn of the loop does. */
 export function _advanceSchedules(ms: number): Promise<void> {
-  return _clock?.advance(ms) ?? Promise.resolve();
+  // The clock moves even when nothing is scheduled yet: `advance(60_000)` is
+  // a minute passing, whether or not a timer was waiting for it.
+  if (_wantVirtual) _scheduler();
+  const clock = _clock;
+  if (!clock) return Promise.resolve();
+  if (ms > 0 && !_undoVirtualDate) {
+    _undoVirtualDate = _installVirtualDate(() => clock.elapsed());
+  }
+  return clock.advance(ms);
+}
+
+/** Fire the schedules ALREADY DUE on the virtual clock — a `schedule.next`
+ *  or `after(id, 0)`, which a real event loop runs right after the method
+ *  returns. `null` when nothing is due, so a settle loop that calls this on
+ *  every round adds no await (and no reordering of microtasks) to the rounds
+ *  where there is nothing to fire. */
+export function _fireDueSchedules(): Promise<void> | null {
+  return _clock?.hasDue() ? _clock.advance(0) : null;
 }
 
 /** Reset the virtual clock + pending schedules (per-mount test isolation). */
@@ -426,6 +490,9 @@ export function _resetSchedules(): void {
   _sched?.cancelAll();
   _sched = null;
   _clock = null;
+  const undo = _undoVirtualDate;
+  _undoVirtualDate = null;
+  undo?.();
 }
 
 // Signal for AIR reactivity — updated on every state change
@@ -815,9 +882,22 @@ function bootStandalone(
      *  already answered, and a suite full of known-false warnings teaches
      *  everyone to skim past the real ones. */
     perfBudget?: PerfBudget;
+    /** The app's `effectTimeoutMs` — with `perfBudget.methods[m].timeout`,
+     *  the ceiling `await cell.method()` gives up at. */
+    effectTimeoutMs?: number;
   } = {},
 ): AioApp<Record<string, unknown>, Msg> {
   if (_cellApp) return _cellApp; // idempotent — first caller wins
+  // THE SAME call ceiling the server sets at boot (aio.ts), from the same two
+  // knobs. Nothing here set it, so on this runtime every method waited the
+  // built-in 30 s whatever the app configured: a method budgeted at 300 ms
+  // resolved after 800 under bootCells/testUI (and in the APK) and rejected
+  // at 300 against a real server — a test green over a timeout the app
+  // enforces. Set on every boot, so a previous boot's numbers never carry.
+  _setCallTimeouts(
+    opts.effectTimeoutMs,
+    callTimeoutsOf(opts.perfBudget),
+  );
   // `circuitBreaker` rides through exactly like the server composition
   // (aio-composition.ts) — an app that configures a breaker gets the SAME
   // auto-disable behaviour on Android and in the in-process harnesses.
@@ -864,17 +944,36 @@ function bootStandalone(
       },
     },
   );
+  // The callable surface is bound AFTER every cell's `__init` — the server's
+  // order (aio-cells-bridge.ts runs `initAll` in onStart; the cells runner
+  // binds afterwards). It used to be bound first, so `proj.bump()` straight
+  // from an `onInit` worked under bootCells/testUI and threw "called before
+  // the cell's runtime is booted" the moment the app itself started. Until
+  // then each method is the SAME guard a never-booted cell has — installed,
+  // not just left over, because a module-singleton cell still carries the
+  // PREVIOUS boot's binding (a dead app's dispatch) after a reset.
   for (const f of cells) {
-    // bindCell: wrap methods to dispatch through the local loop
-    bindCell(
-      f,
-      (action) => Promise.resolve(app.dispatch(action)),
-      () => app.getState() as Record<string, unknown>,
-    );
-    // bindCellReactive (no sendFn): upgrade the state getters to read the
-    // per-cell signal — keeps the bound methods from bindCell intact
-    bindCellReactive(f);
+    const target = f as unknown as Record<string, unknown>;
+    for (const key of f.__aio.actionKeys) {
+      const raw = (f.__aio.actions as Record<string, unknown>)[key];
+      if (typeof raw === "function") {
+        target[key] = makeUnboundGuard(f.__aio.id, key, raw);
+      }
+    }
   }
+  const bindAll = () => {
+    for (const f of cells) {
+      // bindCell: wrap methods to dispatch through the local loop
+      bindCell(
+        f,
+        (action) => Promise.resolve(app.dispatch(action)),
+        () => app.getState() as Record<string, unknown>,
+      );
+      // bindCellReactive (no sendFn): upgrade the state getters to read the
+      // per-cell signal — keeps the bound methods from bindCell intact
+      bindCellReactive(f);
+    }
+  };
   // A disabled cell must stop owning things — the same contract the server
   // runtime wires in `aio.ts` (`config._onScheduleReady`), which nothing wired
   // here: a cell the registry disabled kept its timers ticking and its
@@ -901,7 +1000,10 @@ function bootStandalone(
     dispatch: (a: Msg) => void app.dispatch(a),
     getState: () => app.getState() as unknown,
   };
-  composed.initAll(lifecycleApp); // wires setCbApp, runs each cell's onInit
+  // wires setCbApp, runs each cell's onInit — marked as booting exactly as the
+  // server marks it, so an early call is refused with the server's words.
+  _whileCellsBoot(cells, () => composed.initAll(lifecycleApp));
+  bindAll();
   let destroyed = false;
   _destroyCells = () => {
     if (destroyed) return; // close() then _resetState() must not destroy twice
@@ -920,6 +1022,22 @@ function bootStandalone(
     _destroyCells?.();
   };
   return app;
+}
+
+/** `perfBudget.methods[key].timeout` as the per-method map `_setCallTimeouts`
+ *  takes — the same projection the server boot makes (aio.ts): only the
+ *  methods that declare a numeric or `"warn"` timeout. */
+function callTimeoutsOf(
+  perfBudget: PerfBudget | undefined,
+): Record<string, number | "warn"> | undefined {
+  if (!perfBudget?.methods) return undefined;
+  return Object.fromEntries(
+    Object.entries(perfBudget.methods)
+      .filter(([, v]) =>
+        typeof v?.timeout === "number" || v?.timeout === "warn"
+      )
+      .map(([k, v]) => [k, v!.timeout as number | "warn"]),
+  );
 }
 
 /** Standalone builds have no server — instead, boot the local runtime from the
@@ -977,9 +1095,42 @@ export function _applyShellUi(
   if (!ui || typeof document === "undefined") return;
   const lang = typeof ui.lang === "string" ? ui.lang.trim() : "";
   if (lang) document.documentElement.lang = lang;
+  // `ui.dir` travels the same way `ui.lang` does, and for the same reason: one
+  // attribute flips the whole default UI, and the packaged shell is written
+  // before the config exists. It reached NO target before this — the server's
+  // own generators dropped it too — so an app shipping Arabic or Hebrew set
+  // it, got no error, and stayed LTR everywhere.
+  const dir = typeof ui.dir === "string" ? ui.dir.trim() : "";
+  if (dir === "ltr" || dir === "rtl" || dir === "auto") {
+    document.documentElement.dir = dir;
+  }
   const theme = ui.theme;
+  // `"none"` means no aio CSS on the page AT ALL — "not even the two-rule
+  // box-model baseline… The switch for bringing an existing stylesheet, which
+  // `border-box` on `*` would silently re-lay-out." The packaged shell cannot
+  // know that at build time, so it emits the tokens sheet and this takes it
+  // away — the APK used to apply `*{box-sizing:border-box}` to the one app
+  // that asked it not to.
+  if (theme === "none") {
+    document.querySelector("style[data-aio-box-base]")?.remove();
+    document.querySelector("style[data-aio-theme-base]")?.remove();
+    for (const el of document.querySelectorAll("style[media='not all']")) {
+      if (el.hasAttribute("data-aio-theme-deferred")) el.remove();
+      if (el.hasAttribute("data-aio-theme-deferred-nolayout")) el.remove();
+    }
+    return;
+  }
   if (theme !== "auto" && theme !== "full") return;
-  const deferred = document.querySelector("style[data-aio-theme-deferred]");
+  // `ui.layout: false` picks the OTHER deferred sheet — the same visual look
+  // without the page-layout defaults. One sheet meant the APK always enabled
+  // the full-layout variant, so `{ theme: "full", layout: false }` laid the
+  // page out inside its own APK after not doing so in `deno task dev`.
+  const wantLayout = ui.layout !== false;
+  const deferred = document.querySelector(
+    wantLayout
+      ? "style[data-aio-theme-deferred]"
+      : "style[data-aio-theme-deferred-nolayout]",
+  );
   if (!deferred) return;
   // `"auto"` steps aside for an app that ships its own stylesheet — the same
   // rule the server shell applies, asked at the one moment this runtime can
@@ -1008,6 +1159,7 @@ function runStandalone(
       cellDefaults: cfg.cellDefaults,
       localFirst: cfg.localFirst,
       perfBudget: cfg.perfBudget as PerfBudget | undefined,
+      effectTimeoutMs: cfg.effectTimeoutMs as number | undefined,
     }),
   );
 }

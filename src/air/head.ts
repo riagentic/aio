@@ -28,6 +28,7 @@
 // list that the SSR start hook clears.
 
 import { _inRender, onCleanup, useRef } from "./renderer-lifecycle.ts";
+import { _activeRoot } from "./renderer-state.ts";
 import { _isSsrRendering } from "./vdom-ssr.ts";
 import { escapeAttr, escapeHtml } from "./ssr-utils.ts";
 import { isDevMode } from "../state/dev-flag.ts";
@@ -57,13 +58,42 @@ type Merged = {
   tags: { kind: "meta" | "link"; attrs: HeadTag }[];
 };
 
-/** Live client entries, in mount order (a Map keeps insertion order). */
-const _live = new Map<object, HeadInput>();
+/** Live client entries, keyed by component instance.
+ *
+ *  INSERTION ORDER IS NOT MOUNT ORDER, which is the trap this comment used to
+ *  walk into. `useHead` registers its cleanup in the component BODY, and a
+ *  body cleanup runs before every re-render as well as on unmount — so each
+ *  re-render deletes the entry and re-adds it, moving that owner to the END
+ *  of the Map. `_merge` is "later wins", so a layout that re-rendered for a
+ *  reason of its own (a theme signal, an unread count) jumped ahead of the
+ *  page inside it and took the title, the description and the canonical with
+ *  it, permanently, until something else happened to re-render. SSR, which
+ *  renders parent before child in one pass, got it right — so the same app
+ *  disagreed with itself either side of hydration.
+ *
+ *  So each owner carries the sequence number it was FIRST seen with, and
+ *  `_merge` reads them in that order. Components render outside-in, so first
+ *  registration IS depth order, and re-registration cannot change it. */
+const _live = new Map<HeadOwner, HeadInput>();
+/** A component instance that owns part of `<head>`, with its mount order and
+ *  the document it was rendered into. */
+type HeadOwner = { seq: number; doc?: Document };
+let _nextSeq = 0;
+
+/** Live entries of the owners rendered into `doc`, oldest owner first. */
+function _liveInOrder(doc: Document): HeadInput[] {
+  return [..._live.entries()]
+    .filter(([owner]) => owner.doc === doc)
+    .sort((a, b) => a[0].seq - b[0].seq)
+    .map(([, input]) => input);
+}
 /** Entries of the SSR render in progress. */
 let _ssr: HeadInput[] = [];
-/** The document's own title before the first owner set one; restored when
- *  the last owner unmounts. `null` = nothing overridden. */
-let _baseTitle: string | null = null;
+/** Each document's own title before the first owner set one; restored when
+ *  that document's last owner unmounts. Absent = nothing overridden. Per
+ *  document, because one process can mount apps into several (Electron child
+ *  windows, `testUI(App, { document })`). */
+let _baseTitles = new WeakMap<Document, string>();
 const ATTR = "data-aio-head";
 const ONE_PER_PAGE = new Set(["canonical", "manifest", "icon"]);
 
@@ -99,16 +129,16 @@ function _merge(entries: Iterable<HeadInput>): Merged {
  *  module owns (`data-aio-head`) rather than diffing: a page has a handful of
  *  them, and "remove ours, add ours" cannot leave a stale one behind. Tags the
  *  shell or the author put in `<head>` are never touched. */
-function _apply(): void {
-  const doc = (globalThis as { document?: Document }).document;
+function _apply(doc: Document | undefined): void {
   if (!doc?.head) return;
-  const { title, tags } = _merge(_live.values());
+  const { title, tags } = _merge(_liveInOrder(doc));
+  const base = _baseTitles.get(doc);
   if (title !== undefined) {
-    if (_baseTitle === null) _baseTitle = doc.title;
+    if (base === undefined) _baseTitles.set(doc, doc.title);
     if (doc.title !== title) doc.title = title;
-  } else if (_baseTitle !== null) {
-    doc.title = _baseTitle;
-    _baseTitle = null;
+  } else if (base !== undefined) {
+    doc.title = base;
+    _baseTitles.delete(doc);
   }
   for (const el of Array.from(doc.head.querySelectorAll(`[${ATTR}]`))) {
     el.remove();
@@ -122,6 +152,31 @@ function _apply(): void {
     el.setAttribute(ATTR, "");
     doc.head.appendChild(el);
   }
+}
+
+/** The document the component rendering RIGHT NOW is mounted in. */
+function _renderDoc(): Document | undefined {
+  // The MOUNTED document, not the ambient global — the rule every other hook
+  // in this renderer follows (`onGlobalKey`/`onWindowEvent` resolve it the
+  // same way, and their comments name Electron child windows and `<webview>`
+  // for the reason).
+  //
+  // Reading `globalThis.document` had two costs. In a multi-window Electron
+  // app it retitled the WRONG window: measured, the app mounted in window B
+  // and `useHead({ title: "Invoice #42" })` set window A's title and put the
+  // meta tags in A's head. And under the supported `testUI(App, { document })`
+  // path there is no ambient global at all, so the hook RAN, returned
+  // normally, wrote nothing and warned nothing — a silent no-op, in a
+  // framework whose first rule is "fail loud, never silent". A `useHead` test
+  // written that way passed while asserting nothing.
+  //
+  // …and asked at RENDER time, where the root is known. The cleanup that hands
+  // the title back runs at unmount, when no root is active: resolving the
+  // document there fell back to the global, so a root `_unmount` left a BYO
+  // document's title and tags in place forever, and in a two-window app wrote
+  // window B's saved title into window A.
+  return (_activeRoot?.root?.ownerDocument ??
+    (globalThis as { document?: Document }).document) as Document | undefined;
 }
 
 /**
@@ -163,14 +218,18 @@ export function useHead(input: HeadInput): void {
     return;
   }
   // A stable identity per component INSTANCE, not per call: two `<Post/>`s
-  // are two owners, and a re-render of one is the same owner.
-  const key = useRef<object>({}).current;
-  _live.set(key, input);
+  // are two owners, and a re-render of one is the same owner. The sequence
+  // number is stamped on FIRST render and never moves — see `_live`.
+  const owner = useRef<HeadOwner>({ seq: -1 }).current;
+  if (owner.seq < 0) owner.seq = _nextSeq++;
+  const doc = _renderDoc();
+  owner.doc = doc;
+  _live.set(owner, input);
   onCleanup(() => {
-    _live.delete(key);
-    _apply();
+    _live.delete(owner);
+    _apply(doc);
   });
-  _apply();
+  _apply(doc);
 }
 
 /**
@@ -182,7 +241,10 @@ export function useHead(input: HeadInput): void {
  * ```ts
  * const body = renderToString(<App />);
  * const head = collectHead();   // after the body: render is sync, so it is known
- * return `<!doctype html><html><head>${head}${collectCss()}</head><body>${body}</body></html>`;
+ * // collectHead() returns MARKUP; collectCss() returns CSS, so it needs a
+ * // <style> around it — bare, a browser treats it as text and applies none.
+ * return `<!doctype html><html><head>${head}<style>${collectCss()}</style>` +
+ *   `</head><body>${body}</body></html>`;
  * ```
  *
  * Empty string when no component used {@linkcode useHead}. With
@@ -216,5 +278,9 @@ export function _resetHeadSsr(): void {
 export function _resetHead(): void {
   _live.clear();
   _ssr = [];
-  _baseTitle = null;
+  _baseTitles = new WeakMap();
+  // The owner sequence too, or it is not a reset: the numbers only have to be
+  // relative, but a counter that survives teardown is module state nobody
+  // owns, which is what the reset ledger exists to refuse.
+  _nextSeq = 0;
 }

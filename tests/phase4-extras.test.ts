@@ -735,3 +735,24 @@ Deno.test({
     await cleanup();
   },
 });
+
+// The DOCUMENTED call form of a public export must be callable.
+//
+// `src/extras/mod.ts` and `docs/basics/api-reference.md` both said
+// `checkCells(cells)`. It throws: the first argument is the initial STATE and
+// the second the run config, so a cell array arrived where a config was
+// expected and the first `config.reduce` read blew up with "Cannot read
+// properties of undefined". `docs/api-snapshot.json` had always recorded the
+// real signature, so `check:api` saw the truth while the doc comment beside
+// the export did not — two descriptions of one fact, and the human-readable
+// one was wrong.
+Deno.test("checkCells: the documented call form returns findings", async () => {
+  const { checkCells } = await import("../src/extras/mod.ts");
+  const findings = await checkCells({ counter: { n: 0 } }, {}, Deno.cwd());
+  assert(Array.isArray(findings.ok), "it reports what is fine");
+  assert(Array.isArray(findings.fail), "…and what is not");
+  assert(
+    findings.ok.some((l: string) => l.includes("state")),
+    `it saw the state it was given: ${JSON.stringify(findings.ok)}`,
+  );
+});

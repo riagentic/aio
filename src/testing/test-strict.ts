@@ -160,64 +160,160 @@ function _sandboxAppDirs(): void {
 //
 // "Observed" is decided the way the language decides it: attaching a handler
 // (`await`, `.then`, `.catch`, `.finally`, `Promise.all`) counts as looking.
-// The wrapper below is the same thenable `testCell`'s `send` returns.
+// The wrapper below is the same `_observedCall` `testCell`'s `send` returns.
+
+/** What a harnessed method call returns: a REAL promise over `p` that tells
+ *  `onObserved` the first time anyone looks at it.
+ *
+ *  A plain `{ then, catch, finally }` object did the looking-detection, and
+ *  was not a Promise: `cell.inc() instanceof Promise` was true in production
+ *  and false under `testCell`/`bootCells`/`testUI`, so a test of code that
+ *  branches on it (`if (r instanceof Promise)`, a `Promise`-typed helper that
+ *  checks) exercised the other branch. A subclass is a Promise to every check
+ *  there is, and the language already routes every way of looking through
+ *  `then`: `await` and `Promise.resolve`/`all`/`race` call it on a subclass
+ *  instance (they only skip it for a plain `Promise`), and `catch`/`finally`
+ *  are specified as calls to `this.then`. Derived promises are plain ones
+ *  (`Symbol.species`), so only the call itself carries the hook.
+ *  @internal */
+export function _observedCall<T>(
+  p: Promise<T>,
+  onObserved: () => void,
+): Promise<T> {
+  return ObservedCall.over(p, onObserved);
+}
+
+class ObservedCall<T> extends Promise<T> {
+  static override get [Symbol.species](): PromiseConstructor {
+    return Promise;
+  }
+  #onObserved: (() => void) | undefined;
+  static over<T>(p: Promise<T>, onObserved: () => void): ObservedCall<T> {
+    let resolve!: (v: T | PromiseLike<T>) => void;
+    let reject!: (e: unknown) => void;
+    const call = new ObservedCall<T>((res, rej) => {
+      resolve = res;
+      reject = rej;
+    });
+    call.#onObserved = onObserved;
+    // Handled, but NOT looked at: the harness's own handler must not count as
+    // the test observing the call (it reaches the ledger instead), and must
+    // keep an unlooked-at rejection from killing the process. Called on the
+    // base prototype so it bypasses the `then` below.
+    Promise.prototype.then.call(call, undefined, () => {});
+    p.then(resolve, reject);
+    return call;
+  }
+  override then<R1 = T, R2 = never>(
+    onFulfilled?: ((value: T) => R1 | PromiseLike<R1>) | null,
+    onRejected?: ((reason: unknown) => R2 | PromiseLike<R2>) | null,
+  ): Promise<R1 | R2> {
+    const look = this.#onObserved;
+    if (look) {
+      this.#onObserved = undefined;
+      look();
+    }
+    return super.then(onFulfilled, onRejected);
+  }
+}
+
+/** How a harness calls a `worker: true` cell's method — see
+ *  `_callAcrossWorkerBoundary` (boot-refusals.ts). Passed in rather than
+ *  imported: this module rides in the browser graph, which must not grow a
+ *  dependency for a server-side harness concern. @internal */
+export type WorkerBoundaryCall = (
+  cellId: string,
+  args: unknown[],
+  run: (args: unknown[]) => unknown,
+) => unknown;
 
 /** One recorded failure and whether the caller ever looked at it. */
 type LedgerEntry = { err: unknown; method: string; seen: () => boolean };
+
+/** One call whose promise has not settled yet. */
+type OpenCall = {
+  method: string;
+  async: boolean;
+  p: Promise<unknown>;
+  seen: () => boolean;
+};
 
 /** A ledger installed over a booted cell set. */
 export type CallFailureLedger = {
   /** Throw the first failure nobody observed, then forget every entry
    *  (delivered or reported — either way, done with them). */
   raise(): void;
+  /** Wait, at most `budgetMs`, for every call nobody observed to settle, so a
+   *  failure that lands just after the test body returned is in the ledger
+   *  before `raise()` looks. Returns the calls still open when it stopped. */
+  drain(budgetMs: number): Promise<string[]>;
+  /** The SYNCHRONOUS teardown's half of `drain()`, which cannot wait. Call it
+   *  BEFORE the runtime reset. It returns the unobserved async calls still in
+   *  flight — the reset orphans those (their promises never settle again), so
+   *  their outcome is lost and the caller must say so — and arranges for a
+   *  sync-method call whose rejection already happened, but whose handler is
+   *  still a microtask away, to fail loud instead of vanishing. */
+  abandon(): string[];
   /** Put the cells' own bound method functions back. */
   restore(): void;
 };
 
-/** Wrap every bound ASYNC method on `cells` so a rejection nobody looked at is
+/** Wrap every bound method on `cells` so a rejection nobody looked at is
  *  recorded instead of swallowed. Call AFTER the cells are bound (i.e. after
  *  the runtime booted them); `restore()` on teardown.
  *
- *  Sync methods are deliberately not wrapped — `testCell` does not ledger them
- *  either (a sync reducer throw rejects the caller's promise at the call site),
- *  and the two harnesses must agree.
+ *  SYNC methods too. They used to be skipped on the claim that `testCell` does
+ *  not ledger them either — but `testCell`'s sync send hands back a rejected
+ *  promise nobody handles, which fails the test as an uncaught rejection. The
+ *  runtime's bound method pre-catches the same rejection (fire-and-forget
+ *  callers must not crash the app), so `onClick={() => cell.validate()}` with a
+ *  throwing reducer failed `testCell` and passed `testUI` and `bootCells`,
+ *  REDUCE_ERROR logged and all. One rule for every method: a failure nobody
+ *  observed surfaces.
  *  @internal */
 export function _watchUnobservedCalls(
   cells: readonly CellDef[],
+  acrossWorkerBoundary: WorkerBoundaryCall,
 ): CallFailureLedger {
   const entries: LedgerEntry[] = [];
+  const open = new Set<OpenCall>();
   const undo: (() => void)[] = [];
   for (const def of cells) {
     const asyncMethods = def.__aio?.asyncMethods;
-    if (!asyncMethods || asyncMethods.size === 0) continue;
-    for (const key of def.__aio.actionKeys ?? []) {
-      if (!asyncMethods.has(key)) continue;
+    for (const key of def.__aio?.actionKeys ?? []) {
       const holder = def as unknown as Record<string, unknown>;
       const original = holder[key];
       if (typeof original !== "function") continue;
       const call = original as (...args: unknown[]) => unknown;
       const method = `${def.__aio.id}.${key}()`;
+      const isAsync = asyncMethods?.has(key) === true;
+      const worker = def.__aio?.worker === true;
       const wrapped = (...args: unknown[]): unknown => {
-        const started = call.apply(def, args);
+        const started = worker
+          ? acrossWorkerBoundary(
+            def.__aio.id,
+            args,
+            (a) => call.apply(def, a),
+          )
+          : call.apply(def, args);
         if (!isThenable(started)) return started;
         const p = started as Promise<unknown>;
         let observed = false;
+        const seen = () => observed;
+        const entry: OpenCall = { method, async: isAsync, p, seen };
+        open.add(entry);
         // Recording (not re-throwing) also marks the rejection handled, so an
         // un-awaited failing call cannot escape as an unhandled rejection and
         // kill the test process — exactly what the runtime's own no-op catch
         // does today, minus the amnesia.
-        p.catch((err) => entries.push({ err, method, seen: () => observed }));
-        const mark = <T>(v: T): T => (observed = true, v);
-        return {
-          then: (onF: unknown, onR: unknown) =>
-            mark(p).then(
-              onF as never,
-              onR as never,
-            ),
-          catch: (onR: unknown) => mark(p).catch(onR as never),
-          finally: (onC: unknown) => mark(p).finally(onC as never),
-          [Symbol.toStringTag]: "Promise",
-        };
+        p.then(
+          () => open.delete(entry),
+          (err) => {
+            open.delete(entry);
+            entries.push({ err, method, seen });
+          },
+        );
+        return _observedCall(p, () => observed = true);
       };
       const creator = (def.__aio.actions as Record<string, unknown>)[key];
       if (creator) attachMeta(wrapped, creator);
@@ -228,31 +324,98 @@ export function _watchUnobservedCalls(
       });
     }
   }
+  const unobserved = () => [...open].filter((c) => !c.seen());
   return {
     raise() {
       const first = entries.find((e) => !e.seen());
       entries.length = 0;
       if (!first) return;
-      const err = first.err;
-      const detail = err instanceof Error ? err.message : String(err);
-      const named = new Error(
-        `${first.method} failed and nothing awaited it — ${detail}\n` +
-          `  cause: the call was made fire-and-forget (the ordinary ` +
-          `\`onClick={() => cell.method()}\` shape), so its rejection reached ` +
-          `no caller. Production logs it and dispatches \`__error\`; this ` +
-          `harness surfaces it rather than reporting success.\n` +
-          `  fix: await the call (or assert on it — \`await assertRejects(() => ` +
-          `cell.method())\`) if the failure is expected; otherwise fix the ` +
-          `method.`,
-      );
-      if (err instanceof Error) named.cause = err;
-      throw named;
+      throw unobservedError(first.method, first.err);
+    },
+    async drain(budgetMs: number) {
+      const deadline = Date.now() + budgetMs;
+      // Looped: a call that settles can start another (a follow-up dispatch),
+      // and that one is just as unobserved.
+      for (let left = budgetMs; left > 0; left = deadline - Date.now()) {
+        const waiting = unobserved();
+        if (waiting.length === 0) break;
+        let timer: ReturnType<typeof setTimeout> | undefined;
+        await Promise.race([
+          Promise.allSettled(waiting.map((c) => c.p)),
+          new Promise((r) => timer = setTimeout(r, left)),
+        ]);
+        clearTimeout(timer);
+      }
+      // The settle handlers above are microtasks queued by the settlement
+      // itself; let them record before the caller raises.
+      for (let i = 0; i < 10; i++) await Promise.resolve();
+      return unobserved().map((c) => c.method);
+    },
+    abandon() {
+      const still = unobserved();
+      for (const c of still) {
+        if (c.async) continue;
+        // A sync method's reducer ran during the call, so its rejection has
+        // ALREADY happened — only the handler that records it is still queued.
+        // Nothing will ever read this ledger again, so the failure is thrown
+        // where the runtime cannot swallow it: an unhandled rejection, which
+        // fails the test module by name. Loud rather than late-and-silent.
+        c.p.then(undefined, (err) => {
+          throw unobservedError(c.method, err);
+        });
+      }
+      return still.filter((c) => c.async).map((c) => c.method);
     },
     restore() {
       for (const fn of undo.splice(0)) fn();
       entries.length = 0;
+      open.clear();
     },
   };
+}
+
+/** The error an unobserved failure surfaces as — one wording for every
+ *  harness and every path (raise, late rejection). */
+function unobservedError(method: string, err: unknown): Error {
+  const detail = err instanceof Error ? err.message : String(err);
+  const named = new Error(
+    `${method} failed and nothing awaited it — ${detail}\n` +
+      `  cause: the call was made fire-and-forget (the ordinary ` +
+      `\`onClick={() => cell.method()}\` shape), so its rejection reached ` +
+      `no caller. Production logs it and dispatches \`__error\`; this ` +
+      `harness surfaces it rather than reporting success.\n` +
+      `  fix: await the call (or assert on it — \`await assertRejects(() => ` +
+      `cell.method())\`) if the failure is expected; otherwise fix the ` +
+      `method.`,
+  );
+  if (err instanceof Error) named.cause = err;
+  return named;
+}
+
+/** How long a teardown that can wait gives un-awaited calls to finish, so a
+ *  failure landing just after the test body returned still fails the test.
+ *  Bounded because a long-lived call (a poller, a stream) is legitimate at
+ *  teardown and must cost a test a moment, not its timeout. @internal */
+export const _DISPOSE_DRAIN_MS = 250;
+
+/** The line a teardown prints when it had to abandon unobserved calls whose
+ *  outcome it can no longer learn. Not a throw: a long-lived call (a poller, a
+ *  stream a component starts on mount) is a legitimate thing to still have
+ *  running at teardown, and failing every such test would be a harness
+ *  refusing ordinary apps. But not silent either — a failure inside one of
+ *  these is invisible from here, and the test author has to know that.
+ *  @internal */
+export function _abandonedCallsWarning(
+  harness: string,
+  methods: readonly string[],
+  spelling: string,
+): string {
+  return `[aio:test] ${harness} teardown with ${methods.length} un-awaited ` +
+    `call(s) still in flight: ${methods.join(", ")}. Teardown orphans them, ` +
+    `so if one fails afterwards this test cannot see it.\n` +
+    `  fix: await the call (or \`await ${spelling}.settle()\`) before ` +
+    `teardown; if it is deliberately left running, attach a handler ` +
+    `(\`.catch(…)\`) to say so.`;
 }
 
 function isThenable(v: unknown): boolean {

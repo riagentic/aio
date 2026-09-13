@@ -88,6 +88,20 @@ export function onCleanup(fn: () => void): void {
   }
 }
 
+/** @internal Run `fn` when the component rendering right now goes away for
+ *  good: at its unmount, or at once if this render is THROWN AWAY before an
+ *  instance exists (its body threw) or the instance is discarded unmounted (a
+ *  boundary above it caught). Returns false outside a render.
+ *
+ *  Not `onMount(() => onCleanup(fn))`: a render that never commits never runs
+ *  its `onMount`, so a hold released only from there leaked for good. */
+export function _onUnmount(fn: () => void): boolean {
+  const collector = _currentCollector;
+  if (!collector) return false;
+  (collector.mountCleanupCallbacks ??= []).push(fn);
+  return true;
+}
+
 // ── onGlobalKey ───────────────────────────────────────────────────────
 
 /** Modifier state a chord can require. Omitted = "don't care". */
@@ -307,6 +321,20 @@ export function useSignal<T>(initial: T): Signal<T> {
 
 let _ssrIdCounter = 0;
 
+/** The id sequence for everything that is NOT continuing server markup: every
+ *  `mount()` root, and a hydrated root once its hydration pass is over. One per
+ *  document, not one per root — a per-root counter restarted at 0 for each
+ *  root, so two `mount()`s on one page both handed out `:r0:` and a
+ *  `<label for>` in the second root pointed at the first root's input.
+ *
+ *  Its ids are spelled `:rc{N}:`, apart from the server's `:r{N}:`. One shared
+ *  spelling cannot be made unique: a hydration pass MUST reproduce the server's
+ *  numbers, and it can run after a `mount()` has already handed those numbers
+ *  out — `mount()` then `hydrate()` on one page gave both roots `:r0:`. No
+ *  client counter can skip numbers a later hydration will need, so the two
+ *  sequences are kept from ever meeting instead. */
+let _clientIdCounter = 0;
+
 /** Reset SSR ID counter. Called at the start of each renderToString. */
 export function _resetSsrIdCounter(): void {
   _ssrIdCounter = 0;
@@ -314,7 +342,9 @@ export function _resetSsrIdCounter(): void {
 
 /**
  * Generate a unique, SSR-stable ID. Persists across re-renders.
- * Format: `:r{N}:` — deterministic per render tree traversal order.
+ * Format: `:r{N}:` on the server and while hydrating its markup (deterministic
+ * per render tree traversal order); `:rc{N}:` for ids a client root generates
+ * itself, one sequence per document, so the two can never collide.
  * Must be called inside a component function body during render.
  */
 export function useId(): string {
@@ -327,8 +357,14 @@ export function useId(): string {
   const idx = collector.refIndex++;
   if (idx >= collector.refs.length) {
     const root = _activeRoot;
-    const n = root ? root._idCounter++ : _ssrIdCounter++;
-    const ref = { current: `:r${n}:` };
+    // Hydrating: continue the per-root sequence renderToString used (it
+    // restarts at 0 too), so the id matches the server's markup.
+    const id = !root
+      ? `:r${_ssrIdCounter++}:`
+      : root._ssrIds
+      ? `:r${root._idCounter++}:`
+      : `:rc${_clientIdCounter++}:`;
+    const ref = { current: id };
     collector.refs.push(ref);
     return ref.current;
   }

@@ -20,6 +20,7 @@ import type { SessionStore } from "./sessions.ts";
 import type { AioUser } from "./aio-types.ts";
 import { log } from "../diagnostics/logger-api.ts";
 import { count } from "../diagnostics/fmt.ts";
+import { _onTotpReplayReset } from "./auth-totp.ts";
 
 /** OWASP 2023 recommendation for PBKDF2-HMAC-SHA-256. */
 const PBKDF2_ITERS = 600_000;
@@ -196,6 +197,24 @@ export interface UserStore {
    *  authenticator; there are no user-held recovery codes. */
   disableTotp(id: string): boolean;
   totpSecret(id: string): { secret: string; enabled: boolean } | null;
+  /** Subscribe to CHANGES to a user's identity row — role, email, lock state,
+   *  verification, second factor, deletion.
+   *
+   *  The session store has had `onRevoked` since the WS manager needed to
+   *  disarm live sockets the moment a token dies. Nothing said the same thing
+   *  about the row those sockets resolve their user FROM, so a demotion was
+   *  honoured by the very next HTTP request and ignored by an already-open
+   *  socket until the 5-second sweep found it — ten more frames of admin-only
+   *  state to someone who is no longer an admin, and nothing ever closes that
+   *  socket. Three docstrings and `docs/auth/auth.md` all said a role change
+   *  "lands here too"; this is what makes that true.
+   *
+   *  OPTIONAL because `UserStore` is public surface and a required member
+   *  would break anyone who implements it. A store without it degrades to the
+   *  sweep, which is exactly where things stood.
+   *
+   *  @returns unsubscribe */
+  onUserChanged?(listener: (id: string) => void): () => void;
   /** Issue a one-shot token (returned raw, stored hashed) with a TTL. */
   issueToken(
     kind: TokenKind,
@@ -209,6 +228,59 @@ export interface UserStore {
     token: string,
   ): { subject: string; payload: string | null } | null;
   close(): void;
+}
+
+/** The per-account lockout, for the one caller that verifies a credential
+ *  OTHER than the password: the TOTP step of `/__aio/auth/totp`.
+ *
+ *  Wrong passwords always fed the lockout (5 → 15 minutes); wrong second-factor
+ *  codes fed only the per-IP budget, which a botnet behind the documented proxy
+ *  rotates past. Measured: 40 wrong TOTP codes for one account from 40
+ *  addresses, then the right one → a session. The lockout is "the only defence
+ *  a botnet's rotating IPs don't sidestep" (see `bumpFail`), and the factor
+ *  that exists for the case where the password has LEAKED was outside it.
+ *
+ *  Internal — reached through `accountLockoutOf`, not a `UserStore` member,
+ *  because `UserStore` is public surface. */
+export interface AccountLockout {
+  /** Count one failed second factor. True when the account is locked after it
+   *  (this failure locked it, or it already was) — and a lock burns the
+   *  subject's outstanding TOTP pending tokens, so guesses already in flight
+   *  cannot keep trying the codes a lock is meant to stop. */
+  fail(id: string): boolean;
+  /** Is a lockout active right now? */
+  locked(id: string): boolean;
+  /** A completed login: the counter starts over. */
+  clear(id: string): void;
+}
+
+const _lockouts = new WeakMap<UserStore, AccountLockout>();
+
+/** The lockout behind a store opened by `openUserStore`; null for any other
+ *  implementation of the interface (which then has no per-account lockout for
+ *  second factors — the caller says so out loud). */
+export function accountLockoutOf(store: UserStore): AccountLockout | null {
+  return _lockouts.get(store) ?? null;
+}
+
+/** The TOTP step an account last had ACCEPTED, kept in auth.db so a code used
+ *  just before a restart is still spent after it. `verifyTotp`'s own record is
+ *  in memory and died with the process — within the 90-second window, the
+ *  same code logged in again. Internal, like `AccountLockout`, because
+ *  `UserStore` is public surface. */
+export interface TotpReplay {
+  /** Consume `step` for this account: true when it is newer than every step
+   *  accepted before (and is now recorded), false for a replay. One atomic
+   *  compare-and-set, so two concurrent checks cannot both win. */
+  accept(id: string, step: number): boolean;
+}
+
+const _totpReplays = new WeakMap<UserStore, TotpReplay>();
+
+/** The persisted replay record behind a store opened by `openUserStore`; null
+ *  for any other implementation (which keeps only the in-memory guard). */
+export function totpReplayOf(store: UserStore): TotpReplay | null {
+  return _totpReplays.get(store) ?? null;
 }
 
 /** Options for `openUserStore`.
@@ -250,6 +322,27 @@ export function openUserStore(
     payload TEXT,
     expires_at INTEGER NOT NULL
   )`);
+  // Additive migration: the last accepted TOTP step (see `TotpReplay`). A
+  // column with a default, so an older build opening this file reads and
+  // writes it exactly as before.
+  let totpStepColumn = true;
+  try {
+    const cols = db.prepare("PRAGMA table_info(users)").all() as Array<
+      { name: string }
+    >;
+    if (!cols.some((c) => c.name === "totp_step")) {
+      db.exec(
+        "ALTER TABLE users ADD COLUMN totp_step INTEGER NOT NULL DEFAULT 0",
+      );
+    }
+  } catch (e) {
+    totpStepColumn = false;
+    log.warn(
+      `[aio] auth: could not add the TOTP replay column to ${path} (${e}) — ` +
+        `a second-factor code used just before a restart can be used once ` +
+        `more after it, inside its 90-second window.`,
+    );
+  }
   const ins = db.prepare(
     "INSERT INTO users (id, pw, role, created_at, email) VALUES (?, ?, ?, ?, ?)",
   );
@@ -268,6 +361,21 @@ export function openUserStore(
             totp = CASE WHEN totp_on = 1 THEN totp ELSE NULL END
       WHERE id = ?`,
   );
+  // Identity-change listeners — see `onUserChanged` on the interface. Fired
+  // for every write that changes what a live socket would resolve this user
+  // to, so the WS manager can re-resolve now rather than at its next sweep.
+  const _userListeners = new Set<(id: string) => void>();
+  const _changed = (id: string): void => {
+    for (const l of _userListeners) {
+      try {
+        l(id);
+      } catch {
+        // aio-ok: a listener is an observer — one that throws must not undo a
+        // write that already landed, nor stop the others hearing it
+      }
+    }
+  };
+
   const updRole = db.prepare("UPDATE users SET role = ? WHERE id = ?");
   const updEmail = db.prepare("UPDATE users SET email = ? WHERE id = ?");
   const updVerified = db.prepare("UPDATE users SET verified = 1 WHERE id = ?");
@@ -358,6 +466,48 @@ export function openUserStore(
 
   const purgeTokens = (subject: string): number =>
     Number(tokPurge.run(normId(subject)).changes);
+  const tokPurgeTotp = db.prepare(
+    "DELETE FROM one_shot_tokens WHERE subject = ? AND kind = 'totp'",
+  );
+
+  /** Count a failure atomically, and warn exactly once when it locks. Shared
+   *  by the password and the second factor, so both feed ONE counter. */
+  const recordFailure = (id: string, what: string): void => {
+    const now = Date.now();
+    const r = bumpFail.run(LOCK_AFTER, LOCK_AFTER, now + LOCK_MS, id, now);
+    if (Number(r.changes) === 1) {
+      const after = selLock.get(id) as { locked_until: number } | undefined;
+      if ((after?.locked_until ?? 0) > now) {
+        log.warn(
+          `[aio] auth: account "${id}" locked for ${
+            LOCK_MS / 60_000
+          }m after ${LOCK_AFTER} failed ${what}`,
+        );
+      }
+    }
+  };
+  const lockedNow = (id: string): boolean =>
+    ((selLock.get(id) as { locked_until: number } | undefined)
+      ?.locked_until ?? 0) > Date.now();
+
+  /** The tail of each account's verify queue — see `verify`. Keyed by the
+   *  normalized id, so two spellings of one account cannot open two parallel
+   *  lanes; per store (it lives in this closure), so two apps in one process
+   *  never delay each other. An entry is dropped once its queue drains: no
+   *  per-account residue, however many ids a guesser invents. */
+  const _verifyQueues = new Map<string, Promise<void>>();
+  const oneVerifyAtATime = <T>(
+    key: string,
+    fn: () => Promise<T>,
+  ): Promise<T> => {
+    const run = (_verifyQueues.get(key) ?? Promise.resolve()).then(fn);
+    const tail = run.then(() => {}, () => {});
+    _verifyQueues.set(key, tail);
+    void tail.then(() => {
+      if (_verifyQueues.get(key) === tail) _verifyQueues.delete(key);
+    });
+    return run;
+  };
 
   /** How many session rows this same auth.db holds for a user. Only used to
    *  make an UNBOUND store's password change loud (see setPassword) — the
@@ -373,7 +523,7 @@ export function openUserStore(
     }
   };
 
-  return {
+  const store: UserStore = {
     async create(rawId, password, opts) {
       const id = normId(rawId);
       if (id.length < 1 || id.length > 256 || HAS_INVISIBLE.test(id)) {
@@ -403,41 +553,58 @@ export function openUserStore(
         totpEnabled: false,
       };
     },
-    async verify(rawId, password) {
+    verify(rawId, password) {
       const id = normId(rawId);
-      const row = sel.get(id) as Row | undefined;
-      const now = Date.now();
-      // Hash FIRST, unconditionally — locked, unknown, and wrong-password
-      // paths all cost one PBKDF2, so timing reveals nothing.
-      const ok = await verifyPassword(password, row?.pw ?? DECOY);
-      if (!row) return null;
-      // Wrong password (or unknown user) ALWAYS returns a generic null — the
-      // "locked" signal is never handed to a caller who can't prove they know
-      // the password, so a wrong-guessing attacker can't distinguish
-      // exists/locked/absent by the response (no account enumeration, no
-      // lock-state oracle). Only the correct-password branch below can reveal
-      // a lock — to the legitimate account owner.
-      if (!ok) {
-        // Atomic increment-and-maybe-lock; the WHERE clause covers the
-        // "already locked — don't extend" case that used to be a stale read.
-        const r = bumpFail.run(LOCK_AFTER, LOCK_AFTER, now + LOCK_MS, id, now);
-        if (Number(r.changes) === 1) {
-          const after = selLock.get(id) as { locked_until: number } | undefined;
-          if ((after?.locked_until ?? 0) > now) {
-            log.warn(
-              `[aio] auth: account "${id}" locked for ${
-                LOCK_MS / 60_000
-              }m after ${LOCK_AFTER} failed logins`,
-            );
-          }
+      // ONE VERIFY AT A TIME PER ACCOUNT: lock check → PBKDF2 → count is a
+      // read-then-await-then-write, and `bumpFail` being atomic only fixed
+      // the COUNT. Every guess that started before the fifth failure was
+      // counted still had its password checked, and a right one read the
+      // pre-lock row. Measured: 29 wrong passwords and the right one in one
+      // `Promise.all` → `{ id, role }`, a session thirty guesses into a
+      // lockout that allows five. Serialized, a burst is exactly the
+      // sequential case (five nulls, a lock, `"locked"`). Not a reservation
+      // (count first, refund on success): the fifth reservation would lock
+      // the account before a CORRECT fifth password was even hashed. Mirrors
+      // the TOTP route's queue in auth-flows.ts. Unknown ids queue too, so a
+      // burst costs the same whether or not the account exists.
+      return oneVerifyAtATime(id, async () => {
+        const row = sel.get(id) as Row | undefined;
+        // Hash FIRST, unconditionally — locked, unknown, and wrong-password
+        // paths all cost one PBKDF2, so timing reveals nothing.
+        const ok = await verifyPassword(password, row?.pw ?? DECOY);
+        if (!row) return null;
+        // Wrong password (or unknown user) ALWAYS returns a generic null — the
+        // "locked" signal is never handed to a caller who can't prove they
+        // know the password, so a wrong-guessing attacker can't distinguish
+        // exists/locked/absent by the response (no account enumeration, no
+        // lock-state oracle). Only the correct-password branch below can
+        // reveal a lock — to the legitimate account owner.
+        if (!ok) {
+          // Atomic increment-and-maybe-lock; the WHERE clause covers the
+          // "already locked — don't extend" case that used to be a stale read.
+          recordFailure(id, "logins");
+          return null;
         }
-        return null;
-      }
-      // Password is correct. If the account is under an active lockout, tell
-      // the owner (they can wait it out) — but only now, past the password gate.
-      if (row.locked_until > now) return "locked";
-      if (row.fails > 0 || row.locked_until > 0) updFails.run(0, 0, id);
-      return { id: row.id, role: row.role };
+        // RE-READ after the await. The queue serializes verifies, not the
+        // store's other writers: during the hash the account can be removed,
+        // its password rotated, or locked by the TOTP step. A verdict about a
+        // row that no longer exists is not a login — the route mints a session
+        // from whatever this returns, for a deleted account included.
+        const now = sel.get(id) as Row | undefined;
+        if (!now || now.pw !== row.pw) return null;
+        // Password is correct. If the account is under an active lockout, tell
+        // the owner (they can wait it out) — but only now, past the password
+        // gate.
+        if (now.locked_until > Date.now()) return "locked";
+        // With a second factor enrolled, a right password is HALF a login, and
+        // it must not wipe the counter the other half feeds: otherwise every
+        // guess cycle (password → pending → wrong code) resets to zero before
+        // the next wrong code, and the TOTP lockout never arrives. The TOTP
+        // step clears the counter when the login actually completes.
+        if (now.totp_on === 1) return { id: now.id, role: now.role };
+        if (now.fails > 0 || now.locked_until > 0) updFails.run(0, 0, id);
+        return { id: now.id, role: now.role };
+      });
     },
     async setPassword(rawId, newPassword) {
       const id = normId(rawId);
@@ -477,16 +644,32 @@ export function openUserStore(
     },
     purgeTokens,
     setRole(rawId, role) {
-      return updRole.run(role, normId(rawId)).changes > 0;
+      const id = normId(rawId);
+      const ok = updRole.run(role, id).changes > 0;
+      if (ok) _changed(id);
+      return ok;
     },
     setEmail(rawId, email) {
-      return updEmail.run(email, normId(rawId)).changes > 0;
+      const id = normId(rawId);
+      const ok = updEmail.run(email, id).changes > 0;
+      if (ok) _changed(id);
+      return ok;
     },
     markVerified(rawId) {
-      return updVerified.run(normId(rawId)).changes > 0;
+      const id = normId(rawId);
+      const ok = updVerified.run(id).changes > 0;
+      if (ok) _changed(id);
+      return ok;
     },
     unlock(rawId) {
-      return updFails.run(0, 0, normId(rawId)).changes > 0;
+      const id = normId(rawId);
+      const ok = updFails.run(0, 0, id).changes > 0;
+      if (ok) _changed(id);
+      return ok;
+    },
+    onUserChanged(listener) {
+      _userListeners.add(listener);
+      return () => _userListeners.delete(listener);
     },
     list() {
       const rows = db.prepare(
@@ -538,6 +721,23 @@ export function openUserStore(
       return Number((cnt.get() as { n: number }).n);
     },
     setTotpSecret(rawId, secretB32) {
+      // REFUSED at the write. Every TOTP code is derived by base32-decoding
+      // this string, and the decoder throws `invalid_base32` — uncaught, deep
+      // inside the login flow, as a bare `500 Internal Server Error`. So a hex
+      // secret (the shape a migration off another system hands you) was
+      // accepted with `true`, reported success, and then every login attempt
+      // for that account answered 500 with no explanation, burning a `pending`
+      // token each time. The write site is the one place that can say what is
+      // wrong while the caller still knows what it passed.
+      const clean = String(secretB32 ?? "").replace(/=+$/, "").toUpperCase();
+      if (!clean || /[^A-Z2-7]/.test(clean)) {
+        throw new Error(
+          `setTotpSecret: the secret must be base32 (A-Z and 2-7). Got ` +
+            `${JSON.stringify(String(secretB32).slice(0, 12))}… — every TOTP ` +
+            `code is derived by decoding it, so this would be accepted here ` +
+            `and then fail every login for this account.`,
+        );
+      }
       return updTotp.run(secretB32, normId(rawId)).changes > 0;
     },
     enableTotp(rawId) {
@@ -578,7 +778,47 @@ export function openUserStore(
       return { subject: row.subject, payload: row.payload };
     },
     close() {
+      _unhookTotpReset?.();
       db.close();
     },
   };
+  let _unhookTotpReset: (() => void) | undefined;
+  if (totpStepColumn) {
+    const updTotpStep = db.prepare(
+      "UPDATE users SET totp_step = ? WHERE id = ? AND totp_step < ?",
+    );
+    _totpReplays.set(store, {
+      accept: (rawId, step) =>
+        updTotpStep.run(step, normId(rawId), step).changes > 0,
+    });
+    // Test seam only (see `_resetTotpReplay`).
+    const resetSteps = db.prepare("UPDATE users SET totp_step = 0");
+    _unhookTotpReset = _onTotpReplayReset(() => {
+      try {
+        resetSteps.run();
+      } catch {
+        // aio-ok: a store dropped without close() — its database is gone, so
+        // there is nothing left to reset; stop asking.
+        _unhookTotpReset?.();
+      }
+    });
+  }
+  _lockouts.set(store, {
+    fail(rawId) {
+      const id = normId(rawId);
+      recordFailure(id, "logins (second factor)");
+      if (!lockedNow(id)) return false;
+      tokPurgeTotp.run(id);
+      return true;
+    },
+    locked: (rawId) => lockedNow(normId(rawId)),
+    clear(rawId) {
+      const id = normId(rawId);
+      const row = sel.get(id) as Row | undefined;
+      if (row && (row.fails > 0 || row.locked_until > 0)) {
+        updFails.run(0, 0, id);
+      }
+    },
+  });
+  return store;
 }

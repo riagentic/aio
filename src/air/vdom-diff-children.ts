@@ -141,7 +141,24 @@ export function diffChildren(
         }
       }
     }
-    if (someKeyed && someUnkeyed) {
+    // MIXED means mixed INSIDE A LIST — an array expression whose items are
+    // partly keyed. `<h2/>{items.map((i) => <li key={i.id}/>)}<input/>`, the
+    // docs' own shape, is not that: `diffKeyed` matches unkeyed children
+    // positionally among the UNKEYED ones (AIO-114), so the heading is always
+    // unkeyed #0 and the input #1 however the rows move, and no key on them
+    // would change a thing. It warned anyway, on every render of the most
+    // ordinary list layout there is. A `.map` that keys some rows and not
+    // others is the case that does go wrong: its unkeyed rows shift slots when
+    // a keyed row is added or removed. (Array identity is not recorded, only
+    // "came from an array", so two ADJACENT arrays — one keyed, one not — still
+    // read as one mixed list.)
+    const fromArray = real.filter(
+      (c) => typeof c === "object" && _isFromArray(c),
+    ) as VNode[];
+    const arrayKeyed = someKeyed && fromArray.some((c) => c.key !== undefined);
+    const arrayUnkeyed = someUnkeyed &&
+      fromArray.some((c) => c.key === undefined);
+    if (arrayKeyed && arrayUnkeyed) {
       const where = _whereInTree(parent, nextChildren);
       _devWarn(
         `mixed-keys${where}`,
@@ -165,7 +182,17 @@ export function diffChildren(
     }
   }
 
-  if (hasKeys) {
+  // The keyed path whenever EITHER side has keys. On `next` alone, a keyed
+  // list emptying out (`<h2/>{[]}<input/>`, old `<h2/><p key=a/><input/>`)
+  // took the positional path, which lined the input up against the departed
+  // row and RE-CREATED it — the user's typed text gone the moment the last
+  // row was deleted. `diffKeyed` removes the departed keyed rows and matches
+  // the unkeyed survivors among themselves, which is the same answer the
+  // growing direction already got.
+  const oldHasKeys = !hasKeys && oldChildren.some(
+    (c) => typeof c === "object" && c !== null && c.key !== undefined,
+  );
+  if (hasKeys || oldHasKeys) {
     diffKeyed(
       parent,
       nextChildren as VNode[],
@@ -332,6 +359,34 @@ function _placeSpan(
   return placed;
 }
 
+/** The positions of `seq` that form one longest strictly increasing
+ *  subsequence, ignoring entries `< 0`. O(n log n) (patience sorting with
+ *  predecessor links). @internal — exported for its test. */
+export function _longestIncreasing(seq: readonly number[]): Set<number> {
+  const tails: number[] = []; // position of the smallest tail for each length
+  const prev = new Array<number>(seq.length).fill(-1);
+  for (let i = 0; i < seq.length; i++) {
+    const v = seq[i]!;
+    if (v < 0) continue;
+    let lo = 0;
+    let hi = tails.length;
+    while (lo < hi) {
+      const mid = (lo + hi) >> 1;
+      if (seq[tails[mid]!]! < v) lo = mid + 1;
+      else hi = mid;
+    }
+    if (lo > 0) prev[i] = tails[lo - 1]!;
+    tails[lo] = i;
+  }
+  const out = new Set<number>();
+  let k = tails.length > 0 ? tails[tails.length - 1]! : -1;
+  while (k >= 0) {
+    out.add(k);
+    k = prev[k]!;
+  }
+  return out;
+}
+
 function diffKeyed(
   parent: Node,
   nextChildren: VNode[],
@@ -422,6 +477,37 @@ function diffKeyed(
     if (nextKeys.has(oc.key!)) removeDom(parent, oc, ctx);
   }
 
+  // Which surviving keyed rows can STAY where they are. The loop below places
+  // every child right after the previous one, which is correct but moved
+  // every row in front of a displaced one: moving the first row to the end
+  // re-inserted the other N-1 instead of the one that moved — and a node that
+  // is re-inserted loses focus, selection and a running CSS transition, so an
+  // input being typed into in a reordered list dropped the caret. The rows
+  // whose OLD order already agrees with the new order (a longest increasing
+  // subsequence of their old positions) are left in place; only the rest move.
+  //
+  // Why skipping them is sound: departures are gone and the DOM holds the
+  // survivors in OLD order, so the stable rows already sit in NEW order among
+  // themselves. Everything placed before a stable row is inserted right after
+  // `lastPlaced`, which is always in front of it, and every node still lying
+  // between is either placed later (after this row) or removed at the end.
+  const oldIndex = new Map<VNode, number>();
+  for (let i = 0; i < oldChildren.length; i++) {
+    const oc = oldChildren[i]!;
+    if (oc.key !== undefined && oldMap.get(oc.key) === oc) oldIndex.set(oc, i);
+  }
+  const seenKeys = new Set<string | number>();
+  const matchedOld = (nextChildren as (VNode | string | number)[]).map((nc) => {
+    if (typeof nc !== "object" || nc === null || nc.key === undefined) {
+      return -1;
+    }
+    if (seenKeys.has(nc.key)) return -1; // a duplicate is created new (AIO-417)
+    seenKeys.add(nc.key);
+    const oc = oldMap.get(nc.key);
+    return oc ? oldIndex.get(oc) ?? -1 : -1;
+  });
+  const stable = _longestIncreasing(matchedOld);
+
   const usedKeys = new Set<string | number>();
   // AIO-395: seed placement at the region start — `lastPlaced.nextSibling`
   // then resolves to the first node of THIS fragment's region instead of
@@ -429,7 +515,8 @@ function diffKeyed(
   let lastPlaced: Node | null = startAnchor;
   let nkIdx = 0;
 
-  for (const nc of (nextChildren as (VNode | string | number)[])) {
+  for (let ni = 0; ni < nextChildren.length; ni++) {
+    const nc = nextChildren[ni] as VNode | string | number;
     // Non-keyed child: positionally match against old non-keyed (AIO-114)
     if (
       typeof nc !== "object" || nc === null || (nc as VNode).key === undefined
@@ -508,8 +595,15 @@ function diffKeyed(
       const dom = nc._dom ?? oc._dom;
       // AIO-177: a Fragment/boundary/component child spans N nodes — move the
       // whole span, not just its first node.
-      if (dom) {
-        lastPlaced = _placeSpan(parent, dom, _domNodeCount(nc), lastPlaced);
+      const span = _domNodeCount(nc);
+      if (dom && stable.has(ni)) {
+        // In place already (see `stable`): only the cursor moves, to the
+        // span's last node.
+        let last: Node = dom;
+        for (let i = 1; i < span; i++) last = _nextLive(last) ?? last;
+        if (span > 0) lastPlaced = last;
+      } else if (dom) {
+        lastPlaced = _placeSpan(parent, dom, span, lastPlaced);
       }
     } else {
       // A key coming BACK while its old row is still animating out must

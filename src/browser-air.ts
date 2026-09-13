@@ -177,6 +177,45 @@ export { renderToStream } from "./air/ssr-stream.ts";
 
 // ── Shared utilities (AIO-47) ──────────────────────────────────────
 export { msg, notify, own, schedule } from "./browser/browser-shared.ts";
+// `self("m")` is how a cell schedules its own method (docs/state/scheduling.md)
+// and a cell module is in the client graph, so the name has to resolve HERE —
+// mod.ts exporting it alone type-checked the doc example and then refused it at
+// bundle time (report 9b §3). state/self.ts has no imports: nothing server-side
+// rides along. tests/browser-air-mod-parity.test.ts gates the next such name.
+export { self } from "./state/self.ts";
+export type { SelfAction } from "./state/self.ts";
+// The rest of that class: names mod.ts exports that a cell module (or a
+// component) imports from "aio" in the docs' own examples — `race`/`until` in
+// async methods (docs/state/methods.md), `call` (quickstart), `errorCode`
+// (docs/debugging/errors.md), `createSelector`, `authClient`. Each one
+// type-checked and then refused the browser bundle exactly as `self` did.
+// Every module below is Deno-free and the SAME implementation mod.ts exports
+// (tests/browser-air-mod-parity.test.ts pins identity and the ledger;
+// tests/browser-bundle-self-export.test.ts bundles each for the browser).
+export { call } from "./state/cell-impl.ts";
+export {
+  race,
+  type RaceResult,
+  sleep,
+  until,
+  type UntilOptions,
+  UntilTimeoutError,
+} from "./state/async-helpers.ts";
+export { errorCode } from "./protocol/envelope.ts";
+export { createSelector, type Selector } from "./selector.ts";
+export { authClient, createAuthClient } from "./browser/auth-client.ts";
+export {
+  type Degraded,
+  degraded,
+  degradedReport,
+} from "./diagnostics/degraded.ts";
+// Server-side work a cell METHOD does, spelled in the cell module — which the
+// UI imports. The method body never runs in the browser (a browser cell is a
+// protocol stub), but the import has to resolve or the bundle is refused.
+// `serverImport` is documented "in the cell" (docs/testing/ui-testing.md) and
+// has no imports. (`blocking` is NOT here: its module-scope pool-size IIFE is
+// not tree-shaken, measured +0.8 KB gzip on every page — see the ledger.)
+export { serverImport } from "./state/server-import.ts";
 /** Ask for desktop-notification permission from a click handler — the one
  *  place a browser grants it. See `notify()`. */
 export { requestNotificationPermission } from "./browser/desktop-notify.ts";

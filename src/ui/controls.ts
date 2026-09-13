@@ -20,7 +20,14 @@
 // ARIA keyboard interaction for its role, and `tests/ui-controls.test.ts`
 // drives every one of them by key.
 import { Fragment, h } from "../air/vdom.ts";
-import { onCleanup, onMount, useSignal } from "../air/aio-renderer.ts";
+import {
+  _resetSsrIdCounter,
+  onCleanup,
+  onMount,
+  useId,
+  useRef,
+  useSignal,
+} from "../air/aio-renderer.ts";
 import type { VChild, VNode } from "../air/vdom.ts";
 
 /** Inline style object accepted by every kit component. */
@@ -48,17 +55,32 @@ function rest(props: Record<string, unknown>, own: string[]): Common {
 
 /** A stable id for wiring `aria-controls` / `aria-labelledby` pairs.
  *
- *  Deterministic per component instance rather than random: an id that changes
- *  between the server render and the client hydration breaks the association
- *  it exists to make, silently. */
-let _idSeq = 0;
+ *  Deterministic per component INSTANCE, which is what the pairing needs. A
+ *  bare module counter read that claim and broke it: every call sites is a
+ *  component BODY, so it re-ran on every render and handed back a new id each
+ *  time. `aria-controls` then pointed at an id that no longer existed, a
+ *  RadioGroup's shared `name` changed under the browser (which is what makes
+ *  arrow keys work within a group), and the server's id disagreed with the
+ *  client's on hydration — the exact failure the comment above promised not to
+ *  have.
+ *
+ *  `useId()` is the renderer's own answer: one value per instance, held across
+ *  re-renders and stable through SSR. Its raw form is `:r3:`, whose colons
+ *  need escaping in a selector, so the digits are lifted into a readable
+ *  prefixed id instead. */
 function nextId(prefix: string): string {
-  return `aio-${prefix}-${++_idSeq}`;
+  return `aio-${prefix}-${useId().replace(/[^0-9a-zA-Z]/g, "")}`;
 }
 
-/** @internal test seam — make ids predictable across cases. */
+/** @internal test seam — make ids predictable across cases.
+ *
+ *  The ids come from the renderer now, so this resets the renderer's counter
+ *  rather than a second one of its own — the SSR path, process-wide for the
+ *  length of one `renderToString`. A MOUNT does not restart at zero: its ids
+ *  come from one document-wide sequence, so two roots on a page never share
+ *  one, and a test that asserts a mounted id should read it from the DOM. */
 export function _resetControlIds(): void {
-  _idSeq = 0;
+  _resetSsrIdCounter();
 }
 
 // ── Radio group ──────────────────────────────────────────────────────
@@ -228,8 +250,14 @@ export function Tabs(props: TabsProps): VNode {
   const firstEnabled = tabs.find((t) => !t.disabled)?.id ?? tabs[0]?.id ?? "";
   const inner = useSignal(props.value ?? firstEnabled);
   // Controlled when `value` is supplied, uncontrolled otherwise — the same
-  // rule every input in this kit follows.
-  const active = props.value ?? inner.value;
+  // rule every input in this kit follows. Uncontrolled, the remembered id can
+  // outlive its tab: remove the active tab from `tabs` and nothing was
+  // selected, no tab was tabbable (every one at tabIndex -1, so Tab skipped the
+  // whole list) and the panel was empty. The first enabled tab is what an
+  // uncontrolled Tabs shows when nothing was chosen, so it is also the answer
+  // when the choice no longer exists.
+  const active = props.value ??
+    (tabs.some((t) => t.id === inner.value) ? inner.value : firstEnabled);
   const baseId = nextId("tabs");
 
   const select = (id: string): void => {
@@ -247,9 +275,25 @@ export function Tabs(props: TabsProps): VNode {
       select(t.id);
       // Roving focus: the newly-selected tab must RECEIVE focus, or the next
       // arrow key goes to the old one and the list feels broken.
-      const el = (e.currentTarget as HTMLElement | null)?.parentElement
-        ?.querySelector<HTMLElement>(`#${CSS.escape(`${baseId}-tab-${t.id}`)}`);
-      el?.focus();
+      //
+      // Scanning the siblings rather than running an id SELECTOR. The selector
+      // form needed `CSS.escape`, because a tab id is app data and may hold
+      // anything — and `CSS` is a bare global that is simply absent outside a
+      // browser, so under `testUI` the whole handler threw `CSS is not
+      // defined` and the arrow keys silently did nothing. A comparison needs
+      // no escaping and cannot be defeated by an exotic id.
+      const wanted = `${baseId}-tab-${t.id}`;
+      const siblings = (e.currentTarget as HTMLElement | null)?.parentElement
+        ?.children;
+      if (siblings) {
+        for (let k = 0; k < siblings.length; k++) {
+          const c = siblings[k] as HTMLElement;
+          if (c?.id === wanted) {
+            c.focus?.();
+            break;
+          }
+        }
+      }
       return;
     }
   };
@@ -384,15 +428,26 @@ export function Progress(props: ProgressProps): VNode {
   if (!showValue || value === undefined || !Number.isFinite(max) || max === 0) {
     return bar;
   }
+  // The BAR clamps — that is what `<progress>` does with a value outside
+  // [0, max] — so the text beside it has to clamp the same way. It did not:
+  // `value=150 max=100` drew a full bar and printed "150%", and a negative
+  // value printed "-20%" beside an empty one. A number that contradicts the
+  // thing it is labelling is worse than no number.
+  const pct = Math.round((value / max) * 100);
+  const shown = pct < 0 ? 0 : pct > 100 ? 100 : pct;
+  if (
+    shown !== pct && (globalThis as Record<string, unknown>).__aioDev === true
+  ) {
+    console.warn(
+      `[aio-dev] <Progress value={${value}} max={${max}}> is outside its ` +
+        `range — the bar clamps, so the label shows ${shown}%.`,
+    );
+  }
   return h(
     "span",
     { class: "aio-progress-row" },
     bar,
-    h(
-      "span",
-      { class: "aio-progress__value" },
-      `${Math.round((value / max) * 100)}%`,
-    ),
+    h("span", { class: "aio-progress__value" }, `${shown}%`),
   );
 }
 
@@ -465,6 +520,38 @@ export function Tooltip(props: TooltipProps): VNode {
   const { text, placement = "top", children, class: cls } = props;
   const id = nextId("tip");
   const hidden = useSignal(false);
+  // `aria-describedby` has to sit on the element that takes FOCUS — a screen
+  // reader announces the description of the focused element, and the wrapper
+  // span is never focused, so `<Tooltip><button>` read the button with no
+  // description at all. With exactly one child node it goes on that child
+  // (merged with any description the child already has). A plain element
+  // takes it and the wrapper drops it; a component (`<Button>`) is passed it
+  // as a prop, and the wrapper KEEPS its own in case the component does not
+  // forward attributes. Text, or several nodes, keep the wrapper form.
+  const only = Array.isArray(children) && children.length === 1
+    ? children[0]
+    : children;
+  const child = only !== null && typeof only === "object" &&
+      !Array.isArray(only) &&
+      (typeof (only as VNode).tag === "string" ||
+        typeof (only as VNode).tag === "function")
+    ? only as VNode
+    : null;
+  const own = child?.props["aria-describedby"];
+  const trigger = child
+    ? h(
+      child.tag as string,
+      {
+        ...child.props,
+        key: child.key,
+        "aria-describedby": typeof own === "string" && own
+          ? `${own} ${id}`
+          : id,
+      },
+      ...child.children,
+    )
+    : children;
+  const onElement = typeof child?.tag === "string";
   return h(
     "span",
     {
@@ -480,8 +567,11 @@ export function Tooltip(props: TooltipProps): VNode {
     },
     h(
       "span",
-      { class: "aio-tip__trigger", "aria-describedby": id },
-      children,
+      {
+        class: "aio-tip__trigger",
+        ...(onElement ? {} : { "aria-describedby": id }),
+      },
+      trigger,
     ),
     h("span", { class: "aio-tip__bubble", role: "tooltip", id }, text),
   );
@@ -523,37 +613,59 @@ export function Menu(props: MenuProps): VNode {
   const { trigger, items, label, onSelect, class: cls } = props;
   const open = useSignal(false);
   const id = nextId("menu");
-  let root: HTMLElement | null = null;
+  // The root element, held in a REF that outlives the render. It was a per-
+  // render `let`, and the renderer detaches a ref (calls it with null) before
+  // attaching the next render's — so every closure from an earlier render saw
+  // `null` from then on. The outside-click listener is installed once, in the
+  // FIRST render's `onMount`, and opening the menu IS a re-render: by the time
+  // anyone clicked outside, its `root` was null and the menu never closed. The
+  // same null made "open focuses the first item" a no-op.
+  const root = useRef<HTMLElement | null>(null);
 
-  const focusItem = (i: number): void => {
-    const list = root?.querySelectorAll<HTMLElement>('[role="menuitem"]');
+  /** Focus item `i` (wrapping), or the nearest enabled one walking `dir` — a
+   *  disabled <button> cannot take focus, so landing on one left focus on the
+   *  trigger with the list open. */
+  const focusItem = (i: number, dir: 1 | -1 = 1): void => {
+    const list = root.current?.querySelectorAll<HTMLElement>(
+      '[role="menuitem"]',
+    );
     if (!list || list.length === 0) return;
     const n = list.length;
-    list[((i % n) + n) % n]?.focus();
+    for (let step = 0; step < n; step++) {
+      const el = list[(((i + dir * step) % n) + n) % n]!;
+      if (el.hasAttribute("disabled")) continue;
+      el.focus();
+      return;
+    }
   };
 
   const close = (refocus: boolean): void => {
     if (!open.value) return;
     open.set(false);
     if (refocus) {
-      root?.querySelector<HTMLElement>(".aio-menu__trigger")?.focus();
+      root.current?.querySelector<HTMLElement>(".aio-menu__trigger")?.focus();
     }
   };
 
   onMount(() => {
-    const doc = root?.ownerDocument;
+    const doc = root.current?.ownerDocument;
     if (!doc) return;
     const onDocDown = (e: Event) => {
-      if (root && !root.contains(e.target as Node)) close(false);
+      const el = root.current;
+      if (el && !el.contains(e.target as Node)) close(false);
     };
     doc.addEventListener("pointerdown", onDocDown, true);
     onCleanup(() => doc.removeEventListener("pointerdown", onDocDown, true));
   });
 
-  const openWith = (index: number): void => {
+  const openWith = (index: number, dir: 1 | -1 = 1): void => {
+    if (open.peek()) {
+      focusItem(index, dir); // the list is already there
+      return;
+    }
     open.set(true);
     // The list does not exist until this render commits.
-    queueMicrotask(() => focusItem(index));
+    queueMicrotask(() => focusItem(index, dir));
   };
 
   return h(
@@ -562,10 +674,14 @@ export function Menu(props: MenuProps): VNode {
       ...rest(props, ["trigger", "items", "label", "onSelect", "class"]),
       class: cx("aio-menu", cls),
       ref: (el: HTMLElement | null) => {
-        root = el;
+        root.current = el;
       },
       onKeyDown: (e: KeyboardEvent) => {
-        if (e.key === "Escape") {
+        // Only an OPEN menu consumes Escape. `preventDefault` is how an
+        // enclosing Modal knows the key was handled — the first Escape closes
+        // the menu, not the dialog around it — so a closed menu must leave it
+        // alone, or Escape on a focused trigger could never close that dialog.
+        if (e.key === "Escape" && open.peek()) {
           e.preventDefault();
           close(true);
         } else if (e.key === "Tab") {
@@ -593,7 +709,7 @@ export function Menu(props: MenuProps): VNode {
           openWith(0);
         } else if (e.key === "ArrowUp") {
           e.preventDefault();
-          openWith(items.length - 1);
+          openWith(items.length - 1, -1);
         }
       },
     }, trigger),
@@ -627,13 +743,13 @@ export function Menu(props: MenuProps): VNode {
                 focusItem(i + 1);
               } else if (e.key === "ArrowUp") {
                 e.preventDefault();
-                focusItem(i - 1);
+                focusItem(i - 1, -1);
               } else if (e.key === "Home") {
                 e.preventDefault();
                 focusItem(0);
               } else if (e.key === "End") {
                 e.preventDefault();
-                focusItem(items.length - 1);
+                focusItem(items.length - 1, -1);
               }
             },
           }, it.label)

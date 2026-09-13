@@ -251,7 +251,7 @@ export function initDiagnostics(
           // theatre"), and so does the checkpoint; this sink printed
           // `vault: key ""→"hunter2"` in cleartext. The changed KEYS stay — what
           // moved is not the secret.
-          const hide = redact.cells.has(d.cell);
+          const hide = redact.redactsCell(d.cell);
           log.debug(
             "state-diff",
             formatDiff(

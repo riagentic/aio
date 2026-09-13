@@ -18,11 +18,20 @@ import { connectCli } from "aio/server";
 import { instances, resolveAppId } from "aio/extras";
 import { args, EXIT, fail, style, table, watch } from "aio/cli";
 import { todos } from "./cell/todos.ts";
+import config from "../deno.json" with { type: "json" };
+
+// WHO this tool is — from ITS OWN deno.json, imported (so a compiled binary
+// carries it too), never inferred. Both roles find each other by this id, and
+// inference reads the deno.json of whatever directory you run the command
+// from: `todo list` from ~ looked for a different app than `deno task dev`
+// had started, and either role run inside another project became that project
+// — its lock, its data.
+const APP_ID = resolveAppId(config.title);
 
 if (Deno.args[0] === "serve") {
   // aio parses its own flags (--port, --expose, …) from Deno.args; the bare
   // `serve` word is not a flag, so it passes through.
-  await aio.run({ client: "server-only" });
+  await aio.run({ appId: APP_ID, client: "server-only" });
 } else {
   const a = args({
     name: "todo",
@@ -50,7 +59,7 @@ if (Deno.args[0] === "serve") {
   // hard-coded ws://localhost:8000 was wrong on nearly every run: `todo list`
   // said "no server" against a server that was running. The lock the app
   // writes is the one place that knows, and it is what `am` reads too.
-  const live = instances(resolveAppId()).find((i) => i.alive && i.port > 0);
+  const live = instances(APP_ID).find((i) => i.alive && i.port > 0);
   const url = a.flags.url ??
     (live ? `ws://localhost:${live.port}/ws` : undefined);
   if (!url) {

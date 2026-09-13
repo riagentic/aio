@@ -3,14 +3,39 @@
 // the socket (resolves on the server ack) and `counter.count` reads live
 // server state — no raw { type, payload } wire actions, no state mirror.
 import { connectCli } from "aio/server";
+import { instances, resolveAppId } from "aio/extras";
+import config from "../deno.json" with { type: "json" };
 import { counter } from "./cell/counter.ts";
 
-const url = Deno.args[0] || "ws://localhost:8000/ws";
+// WHERE the server is. `deno task dev` binds a FREE port, so the hard-coded
+// ws://localhost:8000 this used to default to reached nothing (or another
+// app), and retried it forever without a word. A URL argument wins — a server
+// elsewhere; otherwise the lock file the running server wrote says where it
+// is, the same lookup `am instances` does, keyed by THIS project's identity
+// (its own deno.json, not the directory you run the client from).
+const live = instances(resolveAppId(config.title))
+  .find((i) => i.alive && i.port > 0);
+const url = Deno.args[0] ??
+  (live ? `ws://localhost:${live.port}/ws` : undefined);
+if (!url) {
+  console.error(
+    `no ${config.title} server running — start one with \`deno task dev\`, ` +
+      `or pass its URL: deno task client ws://host:port/ws`,
+  );
+  Deno.exit(1);
+}
 console.log("Connecting to", url, "...");
 
-const app = connectCli(url);
+// Bounded: a server that is not there is an answer, not a hang.
+const app = connectCli(url, { readyTimeoutMs: 10_000 });
 app.bind(counter);
-await app.ready;
+try {
+  await app.ready;
+} catch (e) {
+  console.error(`no server at ${url} — ${e instanceof Error ? e.message : e}`);
+  app.close();
+  Deno.exit(1);
+}
 
 console.log("Counter:", counter.count);
 app.subscribe(() => console.log("Counter:", counter.count));

@@ -35,9 +35,11 @@ import {
 } from "./build/build-flags.ts";
 import { resolveAppDir, resolveEntry } from "./build/build-config.ts";
 import { DIST_DIR } from "./server/app-files.ts";
+import { bakedServerUrl } from "./server/paths.ts";
 import { ansi } from "./diagnostics/color.ts";
 import { bytes, count, style, tally } from "./diagnostics/fmt.ts";
 import {
+  artifactName,
   crossCompileBlocker,
   hostPlatform,
   isHostPlatform,
@@ -435,6 +437,36 @@ export function suffixedTargets(
   return suffixed;
 }
 
+/** Which file name a target's artifact starts from, by target kind — the
+ *  shape the single-target builder writes (see `isArtifactName`).
+ *
+ *  Targets only collide when they write the SAME name. Grouping by the app's
+ *  binary name alone treated every client as a collision with the server it
+ *  dials: `["server", "cli-client"]` labelled the client, whose artifact
+ *  already says what it is, and placed `notes-1.2.345-client-cli-client`
+ *  where docs/build/versioning.md promises `notes-1.2.345-client` (the
+ *  android client likewise, as `…-client-android-client.apk`). */
+const ARTIFACT_SHAPE: Readonly<Record<string, string>> = {
+  server: "<bin>",
+  "server-app": "<bin>",
+  browser: "<bin>",
+  cli: "<bin>",
+  electron: "<bin>-<arch>.AppImage",
+  android: "<bin>.apk",
+  "android-client": "<bin>-client.apk",
+  "cli-client": "<bin>-client",
+  "ios-client": "<bin>-ios-client",
+  // Not named after the app at all — two of these collide whatever they build.
+  "electron-client": "aio-client-<arch>.AppImage",
+};
+
+/** The collision group of a target's artifact: two targets in one group would
+ *  write the same file, so all but the first declared carry their label.
+ *  Pure. An unknown kind is its own group (it collides with nothing known). */
+function artifactGroup(kind: string, binaryName: string): string {
+  return (ARTIFACT_SHAPE[kind] ?? `<bin>:${kind}`).replace("<bin>", binaryName);
+}
+
 /** The flat-layout name for `file` built by `target`: the bare name, unless
  *  this target shares its binary name with an earlier-declared one.
  *
@@ -463,6 +495,130 @@ export function placedName(
   return version
     ? versionedArtifactName(labelled, version.binaryName, version.version)
     : labelled;
+}
+
+/** Target kinds whose artifact is a bare binary booting `aio.run()` — the
+ *  ones `--version` answers with the identity the app will run under. */
+const IDENTITY_KINDS: ReadonlySet<string> = new Set([
+  "server",
+  "server-app",
+  "browser",
+]);
+
+/** A placed artifact to ask for its runtime identity. */
+interface IdentityProbe {
+  target: string;
+  /** The binary name the build gave it (per-target `name`, else the title). */
+  binary: string;
+  path: string;
+}
+
+/** Ask each placed binary which appId it runs under: `--version` prints
+ *  `<appId> [<version>] (aio …)` from the SAME `resolveAppId` call the boot
+ *  makes, explicit `aio.run({ appId })` included — measured, not inferred from
+ *  deno.json, which cannot see what an entry passes. Unanswered probes are
+ *  dropped: the build's own smoke run already refused a binary that does not
+ *  run. */
+async function probeIdentities(
+  probes: readonly IdentityProbe[],
+): Promise<(IdentityProbe & { appId: string })[]> {
+  const out: (IdentityProbe & { appId: string })[] = [];
+  for (const p of probes) {
+    try {
+      const r = await new Deno.Command(p.path, {
+        args: ["--version"],
+        stdout: "piped",
+        stderr: "null",
+        signal: AbortSignal.timeout(30_000),
+      }).output();
+      const line = new TextDecoder().decode(r.stdout).trim().split("\n").pop();
+      const appId = line?.match(/^(\S+)(?: \S+)? \(aio [^)]*\)$/)?.[1];
+      if (r.success && appId) out.push({ ...p, appId });
+    } catch {
+      /* not runnable here — the build's smoke run owns that verdict */
+    }
+  }
+  return out;
+}
+
+/** One warning per appId that two DIFFERENTLY named apps resolved to.
+ *
+ *  A per-target `name` renames the BINARY, not the app: a compiled binary
+ *  takes its identity from its embedded deno.json (appId > title > name), and
+ *  every target of one repo embeds the same one. So the `relay` of a
+ *  `{ "server": { "name": "relay", "entry": "src/relay/app.ts" } }` fleet ran
+ *  as the main app — `[AIO] Already running: spapp` when both started on one
+ *  machine, and one shared data directory when they did not collide.
+ *
+ *  A warning, not a refusal: two apps deployed to different machines never
+ *  meet, and a build that shipped them has been working; and baking the
+ *  target name in as the appId would MOVE an already-deployed binary's data
+ *  directory on its next build. The fix is the app's own, one line per entry.
+ *  Pure. */
+function sharedIdentityWarnings(
+  probed: readonly { target: string; binary: string; appId: string }[],
+): string[] {
+  const byId = new Map<string, Map<string, string[]>>();
+  for (const p of probed) {
+    const bins = byId.get(p.appId) ??
+      byId.set(p.appId, new Map()).get(p.appId)!;
+    (bins.get(p.binary) ?? bins.set(p.binary, []).get(p.binary)!).push(
+      p.target,
+    );
+  }
+  const warnings: string[] = [];
+  for (const [appId, bins] of byId) {
+    if (bins.size < 2) continue;
+    const who = [...bins].map(([b, ts]) => `${b} (${ts.join(", ")})`);
+    warnings.push(
+      `${who.join(" and ")} are different apps that all run as appId ` +
+        `"${appId}" — one lock and one data directory: started ` +
+        `on one machine the second refuses with "Already running", and ` +
+        `otherwise they share state. A per-target "name" renames the binary, ` +
+        `not the app. Give each entry its own identity: ` +
+        `aio.run({ appId: "<name>", … }) (docs/basics/app-architectures.md).`,
+    );
+  }
+  return warnings;
+}
+
+/** Point a placed systemd unit at the files that are actually in the release,
+ *  and return the install steps that use them.
+ *
+ *  The single-target build writes the unit and its "Install:" advice before
+ *  the fleet renames anything, so both named the STAGED files — `sudo cp app
+ *  /usr/local/bin/app`, `sudo cp app.service /etc/systemd/system/` — while
+ *  `dist/` held `app-1.2.3` and `app-1.2.3.service`. Copied as printed, the
+ *  second one also installs the unit as `app-1.2.3.service`, and the
+ *  `systemctl enable --now app` right after it finds no such unit. So the
+ *  unit's own install comment is rewritten to the placed binary here, and the
+ *  steps copy the unit to the name `ExecStart` and `enable` expect. */
+async function placeServiceUnit(
+  unitPath: string,
+  binary: string,
+  stagedBin: string,
+  renamed: ReadonlyMap<string, string>,
+  outRel: string,
+): Promise<string[]> {
+  const placedBin = renamed.get(stagedBin);
+  if (placedBin && placedBin !== stagedBin) {
+    const text = await Deno.readTextFile(unitPath);
+    await Deno.writeTextFile(
+      unitPath,
+      text.replace(
+        `(sudo cp ${stagedBin} /usr/local/bin/${binary})`,
+        `(sudo cp ${placedBin} /usr/local/bin/${binary})`,
+      ),
+    );
+  }
+  const unitFile = unitPath.slice(unitPath.lastIndexOf(SEPARATOR) + 1);
+  return [
+    ...(placedBin
+      ? [`sudo cp ${join(outRel, placedBin)} /usr/local/bin/${binary}`]
+      : []),
+    `sudo cp ${join(outRel, unitFile)} /etc/systemd/system/${binary}.service`,
+    `sudo systemctl enable --now ${binary}`,
+  ];
 }
 
 /** The target names a previous `dist/manifest.json` recorded, so a build can
@@ -752,6 +908,14 @@ export async function buildAll(): Promise<number> {
     );
     return 1;
   }
+  // An address that is not one fails HERE, once, naming the field — not once
+  // per child build after the server target has already compiled.
+  try {
+    bakedServerUrl(block.server);
+  } catch (e) {
+    console.error(`${C.red}✗ ${(e as Error).message}${C.r}\n`);
+    return 1;
+  }
   // A fleet of clients with nothing to connect to is a config that BUILDS
   // fine and ships broken: `*-client` artifacts dial a server, and a fleet
   // declaring clients but no `server` target and no `build.server` address
@@ -838,7 +1002,20 @@ export async function buildAll(): Promise<number> {
     );
   }
 
-  const outDir = resolve(join(root, flag("out") ?? block.out ?? DIST_DIR));
+  // `resolve(root, arg)`, not `resolve(join(root, arg))`. `join()` swallows
+  // the leading separator of a later segment, so `--out=/srv/release` became
+  // `<root>/srv/release` — a directory INSIDE the project, which
+  // `unsafeOutDir` then approved. The summary printed the leading slash
+  // stripped, so it read as the path that was asked for, and the artifact was
+  // nowhere near it. A RELATIVE escape (`--out=../release`) was refused
+  // loudly the whole time, so the check worked for one spelling and was
+  // silently bypassed by the other. `build-config.ts` has always used
+  // `resolve(root, outArg ?? ".")` — two readers of one flag, disagreeing.
+  //
+  // With this, an absolute path outside the project reaches `unsafeOutDir`
+  // and is REFUSED by name, which is the answer the relative form already
+  // gave.
+  const outDir = resolve(root, flag("out") ?? block.out ?? DIST_DIR);
   // The app dirs come from THE decider — one per target, since each target may
   // compile its own entry — so `out` can never be pointed at the directory
   // holding ANY of the built apps' sources, whatever layout they use.
@@ -971,6 +1148,11 @@ export async function buildAll(): Promise<number> {
   );
 
   const results: TargetResult[] = [];
+  const rel = (p: string) => p.replace(root + "/", "");
+  /** Install steps for each placed systemd unit, printed with the summary. */
+  const serviceInstalls: { target: string; lines: string[] }[] = [];
+  /** Placed binaries that boot `aio.run()`, asked for their identity below. */
+  const identityProbes: IdentityProbe[] = [];
   try {
     for (const t of targetList) {
       const target = t.name;
@@ -1189,12 +1371,13 @@ export async function buildAll(): Promise<number> {
     const suffixed = suffixedTargets(
       block.targets,
       targetList,
-      (t) => slugify(t.appName ?? title),
+      (t) => artifactGroup(t.kind, slugify(t.appName ?? title)),
     );
     const used = new Map<string, string>(); // placed name → the target that owns it
     const manifestTargets = [];
     for (const r of results) {
       const placed: ArtifactRec[] = [];
+      const renamed = new Map<string, string>(); // staged name → placed name
       if (r.ok) {
         for (const a of r.artifacts) {
           // Flat layout, named by TARGET — deterministic, and identical whether
@@ -1225,6 +1408,31 @@ export async function buildAll(): Promise<number> {
             join(outDir, name),
           );
           placed.push({ file: name, bytes: a.bytes });
+          renamed.set(a.file, name);
+        }
+        const kind = targetList.find((t) => t.name === r.target)?.kind;
+        const bin = renamed.get(artifactName(r.binary, r.platform));
+        if (
+          bin && kind && IDENTITY_KINDS.has(kind) && isHostPlatform(r.platform)
+        ) {
+          identityProbes.push({
+            target: r.target,
+            binary: r.binary,
+            path: join(outDir, bin),
+          });
+        }
+        const unit = renamed.get(`${r.binary}.service`);
+        if (unit) {
+          serviceInstalls.push({
+            target: r.target,
+            lines: await placeServiceUnit(
+              join(outDir, unit),
+              r.binary,
+              artifactName(r.binary, r.platform),
+              renamed,
+              rel(outDir),
+            ),
+          });
         }
         // The summary prints what is ON DISK. It used to print the staged name
         // (`✓ cli → notes`) while the file it had just written was `notes-cli`.
@@ -1296,7 +1504,6 @@ export async function buildAll(): Promise<number> {
 
   // ── summary ───────────────────────────────────────────────────────────────
   const failed = results.filter((r) => !r.ok);
-  const rel = (p: string) => p.replace(root + "/", "");
   console.log(`\n${C.b}built${C.r}`);
   const multi = new Set(results.map((r) => r.platform)).size > 1;
   const tag = (t: TargetResult) =>
@@ -1339,6 +1546,18 @@ export async function buildAll(): Promise<number> {
   if (block.server) {
     console.log(
       `\n  ${C.dim}clients connect to server:${C.r} ${C.blue}${block.server}${C.r}`,
+    );
+  }
+  for (
+    const line of sharedIdentityWarnings(await probeIdentities(identityProbes))
+  ) {
+    console.warn(`\n  ${C.yellow}⚠ ${line}${C.r}`);
+  }
+  for (const { target, lines } of serviceInstalls) {
+    console.log(
+      `\n  ${C.dim}install ${target} as a service:${C.r}\n${
+        lines.map((l) => `    ${l}`).join("\n")
+      }`,
     );
   }
   // What was CHECKED, not only what was produced (report 2 §3). The client-graph

@@ -354,46 +354,147 @@ export function isFixturePath(path: string): boolean {
  * the reader sees in the file.
  *
  * Still deliberately generous within code: callers narrow the input (aiol
- * passes one cell's config block; `am pin` passes whole files that call
- * `cell(`). A false positive costs a warning a human can overrule; a miss costs
+ * passes one cell's config block; `am pin` and `am migrate` pass whole files
+ * to `removalsInFile`). A false positive costs a warning a human can overrule; a miss costs
  * an app that explodes at boot on a version it was told was safe.
  */
 export function removalsInSource(text: string): RemovalHit[] {
-  const hits: RemovalHit[] = [];
-  const raw = text.split("\n");
   const code = codeText(text);
-  const lines = code.split("\n");
   // A cell-config key is a key of the object handed to `cell(...)` — and
   // nowhere else. `machine: {` is also a perfectly ordinary key in a UI
   // scope-label map, and matching it anywhere in a file that happens to call
   // `cell(` somewhere refused `am pin` on a false positive with `--force` as
   // the only way past (report 9 §5.2). When the text contains cell() calls, only
-  // lines inside their argument lists count; when it contains none — aiol
+  // offsets inside their argument lists count; when it contains none — aiol
   // hands over one cell's config BLOCK, already extracted — every line does.
+  // A WHOLE FILE is not a block: callers holding one use `removalsInFile`.
   const spans = _cellCallSpans(code);
+  return scanRemovals(
+    text,
+    code,
+    (at) => spans.length === 0 || spans.some(([s, e]) => at >= s && at < e),
+  );
+}
+
+/**
+ * `removalsInSource` for a WHOLE source file — what `am pin` and `am migrate`
+ * hold.
+ *
+ * The difference is one rule: a cell-config key counts only inside a cell
+ * config literal — a `cell(…)` argument list, or an object literal bound to a
+ * name that a `cell(…)` call receives (`cell("c", config)`, `{ ...base }`). A
+ * file with no `cell(` has no cell config at all. `removalsInSource`'s "no
+ * `cell(` → every line counts" is right for aiol's pre-extracted block and was
+ * wrong for a file: a table of the names models invent for the shell tool
+ * (`execute: "sh"`) and a record of scope labels (`machine: { label }`) —
+ * neither anywhere near a cell — refused a compatible upgrade (report 9 §2a).
+ * `execute`, `machine`, `actions`, `generators` are ordinary English words;
+ * any app of size has them as keys.
+ *
+ * API-shape rows carry their own pattern and are found anywhere, as before.
+ */
+export function removalsInFile(text: string): RemovalHit[] {
+  const code = codeText(text);
+  const spans = _cellConfigSpans(code);
+  return scanRemovals(
+    text,
+    code,
+    (at) => spans.some(([s, e]) => at >= s && at < e),
+  );
+}
+
+/** THE matcher both entry points share: one hit per row, first line it is on,
+ *  judged against masked `code` and quoted from the original `text`.
+ *  `inCell(offset)` decides whether a cell-config key at that offset is config. */
+function scanRemovals(
+  text: string,
+  code: string,
+  inCell: (at: number) => boolean,
+): RemovalHit[] {
+  const hits: RemovalHit[] = [];
+  const raw = text.split("\n");
+  const lines = code.split("\n");
   const lineStart: number[] = [0];
   for (let i = 0; i < lines.length - 1; i++) {
     lineStart.push(lineStart[i]! + lines[i]!.length + 1);
   }
-  // Judged at the KEY's own offset, not the line's: a one-line
-  // `cell("x", { machine: … })` has its line start before the call opens.
-  const inCell = (at: number): boolean =>
-    spans.length === 0 || spans.some(([s, e]) => at >= s && at < e);
   for (const r of REMOVALS) {
-    const re = r.kind === "cell-config"
-      ? new RegExp(`(^|[{,\\s])${r.key}\\s*:`)
+    const cellKey = r.kind === "cell-config";
+    const re = cellKey
+      ? new RegExp(`(^|[{,\\s])${r.key}\\s*:`, "g")
       : r.pattern; // an API shape names its own pattern, or is not textual
     if (!re) continue;
     const i = lines.findIndex((l, n) => {
-      const m = re.exec(l);
-      if (!m) return false;
-      if (r.kind !== "cell-config") return true;
-      // The key itself, past the leading delimiter the pattern also matched.
-      return inCell(lineStart[n]! + m.index + m[0].indexOf(r.key));
+      if (!cellKey) return re.test(l);
+      // Every occurrence on the line, each judged at the KEY's own offset (not
+      // the line's): a one-line `cell("x", { machine: … })` has its line start
+      // before the call opens, and a line can hold a plain `machine:` before
+      // a config one.
+      for (const m of l.matchAll(re)) {
+        if (inCell(lineStart[n]! + m.index! + m[0].indexOf(r.key))) {
+          return true;
+        }
+      }
+      return false;
     });
     if (i >= 0) hits.push({ removal: r, line: i + 1, text: raw[i]!.trim() });
   }
   return hits.sort((a, b) => a.line - b.line);
+}
+
+/** Offsets of every cell CONFIG literal in MASKED code: each `cell(…)`
+ *  argument list, plus the object literal of any name that list hands over —
+ *  as a whole argument (`cell("c", config)`) or as a spread (`{ ...base }`) —
+ *  when the file binds that name to one (`const config = { … }`, with or
+ *  without a type annotation). A name bound elsewhere (an import) is not
+ *  followed: that file is scanned on its own, and a config there is judged by
+ *  its own `cell(` — or, with none, not at all. */
+export function _cellConfigSpans(code: string): [number, number][] {
+  const calls = _cellCallSpans(code);
+  const spans = [...calls];
+  const names = new Set<string>();
+  for (const [s, e] of calls) {
+    // Walk the argument list once: a depth-0 argument that is a bare name, and
+    // a `...name` spread directly inside a depth-0 object argument. Anything
+    // deeper (`{ state, methods }` shorthand, a nested spread) is not a config
+    // object being handed over.
+    let depth = 0;
+    let argStart = s;
+    for (let i = s; i <= e; i++) {
+      const ch = i < e ? code[i] : ",";
+      if (ch === "(" || ch === "[" || ch === "{") depth++;
+      else if ((ch === ")" || ch === "]" || ch === "}") && depth > 0) depth--;
+      else if (depth === 0 && (ch === "," || ch === ")")) {
+        const arg = code.slice(argStart, i).trim();
+        if (/^[A-Za-z_$][\w$]*$/.test(arg)) names.add(arg);
+        argStart = i + 1;
+      }
+      if (depth === 1 && code.startsWith("...", i)) {
+        const m = /^\.\.\.\s*([A-Za-z_$][\w$]*)/.exec(code.slice(i, i + 80));
+        if (m) names.add(m[1]!);
+      }
+    }
+  }
+  for (const name of names) {
+    const bind = new RegExp(
+      `\\b(?:const|let|var)\\s+${name.replace(/\$/g, "\\$")}\\b[^=;]*=\\s*\\{`,
+      "g",
+    );
+    for (const m of code.matchAll(bind)) {
+      const open = m.index! + m[0].length - 1;
+      let depth = 0;
+      let i = open;
+      for (; i < code.length; i++) {
+        const ch = code[i];
+        if (ch === "(" || ch === "[" || ch === "{") depth++;
+        else if (ch === ")" || ch === "]" || ch === "}") {
+          if (--depth === 0) break;
+        }
+      }
+      spans.push([open, i + 1]);
+    }
+  }
+  return spans;
 }
 
 /** Offsets `[start, end)` of every `cell(...)` call's argument list in MASKED

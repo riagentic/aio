@@ -13,7 +13,7 @@
 // event — not per-occurrence spam, which is what made the original invisible —
 // and one more when it recovers. Everything in between is counted, not logged.
 
-import { diagEmit } from "./diagnostic-bus.ts";
+import { _diagScopeNow, diagEmit } from "./diagnostic-bus.ts";
 import { log } from "./logger-api.ts";
 
 // Console, not `log` — this module is reachable from the BROWSER bundle (the
@@ -53,7 +53,24 @@ type Entry = {
   lastError: string;
   /** Last time this tracker was resolved — the eviction order below. */
   touched: number;
+  /** The apps whose code failed in this episode (see "Per app" below). */
+  scopes: Set<object>;
 };
+
+// ── Per app ──────────────────────────────────────────────────────────
+// One process can host several apps, and every registry here is one per
+// process — so app B's `/health` listed a tracker only app A's code had been
+// failing, and a client only A served. The public API cannot change (a name
+// is still one tracker, as `degraded()` documents), so each failure and each
+// client record remembers WHICH app's code produced it (`_diagScopeNow` — the
+// same answer the diagnostic bus and the logger use), and a report asked from
+// inside an app shows that app's rows plus the unattributed ones. A report
+// asked from outside any app (a test, the browser) still shows everything.
+
+/** Does a row recorded by `scopes` belong in a report asked by `now`? */
+function _visibleTo(now: object | undefined, scopes: Set<object>): boolean {
+  return now === undefined || scopes.size === 0 || scopes.has(now);
+}
 
 /** How many distinct names may be watched at once.
  *
@@ -112,37 +129,103 @@ const CLIENT_CAP_PER_CLIENT = 16;
 const NAME_CAP = 64;
 const ERROR_CAP = 200;
 const _clientRegistry = new Map<string, Map<string, DegradedChange>>();
+/** Which app's server recorded each client — see "Per app". */
+const _clientScope = new Map<string, object>();
 
-/** Record a client's degradation change (server side). Values are capped —
- *  this arrives off the wire. */
+/** Who sent a `cdiag` frame — supplied by the transport that received it
+ *  (this module cannot know a socket or a user; `diagnostics` never imports
+ *  `server`). */
+export type ClientDegradedOrigin = {
+  /** The receiving transport — also the log category ("ws", "uds"). */
+  transport: string;
+  /** The server's client counter, as `am clients` shows it. */
+  index: number;
+  /** The signed-in user's id; absent for an anonymous or local peer. */
+  user?: string;
+};
+
+/** Names each client has already been attributed for, so a report is named
+ *  once per client per name — not once per frame, and not again after a
+ *  recovery. Lives until the client disconnects (`_clearClientDegraded`). */
+const _clientSaid = new Map<string, Set<string>>();
+
+/** Record a client's degradation change (server side). THE one definition of
+ *  what a `cdiag` frame may claim, for every transport that carries it — WS
+ *  and UDS each had their own copy, and only one of them learned the rules
+ *  below.
+ *
+ *  It is a CLIENT's claim, and handled as one. Any connected peer can send it
+ *  (the r3 auth hunt forged `failures: 999, lastError: "FORGED by bob"` and
+ *  health turned degraded), so:
+ *  • malformed frames are dropped, and values are capped — this is off the
+ *    wire;
+ *  • the numbers are checked — a failure count or start time no client can
+ *    truthfully have (negative, fractional, infinite, in the future) is not
+ *    stored as fact;
+ *  • the report is ATTRIBUTED in the server log, once per client per name, so
+ *    a "degraded" on /__aio/health is traceable to the peer that said so. */
 export function _recordClientDegraded(
   clientId: string,
-  ev: DegradedChange,
+  raw: unknown,
+  origin: ClientDegradedOrigin,
 ): void {
+  const d = raw as Partial<DegradedChange> | null | undefined;
+  if (
+    !d || typeof d !== "object" || typeof d.name !== "string" ||
+    d.name.length === 0 || (d.kind !== "down" && d.kind !== "up")
+  ) return;
+  const now = Date.now();
+  const f = d.failures, t = d.since;
+  const failures = typeof f === "number" && Number.isFinite(f) && f > 0
+    ? Math.min(Math.floor(f), Number.MAX_SAFE_INTEGER)
+    : 0;
+  const since = typeof t === "number" && Number.isFinite(t) && t > 0 &&
+      t <= now
+    ? t
+    : now;
+  const lastError = typeof d.lastError === "string"
+    ? d.lastError.slice(0, ERROR_CAP)
+    : "";
   let entries = _clientRegistry.get(clientId);
   if (!entries) {
     entries = new Map();
     _clientRegistry.set(clientId, entries);
   }
-  const name = ev.name.slice(0, NAME_CAP);
-  if (ev.kind === "up") {
+  const scope = _diagScopeNow();
+  if (scope !== undefined) _clientScope.set(clientId, scope);
+  const name = d.name.slice(0, NAME_CAP);
+  if (d.kind === "up") {
     entries.delete(name);
-    if (entries.size === 0) _clientRegistry.delete(clientId);
+    if (entries.size === 0) {
+      _clientRegistry.delete(clientId);
+      _clientScope.delete(clientId);
+    }
     return;
   }
   if (entries.size >= CLIENT_CAP_PER_CLIENT && !entries.has(name)) return;
-  entries.set(name, {
-    name,
-    kind: "down",
-    failures: ev.failures,
-    since: ev.since,
-    lastError: ev.lastError.slice(0, ERROR_CAP),
-  });
+  entries.set(name, { name, kind: "down", failures, since, lastError });
+  let said = _clientSaid.get(clientId);
+  if (!said) _clientSaid.set(clientId, said = new Set());
+  // Capped like the registry: once the peer has been named for 16 names it
+  // is identified, and a peer cycling names cannot grow this set.
+  if (said.has(name) || said.size >= CLIENT_CAP_PER_CLIENT) return;
+  said.add(name);
+  log.warn(
+    origin.transport,
+    `client #${origin.index} over ${origin.transport} (${
+      origin.user !== undefined ? `user=${origin.user}` : "anonymous"
+    }) reports its "${name}" degraded (${failures} failures): ${
+      JSON.stringify(lastError)
+    } — a CLIENT's report (cdiag), shown on /__aio/health under ` +
+      `clientDegraded until it recovers or disconnects`,
+  );
 }
 
 /** A client disconnected — its degradations are no longer live signal. */
 export function _clearClientDegraded(clientId: string): void {
   _clientRegistry.delete(clientId);
+  _clientScope.delete(clientId);
+  _clientSaid.delete(clientId);
 }
 
 /** Aggregated client-side degradations for health output: one row per
@@ -157,7 +240,10 @@ export function clientDegradedReport(): {
     string,
     { name: string; clients: number; failures: number; lastError: string }
   >();
-  for (const entries of _clientRegistry.values()) {
+  const now = _diagScopeNow();
+  for (const [clientId, entries] of _clientRegistry) {
+    const scope = _clientScope.get(clientId);
+    if (now !== undefined && scope !== undefined && scope !== now) continue;
     for (const ev of entries.values()) {
       const row = byName.get(ev.name);
       if (row) {
@@ -246,6 +332,7 @@ export function degraded(
         since: 0,
         lastError: "",
         touched: Date.now(),
+        scopes: new Set(),
       };
       _registry.set(key, entry);
     } else {
@@ -271,6 +358,8 @@ export function degraded(
       .slice(0, ERROR_CAP);
     if (e.failures === 0) e.since = Date.now();
     e.failures++;
+    const scope = _diagScopeNow();
+    if (scope !== undefined) e.scopes.add(scope);
     if (e.escalated || e.failures < e.after) return;
     e.escalated = true;
     const msg = `${key}: degraded — ${e.failures} consecutive failures, ` +
@@ -309,6 +398,7 @@ export function degraded(
     e.failures = 0;
     e.escalated = false;
     e.lastError = "";
+    e.scopes.clear();
   };
 
   return {
@@ -343,8 +433,9 @@ export function degradedReport(): {
   lastError: string;
 }[] {
   const out = [];
+  const now = _diagScopeNow();
   for (const e of _registry.values()) {
-    if (!e.escalated) continue;
+    if (!e.escalated || !_visibleTo(now, e.scopes)) continue;
     out.push({
       name: e.name,
       failures: e.failures,
@@ -365,6 +456,8 @@ export function _degradedRegistrySize(): number {
 export function _resetDegraded(): void {
   _registry.clear();
   _clientRegistry.clear();
+  _clientScope.clear();
+  _clientSaid.clear();
   _relay = null;
   _capWarned = false;
 }

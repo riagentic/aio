@@ -7,12 +7,13 @@
 
 import { batch } from "./signal.ts";
 import {
+  _reservedPathOp,
   applyWirePatches,
+  RESERVED_PATH_SEGMENT,
   type WirePatch as Patch,
 } from "../protocol/patch-ops.ts";
 import { enc } from "../protocol/envelope.ts";
 import { _resetInitialShapeKeys } from "../protocol/protocol-diagnostics.ts";
-import { _BLOCKED_KEYS } from "./state-array-utils.ts";
 import {
   _applyFullState,
   _getOrCreateCellSignal,
@@ -120,25 +121,28 @@ export function handleMessage(data: any): HandleResult {
     const patches: Patch[] = data.$patches;
     if (patches.length === 0) return "noop";
 
-    // Defense-in-depth: reject patches whose path segments target reserved
-    // prototype keys (__proto__, constructor, prototype). Immer 10 guards
-    // these internally (throws), but we drop malformed wire data early with a
-    // clear message rather than relying on Immer's throw + resync path — a
-    // compromised/buggy server should never be able to probe these keys.
-    for (const p of patches) {
-      for (const seg of p.path) {
-        if (typeof seg === "string" && _BLOCKED_KEYS.has(seg)) {
-          // Refused, and resynced for the same reason as above: whatever the
-          // server meant to send, this client did not apply it and is now
-          // behind. (The refusal itself stands — a reserved prototype key is
-          // never applied, however it got here.)
-          log.warn(
-            `dropped $patches with reserved path segment "${seg}" — requesting resync`,
-          );
-          _requestResync();
-          return "dropped";
-        }
-      }
+    // Defense-in-depth: refuse a frame whose path walks `__proto__` before
+    // anything touches it. The applier refuses it too (applyWirePatches, for
+    // every consumer), but a compromised/buggy server should not even get to
+    // probe it — so it is dropped here with a clear message.
+    //
+    // ONLY `__proto__`. `constructor` and `prototype` used to be refused here
+    // as well, and they are ordinary state keys: a dictionary holding the word
+    // "constructor" turned EVERY delta that touched it into a dropped frame
+    // plus a full-state resync (measured: 4 of 4 updates on a real socket).
+    // Why they cannot pollute a prototype through the applier is argued, and
+    // enforced, at `RESERVED_PATH_SEGMENT` in protocol/patch-ops.ts.
+    const reserved = _reservedPathOp(patches);
+    if (reserved) {
+      // Refused, and resynced for the same reason as above: whatever the
+      // server meant to send, this client did not apply it and is now behind.
+      // (The refusal itself stands — `__proto__` is never applied, however it
+      // got here.)
+      log.warn(
+        `dropped $patches with reserved path segment "${RESERVED_PATH_SEGMENT}" — requesting resync`,
+      );
+      _requestResync();
+      return "dropped";
     }
 
     try {
@@ -157,8 +161,13 @@ export function handleMessage(data: any): HandleResult {
       batch(() => {
         _stateSignal.set(next);
         for (const cellName of changedCells) {
-          if (_BLOCKED_KEYS.has(cellName)) continue;
-          const cellState = (next as Record<string, unknown>)[cellName];
+          // `_cellSignals` is a Map, so any cell name is a safe key there;
+          // `__proto__` cannot reach this line (refused above). OWN keys only:
+          // a removed cell named `constructor` must read as gone, not as
+          // the inherited `Object` function.
+          const cellState = Object.hasOwn(next as object, cellName)
+            ? (next as Record<string, unknown>)[cellName]
+            : undefined;
           _getOrCreateCellSignal(cellName, cellState).set(cellState);
         }
       });

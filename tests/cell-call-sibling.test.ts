@@ -249,7 +249,13 @@ testCell(
 // refused the first shape of this change on exactly those grounds.
 //
 // These declarations compile or this file does not run — which is the only
-// assertion a type needs.
+// assertion a type needs. The cell below is NOT cast: it was built `as any`
+// until report 9b §1, which is how the documented spelling
+// `s: State & MethodDraftCalls<Calls>` shipped without ever being checked
+// against `Method<S>` — and it does not compile (TS2322, "Property '$call' is
+// missing"). A method's draft type is frozen surface and does not declare
+// `$call`, so a method that REQUIRES it is refused; `Partial<>` asks for
+// nothing, exactly as `Partial<MethodDraftMeta>` does for `$signal`.
 type TypedState = { count: number; notes: string[] };
 
 // The precise spelling is an INTERFACE the method names, not
@@ -265,22 +271,30 @@ const typedMethods = {
     s.notes.push(kind);
     return s.notes.length;
   },
-  async run(s: TypedState & MethodDraftCalls<TypedCalls>) {
+  async run(s: TypedState & Partial<MethodDraftCalls<TypedCalls>>) {
     // Precisely typed: `kind` is a string, the return is a number.
-    const n: number = s.$call.bench("cold");
+    const n: number = s.$call!.bench("cold");
     await Promise.resolve();
     s.count = n;
   },
   // The permissive default — no type argument, still a legal spelling.
-  loose(s: TypedState & MethodDraftCalls) {
-    s.$call.bench("whatever");
+  loose(s: TypedState & Partial<MethodDraftCalls>) {
+    s.$call!.bench("whatever");
   },
 };
 
 const typedCell = cell("sibtyped", {
   state: { count: 0, notes: [] as string[] },
-  methods: typedMethods,
-} as D);
+  methods: {
+    ...typedMethods,
+    // An unannotated draft, cast where it is used — the other spelling the
+    // doc teaches. Inline, because only the cell's own method map gives `s`
+    // its type without an annotation.
+    cast(s) {
+      (s as typeof s & MethodDraftCalls<TypedCalls>).$call.bench("cast");
+    },
+  },
+});
 
 testCell(
   typedCell,
@@ -291,6 +305,8 @@ testCell(
     assertEquals(t.getState().notes, ["cold"]);
     await t.send.loose();
     assertEquals(t.getState().notes, ["cold", "whatever"]);
+    await t.send.cast();
+    assertEquals(t.getState().notes, ["cold", "whatever", "cast"]);
   },
 );
 

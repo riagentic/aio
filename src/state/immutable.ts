@@ -110,7 +110,7 @@ function _noteUncloneable(what: string): void {
   if (_warnedUncloneable) return;
   _warnedUncloneable = true;
   log.warn(
-    `[aio] cell state contains ${what}, which cannot be copied — it is shared ` +
+    `cell state contains ${what}, which cannot be copied — it is shared ` +
       `by REFERENCE between the declared initial state and live state instead ` +
       `of cloned. Keep cell state to plain JSON-shaped data (objects, arrays, ` +
       `numbers, strings, booleans, null, Date, Map, Set); move behaviour to ` +
@@ -174,7 +174,7 @@ export function noteUnfreezable(
   if (_unfreezableWarned.has(kind)) return;
   _unfreezableWarned.add(kind);
   log.warn(
-    `[aio] a ${what} in cell state cannot be frozen — an in-place mutation ` +
+    `a ${what} in cell state cannot be frozen — an in-place mutation ` +
       `of it will NOT throw the way every other illegal write does, will ` +
       `commit NO patch, and so will reach no client and no state.db while ` +
       `looking correct in this process. Assign a NEW value instead of ` +
@@ -340,7 +340,7 @@ export function noteFreezeSkipped(what: string): void {
   if (g.__aioFreezeSkipped) return;
   g.__aioFreezeSkipped = true;
   log.info(
-    `[aio] dev freeze skipped: ${what} > ${FREEZE_SIZE_LIMIT}B — an illegal ` +
+    `dev freeze skipped: ${what} > ${FREEZE_SIZE_LIMIT}B — an illegal ` +
       `in-place mutation of it will NOT throw at the site. Split the slice, ` +
       `or keep large blobs out of cell state (logged once).`,
   );
@@ -389,14 +389,41 @@ export function freezeInitial<T>(value: T): T {
 //
 // which names neither the cell, nor the rule, nor the fix.
 
+/** The engines' own sentences for a write to a frozen object — PROPERTY
+ *  phrasings only. A bare `read-only` matched far more than state: every
+ *  `EROFS` ("Read-only file system (os error 30)") and every config refusal
+ *  that printed the option table ("READ-ONLY directories this app SERVES")
+ *  grew a paragraph about frozen cell state that had nothing to do with it. */
+const FROZEN_WRITE = new RegExp(
+  [
+    // V8 (measured, Deno 2.9): "Cannot assign to read only property 'n' of
+    // object '#<Object>'", "Cannot add property x, object is not extensible",
+    // "Cannot define property z, object is not extensible", "Cannot delete
+    // property 'n' of #<Object>", "#<Object> is not extensible"
+    "Cannot (?:assign to read[ -]only property|add property|define property|delete property)",
+    "is not extensible",
+    // SpiderMonkey: '"n" is read-only', "can't define property "x": Object is
+    // not extensible", 'property "x" is non-configurable and can't be deleted'
+    '"[^"]*" is read-only',
+    "can't (?:define|add) property",
+    "non-configurable and can't be deleted",
+    // JavaScriptCore: "Attempted to assign to readonly property.",
+    // "Unable to delete property."
+    "Attempted to assign to readonly property",
+    "Unable to delete property",
+    "already been frozen",
+    "preventExtensions",
+  ].join("|"),
+  "i",
+);
+
 /** Does this engine message mean "you wrote to frozen state"?
  *
  *  Every engine phrases it differently and none of them mention freezing:
  *  V8 says "object is not extensible" for a grow, "Cannot assign to read only
  *  property" for an overwrite, "Cannot delete property" for a delete. */
 export function isFrozenWriteError(message: string): boolean {
-  return /not extensible|read only|read-only|already been frozen|Cannot delete property|preventExtensions/i
-    .test(message);
+  return FROZEN_WRITE.test(message);
 }
 
 /** THE explanation for a frozen-state write. `raw` is the engine's own text

@@ -66,6 +66,8 @@ export { _getLazyListeners, lazy } from "./vdom-lazy.ts";
 
 // ── SSR (vdom-ssr.ts) ───────────────────────────────────────────────
 export {
+  _enterSsr,
+  _exitSsr,
   _invokeSsrStartHook,
   _setSsrStartHook,
   renderToString,

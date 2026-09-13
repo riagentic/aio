@@ -86,6 +86,12 @@ export type ProtoHello = {
    *  default, and the server still enforces its own limit regardless of what
    *  any client does with this. Additive within protocol v3. */
   rate?: number;
+  /** The SERVER's inbound frame size limit, bytes (`wsLimits.maxMessageBytes`).
+   *  A frame over it is dropped unread, so a client that batches — the sync
+   *  engine's reconnect flush — sizes its frames to it instead of assuming the
+   *  1 MB default an app may have lowered. Advisory like `rate`: the server
+   *  enforces its own limit whatever a client does. Additive within v3. */
+  maxMessageBytes?: number;
 };
 
 /** This build's announcement. Pass the build's aio version when known (the
@@ -146,12 +152,20 @@ export function parseProtoHello(input: unknown): ProtoHello | null {
           p.rate >= 1 && p.rate <= 1_000_000
         ? Math.floor(p.rate)
         : undefined;
+      // Bounded the same way: it becomes a slice budget, and a tiny or absurd
+      // value must not shrink a flush to one op a frame or mean "no limit".
+      const maxMessageBytes = typeof p.maxMessageBytes === "number" &&
+          Number.isFinite(p.maxMessageBytes) && p.maxMessageBytes >= 1024 &&
+          p.maxMessageBytes <= 1_000_000_000
+        ? Math.floor(p.maxMessageBytes)
+        : undefined;
       return {
         v: p.v,
         min: p.min,
         ...(ver ? { ver } : {}),
         ...(app ? { app } : {}),
         ...(rate ? { rate } : {}),
+        ...(maxMessageBytes ? { maxMessageBytes } : {}),
       };
     }
     return null;

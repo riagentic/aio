@@ -162,7 +162,9 @@ them never double-executes a method.
 **A failure nobody looked at surfaces.** If a method throws and the test never
 observed that call, `settle()` re-raises it (and so does the end of the test, if
 `settle()` is never called) — a fire-and-forget send cannot fail silently into a
-green test. Observing it yourself keeps `settle()` quiet:
+green test. Sync and async methods alike: an un-awaited `t.send.boom()` whose
+reducer throws is raised by name, not left as an uncaught rejection. Observing
+it yourself keeps `settle()` quiet:
 
 ```ts
 await assertRejects(() => t.send.boom(), Error, "kaboom"); // handled here…
@@ -230,6 +232,20 @@ about failures:
 - **A failing method nobody awaited fails the test** at the next `settle()` or
   `dispose()`. Awaiting it (or `await assertRejects(() => cell.go())`) counts as
   observing it, and is not reported twice.
+
+It also keeps the app's clock and ceilings honest:
+
+- **One clock.** After the first `h.advance(ms)`, `Date.now()` / `new Date()` in
+  app code read real time plus the time advanced — the same clock the schedules
+  run on — so an absolute `schedule.at(Date.now() + 5000)` written after an
+  advance fires 5 s later. Disposing puts the real `Date` back.
+- **`h.settle()` runs what is already due** — a `schedule.next` runs right after
+  its method, as on a real server; later timers still wait for `advance`.
+- **`perfBudget.methods[m].timeout` is the call ceiling here too**: pass the
+  app's `perfBudget` and `await cell.method()` gives up when the app would.
+- **A cell method called straight from `onInit` throws**, as `aio.run` does —
+  methods are bound after every cell's `__init`. Use `app.dispatch(...)` there,
+  or `onStart` (docs/state/lifecycle.md).
 
 ## TestContext API
 

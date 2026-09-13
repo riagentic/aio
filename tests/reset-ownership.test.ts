@@ -50,6 +50,14 @@ const OWNERS: Record<string, [Owner, string]> = {
     "SSR start hook clears them so one request's head never leaks into the " +
     "next.",
   ],
+  _resetSsrSelect: [
+    "LIFECYCLE",
+    "the stack of open <select> scopes, so an option knows which select's " +
+    "value it is being compared against. The SSR start hook clears it for " +
+    "the same reason it clears the head: a render that threw partway (a " +
+    "Suspense boundary signals pending BY throwing) would otherwise leave a " +
+    "scope open and mark options in the next request.",
+  ],
   _resetCss: [
     "MANUAL",
     "scoped-CSS rules live in src/ui/, and neither src/state/ (where " +
@@ -208,7 +216,26 @@ const OWNERS: Record<string, [Owner, string]> = {
   // `aio/ui` control ids (aria-controls / aria-labelledby pairs). MANUAL
   // because the counter is deliberately monotonic within a page — resetting it
   // per test is what makes an ASSERTION on an id readable, and resetting it in
-  // product code would hand two live components the same id.
+  // product code would hand two live components the same id. It delegates to
+  // the renderer's SSR id counter: the ids are `useId()`s now, so a MOUNT
+  // restarts them on its own (the counter is per root) and only the SSR path
+  // is process-wide.
+  // The open-modal stack (`aio/ui` Modal). MANUAL because a modal that
+  // outlives its test would keep answering Escape for the next one — which is
+  // the bug the stack exists to prevent, one level up — while in product code
+  // the stack IS the state: clearing it would orphan every open dialog's
+  // handler and leave Escape doing nothing.
+  // Which unattributable writes `reactiveDB` has already reported. MANUAL
+  // because the dedupe is per PROCESS on purpose — the same statement repeats
+  // on every write, and the warning is about a live query that has gone stale,
+  // not about one call. A test that wants to OBSERVE it has to clear it;
+  // clearing it in product code would repeat the line on every write of a hot
+  // path, which is the flooding the dedupe exists to stop.
+  _resetReactiveWarnings: [
+    "MANUAL",
+    "stale-query warn dedup; repeating it is the bug",
+  ],
+  _resetModalStack: ["MANUAL", "open-modal stack; a stale entry is the bug"],
   _resetControlIds: ["MANUAL", "aria id counter; a collision is the bug"],
   // The once-per-process frozen-write explanation. MANUAL because the whole
   // point is that it is said ONCE: resetting it per test is what lets a test

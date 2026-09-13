@@ -31,6 +31,12 @@ prompt), a PWA. Clicking it brings the app to the front and, with `route`,
 navigates there. The icon is the app's own monogram, so a notification looks
 like the app that sent it.
 
+**Every** connected client means every user: with per-user auth, a notification
+raised inside alice's call is shown on bob's screen too. Keep one user's data
+out of `title` and `body` — show per-user news through that user's own state
+instead. The server says this once per app, the first time a notification is
+raised inside a signed-in user's call.
+
 | option   |                                                                 |
 | -------- | --------------------------------------------------------------- |
 | `title`  | required, non-empty — refused where it is written otherwise     |
@@ -56,6 +62,9 @@ import { requestNotificationPermission } from "aio/air";
 
 - **No UI client connected** (a server-only or CLI-only run): the server logs
   `notify: no UI client is connected — "…" was not shown`. Never silent.
+- **A client that has stopped reading its socket** (over 4 MB of unread frames
+  held for it): the card is skipped for that client — not queued, and the
+  connection is kept — and the server names the client once.
 - **An Android WebView** or a test window has no Notification API: logged once.
 - A **`connectCli`** client cannot show a card; it prints the line.
 - **`testCell`** records it: `t.expect.effects(["__notify"])`. It arms nothing,

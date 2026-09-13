@@ -213,6 +213,16 @@ testCell(
   },
 );
 
+const boomForDispose = cell("hspDispose", {
+  state: { n: 0 },
+  methods: {
+    // deno-lint-ignore require-await
+    async go(_s: { n: number }) {
+      throw new Error("hsp: dispose-kaboom");
+    },
+  },
+});
+
 Deno.test("bootCells surfaces the same un-awaited failure", async () => {
   const h1 = await bootCells([boomForBootCells]);
   try {
@@ -320,6 +330,55 @@ const slowUi = cell("hspSlowUi", {
       s.n = 1;
     },
   },
+});
+
+Deno.test("bootCells: dispose() alone surfaces it — settle() is not required", async () => {
+  // `using h = await bootCells([c]); c.failingMethod();` — the ordinary
+  // fire-and-forget shape, with no settle(). `dispose()` used to call
+  // `ledger.restore()` and THEN `ledger.raise()`, and restore ends with
+  // `entries.length = 0` — so the raise always found an empty ledger and the
+  // hard gate its own comment describes could not fire at all. Green test,
+  // method blew up.
+  //
+  // NO sleep before teardown. This test used to wait 20ms "to let the
+  // rejection land", which is exactly the gap a real test does not leave —
+  // and with the sleep in place a teardown that never waited for in-flight
+  // calls passed it. `await using` (Symbol.asyncDispose) is the teardown that
+  // can wait, so it must catch the call fired on the line before.
+  const h1 = await bootCells([boomForDispose]);
+  boomForDispose.go();
+  const e = await assertRejects(() =>
+    (h1 as unknown as { [Symbol.asyncDispose](): Promise<void> })
+      [Symbol.asyncDispose]()
+  );
+  assertStringIncludes((e as Error).message, "hsp: dispose-kaboom");
+  assertStringIncludes((e as Error).message, "nothing awaited it");
+});
+
+Deno.test("bootCells: a SYNC dispose() cannot wait, and says so instead of passing quietly", async () => {
+  // The limit, pinned: a synchronous teardown cannot await a call that is a
+  // microtask from failing, and the reset orphans it. So it throws what has
+  // already landed, and NAMES what it had to abandon.
+  const h1 = await bootCells([boomForDispose]);
+  boomForDispose.go();
+  const said: string[] = [];
+  const w = console.warn;
+  console.warn = (...a: unknown[]) => void said.push(a.map(String).join(" "));
+  try {
+    h1.dispose();
+  } finally {
+    console.warn = w;
+  }
+  const line = said.find((m) => m.includes("still in flight")) ?? "";
+  assertStringIncludes(line, "hspDispose.go()");
+  assertStringIncludes(line, "cannot see it");
+
+  // …and once the rejection HAS landed, the sync dispose throws it.
+  const h2 = await bootCells([boomForDispose]);
+  boomForDispose.go();
+  await new Promise((r) => setTimeout(r, 20));
+  const e = assertThrows(() => h2.dispose());
+  assertStringIncludes((e as Error).message, "hsp: dispose-kaboom");
 });
 
 Deno.test("testUI: an un-awaited failing method fails the test", async () => {

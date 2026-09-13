@@ -39,6 +39,17 @@ export const AIO_RUNTIME_FLAGS: ReadonlySet<string> = new Set(
     "--host=",
     "--cdp",
     "--cdp=",
+    // `aio-cli.ts` parses all three spellings, and none of them was here —
+    // the registry two different readers consult. So `declareAppFlags(["--watch="])`
+    // passed the collision guard and the app then LOST the flag to aio, which
+    // is verbatim the failure that guard's own message describes ("a flag
+    // cannot mean two things in one process, and the app would silently lose
+    // whichever meaning aio applied first"). And `aio/cli`'s `args()`, which
+    // passes aio's own flags through, refused `--no-watch` with "unknown
+    // flag" — a flag `am help` advertises as the way to turn live reload off.
+    "--watch",
+    "--watch=",
+    "--no-watch",
     "--__aio-relaunch-after=",
   ].map((f) => (f.endsWith("=") ? f.slice(0, -1) : f)),
 );

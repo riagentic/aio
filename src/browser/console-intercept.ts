@@ -5,12 +5,26 @@ import { enc } from "../protocol/envelope.ts";
 import { degraded } from "../diagnostics/degraded.ts";
 import type { ClientLogEntry } from "../air/dom-inspector-types.ts";
 
-export type SendFn = (msg: string) => void;
+/** Returns whether the frame reached the wire, when the transport can say.
+ *
+ *  It could not, and that made the health tracker below structurally unable to
+ *  fire: `_sendRaw` CATCHES its own throw and returns false, so the `try` here
+ *  never saw a failure and `ok()` ran on every drop. Measured: a socket
+ *  refusing every write forwarded 0 of 200 console lines while
+ *  `degraded("client:log-forward")` stayed clean and `/__aio/health` reported
+ *  the channel healthy. This is the channel the browser reports its own errors
+ *  on — when it dies for good the page goes quiet in exactly the way that
+ *  looks like "no errors", which is the case the tracker exists for.
+ *
+ *  `void` is still accepted: a transport that cannot tell is treated as
+ *  delivered, which is where things stood. */
+export type SendFn = (msg: string) => void | boolean;
 
 const MAX_MSG_LEN = 4096;
 const MAX_STACK_LEN = 2048;
 
 let _send: SendFn | null = null;
+let _hasChannel: () => boolean = () => true;
 let _installed = false;
 let _forwarding = false;
 
@@ -92,6 +106,15 @@ export function _forward(
   args: unknown[],
 ): void {
   if (!_send || _forwarding) return;
+  // No channel is not a failed write. Before the client connects — and in a
+  // harness, where it never does — the transport answers `false` for every
+  // line, exactly as it does for a socket that refused one, and each console
+  // call was counted as a transport failure: five `console.warn`s in a clean
+  // `testUI` test escalated `client:log-forward` to degraded. The line still
+  // printed locally (the wrapper calls the original first); there was simply
+  // nowhere to forward it yet, and a tracker for a channel that does not exist
+  // yet can only raise a false alarm. Neither ok() nor fail(): no evidence.
+  if (!_hasChannel()) return;
   // Diagnostic events already reach client.log server-side (the diagnostic
   // bus writes every error/warning it broadcasts); the console fallback
   // printing them (`_deliverDiag`, marked "[aio:diag]") must not loop them
@@ -105,7 +128,22 @@ export function _forward(
       ts: Date.now(),
       ...(_callSite() ? { source: _callSite() } : {}),
     };
-    _send(enc("log", entry));
+    const delivered = _send(enc("log", entry));
+    // …and a line that got through ENDS the episode. `degraded()`'s contract
+    // is "call ok() on every success, not only the first", and this call site
+    // only ever called `fail`: five dropped lines spread across a whole
+    // session — each followed by thousands of successful ones — escalated and
+    // then reported a permanently degraded client on /__aio/health, for the
+    // life of the page. A false alarm that outlives its cause is worse than
+    // no alarm, which is the argument the broadcaster already makes.
+    if (delivered === false) {
+      // The transport refused the write and said so instead of throwing.
+      degraded("client:log-forward").fail(
+        new Error("the transport refused the write — this log line was lost"),
+      );
+    } else {
+      degraded("client:log-forward").ok();
+    }
   } catch (e) {
     // A single drop is expected — the transport reconnects and the next line
     // gets through. What must not be silent is the PERMANENT case: this is the
@@ -133,7 +171,12 @@ let _origConsole: {
   debug: (...args: unknown[]) => void;
 } | null = null;
 
-export function installConsoleIntercept(send: SendFn): void {
+export function installConsoleIntercept(
+  send: SendFn,
+  /** Is there a channel to forward on at all? Absent → assume there is (a
+   *  transport that cannot tell is judged by `send`'s answer alone). */
+  hasChannel?: () => boolean,
+): void {
   // The send channel is refreshed on every call, BEFORE the idempotence guard
   // below — so a re-install after a reconnect re-points the forwarder even
   // though the console wrappers are only installed once.
@@ -145,6 +188,7 @@ export function installConsoleIntercept(send: SendFn): void {
   // reconnect never leaves a stale send pinned here. A setter for a problem
   // that does not exist reads as a problem that is being handled.
   _send = send;
+  _hasChannel = hasChannel ?? (() => true);
   if (_installed) return;
   _installed = true;
 
@@ -203,6 +247,7 @@ export function installConsoleIntercept(send: SendFn): void {
 export function uninstallConsoleIntercept(): void {
   if (!_installed) return;
   _send = null;
+  _hasChannel = () => true;
   if (_origConsole) {
     console.log = _origConsole.log;
     console.info = _origConsole.info;

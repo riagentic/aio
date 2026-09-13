@@ -1,4 +1,4 @@
-import { assertEquals } from "@std/assert";
+import { assertEquals, assertRejects } from "@std/assert";
 import { describe, it } from "@std/testing/bdd";
 import {
   createSyncEngine,
@@ -95,7 +95,14 @@ describe("SyncEngine", () => {
 
     await engine.handleLocalAction("todos", "add", { text: "1" });
     await engine.handleLocalAction("todos", "add", { text: "2" });
-    await engine.handleLocalAction("todos", "add", { text: "3" });
+    // The one past the cap is DISCARDED, so its caller is told — a `return`
+    // here resolved the promise and reported success for a change that was
+    // already gone.
+    await assertRejects(
+      () => engine.handleLocalAction("todos", "add", { text: "3" }),
+      Error,
+      "DROPPED",
+    );
     assertEquals(engine.getStatus("todos").status, "blocked");
   });
 

@@ -84,7 +84,10 @@ Two things it is easy to be wrong about:
   that at the moment it fires, and names `long:` and `timeout: "warn"` as the
   two ways out.
 - **`transaction`** gives the method a snapshot across `await`s. That is what
-  makes an async method's state reads coherent, and it is on by default.
+  makes an async method's state reads coherent — and it is **opt-in**
+  (`transaction: true` on the cell). Without it, a read after an `await` sees
+  live state, and each write publishes on the next microtask
+  ([transactional methods](../state/transactional-methods.md)).
 
 ## `*.server.ts` — the context in the filename
 
@@ -139,7 +142,9 @@ the client graph, and that is a fact about the graph. The four answers:
 | `unreached`        | nothing the UI loads imports it — server context, or dead code       |
 
 A `*.server.ts` filename overrides all four: it is server-only by name, and the
-bundler marks it external.
+bundler marks it external. The graph ends there too — a module reached only
+through a dynamically imported `*.server.ts` file is not in the client graph, so
+`am check` does not judge it by browser rules.
 
 ## When you are lost
 

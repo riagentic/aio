@@ -2,19 +2,28 @@
 import { vetWirePayload } from "../state/action-encode.ts";
 import { enc } from "../protocol/envelope.ts";
 import { peerHello } from "../protocol/protocol-version.ts";
+import { createSendPacer, type PacedFrame } from "../protocol/send-pacer.ts";
 import { randomUuid } from "../rand.ts";
-import type { HLC, SyncConfig, SyncOp, SyncStatus } from "./types.ts";
+import type {
+  HLC,
+  PushPatch,
+  SyncConfig,
+  SyncOp,
+  SyncStatus,
+} from "./types.ts";
 import { STALE_OP_REASON, SYNC_DEFAULTS } from "./types.ts";
 import type { OpBuffer } from "./op-buffer.ts";
 import { compareHLC, createHLC, type HLClock } from "./hlc.ts";
 import {
   rebase,
+  type RebaseResult,
   REDUCER_FAILED,
   type SyncReducer,
   type SyncReducerResult,
 } from "./rebase.ts";
 import type { SyncConflict } from "./types.ts";
 import { mergeField } from "./merge.ts";
+import { applyStatePatch, stateDigest } from "./state-patch.ts";
 import { log } from "../diagnostics/logger-api.ts";
 
 /**
@@ -32,6 +41,22 @@ export interface SyncEngineDeps {
   /** Update confirmed state for a cell — called on remote ops and snapshots */
   setConfirmedState: (cell: string, state: Record<string, unknown>) => void;
   onStateUpdate: (cell: string, optimistic: Record<string, unknown>) => void;
+  /** How long to wait for a catch-up response before asking again — the
+   *  watchdog in `requestSync`. Optional so only a TEST has to name it; the
+   *  default is the one the product runs on, so a test that shortens it is
+   *  exercising the same code path with a smaller number. */
+  catchupTimeoutMs?: number;
+  /** The reducer is PURE — same state and payload in, same state out, with
+   *  the input left untouched (browser-sync's is: an Immer `produce` over the
+   *  cell's own method). When set, every fold runs it twice and compares, which
+   *  is how a method that reads a clock or a random source is caught — see
+   *  `reduceChecked`. Off by default because a test reducer that mutates its
+   *  input in place would be applied twice. */
+  pureReducer?: boolean;
+  /** The error the reducer's most recent REDUCER_FAILED stood for, when the
+   *  host kept it — so a local call that throws rejects with the method's own
+   *  error rather than a generic one. */
+  lastReducerError?: () => unknown;
   log?: {
     warn: (msg: string) => void;
     /** Observe-only dedup visibility — a dropped duplicate hints at a cursor
@@ -78,11 +103,24 @@ export interface SyncEngine {
     /** Cells whose cursor the server never issued — adopt the snapshot and
      *  its cursor unconditionally (see `SyncResponse.reset`). */
     reset?: string[];
+    /** An unsolicited server-origin snapshot — see `SyncResponse.push`. */
+    push?: boolean;
+    /** A server-origin write as a patch — see `PushPatch`. */
+    patch?: Record<string, PushPatch>;
   }): Promise<void>;
   setOnline(online: boolean): void;
   getStatus(cell: string): SyncStatus;
   requestSync(): Promise<void>;
   isSyncCell(cellName: string): boolean;
+  /** Stop everything this engine armed — today, the catch-up watchdog.
+   *
+   *  `_resetBrowserSync()` dropped the engine REFERENCE and left its timer
+   *  running, so an armed watchdog outlived the engine and Deno's test
+   *  sanitizer blamed whichever test ran next ("2 timers were started in this
+   *  test, but never completed") — nineteen sync tests, none of which had
+   *  started a timer. That is the same shape `closeWindow()` exists for, one
+   *  layer down: dropping a reference is not shutting something down. */
+  dispose(): void;
 }
 
 /**
@@ -135,91 +173,100 @@ export function createSyncEngine(deps: SyncEngineDeps): SyncEngine {
   // A single op stays instant — the fast path sends inline, so nothing about
   // ordinary use gets slower. Only a burst queues, and it drains at a rate the
   // server told us it can take.
-  /** Fraction of the server's advertised budget to actually use. Sending AT
-   *  the ceiling races the server's own window boundary; the headroom is what
-   *  makes "paced" mean "never refused" rather than "usually". */
-  const PACE_SAFETY = 0.6;
-  /** Used when the peer advertises nothing — an older server, or a transport
-   *  with no hello. Matches the server's own default so an unaware peer is
-   *  paced as if it were a default one, never faster. */
-  const PACE_FALLBACK_PER_SEC = 100;
-  /** Drain granularity. Smaller means smoother pacing and more timer wakeups;
-   *  100ms keeps a 1000-op seed draining steadily without a wakeup per op. */
-  const PACE_TICK_MS = 100;
-
-  const _paceQueue: string[] = [];
-  let _paceTimer: ReturnType<typeof setTimeout> | undefined;
-  let _paceWindowStart = 0;
-  let _paceSentInWindow = 0;
-
-  /** Frames/sec this client allows itself: what the server advertised in its
-   *  hello (`rate`), less headroom. */
-  const paceBudget = (): number => {
-    const advertised = peerHello()?.rate;
-    const base = typeof advertised === "number" && advertised >= 1
-      ? advertised
-      : PACE_FALLBACK_PER_SEC;
-    return Math.max(1, Math.floor(base * PACE_SAFETY));
-  };
-
-  /** Room left in the current one-second window, rolling it over when due. */
-  const paceRoom = (): number => {
-    const now = Date.now();
-    if (now - _paceWindowStart >= 1000) {
-      _paceWindowStart = now;
-      _paceSentInWindow = 0;
-    }
-    return paceBudget() - _paceSentInWindow;
-  };
-
-  /** Timer is armed ONLY while frames are waiting and cleared the moment the
-   *  queue empties — a sync engine must not hold a handle open across a test's
-   *  teardown, which is what the op/resource sanitizers exist to catch. */
-  const armPaceTimer = (): void => {
-    if (_paceTimer !== undefined || _paceQueue.length === 0) return;
-    _paceTimer = setTimeout(() => {
-      _paceTimer = undefined;
-      drainPaced();
-    }, PACE_TICK_MS);
-  };
-
-  const drainPaced = (): void => {
-    if (!online) {
-      // Reconnect re-sends from the durable buffer; a queued frame here would
-      // be a duplicate of that, so the queue is dropped rather than held.
-      _paceQueue.length = 0;
-      return;
-    }
-    let room = paceRoom();
-    while (room > 0 && _paceQueue.length > 0) {
-      deps.send(_paceQueue.shift()!);
-      _paceSentInWindow++;
-      room--;
-    }
-    armPaceTimer();
-  };
+  //
+  // The bound is `send-pacer.ts`'s token bucket — the same one every other
+  // writer on the socket uses — not a pacer of its own. This engine used to
+  // count sends in a fixed one-second window at 60% of the advertised rate,
+  // which caps a WINDOW, not a second: ops trickling in at the end of one
+  // window and a burst at the start of the next put 2 × 60 = 120 frames into
+  // well under a second, past a 100/sec server whose own window straddles the
+  // two. A bucket holding `burst` and refilling at `perSec` can never put more
+  // than `burst + perSec` (80% of the rate) into ANY second.
+  let _pacerSeq = 0;
+  const _pacer = createSendPacer<PacedFrame>({
+    write: (entry) => {
+      // A drain racing `setOnline(false)`: the socket is gone, and the
+      // buffer re-sends this op on reconnect — refuse rather than write.
+      if (!online) throw new Error("the sync connection is offline");
+      deps.send(entry.frame);
+    },
+    onRefused: (entries, err) => {
+      // Nothing is lost — every refused frame is an op already in the durable
+      // buffer, and the reconnect flush re-sends it — but a transport that
+      // refuses while this engine thinks it is online must not go unsaid.
+      if (online) {
+        log.warn(
+          "sync",
+          `the transport refused a paced op frame (${
+            err instanceof Error ? err.message : String(err)
+          }) — ${entries.length} queued op frame(s) dropped from the pacer; ` +
+            `they stay in the offline buffer and re-send on reconnect.`,
+        );
+      }
+    },
+    rate: () => peerHello()?.rate,
+  });
 
   /** Send an op frame, immediately when there is room and in order when there
    *  is not. Ordering is preserved: once anything is queued, everything queues
    *  behind it. */
   const sendOpPaced = (msg: string): void => {
-    if (_paceQueue.length === 0 && paceRoom() > 0) {
-      _paceSentInWindow++;
-      deps.send(msg);
-      return;
-    }
-    _paceQueue.push(msg);
-    armPaceTimer();
+    _pacer.push({ frame: msg, seq: _pacerSeq++ });
   };
 
   /** Drop queued frames and disarm. Called when the connection goes away. */
   const resetPacing = (): void => {
-    _paceQueue.length = 0;
-    if (_paceTimer !== undefined) {
-      clearTimeout(_paceTimer);
-      _paceTimer = undefined;
-    }
+    _pacer.take();
   };
+  // ── reconnect flush, in frames the server will take ──────────────────
+  //
+  // A reconnect re-sends the whole offline queue inside ONE `sync-req`. The
+  // server drops any inbound frame over its message limit (1 MB by default)
+  // without reading it — so a queue of 400 ops × 4 KB went out as a 1.6 MB
+  // frame, was dropped, was re-sent at the next reconnect, dropped again: no
+  // op ever acked, the catch-up never answered, and the writes stayed off every
+  // other screen for good while this one kept showing them.
+  //
+  // So the queue goes out in slices. Each `sync-req` carries only what fits the
+  // budget; when its response lands the next slice goes, until the queue is
+  // drained. A slice at a time also keeps the ORDER the server applies them in
+  // equal to the order they were made in, and new ops made meanwhile wait in
+  // the buffer behind the older ones (`_flushing`) rather than overtaking them.
+  //
+  // The budget is a quarter of the server's frame limit — room for the
+  // envelope — and never more than a quarter of the 1 MB default. The WS
+  // server advertises its limit in the hello (`maxMessageBytes`); before it
+  // did, a fixed 250 KB slice was the guess, and an app that lowered
+  // `wsLimits.maxMessageBytes` under it had every flush frame dropped unread,
+  // at every reconnect. A peer that does not advertise (the UDS/IPC hello)
+  // keeps the default quarter. Capped rather than scaled UP for a raised
+  // limit: a bigger frame buys nothing a paced second slice does not, and
+  // weighs against the server's byte-rate guard. `.length` is the measure the
+  // server itself applies.
+  const SYNC_REQ_BUDGET = 250_000;
+  const syncReqBudget = (): number => {
+    const limit = peerHello()?.maxMessageBytes;
+    return typeof limit === "number" && limit >= 1
+      ? Math.min(SYNC_REQ_BUDGET, Math.floor(limit / 4))
+      : SYNC_REQ_BUDGET;
+  };
+  /** Byte rate the flush allows itself between slices — well under the
+   *  server's default 5 MB/s per-connection guard. */
+  const FLUSH_BYTES_PER_SEC = 1_000_000;
+  let _flushing = false;
+  let _flushTimer: ReturnType<typeof setTimeout> | undefined;
+  /** Ids of the last slice sent — to notice a slice that made no progress. */
+  let _lastSliceIds: string[] = [];
+  let _lastSliceBytes = 0;
+  function stopFlush(): void {
+    _flushing = false;
+    _lastSliceIds = [];
+    if (_flushTimer !== undefined) {
+      clearTimeout(_flushTimer);
+      _flushTimer = undefined;
+    }
+  }
+
   const statuses = new Map<string, SyncStatus>();
 
   // Per-cell async mutex — serializes all state mutations (local, ack, remote, sync)
@@ -323,9 +370,21 @@ export function createSyncEngine(deps: SyncEngineDeps): SyncEngine {
   // degrading to the previous (possibly misordered) behaviour is acceptable,
   // freezing a cell's updates forever is not.
   const DEFER_CAP = 4096;
+  /** How long to wait for a catch-up response before asking again.
+   *
+   *  Comfortably longer than a healthy round trip (a catch-up is one query
+   *  and one frame) and shorter than the 30s call ceiling, so a frozen sync
+   *  cell recovers well before an app-level timeout blames the app. */
+  const CATCHUP_TIMEOUT_MS = deps.catchupTimeoutMs ?? 15_000;
   type Deferred =
     | { kind: "ack"; opId: string; serverHlc: HLC; serverTs?: number }
-    | { kind: "op"; op: SyncOp };
+    | { kind: "op"; op: SyncOp }
+    /** A pushed server-origin write, whole or as a patch (see
+     *  `installPushed`). */
+    | { kind: "snap"; push: Pushed; ts: number };
+  type Pushed =
+    | { state: Record<string, unknown> }
+    | { patch: PushPatch };
   const _catchup = new Set<string>();
   const _deferred = new Map<string, Deferred[]>();
   // The id of the last catch-up this engine sent. A response says which
@@ -346,6 +405,22 @@ export function createSyncEngine(deps: SyncEngineDeps): SyncEngine {
    *  there is none (or the hold is full) and the caller must apply it now. */
   function hold(cell: string, item: Deferred): boolean {
     if (!_catchup.has(cell)) return false;
+    // Something is now WAITING on a catch-up, which is the only state the
+    // watchdog exists for: until now nothing reopened this gate on its own.
+    // Three things could — engine boot, going offline→online, and a `sync-err`
+    // frame — and a response LOST on a still-open connection is none of them.
+    // Measured: the cell stopped receiving peer changes and stopped confirming
+    // its own ops, permanently and silently, with the pending buffer growing
+    // toward `pendingCap` and the user's own mutations throwing past it. The
+    // comment on `_reqSeq` called this "self-healing: a lost response leaves
+    // the gate shut only until the next request is answered"; nothing ever
+    // sent a next request.
+    //
+    // Armed HERE rather than in `requestSync` for two reasons that are the
+    // same reason: an idle gate is harmless, and a timer nobody is waiting on
+    // is a resource with no owner — which is how the first version of this
+    // leaked into three test files that had never started a timer.
+    _armCatchupWatchdog();
     const q = _deferred.get(cell);
     if (q === undefined) {
       _deferred.set(cell, [item]);
@@ -355,9 +430,79 @@ export function createSyncEngine(deps: SyncEngineDeps): SyncEngine {
     q.push(item);
     return true;
   }
+  /** Value equality for the conflict check. A REFERENCE compare was wrong
+   *  here: `rebase` structuredClones the confirmed state, so every object or
+   *  array field came back with a fresh identity and "did local change this?"
+   *  answered yes for fields nobody had touched. Sync state is JSON-shaped by
+   *  contract (it crosses the wire), so a structural compare is both possible
+   *  and cheap — and short-circuits on identity for the common case. */
+  function _sameValue(a: unknown, b: unknown): boolean {
+    if (a === b) return true;
+    // NaN is the one value unequal to itself; without this a NaN field read
+    // as "changed" on every compare (a conflict nobody made, and a method
+    // reported as nondeterministic for storing NaN).
+    if (Number.isNaN(a) && Number.isNaN(b)) return true;
+    if (a === null || b === null) return false;
+    if (typeof a !== "object" || typeof b !== "object") return false;
+    if (Array.isArray(a) !== Array.isArray(b)) return false;
+    if (Array.isArray(a) && Array.isArray(b)) {
+      if (a.length !== b.length) return false;
+      for (let i = 0; i < a.length; i++) {
+        if (!_sameValue(a[i], b[i])) return false;
+      }
+      return true;
+    }
+    const ka = Object.keys(a as Record<string, unknown>);
+    const kb = Object.keys(b as Record<string, unknown>);
+    if (ka.length !== kb.length) return false;
+    for (const k of ka) {
+      if (!Object.hasOwn(b as Record<string, unknown>, k)) return false;
+      if (
+        !_sameValue(
+          (a as Record<string, unknown>)[k],
+          (b as Record<string, unknown>)[k],
+        )
+      ) return false;
+    }
+    return true;
+  }
+
   function dropHeld(): void {
     _catchup.clear();
     _deferred.clear();
+    _clearCatchupTimer();
+  }
+
+  /** The catch-up watchdog — see `hold`. */
+  let _catchupTimer: ReturnType<typeof setTimeout> | undefined;
+  function _clearCatchupTimer(): void {
+    if (_catchupTimer !== undefined) {
+      clearTimeout(_catchupTimer);
+      _catchupTimer = undefined;
+    }
+  }
+  /** Ask again if the catch-up this is holding for never lands.
+   *
+   *  It RE-REQUESTS rather than force-opening the gate: held items can only be
+   *  folded against a response (snapshot, ops and rebase, under one lock), so
+   *  asking again is the honest recovery — the same thing a `sync-err` does.
+   *  Re-arms, so a server that never answers costs one request per interval
+   *  instead of a dead cell. */
+  function _armCatchupWatchdog(): void {
+    if (_catchupTimer !== undefined) return; // already watching this catch-up
+    _catchupTimer = setTimeout(() => {
+      _catchupTimer = undefined;
+      if (_catchup.size === 0) return; // answered while we waited
+      deps.log?.warn(
+        `[sync] no catch-up response after ${
+          Math.round(CATCHUP_TIMEOUT_MS / 1000)
+        }s — asking again. Until one lands this client applies no peer ` +
+          `changes and confirms none of its own.`,
+      );
+      void engine.requestSync();
+    }, CATCHUP_TIMEOUT_MS);
+    // A pending watchdog must never be the reason a process stays alive.
+    (_catchupTimer as unknown as { unref?: () => void }).unref?.();
   }
 
   // A buggy reducer that returns undefined does so for EVERY op of that
@@ -400,8 +545,105 @@ export function createSyncEngine(deps: SyncEngineDeps): SyncEngine {
     );
   }
 
+  // ── A method that does not give the same answer twice ────────────────
+  // Every replica REPLAYS an op through the cell's method: the origin at its
+  // ack, every peer at the broadcast, the server at dispatch, a reloaded client
+  // in its catch-up. A method that reads a clock or a random source computes a
+  // different value on each — the docs' own Quick Start did,
+  // `s.items.push({ id: crypto.randomUUID(), text })` — so the origin, the
+  // server and every peer held a different id for the same item, a peer's
+  // `remove(id)` then matched nothing on the server, and every screen stayed
+  // forked for good with nothing said anywhere.
+  //
+  // The engine cannot make such a method deterministic (the value would have to
+  // travel with the op, which is a wire change — future/v2.md). What it can do
+  // is SEE it: a pure reducer run twice on one input must return one answer,
+  // so a second run that disagrees is proof. Then it says so, once per method,
+  // at error level with the fix, and asks the server for the cell's real state
+  // (`SyncRequest.resync`) so this client at least converges on the server's
+  // values instead of keeping its own.
+  const _nondetWarned = new Set<string>();
+  const _resyncWanted = new Set<string>();
+  let _resyncTimer: ReturnType<typeof setTimeout> | undefined;
+  function scheduleResync(cell: string): void {
+    _resyncWanted.add(cell);
+    if (_resyncTimer !== undefined) return;
+    // After the fold in progress (the caller holds the cell lock, and the
+    // server's snapshot must be taken AFTER the op this fold is for), and
+    // coalesced: a burst of ops of one bad method costs one round.
+    _resyncTimer = setTimeout(() => {
+      _resyncTimer = undefined;
+      if (_resyncWanted.size > 0) void engine.requestSync();
+    }, 0);
+  }
+  function reportNondeterministic(cell: string, action: string): void {
+    const key = `${cell}:${action}`;
+    if (_nondetWarned.has(key)) return;
+    _nondetWarned.add(key);
+    log.error(
+      "sync",
+      `${cell}.${action} is not deterministic — run twice on the same state ` +
+        `with the same arguments it produced two different results. Every ` +
+        `replica (this client, the server, each peer) replays a sync method, ` +
+        `so each computes its own value and they silently disagree: an id ` +
+        `made with crypto.randomUUID() or Math.random(), or a Date.now() ` +
+        `timestamp, differs on every screen and an edit that names it misses ` +
+        `on the server. Compute the value where the call is made and pass it ` +
+        `in: \`${cell}.${action}({ id: crypto.randomUUID(), … })\`. This ` +
+        `client re-syncs the cell from the server after each such op. ` +
+        `(logged once per method)`,
+    );
+  }
+  /** Fold one op through the reducer — twice when the reducer is declared
+   *  pure, to catch a method that answers differently each time. */
+  function reduceChecked(
+    state: Record<string, unknown>,
+    action: string,
+    payload: unknown,
+    cell: string,
+  ): SyncReducerResult | undefined {
+    const first = deps.reducer(state, action, payload, cell);
+    if (
+      !deps.pureReducer || first === null || first === undefined ||
+      first === REDUCER_FAILED
+    ) return first;
+    const second = deps.reducer(state, action, payload, cell);
+    if (second !== REDUCER_FAILED && !_sameValue(first, second)) {
+      reportNondeterministic(cell, action);
+      scheduleResync(cell);
+    }
+    return first;
+  }
+
   for (const cell of Object.keys(deps.cells)) {
     statuses.set(cell, { status: "online", pending: 0, lastSync: 0 });
+  }
+
+  /** `deps.reducer`, except that its `index`-th call — the fold of the op a
+   *  local call just queued — runs twice and compares (see `reduceChecked`).
+   *
+   *  The early warning for a method that cannot be replayed faithfully has to
+   *  run on the state the op is ACTUALLY applied to: confirmed state plus
+   *  every op still pending before it. It ran on confirmed state alone, so an
+   *  edit of an item that itself was still unconfirmed — every offline edit
+   *  of something created offline — replayed `rename(i1)` against a state
+   *  with no `i1`, the method threw, and the browser reducer printed
+   *  "reducer failed … no item i1" on every such edit, for a call that had
+   *  succeeded. `rebase` folds the ops in order, one reducer call each, so the
+   *  op's own call sees exactly its real input. */
+  function checkingReducer(cell: string, index: number): SyncReducer {
+    let call = 0;
+    return (state, action, payload, c) => {
+      const first = deps.reducer(state, action, payload, c);
+      if (call++ !== index) return first;
+      if (first !== null && first !== undefined && first !== REDUCER_FAILED) {
+        const second = deps.reducer(state, action, payload, c);
+        if (second !== REDUCER_FAILED && !_sameValue(first, second)) {
+          reportNondeterministic(cell, action);
+        }
+      }
+      return first;
+    };
   }
 
   function updateStatus(cell: string, patch: Partial<SyncStatus>) {
@@ -424,10 +666,21 @@ export function createSyncEngine(deps: SyncEngineDeps): SyncEngine {
     return next;
   }
 
-  async function rebaseCell(cell: string): Promise<Record<string, unknown>> {
+  async function rebaseCell(
+    cell: string,
+    /** An op the caller reports itself — see `handleLocalAction`. It is also
+     *  the op whose determinism is checked, when the reducer is pure. */
+    quietFor?: string,
+  ): Promise<RebaseResult> {
     const confirmedState = deps.getConfirmedState()[cell] ?? {};
     const unconfirmed = await deps.buffer.getUnconfirmed(cell);
-    const result = rebase(confirmedState, unconfirmed, deps.reducer);
+    const result = rebase(
+      confirmedState,
+      unconfirmed,
+      quietFor !== undefined && deps.pureReducer
+        ? checkingReducer(cell, unconfirmed.findIndex((o) => o.id === quietFor))
+        : deps.reducer,
+    );
     // The op the client itself is holding could not be replayed. Ack,
     // catch-up and broadcast have always said so; rebase returned the fact in
     // `dropped` and NOTHING read it, so the one path replaying the user's own
@@ -436,6 +689,7 @@ export function createSyncEngine(deps: SyncEngineDeps): SyncEngine {
     // reporters as the other three paths, so the wording and the once-per-key
     // dedup are shared rather than re-invented.
     for (const { op, why } of result.notApplied) {
+      if (op.id === quietFor) continue;
       if (why === "failed") foldFailure(cell, op.id, op.action, "rebase");
       else _warnUndefReducer(cell, op.action);
     }
@@ -448,7 +702,7 @@ export function createSyncEngine(deps: SyncEngineDeps): SyncEngine {
     // were awaiting an ack while the buffer held some, and the same
     // under-count hid an op the reducer could not replay.
     updateStatus(cell, { pending: unconfirmed.length });
-    return result.optimistic;
+    return result;
   }
 
   /** Fold an ack into confirmed state. Caller holds the cell lock. */
@@ -496,7 +750,7 @@ export function createSyncEngine(deps: SyncEngineDeps): SyncEngine {
     }
     if (pending && !inSnapshot) {
       const confirmed = deps.getConfirmedState()[cell] ?? {};
-      const next = deps.reducer(
+      const next = reduceChecked(
         confirmed,
         pending.action,
         pending.payload,
@@ -591,7 +845,7 @@ export function createSyncEngine(deps: SyncEngineDeps): SyncEngine {
       return Promise.resolve();
     }
     const confirmed = deps.getConfirmedState()[cell] ?? {};
-    const next = deps.reducer(confirmed, op.action, op.payload, op.cell);
+    const next = reduceChecked(confirmed, op.action, op.payload, cell);
     // Same guard the ack and remote-op paths carry: `null` is the contract's
     // no-op, `undefined` is a buggy reducer. Letting it through set confirmed
     // state to undefined, and the next rebase read
@@ -610,8 +864,19 @@ export function createSyncEngine(deps: SyncEngineDeps): SyncEngine {
     }
     markApplied(cell, op.id);
     noteConfirmedTs(cell, op.serverTs);
-    if (next !== null) deps.setConfirmedState(cell, next);
-    return Promise.resolve();
+    if (next === null) return Promise.resolve();
+    deps.setConfirmedState(cell, next);
+    // A catch-up is where concurrent OFFLINE edits meet: the peer ops the
+    // client missed fold here, ahead (in server order) of the acks for the
+    // client's own queued ops — and this path never looked, so the documented
+    // `onConflict` ("a remote op changes a field your unconfirmed local ops
+    // also changed") fired only for edits made while both were online. Two
+    // peers editing one note offline lost one edit with no callback and no
+    // line anywhere. Same check as the live path; the view is left to the
+    // batch's own rebase.
+    return pendingIds.size > 0
+      ? conflictWork(cell, confirmed, next, op.hlc, undefined)
+      : Promise.resolve();
   }
 
   /** Fold a remote op into confirmed state. Caller holds the cell lock. */
@@ -643,7 +908,7 @@ export function createSyncEngine(deps: SyncEngineDeps): SyncEngine {
     if (isDup) {
       logDuplicate(op.cell, op.id, "broadcast");
     } else {
-      next = deps.reducer(confirmed, op.action, op.payload, op.cell);
+      next = reduceChecked(confirmed, op.action, op.payload, op.cell);
       // Mark applied only after a fold that actually happened (see
       // `foldFailure`) — and leave without touching the watermark below when
       // it did not, so nothing seals an op this client never applied.
@@ -681,8 +946,28 @@ export function createSyncEngine(deps: SyncEngineDeps): SyncEngine {
       });
     }
     if (isDup) return;
-    const optimistic = await rebaseCell(op.cell);
+    const optimistic = (await rebaseCell(op.cell)).optimistic;
+    if (next != null) {
+      await conflictWork(op.cell, confirmed, next, op.hlc, optimistic);
+    }
+  }
 
+  /** Merge strategy fields whose merged VIEW was already reported as one the
+   *  server will not keep — once per cell:field. */
+  const _viewOnlyWarned = new Set<string>();
+
+  /** A remote op just moved confirmed state from `confirmed` to `after` —
+   *  report every field it changed that this client's unconfirmed ops also
+   *  change. Caller holds the cell lock. `optimistic` is the rebased view the
+   *  caller already pushed (live broadcast), or `undefined` for a catch-up
+   *  fold, which reports but leaves the view to the batch's own rebase. */
+  async function conflictWork(
+    cell: string,
+    confirmed: Record<string, unknown>,
+    after: Record<string, unknown>,
+    opHlc: HLC,
+    optimistic: Record<string, unknown> | undefined,
+  ): Promise<void> {
     // Conflict handling: a field the remote op changed that surviving
     // local (unconfirmed) ops still override. Default semantics are
     // rebase-LWW — local replays on top — so `local` is what the user
@@ -690,58 +975,107 @@ export function createSyncEngine(deps: SyncEngineDeps): SyncEngine {
     // configured merge strategy get a CRDT merge applied to the CLIENT
     // VIEW for the conflict window (the server stays the convergence
     // authority — its next snapshot/ack rebase replaces the view).
-    const cfg = deps.cells[op.cell];
+    const cfg = deps.cells[cell];
     const mergeCfg = cfg?.merge ?? {};
     const onConflict = cfg?.onConflict;
     const wantsConflictWork = onConflict !== undefined ||
       Object.keys(mergeCfg).length > 0;
-    if (wantsConflictWork && next != null) {
-      const after = next as Record<string, unknown>;
+    if (wantsConflictWork) {
       const conflicts: SyncConflict[] = [];
       let mergedView: Record<string, unknown> | null = null;
+      let viewOfServer: Record<string, unknown> | undefined;
       // Local-side timestamp for merges: the newest surviving local op.
-      const unconfirmed = await deps.buffer.getUnconfirmed(op.cell);
+      const unconfirmed = await deps.buffer.getUnconfirmed(cell);
       const localHlc = unconfirmed.reduce(
         (m: HLC | null, o) =>
           m === null || compareHLC(o.hlc, m) > 0 ? o.hlc : m,
         null,
       ) ?? clock.now();
+      // The view as it was BEFORE this op landed — `rebase` replayed against
+      // the OLD confirmed state. Two different wrong answers came out of not
+      // having it:
+      //
+      //  • `optimistic` is POST-rebase, so for an increment-style reducer it
+      //    ALREADY contains the remote delta. `mergeCounter` then adds it a
+      //    second time: base + localΔ + 2·remoteΔ. Measured with
+      //    `merge: { count: "counter" }`, a local +1 and a peer +1 on a base
+      //    of 0 produced a view of 3 — and the conflict record said
+      //    `local: 2`, which is the correct answer the merge then spoiled.
+      //    Declaring the strategy made the view WORSE than the `lww` default.
+      //    (An ASSIGNING reducer — `set {n:5}` — is the one shape where the
+      //    post-rebase value happened to be right, which is the shape the
+      //    existing test pins.) The pre-rebase view is correct for both.
+      //
+      //  • "did local override this field?" was a REFERENCE compare, and
+      //    `rebase` structuredClones the whole confirmed state — so once any
+      //    local op was pending, every object/array field had a fresh
+      //    reference and could never compare equal. `onConflict` fired for
+      //    fields the client had never touched, with `local` deep-equal to
+      //    `remote`, and dragged them through `mergeField` as well.
+      //
+      // Computed once, and only when there is conflict work to do.
+      const beforeRebase = rebase(
+        confirmed,
+        unconfirmed,
+        deps.reducer,
+      ).optimistic;
       for (const field of Object.keys(after)) {
-        const remoteChanged = confirmed[field] !== after[field];
-        const localOverrides = after[field] !== optimistic[field];
+        const remoteChanged = !_sameValue(confirmed[field], after[field]);
+        const localOverrides = !_sameValue(
+          confirmed[field],
+          beforeRebase[field],
+        );
         if (!remoteChanged || !localOverrides) continue;
         const strategy = mergeCfg[field] ?? "lww";
         if (strategy !== "lww") {
           try {
             const m = mergeField(
               strategy,
-              optimistic[field],
+              beforeRebase[field],
               localHlc,
               after[field],
-              op.hlc,
+              opHlc,
               confirmed[field],
               cfg?.identity?.[field] ?? "id",
             );
-            mergedView ??= { ...optimistic };
-            mergedView[field] = m.value;
+            // What the SERVER will hold is not this merge. It applies the op
+            // through the method, never through a merge strategy, so the
+            // field ends up exactly as the rebase computes it — `optimistic`.
+            // A merge that differs from it exists on this screen only, until
+            // the ack; the peer's (or this user's) part of it is then gone.
+            // The docs promised "never a silent loss" for `text`; an
+            // assigning method (`setBody(s, text) { s.body = text }`) made it
+            // one. Say so, once, with what to change.
+            viewOfServer ??= optimistic ??
+              rebase(after, unconfirmed, deps.reducer).optimistic;
+            if (!_sameValue(m.value, viewOfServer[field])) {
+              warnViewOnlyMerge(cell, field, strategy);
+            }
+            if (optimistic !== undefined) {
+              mergedView ??= { ...optimistic };
+              mergedView[field] = m.value;
+            }
           } catch (e) {
             deps.log?.warn(
-              `[sync] ${op.cell}.${field}: ${strategy} merge failed (${e}) — keeping rebase-LWW view`,
+              `[sync] ${cell}.${field}: ${strategy} merge failed (${e}) — keeping rebase-LWW view`,
             );
           }
         }
         conflicts.push({
           field,
-          local: optimistic[field],
+          // The value the merge was given — the view before this op landed.
+          // Reporting the post-rebase one described a different number from
+          // the one the resolution was computed from.
+          local: beforeRebase[field],
           remote: after[field],
           resolution: strategy,
         });
       }
-      if (mergedView) deps.onStateUpdate(op.cell, mergedView);
+      if (mergedView) deps.onStateUpdate(cell, mergedView);
       if (conflicts.length > 0) {
         _conflictsSince.set(
-          op.cell,
-          (_conflictsSince.get(op.cell) ?? 0) + conflicts.length,
+          cell,
+          (_conflictsSince.get(cell) ?? 0) + conflicts.length,
         );
       }
       if (conflicts.length > 0 && onConflict) {
@@ -752,6 +1086,157 @@ export function createSyncEngine(deps: SyncEngineDeps): SyncEngine {
         }
       }
     }
+  }
+
+  function warnViewOnlyMerge(
+    cell: string,
+    field: string,
+    strategy: string,
+  ): void {
+    const key = `${cell}:${field}`;
+    if (_viewOnlyWarned.has(key)) return;
+    _viewOnlyWarned.add(key);
+    log.warn(
+      "sync",
+      `${cell}.${field}: this client's change and a concurrent one from ` +
+        `another client collided, and merge "${strategy}" cannot keep both. ` +
+        `The server applies each op through the cell's method, and this ` +
+        `method replaces the whole value — so the change the server gets ` +
+        `last overwrites the other, there and on every screen (a merged ` +
+        `view shown here meanwhile is temporary; onConflict was called with ` +
+        `it). A merge ` +
+        `strategy holds only for a method that applies the EDIT instead of ` +
+        `assigning the result: \`s.n += delta\` for a counter, push/filter ` +
+        `for a set, and for text a method that patches the value it finds. ` +
+        `(logged once per field)`,
+    );
+  }
+
+  /** Install a pushed server-origin snapshot as confirmed state. Caller holds
+   *  the cell lock and rebases afterwards.
+   *
+   *  A push is a snapshot like any catch-up snapshot — the server captured it
+   *  under the cell's lock right after reserving `ts` — so it takes the same
+   *  watermark: an ack or a held op at or below `ts` is already inside it.
+   *  Only ever an improvement: a position below what confirmed state already
+   *  reflects would roll back ops folded since (unreachable on one ordered
+   *  connection, and harmless to skip — the newer state came from the same
+   *  server). The cursor is NOT moved; it advances only through a catch-up
+   *  response, and the next catch-up is served a snapshot anyway (the write
+   *  compacted the cell above every cursor issued before it). */
+  function installPushed(cell: string, push: Pushed, ts: number): void {
+    const covered = _confirmedTs.get(cell);
+    if (covered !== undefined && ts < covered) {
+      deps.log?.debug?.(
+        `[sync] ${cell}: ignoring a pushed server snapshot at position ${ts} ` +
+          `— confirmed state already covers ${covered}`,
+      );
+      return;
+    }
+    let state: Record<string, unknown>;
+    if ("state" in push) {
+      state = push.state;
+      _pushMisses.delete(cell);
+    } else {
+      // A patch is taken against the state the server last pushed, and
+      // applied here to the state this client folded — which is that plus
+      // the ops since, replayed on a state without the write. Almost always
+      // the same thing; provably so only when the result digests to the
+      // server's (see state-patch.ts for the two shapes where it does not).
+      const patched = applyStatePatch(
+        deps.getConfirmedState()[cell] ?? {},
+        push.patch.set,
+      );
+      const sum = patched === null ? null : stateDigest(patched);
+      if (patched === null || sum?.digest !== push.patch.digest) {
+        // Keep what we have — it is missing the write, not wrong about
+        // anything else — and ask for the cell. The server answers this
+        // client alone with a snapshot.
+        const misses = (_pushMisses.get(cell) ?? 0) + 1;
+        _pushMisses.set(cell, misses);
+        deps.log?.debug?.(
+          `[sync] ${cell}: a pushed server write at position ${ts} does not ` +
+            `match this client's state once applied — re-syncing the cell`,
+        );
+        if (misses === PUSH_MISS_WARN_AT) {
+          log.warn(
+            "sync",
+            `${cell}: ${misses} pushed server writes in a row did not match ` +
+              `this client's state, and each costs a full re-sync of the ` +
+              `cell. The client folds the same ops the server applied, so a ` +
+              `run of these means they give different results here: a sync ` +
+              `method that reads a clock or a random source, or cell state ` +
+              `that is not plain JSON (a Map, a class instance). (logged once ` +
+              `per run)`,
+          );
+        }
+        scheduleResync(cell);
+        return;
+      }
+      _pushMisses.delete(cell);
+      state = patched;
+    }
+    deps.setConfirmedState(cell, state);
+    _snapshotTs.set(cell, ts);
+    noteConfirmedTs(cell, ts);
+  }
+  /** Pushed patches in a row that did not match, per cell — a run is a
+   *  divergence the re-syncs are papering over, and gets said once. */
+  const _pushMisses = new Map<string, number>();
+  const PUSH_MISS_WARN_AT = 3;
+
+  async function foldPushed(response: {
+    snapshot?: Record<string, Record<string, unknown>>;
+    lastServerTs?: Record<string, number>;
+    patch?: Record<string, PushPatch>;
+  }): Promise<void> {
+    // Every lock is TAKEN synchronously, before this returns to the event
+    // loop: frames are folded in the order they arrived, and a frame for the
+    // same cell handled after this one must queue behind it.
+    const work: Promise<void>[] = [];
+    const fold = (cell: string, push: Pushed, ts: number): void => {
+      // Behind an outstanding catch-up it waits its turn like every other
+      // confirmed-state frame, and folds in position (see `hold`).
+      if (hold(cell, { kind: "snap", push, ts })) return;
+      work.push(withLock(cell, async () => {
+        installPushed(cell, push, ts);
+        await rebaseCell(cell);
+      }));
+    };
+    for (const [cell, patch] of Object.entries(response.patch ?? {})) {
+      if (!(cell in deps.cells)) continue;
+      if (
+        !patch || typeof patch !== "object" || typeof patch.ts !== "number" ||
+        !Number.isFinite(patch.ts) || !Array.isArray(patch.set) ||
+        typeof patch.digest !== "string"
+      ) {
+        deps.log?.warn(
+          `[sync] ${cell}: a pushed server write without a position, a patch ` +
+            `or a digest was ignored — it cannot be placed among this cell's ` +
+            `ops. Re-syncing the cell.`,
+        );
+        scheduleResync(cell);
+        continue;
+      }
+      fold(cell, { patch }, patch.ts);
+    }
+    for (const [cell, state] of Object.entries(response.snapshot ?? {})) {
+      if (!(cell in deps.cells)) continue;
+      const ts = response.lastServerTs?.[cell];
+      if (
+        typeof ts !== "number" || !Number.isFinite(ts) || !state ||
+        typeof state !== "object" || Array.isArray(state)
+      ) {
+        deps.log?.warn(
+          `[sync] ${cell}: a pushed server snapshot without a position (or ` +
+            `without a state object) was ignored — it cannot be placed among ` +
+            `this cell's ops. The next catch-up brings the change.`,
+        );
+        continue;
+      }
+      fold(cell, { state }, ts);
+    }
+    await Promise.all(work);
   }
 
   const engine: SyncEngine = {
@@ -779,23 +1264,69 @@ export function createSyncEngine(deps: SyncEngineDeps): SyncEngine {
           _clientTs: Date.now(),
         };
 
-        // Try to make room by pruning confirmed ops before rejecting
-        let accepted = await deps.buffer.add(op);
-        if (!accepted) {
-          await deps.buffer.pruneConfirmed(cell);
-          accepted = await deps.buffer.add(op);
-        }
+        // ONE `add`. The buffer makes room itself before it refuses (prunes
+        // confirmed ops, evicts stale ones — op-buffer.ts) and fires
+        // `onDrop(op, "prune-failed")` when it does refuse. A second
+        // prune-and-add here could not find room the first had not, and
+        // reported the same lost op twice: two console errors and two
+        // `sync-op-dropped` events per change (r3 chaos: 40 drop reports for
+        // 20 ops). Pinned by tests/sync/cap-drop-reported-once.test.ts.
+        const accepted = await deps.buffer.add(op);
         if (!accepted) {
           updateStatus(cell, { status: "blocked" });
-          deps.log?.warn(
-            `[sync] ${cell}: op buffer full (pending cap reached) — op dropped. Reconnect or reduce mutation rate.`,
+          // THROW, do not return. `return` resolved the caller's promise, and
+          // `handleSyncLocalAction` turns a resolve into `_resolveAck(cid)` —
+          // so `await todos.add(item)` reported SUCCESS for a mutation that
+          // had just been discarded. The console said so and `onDrop` fired,
+          // but the awaited promise is what app code branches on, and it lied.
+          //
+          // The framework already decided this the other way on the twin
+          // queue: `offline-queue.ts` rejects a dropped action's pending ack
+          // "so the caller hears 'dropped' NOW". Two offline queues, one
+          // fact, two answers — and the quiet one was the one that loses
+          // data. Rejecting is also what the `vetWirePayload` refusal above
+          // does, for the same reason and through the same channel.
+          throw new Error(
+            `[sync] ${cell}:${action} was DROPPED — the offline queue is ` +
+              `full (pending cap reached), so this change never reached the ` +
+              `server and is gone. Reconnect, or reduce the mutation rate.`,
           );
-          return;
         }
 
-        await rebaseCell(cell);
+        const { notApplied } = await rebaseCell(cell, id);
 
-        if (online) {
+        // The method THREW for this call. On a plain cell the caller's promise
+        // rejects with the method's error and nothing is applied; here the op
+        // was queued, sent, the server's own dispatch threw too, and the
+        // caller was told SUCCESS — `await notes.add(x)` resolved for a change
+        // that was never going to exist (the rebase above already knew, and
+        // only logged it as a replay failure). A local call is decided on the
+        // local view, exactly like a plain cell's is on the server's: take the
+        // op back out before anything else sees it, and reject.
+        const failed = notApplied.find((n) => n.op.id === id);
+        if (failed?.why === "failed") {
+          await deps.buffer.pruneStale(cell, id);
+          await rebaseCell(cell);
+          // The method's OWN error when the host kept it — the same rejection
+          // the plain cell gives, so app code handles one error, not two.
+          const cause = deps.lastReducerError?.();
+          if (cause instanceof Error) throw cause;
+          throw new Error(
+            `[sync] ${cell}.${action} threw${
+              cause === undefined ? "" : `: ${String(cause)}`
+            } — the change was not applied and not queued.`,
+          );
+        }
+        // The early warning for a method that cannot be replayed faithfully
+        // ran inside the rebase above, on the op's real input (see
+        // `checkingReducer`). The resync itself waits for the ack (see
+        // `reduceChecked`).
+
+        // While a chunked reconnect flush is still sending OLDER queued ops
+        // (see `requestSync`), a new op must queue behind them: sent now, it
+        // would reach the server — and be applied — ahead of changes the user
+        // made before it. It is in the buffer, so the flush carries it.
+        if (online && !_flushing) {
           sendOpPaced(enc("op", { id, hlc, cell, action, payload }));
         }
       });
@@ -865,6 +1396,10 @@ export function createSyncEngine(deps: SyncEngineDeps): SyncEngine {
     },
 
     async handleSyncResponse(response) {
+      // Not an answer to anything this client asked — a server-side write
+      // being pushed. It must not drain the held queue, open the gate, move a
+      // cursor or fire `onSync`, all of which belong to a real catch-up.
+      if (response.push === true) return foldPushed(response);
       // Receive HLCs into global clock (safe outside per-cell lock)
       if (response.ops) {
         for (const op of response.ops) clock.receive(op.hlc);
@@ -944,7 +1479,10 @@ export function createSyncEngine(deps: SyncEngineDeps): SyncEngine {
       }
       const held = new Map(_deferred);
       _deferred.clear();
-      if (answersLatest) _catchup.clear();
+      if (answersLatest) {
+        _catchup.clear();
+        _clearCatchupTimer();
+      }
 
       // Process each affected cell: snapshot → ops → rebase (all under one lock)
       //
@@ -1060,6 +1598,16 @@ export function createSyncEngine(deps: SyncEngineDeps): SyncEngine {
                 continue;
               }
               batch.push({ ts: h.op.serverTs, run: () => foldRemoteOp(h.op) });
+            } else if (h.kind === "snap") {
+              // A pushed snapshot the response's own snapshot already covers
+              // is older news; above it, it is the newer state and folds in
+              // its position.
+              if (snapTs !== undefined && h.ts <= snapTs) continue;
+              const { push, ts } = h;
+              batch.push({
+                ts,
+                run: () => Promise.resolve(installPushed(cell, push, ts)),
+              });
             } else {
               // Same argument for a held ack, except it must still RUN: the op
               // has to be confirmed and the buffer drained. Carrying the
@@ -1214,6 +1762,41 @@ export function createSyncEngine(deps: SyncEngineDeps): SyncEngine {
           );
         }
       }
+
+      // The next slice of a reconnect flush, paced by what the last one
+      // weighed (see SYNC_REQ_BUDGET).
+      if (answersLatest && _flushing && _flushTimer === undefined && online) {
+        // A slice whose every op is STILL unconfirmed now that its response
+        // has landed got nowhere (the server cannot persist them, or refuses
+        // them without a word): sending it again would loop forever. Stop, say
+        // so, and leave the queue — and the ops made meanwhile — to the next
+        // reconnect.
+        const still = new Set<string>();
+        for (const cell of Object.keys(deps.cells)) {
+          for (const o of await deps.buffer.getUnconfirmed(cell)) {
+            still.add(o.id);
+          }
+        }
+        if (
+          _lastSliceIds.length > 0 && _lastSliceIds.every((id) => still.has(id))
+        ) {
+          log.error(
+            "sync",
+            `the offline queue flush made no progress — none of the ` +
+              `${_lastSliceIds.length} change(s) in the last slice was ` +
+              `acknowledged or refused. ${still.size} change(s) stay queued ` +
+              `and are re-sent on the next reconnect; the server log says why ` +
+              `it did not take them.`,
+          );
+          stopFlush();
+          return;
+        }
+        const delay = Math.ceil(_lastSliceBytes * 1000 / FLUSH_BYTES_PER_SEC);
+        _flushTimer = setTimeout(() => {
+          _flushTimer = undefined;
+          if (_flushing) void engine.requestSync();
+        }, delay);
+      }
     },
 
     setOnline(v) {
@@ -1222,6 +1805,9 @@ export function createSyncEngine(deps: SyncEngineDeps): SyncEngine {
       // Frames queued for a socket that is gone are duplicates of what the
       // durable buffer will re-send; drop them with the connection.
       if (!v) resetPacing();
+      // …and so does a flush in progress: the reconnect starts it over from
+      // the buffer.
+      if (!v) stopFlush();
       // The connection died with a catch-up outstanding: whatever it was
       // holding is safe to drop (a held ack left its op unconfirmed → re-sent;
       // a held broadcast sits above a cursor only a response advances →
@@ -1275,12 +1861,33 @@ export function createSyncEngine(deps: SyncEngineDeps): SyncEngine {
         updateStatus(cell, { status: "syncing" });
       }
 
+      // The slice this request carries (see SYNC_REQ_BUDGET). Always at least
+      // one op, so an op bigger than the budget still travels — alone.
+      const slice: SyncOp[] = [];
+      let sliceBytes = 0;
+      const budget = syncReqBudget();
+      for (const op of allPending) {
+        const n = JSON.stringify(op).length + 1;
+        if (slice.length > 0 && sliceBytes + n > budget) break;
+        slice.push(op);
+        sliceBytes += n;
+      }
+      const more = allPending.length > slice.length;
+      _flushing = more;
+      _lastSliceIds = more ? slice.map((o) => o.id) : [];
+      _lastSliceBytes = sliceBytes;
+      const resync = [..._resyncWanted];
+      _resyncWanted.clear();
+
       // From here until the response lands, anything that would mutate
       // confirmed state is AHEAD of that response — hold it (see `hold`).
       // Armed BEFORE the send: a transport that answers synchronously would
       // otherwise open the gate before it was closed and leave it shut with no
       // response left to open it.
       for (const cell of Object.keys(deps.cells)) _catchup.add(cell);
+      // The watchdog is armed by `hold()`, not here: a gate with NOTHING held
+      // is delaying nothing, so there is nothing to recover. See `_armCatchupWatchdog`.
+      _clearCatchupTimer();
       const reqId = ++_reqSeq;
       _reqSentAt = Date.now();
       try {
@@ -1293,9 +1900,19 @@ export function createSyncEngine(deps: SyncEngineDeps): SyncEngine {
           // back to the client-id filter, exactly as before.
           session: _session,
           cells,
-          pendingOps: allPending,
+          pendingOps: slice,
+          ...(resync.length > 0 ? { resync } : {}),
+          // A server write may be pushed to this engine as a patch.
+          pushPatch: true,
         }));
+        // A slice is waiting on this response to send the next one, and a
+        // response lost on an open connection would otherwise strand every
+        // op queued behind it (new ops wait for the flush). The watchdog asks
+        // again — which also re-sends this slice.
+        if (more) _armCatchupWatchdog();
       } catch {
+        for (const c of resync) _resyncWanted.add(c);
+        stopFlush();
         dropHeld(); // no request went out — nothing will open the gate
         // Revert status on send failure
         for (const cell of Object.keys(deps.cells)) {
@@ -1309,6 +1926,15 @@ export function createSyncEngine(deps: SyncEngineDeps): SyncEngine {
 
     isSyncCell(cellName) {
       return cellName in deps.cells;
+    },
+    dispose() {
+      _clearCatchupTimer();
+      stopFlush();
+      resetPacing();
+      if (_resyncTimer !== undefined) {
+        clearTimeout(_resyncTimer);
+        _resyncTimer = undefined;
+      }
     },
   };
   return engine;

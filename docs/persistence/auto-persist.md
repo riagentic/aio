@@ -14,7 +14,14 @@ single `state.db`. On restart, persisted state is **deep-merged** with
 - Keys removed from `initialState` are dropped (schema wins)
 - Arrays are replaced wholesale (not merged element-by-element)
 - Type mismatches (e.g. persisted `null` where initial has an object) fall back
-  to initial
+  to initial — a stored `null` under a declared **object** is replaced by the
+  declared default, and restore warns naming the path (a declared array or
+  primitive keeps its stored `null`). If `null` is a value the field holds,
+  declare it `null as T | null`. Dev also warns at the write that stores one.
+- A key a method adds to a declared non-empty object (`opts: { a: 1 }`, then
+  `s.opts.b = 3`) is **not** restored: dev warns at the write and refuses to
+  boot on it, production boots without it and the next write removes it from
+  disk. Declare it, or declare the object as `{}` (an open record).
 
 Writes are **debounced** (`persistDebounceMs`, default 100 ms), so a method that
 has returned is committed in memory and broadcast, but not yet on disk. What
@@ -205,6 +212,11 @@ const hw = cell("hw", {
 });
 ```
 
+What `onMigrate` returns is trimmed to the declared shape before it is stored:
+the old key (`ramBps`) is read, carried across, and then dropped with one
+warning naming it — so the **next** boot, which has no migration left to run,
+finds only declared fields. Deleting it yourself is allowed and changes nothing.
+
 ### The case the top-level rules do NOT cover: a field inside a collection
 
 The table above defaults **top-level** keys. Restore is
@@ -298,10 +310,14 @@ up `state.db` and clear the cell's stored slice yourself.
 When the WebSocket disconnects, actions are queued IN MEMORY and replayed on
 reconnect.
 
-1. First connect: actions queue in memory (max 100) until WS ready
+1. First connect: actions queue in memory until WS ready — 1000 for a cell
+   method call, 100 for `useCell().send` / `useAio().send` (two queues, one drop
+   policy)
 2. After first connect: disconnections queue actions in memory (lost on reload)
 3. On reconnect: queued actions replay in order
-4. Actions older than 24 hours are discarded before replay
+4. At the cap the OLDEST queued action is dropped — newest data wins — and its
+   caller's promise REJECTS rather than resolving. Nothing expires on a clock:
+   the queue holds `{action, seq}` and no timestamp
 
 No configuration needed. If you need custom behavior, handle it in your reducer
 (idempotency, conflict resolution).
@@ -313,25 +329,34 @@ Export and import state for debugging, backup, or state transfer.
 standalone/Android mode.
 
 ```ts
-const app = await aio.run({ cells: [myCell] });
+const app = await aio.run({ cells: [counter] });
 
-const json = app.snapshot!(); // export current state as JSON
-app.loadSnapshot!('{"counter": 42}'); // replace state, broadcast to all clients
+const json = app.snapshot!(); // '{"counter":{"count":3}}' — one object per cell
+app.loadSnapshot!('{"counter":{"count":42}}'); // replace state, broadcast to all clients
 app.loadSnapshot!(otherAppsFile, { force: true }); // a file whose cell set does not match — refused without force
 ```
+
+A snapshot has the shape `snapshot()` returns: an object keyed by cell name,
+each value that cell's **whole state object**. It must name every declared cell
+and no other — a missing cell would be wiped, so a mismatch throws
+(`snapshot refused — it has nothing for cell "counter"…`) unless `force: true`.
+Pass the exact string `snapshot()` gave you.
 
 ### HTTP endpoints
 
 ```sh
-# Export
-curl http://localhost:8000/__aio/snapshot
+# Export — the port is on the boot line, or in `am instances`
+curl http://localhost:<port>/__aio/snapshot
 
 # Import (X-AIO header required for CSRF protection)
-curl -X POST http://localhost:8000/__aio/snapshot \
+curl -X POST http://localhost:<port>/__aio/snapshot \
   -H 'Content-Type: application/json' \
   -H 'X-AIO: 1' \
-  -d '{"counter": 42}'
+  -d '{"counter":{"count":42}}'
 ```
+
+A body whose cell value is not an object (`{"counter": 42}`) is a `400` naming
+the cell; a cell-set mismatch is a `400` too, and `?force=1` overrides it.
 
 `loadSnapshot` triggers persistence (debounced write), broadcasts the new state
 to all connected clients, and records a `__snapshot` entry in the time-travel

@@ -17,7 +17,7 @@
 // So `schedule.every('fast tick!', 5, …)` was green in a test and refused
 // twice over by the app it was a test OF. Now the harness drives the REAL
 // manager on a virtual clock — the clock is the only thing swapped.
-import { assert, assertEquals } from "@std/assert";
+import { assert, assertEquals, assertRejects } from "@std/assert";
 import { cell, schedule } from "../mod.ts";
 import { bootCells } from "../src/testing/cell-test.ts";
 
@@ -60,7 +60,9 @@ const P = poll as unknown as {
 Deno.test("harness: a sub-floor `every` is refused, exactly as in production", async () => {
   fires.length = 0;
   await using h = await bootCells([poll]);
-  await P.startTooFast();
+  // Refused where it is WRITTEN — the builder throws inside the method, so the
+  // call fails (it used to resolve and fail later, as an effect error).
+  await assertRejects(() => P.startTooFast(), Error, "ms must be >= 10");
   await h.advance(1000); // 200 ticks' worth, if it had been armed
   assertEquals(
     P.n,
@@ -72,7 +74,7 @@ Deno.test("harness: a sub-floor `every` is refused, exactly as in production", a
 Deno.test("harness: an invalid schedule id is refused, exactly as in production", async () => {
   fires.length = 0;
   await using h = await bootCells([poll]);
-  await P.startBadId();
+  await assertRejects(() => P.startBadId(), Error, "invalid schedule id");
   await h.advance(5000);
   assertEquals(P.n, 0, "an id production rejects must not tick in a test");
 });

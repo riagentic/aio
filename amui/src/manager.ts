@@ -854,7 +854,13 @@ export const manager = cell("manager", {
     /** Tail the selected app's logs for the Logs tab. `cwd` is the project path
      *  (== the app's working dir). Re-reads on demand + on the follow poll. No
      *  streaming endpoint exists, so this is a file tail (last ~500 lines). */
-    async loadLogs(s, path: string, source?: LogSource) {
+    // `= undefined`, not `source?:` — a TS `?` is erased at runtime, so the
+    // framework's arity tripwire saw a method declaring two arguments called
+    // with one and said so, on amui's own most-used screen. A DEFAULT is what
+    // makes optionality visible at runtime, which is exactly what that warning
+    // asks for. The real default depends on state (`s.logSource`), so it stays
+    // in the body.
+    async loadLogs(s, path: string, source: LogSource | undefined = undefined) {
       const proj = s.projects.find((p) => p.path === path);
       if (!proj) return;
       const src = (source ?? s.logSource) as LogSource;
@@ -1010,15 +1016,19 @@ export const manager = cell("manager", {
       // named payload reached a `cell:method` as NO arguments at all — and the
       // trojan still answered ok, so amui reported "dispatched". Use `am`'s
       // rule instead of a second copy of it.
-      const { envelopePayload } = await import("./server/control.server.ts");
+      //
+      // `envelopeJsonPayload`, not `envelopePayload`: this box holds a raw JSON
+      // VALUE, and its own placeholder asks for an array of arguments. The
+      // named-pairs envelope wrapped that array as ONE argument, so the
+      // documented spelling sent `[["x"]]` to a method expecting `"x"`.
+      const { envelopeJsonPayload } = await import(
+        "./server/control.server.ts"
+      );
       const r = await trojanPost(
         proj.running.port,
         "dispatch",
         payload !== undefined
-          ? {
-            type,
-            payload: envelopePayload(type, payload as Record<string, unknown>),
-          }
+          ? { type, payload: envelopeJsonPayload(type, payload) }
           : { type },
         proj.running.appId,
       );

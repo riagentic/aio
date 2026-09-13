@@ -139,7 +139,7 @@ export const LEDGER: readonly Mutation[] = [
       "a leaked pairing PIN stays replayable for its whole window \u2014 anyone who saw the boot banner can pull the profile and the app key, repeatedly",
     file: "src/server/pairing.ts",
     find:
-      "    _state = null; // one-shot: consume on success so it can't be replayed",
+      "    _states.delete(scope); // one-shot: consume on success so it can't be replayed",
     replace: "    // one-shot consumption removed",
     test: "tests/pairing.test.ts",
     filter:
@@ -149,13 +149,33 @@ export const LEDGER: readonly Mutation[] = [
     what:
       "the 6-digit pairing PIN becomes brute-forceable at line speed \u2014 an attacker on the LAN grinds it and walks off with the app key",
     file: "src/server/pairing.ts",
-    find:
-      "  if ((_state.attempts.get(key) ?? 0) >= MAX_ATTEMPTS) return false;",
+    find: "  if ((s.attempts.get(key) ?? 0) >= MAX_ATTEMPTS) return false;",
     replace:
-      "  if ((_state.attempts.get(key) ?? 0) >= Number.MAX_SAFE_INTEGER) return false;",
+      "  if ((s.attempts.get(key) ?? 0) >= Number.MAX_SAFE_INTEGER) return false;",
     test: "tests/pairing.test.ts",
     filter:
       "pairing: wrong tries lock the OFFENDING client key, not the PIN globally",
+  },
+  {
+    what:
+      "a pairing PIN has no TOTAL guess budget \u2014 a guesser rotating source addresses grinds all 10^6 codes inside the TTL and walks off with the app key",
+    file: "src/server/pairing.ts",
+    find: "  if (++s.wrong >= MAX_WRONG_TOTAL) {",
+    replace: "  if (++s.wrong >= Number.MAX_SAFE_INTEGER) {",
+    test: "tests/pairing-per-app.test.ts",
+    filter: "pairing: wrong guesses from many addresses BURN the code",
+  },
+  {
+    what:
+      "the pairing PIN is one slot for the whole process \u2014 app B's code pairs app A and hands out A's key, and A's printed code is dead",
+    file: "src/server/pairing.ts",
+    find:
+      "  _states.set(scope, { pin, createdAt: now, attempts: new Map(), wrong: 0 });",
+    replace:
+      "  _states.clear(); _states.set(scope, { pin, createdAt: now, attempts: new Map(), wrong: 0 });",
+    test: "tests/pairing-per-app.test.ts",
+    filter:
+      "pairing: two apps in one process each pair with their OWN code only",
   },
   {
     what:
@@ -188,6 +208,78 @@ export const LEDGER: readonly Mutation[] = [
     test: "tests/auth-boundary.test.ts",
     filter:
       "totp: the code compare is timing-safe in the source, not just in the docstring",
+  },
+  {
+    what:
+      "a TOTP code used just before a restart signs in again just after it \u2014 the replay record lives only in the process that died",
+    file: "src/server/auth-users.ts",
+    find: "        updTotpStep.run(step, normId(rawId), step).changes > 0,",
+    replace: "        updTotpStep.run(step, normId(rawId), step).changes >= 0,",
+    test: "tests/totp-replay-across-restart.test.ts",
+    filter: "totp: a code accepted before a restart is refused after it",
+  },
+  {
+    what:
+      "an OIDC email the provider never verified maps to a role \u2014 typing boss@corp.com at the IdP makes you the app's admin",
+    file: "src/server/auth-oidc.ts",
+    find: "  const emailVerified = claims.email_verified === true;",
+    replace: "  const emailVerified = claims.email_verified !== null;",
+    test: "tests/oidc-claims-hardening.test.ts",
+    filter:
+      "oidc: an UNVERIFIED email grants no role, is not stored, and is not marked verified",
+  },
+  {
+    what:
+      "a page on any other origin POSTs to an app route with the visitor's cookie \u2014 CSRF against every route of every app",
+    file: "src/server/server-auth.ts",
+    find: "  if (!verdict) return null;",
+    replace: "  if (!verdict || Date.now() > 0) return null;",
+    test: "tests/cross-origin-http-gate.test.ts",
+    filter:
+      "cross-origin: an auth:true app refuses a foreign POST that carries the victim's session cookie",
+  },
+  {
+    what:
+      "the CSRF gate refuses a cookieless cross-site form POST to an EXPOSED app's public route \u2014 payment return URLs and SAML/OIDC form_post receivers stop working",
+    file: "src/server/server-auth.ts",
+    find: "  if (!ambientCookie && !byPosition) return null;",
+    replace:
+      "  if (!ambientCookie && !byPosition && Date.now() < 0) return null;",
+    test: "tests/cross-origin-http-gate.test.ts",
+    filter:
+      "cross-origin: an EXPOSED app's route takes a cookieless cross-site POST; a cookie or a local peer is refused",
+  },
+  {
+    what:
+      "the CSRF gate lets a foreign page POST with the visitor's cookie to an exposed app \u2014 a sibling localhost port acts as the signed-in user",
+    file: "src/server/server-auth.ts",
+    find:
+      '  const ambientCookie = (req.headers.get("cookie") ?? "").trim() !== "";',
+    replace: "  const ambientCookie = false;",
+    test: "tests/cross-origin-http-gate.test.ts",
+    filter:
+      "cross-origin: an exposed auth:true app refuses a sibling-port POST riding the session cookie",
+  },
+  {
+    what:
+      "an allowedOrigins entry naming one origin admits every port and scheme on its host \u2014 any other service on that machine opens an authenticated socket",
+    file: "src/server/server-auth.ts",
+    find:
+      "          if (u.protocol === o.protocol && u.host === o.host) return true;",
+    replace: "          if (u.hostname === o.hostname) return true;",
+    test: "tests/cross-origin-http-gate.test.ts",
+    filter:
+      "allowedOrigins: a full-origin entry admits exactly that origin; a bare hostname any port",
+  },
+  {
+    what:
+      "with per-user auth, one user's error text (a dev diag frame) reaches every other user's socket",
+    file: "src/server/server.ts",
+    find: "          if (!rawStateControlAllowed(meta.user)) continue;",
+    replace: "          if (false) continue;",
+    test: "tests/diag-per-user-admin-only.test.ts",
+    filter:
+      "diag: a user's reduce error reaches admin sockets, never another user's",
   },
   {
     what:
@@ -320,7 +412,8 @@ export const LEDGER: readonly Mutation[] = [
     replace:
       "      if (sql?.stmts.length) return; // the snapshot itself is what failed",
     test: "tests/persist-bad-row-isolation.test.ts",
-    filter: "persist: a row SQLite refuses does not stop the state snapshot",
+    filter:
+      "persist: a row SQLite refuses holds its own cell, and every other cell still persists",
   },
   {
     what:
@@ -416,10 +509,9 @@ export const LEDGER: readonly Mutation[] = [
     what:
       "an unhandled rejection from a fire-and-forget dispatch kills a long-running server that owns persisted state instead of being logged and survived",
     file: "src/diagnostics/crash-handler.ts",
-    find:
-      "    if (guardRejections && (isBootComplete?.() ?? true)) e.preventDefault();",
+    find: "    if (guardRejections && (isBootComplete?.() ?? true)) {",
     replace:
-      "    if (false && guardRejections && (isBootComplete?.() ?? true)) e.preventDefault();",
+      "    if (false && guardRejections && (isBootComplete?.() ?? true)) {",
     test: "tests/guard-dispatches.test.ts",
     filter:
       "guardDispatches: a rejection is logged AND prevented from crashing",
@@ -457,8 +549,8 @@ export const LEDGER: readonly Mutation[] = [
     what:
       "persisted keys bleed between cells \u2014 one cell's restore picks up another's rows, and a neighbouring prefix silently overwrites them",
     file: "src/server/skv-sqlite.ts",
-    find: "        [`${prefix}${SEP}`, `${prefix}${SEP}${HIGH}`],", // aio-ok: the literal SOURCE line this mutation patches in and out
-    replace: "        [prefix, `${prefix}${HIGH}`],", // aio-ok: the literal SOURCE line this mutation patches in and out
+    find: "        [`${prefix}${SEP}`, `${prefix}${AFTER_SEP}`],", // aio-ok: the literal SOURCE line this mutation patches in and out
+    replace: "        [prefix, `${prefix}${AFTER_SEP}`],", // aio-ok: the literal SOURCE line this mutation patches in and out
     test: "tests/skv-sqlite.test.ts",
     filter: "sqliteKv: prefixes never bleed into each other",
   },
@@ -521,8 +613,8 @@ export const LEDGER: readonly Mutation[] = [
     // `{ok:true, value:undefined}` for an async method that threw while the
     // operator's door answered honestly.
     file: "src/server/aio-server.ts",
-    find: "      cellId && (asyncMethods[cellId] ?? []).includes(methodName)",
-    replace: "      false && (asyncMethods[cellId] ?? []).includes(methodName)",
+    find: "      cellId && Object.hasOwn(asyncMethods, cellId) &&",
+    replace: "      false && Object.hasOwn(asyncMethods, cellId) &&",
     test: "tests/trojan-async-rejection-reaches-caller.test.ts",
     filter:
       "trojan dispatch: a post-await throw is the route's answer, not a log line",
@@ -651,8 +743,9 @@ export const LEDGER: readonly Mutation[] = [
     what:
       "a grown string goes back to shipping WHOLE on every broadcast window \u2014 a streamed reply costs its own length squared and pushes the app over the pressure threshold, exactly the field report the append op closed",
     file: "src/state/patch-compact.ts",
-    find: "  return narrowStringPatches(prev, narrowArrayPatches(prev, ops));",
-    replace: "  return narrowArrayPatches(prev, ops);",
+    find:
+      "  const narrowed = narrowStringPatches(prev, narrowArrayPatches(prev, ops));",
+    replace: "  const narrowed = narrowArrayPatches(prev, ops);",
     test: "tests/append-patches-wire.test.ts",
     filter:
       "append: streaming 50 chunks into a 10 KB string costs the chunks, not the string",
@@ -687,6 +780,141 @@ export const LEDGER: readonly Mutation[] = [
     test: "tests/patch-ops.test.ts",
     filter:
       "browser applier: handleMessage applies an append frame to the client state",
+  },
+  {
+    what:
+      "a peer that stopped reading is skipped by broadcastRaw instead of closed — it misses a sync op, moves its cursor past it and silently diverges forever",
+    file: "src/server/server-broadcast.ts",
+    find: "        _closeNotDraining(ws, meta);",
+    replace: "        void _closeNotDraining;",
+    test: "tests/ws-raw-broadcast-backlog.test.ts",
+    filter:
+      "ws backlog: broadcastRaw stops feeding a peer that never reads, and closes it so it resyncs",
+  },
+  {
+    what:
+      "a frozen client that recovers on an IDLE app is never resynced — its skipped rounds are lost and it shows stale state until some unrelated write happens",
+    file: "src/server/server-broadcast.ts",
+    find: "    resyncRecovered,",
+    replace: "    (_id: string) => {},",
+    test: "tests/frozen-client-recovery-resync.test.ts",
+    filter:
+      "vitals: a frozen client that recovers on an IDLE app is resynced immediately",
+  },
+  {
+    what:
+      "the sync engine prunes and retries a refused op itself — every op lost at the pending cap is reported twice, and a 'N changes were lost' banner doubles",
+    file: "src/sync/sync-engine.ts",
+    find: "        const accepted = await deps.buffer.add(op);",
+    replace:
+      "        let accepted = await deps.buffer.add(op); if (!accepted) { await deps.buffer.pruneConfirmed(cell); accepted = await deps.buffer.add(op); }",
+    test: "tests/sync/cap-drop-reported-once.test.ts",
+    filter: "sync cap: a refused op fires onDrop exactly once",
+  },
+  {
+    what:
+      "with per-user auth, the time-travel flush sends every user's action log (types, timings, error text) to every other user's socket",
+    file: "src/server/server-broadcast.ts",
+    find:
+      "        if (meta.perUserAuth && !rawStateControlAllowed(meta.user)) continue;",
+    replace:
+      "        if (meta.perUserAuth && !rawStateControlAllowed(meta.user) && Date.now() < 0) continue;",
+    test: "tests/tt-state-per-user-admin-only.test.ts",
+    filter:
+      "tt-state: a user's action log reaches admin sockets, never another user's — on flush and on connect",
+  },
+  {
+    what:
+      "with per-user auth, a socket's connect greeting hands a non-admin the whole time-travel history of every user",
+    file: "src/server/server-ws.ts",
+    find: "        !(meta.perUserAuth && !rawStateControlAllowed(meta.user))",
+    replace:
+      "        !(meta.perUserAuth && !rawStateControlAllowed(meta.user) && Date.now() < 0)",
+    test: "tests/tt-state-per-user-admin-only.test.ts",
+    filter:
+      "tt-state: a user's action log reaches admin sockets, never another user's — on flush and on connect",
+  },
+  {
+    what:
+      "the WebSocket Origin gate drifts from originVerdict, the decider the HTTP gate reads — aio's own Electron dev window (aio://app) is refused its socket while HTTP admits it",
+    file: "src/server/server-ws.ts",
+    find: "      const verdict = originVerdict(origin, {",
+    replace:
+      '      const verdict = origin.startsWith("aio:") ? { status: 403 as const, reason: "" } : originVerdict(origin, {',
+    test: "tests/ws-origin-one-decider.test.ts",
+    filter:
+      "ws origin: the upgrade gate answers exactly what originVerdict answers — aio://app included",
+  },
+  {
+    what:
+      "the sync handler keeps writing sync-res / acks / whole-cell pushes to a peer that stopped reading — unbounded server heap per stuck sync client",
+    file: "src/sync/server-handler.ts",
+    find: "    if (!gone && held > SYNC_SOCKET_HIGH_WATER) {",
+    replace: "    if (!gone && held < 0) {",
+    test: "tests/sync-send-high-water.test.ts",
+    filter:
+      "sync sendTo: a peer over the high-water mark is closed 1013, not written to; a draining one is answered",
+  },
+  {
+    what:
+      "a notify() storm keeps queueing toasts for a peer that stopped reading, and counts them as shown",
+    file: "src/server/server-broadcast.ts",
+    find: "          (dropped ??= []).push(meta);",
+    replace: "          (dropped ??= []).push(meta); ws.send(raw); n++;",
+    test: "tests/ws-notify-backlog.test.ts",
+    filter:
+      "broadcastUi: a toast skips a peer over the high-water mark, keeps it open, says so once, and counts only deliveries",
+  },
+  {
+    what:
+      "a client's cdiag frame stores a failure count no client can have (negative, fractional, infinite) and /__aio/health reports it as fact",
+    file: "src/diagnostics/degraded.ts",
+    find:
+      '  const failures = typeof f === "number" && Number.isFinite(f) && f > 0',
+    replace: '  const failures = typeof f === "number"',
+    test: "tests/cdiag-client-origin.test.ts",
+    filter:
+      "cdiag: impossible numbers are not reported as fact, and the report is attributed to its client in the server log",
+  },
+  {
+    what:
+      "a client's cdiag report turns /__aio/health degraded with nothing in the server log saying which client (or user) claimed it",
+    file: "src/diagnostics/degraded.ts",
+    find: "  if (said.has(name) || said.size >= CLIENT_CAP_PER_CLIENT) return;",
+    replace: "  if (said.has(name) || said.size >= 0) return;",
+    test: "tests/cdiag-client-origin.test.ts",
+    filter:
+      "cdiag: impossible numbers are not reported as fact, and the report is attributed to its client in the server log",
+  },
+  {
+    what:
+      "a closed Electron window's cdiag report stays on /__aio/health as degraded until the process restarts — the UDS router never cleared a gone peer's record",
+    file: "src/server/uds.ts",
+    find: "  if (client) _clearClientDegraded(client.id);",
+    replace: "  if (client && Date.now() < 0) _clearClientDegraded(client.id);",
+    test: "tests/uds-cdiag-client-origin.test.ts",
+    filter:
+      "uds cdiag: impossible numbers are not reported as fact, the report is attributed once per name, and a gone peer's report is cleared",
+  },
+  {
+    what:
+      "a notify() raised inside a signed-in user's call reaches every other user's screen and nothing ever says so",
+    file: "src/server/aio-dispatch.ts",
+    find: "    warn(notifyCrossUserNotice());",
+    replace: "    void notifyCrossUserNotice;",
+    test: "tests/notify-per-user-notice.test.ts",
+    filter:
+      "notify: raised in a signed-in user's call → delivered app-wide as documented, and named once",
+  },
+  {
+    what:
+      "the same notify() moved into a `worker: true` cell reaches every other user's screen and nothing says so — only the dispatch loop's router knew the notice",
+    file: "src/server/aio.ts",
+    find: "              _workerUserCalls > 0,",
+    replace: "              _workerUserCalls < 0,",
+    test: "tests/worker-notify-per-user-notice.test.ts",
+    filter:
+      "notify from a REAL worker cell: raised in a signed-in user's call → delivered app-wide, and named once",
   },
 ];
 

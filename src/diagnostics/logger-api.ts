@@ -6,17 +6,91 @@ import { printConsole } from "./logger-format.ts";
 import { frozenWriteMessage, isFrozenWriteError } from "../state/immutable.ts";
 
 // ── Public singleton ──────────────────────────────────────────────────
+//
+// ONE PROCESS CAN RUN SEVERAL APPS (library mode, `testApps`), and each has
+// its own logger writing to its own directory. This used to be a single slot:
+// the last app to boot took it, and the first app to CLOSE emptied it. So with
+// app B up, app A's errors were written into B's `error.log`; after B closed,
+// A's errors reached no file at all and `reportError` crashed on the null.
+//
+// Three tiers now, resolved per call by `getLogger()`:
+//   1. an explicit `setLogger(sink)` — a test's capture sink, `am`'s stderr
+//      sink, the data-contract query. The most specific instruction wins.
+//   2. the logger of the app whose code is running (`setLoggerScope` — each
+//      `aio.run()` runs as its app, so everything its boot starts — routes,
+//      timers, sockets, dispatch — carries the scope). An app whose logger
+//      does not exist YET (early boot, or `logging: false`) is console-only:
+//      never another app's files.
+//   3. the most recently installed app logger that is still running — module
+//      code outside any app. Never null while any app with a logger runs.
 
-let _active: LogSink | null = null;
+let _override: LogSink | null = null;
 
-/** Wire the framework logger instance into the public singleton */
+/** App loggers, oldest first. `up` flips when the app has started, which is
+ *  what `setLogger(null)` needs to tell a refused boot's logger (detach it)
+ *  from a running app's (never). */
+const _apps: { sink: LogSink; up: boolean }[] = [];
+/** Loggers whose app has stopped. An override pointing at one is stale — the
+ *  `prev = getLogger(); …; setLogger(prev)` idiom captures an app's logger
+ *  and would otherwise pin a closed app's sink as the process logger. */
+const _retired = new WeakSet<LogSink>();
+
+/** `undefined` — no app is running this code; `null` — an app is, and it has
+ *  no logger (yet): console only. */
+let _scope: (() => LogSink | null | undefined) | null = null;
+
+/** Wire the framework logger instance into the public singleton.
+ *
+ *  A sink is an explicit override and wins over every app's own logger.
+ *  `null` clears the override, and also detaches any app logger whose app
+ *  never came up (a refused boot's teardown calls exactly this) — a RUNNING
+ *  app's logger is only ever detached by that app's own stop. */
 export function setLogger(l: LogSink | null): void {
-  _active = l;
+  _override = l;
+  if (l !== null) return;
+  for (const e of _apps.filter((a) => !a.up)) releaseAppLogger(e.sink);
+}
+
+/** Install one app's logger (at its boot). It becomes the fallback for code
+ *  outside any app until a later app installs its own. */
+export function installAppLogger(l: LogSink): void {
+  releaseAppLogger(l);
+  _retired.delete(l);
+  _apps.push({ sink: l, up: false });
+}
+
+/** The app is up: from here only `releaseAppLogger` detaches its logger. */
+export function markAppLoggerUp(l: LogSink): void {
+  const e = _apps.find((a) => a.sink === l);
+  if (e) e.up = true;
+}
+
+/** Detach exactly this app's logger — its app stopped. Every other app's
+ *  logger stays where it was. */
+export function releaseAppLogger(l: LogSink): void {
+  const i = _apps.findIndex((a) => a.sink === l);
+  if (i >= 0) _apps.splice(i, 1);
+  _retired.add(l);
+}
+
+/** How to ask "whose app is running this code?". Installed once by the
+ *  server side (an AsyncLocalStorage, which this client-reachable module must
+ *  not import). */
+export function setLoggerScope(
+  get: () => LogSink | null | undefined,
+): void {
+  _scope = get;
 }
 
 /** Get the active logger instance (null if not configured) */
 export function getLogger(): LogSink | null {
-  return _active;
+  if (_override && !_retired.has(_override)) return _override;
+  const scoped = _scope?.();
+  // An app with no logger of its own is NOT the last app's: its early boot
+  // lines went into the other app's files.
+  if (scoped === null) return null;
+  if (scoped && _apps.some((a) => a.sink === scoped)) return scoped;
+  return _apps.at(-1)?.sink ?? null;
 }
 
 /** Where the app's logs live when no LOGGER is active.
@@ -43,7 +117,7 @@ export function setFallbackLogDir(dir: string | null): void {
  *  the default dot-dir. Single source of truth for the diagnostics +
  *  client-log sinks. */
 export function getLogDir(): string {
-  return _active?.logDir ?? _fallbackLogDir ?? DEFAULT_LOG_DIR;
+  return getLogger()?.logDir ?? _fallbackLogDir ?? DEFAULT_LOG_DIR;
 }
 
 /** Public log API — falls back to console when AioLogger is not active.
@@ -144,8 +218,9 @@ function emit(
   c?: Record<string, unknown>,
 ): void {
   const [cat, msg, data] = resolveArgs(a, b, c);
-  if (_active) {
-    _active.pub(lvl, cat, msg, data);
+  const active = getLogger();
+  if (active) {
+    active.pub(lvl, cat, msg, data);
     return;
   }
   // Fallback: console mirrors app.log — info, warn + error only
@@ -225,8 +300,9 @@ export function _resetFrozenWriteHint(): void {
  */
 function explainFrozenWrite(line: string): void {
   if (_saidFrozen || !line) return;
-  // The cheap test first: the engine's phrasings all contain one of these.
-  if (!/read.only|not extensible|Cannot delete property/i.test(line)) return;
+  // The engine's own property phrasings, and only those — see immutable.ts.
+  // (The cheap prefilter that sat here was `read.only`, which is how an EROFS
+  // "Read-only file system" error came to be explained as frozen state.)
   if (!isFrozenWriteError(line)) return;
   _saidFrozen = true;
   emit("error", frozenWriteMessage("state is frozen"), undefined, undefined);

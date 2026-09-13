@@ -13,9 +13,16 @@ import {
   isChildOf,
   removeDom,
 } from "./vdom-remove.ts";
-import { _occupied, createDom } from "./vdom-render.ts";
+import { _fallbackSlot, _occupied, createDom } from "./vdom-render.ts";
 import { _registerLazyListeners } from "./vdom-create.ts";
 import type { DiffFn } from "./vdom-diff-children.ts";
+import {
+  _boundaryStack,
+  _instanceStack,
+  _isolationBases,
+  _noteDiscard,
+  _suspenseRetries,
+} from "./renderer-state.ts";
 
 /** DiffChildren function signature — injected to break circular dep.
  *  Returns the region's first DOM node (see `diffChildren`). */
@@ -275,6 +282,12 @@ export function _diffErrorBoundary(
   const oldFirst = _regionStart(parent, ov, startAnchor);
   const at = _regionAnchor(parent, ov, oldFirst);
 
+  // On the boundary stack for the CHILDREN only (popped before the fallback
+  // work in either exit), exactly as the mount branch does: a component that
+  // throws in here during a re-render pass must reach THIS catch rather than be
+  // contained where it stands (`_isolationBases`), and a component created on
+  // recovery records this boundary as its own instead of the one outside it.
+  _boundaryStack.push(nv);
   try {
     if (wasError) {
       // Recovering from error: build the children FIRST and only then retire
@@ -323,15 +336,23 @@ export function _diffErrorBoundary(
       );
       _updateContainerDom(parent, nv, ov, ctx, regionFirst);
     }
+    _boundaryStack.pop();
     nv._rendered = undefined;
   } catch (error) {
+    _boundaryStack.pop();
+    // Whatever the children built before the throw is thrown away here or by
+    // the boundary above — retired by the region's owner (`_sweepDiscarded`).
+    // A throw that was not a component's (a malformed child) passes no
+    // `abortComponent`, so the boundary records it itself.
+    _noteDiscard();
     // AIO-178: re-throw _LAZY_PENDING so Suspense can handle it
     if (error === _LAZY_PENDING) throw error;
     if (!fallback) throw error;
     // AIO-190: call fallback BEFORE removing old DOM
-    let fallbackVnode: VNode | string | number | null;
+    let fallbackVnode: VNode | string | number;
     try {
-      fallbackVnode = fallback(error as Error);
+      // Nothing to show is a placeholder, never `null` — see `_fallbackSlot`.
+      fallbackVnode = _fallbackSlot(fallback(error as Error));
     } catch (fallbackError) {
       console.error(
         "[aio:vdom] ErrorBoundary fallback threw:",
@@ -358,16 +379,14 @@ export function _diffErrorBoundary(
       return;
     }
     _retireRegion(parent, ov, ctx, oldFirst, startAnchor, at);
-    if (fallbackVnode != null) {
-      const dom = createDom(fallbackVnode, ctx, isSvg, parent);
-      // The node the fallback OCCUPIES, not the carrier `createDom` returned: a
-      // bare-string fallback has no `_dom` to look up and a Fragment's carrier
-      // is a DocumentFragment that insertion empties and leaves detached, so
-      // the boundary was left anchored to nothing and lost its slot.
-      const first = dom ? _occupied(fallbackVnode, dom) : null;
-      if (dom) _insertAt(parent, dom, at);
-      nv._dom = first ?? undefined;
-    }
+    const dom = createDom(fallbackVnode, ctx, isSvg, parent);
+    // The node the fallback OCCUPIES, not the carrier `createDom` returned: a
+    // bare-string fallback has no `_dom` to look up and a Fragment's carrier
+    // is a DocumentFragment that insertion empties and leaves detached, so
+    // the boundary was left anchored to nothing and lost its slot.
+    const first = dom ? _occupied(fallbackVnode, dom) : null;
+    if (dom) _insertAt(parent, dom, at);
+    nv._dom = first ?? undefined;
   }
 }
 
@@ -391,14 +410,24 @@ export function _diffSuspense(
   // Measured before any removal — see the same comment in _diffErrorBoundary.
   const oldFirst = _regionStart(parent, ov, startAnchor);
   const at = _regionAnchor(parent, ov, oldFirst);
+  // AIO-201: the children a retry finished building, retired if the failure
+  // leaves this boundary (see the catch).
+  const created: (VNode | string | number)[] = [];
   try {
     if (wasPending) {
       // Was showing fallback, try rendering children again — same slot. The
       // fallback is retired only once they SUCCEED (see _diffErrorBoundary).
       const frag = ctx.doc.createDocumentFragment();
       let firstDom: Node | null = null;
-      // AIO-201: track created children so we can clean up on partial failure
-      const created: (VNode | string | number)[] = [];
+      // Not contained per component in here (`-1`): the build is off-document
+      // and all-or-nothing, so a component that throws must fail the WHOLE
+      // retry — an empty slot for it would retire the fallback and show a
+      // hole. The catch below contains it at this boundary instead.
+      _isolationBases.push(-1);
+      _suspenseRetries.push({
+        instances: _instanceStack.length,
+        boundaries: _boundaryStack.length,
+      });
       try {
         for (const child of nv.children) {
           const childDom = createDom(child, ctx, isSvg, parent);
@@ -408,12 +437,9 @@ export function _diffSuspense(
           }
           created.push(child);
         }
-      } catch (innerThrown) {
-        // AIO-201: clean up partially-created children
-        for (const child of created) {
-          if (typeof child === "object") _removeDomCleanup(child, ctx);
-        }
-        throw innerThrown;
+      } finally {
+        _suspenseRetries.pop();
+        _isolationBases.pop();
       }
       const produced = frag.firstChild;
       removeDom(parent, ov._rendered!, ctx, oldFirst);
@@ -446,28 +472,47 @@ export function _diffSuspense(
     }
     nv._rendered = undefined;
   } catch (thrown) {
-    if (thrown !== _LAZY_PENDING) throw thrown;
-    // Register for lazy resolution notifications
-    _registerLazyListeners(nv.children, ctx);
-    nv._rendered = fallback ?? null;
-    if (wasPending && ov._rendered != null && fallback != null) {
+    // What the children built before the throw is discarded — retired by the
+    // region's owner once this boundary shows its fallback (`_sweepDiscarded`).
+    _noteDiscard();
+    if (thrown !== _LAZY_PENDING) {
+      // A retry from the fallback that failed for REAL (a lazy import that
+      // rejected, a child that throws). The fallback is untouched — it is only
+      // retired once the children succeed — so during a re-render pass it is
+      // this boundary's last committed output, kept exactly like a component's
+      // (see `_isolationBases`): "the <Suspense> fallback stays on screen".
+      const contained = wasPending && ov._rendered != null &&
+        fallback != null &&
+        !!ctx.hooks?.isolateComponentError?.(nv, ov, thrown, undefined);
+      if (!contained) {
+        // The failure leaves this boundary, so it never shows a fallback and
+        // no sweep sees it as discarded: retire what the retry built here.
+        for (const child of created) {
+          if (typeof child === "object") _removeDomCleanup(child, ctx);
+        }
+        throw thrown;
+      }
+    } else {
+      // Register for lazy resolution notifications
+      _registerLazyListeners(nv.children, ctx);
+    }
+    // No fallback is a placeholder, never `null` — see `_fallbackSlot`.
+    const shown = _fallbackSlot(fallback);
+    nv._rendered = shown;
+    if (wasPending && ov._rendered != null) {
       // Still pending — patch the fallback that is already on screen instead of
       // rebuilding it. This is the whole duration of a lazy load, so rebuilding
       // restarted a spinner's animation on every render in between.
-      nv._dom = _diffFn(parent, fallback, ov._rendered, ctx, isSvg, oldFirst) ??
+      nv._dom = _diffFn(parent, shown, ov._rendered, ctx, isSvg, oldFirst) ??
         undefined;
       return;
     }
-    if (!wasPending) {
-      _retireRegion(parent, ov, ctx, oldFirst, startAnchor, at);
-    } else if (ov._rendered != null) {
-      removeDom(parent, ov._rendered, ctx, oldFirst);
-    }
-    if (fallback != null) {
-      const dom = createDom(fallback, ctx, isSvg, parent);
-      const first = dom ? _occupied(fallback, dom) : null;
-      if (dom) _insertAt(parent, dom, at);
-      nv._dom = first ?? undefined;
-    }
+    // Not pending before (a pending one was patched above): the children's
+    // region gives way to the fallback.
+    _retireRegion(parent, ov, ctx, oldFirst, startAnchor, at);
+    const dom = createDom(shown, ctx, isSvg, parent);
+    const first = dom ? _occupied(shown, dom) : null;
+    if (dom) _insertAt(parent, dom, at);
+    nv._dom = first ?? undefined;
   }
 }

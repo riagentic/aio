@@ -6,6 +6,7 @@
 
 import { readDenoJsonSync } from "../server/deno-json.ts";
 import { envPort, resolveEntryPath } from "../server/paths.ts";
+import { envDefaultPort } from "../server/aio-cli.ts";
 import {
   type InstanceInfo,
   instances,
@@ -17,9 +18,13 @@ import {
   writeLock,
 } from "../server/single-instance-lock.ts";
 import { basename, join, resolve } from "@std/path";
-import { appDirs, registerAppDirs } from "../server/app-dirs.ts";
+import {
+  appDirs,
+  registerAppDirs,
+  RESERVED_APP_NAMES,
+} from "../server/app-dirs.ts";
 import type { GlobalFlags } from "./am-types.ts";
-import { detectMode, fail, out, outError } from "./am-output.ts";
+import { detectMode, fail, outError, outValue } from "./am-output.ts";
 import { trojanGet, trojanPost } from "./am-http.ts";
 import { type Component, projectComponents } from "./am-components.ts";
 import { cwdIsProject, projectRoot } from "./am-project.ts";
@@ -155,9 +160,12 @@ export function resolveAmAppId(flag?: string): string {
 
 /** The port this app has DECLARED, or undefined when it has declared none.
  *
- *  THE SAME three rungs the runtime resolves, in the same order (`aio.ts`:
- *  `cli.port ?? envPort() ?? config.port ?? await findFreePort()`):
- *  `--port` > `AIO_PORT` > the entry's `aio.run({ port })`.
+ *  THE SAME four rungs the runtime resolves, in the same order (`aio.ts`:
+ *  `cli.port ?? envPort() ?? config.port ?? envDefaultPort() ?? await
+ *  findFreePort()`): `--port` > `AIO_PORT` > the entry's `aio.run({ port })` >
+ *  `AIO_DEFAULT_PORT`. The last one is what a generated systemd unit sets; `am`
+ *  run with that environment used to say "the app picks a free port" about a
+ *  service that binds 3000 on every restart.
  *
  *  Undefined is an answer, not a gap. It used to fall back to 8000 — so
  *  `am start` and `deno task dev` gave the SAME app two different ports, and
@@ -177,7 +185,8 @@ export function declaredPort(flag?: number): number | undefined {
   const env = envPort(); // throws on a malformed AIO_PORT — see resolvePort
   if (env !== undefined) return env;
   _warnDenoJsonPort();
-  return readEntryConfig().port;
+  // `AIO_DEFAULT_PORT=0` means "pick a free one" — no rung, as in `aio.ts`.
+  return readEntryConfig().port ?? (envDefaultPort() || undefined);
 }
 
 /** Dropping a rung silently is the failure this codebase keeps fixing, so the
@@ -589,7 +598,7 @@ export function resolvePath(
 
 /** Parse CLI arguments into command, positional args, and global flags (--json, --quiet, --port, --app) */
 export function parseGlobalFlags(
-  raw: string[],
+  argv: string[],
 ): { command: string; args: string[]; flags: GlobalFlags } {
   const flags: GlobalFlags = {};
   const rest: string[] = [];
@@ -626,6 +635,15 @@ export function parseGlobalFlags(
   // negative NUMBER is still a value (`--wait=-5` has its own bounds check).
   const looksLikeFlag = (t: string | undefined) =>
     t !== undefined && /^-[A-Za-z-]/.test(t);
+  // `--` ends am's options: everything after it is an ARGUMENT, however it is
+  // spelled. The flag gate (am-flags.ts `unknownFlags`) already stopped at it,
+  // but this parser did not — so `am dispatch todo:add -- --force` consumed
+  // `--force` as am's own flag and dispatched with no argument at all. The
+  // marker itself stays in `rest`, so the gate still sees where options end;
+  // {@linkcode argsForHandler} removes it before a verb reads its arguments.
+  const end = argv.indexOf("--");
+  const tail = end === -1 ? [] : argv.slice(end);
+  const raw = end === -1 ? argv : argv.slice(0, end);
   for (let i = 0; i < raw.length; i++) {
     const a = raw[i]!;
     if (takesValue.has(a) && i + 1 < raw.length && !looksLikeFlag(raw[i + 1])) {
@@ -752,10 +770,28 @@ export function parseGlobalFlags(
     else if (a === "--help" || a === "-h") flags.help = true;
     else rest.push(a);
   }
+  rest.push(...tail);
 
   const command = rest[0] ?? "help";
   const args = rest.slice(1);
   return { command, args, flags };
+}
+
+/** The arguments a verb's handler reads: `args` without the first `--`.
+ *
+ *  The marker is kept through `parseGlobalFlags` so the flag gate knows where
+ *  options end, and removed here so `am dispatch t:add -- --force` hands the
+ *  method `"--force"` rather than `"--"` and `"--force"`. A PASSTHROUGH verb
+ *  (`am start`, …) keeps it: its surplus arguments are forwarded to another
+ *  program, and whether `--` means something there is that program's call. */
+export function argsForHandler(
+  args: readonly string[],
+  passthrough: boolean,
+): string[] {
+  const at = args.indexOf("--");
+  return passthrough || at === -1
+    ? [...args]
+    : [...args.slice(0, at), ...args.slice(at + 1)];
 }
 
 /** Parse a numeric CLI argument, or say why it is not one. Never returns NaN.
@@ -905,7 +941,7 @@ export async function runTrojanGet(
     outError(result.error, ctx.mode);
     Deno.exit(1);
   }
-  out(result.data, ctx.mode);
+  outValue(result.data, ctx.mode);
 }
 
 /** POST to a trojan route and print the result — exits(1) loudly on failure. */
@@ -919,7 +955,7 @@ export async function runTrojanPost(
     outError(result.error, ctx.mode);
     Deno.exit(1);
   }
-  out(result.data, ctx.mode);
+  outValue(result.data, ctx.mode);
 }
 
 // ── App names are names, never paths ────────────────────────
@@ -950,6 +986,26 @@ export function appNameError(name: string, verb: string): string | null {
     `  (".", ".." and "a/b" are refused because join() normalizes them: ` +
     `am remove .. would delete $HOME)\n` +
     `  fix: am installed   # lists the names this machine has`;
+}
+
+// `RESERVED_APP_NAMES` lives with the home rule it protects (app-dirs.ts),
+// because the BOOT refuses those names too — `am create` is not the only way
+// an app gets a name. Re-exported here so `am`'s import stays what it was.
+export { RESERVED_APP_NAMES };
+
+/** `null` when `name` may be an app's name, else the refusal — cause and fix.
+ *  Case-insensitive: `~/.SSH` is `~/.ssh` on macOS and Windows. */
+export function reservedAppNameError(
+  name: string,
+  verb: string,
+): string | null {
+  if (!RESERVED_APP_NAMES.has(name.toLowerCase())) return null;
+  return `"${name}" is reserved — ${verb} would use ~/.${name} as the app's ` +
+    `data directory, and that directory belongs to ${
+      name.toLowerCase() === "aio"
+        ? "aio itself (the machine CA and release keys)"
+        : "another program"
+    }.\n  fix: pick another name`;
 }
 
 /** Refuse to write over a file that is already there, unless `--force`.

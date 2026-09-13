@@ -13,8 +13,15 @@ import type { SkvInstance, SkvStmt } from "./skv.ts";
 /** Key separator for multi-key rows. Unit Separator (U+001F) — cell names
  *  are identifier-safe by validation, so it can never collide. */
 const SEP = "\x1f";
-/** Upper bound for prefix range scans (max BMP char). */
-const HIGH = "￿";
+/** Upper bound for a prefix range scan: the character AFTER the separator.
+ *
+ *  It used to be `\uFFFF`, the highest BMP character, which looks like it
+ *  bounds everything and does not — a key whose first character IS `\uFFFF`
+ *  sorts at or past `prefix + SEP + "\uFFFF"` and was silently dropped from
+ *  `getMulti`, having been written without complaint. Half-open on the next
+ *  separator byte has no such edge: every key that starts with `prefix + SEP`
+ *  is below it, whatever follows. */
+const AFTER_SEP = String.fromCharCode(SEP.charCodeAt(0) + 1);
 
 export const SKV_SCHEMA =
   `CREATE TABLE IF NOT EXISTS aio_kv (k TEXT PRIMARY KEY, v TEXT NOT NULL)`;
@@ -76,7 +83,7 @@ export function sqliteKv(db: DB): SkvInstance {
     getMulti: async <T>(prefix: string) => {
       const { rows } = await db.query<{ k: string; v: string }>(
         `SELECT k, v FROM aio_kv WHERE k >= ? AND k < ?`,
-        [`${prefix}${SEP}`, `${prefix}${SEP}${HIGH}`],
+        [`${prefix}${SEP}`, `${prefix}${AFTER_SEP}`],
       );
       if (rows.length === 0) return null;
       const result: Record<string, unknown> = {};

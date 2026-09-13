@@ -11,7 +11,7 @@ import {
   timelineCapped,
 } from "../src/am/am-cmd-timeline.ts";
 import { createTimeline, TIMELINE_RING } from "../src/server/timeline.ts";
-import { parseJournalEntries } from "../src/am/record.ts";
+import { parseJournal } from "../src/am/record.ts";
 import type { GlobalFlags } from "../src/am/am-types.ts";
 
 const FLAGS = { json: true } as unknown as GlobalFlags;
@@ -71,15 +71,15 @@ Deno.test("parseRange: garbage → NaN sentinel", () => {
   assert(Number.isNaN(r.lo) && Number.isNaN(r.hi));
 });
 
-// ── parseJournalEntries (seq preserved) ──────────────────────────────────────
+// ── parseJournal (seq preserved) ─────────────────────────────────────────────
 
-Deno.test("parseJournalEntries: keeps seq + ts, sorts, drops torn tail", () => {
+Deno.test("parseJournal: keeps seq + ts, sorts, drops torn tail", () => {
   const text = [
     JSON.stringify({ seq: 2, type: "c:b", payload: { args: [2] }, ts: 20 }),
     JSON.stringify({ seq: 1, type: "c:a", payload: { args: [1] }, ts: 10 }),
     '{"seq":3,"type":"c:c","payl',
   ].join("\n");
-  const rows = parseJournalEntries(text);
+  const rows = parseJournal(text).rows;
   assertEquals(rows.map((r) => r.seq), [1, 2]);
   assertEquals(rows[0]!.ts, 10);
 });

@@ -22,7 +22,9 @@ Deno.test("_serialize: strings pass through, objects JSON, errors readable, circ
 Deno.test("console intercept: forwards console.* and restores on uninstall", () => {
   const sent: string[] = [];
   try {
-    installConsoleIntercept((msg) => sent.push(msg));
+    installConsoleIntercept((msg) => {
+      sent.push(msg);
+    });
     console.log("via", "intercept");
     console.error("bad");
     assertEquals(sent.length, 2);
@@ -49,7 +51,9 @@ Deno.test("console intercept: forwards console.* and restores on uninstall", () 
 Deno.test("console intercept: forwards uncaught error events", () => {
   const sent: string[] = [];
   try {
-    installConsoleIntercept((msg) => sent.push(msg));
+    installConsoleIntercept((msg) => {
+      sent.push(msg);
+    });
     const evt = new ErrorEvent("error", {
       error: new Error("uncaught-boom"),
       message: "uncaught-boom",
@@ -83,7 +87,9 @@ Deno.test("console intercept: forwards uncaught error events", () => {
 Deno.test("console intercept: the forwarded entry carries the CALLER's location", () => {
   const sent: string[] = [];
   try {
-    installConsoleIntercept((msg) => sent.push(msg));
+    installConsoleIntercept((msg) => {
+      sent.push(msg);
+    });
     console.warn("[gate] start");
   } finally {
     uninstallConsoleIntercept();

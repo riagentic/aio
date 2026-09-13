@@ -13,7 +13,13 @@
  * this module is the one decider, dependency-free so both `am-utils` and
  * `am-components` can import it without a cycle.
  */
-import { dirname, join, resolve, SEPARATOR as sep } from "@std/path";
+import {
+  dirname,
+  isAbsolute,
+  join,
+  resolve,
+  SEPARATOR as sep,
+} from "@std/path";
 import { DENO_JSON_NAMES } from "../server/deno-json.ts";
 
 /** The project this `am` invocation is about: the nearest ancestor of the cwd
@@ -57,4 +63,40 @@ export function isUnder(root: string, path: string): boolean {
   const a = resolve(root);
   const b = resolve(path);
   return b === a || b.startsWith(a.endsWith(sep) ? a : a + sep);
+}
+
+/** Where a FILE argument (`am preview <file>`, `am where <file>`) points — THE
+ *  rule, so two verbs cannot read one path two ways.
+ *
+ *  They did. `am where src/ui/Card.tsx` resolved from the project root and
+ *  `am preview src/ui/Card.tsx` from the ENTRY's directory, so the path a shell
+ *  completes answered "no such file …/src/src/ui/Card.tsx" in one verb and
+ *  worked in the other. The rule is what a shell user means: relative to the
+ *  cwd first (tab completion writes that path, and `deno task am` runs from the
+ *  project root), then each fallback `base` in order — the project root, and
+ *  for preview the app directory, so the `ui/Card.tsx` spelling that was the
+ *  only one that worked keeps working. The first path that EXISTS wins; none
+ *  existing returns every place looked, so the refusal can name them. */
+export function resolveFileArg(
+  target: string,
+  bases: readonly string[],
+  cwd = Deno.cwd(),
+): { ok: true; path: string } | { ok: false; tried: string[] } {
+  if (isAbsolute(target)) {
+    return exists(target)
+      ? { ok: true, path: target }
+      : { ok: false, tried: [target] };
+  }
+  const tried = [...new Set([cwd, ...bases].map((b) => resolve(b, target)))];
+  const hit = tried.find(exists);
+  return hit ? { ok: true, path: hit } : { ok: false, tried };
+}
+
+function exists(path: string): boolean {
+  try {
+    Deno.statSync(path);
+    return true;
+  } catch {
+    return false;
+  }
 }

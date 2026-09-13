@@ -22,7 +22,7 @@ import {
 import type { ScheduleEffect } from "../state/schedule.ts";
 import type { OwnEffect } from "../state/own.ts";
 import { routeEffect } from "../state/route-effect.ts";
-import { notifyPayload } from "../state/notify.ts";
+import { type NotifyEffect, notifyPayload } from "../state/notify.ts";
 import { enc } from "../protocol/envelope.ts";
 import { diagEmit } from "../diagnostics/diagnostic-bus.ts";
 import { runWithUser } from "./auth-context.ts";
@@ -31,6 +31,74 @@ import { runWithUser } from "./auth-context.ts";
 type User = { id: string; role: string };
 
 /** Patch entry — cell name + immer ops from a single reduce call */
+/** Show a `notify()` effect: a desktop notification is rendered by a CLIENT,
+ *  so the server's job is to hand it to every connected one — and to SAY so
+ *  when none is, because a card that never appeared is the silent shape.
+ *
+ *  Exported because two call sites need the same semantics: the dispatch
+ *  loop's effect router, and the worker pool's — a `notify()` from a
+ *  `worker: true` cell is posted home as an effect and executed on the main
+ *  isolate. The pool's router hand-wrote its own chain (schedule, own, then
+ *  "must be an app action"), so a notify effect from a worker was dispatched
+ *  as an action type no cell answers and vanished without a log. One
+ *  implementation, so the two can no longer disagree about what a
+ *  notification does.
+ */
+export function showNotifyEffect(
+  e: NotifyEffect,
+  broadcastUi: ((raw: string) => number) | undefined,
+  warn: (msg: string) => void,
+): number {
+  const raw = enc("notify", notifyPayload(e));
+  const reached = broadcastUi?.(raw) ?? 0;
+  if (reached === 0) {
+    warn(
+      `notify: no UI client is connected — "${e.title}" was not ` +
+        `shown (a server-only or CLI-only run has nowhere to show it)`,
+    );
+  }
+  return reached;
+}
+
+/** The one-time notice for a `notify()` raised inside a SIGNED-IN user's call.
+ *
+ *  The documented contract (docs/clients/notifications.md) is that the server
+ *  hands a notification to EVERY connected UI client — and under per-user
+ *  auth "every client" is every user's session. So a method that tells alice
+ *  "your card was declined" pops that card up on bob's screen too, which the
+ *  r3 auth hunt observed and nothing said. The contract is public and frozen,
+ *  so it is not narrowed silently to the caller; it is NAMED, at the moment
+ *  an app first relies on it with a user in scope (a call with no user —
+ *  public or shared-key mode, a schedule, server code — crosses no user
+ *  boundary and says nothing). @internal */
+export function notifyCrossUserNotice(): string {
+  return `notify: a notification was raised inside a signed-in user's call, ` +
+    `and — as documented — it is shown on EVERY connected UI client, other ` +
+    `users' sessions included. notify() is app-wide: do not put one user's ` +
+    `data in its title or body; show per-user news through that user's own ` +
+    `state (a forUser-visible field) instead. (said once per app)`;
+}
+
+/** Say {@link notifyCrossUserNotice} once per app, from EVERY router that shows
+ *  a notification: the dispatch loop's (main-isolate cells) and the worker
+ *  pool's (aio.ts — a `worker: true` cell's notify is posted home and shown
+ *  there). Only the dispatch loop had been taught the notice, so the same
+ *  method moved into a worker put one user's toast on another user's screen
+ *  with nothing naming it. One gate per app, handed to both, so the notice is
+ *  one decision and one line whichever kind of cell raises it first.
+ *  Call it with what `showNotifyEffect` returned and the user in scope for
+ *  the call that raised the notification. @internal */
+export function notifyCrossUserGate(
+  warn: (msg: string) => void,
+): (reached: number, user: unknown) => void {
+  let said = false;
+  return (reached, user) => {
+    if (said || reached === 0 || !user) return;
+    said = true;
+    warn(notifyCrossUserNotice());
+  };
+}
+
 export type PatchEntry = {
   cell: string;
   ops: import("../protocol/patch-ops.ts").WirePatch[];
@@ -141,6 +209,9 @@ export type DispatchSetupDeps<S, A, E, App = any> = {
   /** Exact action types omitted from time-travel history (diagnostics
    *  `skipActions`) — framework-internal suffixes are always skipped. */
   ttSkipActions?: Set<string>;
+  /** The app's {@link notifyCrossUserGate}. aio.ts passes the one it also
+   *  hands the worker pool's effect router; absent, this loop keeps its own. */
+  notifyCrossUser?: (reached: number, user: unknown) => void;
   /** Accepted and unused since alpha70: the drain gate no longer counts
    *  pending calls (it reads the `_inflight` flag on the action instead —
    *  dispatch.ts INFLIGHT), so there is nothing left to scope.
@@ -169,6 +240,26 @@ function isInternalAction(type: string): boolean {
   return false;
 }
 
+/** Route a hook's REJECTION where its throw goes.
+ *
+ *  The observe-only hooks are typed `=> void`, but an `async` hook — or one
+ *  that returns the cell-method call it made — does not throw, it rejects, and
+ *  try/catch never sees that. The app's own hook reached the crash handler as
+ *  an unhandled rejection while the app ran, and ended the process during
+ *  `close()` (a hook reacting to a `__destroy`). `composeHooks` already guarded
+ *  this for plugin hooks; with no plugins the app's hook is called straight
+ *  from here, so here is where it is guarded. ONE definition: the WebSocket
+ *  manager's `onConnect` / `onDisconnect` runner (server-ws.ts) reads it too.
+ *  @internal */
+export function guardHookResult(
+  r: unknown,
+  failed: (e: unknown) => void,
+): void {
+  if (typeof (r as PromiseLike<unknown> | null)?.then === "function") {
+    (r as PromiseLike<unknown>).then(undefined, failed);
+  }
+}
+
 /** Wire reduce/execute hooks, time-travel, patch collection, and create dispatch loop.
  *
  *  Hook execution order (per action in a batch):
@@ -180,7 +271,8 @@ function isInternalAction(type: string): boolean {
  *  After the batch drains (all queued actions processed):
  *    6. onDone()                          — persist state + broadcast patches to clients
  *
- *  Any hook throwing is caught, reported via AioError, and does not abort the batch. */
+ *  Any hook throwing — or rejecting — is caught, reported via AioError, and
+ *  does not abort the batch. */
 // App default must be `any` for function parameter contravariance
 // deno-lint-ignore no-explicit-any
 export function setupDispatch<S, A, E, App = any>(
@@ -212,6 +304,9 @@ export function setupDispatch<S, A, E, App = any>(
   let _currentActionUser: User | undefined;
   // Tracks whether any action actually ran reduce() in this drain cycle
   let _anyProcessed = false;
+  // `notifyCrossUserNotice` — once per app, not per call (see the gate).
+  const _notifyCrossUser = deps.notifyCrossUser ??
+    notifyCrossUserGate((m) => log.warn(m));
 
   const hookedReduce: typeof reduce = (s, a) => {
     const user = (a as Record<string, unknown>)?._user as User | undefined;
@@ -248,9 +343,7 @@ export function setupDispatch<S, A, E, App = any>(
     _anyProcessed = true;
     _currentActionUser = user;
     if (onAction) {
-      try {
-        onAction(a, s, user);
-      } catch (e) {
+      const failed = (e: unknown) => {
         const actionType = (a as Record<string, unknown>)?.type as
           | string
           | undefined;
@@ -259,6 +352,11 @@ export function setupDispatch<S, A, E, App = any>(
           actionType,
         });
         reportAioError(err, reportOpts);
+      };
+      try {
+        guardHookResult(onAction(a, s, user), failed);
+      } catch (e) {
+        failed(e);
       }
     }
     // Ambient identity: reduce (cell methods) runs inside runWithUser so
@@ -281,10 +379,7 @@ export function setupDispatch<S, A, E, App = any>(
   // a green test over a broken path.
   const hookedExecute = (app: App, e: E) => {
     if (onEffect) {
-      try {
-        // (effect, state, user) — positional parity with onAction.
-        onEffect(e, getState(), _currentActionUser);
-      } catch (err) {
+      const failed = (err: unknown) => {
         const effectType = (e as Record<string, unknown>)?.type as
           | string
           | undefined;
@@ -293,6 +388,12 @@ export function setupDispatch<S, A, E, App = any>(
           effectType,
         });
         reportAioError(aioErr, reportOpts);
+      };
+      try {
+        // (effect, state, user) — positional parity with onAction.
+        guardHookResult(onEffect(e, getState(), _currentActionUser), failed);
+      } catch (err) {
+        failed(err);
       }
     }
     return runWithUser(_currentActionUser, () => deps.execute(app, e));
@@ -350,19 +451,11 @@ export function setupDispatch<S, A, E, App = any>(
       routeEffect<E>(effect, {
         schedule: (e) => scheduleManager.handle(e),
         own: (e) => ownManager.handle(e),
-        // A desktop notification is shown by a CLIENT; the server's job is
-        // to hand it to every one that is connected — and to say so when
-        // none is, because a card that never appeared is the silent shape.
-        notify: (e) => {
-          const raw = enc("notify", notifyPayload(e));
-          const reached = getServer().broadcastUi?.(raw) ?? 0;
-          if (reached === 0) {
-            log.warn(
-              `notify: no UI client is connected — "${e.title}" was not ` +
-                `shown (a server-only or CLI-only run has nowhere to show it)`,
-            );
-          }
-        },
+        notify: (e) =>
+          _notifyCrossUser(
+            showNotifyEffect(e, getServer().broadcastUi, log.warn),
+            _currentActionUser,
+          ),
         app: (e) => hookedExecute(getApp(), e),
       }),
     getState,

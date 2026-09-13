@@ -24,7 +24,7 @@ import { BUILD_BOOL_FLAGS, BUILD_VALUE_FLAGS } from "../build/build-flags.ts";
  *  annotation is a WIDENING for every consumer — with the literal type,
  *  `VERSION === "1.0.0-alpha76"` was a compile error for having no overlap;
  *  now it is an ordinary comparison. */
-export const VERSION: string = "1.0.0-beta";
+export const VERSION: string = "1.0.1-beta";
 
 /** What `--version` prints: what this artifact IS, and what it was built with.
  *
@@ -228,6 +228,56 @@ export function cdpPort(): number | undefined {
   return _cdpPort ?? undefined;
 }
 
+/** The variable behind the port chain's LAST rung — see `envDefaultPort`. */
+export const DEFAULT_PORT_ENV = "AIO_DEFAULT_PORT";
+
+/** The port to bind when NOTHING names one — `AIO_DEFAULT_PORT`.
+ *
+ *  The bottom rung of THE port chain, below the app itself: `--port` >
+ *  `AIO_PORT` > `aio.run({ port })` > `AIO_DEFAULT_PORT` > a free one. It
+ *  exists for the one caller that must say "a stable port" without knowing
+ *  whether the app declares its own: the generated systemd unit. `--port=3000`
+ *  there overrode a declared `port: 8123`; no flag at all made the service come
+ *  up on a different random port after every restart (measured: :49167, then
+ *  :57074), where no client could find it twice. `AIO_PORT` would override the
+ *  declaration exactly like the flag did — hence a rung beneath it.
+ *
+ *  Read the same way in dev, prod and compiled: it is an environment fact,
+ *  and a malformed value is REFUSED exactly as `AIO_PORT` is (see `envPort`) —
+ *  a typo that quietly fell back to a random port is the bug this rung fixes.
+ *  `0` means "pick a free one", the same as saying nothing. */
+export function envDefaultPort(): number | undefined {
+  let raw: string | undefined;
+  try {
+    raw = Deno.env.get(DEFAULT_PORT_ENV);
+  } catch {
+    return undefined; // no --allow-env here: the environment is not readable
+  }
+  if (raw === undefined || raw.trim() === "") return undefined;
+  const n = Number(raw.trim());
+  if (!Number.isInteger(n) || n < 0 || n > 65535) {
+    throw new Error(
+      `${DEFAULT_PORT_ENV}=${raw} is not a port (want an integer 0-65535; 0 ` +
+        `means "pick a free one"). Fix or unset it — it will not be ignored.`,
+    );
+  }
+  return n;
+}
+
+/** Did this command line ask for prod — `--prod`, before any bare `--`?
+ *
+ *  THE rule, shared by `parseCli` (the `prod` field) and `isDevBoot` (which
+ *  must answer at IMPORT time, before `aio.run({ appFlags })` has declared the
+ *  app's own flags — so it cannot call `parseCli`, which refuses a flag it
+ *  does not know yet). Pure, never throws. */
+export function prodRequested(args: readonly string[] = Deno.args): boolean {
+  for (const arg of args) {
+    if (arg === "--") return false; // everything after `--` belongs to the app
+    if (arg === "--prod") return true;
+  }
+  return false;
+}
+
 /** Parses CLI flags from Deno.args (or custom array for testing) */
 export function parseCli(args: readonly string[] = Deno.args): CliFlags {
   const isDefault = args === Deno.args;
@@ -334,7 +384,7 @@ function _parseCliUncached(args: readonly string[]): CliFlags {
     } else if (arg === "--keep-server") r.keepServer = true;
     else if (arg.startsWith("--title=")) r.title = arg.slice(8);
     else if (arg === "--verbose") r.verbose = true;
-    else if (arg === "--prod") r.prod = true;
+    else if (arg === "--prod") r.prod = prodRequested(args);
     else if (arg === "--version") r.version = true;
     else if (arg === "--expose") r.expose = true;
     else if (arg.startsWith("--channel=")) r.channel = arg.slice(10);
@@ -571,7 +621,8 @@ export function printHelp(
 Usage: ${usage}
 
 Flags:
-  --port=N         Server port (default: a free one, or $AIO_PORT). Naming a
+  --port=N         Server port (default: $AIO_PORT, then aio.run({ port }),
+                   then $AIO_DEFAULT_PORT, then a free one). Naming a
                    port is ALSO the opt-out from zero TCP ports: a local
                    electron app binds no port unless one is named here
                    (or via $AIO_PORT / aio.run({ port }))

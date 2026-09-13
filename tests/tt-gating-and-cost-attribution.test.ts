@@ -26,8 +26,10 @@ function report(otherBytes: number, cellBytesPerSec: number) {
       keys: [{ key: "labels", bytes: 4032, bytesPerSec: 400, pushes: 15 }],
     }],
     wire: {
-      bytesPerSec: (otherBytes / 10) + cellBytesPerSec,
-      bytesPerSecPerClient: (otherBytes / 10) + cellBytesPerSec,
+      // Consistent with `totalBytes` over the 10s send span, as the meter's
+      // own report always is — `am cost` derives the unattributed rate from it.
+      bytesPerSec: (otherBytes + 23_000) / 10,
+      bytesPerSecPerClient: (otherBytes + 23_000) / 10,
       framesPerSec: 15.6,
       fullResendShare: 0,
       byKind: { patch: 165, full: 0, other: 302 },

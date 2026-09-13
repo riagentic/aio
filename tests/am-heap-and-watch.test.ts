@@ -113,8 +113,10 @@ Deno.test("am help lists heap and state --watch", async () => {
   assertStringIncludes(help, "--watch");
   assertStringIncludes(
     help,
-    "A line per CHANGE",
+    "prints only",
     "the help has to say what makes --watch different from --wait, or the " +
-      "two read as synonyms and people keep writing the until loop",
+      "two read as synonyms and people keep writing the until loop — and it " +
+      "has to say it POLLS, because a change undone between two polls is " +
+      "never printed",
   );
 });

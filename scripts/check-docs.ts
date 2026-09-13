@@ -6,7 +6,13 @@
 import { walk } from "https://deno.land/std@0.208.0/fs/walk.ts";
 
 const DOCS_DIR = new URL("../docs/", import.meta.url).pathname;
-const VERSION_RE = /v(\d+\.\d+\.\d+)/g;
+// The PRERELEASE SUFFIX is part of the version, and leaving it out meant this
+// scan could not tell one release from another: through the whole alpha line
+// `v1.0.0-alpha38` matched as `v1.0.0` and was counted as agreeing with
+// `v1.0.0-alpha77`, so the summary printed "✓ v1.0.0 (66 occurrences)" while
+// verifying nothing. The scan is advisory (docs legitimately name historical
+// versions), but an advisory line that cannot be wrong is not advice.
+const VERSION_RE = /v(\d+\.\d+\.\d+(?:-[0-9A-Za-z][0-9A-Za-z.-]*)?)/g;
 const SKIP_FILES = new Set(["changelog.md", "upgrade.md"]);
 
 async function main(): Promise<void> {
@@ -148,6 +154,14 @@ async function main(): Promise<void> {
     }`,
   );
   if (claimIssues.length) fatal.push(...claimIssues);
+
+  const cssIssues = await checkCollectCss(docs);
+  console.log(
+    `collectCss() examples: ${
+      cssIssues.length ? `${cssIssues.length} ship unstyled CSS` : "all wrapped"
+    }`,
+  );
+  if (cssIssues.length) fatal.push(...cssIssues);
 
   const codeIssues = await checkErrorCodes();
   console.log(
@@ -440,6 +454,46 @@ async function checkSrcDocRefs(): Promise<string[]> {
 
 /** Assert every `AioErrorCode` value defined in src/error.ts appears in
  *  docs/debugging/errors.md. Returns one message per undocumented code. */
+/** `collectCss()` returns CSS, not markup.
+ *
+ *  Measured: it returns `.aio-h66u19{color:red}`. Dropped into
+ *  `<head>${collectCss()}</head>` and parsed, the document has ZERO `<style>`
+ *  elements and that text sits in the head as inert text — every scoped class
+ *  silently does nothing, so a reader who copied the example ships an
+ *  unstyled page and has nothing to grep for.
+ *
+ *  Both code examples in the tree made exactly that mistake, and so did the
+ *  prose beside them, because `collectHead()` — which DOES return markup —
+ *  sits next to it in the same template and reads the same way. So the rule
+ *  is about the PAIR: anything interpolating `collectCss()` into HTML has to
+ *  put a `<style>` around it. */
+async function checkCollectCss(docs: DocFile[]): Promise<string[]> {
+  const root = new URL("..", import.meta.url).pathname;
+  const issues: string[] = [];
+  const scan = (where: string, text: string) => {
+    for (const m of text.matchAll(/\$\{\s*collectCss\(\)\s*\}/g)) {
+      const before = text.slice(Math.max(0, m.index - 80), m.index);
+      if (/<style[^>]*>\s*$/.test(before)) continue;
+      issues.push(
+        `  ${where}: \`${m[0]}\` is not inside a <style> — collectCss() ` +
+          `returns CSS TEXT, so a browser applies none of it`,
+      );
+    }
+  };
+  for (const d of docs) scan(d.rel, d.lines.join("\n"));
+  const walk = async (dir: string): Promise<void> => {
+    for await (const e of Deno.readDir(dir)) {
+      const pth = `${dir}/${e.name}`;
+      if (e.isDirectory) await walk(pth);
+      else if (e.isFile && /\.(ts|tsx)$/.test(e.name)) {
+        scan(pth.slice(root.length), await Deno.readTextFile(pth));
+      }
+    }
+  };
+  await walk(`${root}src`);
+  return issues;
+}
+
 async function checkErrorCodes(): Promise<string[]> {
   const errorTs = await Deno.readTextFile(
     new URL("../src/diagnostics/error.ts", import.meta.url).pathname,
@@ -462,7 +516,9 @@ async function detectVersion(): Promise<string | undefined> {
     const changelog = await Deno.readTextFile(
       new URL("../CHANGELOG.md", import.meta.url).pathname,
     );
-    const match = changelog.match(/^## v?(\d+\.\d+\.\d+)/m);
+    const match = changelog.match(
+      /^## v?(\d+\.\d+\.\d+(?:-[0-9A-Za-z][0-9A-Za-z.-]*)?)/m,
+    );
     return match?.[1];
   } catch {
     return undefined;

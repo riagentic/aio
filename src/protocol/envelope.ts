@@ -314,6 +314,17 @@ export type AckPayload = {
    *  server may name a code this build has never heard of, and erasing it
    *  would be worse than passing it through. */
   code?: string;
+  /** Set ONLY when the server dropped the frame BEFORE running anything,
+   *  against a budget that reopens by itself (messages/sec, bytes/sec, the
+   *  server-wide fuse): the call never ran, and the same frame is expected to
+   *  be taken if it is re-sent after this many ms. A client that can re-send
+   *  (the browser transport, `connectCli`) holds the call and does; one that cannot rejects
+   *  with `error`, as before.
+   *
+   *  A frame refused for what it IS (too large, malformed, not allowed) never
+   *  carries it — re-sending cannot change that answer. Additive within v3: an
+   *  older server omits it and an older client ignores it. */
+  retryAfterMs?: number;
 };
 // The CRDT frames — "op", "sync-req", "sync-res", "sync-ack", "op-rejected",
 // "sync-err" — deliberately have NO payload type here. Their shapes live in

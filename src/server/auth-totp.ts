@@ -84,9 +84,13 @@ export async function totpCode(
 // The login route mitigates it with a one-shot pending token, but `verifyTotp`
 // itself is also what guards TOTP enable/disable.
 //
-// Kept in memory, keyed by secret: the window is 90 seconds, so a process
-// restart cannot meaningfully widen it, and this needs no schema migration on
-// a store that has never had one. Entries older than two windows are swept.
+// Kept in memory, keyed by secret, for `verifyTotp` itself. That alone did
+// NOT survive a restart: a code used just before one was accepted again just
+// after it, inside the same 90 seconds — and "restart the app" is something a
+// crash, a deploy or `am restart` does on its own schedule. So the login flows
+// ALSO record the accepted step with the account (`totpReplayOf` in
+// auth-users.ts), compare-and-set in the database. Entries older than two
+// windows are swept.
 const REPLAY_WINDOW_MS = 90_000;
 const _lastStep = new Map<string, { step: number; at: number }>();
 function _sweepSteps(now: number): void {
@@ -106,6 +110,16 @@ export async function verifyTotp(
   secretB32: string,
   submitted: string,
 ): Promise<boolean> {
+  return (await _acceptTotpStep(secretB32, submitted)) !== false;
+}
+
+/** `verifyTotp`, returning the STEP it accepted (or false) — so a caller that
+ *  persists replay state records exactly the step this check consumed.
+ *  @internal */
+export async function _acceptTotpStep(
+  secretB32: string,
+  submitted: string,
+): Promise<number | false> {
   if (!/^\d{6}$/.test(submitted)) return false;
   const nowMs = Date.now();
   const now = Math.floor(nowMs / 30_000);
@@ -118,12 +132,25 @@ export async function verifyTotp(
     if (prev && step <= prev.step) return false; // replay of a used code
     _sweepSteps(nowMs);
     _lastStep.set(secretB32, { step, at: nowMs });
-    return true;
+    return step;
   }
   return false;
+}
+
+/** Stores that persist consumed steps register here, so the test seam below
+ *  forgets THEIR record too — a seam that reset only memory would now reset
+ *  nothing a login checks. */
+const _replayResetHooks = new Set<() => void>();
+
+/** Register a persisted-replay reset for `_resetTotpReplay`; returns the
+ *  unregister (a store calls it when it closes). @internal */
+export function _onTotpReplayReset(fn: () => void): () => void {
+  _replayResetHooks.add(fn);
+  return () => _replayResetHooks.delete(fn);
 }
 
 /** Test isolation — forget which steps have been consumed. @internal */
 export function _resetTotpReplay(): void {
   _lastStep.clear();
+  for (const reset of [..._replayResetHooks]) reset();
 }

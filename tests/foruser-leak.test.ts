@@ -618,6 +618,69 @@ Deno.test("forUser: an ASYNC filter omits the cell and says which mistake it is"
     );
     assertStringIncludes(hit!, "async-filter");
     assertStringIncludes(hit!, "cannot await");
+    // …and what to do instead.
+    assertStringIncludes(hit!, "Make the filter synchronous");
+  } finally {
+    setLogger(prev);
+    _resetAioRuntime();
+  }
+});
+
+// A throwing filter's error says what was at stake when the cell has NO
+// structural filter: the pre-filter value there is the whole cell. A cell with
+// an include/exclude gets no such warning — its pre-filter value is already
+// narrowed.
+Deno.test("forUser: a throwing filter on a cell with NO structural filter warns that the fallback is its ENTIRE state", () => {
+  _resetAioRuntime();
+  const errors: string[] = [];
+  const prev = getLogger();
+  setLogger(
+    {
+      logDir: "",
+      pub: (lvl: string, cat: string, msg?: string) => {
+        if (lvl === "error") errors.push(msg ?? cat);
+      },
+      perf: () => {},
+      flush: () => Promise.resolve(),
+      // deno-lint-ignore no-explicit-any
+    } as any,
+  );
+  const boom = () => {
+    throw new Error("no org on user");
+  };
+  try {
+    const whole = cell("throw-whole", {
+      state: { rows: ["PRIVATE"] },
+      // deno-lint-ignore no-explicit-any
+      visible: { forUser: boom as any },
+      methods: { noop() {} },
+    });
+    const narrowed = cell("throw-narrowed", {
+      state: { rows: ["PRIVATE"], pub: 1 },
+      // deno-lint-ignore no-explicit-any
+      visible: { include: ["pub"], forUser: boom as any },
+      methods: { noop() {} },
+    });
+    // deno-lint-ignore no-explicit-any
+    const wiring = composeCellsWiring({
+      cellEntries: [whole, narrowed] as any,
+    });
+    const ui = wiring.autoGetUIState!(
+      {
+        "throw-whole": { rows: ["PRIVATE"] },
+        "throw-narrowed": { rows: ["PRIVATE"], pub: 1 },
+      },
+      { id: "u1", role: "user" },
+    ) as Record<string, unknown>;
+    assertEquals(ui, {});
+    const hitWhole = errors.find((e) => e.includes("[throw-whole]"));
+    const hitNarrowed = errors.find((e) => e.includes("[throw-narrowed]"));
+    assertStringIncludes(hitWhole ?? "(none)", "visible.forUser threw");
+    assertStringIncludes(hitWhole!, "NO structural visible filter");
+    assertStringIncludes(hitWhole!, "ENTIRE state");
+    assertStringIncludes(hitWhole!, "no org on user");
+    assertStringIncludes(hitNarrowed ?? "(none)", "visible.forUser threw");
+    assertEquals(hitNarrowed!.includes("ENTIRE state"), false, hitNarrowed);
   } finally {
     setLogger(prev);
     _resetAioRuntime();

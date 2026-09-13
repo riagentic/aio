@@ -70,7 +70,7 @@ Deno.test("service unit: no directive carries a trailing comment — systemd wou
     const exec = ds.find((d) => d.key === "ExecStart")!;
     assertEquals(
       exec.value.trim(),
-      "/usr/local/bin/svc --port=3000 --expose --client=server-only",
+      "/usr/local/bin/svc --expose --client=server-only",
       `ExecStart must be the binary and its flags, nothing else: ${exec.value}`,
     );
     const rpes = ds.find((d) => d.key === "RestartPreventExitStatus")!;

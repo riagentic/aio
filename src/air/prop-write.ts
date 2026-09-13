@@ -203,11 +203,47 @@ export function _writeProp(
     // The `k in el` guard is load-bearing — `disabled`/`value` on a <div> are
     // NOT properties there, and assigning them creates an invisible expando
     // instead of the attribute the server rendered.
+    if (v == null) {
+      // null/undefined is the prop being ABSENT, on every path. Assigning `""`
+      // is not that: `option.value = ""` reflects into `value=""`, and an
+      // <option> with a value attribute no longer takes its value from its
+      // TEXT — so `<option value={maybe}>English</option>` submitted `""` after
+      // hydrate or an incremental render, while a fresh mount (which skips an
+      // undefined prop) submitted "English". Same removal as a prop that left.
+      _clearDomProp(el, k);
+      return;
+    }
+    if (k === "value" && el.tagName === "SELECT" && Array.isArray(v)) {
+      _selectValues(el as unknown as HTMLSelectElement, v);
+      return;
+    }
     // deno-lint-ignore no-explicit-any
-    (el as any)[k] = v ?? "";
+    (el as any)[k] = v;
     return;
   }
   const ns = _attrNS(k);
+  if (v === false && _STRING_FALSE_ATTRS(k)) {
+    // …but not for the attributes where "false" is a VALUE.
+    //
+    // `false` means "this attribute is absent" for a real boolean attribute
+    // (`disabled`, `checked`), and those are handled by name elsewhere. For
+    // `aria-*` and the enumerated attributes it means the opposite of what the
+    // author wrote: `aria-pressed` ABSENT says "not a toggle button at all",
+    // and `aria-expanded` absent says "not expandable" — so an
+    // `aria-expanded={open}` toggle announced itself correctly when open and
+    // became a plain button when closed. Measured across both renderers:
+    // aria-expanded/hidden/checked/selected/pressed/invalid/disabled,
+    // draggable, spellCheck and contentEditable were all dropped, and
+    // `<img draggable={false}>` could not turn dragging off at all.
+    //
+    // aio's own kit works around it by hand (`? "true" : "false"` strings in
+    // `src/ui/controls.ts`), and aio's own app manager did not:
+    // `aria-checked={showAll.value === v}` rendered nothing whenever it was
+    // false.
+    if (ns) el.setAttributeNS(ns, k, "false");
+    else el.setAttribute(_attrName(k), "false");
+    return;
+  }
   if (v === false || v == null) {
     if (ns) el.removeAttributeNS(ns, k.slice(k.indexOf(":") + 1));
     else el.removeAttribute(_attrName(k));
@@ -215,6 +251,58 @@ export function _writeProp(
   }
   if (ns) el.setAttributeNS(ns, k, String(v));
   else el.setAttribute(_attrName(k), String(v));
+}
+
+/** Put a `_DOM_PROPS` prop back to the element's DEFAULT — the ONE removal,
+ *  shared by a prop that left the props object and a prop set to null.
+ *
+ *  Clearing the property is not enough whenever the property reads through
+ *  its content attribute: a checkbox's `.value` answers `"on"` only while it
+ *  has no `value` attribute, and an <option>'s answers its text. So the
+ *  attribute the prop wrote is dropped too. The property is reset FIRST and
+ *  the attribute dropped after: on a checkbox (and an option) the property
+ *  write itself REFLECTS back into the attribute, so the other order just
+ *  puts it back. */
+export function _clearDomProp(el: HTMLElement, k: string): void {
+  // deno-lint-ignore no-explicit-any
+  const e = el as any;
+  e[k] = typeof e[k] === "boolean" ? false : "";
+  const attr = _propAttr(el.tagName.toLowerCase(), k);
+  if (attr) el.removeAttribute(attr);
+}
+
+/** `<select multiple value={["en", "de"]}>` — select exactly the options whose
+ *  value is in the array.
+ *
+ *  `select.value = array` stringifies to `"en,de"`, matches no option and
+ *  DESELECTS every one: a mounted multi-select showed nothing chosen, and
+ *  hydration wiped the `selected` options SSR had correctly emitted for the
+ *  same array. Compared as strings, as the SSR writer and the DOM compare
+ *  option values. Only options whose state differs are written. */
+export function _selectValues(
+  el: HTMLSelectElement,
+  values: readonly unknown[],
+): void {
+  const want = new Set(values.map(String));
+  const opts = el.options;
+  for (let i = 0; i < opts.length; i++) {
+    const o = opts[i]!;
+    const on = want.has(o.value);
+    if (o.selected !== on) o.selected = on;
+  }
+}
+
+/** Attributes whose `false` is a STRING VALUE, not an absence.
+ *
+ *  Every `aria-*` attribute is a string attribute in ARIA (the states take
+ *  "true"/"false"/"mixed"/"undefined"), and these four HTML attributes are
+ *  ENUMERATED — `draggable="false"` really does turn dragging off, while
+ *  removing the attribute leaves the element at its default. Shared by the
+ *  client patcher and the SSR emitter so both renderers answer the same. */
+export function _STRING_FALSE_ATTRS(k: string): boolean {
+  return k.startsWith("aria-") || k === "draggable" || k === "spellCheck" ||
+    k === "spellcheck" || k === "contentEditable" || k === "contenteditable" ||
+    k === "translate";
 }
 
 // ── Controlled props ──────────────────────────────────────────────────
@@ -257,6 +345,16 @@ export function _controlDrifted(
   rv: unknown,
 ): boolean {
   if (!_isControlled(el, k)) return false;
+  if (k === "value" && el.tagName === "SELECT" && Array.isArray(rv)) {
+    // A multi-select shows a SET, which `.value` (the first selected option)
+    // cannot describe — compare the set itself.
+    const want = new Set(rv.map(String));
+    const opts = (el as unknown as HTMLSelectElement).options;
+    for (let i = 0; i < opts.length; i++) {
+      if (opts[i]!.selected !== want.has(opts[i]!.value)) return true;
+    }
+    return false;
+  }
   const cur = (el as unknown as Record<string, unknown>)[k];
   // `_writeProp` assigns `v ?? ""`, so that is the value the DOM would hold.
   if (k === "checked") return Boolean(cur) !== Boolean(rv ?? "");

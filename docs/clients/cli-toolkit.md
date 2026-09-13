@@ -30,7 +30,8 @@ const a = args({
   positional: ["id"], // → a.pos.id
   rest: "text", //       → a.rest: everything after the named positionals
   flags: {
-    url: { type: "string", default: "ws://localhost:8000/ws", help: "server" },
+    url: { type: "string", help: "server (default: the running instance)" },
+    format: { type: "string", default: "table", help: "table | plain" },
     watch: { type: "boolean", short: "w", help: "redraw on change" },
     json: { type: "boolean", help: "machine-readable output" },
     n: { type: "number", required: true },
@@ -38,7 +39,8 @@ const a = args({
   },
 });
 a.command; //   "list" | "add"
-a.flags.url; // string       (has a default)
+a.flags.url; // string | undefined
+a.flags.format; // string    (has a default)
 a.flags.n; //   number       (required)
 a.flags.tag; // string[]
 a.json; //      true when --json was given
@@ -46,7 +48,8 @@ a.json; //      true when --json was given
 
 - Types come from the spec: a flag with a `default` or `required: true` is
   non-optional; a boolean is always `boolean` (default `false`); `string[]`
-  defaults to `[]`.
+  defaults to `[]`, and a declared `default` array is replaced — not appended to
+  — by the first value given.
 - Accepted spellings: `--url=x`, `--url x`, `-n 3`, `-n3` is not. A bare `--`
   stops flag parsing.
 - **Unknown flags are refused**, with a did-you-mean, exit code 2 — the same
@@ -234,7 +237,10 @@ things in one process.
   flags (`--port`, `--expose`) and a bare command word passes through.
 - **`cli-client` target** — a thin binary that only connects (`connectCli` +
   `bind`): `args()` for its flags, `watch()` for a dashboard, `table()` for its
-  output.
+  output. Its writes are paced to the server's advertised `messagesPerSec`
+  exactly like the browser client's ([browser](browser.md)): `Promise.all` over
+  1000 bound calls resolves late, never refused; a budget drop is re-sent; a
+  call not yet written when the connection drops replays on reconnect.
 - **Scripts** — `--json` on the flags you declare, refusals as JSON on stdout,
   exit 2 for usage, 1 for failure.
 

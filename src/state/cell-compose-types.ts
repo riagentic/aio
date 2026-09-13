@@ -51,6 +51,30 @@ export type ComposedCells = {
   destroyAll: (
     app: { dispatch: (a: Msg) => void; getState: () => unknown },
   ) => void;
+  /** {@linkcode initAll}, minus the cells another ISOLATE owns.
+   *
+   *  A `worker: true` cell composes on BOTH sides — main routes to it, the
+   *  worker runs it — and both sides walked `initAll`, so its `onInit` ran
+   *  TWICE, on two threads. An `onInit` that opens a device, seeds a table or
+   *  starts a watcher did all of it twice, and the in-isolate harness could
+   *  never show it because there is no second isolate there.
+   *
+   *  A NEW DOOR rather than a parameter on `initAll`: the surface is frozen,
+   *  and `check:api` refuses even an optional trailing parameter — "adding an
+   *  optional trailing parameter IS assignable in both directions, and it is
+   *  still refused here; the value of the promise is that it has none". One
+   *  implementation behind two names, and OPTIONAL so that adding it is not a
+   *  required member anybody implementing this interface would have to grow.
+   *  `composeCells` always provides it. */
+  initAllExcept?: (
+    app: { dispatch: (a: Msg) => void; getState: () => unknown },
+    skip: (cellId: string) => boolean,
+  ) => void;
+  /** {@linkcode destroyAll}, minus the cells another isolate owns. */
+  destroyAllExcept?: (
+    app: { dispatch: (a: Msg) => void; getState: () => unknown },
+    skip: (cellId: string) => boolean,
+  ) => void;
   /** Cell registry for enable/disable/status/health */
   registry: {
     enable: (

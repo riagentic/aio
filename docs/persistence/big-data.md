@@ -128,6 +128,7 @@ const info = await app.blobs!.put(bytes, { name: "cat.png" });
 app.blobs!.url(info.id); // "/__aio/blobs/9f86d0…" — hand it to an <img>/<video>
 await app.blobs!.info(info.id); // { id, size, name? } | null
 await app.blobs!.stream(info.id); // ReadableStream<Uint8Array>
+await app.blobs!.stream(info.id, { start: 0, end: 1024 }); // bytes [0, 1024) — non-negative integers
 await app.blobs!.list(); // every stored blob
 await app.blobs!.delete(info.id); // true when something was removed
 ```

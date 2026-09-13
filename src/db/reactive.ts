@@ -10,16 +10,64 @@
 // underlying DB are invisible — that's the seam).
 import type { DB, QueryResult, Tx } from "./types.ts";
 import { log } from "../diagnostics/logger-api.ts";
+import { readTablesIn, writesRows, writeTablesIn } from "./sql-shape.ts";
 
-const READ_TABLES = /\b(?:from|join)\s+["'`]?([A-Za-z_]\w*)/gi;
-const WRITE_TABLES =
-  /\b(?:insert\s+into|update|delete\s+from|replace\s+into)\s+["'`]?([A-Za-z_]\w*)/gi;
+// Which tables a statement reads and writes — and whether it writes at all —
+// is answered by `sql-shape.ts`, the same lexer `db.query()`'s writer-lock gate
+// uses. This file used to carry its own two regexes, and every shape they
+// missed was a live query that silently stopped refreshing: `INSERT OR IGNORE
+// INTO mail` (no table), `UPDATE OR IGNORE mail` (the table "or"),
+// `FROM main.mail` (the table "main"), `FROM [mail]` (none), `FROM folders,
+// mail` (only "folders"), and a `WITH … DELETE` or `INSERT … RETURNING` sent
+// through `query()` (never invalidated anything).
+//
+// This file's own rule: "Loud, never silent — a live query that stopped
+// refreshing is a UI quietly showing stale rows, which is exactly what this
+// file exists to prevent."
+const _unattributed = new Set<string>();
 
-/** Lowercased table names matched by `re` in `sql`. */
-export function tablesIn(sql: string, re: RegExp): Set<string> {
-  const out = new Set<string>();
-  for (const m of sql.matchAll(re)) out.add(m[1]!.toLowerCase());
-  return out;
+/** Warn once per shape when a write names no table this can invalidate. */
+function _warnUnattributed(sql: string): void {
+  const head = sql.trim().slice(0, 60);
+  if (_unattributed.has(head)) return;
+  _unattributed.add(head);
+  log.warn(
+    `reactive: could not tell which table this write touches, so no live ` +
+      `query was refreshed — rows already on screen are now stale: ` +
+      `${head}${sql.trim().length > 60 ? "…" : ""}`,
+  );
+}
+
+/** Warn once per shape when a live query names no table a write could
+ *  invalidate — it would be filled once and then never refresh. */
+function _warnUnattributedRead(sql: string): void {
+  const head = "read:" + sql.trim().slice(0, 60);
+  if (_unattributed.has(head)) return;
+  _unattributed.add(head);
+  log.warn(
+    `reactive: could not tell which table this live query reads, so no ` +
+      `write will ever refresh it — its rows stay as they are now: ` +
+      `${sql.trim().slice(0, 60)}${sql.trim().length > 60 ? "…" : ""}. ` +
+      `Name the table plainly in FROM/JOIN, or call refresh() yourself.`,
+  );
+}
+
+/** The tables a write statement touches, warning when it writes but names
+ *  none this wrapper can recognise. */
+function _written(sql: string): Set<string> {
+  const touched = writeTablesIn(sql);
+  if (touched.size === 0 && writesRows(sql)) _warnUnattributed(sql);
+  return touched;
+}
+
+/** @internal test seam — forget which unattributed writes have been reported.
+ *  The dedupe is per PROCESS on purpose (the same statement repeats on every
+ *  write), so a test that wants to observe the warning has to clear it.
+ *  Product code must never call this: clearing it would repeat the line on
+ *  every write of a hot path, which is what the dedupe exists to stop. */
+// aio-ok: a test-only reset; calling it from product code is the bug it guards
+export function _resetReactiveWarnings(): void {
+  _unattributed.clear();
 }
 
 /** A live SQL query — its rows stay current as writes land, and subscribers are
@@ -98,7 +146,16 @@ export function reactiveDB(db: DB): ReactiveDB {
   }
 
   return {
-    query: (sql, params) => db.query(sql, params),
+    // A write can arrive through `query()` too — `INSERT … RETURNING` is
+    // only readable that way — and it changes rows exactly like `execute()`.
+    async query<T = Record<string, unknown>>(
+      sql: string,
+      params?: unknown[],
+    ): Promise<QueryResult<T>> {
+      const r = await db.query<T>(sql, params);
+      if (writesRows(sql)) await invalidate(_written(sql));
+      return r;
+    },
     lastWriterError: db.lastWriterError?.bind(db),
     close: () => db.close(),
     // Pass-through: neither changes table contents, so no query invalidation.
@@ -107,7 +164,7 @@ export function reactiveDB(db: DB): ReactiveDB {
 
     async execute(sql: string, params?: unknown[]): Promise<QueryResult> {
       const r = await db.execute(sql, params);
-      await invalidate(tablesIn(sql, WRITE_TABLES));
+      await invalidate(_written(sql));
       return r;
     },
 
@@ -131,7 +188,7 @@ export function reactiveDB(db: DB): ReactiveDB {
         .then(async (r) => {
           const written = new Set<string>();
           for (const s of stmts) {
-            for (const t of tablesIn(s.sql, WRITE_TABLES)) written.add(t);
+            for (const t of _written(s.sql)) written.add(t);
           }
           await invalidate(written);
           return r;
@@ -142,7 +199,9 @@ export function reactiveDB(db: DB): ReactiveDB {
       sql: string,
       params?: unknown[],
     ): Promise<ReactiveQuery<T>> {
-      const tables = tablesIn(sql, READ_TABLES);
+      const read = readTablesIn(sql);
+      if (read.unattributed) _warnUnattributedRead(sql);
+      const tables = read.tables;
       const rows: T[] = [];
       const subs = new Set<(r: T[]) => void>();
       const rerun = async () => {

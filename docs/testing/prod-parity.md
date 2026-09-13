@@ -16,8 +16,10 @@ Three boundaries separate a test from a running app.
 ## The worker serialization boundary — always on
 
 A `worker: true` cell is reached by `postMessage`, so every argument and every
-return value is structured-cloned. The harness clones across that boundary too,
-for exactly the cells that would have been hosted:
+return value is structured-cloned. Every harness (`testServer`, `bootCells`,
+`testUI`, `testCell`) clones across that boundary too, for exactly the cells
+that would have been hosted — arguments, and the return value of sync and async
+methods alike:
 
 ```ts
 await using srv = await testServer({ cells: [heavy] });
@@ -36,6 +38,11 @@ synchronously; a cell method always returns a promise, so the runtime converts
 it rather than letting one mistake have two shapes.)
 
 ## Worker isolation — `workers: "real"`
+
+Two things a real worker refuses are refused in-isolate too, so they need no
+option: reading another cell's state from inside a worker cell's method, and
+calling any cell's method from there (docs/state/cell-workers.md). What the
+option adds is the separate heap and module graph.
 
 Isolation is the other half, and it is opt-in because it costs a worker spawn
 per cell.

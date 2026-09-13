@@ -462,6 +462,11 @@ function workerHint(err: AioError): string {
     } (docs/state/cell-workers.md).`;
 }
 
+/** `Error.name` of the `original` behind a `PERSIST_ERROR` that is an
+ *  observation, not a failure: the write it describes still landed, and the
+ *  tip must say so. Set by the persistence manager, read by `generateTip`. */
+export const PERSIST_WRITTEN_ANYWAY = "PersistWrittenAnyway";
+
 export function generateTip(err: AioError): string | undefined {
   // FIRST, before the per-code tips: a frozen-state write is recognisable by
   // its message whatever code it arrives under, and it is the single most
@@ -604,6 +609,14 @@ export function generateTip(err: AioError): string | undefined {
         `awaiting it here, or hand CPU work to blocking("id", fn, ` +
         `arg).` + workerHint(err) + ` See docs/debugging/performance.md.`;
     case "PERSIST_ERROR": {
+      // An OBSERVATION about a write that still landed (a value JSON changes
+      // on the way, a cell over the size guardrail, a skipped version stamp)
+      // rides this code so it reaches `onError` — but "persist failed … lost
+      // on restart" about a row that is on disk is the one sentence a
+      // durability report must never say falsely.
+      if (err.original?.name === PERSIST_WRITTEN_ANYWAY) {
+        return "Tip: The write still happened and is on disk. The message names what the store could not keep exactly (a value JSON changes on the way, a cell over the size limit, a version stamp that was skipped) — fix that at its source.";
+      }
       // The disk advice only when the failure IS a disk-class failure: a
       // planner refusal ("bound to a state value that is not an array"), a
       // constraint, or a value the store cannot hold used to end with "check
@@ -889,10 +902,30 @@ export function reportError(err: AioError, opts: ReportErrorOpts = {}): void {
       write(formatErrorCompact(err), payload);
     }
 
-    // onError hook (guarded)
+    // onError hook (guarded) — BOTH ways it can fail. The type says `void`, but
+    // `onError: async (err) => { await sentry.send(err) }` type-checks and is
+    // the natural shape for a hook that ships errors somewhere; when that
+    // promise rejected, the try/catch below never saw it and the rejection
+    // went unhandled — which kills a Deno process. The app's error hook took
+    // the app down while reporting an error. Same message, same level as a
+    // sync throw: one fault, one report. Never back into onError itself — a
+    // hook that fails on every error would loop.
     if (onError) {
       try {
-        onError(err);
+        const ret: unknown = onError(err);
+        if (
+          ret !== null && typeof ret === "object" &&
+          typeof (ret as PromiseLike<unknown>).then === "function"
+        ) {
+          // Promise.resolve adopts any thenable, and a `then` that throws
+          // lands in the same catch.
+          Promise.resolve(ret).catch((hookErr: unknown) => {
+            log.error("onError hook threw:", {
+              detail: String(hookErr),
+              async: true,
+            });
+          });
+        }
       } catch (hookErr) {
         log.error("onError hook threw:", { detail: String(hookErr) });
       }

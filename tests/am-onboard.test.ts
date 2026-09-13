@@ -113,7 +113,9 @@ Deno.test("denoJson: the scaffold emits the dieted task set EXACTLY", () => {
   // server-only imported into a cell type-checks cleanly and then fails to
   // build (report 4 §1). A task called `check` that misses the failure mode the
   // framework is known for is the defect, not the missing command.
-  assertStringIncludes(dj.tasks.check!, "deno check src/");
+  // …and `tests/`: a replaced cell breaks the starter test's import, and that
+  // must fail the gate run first, not only `deno task test` (report 9b §7).
+  assertStringIncludes(dj.tasks.check!, "deno check src/ tests/");
   assertStringIncludes(dj.tasks.check!, "am.ts check");
   assertEquals(dj.tasks.fmt, "deno fmt");
   // BOTH linters. `aiol` knows the aio rules and NOTHING about the language, so

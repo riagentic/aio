@@ -15,16 +15,19 @@
  * answering a question about itself.
  */
 
-import { resolve } from "@std/path";
-import { isAbsolute } from "@std/path";
+import { toFileUrl } from "@std/path";
 import type { GlobalFlags } from "./am-types.ts";
 import { detectMode, out, outError } from "./am-output.ts";
 import { projectRoot } from "./am-cmd-process.ts";
+import { resolveFileArg } from "./am-project.ts";
 import { readDenoJsonSync } from "../server/deno-json.ts";
 import { resolveAppDir } from "../build/build-config.ts";
 import { resolveEntryPath } from "../server/paths.ts";
 import { renderHeadlessSurface } from "../server/server-surface.ts";
 import type { UISurfaceNode } from "../air/ui-surface.ts";
+import { getRegisteredCells } from "../state/cell-reactive.ts";
+import { composeCells } from "../state/cell-compose.ts";
+import { bindCell } from "../state/cell-catalog.ts";
 
 /** Parse `--props=` into an object, or say exactly what is wrong with it.
  *
@@ -92,6 +95,45 @@ export function previewLines(roots: readonly UISurfaceNode[]): string[] {
   return out;
 }
 
+/** Bind the cells `file` imports to their DECLARED state, read-only, so the
+ *  component renders with selectors that work.
+ *
+ *  `am surface` renders inside the running server, where every cell is already
+ *  bound to the app; `am preview` renders in this process, where nothing had
+ *  bound them. A field read still worked (it falls back to the declared
+ *  initial state) but a selector is only a function once bound, so
+ *  `notes.open()` threw "notes.open is not a function" in a preview and
+ *  rendered in the live surface.
+ *
+ *  Bound with the SAME two calls the server's boot makes (`composeCells`, then
+ *  `bindCell`), over a state nothing can change — not by booting a runtime: a
+ *  preview renders a component, not the app, and the harness runtimes are not
+ *  the CLI's to boot (scripts/check-boundaries.ts). So a method called during
+ *  the render still refuses loudly, as it did before it was bound. */
+async function bindImportedCells(file: string): Promise<void> {
+  // Importing the module registers the cells it reaches; a broken import is
+  // left to the render, which reports it in its own words.
+  try {
+    await import(toFileUrl(file).href);
+  } catch {
+    return;
+  }
+  const cells = [...getRegisteredCells().values()].filter((c) =>
+    !c.__aio.bound
+  );
+  if (cells.length === 0) return;
+  const state = composeCells(cells, { appId: "am-preview" }).initialState;
+  for (const c of cells) {
+    bindCell(c, (action) => {
+      throw new Error(
+        `am preview renders a component with its cells' declared state, and ` +
+          `runs no methods — ${action.type}() was called during the render. ` +
+          `Drive a running app with am trigger, or test it with testUI.`,
+      );
+    }, () => state);
+  }
+}
+
 /** `am preview <file> [--export=Name] [--props=JSON]` */
 export async function cmdPreview(
   args: string[],
@@ -114,17 +156,17 @@ export async function cmdPreview(
     root,
     resolveEntryPath(readDenoJsonSync(root)?.config),
   );
-  const path = isAbsolute(file) ? file : resolve(baseDir, file);
-  try {
-    Deno.statSync(path);
-  } catch {
+  // The path a shell completes (cwd-relative) first; the app-directory
+  // spelling (`ui/Card.tsx`) is still found after it — see resolveFileArg.
+  const found = resolveFileArg(file, [root, baseDir]);
+  if (!found.ok) {
     outError(
-      `am preview: no such file ${path} — paths are relative to the app ` +
-        `directory (${baseDir}), not the shell's cwd.`,
+      `am preview: no such file ${file} — looked for ${found.tried.join(", ")}`,
       mode,
     );
     Deno.exit(1);
   }
+  const path = found.path;
 
   const props = parsePreviewProps(
     args.find((a) => a.startsWith("--props="))?.slice(8),
@@ -135,6 +177,7 @@ export async function cmdPreview(
   }
   const exportName = args.find((a) => a.startsWith("--export="))?.slice(9);
 
+  await bindImportedCells(path);
   const rendered = await renderHeadlessSurface(path, true, {
     ...(exportName ? { exportName } : {}),
     props: props.props,

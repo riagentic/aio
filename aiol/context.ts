@@ -3,9 +3,11 @@
 import { basename, extname, join, relative } from "@std/path";
 import { codeMatches } from "./scan.ts";
 import { removalsInSource } from "../src/state/removals.ts";
+import { appSourceScope } from "../src/am/app-source-scope.ts";
 import type {
   CellInfo,
   DenoJsonConfig,
+  ExcludedDir,
   Issue,
   LintContext,
   LintReport,
@@ -222,7 +224,15 @@ async function collectFiles(
  *
  *  Bounded on purpose — direct children and one level below — so this costs a
  *  couple of `readDir`s, not a walk of the vendored framework. */
-async function unscannedCodeDirs(projectDir: string): Promise<string[]> {
+async function unscannedCodeDirs(
+  projectDir: string,
+): Promise<{ unscanned: string[]; excluded: ExcludedDir[] }> {
+  // "Not this app's code" is ONE answer, shared with `am pin` / `am migrate`
+  // (src/am/app-source-scope.ts): deno.json `exclude` / `fmt.exclude` and
+  // `.gitignore`. A vendored copy of another project under `examples/` was
+  // hinted "move it under src/" — the one thing that must not happen — and
+  // had no way to be told otherwise (report 9 §4).
+  const scope = await appSourceScope(projectDir);
   const holdsCode = async (dir: string, depth: number): Promise<boolean> => {
     try {
       for await (const e of Deno.readDir(dir)) {
@@ -237,17 +247,24 @@ async function unscannedCodeDirs(projectDir: string): Promise<string[]> {
     } catch { /* unreadable */ }
     return false;
   };
-  const out: string[] = [];
+  const unscanned: string[] = [];
+  const excluded: ExcludedDir[] = [];
   try {
     for await (const e of Deno.readDir(projectDir)) {
       if (!e.isDirectory || e.name.startsWith(".")) continue;
       if (NOT_SOURCE_DIRS.has(e.name) || SCANNED_ROOTS.includes(e.name)) {
         continue;
       }
-      if (await holdsCode(join(projectDir, e.name), 1)) out.push(e.name);
+      if (!await holdsCode(join(projectDir, e.name), 1)) continue;
+      const by = scope.excludedBy(e.name, true);
+      if (by) excluded.push({ dir: e.name, by });
+      else unscanned.push(e.name);
     }
   } catch { /* root unreadable */ }
-  return out.sort();
+  return {
+    unscanned: unscanned.sort(),
+    excluded: excluded.sort((a, b) => a.dir.localeCompare(b.dir)),
+  };
 }
 
 /** Read and parse deno.json or deno.jsonc */
@@ -447,8 +464,15 @@ function parseCellConfig(source: string): {
       }
     }
     const stateBlock = block.slice(sIdx, sEnd);
-    // Extract top-level keys (skip nested object contents)
-    for (const m of stateBlock.matchAll(/([$\w]+)\s*:/g)) {
+    // Extract top-level keys (skip nested object contents). A QUOTED key is a
+    // key: `{ "password": "" }` is the same field to the runtime, which
+    // refuses to boot on it — and was invisible to every rule reading this
+    // list, so the credential lint passed an app the boot refused.
+    for (
+      const m of stateBlock.matchAll(
+        /(?<![$\w"'])(?:(["'])([$\w]+)\1|([$\w]+))\s*:/g,
+      )
+    ) {
       // Count depth up to this match to ensure it's top-level
       const before = stateBlock.slice(0, m.index);
       let kd = 0;
@@ -456,7 +480,7 @@ function parseCellConfig(source: string): {
         if (ch === "{" || ch === "[") kd++;
         else if (ch === "}" || ch === "]") kd--;
       }
-      if (kd === 0) stateKeys.push(m[1]!);
+      if (kd === 0) stateKeys.push(m[2] ?? m[3]!);
     }
   }
 
@@ -675,14 +699,29 @@ export async function buildContext(
       }
     } catch { /* no such directory */ }
   }
-  const isTest = (f: SourceFile) =>
-    f.name.endsWith(".test.ts") || f.name.endsWith(".test.tsx");
+  // `_test.ts` counts too. `isTestPath` documents that spelling as supported
+  // and this predicate did not, so `other_test.ts` was collected, failed the
+  // check below, and was dropped — taking with it the "cell has no test file"
+  // answer, which then reported a tested cell as untested.
+  const isTest = (f: SourceFile) => /(?:\.|_)test\.tsx?$/.test(f.name);
   const tsxFiles = sourceFiles.filter((f) => f.ext === ".tsx");
   const tsFiles = sourceFiles.filter((f) => f.ext === ".ts");
   const testFiles = [
     ...sourceFiles.filter(isTest), // co-located tests, if an app keeps them there
     ...testSources.filter(isTest),
   ];
+  // A file under `tests/` that is NOT a test — a fixture, a helper, a shared
+  // factory — is read and then dropped: it drives no app-code check (sweeping
+  // tests into `tsFiles` trades one class of false positive for another, as
+  // the note above says) and it is not a test either. Dropping it is the
+  // right call; doing it SILENTLY is not. `checkScanCoverage` exists so that
+  // "I found nothing" and "I looked at nothing" never print the same thing,
+  // and it could not see these at all — a helper under `tests/` holding a
+  // hard-coded password went unreported with no hint that anything had been
+  // passed over.
+  const testHelpers = testSources.filter((f) => !isTest(f)).map((f) =>
+    f.relative
+  );
   // A cell defined inside a test is a FIXTURE, not app surface — counting it
   // would then report it as untested. (`.test.tsx` was missed here too.)
   const cells = extractCells(sourceFiles.filter((f) => !isTest(f)));
@@ -700,6 +739,7 @@ export async function buildContext(
       ) ?? null;
   const appTsx = sourceFiles.find((f) => f.name === "App.tsx") ?? null;
 
+  const scanScope = await unscannedCodeDirs(projectDir);
   const ctx: LintContext = {
     projectDir,
     denoJson,
@@ -707,7 +747,9 @@ export async function buildContext(
     sourceFiles,
     cssFiles,
     skipped,
-    unscannedDirs: await unscannedCodeDirs(projectDir),
+    unscannedDirs: scanScope.unscanned,
+    excludedDirs: scanScope.excluded,
+    testHelpers,
     isApp: looksLikeApp(denoJson),
     tsxFiles,
     tsFiles,

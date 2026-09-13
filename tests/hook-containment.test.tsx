@@ -14,7 +14,12 @@
 // contained failure nobody can locate is only half-contained.
 import { assert, assertEquals, assertStringIncludes } from "@std/assert";
 import { cell } from "../mod.ts";
-import { afterRender, onCleanup, onMount } from "../src/air/aio-renderer.ts";
+import {
+  afterRender,
+  onCleanup,
+  onMount,
+  useSignal,
+} from "../src/air/aio-renderer.ts";
 import { Transition } from "../src/air/transition-component.ts";
 import { testUI } from "../src/testing/ui-test.ts";
 
@@ -69,7 +74,13 @@ Deno.test("afterRender that throws keeps the committed render (and names the com
 
   let logs = "";
   logs = await captureErrors(async () => {
-    await using ui = await testUI(App as never);
+    // Every case here provokes a contained failure ON PURPOSE — that is the
+    // subject. `testUI` now surfaces one by default, because a hook or an
+    // onClick that throws and is reported as a PASS is the shape the harness
+    // exists to prevent.
+    await using ui = await testUI(App as never, {
+      allowContainedErrors: true,
+    });
     await ui.settle();
     // (a) the render survived the effect: the toggle EXISTS and works.
     assertEquals(ui.theme.text, "dark");
@@ -103,7 +114,13 @@ Deno.test("callback ref that throws does not abandon the mount", async () => {
 
   const logs = await captureErrors(async () => {
     // Pre-fix this threw out of mount() itself — testUI never returned.
-    await using ui = await testUI(App as never);
+    // Every case here provokes a contained failure ON PURPOSE — that is the
+    // subject. `testUI` now surfaces one by default, because a hook or an
+    // onClick that throws and is reported as a PASS is the shape the harness
+    // exists to prevent.
+    await using ui = await testUI(App as never, {
+      allowContainedErrors: true,
+    });
     await ui.settle();
     assertStringIncludes(ui.html(), "sibling");
     assertEquals(ui.theme.text, "dark");
@@ -138,7 +155,13 @@ Deno.test("callback ref that throws on re-render still commits the re-render", a
   );
 
   const logs = await captureErrors(async () => {
-    await using ui = await testUI(App as never);
+    // Every case here provokes a contained failure ON PURPOSE — that is the
+    // subject. `testUI` now surfaces one by default, because a hook or an
+    // onClick that throws and is reported as a PASS is the shape the harness
+    // exists to prevent.
+    await using ui = await testUI(App as never, {
+      allowContainedErrors: true,
+    });
     await ui.settle();
     armed = true;
     await ui.theme.click();
@@ -167,7 +190,13 @@ Deno.test("onMount / onCleanup that throw are contained and named", async () => 
   );
 
   const logs = await captureErrors(async () => {
-    await using ui = await testUI(App as never);
+    // Every case here provokes a contained failure ON PURPOSE — that is the
+    // subject. `testUI` now surfaces one by default, because a hook or an
+    // onClick that throws and is reported as a PASS is the shape the harness
+    // exists to prevent.
+    await using ui = await testUI(App as never, {
+      allowContainedErrors: true,
+    });
     await ui.settle();
     assert(ui.present("Mounty"), "the component still rendered");
     await ui.mounty.click(); // re-render → body-level onCleanup runs and throws
@@ -205,7 +234,13 @@ Deno.test("exit transition that throws does not abort the removal diff", async (
   );
 
   const logs = await captureErrors(async () => {
-    await using ui = await testUI(App as never);
+    // Every case here provokes a contained failure ON PURPOSE — that is the
+    // subject. `testUI` now surfaces one by default, because a hook or an
+    // onClick that throws and is reported as a PASS is the shape the harness
+    // exists to prevent.
+    await using ui = await testUI(App as never, {
+      allowContainedErrors: true,
+    });
     await ui.settle();
     assert(ui.present("panel"));
     await ui.hide.click();
@@ -215,4 +250,118 @@ Deno.test("exit transition that throws does not abort the removal diff", async (
     assert(ui.present("hide"), "the rest of the tree is untouched");
   });
   assertStringIncludes(logs, "exit-transition callback error");
+});
+
+// ── …and by DEFAULT a contained failure fails the test ───────────────────
+//
+// The five cases above opt out, because the throw is their subject. Everywhere
+// else it must not be silent: a hook that throws and an event handler that
+// throws were both caught, `console.error`'d and dropped, so a `TypeError` in
+// an `onClick` — the single most common app bug there is — was reported by
+// `testUI` as a PASS. A re-render throw already failed the test through
+// `_setRenderErrorSink`; these are the two channels beside it that nothing
+// fed.
+Deno.test("a throwing onMount fails the test unless the test says otherwise", async () => {
+  const App = () => {
+    onMount(() => {
+      throw new Error("MOUNT BOOM");
+    });
+    return <div class="panel">x</div>;
+  };
+  const ui = await testUI(App as never);
+  let msg = "";
+  try {
+    await ui.settle();
+  } catch (e) {
+    msg = e instanceof Error ? e.message : String(e);
+  } finally {
+    await ui.dispose();
+  }
+  assertStringIncludes(msg, "MOUNT BOOM");
+  assertStringIncludes(msg, "CONTAINS this so production keeps rendering");
+});
+
+Deno.test("a throwing event handler fails the test unless the test says otherwise", async () => {
+  const App = () => (
+    <button
+      class="button"
+      onClick={() => {
+        throw new TypeError("HANDLER BOOM");
+      }}
+    >
+      Go
+    </button>
+  );
+  const ui = await testUI(App as never);
+  let msg = "";
+  try {
+    ui.GoButton.click();
+    await ui.settle();
+  } catch (e) {
+    msg = e instanceof Error ? e.message : String(e);
+  } finally {
+    await ui.dispose();
+  }
+  assertStringIncludes(msg, "HANDLER BOOM");
+  assertStringIncludes(msg, "event handler (onclick)");
+});
+
+// ── onMount on a SELF-triggered re-render ────────────────────────────────
+//
+// There are TWO re-render paths and only the diff one drained the callbacks a
+// render collected. The signal path clears `inst.mountCallbacks` on the way in
+// — so they cannot accumulate — and used to throw away anything the body
+// registered on the way out. So an `onMount` first REACHED on a self-triggered
+// re-render never ran.
+//
+// That is the ordinary shape of a component that gates its own subscription
+// behind its own state. The kit's `ConfirmButton` holds `open` in a
+// `useSignal`, so clicking it re-renders itself; `Modal`'s Escape-to-close
+// listener was collected on that render and dropped, and the documented
+// "focus / Escape / ARIA come for free" was false for that one component while
+// `Modal` and `Confirm` were fine. It is not a kit bug: any component that
+// writes `{open() && <Thing/>}` around its own `onMount` got nothing.
+Deno.test("onMount reached on a SELF-triggered re-render still runs", async () => {
+  const mounts: string[] = [];
+  function SelfGated() {
+    const open = useSignal(false);
+    if (open()) onMount(() => void mounts.push("opened"));
+    return (
+      <button t="toggle" onClick={() => open.set(true)}>
+        {open() ? "open" : "shut"}
+      </button>
+    );
+  }
+  await using ui = await testUI(SelfGated as never);
+  await ui.settle();
+  assertEquals(mounts, [], "nothing is mounted while it is shut");
+  ui.toggle.click();
+  await ui.settle();
+  assertEquals(
+    mounts,
+    ["opened"],
+    "the onMount reached on the component's OWN re-render must run",
+  );
+});
+
+Deno.test("…and still only once, however many times it re-renders", async () => {
+  const mounts: string[] = [];
+  function Counter() {
+    const n = useSignal(0);
+    if (n() > 0) onMount(() => void mounts.push("once"));
+    return (
+      <button t="bump" onClick={() => n.set(n() + 1)}>{String(n())}</button>
+    );
+  }
+  await using ui = await testUI(Counter as never);
+  await ui.settle();
+  for (let i = 0; i < 4; i++) {
+    ui.bump.click();
+    await ui.settle();
+  }
+  assertEquals(
+    mounts,
+    ["once"],
+    "onMount is once per INSTANCE, not per render",
+  );
 });

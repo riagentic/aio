@@ -34,23 +34,32 @@ const WINDOWED = new Set(["electron"]);
  *  `--cdp` and try again, and the operator who did got "recorded cdp
  *  127.0.0.1:PORT but nothing answers there" — a two-step path to the same
  *  dead end, when the first answer was knowable. */
-export function noCdpMessage(appId: string, client?: string): string {
+/** @param need what the CALLER wanted — the two verbs that need `--cdp` share
+ *  one explanation, and must not each name the other's job. It was hardcoded
+ *  to a screenshot, so `am eval "1+1"` answered "a screenshot needs it… then
+ *  `am shot` again" to someone who had asked to evaluate an expression. One
+ *  message, two nouns. */
+export function noCdpMessage(
+  appId: string,
+  client?: string,
+  need: { what: string; verb: string } = { what: "a screenshot", verb: "shot" },
+): string {
   if (client !== undefined && !WINDOWED.has(client)) {
     return `${appId} runs with --client=${client}, which has no desktop ` +
-      `window — there is nothing for a screenshot to capture, and no flag ` +
-      `changes that (--cdp drives an Electron window). To see the live UI: ` +
-      `\`am surface ${appId} --json\` reads it as text, or open the page in ` +
-      `your own browser and screenshot it there. For a real window, run the ` +
-      `app with --client=electron.`;
+      `window — there is nothing for ${need.what} to run against, and no ` +
+      `flag changes that (--cdp drives an Electron window). To see the live ` +
+      `UI: \`am surface ${appId} --json\` reads it as text, or open the page ` +
+      `in your own browser. For a real window, run the app with ` +
+      `--client=electron.`;
   }
-  return `${appId} is running without the DevTools Protocol — a screenshot ` +
+  return `${appId} is running without the DevTools Protocol — ${need.what} ` +
     `needs it.${
       client === undefined
         ? ` (If this app runs with --client=browser / cli / server-only there ` +
           `is no window to shoot at all — use \`am surface\` instead.) `
         : " "
     }Restart with the flag: am restart ${appId} --cdp ` +
-    `(or run the app with --cdp / AIO_CDP=1), then am shot again. ` +
+    `(or run the app with --cdp / AIO_CDP=1), then am ${need.verb} again. ` +
     `Opt-in on purpose: --cdp binds a loopback port, and an app that did not ` +
     `ask binds none.`;
 }

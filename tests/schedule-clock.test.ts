@@ -464,6 +464,9 @@ Deno.test("skipIfRunning: a hung tick is audible, not silent", async () => {
   );
   assert(warns.length > 0, "a poller that stopped firing must SAY so");
   assert(warns[0]!.msg.includes("10 consecutive"), warns[0]?.msg);
+  // Stopping the manager has to take the hung tick's call-ceiling timers with
+  // it — the op sanitizer is the assertion (they used to outlive cancelAll).
+  mgr.cancelAll();
 });
 
 Deno.test("skipIfRunning: cancel + re-create the same id clears the guard", async () => {
@@ -489,6 +492,38 @@ Deno.test("skipIfRunning: cancel + re-create the same id clears the guard", asyn
   await clock.advance(100);
   await flush();
   assertEquals(calls.length, 2, "a re-created schedule is not born wedged");
+  // The cancel above dropped the orphaned tick's timers; this drops the live
+  // one's. Either left armed fails the op sanitizer.
+  mgr.cancelAll();
+});
+
+Deno.test("skipIfRunning: cancel and replace disarm a hung tick's call timers", async () => {
+  // A tick's call registration arms the call ceiling (and its heartbeat) on
+  // the REAL clock. A hung tick used to keep both alive past its schedule's
+  // cancel or replace — two live timers per wedged poll, firing into whatever
+  // was left. No cancelAll() here on purpose: the op sanitizer fails this
+  // test if cancel or replace alone leaves either armed.
+  const clock = createVirtualTimers(0);
+  const { calls, fn } = hanging();
+  const { log } = capture();
+  const mgr = createScheduleManager(fn, log, { timers: clock });
+  const every = (skipIfRunning: boolean) =>
+    mgr.handle(
+      schedule.every("poll", 100, { type: "Poll" }, { skipIfRunning }),
+    );
+
+  every(true);
+  await clock.advance(100);
+  await flush();
+  mgr.handle(schedule.cancel("poll"));
+
+  every(true);
+  await clock.advance(100);
+  await flush();
+  every(false); // replace: the virtual interval holds no real resource
+  assertEquals(calls.length, 2);
+  mgr.handle(schedule.cancel("poll"));
+  assertEquals(mgr.active(), []);
 });
 
 Deno.test("skipIfRunning: a settled tick resets the consecutive-skip count", async () => {
@@ -520,6 +555,7 @@ Deno.test("skipIfRunning: a settled tick resets the consecutive-skip count", asy
     !has(lines, "warn", "consecutive ticks"),
     "a slow-but-alive poll must not cry wolf",
   );
+  mgr.cancelAll(); // the second tick is still running: stop takes its timers
 });
 
 // ── `at` in the past ────────────────────────────────────────────────

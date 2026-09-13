@@ -49,6 +49,42 @@ Deno.test("redactor: exact types, prefix wildcard, and nothing by default", () =
 
 // ── Sink 1: the journal (disk) ───────────────────────────────────────
 
+Deno.test("redactor: naming a CELL redacts its actions, not just its slice", () => {
+  // `redactActions: ["vault"]` marked the cell — so the checkpoint withheld
+  // its slice and a security sweep confirmed the setting worked — and matched
+  // NO action, so the journal, `am timeline` and `logs/actions.jsonl` kept
+  // writing the passphrase in cleartext. Plugging one leak and keeping
+  // another is the exact failure this file's header is about, and it was
+  // reachable by the most natural spelling there is: the cell's name.
+  for (const pattern of ["vault", "vault:", "vault:*", "vault*"]) {
+    const r = makeRedactor([pattern]);
+    assert(
+      r.cells.has("vault"),
+      `${pattern}: the cell must be marked (the checkpoint reads this)`,
+    );
+    assert(
+      r("vault:unlockWith"),
+      `${pattern}: marks the cell but redacts no action — the journal keeps ` +
+        `the payload while the checkpoint hides it`,
+    );
+    assert(
+      r("vault:__setUnlockWith"),
+      `${pattern}: an async method reaches the sinks twice, and the write-set ` +
+        `commit carries what it WROTE`,
+    );
+    assert(!r("notes:add"), `${pattern}: must not redact another cell`);
+  }
+});
+
+Deno.test("redactor: naming one METHOD still redacts only that method", () => {
+  // The narrow spelling must stay narrow — the expansion above is for
+  // patterns that name no method at all.
+  const r = makeRedactor(["vault:unlockWith"]);
+  assert(r("vault:unlockWith"));
+  assert(!r("vault:lock"));
+  assert(!r("notes:add"));
+});
+
 Deno.test("journal: a redacted action keeps its sequence, loses its payload", async () => {
   const dir = await Deno.makeTempDir({ prefix: "aio-redact-j-" });
   try {

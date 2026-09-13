@@ -455,7 +455,7 @@ Deno.test("oidc: an external identity cannot land on a local account", async () 
       { redirect: "manual", headers: { cookie: `aio_oidc=${binder}` } },
     );
     assertEquals(cb.status, 302);
-    const ssoToken = /aio_session=([^;]+)/.exec(
+    const ssoToken = /aio_session_[^=]+=([^;]+)/.exec(
       cb.headers.get("set-cookie") ?? "",
     )![1]!;
     await cb.body?.cancel();

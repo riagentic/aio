@@ -304,7 +304,7 @@ export type AioConfig<S, A, E> = {
    *  `{ sink }` hands them anywhere else. Reports honour the SAME `redactActions`
    *  rule as the journal and the timeline. See docs/debugging/feedback.md. */
   feedback?: import("./feedback-boot.ts").FeedbackInput;
-  fullStateThreshold?: number; // 0-1: ratio of changed keys that triggers full state broadcast (default: 0.5)
+  fullStateThreshold?: number; // 0-1: byte ratio — a patch whose JSON exceeds this fraction of the full-state JSON is sent as the full state instead (default: 0.5)
   /** Custom HTTP routes — exact path or "/prefix/*" wildcard → handler. The
    *  escape hatch for uploads, webhooks, and API endpoints that don't belong
    *  in the state channel. Reserved: /__aio and /ws. */
@@ -487,7 +487,11 @@ export type AioConfig<S, A, E> = {
    *  commit; only the return value is lost. `0` waits indefinitely. Per method:
    *  `perfBudget.methods["cell:method"].timeout`. */
   effectTimeoutMs?: number;
-  freezeState?: boolean; // default: false in prod, true in dev — deep freeze state after reduce to catch mutations
+  /** An EXTRA deep-freeze pass over committed state after every reduce
+   *  (default: `true` in dev, `false` in prod). It is not what makes an illegal
+   *  mutation of committed state throw — that is Immer's `autoFreeze`, which
+   *  is never off, in either mode; this is the belt-and-braces pass on top. */
+  freezeState?: boolean;
   memory?: MemoryConfig; // memory pressure monitoring config
   circuitBreaker?: CircuitBreakerConfig; // auto-disable cells after N errors
   onRestore?: (state: S) => S; // transform state after restore, before server starts
@@ -633,6 +637,13 @@ export type AioConfig<S, A, E> = {
   _cellMethodArity?: Record<string, Record<string, number>>;
   /** Internal: per-cell, per-field { persisted, ui } flags — trojan `fields`. */
   _cellFields?: CellFieldFlags;
+  /** @internal Cell id → its `persist` filter as the store applies it, dot
+   *  paths included — journal replay keeps the same fields out of recovered
+   *  state (`_cellFields` flags only the top level). */
+  _cellPersist?: Record<
+    string,
+    import("../state/cell-types.ts").CellFieldFilter
+  >;
 };
 
 /** Cell id → state key → whether the field is persisted / exposed to the UI. */

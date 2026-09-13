@@ -29,6 +29,21 @@ export type ShellConfig = {
    *  exact shell-divergence class this whole file exists to prevent. */
   theme?: UiTheme;
   themeName?: string;
+  /** ui.layout — `false` drops the theme's LAYOUT defaults.
+   *
+   *  `aio-lifecycle.ts` has always SET this on the object it builds here; this
+   *  type had no field for it and `udsProdHTML` never forwarded it, so it was
+   *  dropped on the floor. Type-checking did not notice because the object is
+   *  an un-annotated const spread into the call, which turns excess-property
+   *  checking off. Measured: `{ theme: "full", layout: false }` gave the app
+   *  its own layout under `deno task dev` and the framework's `.row`/`.stack`/
+   *  `.grid`/`.muted` rules inside the packaged shell — 11458 bytes of HTML
+   *  served, 13470 bytes packaged. Exactly the divergence this file exists to
+   *  prevent. */
+  layout?: boolean;
+  /** ui.dir — `<html dir>`, the RTL half of `lang`. Same story: declared on
+   *  the server's own options type and dropped by every generator. */
+  dir?: import("../server/aio-types.ts").UiConfig["dir"];
 };
 
 /** Window metadata extracted from config or HTML meta tags */
@@ -665,6 +680,8 @@ export function udsProdHTML(
     theme: shell?.theme,
     themeName: shell?.themeName,
     lang: shell?.lang,
+    layout: shell?.layout,
+    dir: shell?.dir,
   });
 }
 

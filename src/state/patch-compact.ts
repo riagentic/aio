@@ -5,8 +5,10 @@
 // apply on the client at all).
 import type { Patch } from "immer";
 import {
+  _pathKey as pathKey,
   APPEND_MIN_LENGTH,
   type AppendPatch,
+  applyWirePatches,
   type WirePatch,
 } from "../protocol/patch-ops.ts";
 
@@ -56,10 +58,10 @@ export function narrowArrayPatches(prev: unknown, ops: Patch[]): Patch[] {
   // replacement moved them, so neither `prev` nor `current` can be trusted.
   const untracked = new Set<string>();
 
-  /** Is `p` a strict descendant of `ancestor`? The root key is `""`, which a
-   *  bare prefix test can never match (`"" + NUL` prefixes nothing). */
+  /** Is `p` a strict descendant of `ancestor`? A `pathKey` prefix is a path
+   *  prefix (the root, `""`, prefixes everything). */
   const isUnder = (p: string, ancestor: string): boolean =>
-    ancestor.length === 0 ? p.length > 0 : p.startsWith(ancestor + "\0");
+    p.length > ancestor.length && p.startsWith(ancestor);
 
   // The base a later op at `path` diffs against: the value the PREVIOUS ops in
   // this batch left there. An op invalidates its whole neighborhood — its own
@@ -253,8 +255,7 @@ export function narrowStringPatches(
   // path is equal to, under, or above any of them has an unknown base.
   const touched: string[] = [];
   const related = (a: string, b: string): boolean =>
-    a === b || a.length === 0 || b.length === 0 || a.startsWith(b + "\0") ||
-    b.startsWith(a + "\0");
+    a.startsWith(b) || b.startsWith(a);
   for (let i = 0; i < ops.length; i++) {
     const p = ops[i]!;
     const key = pathKey(p.path);
@@ -288,24 +289,361 @@ export function narrowStringPatches(
 }
 
 /** The ONE narrowing pass patch generation runs: arrays first (a grown list
- *  travels as its adds), then strings (a grown string as its suffix). Both
- *  callers in cell-compose-reduce.ts go through this, so neither rewrite can
- *  apply to one code path and not the other. */
-export function narrowPatches(prev: unknown, ops: Patch[]): WirePatch[] {
-  return narrowStringPatches(prev, narrowArrayPatches(prev, ops));
+ *  travels as its adds), then strings (a grown string as its suffix), then —
+ *  when the caller hands over the NEW state too — key order (a key that moved
+ *  travels as the move; see `fixKeyOrder`). Both callers in
+ *  cell-compose-reduce.ts go through this, so no rewrite can apply to one
+ *  code path and not the other. */
+export function narrowPatches(
+  prev: unknown,
+  ops: Patch[],
+  next?: unknown,
+): WirePatch[] {
+  const narrowed = narrowStringPatches(prev, narrowArrayPatches(prev, ops));
+  return next === undefined ? narrowed : fixKeyOrder(prev, next, narrowed);
 }
 
-/** Key for path identity — joined with NUL to avoid ambiguity.
- *
- *  `String(seg)`, never a bare `join`: an Immer patch path carries the KEY it
- *  was written under, and a SYMBOL key made `join` throw "Cannot convert a
- *  Symbol value to a string" — out of patch narrowing, through the reduce, and
- *  onto the caller as `REDUCE_ERROR … fix: check action payload shape`. The
- *  payload was fine; a symbol key in state is the actual problem, and saying
- *  so is `warnWireLoss`'s job (wire-fidelity.ts), which never got to run. */
-function pathKey(path: readonly (string | number | symbol)[]): string {
-  return path.map((seg) => String(seg)).join("\0");
+/** A canonical array-index key ("0", "7", not "07" or "-1"): JavaScript lists
+ *  these first, ascending, on EVERY object regardless of insertion order — so
+ *  they can never be out of order between two peers holding the same keys. */
+function isIndexKey(k: string): boolean {
+  if (k.length === 0) return false;
+  const c = k.charCodeAt(0);
+  if (c < 48 || c > 57) return false;
+  if (k.length > 1 && c === 48) return false;
+  for (let i = 1; i < k.length; i++) {
+    const d = k.charCodeAt(i);
+    if (d < 48 || d > 57) return false;
+  }
+  return k.length < 10 || Number(k) < 4294967295;
 }
+
+/** Key lists of FROZEN objects, which can never change. Committed state is
+ *  always frozen (Immer's autoFreeze is never disabled), so the `next` a
+ *  commit walked is the `prev` of the commit after it, and `Object.keys` on a
+ *  large dictionary — the dominant cost here, ~0.5 ms at 10k keys — runs once
+ *  per object rather than twice per commit. Small objects are not cached: the
+ *  lookup would cost more than the call. */
+const frozenKeys = new WeakMap<object, string[]>();
+function keysOf(o: object): string[] {
+  const hit = frozenKeys.get(o);
+  if (hit !== undefined) return hit;
+  const keys = Object.keys(o);
+  if (keys.length >= 64 && Object.isFrozen(o)) frozenKeys.set(o, keys);
+  return keys;
+}
+
+/**
+ * Make the patch list reproduce the server's KEY ORDER, not just its keys.
+ *
+ * Immer describes `delete s.words.apple; s.words.apple = 11` as
+ * `replace ["words","apple"]`, and applying that on a client overwrites the
+ * key IN PLACE — while the server's object now holds it LAST. So
+ * `Object.entries(words)` rendered `apple, banana, cherry` live and
+ * `banana, cherry, apple` after a reload (or in SSR), from one state. The
+ * move-to-end idiom is common on purpose — an LRU touch, "bump to the bottom"
+ * — and its purest form (re-adding the SAME value) emits no patch at all, so
+ * the client never learned anything had changed.
+ *
+ * So the changed spine of `next` is walked (only objects whose identity
+ * differs from `prev` — the ones Immer copied; everything else is shared) and
+ * each object's order is compared with the order the client will produce:
+ * `prev`'s surviving keys in place, then new keys appended in `add` order.
+ * Keys the client cannot place are re-sent as `remove` + `add` (the `remove`
+ * only where the client holds the key) in the server's order, appended to the
+ * list — an `add` of an absent key appends. Ops already under a re-sent key
+ * are dropped: the `add` carries the value whole.
+ *
+ * An array that SHIFTED in the same commit (an add/remove at an index, or a
+ * length change) breaks the one assumption the walk leans on — that `prev[i]`
+ * and `next[i]` are the same element and an op path's index is its final one.
+ * There, indices are mapped through the array's own ops, and an element changed
+ * in place is compared against what the client will ACTUALLY hold (the frame
+ * applied to `prev`, computed once and only then) rather than reasoned about.
+ *
+ * Cost: the common case (no key moved) is one lockstep comparison per changed
+ * object, the same order of work Immer's own finalize already did on it, and
+ * the delta is untouched. A move costs one `remove` op per moved key.
+ */
+function fixKeyOrder(
+  prev: unknown,
+  next: unknown,
+  ops: WirePatch[],
+): WirePatch[] {
+  if (prev === next) return ops;
+  // Built on first need: most commits never descend past a scalar write.
+  let opKeys: string[] | null = null;
+  let whole: Set<string> | null = null;
+  let shifted: Set<string> | null = null;
+  const index = (): void => {
+    opKeys = ops.map((p) => pathKey(p.path));
+    whole = new Set();
+    shifted = new Set();
+    for (let i = 0; i < ops.length; i++) {
+      const p = ops[i]!;
+      if (p.op === "add" || p.op === "replace") whole.add(opKeys[i]!);
+      const last = p.path[p.path.length - 1];
+      if (
+        p.path.length > 0 &&
+        (p.op === "add" || p.op === "remove" || last === "length")
+      ) shifted.add(pathKey(p.path.slice(0, -1) as (string | number)[]));
+    }
+  };
+  /** What the client holds once the frame (without these fixes) applies. */
+  let client: { value: unknown } | null = null;
+  const clientAt = (path: readonly (string | number)[]): unknown => {
+    if (client === null) {
+      try {
+        client = { value: applyWirePatches(prev, ops) };
+      } catch {
+        // The client would fail on this frame too and resync with a full
+        // state, which carries the server's order — nothing to fix here.
+        client = { value: undefined };
+      }
+    }
+    let cur = client.value;
+    for (const k of path) {
+      if (cur === null || typeof cur !== "object") return undefined;
+      cur = (cur as Record<string | number, unknown>)[k];
+    }
+    return cur;
+  };
+  /** Keys (as path keys) whose subtree is re-sent whole by a fix. */
+  const resent: string[] = [];
+  const fixes: WirePatch[] = [];
+  const isObj = (v: unknown): v is object =>
+    v !== null && typeof v === "object";
+
+  /** Re-send `tail` (keys of `no`, in order) under `path`; `held` is the
+   *  object the client holds there. */
+  const resend = (
+    path: (string | number)[],
+    held: object,
+    no: Record<string, unknown>,
+    tail: string[],
+  ): void => {
+    for (const k of tail) {
+      const at = [...path, k];
+      if (Object.hasOwn(held, k)) fixes.push({ op: "remove", path: at });
+      fixes.push({ op: "add", path: at, value: no[k] });
+    }
+  };
+
+  /** Identity walk, trusted while no enclosing array shifted this commit. */
+  const walk = (
+    p: unknown,
+    n: unknown,
+    path: (string | number)[],
+    key: string,
+  ): void => {
+    if (
+      p === n || !isObj(p) || !isObj(n) || Array.isArray(p) !== Array.isArray(n)
+    ) return;
+    if (Array.isArray(p)) {
+      const na = n as unknown[];
+      let changed = false;
+      for (let j = 0; !changed && j < na.length; j++) {
+        changed = isObj(na[j]) && (j >= p.length || p[j] !== na[j]);
+      }
+      if (!changed) return;
+      if (opKeys === null) index();
+      if (p.length === na.length && !shifted!.has(key)) {
+        for (let j = 0; j < na.length; j++) {
+          if (p[j] === na[j] || !isObj(na[j])) continue;
+          const ck = key + pathKey([j]);
+          if (!whole!.has(ck)) walk(p[j], na[j], [...path, j], ck);
+        }
+        return;
+      }
+      const origin = originOf(p.length, path, key);
+      if (origin === null || origin.length !== na.length) {
+        // The ops do not account for the array: trust nothing but the client.
+        exact(clientAt(path), na, path);
+        return;
+      }
+      for (let j = 0; j < na.length; j++) {
+        const o = origin[j]!;
+        // A fresh element (added, or replaced whole) arrived as JSON, in the
+        // server's order. Everything else is checked against the client.
+        if (o < 0 || !isObj(na[j]) || p[o] === na[j]) continue;
+        exact(clientAt([...path, j]), na[j], [...path, j]);
+      }
+      return;
+    }
+    const po = p as Record<string, unknown>;
+    const no = n as Record<string, unknown>;
+    const tail = movedTail(po, no, () => {
+      // The keys this commit `add`s under `path`, in op order — the order the
+      // client appends them in.
+      const keys: string[] = [];
+      for (const op of ops) {
+        if (op.op !== "add" || op.path.length !== path.length + 1) continue;
+        const k = op.path[path.length];
+        if (typeof k !== "string") continue;
+        if (pathKey(op.path.slice(0, -1) as (string | number)[]) === key) {
+          keys.push(k);
+        }
+      }
+      return keys;
+    });
+    if (tail !== null) {
+      for (const k of tail) resent.push(key + pathKey([k]));
+      resend(path, po, no, tail);
+    }
+    const moved = tail === null ? null : new Set(tail);
+    for (const k of keysOf(no)) {
+      const nv = no[k];
+      if (!isObj(nv) || moved?.has(k)) continue;
+      if (!Object.hasOwn(po, k) || po[k] === nv) continue;
+      if (opKeys === null) index();
+      const ck = key + pathKey([k]);
+      if (!whole!.has(ck)) walk(po[k], nv, [...path, k], ck);
+    }
+  };
+
+  /** Final index → `prev` index for an array that shifted, from its own ops
+   *  (-1 for an element that arrived whole), or null if they cannot say. */
+  const originOf = (
+    len: number,
+    path: readonly (string | number)[],
+    key: string,
+  ): number[] | null => {
+    const list = Array.from({ length: len }, (_, i) => i);
+    for (const p of ops) {
+      if (p.path.length !== path.length + 1) continue;
+      if (pathKey(p.path.slice(0, -1) as (string | number)[]) !== key) continue;
+      const last = p.path[p.path.length - 1];
+      if (last === "length") {
+        if (typeof p.value !== "number") return null;
+        const from = list.length;
+        list.length = p.value;
+        list.fill(-1, from);
+        continue;
+      }
+      const idx = typeof last === "number" ? last : Number(last);
+      if (!Number.isInteger(idx) || idx < 0 || idx > list.length) return null;
+      if (p.op === "add") list.splice(idx, 0, -1);
+      else if (p.op === "remove") list.splice(idx, 1);
+      else list[idx] = -1;
+    }
+    return list;
+  };
+
+  /** Structural walk against the client's actual value: no identity, op-path
+   *  or drop shortcuts, because under a shifted array none of them hold. */
+  const exact = (
+    c: unknown,
+    n: unknown,
+    path: (string | number)[],
+  ): void => {
+    if (
+      c === n || !isObj(c) || !isObj(n) || Array.isArray(c) !== Array.isArray(n)
+    ) return;
+    if (Array.isArray(c)) {
+      const na = n as unknown[];
+      if (c.length !== na.length) return; // not an order question
+      for (let j = 0; j < na.length; j++) exact(c[j], na[j], [...path, j]);
+      return;
+    }
+    const co = c as Record<string, unknown>;
+    const no = n as Record<string, unknown>;
+    const tail = movedTail(co, no);
+    if (tail !== null) resend(path, co, no, tail);
+    const moved = tail === null ? null : new Set(tail);
+    for (const k of keysOf(no)) {
+      if (!moved?.has(k) && Object.hasOwn(co, k)) {
+        exact(co[k], no[k], [...path, k]);
+      }
+    }
+  };
+
+  walk(prev, next, [], "");
+
+  if (fixes.length === 0) return ops;
+  if (opKeys === null) index();
+  const kept = resent.length === 0
+    ? ops
+    : ops.filter((_, i) => !resent.some((r) => opKeys![i]!.startsWith(r)));
+  return [...kept, ...fixes];
+}
+
+/**
+ * The keys of `n` the client cannot place by itself, in `n`'s order — or null
+ * when `n`'s order is what the client builds from `p` (its survivors in place,
+ * new keys appended in `add` order).
+ */
+function movedTail(
+  p: Record<string, unknown>,
+  n: Record<string, unknown>,
+  addOrder?: () => string[],
+): string[] | null {
+  const pk = keysOf(p);
+  const nk = keysOf(n);
+  let same = pk.length === nk.length;
+  for (let x = 0; same && x < pk.length; x++) same = pk[x] === nk[x];
+  if (same) return null;
+  // Lockstep over the non-index keys: `p`'s survivors, in order, are a prefix
+  // of `n`'s unless a key the client already holds was moved. No allocation —
+  // this is the path every add/remove to a dict takes.
+  let i = 0;
+  let j = 0;
+  for (;;) {
+    while (i < pk.length && (isIndexKey(pk[i]!) || !Object.hasOwn(n, pk[i]!))) {
+      i++;
+    }
+    while (j < nk.length && isIndexKey(nk[j]!)) j++;
+    if (i < pk.length && j < nk.length && pk[i] === nk[j]) {
+      i++;
+      j++;
+    } else break;
+  }
+  // Past the lockstep, only NEW keys is what the client can build by itself.
+  // An OLD key there is a move the client cannot see.
+  let moved = false;
+  let fresh = 0;
+  for (let x = j; !moved && x < nk.length; x++) {
+    if (isIndexKey(nk[x]!)) continue;
+    moved = Object.hasOwn(p, nk[x]!);
+    fresh++;
+  }
+  if (!moved) {
+    // …and only if their `add`s arrive in `n`'s order. Usually Immer emits
+    // them in insertion order, but not always: a new key whose NAME is
+    // inherited (`constructor`, `toString`) that is deleted and re-added keeps
+    // its first slot in Immer's bookkeeping (`"constructor" in base` is true),
+    // so its `add` precedes keys inserted after it.
+    if (fresh < 2 || addOrder === undefined) return null;
+    const rest = nk.slice(j).filter((k) => !isIndexKey(k));
+    const inRest = new Set(rest);
+    const adds = addOrder().filter((k) => inRest.has(k));
+    let inOrder = adds.length === rest.length;
+    for (let x = 0; inOrder && x < rest.length; x++) {
+      inOrder = adds[x] === rest[x];
+    }
+    return inOrder ? null : rest;
+  }
+  // `n` is [keys never moved, in `p` order] ++ [appended keys]. The LONGEST
+  // prefix of old keys in increasing `p` position is a valid "never moved"
+  // part, and the smallest one to leave in place: re-sending the tail after
+  // it reproduces `n` exactly. (Cutting at the lockstep instead would re-send
+  // every key after the first moved one — a touched first key of a 10k dict
+  // re-sent all 10k.)
+  const at = new Map<string, number>();
+  for (let x = 0; x < pk.length; x++) at.set(pk[x]!, x);
+  const order = nk.filter((k) => !isIndexKey(k));
+  let t = 0;
+  for (let last = -1; t < order.length; t++) {
+    const q = at.get(order[t]!);
+    if (q === undefined || q < last) break;
+    last = q;
+  }
+  return order.slice(t);
+}
+
+// Path identity is `_pathKey` (protocol/patch-ops.ts) — ONE decider for the
+// generator and the applier. It used to be a local NUL-joined key here and a
+// second NUL-joined key there, and a state key containing NUL collided with a
+// deeper path in both: `compactPatches` dropped a live write as "superseded".
 
 /**
  * Compact an array of Immer patches: drop every op whose effect a LATER

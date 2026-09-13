@@ -20,6 +20,11 @@ app, that is a bug in aio, not a step you missed.
 - **[The aio restructure (alpha27+)](restructure.md)** — every restructure
   breaking change with before → after recipes (methods-only cells, instances,
   SQLite-only persistence, `aio/extras`, wire catalog)
+- [1.0.0-beta → **1.0.1-beta**](from-1.0.0-beta-to-1.0.1-beta.md) — nothing
+  breaks. A fix round: acked writes to sync and worker cells survive a crash,
+  cross-origin state changes are refused, a flooding or non-reading socket
+  cannot starve or bloat the server, and the test harness is as strict as
+  production again
 - [alpha77 → **1.0.0-beta**](from-alpha77-to-1.0.0-beta.md) — nothing breaks.
   Nine field reports answered: `route()` and `aio/log` become importable,
   `onMount` keeps the cleanup you return, a lifecycle read that subscribes to

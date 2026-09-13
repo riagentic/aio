@@ -16,6 +16,7 @@
 import { runBundle } from "../src/build/build-bundle.ts";
 import { resolveAppDir } from "../src/build/build-config.ts";
 import { ESBUILD_JSX, ESBUILD_SPEC } from "../src/build/esbuild-shared.ts";
+import { BROTLI_QUALITY } from "../src/server/http-encoding.ts";
 
 const ROOT = new URL("..", import.meta.url).pathname;
 
@@ -26,17 +27,25 @@ export interface BundleSizes {
   appRaw: number;
   appGzip: number;
   appBrotli: number;
+  /** What aio's OWN server puts on the wire: brotli at `BROTLI_QUALITY`, the
+   *  quality `http-encoding.ts` compresses at. `appBrotli` above is q11 — the
+   *  figure a precompressed static host would achieve, which aio does not
+   *  have — so it is the wrong number to quote for "what a page costs to
+   *  load", and a doc that quoted it promised bytes nobody is served. */
+  appServed: number;
   /** An app that renders but holds no state — no cell, no socket traffic. The
    *  difference from `app*` is what one cell actually costs. */
   shellRaw: number;
   shellGzip: number;
   shellBrotli: number;
+  shellServed: number;
   /** AIR ALONE: `src/air.ts`, bundled and minified with nothing else. This is
    *  the number comparable to "React + ReactDOM, min+gzip" — and the number
    *  five docs quoted as "~20 KB" without ever measuring it. */
   airRaw: number;
   airGzip: number;
   airBrotli: number;
+  airServed: number;
 }
 
 async function gzipSize(bytes: Uint8Array<ArrayBuffer>): Promise<number> {
@@ -53,6 +62,16 @@ async function brotliSize(bytes: Uint8Array<ArrayBuffer>): Promise<number> {
   // which is what a documented size should quote.
   return z.brotliCompressSync(bytes, {
     params: { [z.constants.BROTLI_PARAM_QUALITY]: 11 },
+  }).byteLength;
+}
+
+/** The bytes aio's server actually sends. Same compressor, same quality as
+ *  `http-encoding.ts` — imported rather than repeated, so the measurement
+ *  cannot drift away from the thing it measures. */
+async function servedSize(bytes: Uint8Array<ArrayBuffer>): Promise<number> {
+  const z = await import("node:zlib");
+  return z.brotliCompressSync(bytes, {
+    params: { [z.constants.BROTLI_PARAM_QUALITY]: BROTLI_QUALITY },
   }).byteLength;
 }
 
@@ -197,12 +216,15 @@ export async function measure(): Promise<BundleSizes> {
     appRaw: app.byteLength,
     appGzip: await gzipSize(app),
     appBrotli: await brotliSize(app),
+    appServed: await servedSize(app),
     shellRaw: shell.byteLength,
     shellGzip: await gzipSize(shell),
     shellBrotli: await brotliSize(shell),
+    shellServed: await servedSize(shell),
     airRaw: air.byteLength,
     airGzip: await gzipSize(air),
     airBrotli: await brotliSize(air),
+    airServed: await servedSize(air),
   };
 }
 
@@ -219,23 +241,48 @@ if (import.meta.main) {
   if (Deno.args.includes("--json")) {
     console.log(JSON.stringify(sizes, null, 2));
   } else {
-    const row = (label: string, raw: number, gz: number, br: number) =>
+    const row = (
+      label: string,
+      raw: number,
+      gz: number,
+      br: number,
+      served: number,
+    ) =>
       `${label.padEnd(22)} ${String(kb(raw)).padStart(5)} KB ${
         String(kb(gz)).padStart(5)
-      } KB ${String(kb(br)).padStart(5)} KB`;
-    console.log("\nbundle                   raw    gzip  brotli");
-    console.log("─".repeat(46));
-    console.log(row("AIR alone", sizes.airRaw, sizes.airGzip, sizes.airBrotli));
+      } KB ${String(kb(br)).padStart(5)} KB ${
+        String(kb(served)).padStart(6)
+      } KB`;
+    console.log(
+      "\nbundle                   raw    gzip  brotli  on the wire",
+    );
+    console.log("─".repeat(58));
+    console.log(
+      row(
+        "AIR alone",
+        sizes.airRaw,
+        sizes.airGzip,
+        sizes.airBrotli,
+        sizes.airServed,
+      ),
+    );
     console.log(
       row(
         "app shell (no cell)",
         sizes.shellRaw,
         sizes.shellGzip,
         sizes.shellBrotli,
+        sizes.shellServed,
       ),
     );
     console.log(
-      row("counter app", sizes.appRaw, sizes.appGzip, sizes.appBrotli),
+      row(
+        "counter app",
+        sizes.appRaw,
+        sizes.appGzip,
+        sizes.appBrotli,
+        sizes.appServed,
+      ),
     );
     console.log("");
   }

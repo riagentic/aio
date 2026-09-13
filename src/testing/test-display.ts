@@ -25,66 +25,28 @@
  * Refusing to run the tests would be worse than a stolen focus.
  */
 
-/** The display aio's tests use. Fixed, not allocated: a stable number is what
- *  lets a human start one Xephyr in the morning and have every later run find
- *  it. High enough not to collide with a real session (`:0`, `:1`) or with the
- *  displays a desktop's own nested tools tend to claim. */
-export const AIO_TEST_DISPLAY: string = ":77";
+import {
+  AIO_NESTED_DISPLAY,
+  AIO_NESTED_SCREEN,
+  displayIsUp,
+  startXephyr,
+  XEPHYR_INSTALL_HINT,
+} from "../server/nested-display.ts";
+
+export { displayIsUp, startXephyr };
+
+/** The display aio's tests use — THE nested display, shared with `am start`
+ *  when it contains an agent's window. One number means one Xephyr on the box
+ *  (see server/nested-display.ts); two would mean two nested desktops and a
+ *  person having to guess which one their app went to. */
+export const AIO_TEST_DISPLAY: string = AIO_NESTED_DISPLAY;
 
 /** Default geometry — big enough for a real app layout, small enough to leave
  *  the screen usable. */
-export const AIO_TEST_SCREEN: string = "1280x900";
+export const AIO_TEST_SCREEN: string = AIO_NESTED_SCREEN;
 
 let _resolved: string | null = null;
 let _warned = false;
-
-/** True when an X server is already listening on `display`.
- *
- *  Checked by its socket rather than by running a client: `xdpyinfo` is not
- *  installed everywhere, and spawning a probe process per call is exactly the
- *  kind of cost that makes a helper get skipped. */
-export function displayIsUp(display: string): boolean {
-  const n = display.replace(/^:/, "").split(".")[0];
-  try {
-    Deno.statSync(`/tmp/.X11-unix/X${n}`);
-    return true;
-  } catch {
-    return false;
-  }
-}
-
-/** Start Xephyr on `display`, DETACHED, and do not wait for it.
- *
- *  Detached is the whole point: the child must outlive this test process, or
- *  the next run starts another one and the flicker is back. Returns false when
- *  Xephyr is not installed — the caller degrades rather than fails. */
-export function startXephyr(
-  display: string = AIO_TEST_DISPLAY,
-  screen: string = AIO_TEST_SCREEN,
-): boolean {
-  try {
-    new Deno.Command("Xephyr", {
-      args: ["-screen", screen, "-resizeable", "-ac", display],
-      stdin: "null",
-      stdout: "null",
-      stderr: "null",
-    }).spawn().unref();
-  } catch {
-    return false; // not installed
-  }
-  // Give the server a moment to create its socket. Bounded and small: this
-  // runs at most once per test process, and a slow start just means the first
-  // window lands on the fallback display rather than failing.
-  const deadline = Date.now() + 3000;
-  while (Date.now() < deadline) {
-    if (displayIsUp(display)) return true;
-    // Busy-wait deliberately: this is a one-shot at process start, and making
-    // it async would push `await` into every GUI-launching call site.
-    const until = Date.now() + 50;
-    while (Date.now() < until) { /* spin */ }
-  }
-  return displayIsUp(display);
-}
 
 /** THE display every GUI child of a test should be launched on.
  *
@@ -113,7 +75,12 @@ export function testDisplay(): string {
   // needs a session to open its window inside — and there is no focus to steal
   // here anyway. Trying anyway costs a doomed spawn and a 3s wait per run.
   if (!Deno.env.get("DISPLAY")) return (_resolved = "");
-  if (startXephyr()) {
+  // Both arguments spelled out, not defaulted: the shared primitive owns the
+  // fallbacks, but what a TEST display is (this number, this geometry) is
+  // this module's decision, and `scripts/xephyr.sh` reads $AIO_TEST_SCREEN
+  // expecting the same value. A default that silently agrees today is the
+  // drift this repo keeps finding.
+  if (startXephyr(AIO_TEST_DISPLAY, AIO_TEST_SCREEN)) {
     console.error(
       `[aio:test] started Xephyr on ${AIO_TEST_DISPLAY} for this and every ` +
         `later run — test windows open THERE, not on your desktop. It stays ` +
@@ -126,8 +93,7 @@ export function testDisplay(): string {
     _warned = true;
     console.error(
       `[aio:test] Xephyr not found — GUI tests will open on your REAL desktop ` +
-        `and take focus. Install it (Debian/Ubuntu: apt install xserver-xephyr, ` +
-        `Fedora: dnf install xorg-x11-server-Xephyr, Arch: pacman -S xorg-server-xephyr), ` +
+        `and take focus. Install it (${XEPHYR_INSTALL_HINT}), ` +
         `or point $AIO_TEST_DISPLAY at a display you control.`,
     );
   }

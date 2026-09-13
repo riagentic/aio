@@ -21,7 +21,7 @@ import {
 import { evaluateHints } from "./hints.ts";
 import { generateCorrelationId } from "../diagnostics/error.ts";
 import { diagEmit } from "../diagnostics/diagnostic-bus.ts";
-import { declaredBudgets } from "../state/budgets.ts";
+import { budgetsFor } from "../state/budgets.ts";
 
 // ─── Types ──────────────────────────────────────────────────────────────────
 
@@ -47,6 +47,11 @@ export type VitalsSystem = {
    *  have none at all: the switch type-checked, was accepted, and changed
    *  nothing, while `hints.ts` advised "if backpressure is off, enable it". */
   backpressureEnabled: boolean;
+  /** Subscribe to "this client was frozen and is heard from again". Returns
+   *  the unsubscribe. The broadcaster is the listener: it SKIPS a frozen
+   *  client's rounds, so the moment it recovers it is owed the state those
+   *  rounds carried — see `resyncRecovered` in server-broadcast.ts. */
+  onClientRecovered: (fn: (clientId: string) => void) => () => void;
   destroy: () => void;
 };
 
@@ -81,6 +86,8 @@ export function createVitalsSystem(config: VitalsConfig): VitalsSystem {
   const hintsEnabled = config.hints !== false;
   const onAlert = config.onVitalAlert;
 
+  /** Who is told a frozen client recovered — see `onClientRecovered`. */
+  const _recoveredListeners = new Set<(clientId: string) => void>();
   const loopProbe = createLoopProbe(thresholds);
   const serverTransport = createTransportProbeServer({
     thresholds,
@@ -100,7 +107,21 @@ export function createVitalsSystem(config: VitalsConfig): VitalsSystem {
         thresholds.transport.frozen,
       );
     },
-    onClientRecovered: (_clientId) => {
+    onClientRecovered: (clientId) => {
+      // An alert alone left the client STALE. Its skipped rounds are only
+      // repaid (`needsFull`) by the next state-change round, and an idle app
+      // has none: the chaos hunt measured 8 s+ of a recovered client sitting
+      // on v=4 while the server held v=6, in dev and prod alike — a
+      // background tab, a closed laptop lid, a GC pause over 2 s. The
+      // listeners (the broadcaster) pay the debt now — BEFORE the alert, so
+      // nothing the alert path does can stand between a client and its state.
+      for (const fn of [..._recoveredListeners]) {
+        try {
+          fn(clientId);
+        } catch (e) {
+          log.error("vitals", `a client-recovered listener threw — ${e}`);
+        }
+      }
       fireAlert("transport", "recovered", 0, 0);
     },
   });
@@ -128,7 +149,11 @@ export function createVitalsSystem(config: VitalsConfig): VitalsSystem {
   // them both correctly. An explicit `vitals.pressure` still WINS — it is the
   // more specific instruction, and silently overriding it would make the
   // narrower spelling the weaker one.
-  const declared = declaredBudgets();
+  // Read synchronously inside the boot that just called `setBudgets`, so the
+  // latest ledger IS this app's — and the monitor keeps it, rather than
+  // recording into whichever app booted last.
+  const budgets = budgetsFor();
+  const declared = budgets.declared();
   const pressureMonitor = pressureCfg !== false
     ? createPressureMonitor({
       payloadThreshold: (typeof pressureCfg === "object"
@@ -137,6 +162,7 @@ export function createVitalsSystem(config: VitalsConfig): VitalsSystem {
       rateThreshold: (typeof pressureCfg === "object"
         ? pressureCfg.rateThreshold
         : undefined) ?? declared.broadcastRate,
+      budgets,
       onDiagnostic: config.onDiagnostic,
     })
     : null;
@@ -299,6 +325,10 @@ export function createVitalsSystem(config: VitalsConfig): VitalsSystem {
     serverTransport,
     pressureMonitor,
     backpressureEnabled: config.backpressure !== false,
+    onClientRecovered: (fn) => {
+      _recoveredListeners.add(fn);
+      return () => _recoveredListeners.delete(fn);
+    },
     checkAndAlert,
     getEndpointData: () => ({
       server: { loop: loopProbe.getVitals() },
@@ -338,6 +368,7 @@ export function createVitalsSystem(config: VitalsConfig): VitalsSystem {
       loopProbe.reset();
       serverTransport.destroy();
       pressureMonitor?.destroy();
+      _recoveredListeners.clear();
     },
   };
 }

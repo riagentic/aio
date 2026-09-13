@@ -145,23 +145,57 @@ const TROJAN_SQL_DEFAULT_LIMIT = 10_000;
 /** Hard cap on serialized result bytes to prevent OOM from a wide SELECT
  *  (e.g. millions of small rows still under DEFAULT_LIMIT). Audit F-9. */
 const TROJAN_SQL_MAX_RESULT_BYTES = 10_000_000;
-let _trojanReqCount = 0;
-let _trojanResetTimer: ReturnType<typeof setTimeout> | null = null;
-
-/** Reset this process's control-plane state — called during server shutdown.
+/** One rate-limit window PER SERVER, keyed by the server's own `trojan`
+ *  capabilities object (built once per `startServer`, shared by its TLS
+ *  control listener, so both doors of one app still draw on one budget).
  *
- *  The rate-limit counters AND the local control credential: the credential is
+ *  It was one module-level counter, and a process can host several apps
+ *  (library mode, `testApps`): 101 `am` calls against app A answered app B's
+ *  FIRST request with a 429 that named a count B never received. A WeakMap,
+ *  so a closed server's window goes with it; a timestamp window, not a timer,
+ *  so nothing is left armed for shutdown to clear. */
+const _trojanWindows = new WeakMap<
+  object,
+  { start: number; count: number; epoch: number }
+>();
+/** Bumped by an unscoped reset: every window opened before it is stale. */
+let _trojanEpoch = 0;
+
+/** Count one request against this server's window; the count so far. */
+function _countTrojanRequest(key: object): number {
+  const now = Date.now();
+  let w = _trojanWindows.get(key);
+  if (!w || now - w.start >= 1000 || w.epoch !== _trojanEpoch) {
+    w = { start: now, count: 0, epoch: _trojanEpoch };
+    _trojanWindows.set(key, w);
+  }
+  return ++w.count;
+}
+
+/** Reset control-plane state — called during server shutdown.
+ *
+ *  The rate-limit window AND the local control credential: the credential is
  *  per-boot, so the process that minted it is the one that must take it away.
  *  Leaving the file behind would be inert (the app only ever accepts the value
  *  it holds in memory) but it would make the next `am` call fail with a stale
- *  key instead of an honest "the app is not running". */
-export function resetTrojanRateLimit(): void {
-  if (_trojanResetTimer) {
-    clearTimeout(_trojanResetTimer);
-    _trojanResetTimer = null;
+ *  key instead of an honest "the app is not running".
+ *
+ *  `owner` scopes it to ONE app, which is what a server's shutdown passes. The
+ *  unscoped form disarmed EVERY credential in the process, so closing app B in
+ *  a two-app process deleted app A's `control.key` from disk and 401'd A's own
+ *  operator — `am` locked out of a perfectly healthy app. With an owner and no
+ *  appId nothing is disarmed: an app with no appId armed nothing
+ *  (`armLocalControl` refuses without one). No argument keeps the old
+ *  meaning — everything — for a test that drove `handleTrojan` directly. */
+export function resetTrojanRateLimit(owner?: { appId?: string }): void {
+  if (owner === undefined) {
+    _trojanEpoch++;
+    disarmLocalControl();
+    return;
   }
-  _trojanReqCount = 0;
-  disarmLocalControl();
+  // The window needs no reset: it is keyed by the closing server's own object
+  // and dies with it.
+  if (owner.appId !== undefined) disarmLocalControl(owner.appId);
 }
 
 /** THE reader for a numeric query param on the trojan API.
@@ -280,15 +314,11 @@ export function handleTrojan(
   // reached directly, so no per-route prod check is load-bearing.
   if (deps.prod) return err("trojan is disabled in production", 404);
 
-  // Rate limiting — 100 requests/sec across all trojan endpoints
-  _trojanReqCount++;
-  if (!_trojanResetTimer) {
-    _trojanResetTimer = setTimeout(() => {
-      _trojanReqCount = 0;
-      _trojanResetTimer = null;
-    }, 1000);
-  }
-  if (_trojanReqCount > TROJAN_RATE_LIMIT) {
+  // Rate limiting — 100 requests/sec across all of ONE app's trojan endpoints
+  // Per server — see `_trojanWindows`. `deps.trojan` is always supplied by a
+  // real server; a hand-built deps without it still gets a window of its own.
+  const reqCount = _countTrojanRequest(deps.trojan ?? deps);
+  if (reqCount > TROJAN_RATE_LIMIT) {
     // SAY THE LIMIT. The two sibling limiters both do — client-log names
     // `>${MAX_RATE} msg/s`, the WS fuse names the rate, the client count and
     // the cap — and this is the one an OPERATOR meets, through `am`, where a
@@ -299,7 +329,7 @@ export function handleTrojan(
     return err(
       `rate limit exceeded — the trojan control plane accepts ` +
         `${TROJAN_RATE_LIMIT} requests/sec across ALL of its endpoints, and ` +
-        `${_trojanReqCount} arrived this second. It clears on its own at the ` +
+        `${reqCount} arrived this second. It clears on its own at the ` +
         `next second; a script calling \`am\` in a tight loop is the usual ` +
         `cause, so space the calls out or do the work in one dispatch.`,
       429,
@@ -752,7 +782,13 @@ async function handlePost(
       if (sepIdx > 0 && Object.keys(methods).length > 0) {
         const cell = action.type.slice(0, sepIdx);
         const method = action.type.slice(sepIdx + 1);
-        const known = methods[cell];
+        // `Object.hasOwn` — `cell` is client-controlled, and a bare index
+        // reads the prototype chain: `constructor`, `toString`, `valueOf` &
+        // co. resolved to a Function, `known.includes` threw, and the
+        // route's outer catch reported `400 invalid JSON` for a body that
+        // was perfectly valid JSON. Fail loud is only worth having if it
+        // fails loud about the right thing.
+        const known = Object.hasOwn(methods, cell) ? methods[cell] : undefined;
         if (!known) {
           return err(
             `unknown cell "${cell}" — not booted (cells: ${
@@ -949,7 +985,8 @@ async function handlePost(
               } — the missing one${_shortBy === 1 ? " is" : "s are"} ` +
               `\`undefined\` inside the method. If it fills its own in, give ` +
               `the parameter a default in the SIGNATURE (\`(s, x = 0)\`), ` +
-              `which is what makes its optionality visible.`,
+              `which is what makes its optionality visible — a TypeScript \`?\` ` +
+              `alone does not (it is erased; only a default is).`,
           }
           : {}),
         ...(persistErr === undefined ? {} : {
@@ -974,6 +1011,25 @@ async function handlePost(
       const body = JSON.parse(rawBody);
       if (typeof body?.path !== "string" || typeof body?.action !== "string") {
         return err("body must be { path, action, text?, key? }", 400);
+      }
+      // A trigger under PAUSED time travel cannot do anything. The click
+      // really happens in the page, and the action it dispatches is DROPPED
+      // by `dispatch.ts` — so the client answers "I clicked it" and `am
+      // trigger` printed `{"ok":true}` with exit 0, while the app's log said
+      // `time travel is PAUSED — 'counter:increment' was not applied` and the
+      // state never moved. `am dispatch` refuses the same situation with a
+      // message; the two disagreed about one fact, and the one CLAUDE.md
+      // tells agents to use for the observe→act→observe loop was the one that
+      // lied. Refuse it HERE, where the answer is known, rather than
+      // reporting a success nothing backs.
+      const hist = trojan.getTTHistory?.() as { paused?: boolean } | undefined;
+      if (hist?.paused === true) {
+        return err(
+          "time travel is paused — the click would be delivered and its " +
+            "action dropped, not applied. Resume time travel (`am timetravel " +
+            "resume`) to drive the UI again.",
+          409,
+        );
       }
       return sendToClient(idx, enc("ui-trigger", body));
     } catch {
@@ -1146,10 +1202,31 @@ async function handlePost(
       // in a comment can't suppress the cap. The LIMIT is appended on a FRESH
       // line so a trailing `-- comment` in the raw query can't swallow it.
       const hasLimit = /\bLIMIT\b/.test(upper);
+      // One MORE than the cap, so "there were more" is a fact rather than a
+      // guess: exactly `N` rows back is indistinguishable from a table that
+      // happens to hold `N`.
       const effectiveQuery = hasLimit
         ? query
-        : `${query.trimEnd()}\nLIMIT ${TROJAN_SQL_DEFAULT_LIMIT}`;
+        : `${query.trimEnd()}\nLIMIT ${TROJAN_SQL_DEFAULT_LIMIT + 1}`;
       const rows = await trojan.sqlQuery(effectiveQuery);
+      // REFUSED, not truncated. The byte cap beside this one answers 413 and
+      // says what to do; the row cap injected a LIMIT and said nothing, so
+      // `am sql "select * from t"` on a 12,000-row table returned 10,000 rows
+      // with exit 0 — and anyone (or any agent) reading that concludes the
+      // table holds exactly 10,000. A wrong answer delivered confidently is
+      // worse than a refusal.
+      if (
+        !hasLimit && Array.isArray(rows) &&
+        rows.length > TROJAN_SQL_DEFAULT_LIMIT
+      ) {
+        return err(
+          `more than ${TROJAN_SQL_DEFAULT_LIMIT} rows — add your own LIMIT ` +
+            `(or a WHERE) so the answer is one you asked for. Silently ` +
+            `returning the first ${TROJAN_SQL_DEFAULT_LIMIT} would read as ` +
+            `the whole table.`,
+          413,
+        );
+      }
       const serialized = JSON.stringify(rows, null, 2);
       if (serialized.length > TROJAN_SQL_MAX_RESULT_BYTES) {
         return err(
@@ -1193,7 +1270,8 @@ async function handlePost(
         400,
       );
     }
-    const pin = generatePin();
+    // THIS app's PIN (keyed by its key) — never another app's in the process.
+    const pin = generatePin(deps.token);
     return json({
       ok: true,
       pin,

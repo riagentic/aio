@@ -31,15 +31,36 @@ const todos = cell("todos", {
   state: { items: [] as Todo[], filter: "all" },
   sync: true, // all fields LWW, 4h retention
   methods: {
-    add(s, text: string) {
-      s.items.push({ id: crypto.randomUUID(), text });
+    add(s, todo: Todo) {
+      s.items.push(todo);
     },
     remove(s, id: string) {
       s.items = s.items.filter((i) => i.id !== id);
     },
   },
 });
+
+todos.add({ id: crypto.randomUUID(), text: "Buy milk" }); // id made by the CALLER
 ```
+
+### Methods must be deterministic
+
+A sync method runs on **every replica**: in the calling tab, on the server, in
+every peer tab, and again in a tab that reloads and rebuilds the cell. So it
+must compute the same state from the same state and arguments everywhere. A
+method that reads a random source or a clock — `crypto.randomUUID()`,
+`Math.random()`, `Date.now()`, `new Date()` — computes a different value on each
+replica: the item gets a different id on every screen, and a `remove(id)` made
+on one of them matches nothing on the server. Make the value where the call is
+made and pass it in, as `add` does above.
+
+aio catches it when it can. The browser engine folds each op twice and compares;
+a method that disagrees with itself is named at error level
+(`todos.add is not deterministic …`, once per method), and the client re-syncs
+that cell from the server after each such op so it converges on the server's
+values. That repairs the screen, not the edits made against the wrong ids in the
+meantime — and a clock read that lands in the same millisecond twice is not
+caught at all. The fix is always the argument.
 
 With custom merge strategies:
 
@@ -72,6 +93,18 @@ const inventory = cell("inventory", {
 ```
 
 ## Architecture
+
+**The offline queue** lives in `localStorage`, one document per cell, so unsent
+changes survive a reload. Where `localStorage` is unusable (a private window,
+site data blocked, a full quota) the queue is kept in memory for the page load —
+sync goes on working, including offline — and an error says once that unsent
+changes will not survive a reload. A reconnect flushes the queue in slices the
+server accepts (see
+[the protocol](crdt-protocol.md#sync-req--sync-res-reconnection)).
+
+A call to a sync method resolves when the change is applied locally and queued —
+and **rejects** with the method's own error, queueing nothing, when the method
+throws, exactly as on a plain cell.
 
 ```
 Client A                    Server                    Client B
@@ -156,8 +189,23 @@ result  INTRO EDITED / body / OUTRO EDITED     ← both survive, no conflict
 Edits to **different** parts of the text are both applied. Edits to the **same**
 part are a real conflict: resolved by HLC exactly as `lww` would, and reported
 through `onConflict` — so the app can say "your change to this paragraph was
-replaced" instead of the user finding out later. Never a silent loss and never a
-mangled hybrid.
+replaced" instead of the user finding out later. Never a mangled hybrid.
+
+**Where the merge happens — read this before relying on one.** A merge strategy
+is computed on the **client**, for the view, while a peer's change and your own
+unconfirmed change overlap. The server does not merge: it applies each op
+through the cell's method, in the order the ops reach it. So the merge survives
+only a method that applies an _edit_. With an assigning method —
+`setBody(s, text) { s.body = text }` — the change the server receives last
+replaces the whole value, on the server and then on every screen, whatever the
+merged view showed for a moment. aio does not keep that quiet: the collision
+reaches `onConflict` (on the live path and in a reconnect's catch-up, where
+offline edits meet), and the engine warns once per field that the merge
+`cannot keep both`. The peer whose edit was replaced gets no callback — its own
+change had already been confirmed, and nothing on the wire says the later op was
+written without seeing it (that needs the op to carry its causal base —
+future/v2.md). For a counter use `s.n += delta`; for a set, push and filter; for
+text, a method that patches the value it finds.
 
 Granularity follows the text: **lines** when there are lines (a paragraph is the
 unit people edit), **characters** when there are not — so a one-line title still
@@ -189,8 +237,20 @@ on it would stall the merge.
 | `text`        | Per-region     | Notes, descriptions, comments, prose |
 | `counter`     | Yes            | Scores, votes, inventory levels      |
 | `lww-per-key` | Per-key        | Profile objects, config maps         |
-| `set-add`     | Yes            | Collaborative lists (keep all)       |
-| `set-remove`  | Yes            | Collaborative lists (honor deletes)  |
+| `set-add`     | Members[^ord]  | Collaborative lists (keep all)       |
+| `set-remove`  | Members[^ord]  | Collaborative lists (honor deletes)  |
+
+[^ord]: MEMBERSHIP is conflict-free: whatever order replicas merge in, the same
+    items survive — pinned over 18,000 randomised three-peer folds in
+    `tests/sync/properties/set-convergence.test.ts`. The ARRAY ORDER is
+    canonical for any single merge (both peers compute the same layout, which is
+    what keeps two screens identical) but not for three peers folded in
+    different orders: each merge picks its order from that PAIR's clocks, and
+    the merged value carries no clock of its own. The only order that would be
+    associative is one derived from the values — sorting by id — which would
+    discard the list order an app renders. In the engine as it stands a merged
+    value reaches only the optimistic client view; the server remains the
+    convergence authority, and its next broadcast sets the layout.
 
 ## Local-first: `sync` for the whole app
 
@@ -233,8 +293,17 @@ Server-origin writes are durable too: a change that arrives as an **op** (client
 method call) lands in the op-log immediately, and any **other** commit to a sync
 cell — an effect, cron, `serverFn`, a server-side method call, an async method's
 outcome — folds into the cell's sync snapshot (debounced 100ms, flushed on clean
-shutdown). The crash-loss window is the same 100ms KV cells have; a restart
-never rewinds a write the server confirmed.
+shutdown; a cell written faster than that still settles at least every 500ms). A
+SIGKILL inside that window loses the writes in it — up to 500ms of them — unless
+the app runs with `journal: true`: then each one is journalled at commit and
+replayed after the op-log restore, by a watermark the fold writes in its own
+transaction, so a restart never rewinds a write the server confirmed and never
+applies one twice. The same fold is **pushed to every connected client** at its
+position, so an open tab takes the write into its confirmed state — without
+that, its next own change rebased the view onto a state that had never heard of
+the write, and the write vanished from the screen while the server kept it. The
+push costs what the write changed (a patch the client checks against a digest of
+the server's state), not the whole cell.
 
 Use `sync: false` wherever an optimistic preview would be a lie — an auth cell,
 a payment, a ledger balance the user must not see move until the server agrees.
@@ -268,6 +337,7 @@ interface SyncConfig {
   offline: { retention: string };           // offline op retention
   onConflict?: (conflicts: SyncConflict[]) => void;
   onSync?: (stats: SyncStats) => void;
+  onRejected?: (info: { opId: string; reason: string }) => void;
 }
 ```
 
@@ -276,9 +346,19 @@ interface SyncConfig {
 | `merge`             | `{}` (all LWW)     | Per-field merge strategy                                                                                                                                                                                                                                                                                                                                                                                                                                    |
 | `identity`          | `{}` (auto `"id"`) | Identity field for set merges                                                                                                                                                                                                                                                                                                                                                                                                                               |
 | `offline.retention` | `"4h"`             | How long to keep offline ops — digits + `ms`/`s`/`m`/`h`/`d` (e.g. `"7d"`). A value this cannot read throws at boot rather than falling back to the default. An UNKNOWN change stamped older than `max(24h, retention)` is refused as `stale-beyond-retention` and dropped from the client's queue (`onDrop` / `onRejected`) instead of being applied a second time after its tombstone was swept — raise `retention` if clients may stay offline that long |
-| `pendingCap`        | `500`              | Max unconfirmed ops before blocking                                                                                                                                                                                                                                                                                                                                                                                                                         |
-| `maxDrift`          | `60000`            | Max clock skew (ms). An op stamped further **ahead** than this is refused by the server with an `op-rejected` naming the skew — it would win every last-write-wins comparison until the clocks meet. Ops stamped in the **past** are always accepted: that is the offline queue                                                                                                                                                                             |
-| `compactOps`        | `1000`             | Server compacts after N ops                                                                                                                                                                                                                                                                                                                                                                                                                                 |
+
+Those, plus the three callbacks above, are every key `sync: {}` accepts —
+anything else throws `sync: unknown option …`. Three limits are framework-wide
+constants (`SYNC_DEFAULTS` from `aio/sync`), not per-cell options:
+
+- `pendingCap` — 500 unconfirmed ops per cell. At the cap the client evicts
+  unconfirmed ops older than `offline.retention` (`onDrop`, `stale-evicted`),
+  and drops the new op if that frees nothing (`onDrop`, `prune-failed`).
+- `maxDrift` — 60 s. An op stamped further **ahead** than this is refused by the
+  server with an `op-rejected` naming the skew — it would win every
+  last-write-wins comparison until the clocks meet. Ops stamped in the **past**
+  are always accepted: that is the offline queue.
+- `compactOps` — the server compacts after 1000 ops.
 
 ## Sync Status
 
@@ -306,13 +386,15 @@ sync: {
 
 ## Callbacks
 
-**onConflict** — called when a remote op collides with unconfirmed local ops:
+**onConflict** — called when a remote op collides with unconfirmed local ops,
+whether it arrives live or in a reconnect's catch-up:
 
 ```ts
 onConflict(conflicts) {
   // conflicts: Array<{ field, local, remote, resolution }>
   // resolution: "lww" (default) or the field's configured merge strategy —
-  // that strategy was already applied to your client view.
+  // that strategy was applied to your client VIEW (live path). The server
+  // keeps whatever the method computes; see "Where the merge happens".
 }
 ```
 

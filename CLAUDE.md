@@ -8,7 +8,7 @@ code in this repository.
 All-in-one full-stack TypeScript framework on Deno ≥2.9 (`MIN_DENO` in
 `src/server/deno-version.ts`). One `cell({ state, methods })` drives server
 state, persistence (worker-thread SQLite, one `state.db`), CRDT sync, and the UI
-(AIR — a signals+JSX renderer; a page downloads 71 KB gz, renderer plus client
+(AIR — a signals+JSX renderer; a page downloads 81 KB gz, renderer plus client
 runtime). One codebase builds to browser, Electron, Android, CLI, and service
 targets. Elm-like core: `(state, action) → { state, effects[] }`.
 v1.0.0-alpha60, ~4300 test blocks in `tests/`.
@@ -16,8 +16,10 @@ v1.0.0-alpha60, ~4300 test blocks in `tests/`.
 An app is TWO files' worth of decisions: `cell({ state, methods })` and a
 component. Everything a finished app also needs — a stylesheet, an icon, a
 window — has a default that is derived from the app's own identity rather than
-left blank: `ui.theme` (a full stylesheet in `@layer aio`, so the app's own CSS
-always wins), a generated monogram icon, and `ui.chrome` for the desktop frame.
+left blank: `ui.theme` (default `"tokens"` — only the `--aio-*` variables,
+nothing paints; `"auto"`, which `am create` writes, is a full stylesheet in
+`@layer aio` until the app ships a `style.css`; `"full"` keeps it alongside the
+app's CSS), a generated monogram icon, and `ui.chrome` for the desktop frame.
 All three take the accent/hue from the same hash of the appId, so one app is one
 colour everywhere it appears.
 
@@ -33,7 +35,7 @@ deno task check             # type-check src/ mod.ts aiol/ examples/ tests/ + am
 deno task lint              # deno lint src/
 deno task lint:aio          # aiol — the custom project linter
 deno task check:boundaries        # src/ folder dependency matrix gate
-deno task check:api         # public-surface snapshot gate (api:update regenerates)
+deno task check:api         # public-surface snapshot gate (update:api regenerates)
 deno task check:docs        # doc accuracy gate (docs:index regenerates docs/content.md)
 deno task check:coverage    # suite + src/ line-coverage floor
 deno task preflight         # publish/install/scaffold sanity, end to end
@@ -58,8 +60,9 @@ deliberate, regenerated diff.
 
 Peer top-level apps: `amui/` (visual app manager), `aiol/` (custom linter),
 `examples/`, `docs/` (`docs/[domain]/[doc].md`), `.katana/` (katas =
-project-quality specs, see below), `feedback/` (field reports from real apps
-built on aio).
+project-quality specs, see below), `future/` (`v2.md` — a fix that would need a
+major version, with what it would break), `feedback/` (field reports from real
+apps built on aio).
 
 ## Architecture
 
@@ -116,11 +119,13 @@ nit. Widen the matrix deliberately, with a comment, or restructure.
 
 ### Auth model
 
-Public by default (including `--expose`); single key (`key: true` persisted /
-`key: "…"` fixed, enforced only under `--expose`; the aio client pairs by PIN);
-or per-user tokens (`users`/`resolveUser`, `auth: true` for full login flows).
-Token comparison is timing-safe. The user flows through hooks and
-`getUIState()`. The server binds 127.0.0.1 unless `--expose`.
+Open on loopback by default; `--expose` with no auth configured generates a
+persisted shared key (`key: false` is the explicit opt-out); single key
+(`key: true` persisted / `key: "…"` fixed, enforced only under `--expose`; the
+aio client pairs by PIN); or per-user tokens (`users`/`resolveUser`,
+`auth: true` for full login flows). Token comparison is timing-safe. The user
+flows through hooks and `getUIState()`. The server binds 127.0.0.1 unless
+`--expose`.
 
 ## Testing UIs (use this, not DOM scraping)
 

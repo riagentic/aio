@@ -138,6 +138,21 @@ export function applyOp(s: { data: Data }, op: Op, log: unknown[]): void {
     case "arr_sort":
       d.nums.sort((a, b) => a - b);
       break;
+    // A comparator with a SIDE EFFECT, then reads — the shape the fuzzer could
+    // not see. Every sort op here used a pure `(a, b) => a - b`, so an async
+    // method that re-ran the comparator on every later read produced the same
+    // array and the differential stayed green while the comparator ran 4 times
+    // sync and 28 times async. The counter is IN STATE, so a divergence is a
+    // divergence in the committed value, which is what this fuzzer compares.
+    case "arr_sort_counting":
+      d.nums.sort((a, b) => {
+        d.a += 1;
+        return a - b;
+      });
+      // …and READS after it, which is when the replay used to happen.
+      d.a += d.nums.length;
+      d.a += d.nums.length;
+      break;
     case "arr_reverse":
       d.nums.reverse();
       break;
@@ -194,6 +209,82 @@ export function applyOp(s: { data: Data }, op: Op, log: unknown[]): void {
     case "arr_copy_within":
       if (d.nums.length > 1) d.nums.copyWithin(0, 1);
       break;
+    // ── what a mutator RETURNS ──────────────────────────────────────
+    // Every kind above throws the return value away, and that is exactly
+    // where the alphabet had a hole: `sort`/`reverse`/`fill`/`copyWithin`
+    // return the receiver and `pop`/`shift`/`splice` return elements OF the
+    // state, so the value handed back has to be as live as the array it came
+    // from. It was not — the async side returned a detached copy, so a write
+    // through it was silently dropped (and the method read its own write back
+    // from the copy, so nothing looked wrong), while a removed row came back
+    // FROZEN and mutating it threw. Both are ordinary app code.
+    case "arr_sort_ret_write": {
+      const r = d.nums.sort((a, b) => a - b);
+      if (r.length) r[op.i % r.length] = op.v;
+      break;
+    }
+    case "arr_reverse_ret_push": {
+      const r = d.nums.reverse();
+      r.push(op.v);
+      break;
+    }
+    case "arr_fill_ret_write": {
+      if (!d.nums.length) break;
+      const r = d.nums.fill(op.v, 0, op.i % d.nums.length);
+      r[0] = op.v + 1;
+      break;
+    }
+    case "arr_copy_within_ret_write": {
+      if (d.nums.length <= 1) break;
+      const r = d.nums.copyWithin(0, 1);
+      r[r.length - 1] = op.v;
+      break;
+    }
+    case "arr_sort_ret_len": {
+      // The return value is the array itself, so its length tracks later
+      // writes. A detached copy's does not.
+      const r = d.nums.sort((a, b) => a - b);
+      d.nums.push(op.v);
+      log.push(r.length);
+      break;
+    }
+    case "objarr_shift_write_push": {
+      // The queue idiom: take a row, stamp it, put it somewhere else.
+      const row = d.items.shift();
+      if (row) {
+        row.q = op.v;
+        d.items.push(row);
+      }
+      break;
+    }
+    case "objarr_pop_write_push": {
+      const row = d.items.pop();
+      if (row) {
+        row.q = op.v;
+        d.items.unshift(row);
+      }
+      break;
+    }
+    case "objarr_splice_ret_write": {
+      if (!d.items.length) break;
+      const removed = d.items.splice(op.i % d.items.length, 1);
+      const row = removed[0];
+      if (row) {
+        row.q = op.v;
+        d.items.push(row);
+      }
+      break;
+    }
+    case "objarr_shift_read_after": {
+      // A removed row is DETACHED: writing to it must not reach back into
+      // the array it came from.
+      const row = d.items.shift();
+      if (row) {
+        row.q = op.v;
+        log.push(d.items.length, JSON.stringify(d.items.map((x) => x.q)));
+      }
+      break;
+    }
     // ── depth ───────────────────────────────────────────────────────
     case "deep_push":
       d.deep.l1.l2.l3.push(op.v);
@@ -320,6 +411,88 @@ export function applyOp(s: { data: Data }, op: Op, log: unknown[]): void {
     case "objarr_entries_write":
       for (const [i, it] of d.items.entries()) it.q = op.v + i;
       break;
+    // A loop that GROWS or SHRINKS the array it walks. An array iterator reads
+    // `length` at every step (the Immer draft does too), so a worklist visits
+    // what it enqueued. The async proxy captured the length when the loop
+    // began and stopped short — the same body visited 6 nodes sync and 4
+    // async. The 64-step cap keeps a pathological program finite; values
+    // pushed are ≥ 100, so they are never re-enqueued.
+    case "arr_for_of_push": {
+      let seen = 0;
+      for (const n of d.nums) {
+        if (++seen > 64) break;
+        if (n < 100) d.nums.push(n + 100);
+      }
+      log.push(seen);
+      break;
+    }
+    case "arr_entries_push": {
+      let seen = 0;
+      for (const [i, n] of d.nums.entries()) {
+        if (++seen > 64) break;
+        if (n < 100 && i % 2 === op.i % 2) d.nums.push(n + 100);
+      }
+      log.push(seen);
+      break;
+    }
+    case "arr_keys_pop": {
+      let seen = 0;
+      for (const _i of d.nums.keys()) {
+        seen++;
+        if (d.nums.length > 1) d.nums.pop();
+      }
+      log.push(seen);
+      break;
+    }
+    case "objarr_values_push": {
+      let seen = 0;
+      for (const it of d.items.values()) {
+        if (++seen > 64) break;
+        if (it.id < 100) d.items.push({ id: it.id + 100, q: op.v });
+      }
+      log.push(seen);
+      break;
+    }
+    // A loop that REPLACES the array it walks. The sync draft's iterator holds
+    // the old array — the assignment only detaches it — so the walk finishes
+    // over what it started on. The async walk went by path, so its next step
+    // read the NEW array through a stale reference and threw half-way, after
+    // the first reassignment had committed: `[1,3,4]` + a rejection where
+    // sync gave `[1]`. Rows are READ after the replacement, never written:
+    // whether a write to a detached row lands depends on whether the new
+    // array kept it, and the async side refuses that write by name
+    // (tests/live-array-iteration-survives-reassign.test.ts).
+    case "arr_values_reassign_filter":
+      for (const n of d.nums.values()) {
+        log.push(n);
+        d.nums = d.nums.filter((y) => y !== n + (op.i % 3));
+      }
+      break;
+    case "arr_keys_reassign":
+      for (const k of d.nums.keys()) {
+        log.push(k);
+        if (k === op.i % 3) d.nums = [op.v];
+      }
+      break;
+    case "arr_for_of_reassign_spread":
+      for (const n of d.nums) {
+        log.push(n);
+        if (n % 2 === op.i % 2) d.nums = [...d.nums, op.v];
+      }
+      break;
+    case "objarr_entries_reassign_read":
+      for (const [i, it] of d.items.entries()) {
+        const id = it.id;
+        log.push(i, id, it.q);
+        if (i === op.i % 2) d.items = d.items.filter((x) => x.id !== id);
+      }
+      break;
+    case "deep_for_of_replace_mid":
+      for (const n of d.deep.l1.l2.l3) {
+        log.push(n);
+        d.deep.l1.l2 = { l3: [n + op.v] };
+      }
+      break;
     // Writing through elements a REBUILT-ARRAY read method handed back.
     // `map`/`filter`/`slice` used to return detached snapshot clones, so these
     // writes vanished in an async method while the identical sync body applied
@@ -414,6 +587,34 @@ export function applyOp(s: { data: Data }, op: Op, log: unknown[]): void {
       );
       break;
     }
+    // A LOCAL object (not a live reference) written to two paths. Plain
+    // JavaScript and the Immer draft keep it one object, so a write through
+    // either name shows through the other until the commit. The async write
+    // path cloned each install separately and committed two objects.
+    case "local_obj_two_slots": {
+      const o = { v: op.v };
+      d.obj.sh1 = o;
+      d.obj.sh2 = o;
+      (d.obj.sh1 as { v: number }).v = op.v + 1;
+      log.push((d.obj.sh2 as { v: number }).v);
+      break;
+    }
+    case "local_arr_two_slots": {
+      const a = [op.v];
+      d.obj.sa1 = a;
+      d.obj.sa2 = a;
+      (d.obj.sa1 as number[]).push(op.i);
+      log.push((d.obj.sa2 as number[]).length);
+      break;
+    }
+    case "local_obj_push_twice": {
+      const row = { id: 70 + (op.i % 3), q: op.v };
+      d.items.push(row);
+      d.items.push(row);
+      d.items[d.items.length - 2]!.q = op.v + 1;
+      log.push(d.items[d.items.length - 1]!.q);
+      break;
+    }
     // ── whole-root replacement ──────────────────────────────────────
     case "root_spread":
       s.data = { ...d, a: op.v };
@@ -469,6 +670,7 @@ export const KINDS = [
   "obj_reassign_spread",
   "obj_then_deep_write",
   "arr_sort",
+  "arr_sort_counting",
   "arr_reverse",
   "arr_fill",
   "read_includes",
@@ -515,6 +717,15 @@ export const KINDS = [
   "objarr_foreach_write",
   "objarr_values_write",
   "objarr_entries_write",
+  "arr_for_of_push",
+  "arr_entries_push",
+  "arr_keys_pop",
+  "objarr_values_push",
+  "arr_values_reassign_filter",
+  "arr_keys_reassign",
+  "arr_for_of_reassign_spread",
+  "objarr_entries_reassign_read",
+  "deep_for_of_replace_mid",
   "read_some_write",
   "objarr_map_write",
   "objarr_filter_write",
@@ -528,6 +739,37 @@ export const KINDS = [
   "alias_assign_write",
   "alias_push_self_write",
   "alias_deep_then_write",
+  "local_obj_two_slots",
+  "local_arr_two_slots",
+  "local_obj_push_twice",
+  "arr_sort_ret_write",
+  "arr_reverse_ret_push",
+  "arr_fill_ret_write",
+  "arr_copy_within_ret_write",
+  "arr_sort_ret_len",
+  "objarr_shift_write_push",
+  "objarr_pop_write_push",
+  "objarr_splice_ret_write",
+  "objarr_shift_read_after",
+];
+
+/** Ops whose value is a row REMOVED from an array — `pop`/`shift`/`splice`.
+ *
+ *  A removed row is detached from state, and the two backends detach it
+ *  differently. The sync draft hands back a draft that is still the SAME
+ *  object as any other slot pointing at it, so writing to a popped row also
+ *  changes the copy still in the array. The async proxy hands back a mutable
+ *  clone, so it does not. Both are defensible and only ONE op can tell them
+ *  apart: `arr_fill_object` is the only kind that puts one object in two
+ *  slots. The combination is excluded from the sync/async differential for
+ *  the same reason {@linkcode ALIAS_KINDS} is excluded from the transaction
+ *  one — an alias is a regime of its own — and the exact divergence is PINNED
+ *  rather than hidden, in `tests/proxy-detached-row.test.ts`. */
+export const DETACHING_KINDS = [
+  "objarr_shift_write_push",
+  "objarr_pop_write_push",
+  "objarr_splice_ret_write",
+  "objarr_shift_read_after",
 ];
 
 /** Ops that leave ONE object reachable at TWO paths.
@@ -549,4 +791,7 @@ export const ALIAS_KINDS = [
   "alias_assign_write",
   "alias_push_self_write",
   "alias_deep_then_write",
+  "local_obj_two_slots",
+  "local_arr_two_slots",
+  "local_obj_push_twice",
 ];

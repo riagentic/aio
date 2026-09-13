@@ -4,6 +4,7 @@
 import { physicalMemoryBytes } from "./heap-policy.ts";
 import type { CellDef, ComposedCells } from "../state/cell.ts";
 import { _releaseCellBindings } from "../state/cell-reactive.ts";
+import { _whileCellsBoot } from "../state/cell-catalog.ts";
 import { mergeLongIntoPerfBudget } from "../state/cell-impl.ts";
 import { bindCell } from "../state/cell.ts";
 import { createMemoryMonitor } from "../diagnostics/memory-monitor.ts";
@@ -17,9 +18,17 @@ import { nearestOf } from "../state/cell-helpers.ts";
 import { parseRetention } from "../sync/op-buffer.ts";
 import { resolveOptions } from "../diagnostics/types.ts";
 import { isLockOwnerAlive, lockKey, readLock } from "./single-instance-lock.ts";
-import { AioLogger, log, setLogger } from "../diagnostics/logger.ts";
+import { AsyncLocalStorage } from "node:async_hooks";
+import { AioLogger, log } from "../diagnostics/logger.ts";
+import { _setStartSocket } from "../diagnostics/logger-core.ts";
+import {
+  installAppLogger,
+  markAppLoggerUp,
+  releaseAppLogger,
+  setLoggerScope,
+} from "../diagnostics/logger-api.ts";
 import { createStormDetector } from "../diagnostics/dispatch-storm.ts";
-import { diagEmit } from "../diagnostics/diagnostic-bus.ts";
+import { _setDiagScope, diagEmit } from "../diagnostics/diagnostic-bus.ts";
 import { makeRedactor } from "../diagnostics/redact.ts";
 import { parseCli } from "./aio-cli.ts";
 import { resolveAppId } from "./single-instance-lock.ts";
@@ -28,6 +37,49 @@ import { appDirs } from "./app-dirs.ts";
 import type { AioApp, AioConfig, AioUser, CellsConfig } from "./aio-types.ts";
 import type { CellFieldFilter } from "../state/cell-types.ts";
 import { setDiagnosticsOptOut } from "../diagnostics/diagnostics-optout.ts";
+
+/** Whose app is running this code — for the logger, the diagnostic bus and
+ *  the `degraded()` registries.
+ *
+ *  Two apps in one process (library mode, `testApps`) each own a logger, and
+ *  `log.*` is one module-level function. The scope used to be entered only
+ *  around what the bridge hands the runtime — reduce, effects, the dispatch
+ *  hooks, start and stop — so everything ELSE an app started fell back to
+ *  whichever app booted last: a route handler, a timer armed in `onStart` or
+ *  in a method, the app's own sockets. Now each `aio.run()` runs AS its app
+ *  (`runAsApp`), and AsyncLocalStorage carries that into everything the boot
+ *  creates. The scope exists before the logger does: until `initLogger` fills
+ *  it in, the app is console-only — never the other app's files.
+ *
+ *  The wrappers below still enter the scope explicitly: a cell method called
+ *  from outside any app (a test, a host) has to run as the app it is bound to. */
+type AppScope = { logger: AioLogger | null };
+const _appScope = new AsyncLocalStorage<AppScope>();
+setLoggerScope(() => _appScope.getStore()?.logger);
+_setDiagScope(() => _appScope.getStore());
+
+/** Run `fn` — a whole `aio.run()` — as a new app. @internal */
+export function runAsApp<T>(fn: () => T): T {
+  return _appScope.run({ logger: null }, fn);
+}
+
+/** Each app's scope, by the config object it booted from (`initLogger`,
+ *  `buildLegacyConfig` and `wrapAppWithCells` all receive the same `fc`). */
+const _scopeOf = new WeakMap<CellsConfig, AppScope>();
+
+/** The scope `fc`'s code runs in — its boot's, or (a bridge built outside
+ *  `aio.run`, e.g. a test) one around its logger. */
+function scopeOf(
+  fc: CellsConfig,
+  logger: AioLogger | null,
+): AppScope | undefined {
+  return _scopeOf.get(fc) ?? (logger ? { logger } : undefined);
+}
+
+/** Run `fn` as `scope`'s app. No scope → the caller's own. */
+function inAppScope<T>(scope: AppScope | undefined, fn: () => T): T {
+  return scope ? _appScope.run(scope, fn) : fn();
+}
 
 /** Whether a top-level state key survives a `persist`/`ui` field filter.
  *  Mirrors the runtime filter semantics ("all"/"none"/include/exclude; default
@@ -87,6 +139,7 @@ export function buildLegacyConfig(
     logger,
     appRef,
   } = input;
+  const scope = scopeOf(fc, logger);
   // `cell({ diagnostics: false })` — this cell's actions stay out of the
   // on-disk dev diagnostics. Registered HERE, beside the other per-cell facts
   // pulled off `composed.cells`, rather than threaded through
@@ -163,6 +216,30 @@ export function buildLegacyConfig(
     if (!VALID_AIO_CONFIG_KEYS.has(k)) delete passthrough[k];
   }
 
+  /** Cells the WORKER POOL owns, and a predicate over their ids.
+   *
+   *  A `worker: true` cell composes on BOTH sides — main routes to it, the
+   *  worker runs it — and both sides walked `initAll`/`destroyAll`, so its
+   *  `onInit` and `onDestroy` each ran TWICE, on two threads. Measured: two
+   *  executions, `where: ["worker","worker"]`, for one boot. An `onInit` that
+   *  opens a device, seeds a table or starts a watcher did all of it twice,
+   *  and the in-isolate harness could never show it because there is no
+   *  second isolate there — the textbook green-test-broken-prod shape.
+   *
+   *  This is the aio.run path, where the pool exists; the harness composes on
+   *  the standalone runtime and keeps running them on its one thread. */
+  const workerCells = composed.cells.filter((f) => f.__aio.worker === true);
+  // …only when this boot ACTUALLY hosts workers. `_hostWorkers` in aio.ts is
+  // `!libraryMode || _workerEntry !== undefined`, so a `worker: true` cell in
+  // libraryMode with no worker entry runs in THIS isolate and must init here.
+  // Skipping it unconditionally would trade a double init for none at all.
+  const hostsWorkers = !(fc as { libraryMode?: boolean }).libraryMode ||
+    (fc as { _workerEntry?: unknown })._workerEntry !== undefined;
+  const workerIds = new Set(
+    hostsWorkers ? workerCells.map((f) => f.__aio.id) : [],
+  );
+  const _ownedByWorker = (id: string) => workerIds.has(id);
+
   return {
     ...(passthrough as Partial<
       AioConfig<Record<string, unknown>, unknown, unknown>
@@ -175,106 +252,164 @@ export function buildLegacyConfig(
     // already fixed once, and a per-method flag that lifted only ONE of them
     // would have re-opened.
     perfBudget: mergeLongIntoPerfBudget(fc.perfBudget, composed.cells),
-    reduce: composed.reduce as AioConfig<
-      Record<string, unknown>,
-      unknown,
-      unknown
-    >["reduce"],
+    reduce: ((state: unknown, action: unknown) =>
+      inAppScope(
+        scope,
+        () =>
+          (composed.reduce as (s: unknown, a: unknown) => unknown)(
+            state,
+            action,
+          ),
+      )) as AioConfig<
+        Record<string, unknown>,
+        unknown,
+        unknown
+      >["reduce"],
     execute:
-      ((app: AioApp<Record<string, unknown>, unknown>, effect: unknown) => {
-        composed.execute(
-          {
-            dispatch: (a) => app.dispatch(a),
-            getState: () => app.getState(),
-          },
-          effect as { type: string; payload: unknown },
-        );
-      }) as AioConfig<Record<string, unknown>, unknown, unknown>["execute"],
+      ((app: AioApp<Record<string, unknown>, unknown>, effect: unknown) =>
+        inAppScope(scope, () =>
+          composed.execute(
+            {
+              dispatch: (a) => app.dispatch(a),
+              getState: () => app.getState(),
+            },
+            effect as { type: string; payload: unknown },
+          ))) as AioConfig<Record<string, unknown>, unknown, unknown>[
+          "execute"
+        ],
     beforeReduce: ((action, state, user) => {
-      if (
-        storm &&
-        !storm.track((action as { type: string }).type ?? "unknown")
-      ) {
-        return null; // breaker active — drop mid-storm dispatches
-      }
-      return userBeforeReduce ? userBeforeReduce(action, state, user) : action;
+      // The drain that called this reports a THROWING reduce itself, after
+      // `reduce` has returned — outside the scope `reduce` runs in. So the
+      // drain is marked as this app's for the rest of its synchronous run.
+      // A drain reached through a cell method is already inside that
+      // method's `run` scope (see bindCell below), which contains this; one
+      // reached from a socket marks that socket handler's turn, which is this
+      // app's own server.
+      if (scope) _appScope.enterWith(scope);
+      return inAppScope(scope, () => {
+        if (
+          storm &&
+          !storm.track((action as { type: string }).type ?? "unknown")
+        ) {
+          return null; // breaker active — drop mid-storm dispatches
+        }
+        return userBeforeReduce
+          ? userBeforeReduce(action, state, user)
+          : action;
+      });
     }) as AioConfig<
       Record<string, unknown>,
       unknown,
       unknown
     >["beforeReduce"],
     onAction: logger
-      ? ((action, state, user) => {
-        logger.observe(
-          action as { type: string; payload?: unknown },
-          state as Record<string, unknown>,
-        );
-        if (fc.onAction) fc.onAction(action, state, user);
-      }) as AioConfig<Record<string, unknown>, unknown, unknown>["onAction"]
+      ? ((action, state, user) =>
+        inAppScope(scope, () => {
+          logger.observe(
+            action as { type: string; payload?: unknown },
+            state as Record<string, unknown>,
+          );
+          // RETURNED, not dropped: an async hook's rejection is guarded at
+          // the dispatch call site, which can only guard what reaches it.
+          return fc.onAction?.(action, state, user);
+        })) as AioConfig<Record<string, unknown>, unknown, unknown>["onAction"]
       : fc.onAction as AioConfig<
         Record<string, unknown>,
         unknown,
         unknown
       >["onAction"],
-    onStart: ((app: AioApp<Record<string, unknown>, unknown>) => {
-      composed.initAll({
-        dispatch: (a) => app.dispatch(a),
-        getState: () => app.getState(),
-      });
-      logger?.onStart(composed.cellNames, app.port);
-      // AIO-418: user `onStart` is fired by the cells runner AFTER
-      // wrapAppWithCells() binds the callable method surface — NOT here. Calling
-      // e.g. `members.seed()` in onStart threw ("cell runtime not booted")
-      // because the method binding happened after this hook. See aio.ts.
-    }) as AioConfig<Record<string, unknown>, unknown, unknown>["onStart"],
+    onStart:
+      ((app: AioApp<Record<string, unknown>, unknown>) =>
+        inAppScope(scope, () => {
+          // Up: from here on only this app's own stop detaches its logger.
+          if (logger) markAppLoggerUp(logger);
+          const initApp = {
+            dispatch: (a: Parameters<typeof app.dispatch>[0]) =>
+              app.dispatch(a),
+            getState: () => app.getState(),
+          };
+          // Optional on the interface (the surface is frozen, so it could not be
+          // required), always present from `composeCells`. A producer without it
+          // keeps the old behaviour rather than silently initialising nothing.
+          // Marked while the `__init`s run, so a method called from a hook
+          // or an onInit in this window is told it came too early — not to
+          // list a cell the app already lists (cell-catalog.ts).
+          _whileCellsBoot(composed.cells, () => {
+            if (composed.initAllExcept) {
+              composed.initAllExcept(initApp, _ownedByWorker);
+            } else composed.initAll(initApp);
+          });
+          // What the app LISTENS on (aio.ts `_listening`), not `app.port`: a
+          // zero-port app keeps a number there it never bound, and this line
+          // printed it — `started port=49725` for a socket-only app.
+          const on =
+            (app as { _listening?: { port?: number; socketPath?: string } })
+              ._listening;
+          if (logger && on?.socketPath) {
+            _setStartSocket(logger, on.socketPath);
+          }
+          logger?.onStart(composed.cellNames, on ? on.port : app.port);
+          // AIO-418: user `onStart` is fired by the cells runner AFTER
+          // wrapAppWithCells() binds the callable method surface — NOT here. Calling
+          // e.g. `members.seed()` in onStart threw ("cell runtime not booted")
+          // because the method binding happened after this hook. See aio.ts.
+        })) as AioConfig<Record<string, unknown>, unknown, unknown>["onStart"],
     // Phase 0 — before dispatch closes. Nothing of the framework's belongs
     // here: the bridge's own teardown (logger flush, cell destroy) is
     // after-the-fact work and stays in `onStop`. This is the app quiescing
     // its own producers, so it is a straight pass-through.
     onStopping: fc.onStopping,
-    onStop: async () => {
-      // THE APP'S HOOK RUNS BEFORE THE LOGGER IS TORN DOWN.
-      //
-      // It used to run LAST — after `setLogger(null)` — so every `log.*` an
-      // app made from its own `onStop` went nowhere. "Wipe secrets on the way
-      // out" and "say what was cleaned up" are the two things people do in
-      // this hook, and the second was silent: no line, no warning, no error.
-      // The comment below even describes a hook that "logged its first line
-      // and never its last", which by then could not happen at all, because
-      // there was nothing left to log to.
-      //
-      // AWAITED. The orchestrator budgets this phase (5 s teardown) precisely
-      // so arbitrary app code can finish; calling the hook without awaiting it
-      // resolved the phase the moment the hook STARTED, and an async `onStop`
-      // — a flush to a remote, a handle to close, a child to wait for — was
-      // abandoned ~ms before `Deno.exit`. Measured: a 4.5 s hook logged its
-      // first line and never its last, on every `am stop`.
-      // Cells first, exactly where they were: a cell's `onDestroy` runs BEFORE
-      // the app's `onStop`, and `tests/beta-promise.test.ts` pins that order.
-      // Fixing the logger needed ONE thing moved, not two — the first attempt
-      // moved this too and silently reordered a lifecycle an app can observe.
-      if (appRef.current) {
-        composed.destroyAll({
-          dispatch: (a) => appRef.current!.dispatch(a),
-          getState: () => appRef.current!.getState(),
-        });
-      }
-      try {
-        if (fc.onStop) await fc.onStop();
-      } finally {
-        // ALWAYS — a hook that throws (a dispatch from `onStop` is refused,
-        // and an app that awaits it throws) used to skip everything below:
-        // the heartbeat interval stayed armed and the "stopped" line was
-        // never written, so the one shutdown that had something to report
-        // was the one that kept the process alive and said nothing.
-        logger?.onStop();
-        // Drain in-flight writes before clearing the singleton. Without this,
-        // the final "stopped" entry + any late error logs race the process
-        // exit and can be lost (F-3).
-        await logger?.flush();
-        setLogger(null);
-      }
-    },
+    onStop: () =>
+      inAppScope(scope, async () => {
+        // THE APP'S HOOK RUNS BEFORE THE LOGGER IS TORN DOWN.
+        //
+        // It used to run LAST — after `setLogger(null)` — so every `log.*` an
+        // app made from its own `onStop` went nowhere. "Wipe secrets on the way
+        // out" and "say what was cleaned up" are the two things people do in
+        // this hook, and the second was silent: no line, no warning, no error.
+        // The comment below even describes a hook that "logged its first line
+        // and never its last", which by then could not happen at all, because
+        // there was nothing left to log to.
+        //
+        // AWAITED. The orchestrator budgets this phase (5 s teardown) precisely
+        // so arbitrary app code can finish; calling the hook without awaiting it
+        // resolved the phase the moment the hook STARTED, and an async `onStop`
+        // — a flush to a remote, a handle to close, a child to wait for — was
+        // abandoned ~ms before `Deno.exit`. Measured: a 4.5 s hook logged its
+        // first line and never its last, on every `am stop`.
+        // Cells first, exactly where they were: a cell's `onDestroy` runs BEFORE
+        // the app's `onStop`, and `tests/beta-promise.test.ts` pins that order.
+        // Fixing the logger needed ONE thing moved, not two — the first attempt
+        // moved this too and silently reordered a lifecycle an app can observe.
+        if (appRef.current) {
+          const stopApp = {
+            dispatch: (a: Parameters<typeof appRef.current.dispatch>[0]) =>
+              appRef.current!.dispatch(a),
+            getState: () => appRef.current!.getState(),
+          };
+          if (composed.destroyAllExcept) {
+            composed.destroyAllExcept(stopApp, _ownedByWorker);
+          } else composed.destroyAll(stopApp);
+        }
+        try {
+          if (fc.onStop) await fc.onStop();
+        } finally {
+          // ALWAYS — a hook that throws (a dispatch from `onStop` is refused,
+          // and an app that awaits it throws) used to skip everything below:
+          // the heartbeat interval stayed armed and the "stopped" line was
+          // never written, so the one shutdown that had something to report
+          // was the one that kept the process alive and said nothing.
+          logger?.onStop();
+          // Drain in-flight writes before clearing the singleton. Without this,
+          // the final "stopped" entry + any late error logs race the process
+          // exit and can be lost (F-3).
+          await logger?.flush();
+          // THIS app's logger, and only it. `setLogger(null)` emptied the one
+          // process-wide slot, so closing app B left a still-running app A
+          // logging to nothing ("reportError failed" on its next error).
+          if (logger) releaseAppLogger(logger);
+        }
+      }),
     onRestore: onRestore as AioConfig<
       Record<string, unknown>,
       unknown,
@@ -326,6 +461,12 @@ export function buildLegacyConfig(
     // Cell id → per-field { persisted, ui } flags — trojan `fields` route (amui
     // State overview). Answers "what survives a restart" (persist) and "what
     // ships to the browser" (ui) for every top-level state key.
+    // Cell id → the persist filter itself, resolved exactly as the store's
+    // getter resolves it (aio-composition.ts buildDBStateGetter), so journal
+    // replay reads nested excludes the way the snapshot writes them.
+    _cellPersist: Object.fromEntries(
+      composed.cells.map((c) => [c.__aio.id, c.__aio.persist ?? "all"]),
+    ),
     _cellFields: Object.fromEntries(
       composed.cells.map((c) => [
         c.__aio.id,
@@ -350,7 +491,7 @@ export function buildLegacyConfig(
     _pluginNames: fc._pluginNames,
     // The defs of cells flagged `worker: true` — _run spawns one Deno worker
     // each and routes their actions off the main dispatch queue.
-    _workerCells: composed.cells.filter((f) => f.__aio.worker === true),
+    _workerCells: workerCells,
     _reduceBreakdown: composed.lastBreakdown,
     _healthGetter: (state: unknown) => {
       const health = composed.registry.health(
@@ -434,6 +575,11 @@ export function buildLegacyConfig(
   };
 }
 
+/** Each app's logger, by the config object it booted from — `initLogger` and
+ *  `wrapAppWithCells` receive the same `fc`, and the second needs the first's
+ *  answer to scope the cell methods it binds. */
+const _loggerOf = new WeakMap<CellsConfig, AioLogger>();
+
 /** Initialize structured logger from CellsConfig */
 export async function initLogger(
   fc: CellsConfig,
@@ -484,7 +630,18 @@ export async function initLogger(
       held.pid !== Deno.pid;
     await logger.init({ rotate: !live });
   }
-  setLogger(logger);
+  // Installed, not "set": another app in this process keeps its own.
+  if (logger) {
+    installAppLogger(logger);
+    _loggerOf.set(fc, logger);
+  }
+  // The boot running this is the app's scope: from here its lines — and those
+  // of every timer and handler its boot already started — are its logger's.
+  const scope = _appScope.getStore();
+  if (scope) {
+    if (logger) scope.logger = logger;
+    _scopeOf.set(fc, scope);
+  }
   return logger;
 }
 
@@ -594,10 +751,16 @@ export async function wrapAppWithCells(
   (app as Record<string, unknown>).cells = cellsApi;
 
   // Bind cells — enables todo.add('milk') syntax (dispatch + selector binding)
+  // …each call scoped to THIS app's logger, and contained: the dispatch it
+  // starts (and whatever that drain reports) is this app's, and the caller's
+  // own scope is back when it returns — a method of app A that calls a cell
+  // of app B still logs as A afterwards.
+  const logger = _loggerOf.get(fc) ?? null;
+  const scope = scopeOf(fc, logger);
   for (const f of composed.cells) {
     bindCell(
       f,
-      (a) => app.dispatch(a),
+      (a) => inAppScope(scope, () => app.dispatch(a)),
       () => app.getState() as Record<string, unknown>,
     );
   }

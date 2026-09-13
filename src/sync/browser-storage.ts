@@ -81,6 +81,39 @@ function adoptLegacyQueue(prefix: string): void {
   } catch { /* storage unavailable (private mode) — nothing to adopt */ }
 }
 
+/** `mine` — a tab's copy of a cell document that localStorage refused, built
+ *  on `base` — replayed onto `theirs`, what localStorage holds now that
+ *  another tab has written. Ops are matched by id: one this tab added is
+ *  appended if missing, one it removed is removed, one it confirmed is
+ *  confirmed; everything else is theirs. The cursor and snapshot are this
+ *  tab's when it changed them, theirs otherwise. */
+function rebaseDoc(base: CellDoc, mine: CellDoc, theirs: CellDoc): CellDoc {
+  const inBase = new Map(base.ops.map((o) => [o.id, o]));
+  const inMine = new Map(mine.ops.map((o) => [o.id, o]));
+  const ops = theirs.ops
+    .filter((o) => !(inBase.has(o.id) && !inMine.has(o.id)))
+    .map((o) =>
+      inMine.get(o.id)?.confirmed && !inBase.get(o.id)?.confirmed
+        ? { ...o, confirmed: true }
+        : o
+    );
+  const have = new Set(ops.map((o) => o.id));
+  for (const o of mine.ops) {
+    if (!inBase.has(o.id) && !have.has(o.id)) ops.push(o);
+  }
+  const same = (a: unknown, b: unknown) =>
+    JSON.stringify(a) === JSON.stringify(b);
+  const doc: CellDoc = { ...theirs, ops };
+  if (
+    !same(mine.meta, base.meta) || mine.metaSession !== base.metaSession
+  ) {
+    doc.meta = mine.meta;
+    doc.metaSession = mine.metaSession;
+  }
+  if (!same(mine.snapshot, base.snapshot)) doc.snapshot = mine.snapshot;
+  return doc;
+}
+
 /**
  * OpBufferStorage persisted in `localStorage` — the browser counterpart of
  * {@linkcode createMemoryStorage}. Namespaced by `prefix` (see
@@ -117,15 +150,63 @@ export function createLocalStorageOpStorage(
       }
     }
     for (const k of junk) localStorage.removeItem(k);
-  } catch { /* storage unavailable (private mode) — nothing to sweep */ }
+  } catch {
+    // aio-ok: storage unavailable (private mode) — nothing to sweep.
+  }
   adoptLegacyQueue(prefix);
+  // The in-memory copy of every document whose last WRITE did not reach
+  // localStorage — and, while it exists, the copy that is read.
+  //
+  // Without it a refused write was not "not durable", it was GONE: `read` went
+  // back to localStorage, which still held the document from before (or
+  // nothing). The engine's pending list therefore never contained the op it
+  // had just queued, so the optimistic view did not show it, the ack found no
+  // pending op to fold into confirmed state, and the tab never saw its own
+  // write — in a private window, a site with storage blocked, or at a full
+  // quota. An offline write was lost outright while its call resolved.
+  //
+  // Only failed cells live here, and only until a write succeeds again: the
+  // document stays in localStorage whenever localStorage takes it, which is
+  // what lets two tabs of one app share a queue.
+  //
+  // …and the copy is an OVERLAY on localStorage, never a replacement for it.
+  // Each entry remembers the localStorage text it was built on (`base`). A
+  // tab that returned its copy blindly never saw another tab's writes again
+  // after one refused write (a quota blip) — and its next write that DID land
+  // wrote its copy over the shared document, deleting the other tab's queued
+  // ops from the queue both tabs read (measured: tab B's `b1` gone after tab
+  // A's next save). When localStorage has moved since, the copy is re-based:
+  // this tab's own unwritten changes (ops added, confirmed, removed; its
+  // cursor) are replayed onto what is there now.
+  const mirror = new Map<string, { doc: CellDoc; base: string | null }>();
+  /** The localStorage text each cell's last `read` parsed — the base a copy
+   *  made from that read is built on. */
+  const lastRaw = new Map<string, string | null>();
   const read = (cell: string): CellDoc => {
     let raw: string | null = null;
+    let readable = true;
     try {
       raw = localStorage.getItem(key(cell));
     } catch {
-      return { ops: [] }; // storage unavailable (private mode) — documented
+      readable = false; // storage unavailable (private mode) — documented
     }
+    const held = mirror.get(cell);
+    if (held !== undefined) {
+      // Nothing else can have written (or nothing can be read): ours is it.
+      if (!readable || raw === held.base) return held.doc;
+      const doc = rebaseDoc(
+        parseDoc(cell, held.base),
+        held.doc,
+        parseDoc(cell, raw),
+      );
+      mirror.set(cell, { doc, base: raw });
+      lastRaw.set(cell, raw);
+      return doc;
+    }
+    lastRaw.set(cell, raw);
+    return readable ? parseDoc(cell, raw) : { ops: [] };
+  };
+  const parseDoc = (cell: string, raw: string | null): CellDoc => {
     if (!raw) return { ops: [] };
     try {
       return JSON.parse(raw) as CellDoc;
@@ -138,7 +219,9 @@ export function createLocalStorageOpStorage(
       // who wants to look.
       try {
         localStorage.setItem(`${key(cell)}.corrupt`, raw);
-      } catch { /* no room for the copy — the warning still goes out */ }
+      } catch {
+        // aio-ok: no room for the copy — the warning still goes out below.
+      }
       log.error(
         "sync",
         `offline queue for "${cell}" is corrupt and was discarded ` +
@@ -165,21 +248,29 @@ export function createLocalStorageOpStorage(
   const write = (cell: string, doc: CellDoc): void => {
     try {
       localStorage.setItem(key(cell), JSON.stringify(doc));
+      mirror.delete(cell);
       writeFailed.delete(cell);
       storeHealth.ok();
     } catch (e) {
+      // Kept in memory FIRST — this page load goes on working from it — on
+      // top of the localStorage text the document was read from.
+      const held = mirror.get(cell);
+      mirror.set(cell, {
+        doc,
+        base: held !== undefined ? held.base : lastRaw.get(cell) ?? null,
+      });
       storeHealth.fail(e);
       if (writeFailed.has(cell)) return;
       writeFailed.add(cell);
       log.error(
         "sync",
         `the offline queue for "${cell}" could not be written to ` +
-          `localStorage (${e}) — unsent changes in this cell will NOT survive ` +
-          `a reload, and the sync engine is not told. Usual causes: the ` +
-          `origin's storage quota is full (clear it, or reduce what the app ` +
-          `keeps there) or storage is disabled for this context (private ` +
-          `mode, a blocked third-party frame). Reported once per cell until ` +
-          `a write succeeds again.`,
+          `localStorage (${e}) — it is kept in memory for this page load, so ` +
+          `sync goes on working, but unsent changes in this cell will NOT ` +
+          `survive a reload. Usual causes: the origin's storage quota is full ` +
+          `(clear it, or reduce what the app keeps there) or storage is ` +
+          `disabled for this context (private mode, a blocked third-party ` +
+          `frame). Reported once per cell until a write succeeds again.`,
       );
     }
   };
@@ -247,9 +338,13 @@ export function createLocalStorageOpStorage(
       return Promise.resolve();
     },
     clear: (cell) => {
+      mirror.delete(cell);
+      lastRaw.delete(cell);
       try {
         localStorage.removeItem(key(cell));
-      } catch { /* storage unavailable */ }
+      } catch {
+        // aio-ok: storage unavailable — clear() has nothing left to remove.
+      }
       return Promise.resolve();
     },
   };

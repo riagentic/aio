@@ -15,7 +15,9 @@
 //       name: "audit",
 //       cells: [auditLog],
 //       routes: { "/audit.csv": () => new Response(toCsv()) },
-//       onAction: (a) => auditLog.record(a.type),
+//       // Never its own cell's actions: recording one IS an action, a loop.
+//       // (docs/basics/plugins.md also skips `__init`/`__destroy`.)
+//       onAction: (a) => a.type.startsWith("audit:") || auditLog.record(a.type),
 //     })
 //
 //     await aio.run({ cells: [app], plugins: [audit] })
@@ -127,6 +129,13 @@ export interface ResolvedPlugins {
   onStop: (() => void | Promise<void>)[];
 }
 
+/** A route pattern with its param NAMES erased — `/u/:id` and `/u/:name` are
+ *  one route to the matcher, so they are one claim here. */
+function routeShape(pattern: string): string {
+  return pattern.split("/").map((seg) => seg.startsWith(":") ? ":" : seg)
+    .join("/");
+}
+
 /** Who claimed a name first — so a collision message can name both sides. */
 type Claim = { by: string; what: string };
 
@@ -136,9 +145,15 @@ function collide(
   first: Claim,
   second: string,
 ): never {
+  // A route claimed under another spelling of the same shape names both
+  // spellings, or the message would name a pattern the first plugin never
+  // wrote.
+  const also = first.what !== key
+    ? ` (the same ${kind} as "${first.what}")`
+    : "";
   throw new Error(
-    `plugin collision: ${kind} "${key}" is claimed by both "${first.by}" and ` +
-      `"${second}".\n` +
+    `plugin collision: ${kind} "${key}"${also} is claimed by both ` +
+      `"${first.by}" and "${second}".\n` +
       `  Two plugins cannot own the same ${kind} — whichever loaded second ` +
       `would silently shadow the other, and you would find out from a ` +
       `behaviour, not an error.\n` +
@@ -216,9 +231,16 @@ export async function resolvePlugins(
       out.cells.push(cell);
     }
     for (const [pattern, handler] of Object.entries(c.routes ?? {})) {
-      const prev = routeOwner.get(pattern);
-      if (prev && prev.by !== p.name) collide("route", pattern, prev, p.name);
-      routeOwner.set(pattern, { by: p.name, what: pattern });
+      // Compared by SHAPE: a param's name is not part of what it matches, so
+      // `/u/:id` and `/u/:name` claim exactly the same requests — and as two
+      // different strings they passed this check, and whichever loaded first
+      // silently answered for both.
+      const shape = routeShape(pattern);
+      const prev = routeOwner.get(shape);
+      if (prev && prev.by !== p.name) {
+        collide("route", pattern, prev, p.name);
+      }
+      if (!prev) routeOwner.set(shape, { by: p.name, what: pattern });
       out.routes[pattern] = handler;
     }
     for (const s of c.schedules ?? []) {
@@ -286,7 +308,16 @@ export function composeHooks<A extends unknown[]>(
   return (...args: A) => {
     for (const h of all) {
       try {
-        h(...args);
+        const r = h(...args) as unknown;
+        // An `async` hook — or one that returns the cell-method call it made
+        // (`onAction: (a) => log.record(a.type)`) — does not throw, it
+        // REJECTS. The try/catch never saw that: the rejection escaped as an
+        // unhandled one, which the crash handler logs while the app runs and
+        // which ends the process outright during shutdown (a hook reacting
+        // to a `__destroy`). Guarded is guarded, whichever way it fails.
+        if (typeof (r as PromiseLike<unknown> | null)?.then === "function") {
+          (r as PromiseLike<unknown>).then(undefined, onError);
+        }
       } catch (e) {
         onError(e);
       }

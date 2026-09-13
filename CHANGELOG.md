@@ -1,5 +1,140 @@
 # Changelog
 
+## v1.0.1-beta — hunted, not read (2026-09-13)
+
+> **Nothing breaks.** The surface is byte-identical to 1.0.0-beta (`check:api`
+> reports no drift); every change is a fix or a stricter refusal of something
+> that was already wrong. `am pin --latest` is the whole upgrade.
+>
+> A fix round. Parallel hunters attacked a running aio from every side — the
+> wire, auth, crash durability, the renderer, the harness against production,
+> two apps in one process — and a finding counted only if the hunter RAN it.
+> Every fix carries a test that is red without it, and each round began with a
+> hunter attacking the previous round's own fixes. Verified findings fell from
+> ~108 (round 2) to ~57 (round 3). This is not "bug-free"; it is the round that
+> closed.
+
+### Data you were told was saved
+
+- **Acked writes to `sync: true` cells survive a crash under `journal: true`.**
+  Server writes were only folded into the sync snapshot up to 500 ms after the
+  ack; a SIGKILL lost up to 36 of 36. They are journalled now, with a per-cell
+  fold watermark committed in the snapshot's own transaction, so replay never
+  loses or doubles one.
+- **`worker: true` cells are journalled** (their patch batches were dropped as
+  framework noise) and appear on the timeline.
+- **A database restored below the journal's compaction point refuses the
+  replay** (`PERSIST_ERROR`, journal parked beside the damaged copy) instead of
+  replaying later actions onto an older state and inventing history.
+- **A snapshot load is journalled**, so a crash right after it no longer replays
+  onto the pre-load database.
+- **A worker cell reads its OWN live state** inside a real worker (it read the
+  declared defaults, silently); worker errors keep `name` and `code`.
+- Earlier rounds: one refused row no longer tears a cell on disk or stops the
+  snapshot; nine data-layer answers that lost or misreported data; a sync cell
+  that forgot every write it did not make itself.
+
+### Security
+
+- **Cross-origin state changes.** A non-GET request with a foreign or `null`
+  `Origin` is refused when it would borrow authority — it carries a cookie, or
+  the app trusts network position (unexposed, or a local peer with no auth). A
+  cookieless form post to an exposed app's public route still passes.
+  `allowedOrigins` full-origin entries now match scheme and port.
+- **Pairing PINs are per app**, burn after 20 wrong guesses, and wrong PINs
+  count toward the address's auth-failure budget.
+- **OIDC**: only `email_verified: true` stores or passes the email; `azp` and
+  the discovery `issuer` are checked.
+- **TOTP**: a code cannot be replayed across a restart; parallel guesses no
+  longer walk through the lockout (earlier round), nor do 29 wrong passwords
+  fired with the right one.
+- **Under per-user auth**: every refusal (unknown cell, `validate`, disabled
+  cell) was acked `ok` to the caller; dev `diag` and `tt-state` frames went to
+  every user. Fixed. A `notify()` raised inside a signed-in user's call says
+  once per app that it reaches every client (the documented contract).
+- **Feedback reports** withhold an async call's arguments when its later
+  write-set touches a hidden field. Earlier rounds closed seven more doors,
+  including an encoded dot past the anonymous shell gate and
+  `redactActions: ["*"]` writing the secret to disk.
+- **Static files** under `auth: true` with no extension or a dotted name were
+  served anonymously.
+
+### The wire
+
+- **One flooding socket cannot starve the rest at a small `messagesPerSec`**:
+  per-client budgets run first; a tripped server fuse refuses only clients over
+  their even share.
+- **A peer that stops reading no longer grows server memory without bound**:
+  over the 4 MB high-water a raw/sync peer is closed `1013` and resyncs on
+  reconnect; toasts and diag frames are skipped for it.
+- A recovered frozen client gets full state at once; a frame larger than
+  `bytesPerSec` is refused immediately; the browser no longer re-sends a
+  timed-out call; calls held by the pacer survive a blip; the sync engine paces
+  with the shared token bucket (a window rollover let 119 frames through in one
+  second at rate 100).
+
+### The renderer
+
+- `ErrorBoundary`/`Suspense` fallbacks unmount everything the failed attempt
+  built (subscriptions grew by one per retry); a `null` fallback recovers.
+- SSR: context Providers propagate (nested `Route`/`Outlet` rendered empty on
+  the server); a stream reads the route once; a parser-implied `<tbody>` no
+  longer discards the server page on hydrate.
+- `useHead` restores its own document's title; `Link` carries the route base;
+  directory-named and dotted deep links get the app shell.
+
+### Tests are the strictest environment again
+
+`testUI`/`testCell`/`bootCells` were more lenient than production in six places:
+`visible.forUser`, the virtual clock vs `Date.now()`, call ceilings, worker
+cells reading or calling peers, `onInit` calling a method, and `schedule.next`
+under `settle`. Each now behaves as production does. `history.back()` fires
+`popstate` under `testUI`.
+
+### Two apps in one process
+
+Logs (including route handlers, timers and pre-logger lines), budgets, `/health`
+uptime and degraded rows, diagnostics dedup, the diag relay and feedback
+auto-capture are per app; simultaneous boots no longer collide on the
+feedback/updates cells. `docs/testing/multi-app.md` lists what stays per app.
+
+### Smaller
+
+- `$call` recursion across `await` is bounded by a chain limit (10 000), not the
+  stack depth (32); paginated recursion works.
+- Markdown inline parsing is linear (a 200 KB line: 10.9 s → 14 ms).
+- A read `PRAGMA` is not reported as a write; an app home holding only OS litter
+  (`.DS_Store`, `Thumbs.db`) is not "foreign"; async `onError`, `onAction`,
+  `onConnect`/`onDisconnect` rejections are guarded; the started line names the
+  socket of a UDS-only app; `am record` groups concurrent calls.
+
+### A field report on 1.0.0-beta (report 9)
+
+- **`self`, `until`, `race`, `sleep`, `call`, `errorCode`, `createSelector`,
+  `authClient`, `degraded` … were missing from the browser bundle** — a cell
+  imported by the UI type-checked and then failed in esbuild. They ship now, a
+  parity test lists every name `"aio"` exports that the bundle does not (each a
+  measured `server:` reason), and `am check` actually builds the bundle.
+- `export type { AirEvent }` from `"aio"` (additive).
+- The contrast audit says "colours could not be resolved here" under a test DOM
+  whose cascade it can prove broken, instead of reporting impossible pairs.
+- `am pin`'s removed-API scan matches keys only inside `cell(...)` config and
+  skips what the app excludes (`deno.json` `exclude`/`fmt.exclude`,
+  `.gitignore`), with counts per directory; aiol's `scan` hint honours the same
+  answer; the post-await read rule honours `// aio-ok`.
+- The dev shape-drift refusal names the data directory and the way out;
+  `am create` says when the appId already has data; the no-display warning names
+  the socket a UDS-only app really listens on.
+- The scaffold's `check` task type-checks `tests/`; the `$call` typing docs
+  teach spellings that compile (measured), and state types are `type` aliases,
+  not `interface`s.
+
+- **The page got heavier: 71 → 81 KB gz** (renderer + client runtime). Every
+  byte is one of the fixes above, itemised in `tests/bundle-size.test.ts`; a
+  size pass is queued, not done.
+- Upgrade guide:
+  [1.0.0-beta → 1.0.1-beta](docs/upgrade/from-1.0.0-beta-to-1.0.1-beta.md).
+
 ## v1.0.0-beta — the reports answered (2026-09-12)
 
 > **The surface is frozen and stays frozen.** Everything in this release is a

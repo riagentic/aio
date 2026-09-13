@@ -4,7 +4,7 @@
 // counter.count in a component auto-tracks and re-renders.
 // Called from ensureConnected() for all registered cells.
 
-import type { CellDef, CellFieldFilter } from "./cell-types.ts";
+import type { AccessUser, CellDef, CellFieldFilter } from "./cell-types.ts";
 import { randomUuid } from "../rand.ts";
 import { attachMeta } from "./cell-catalog.ts";
 import { _cellSignals, getCellSignal } from "./state-signals.ts";
@@ -45,7 +45,7 @@ export function registerCell(def: CellDef): void {
     const existing = _cellRegistry.get(id);
     if (existing !== def) {
       log.warn(
-        `[aio] duplicate cell name '${id}' — cell() called twice with this ` +
+        `duplicate cell name '${id}' — cell() called twice with this ` +
           `name. The previous definition is being replaced. If this is HMR, ` +
           `ignore; if two modules define the same cell name, rename one.`,
       );
@@ -112,9 +112,9 @@ const _reactivelyBound = new WeakSet<CellDef>();
 // Enforcing `ui:` visibility here gives ONE seam for both runtimes: over WS
 // the server already filters at broadcast time; locally (standalone) there is
 // no broadcast, so without this every "secret" was fully readable on the cell
-// object. Reads of a hidden field return undefined AND warn once — loud, not
-// silent. Server-side reads (routes/effects — bound via bindCell) see
-// everything, by design.
+// object. A read of a hidden field THROWS, in dev and prod alike (see
+// `reportHiddenRead`) — never a quiet `undefined`. Server-side reads
+// (routes/effects — bound via bindCell) see everything, by design.
 
 /** A client read of a field the cell hides THROWS — in every context, dev
  *  and prod alike.
@@ -213,6 +213,134 @@ function clientUiFilter(def: CellDef): CellFieldFilter | undefined {
   return def.__aio.scope === "client" ? undefined : def.__aio.ui;
 }
 
+// ── The per-user view, for a runtime that holds the UNFILTERED state ──
+//
+// A real client never holds another user's rows: the server runs
+// `visible.forUser` before the frame leaves (aio-composition.ts), so the
+// getters below read a slice that is already that user's view. `testUI` holds
+// the SERVER's state in the same signals — so it rendered the whole cell,
+// `{ user }` or not, and a UI test passed while showing every user's orders.
+// The harness names the viewer; the getters then answer with what that
+// viewer's socket would carry. Unset (a browser, an APK), nothing changes.
+
+type Slice = Record<string, unknown>;
+type ForUser = (exposed: Slice, user?: AccessUser) => Slice;
+
+/** Who a harness is reading AS — `null` when the runtime already holds a
+ *  client's view (the browser) or has no users at all (standalone). */
+let _clientViewer: {
+  user: AccessUser | undefined;
+  forUserOf: (def: CellDef) => ForUser | undefined;
+} | null = null;
+
+/** Harness-only: read every cell as a client signed in as `user` (undefined =
+ *  an anonymous connection) sees it. `forUserOf` hands over each cell's
+ *  per-user filter — passed in, not read here, because this module rides in
+ *  the browser bundle, whose cell stub does not carry the filter (it runs on
+ *  the server). Returns the undo. @internal */
+export function _readAsClient(
+  user: AccessUser | undefined,
+  forUserOf: (def: CellDef) => ForUser | undefined,
+): () => void {
+  const viewer = { user, forUserOf };
+  _clientViewer = viewer;
+  return () => {
+    if (_clientViewer === viewer) _clientViewer = null;
+  };
+}
+
+/** What `visible.forUser` decides for one cell and one user — the broadcast's
+ *  rules, including the three FAIL-CLOSED ones: a filter that throws, returns
+ *  a Promise, or returns a non-object has decided nothing, so the cell is
+ *  omitted rather than sent unfiltered. `omit` carries the reason.
+ *  `wholeCell` — the cell has NO structural filter, so `structural` is its
+ *  entire state (the omit reason says why that must never be sent).
+ *
+ *  Pure but for one thing: a returned Promise is OBSERVED. Omitting the cell
+ *  and dropping the Promise left a REJECTING async filter as an unhandled
+ *  rejection — a failed test file under `testUI`, and, without
+ *  `guardDispatches`, a server that exits the first time a client is sent the
+ *  cell. The omission is already reported by name; the rejection adds nothing
+ *  but the crash. */
+export function forUserView(
+  cellName: string,
+  forUser: ForUser,
+  structural: Slice,
+  user: AccessUser | undefined,
+  wholeCell = false,
+): { view: Slice } | { omit: string } {
+  let view: unknown;
+  try {
+    view = forUser(structuredClone(structural), user);
+  } catch (e) {
+    return {
+      omit:
+        `[${cellName}] visible.forUser threw — omitting the cell for this ` +
+        `client (fail closed; nothing is sent for it)` +
+        (wholeCell
+          ? `. This cell has NO structural visible filter, so the pre-filter ` +
+            `value is its ENTIRE state — it must never be sent.`
+          : "") +
+        `: ${e}`,
+    };
+  }
+  const then = (view as { then?: unknown } | null)?.then;
+  if (typeof then === "function") {
+    // aio-ok: the cell is omitted and the ASYNC filter named in `omit`;
+    // observing the rejection only keeps it from escaping unhandled.
+    then.call(view, undefined, () => {});
+    return {
+      omit: `[${cellName}] visible.forUser is ASYNC — it returned a Promise, ` +
+        `not a state object. Broadcast filtering cannot await, so the ` +
+        `Promise would reach every client as {}. Make the filter ` +
+        `synchronous (read what it needs from the state it is handed, or ` +
+        `precompute the value in a method) — omitting the cell for this ` +
+        `client (fail closed).`,
+    };
+  }
+  if (!view || typeof view !== "object" || Array.isArray(view)) {
+    return {
+      omit:
+        `[${cellName}] visible.forUser returned ${
+          Array.isArray(view) ? "an array" : typeof view
+        }, not a state object — omitting the cell for this client (fail ` +
+        `closed). A per-user filter must return the slice the client may see.`,
+    };
+  }
+  return { view: view as Slice };
+}
+
+/** One view per committed slice per viewer: a commit replaces the slice
+ *  object, so identity is the cache key and a stale view cannot be served. */
+const _views = new WeakMap<object, { viewer: object; view: Slice | null }>();
+
+/** The slice a client of the current viewer holds for `def` — `raw` itself
+ *  unless a harness named a viewer and the cell has a per-user filter; `null`
+ *  when the filter failed closed (a client with no slice reads declared
+ *  state, exactly like a client the broadcast omitted the cell for). */
+function clientSlice(def: CellDef, raw: unknown): Slice | null {
+  const viewer = _clientViewer;
+  const forUser = viewer?.forUserOf(def);
+  if (
+    !viewer || !forUser || raw == null || typeof raw !== "object" ||
+    def.__aio.scope === "client"
+  ) return raw as Slice | null;
+  const hit = _views.get(raw);
+  if (hit && hit.viewer === viewer) return hit.view;
+  const filter = clientUiFilter(def);
+  const out = forUserView(
+    def.__aio.id,
+    forUser,
+    filterSlice(filter, raw as Slice),
+    viewer.user,
+    (filter ?? "all") === "all",
+  );
+  if ("omit" in out) log.error(out.omit);
+  const view = "view" in out ? out.view : null;
+  _views.set(raw, { viewer, view });
+  return view;
+}
+
 /** Filter a full cell slice for client visibility ("none" → empty slice). */
 function filterSlice(
   filter: CellFieldFilter | undefined,
@@ -225,7 +353,7 @@ function filterSlice(
 const _hiddenKeys = new WeakMap<CellDef, Set<string>>();
 
 /** Wrap a client-visible slice so that reading a ui-HIDDEN field on it reports
- *  exactly as `cell.field` does (throw in dev, warn-once + undefined in prod).
+ *  exactly as `cell.field` does (it throws — dev and prod alike).
  *
  *  Selectors are client reads too, and they were the one client read the ui
  *  filter enforced SILENTLY: `filterSlice` handed a `ui: "none"` cell an empty
@@ -275,8 +403,8 @@ function guardHidden(
  *  rebase, `protocol-cell.ts`), so a hidden field the server-side run could
  *  read is simply absent there — and it read as a clean `undefined` with no
  *  tripwire, in the one runtime nobody tests by hand. Same outcome table as
- *  every other client read: dev THROWS naming cell + field, prod warns once
- *  and returns undefined. Writes pass straight through to the draft. */
+ *  every other client read: it THROWS naming cell + field, dev and prod
+ *  alike. Writes pass straight through to the draft. */
 export function guardHiddenReplay<S extends object>(def: CellDef, draft: S): S {
   return guardHidden(
     def,
@@ -334,7 +462,8 @@ export function bindCellReactive(
         // too. No-op on the server (never bound reactively) and harmless in
         // standalone/test (no transport → no __subs sent).
         trackPath(cellName);
-        const s = sig.value; // tracked read — auto-tracked by AIR renderer
+        // tracked read — auto-tracked by AIR renderer
+        const s = clientSlice(def, sig.value);
         const v = s == null
           ? initialState[key]
           : (s as Record<string, unknown>)[key];
@@ -407,7 +536,10 @@ export function bindCellReactive(
             def,
             filterSlice(
               uiFilter,
-              (sig.value ?? initialState) as Record<string, unknown>,
+              (clientSlice(def, sig.value) ?? initialState) as Record<
+                string,
+                unknown
+              >,
             ),
           );
           // Called WITH args on a PLAIN selector → parameterized
@@ -428,7 +560,10 @@ export function bindCellReactive(
               trackPath(prop);
               // Cross-cell reads honor the OTHER cell's ui filter too.
               const otherDef = _cellRegistry.get(prop);
-              const otherSlice = (other.value ?? otherDef?.__aio.state ??
+              const otherSlice = ((otherDef
+                ? clientSlice(otherDef, other.value)
+                : other.value) ??
+                otherDef?.__aio.state ??
                 {}) as Record<string, unknown>;
               // Same rule across the cell boundary: a deps-form selector
               // reading another cell's hidden field must hear about it too.

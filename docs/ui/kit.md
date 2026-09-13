@@ -162,6 +162,15 @@ Pass `dismissable={false}` to require an explicit action (no Escape/backdrop
 close). `role="dialog"`/`aria-modal` sit on the dialog box itself; the backdrop
 is addressable as `ui.modalBackdrop` so a test can drive click-outside-to-close.
 
+Focus is managed: on open it moves into the dialog (its first focusable element,
+or the dialog box itself when there is none — unless the content already took
+focus), `Tab`/`Shift+Tab` cycle within the dialog, and on close it returns to
+the element that had it before. With dialogs stacked, Escape belongs to the one
+opened most recently; a non-dismissable dialog on top swallows it rather than
+letting it close the one behind. An Escape that something inside already handled
+(`preventDefault` — an open `Menu` does this) or that ends an IME composition
+does not close the dialog.
+
 ### Card + layout — `Card`, `Stack`, `Row`, `Spinner`
 
 ```tsx
@@ -193,6 +202,10 @@ wants.
 ```tsx
 <Pagination page={p} pages={Math.ceil(total / perPage)} onPage={setP} />;
 ```
+
+A `page` outside `1..pages` is clamped: Previous/Next lead back into range, and
+a button is disabled only when it would report the page already shown. A
+fractional `pages` counts its partial last page.
 
 Every button carries an `aria-label` ("Previous page", "Next page", "Page 3"),
 so it is announced by a screen reader and drivable by name in tests
@@ -243,14 +256,18 @@ export default function App() {
 await cart.checkout();
 toast("Order placed", { variant: "success" });
 toast("Network error", { variant: "error", duration: 0 }); // sticky until dismissed
+// `Infinity` (or anything past the ~24.8-day timer limit) is sticky too
 ```
 
 ### Markdown
 
 A safe, common-subset renderer (headings, bold/italic, code, links, images,
-lists, blockquote, hr). It renders to AIR nodes — **not** an HTML string — so
-text is auto-escaped and there's no raw-HTML/XSS passthrough; link and image
-URLs are scheme-checked (`javascript:`/`data:` are dropped).
+lists, blockquote, hr). Code fences may carry an info string
+(`` ```js title="x" `` — the first word becomes `data-lang`) and use more than
+three backticks; blockquotes nest up to 32 levels, deeper `>` reads as text. It
+renders to AIR nodes — **not** an HTML string — so text is auto-escaped and
+there's no raw-HTML/XSS passthrough; link and image URLs are scheme-checked
+(`javascript:`/`data:` are dropped).
 
 ```tsx
 <Markdown source={post.body} />;
@@ -330,7 +347,8 @@ document's `dir`, so it works in RTL with no second implementation.
 />;
 ```
 
-Uncontrolled by default. Pass `value` + `onChange` to drive it from a cell.
+Uncontrolled by default — and if the active tab is removed from `tabs`, the
+first enabled one takes over. Pass `value` + `onChange` to drive it from a cell.
 
 ### `<Menu>` — actions
 
@@ -377,7 +395,8 @@ because interrupting someone to say "saved" is a bug.
 `title=` is the alternative and it is worse in three ways: it never appears for
 a keyboard user, it cannot be styled, and on touch it does not appear at all.
 This one is `aria-describedby`-wired, shows on hover and focus, and closes on
-Escape.
+Escape. With a single child the description goes on that child — the element
+that actually takes focus — so `<Tooltip><Button>` announces it on the button.
 
 ```tsx
 <Tooltip text="Deletes every snapshot">

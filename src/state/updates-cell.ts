@@ -148,20 +148,33 @@ export type CheckResult =
   | { kind: "blocked"; blocked: BlockedUpdate }
   | { kind: "error"; error: string };
 
-let runtime: UpdatesRuntime | null = null;
+/** One app's updates: the runtime it checks with and the cell that shows it.
+ *
+ *  A cell def binds to exactly ONE app (D2), and this cell used to be one
+ *  process-wide object reading one process-wide runtime — so `updates:` on a
+ *  SECOND app in the same process refused to boot ("[updates] already bound —
+ *  use a factory"), a factory the app cannot write for a cell aio owns. The
+ *  process slot is still the one `aio/updates` exports and
+ *  `installUpdatesRuntime` fills, so a single-app process is unchanged; a
+ *  second app gets a slot of its own (`_updatesForApp`). @internal */
+export type UpdatesSlot = {
+  runtime: UpdatesRuntime | null;
+  cell: UpdatesCell | null;
+};
+const _process: UpdatesSlot = { runtime: null, cell: null };
 
 /** Install the platform half. Called once by the server at boot, only when the
  *  app configured `updates`. */
 export function installUpdatesRuntime(r: UpdatesRuntime | null): void {
-  runtime = r;
+  _process.runtime = r;
   // Removing the runtime is a fact about the cell, not just about this module.
   // Publishing it needs a dispatch, and this function is called from places
   // that are not in one (boot, a test's setup), so it is best-effort — the
   // cell's own `ready()` reads `runtime` again and agrees either way.
-  if (r === null && _updates) {
+  if (r === null && _process.cell) {
     try {
       void Promise.resolve(
-        (_updates as unknown as { ready?: () => unknown }).ready?.(),
+        (_process.cell as unknown as { ready?: () => unknown }).ready?.(),
       ).catch(() => {});
     } catch {
       // aio-ok: publishing "no runtime" is observation; the cell is not always
@@ -172,7 +185,51 @@ export function installUpdatesRuntime(r: UpdatesRuntime | null): void {
 
 /** The runtime, for the server's own scheduled check. */
 export function updatesRuntime(): UpdatesRuntime | null {
-  return runtime;
+  return _process.runtime;
+}
+
+/** Put `r` into `slot`: the process slot through `installUpdatesRuntime` (so
+ *  its "removed" publication still happens), any other slot directly — only
+ *  the process slot is reachable from app code. @internal */
+export function _installUpdatesRuntimeIn(
+  slot: UpdatesSlot,
+  r: UpdatesRuntime | null,
+): void {
+  if (slot === _process) installUpdatesRuntime(r);
+  else slot.runtime = r;
+}
+
+/** A boot holds the process slot and has not bound its cell yet. */
+let _processClaimed = false;
+
+/** The slot `aio.run()` gives an app that configured `updates`: the process
+ *  slot while its cell is free, a fresh one (its own cell, its own runtime)
+ *  when another app in this process already holds it. @internal */
+export function _updatesForApp(): UpdatesSlot & { cell: UpdatesCell } {
+  const shared = createUpdatesCell();
+  // Claimed HERE, synchronously — see `_processClaimed` in feedback-cell.ts:
+  // `bound` flips many awaits later, so two concurrent boots both took it.
+  if (
+    !_processClaimed &&
+    !(shared as unknown as { __aio: { bound?: boolean } }).__aio.bound
+  ) {
+    _processClaimed = true;
+    return _process as UpdatesSlot & { cell: UpdatesCell };
+  }
+  const slot: UpdatesSlot = { runtime: null, cell: null };
+  slot.cell = buildUpdatesCell(slot);
+  return slot as UpdatesSlot & { cell: UpdatesCell };
+}
+
+/** The boot that took `slot` bound its cell or refused — `bound` (or nothing)
+ *  holds the process slot from here. @internal */
+export function _releaseUpdatesClaim(slot: UpdatesSlot | undefined): void {
+  if (slot === _process) _processClaimed = false;
+}
+
+/** Is `slot` the process slot `aio/updates` exposes? @internal */
+export function _isProcessUpdatesSlot(slot: UpdatesSlot): boolean {
+  return slot === _process;
 }
 
 /** Publish the CONFIGURATION into the cell, before any check has run.
@@ -186,9 +243,9 @@ export function updatesRuntime(): UpdatesRuntime | null {
  *  to `updates.enabled` was blank for a network round-trip at every boot, and
  *  for an app with `check: false` — which never runs a boot check at all — it
  *  was blank forever. */
-export function readyUpdates(): void {
-  if (!runtime) return;
-  const cell = _updates as unknown as { ready?: () => void } | null;
+export function readyUpdates(slot: UpdatesSlot = _process): void {
+  if (!slot.runtime) return;
+  const cell = slot.cell as unknown as { ready?: () => void } | null;
   cell?.ready?.();
 }
 
@@ -269,8 +326,6 @@ const NOT_CONFIGURED =
  *  since alpha76 — the runtime has always served all four on every method. */
 type Draft = UpdatesState & MethodDraftMeta<UpdatesState>;
 
-let _updates: UpdatesCell | null = null;
-
 /** Create (once) the built-in `updates` cell.
  *
  *  A FACTORY, not a module-level `cell(…)`, and that distinction is
@@ -288,8 +343,12 @@ let _updates: UpdatesCell | null = null;
  *  exactly one app (D2): `aio/updates` and the boot path must get the same
  *  object, not two. */
 export function createUpdatesCell(): UpdatesCell {
-  if (_updates) return _updates;
-  _updates = cell("updates", {
+  return _process.cell ??= buildUpdatesCell(_process);
+}
+
+/** The cell itself, reading `slot.runtime` — see `UpdatesSlot`. */
+function buildUpdatesCell(slot: UpdatesSlot): UpdatesCell {
+  return cell("updates", {
     state: {
       /** False until the runtime the server installs starts its first check —
        *  a UI can hide itself entirely rather than render a permanently idle
@@ -362,7 +421,7 @@ export function createUpdatesCell(): UpdatesCell {
     // install aio binds 127.0.0.1, so every client is already on this machine and
     // there is nobody else to gate. Once the app is --expose'd that stops being
     // true, and "restart this app" is not a verb an anonymous visitor gets.
-    access: (user) => !runtime?.exposed || !!user,
+    access: (user) => !slot.runtime?.exposed || !!user,
 
     methods: {
       /** Publish the configuration: what updates are on, from where, for which
@@ -373,20 +432,20 @@ export function createUpdatesCell(): UpdatesCell {
         // stub, checked, then removed the stub kept `enabled: true` — so a UI
         // gated on it could be tested for its presence and never its absence,
         // which is the half that regresses silently.
-        if (!runtime) {
+        if (!slot.runtime) {
           s.enabled = false;
           return;
         }
         s.enabled = true;
-        s.kind = runtime.kind;
-        s.channel = runtime.channel;
-        s.current = runtime.current;
-        s.currentUnknown = runtime.currentUnknown;
+        s.kind = slot.runtime.kind;
+        s.channel = slot.runtime.channel;
+        s.current = slot.runtime.current;
+        s.currentUnknown = slot.runtime.currentUnknown;
       },
 
       /** Ask the source what it has. Safe to call at any time. */
       async check(s: Draft) {
-        if (!runtime) {
+        if (!slot.runtime) {
           const error = NOT_CONFIGURED;
           s.error = error;
           s.status = "error";
@@ -410,10 +469,10 @@ export function createUpdatesCell(): UpdatesCell {
         // check begins rather than one round-trip later — a chip that is blank
         // until the first answer arrives is a chip that lies at every boot.
         s.enabled = true;
-        s.kind = runtime.kind;
-        s.channel = runtime.channel;
-        s.current = runtime.current;
-        s.currentUnknown = runtime.currentUnknown;
+        s.kind = slot.runtime.kind;
+        s.channel = slot.runtime.channel;
+        s.current = slot.runtime.current;
+        s.currentUnknown = slot.runtime.currentUnknown;
         // Publish NOW, mid-method. Without this the whole write-set commits
         // once at return (`transaction`), so `status: "checking"` existed only
         // inside this function: no client ever saw it, and a spinner bound to
@@ -431,7 +490,7 @@ export function createUpdatesCell(): UpdatesCell {
           // `s.dismissed` is read from the snapshot: the version the user said
           // No to, persisted across restarts, and the only input the runtime
           // cannot know on its own.
-          r = await runtime.check({ dismissed: s.dismissed });
+          r = await slot.runtime.check({ dismissed: s.dismissed });
         } catch (e) {
           const error = e instanceof Error ? e.message : String(e);
           s.status = "error";
@@ -465,8 +524,12 @@ export function createUpdatesCell(): UpdatesCell {
 
       /** Install what `check` found, then restart. Returns only on failure —
        *  a successful apply ends with the process being replaced. */
-      async apply(s: Draft, opts?: ApplyOptions) {
-        if (!runtime) {
+      // `= {}`, not `opts?`: the short-call guard reads `fn.length`, which
+      // counts an optional `?` parameter as REQUIRED — so the documented
+      // `updates.apply()` warned "declares 1 argument and this call passed 0"
+      // on every first install. A signature default is what it can see.
+      async apply(s: Draft, opts: ApplyOptions = {}) {
+        if (!slot.runtime) {
           s.error = NOT_CONFIGURED;
           s.status = "error";
           return;
@@ -485,7 +548,14 @@ export function createUpdatesCell(): UpdatesCell {
         }
 
         const accept = opts?.acceptDataLoss === true;
-        if (!s.available && !(accept && s.blocked)) {
+        // `retireData` is the OTHER door for a blocked release (it moves the
+        // profile aside instead of migrating it). It used to be read by the
+        // runtime and never reach it: this gate refused it unless
+        // `acceptDataLoss` came too, and the call below forwarded only that —
+        // so the documented `apply({ retireData: true })` was a refusal, and
+        // `{ acceptDataLoss, retireData }` silently migrated instead of retiring.
+        const retire = opts?.retireData === true;
+        if (!s.available && !((accept || retire) && s.blocked)) {
           // Never install something the user was not shown. A `blocked` release
           // lands here too unless the caller deliberately opened the one-way
           // door — and then it is told which door, in the same sentence.
@@ -496,7 +566,9 @@ export function createUpdatesCell(): UpdatesCell {
               `survive it. If that verdict is wrong (a mis-published data ` +
               `contract), take it deliberately with ` +
               `updates.apply({ acceptDataLoss: true }) — that refuses unless a ` +
-              `backup can be taken, and takes one first.`
+              `backup can be taken, and takes one first — or start fresh with ` +
+              `updates.apply({ retireData: true }), which moves the current ` +
+              `data aside (never deletes it).`
             : "no update is available to apply — call updates.check() first";
           s.status = "error";
           return;
@@ -510,7 +582,11 @@ export function createUpdatesCell(): UpdatesCell {
         // zero, and a successful one never showed a bar at all.
         s.$commit();
         try {
-          await runtime.apply({ acceptDataLoss: accept });
+          await slot.runtime.apply(
+            retire
+              ? { acceptDataLoss: accept, retireData: true }
+              : { acceptDataLoss: accept },
+          );
           // Reached only when the swap is done and the handover is scheduled
           // but has not happened yet: the artifact is staged, the process is
           // about to be replaced. Saying "idle" here would be a lie for the
@@ -575,6 +651,12 @@ export function createUpdatesCell(): UpdatesCell {
         s.available = null;
         s.blocked = null;
         s.status = "idle";
+        // The error goes with the thing it was about. `apply()` on a blocked
+        // release leaves its refusal in `error`; "Hide" put the release away
+        // and left that refusal on screen, now about nothing, with status
+        // "idle" beside it. `undismiss()` has always cleared it for the same
+        // reason.
+        s.error = null;
       },
 
       /** Undo a dismissal. The next check offers the release again.
@@ -592,12 +674,12 @@ export function createUpdatesCell(): UpdatesCell {
        *  a dismissal on prod says nothing about test, and a version comparison
        *  across channels can legitimately go backwards. */
       async setChannel(s: Draft, channel: string) {
-        if (!runtime) {
+        if (!slot.runtime) {
           s.error = NOT_CONFIGURED;
           s.status = "error";
           return;
         }
-        await runtime.setChannel(channel);
+        await slot.runtime.setChannel(channel);
         s.channel = channel;
         s.available = null;
         s.blocked = null;
@@ -608,5 +690,4 @@ export function createUpdatesCell(): UpdatesCell {
       },
     },
   }) as unknown as UpdatesCell;
-  return _updates;
 }

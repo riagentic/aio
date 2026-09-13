@@ -25,12 +25,12 @@ write run in one flush cycle — both land in the app's single `state.db`.
 Everything persists to **one SQLite file** (`state.db`). Inside it there are two
 write paths:
 
-|                    | `aio_kv` snapshot table (auto-persist)    | User tables (db schema)                 |
-| ------------------ | ----------------------------------------- | --------------------------------------- |
-| **Config**         | `persist: "all"` or `{ include/exclude }` | `dbSchema: { table(...) }`              |
-| **Size limit**     | None                                      | None                                    |
-| **Write strategy** | Full state replacement                    | Incremental diff (INSERT/UPDATE/DELETE) |
-| **Use case**       | Simple state, scalar UI state             | Tables, queries, large datasets         |
+|                    | `aio_kv` snapshot table (auto-persist)    | User tables (db schema)                  |
+| ------------------ | ----------------------------------------- | ---------------------------------------- |
+| **Config**         | `persist: "all"` or `{ include/exclude }` | `aio.run({ db: { items: table(...) } })` |
+| **Size limit**     | None                                      | None                                     |
+| **Write strategy** | Full state replacement                    | Incremental diff (INSERT/UPDATE/DELETE)  |
+| **Use case**       | Simple state, scalar UI state             | Tables, queries, large datasets          |
 
 Cells with `sync: true` skip the snapshot — their state flows through the CRDT
 op-log in SQLite instead.
@@ -60,7 +60,7 @@ cell("user", {
 
 ## SQLite Persistence
 
-When cells define a `dbSchema`, state maps to SQL tables:
+When the app declares `db:` tables, a cell's array fields map to SQL tables:
 
 ```ts
 const todos = cell("todos", {
@@ -86,10 +86,20 @@ On each flush, `syncTables()` compares current state vs previous state:
    - `toInsert`: rows in current but not in prev
    - `toUpdate`: rows in both but with changed column values
 3. **Full replace** — tables without PK get DELETE ALL + INSERT ALL
-4. All statements execute in **one atomic transaction**
+4. All statements execute in **one atomic transaction**, together with the
+   `aio_kv` snapshot row — a cell's rows and its scalars describe one moment
 
 The previous state snapshot is maintained by the persistence manager and updated
 after each successful flush.
+
+A cell is **one unit on disk**: its bound rows and its snapshot row land
+together or not at all. When a row is refused — by aio's own row checks (a NUL
+in a TEXT column, a duplicate pk) or by SQLite (NOT NULL, UNIQUE, a dangling
+`ref()`) — that cell is **held whole** at its last clean write, so a restart
+brings back an older but consistent cell, never a counter from one moment next
+to rows from another. Every other cell still persists that window, and the held
+cell lands the moment the value is fixed. With `journal: true` a refusal holds
+**everything** instead (see below).
 
 ### Worker Architecture
 
@@ -172,7 +182,8 @@ leaving either way, and an exit code nobody reads is not a verdict. The same
 rule covers `am restart` (it prints `NOT SAVED` and still restarts) and
 `am snapshot load` (it flushes and reports `unsaved` before it says loaded).
 `journal: true` is the other half: a refused write is recoverable from the
-actions themselves on the next boot.
+actions themselves on the next boot — nothing past the last clean write is
+committed, so the journal keeps every one of those actions and replays them.
 
 ### What the SQLite settings buy
 
@@ -217,6 +228,34 @@ recovered instead of lost.
 - The watermark that says "the snapshot already includes up to seq N" is a row
   in `state.db`, written **inside the same transaction as the snapshot**. A
   crash can therefore never make the two disagree, in either direction.
+- A refused write (a row or a value the store cannot hold) advances **nothing**
+  that window — no snapshot, no table, no watermark, for any cell. Replay
+  re-reduces every action past the watermark over the whole state, so writing
+  the healthy cells alone would replay their actions twice. The actions stay in
+  the journal, the next boot replays them, and the refusal repeats — loudly, on
+  every window — until the value is fixed. The journal grows while it does.
+- **Sync cells** (`sync: true`) are journalled too. A client's op is durable
+  before it is acked (the op-log), but a server-side write — a trojan/CLI call,
+  an effect, cron, an async method's outcome — is folded into the cell's CRDT
+  snapshot up to 500 ms after it is acked. Each such write is journalled, and
+  each sync cell keeps its **own** watermark, written inside the fold's
+  transaction; boot replays the writes past it **after** the op-log restore. A
+  write the fold already holds is never applied twice.
+- **Worker cells** (`worker: true`) are journalled as the patch batches their
+  worker commits (`__aioWorkerPatch`, attributed to the cell as
+  `<cell>:__worker` in `am timeline`). A cell with any `redactActions` pattern
+  has its batches' values withheld, because a batch carries no method name.
+- **A database that went back in time is never replayed onto.** Every compaction
+  records what it dropped in `<journal>.base`. When the store's watermark is
+  below that — `checkIntegrityOnBoot` restored `<db>.snapshot`, or a backup was
+  copied over the file — the tail has a hole in front of it, and replaying it
+  would re-run actions on a state they never ran on. Boot refuses the replay
+  with a `PERSIST_ERROR` naming both paths, moves the journal beside the damaged
+  database (`state.db.corrupt-<ts>.journal`, or `journal.gap-<ts>` when nothing
+  was quarantined) and boots on the database as it is. A journal with nothing
+  past the store's watermark (a clean stop compacts it empty) has nothing to
+  invent history with: it is kept, its base moved back to the store, and the
+  next crash replays normally.
 - Each append is a synchronous write, so it survives **process** death. It is
   not fsynced, so power loss can still take the tail. (`sync: true` inside the
   journal implementation would fsync every append; it is not reachable from
@@ -239,12 +278,12 @@ flush short.
 
 ### What survives what
 
-| Failure                       | Default (WAL + NORMAL)                                               | `journal: true`              | `synchronous = FULL` |
-| ----------------------------- | -------------------------------------------------------------------- | ---------------------------- | -------------------- |
-| Process killed (SIGKILL, OOM) | all COMMITTED writes                                                 | committed writes + the tail  | all COMMITTED writes |
-| …the last debounce window     | lost                                                                 | replayed on next boot        | lost                 |
-| Power loss / kernel panic     | last commits may be lost                                             | journal tail may be lost too | all COMMITTED writes |
-| Disk corruption               | `checkIntegrityOnBoot` quarantines and restores from `<db>.snapshot` | same                         | same                 |
+| Failure                       | Default (WAL + NORMAL)                                               | `journal: true`                                                                          | `synchronous = FULL` |
+| ----------------------------- | -------------------------------------------------------------------- | ---------------------------------------------------------------------------------------- | -------------------- |
+| Process killed (SIGKILL, OOM) | all COMMITTED writes                                                 | committed writes + the tail                                                              | all COMMITTED writes |
+| …the last debounce window     | lost                                                                 | replayed on next boot                                                                    | lost                 |
+| Power loss / kernel panic     | last commits may be lost                                             | journal tail may be lost too                                                             | all COMMITTED writes |
+| Disk corruption               | `checkIntegrityOnBoot` quarantines and restores from `<db>.snapshot` | same; the tail is NOT replayed across the restore (journal kept beside the damaged file) | same                 |
 
 Nothing on this table is free: `journal: true` costs a synchronous append per
 action, and `synchronous = FULL` costs an fsync per commit.

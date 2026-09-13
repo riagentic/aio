@@ -8,6 +8,14 @@ specifically.
 
 ## Read these first, in this order
 
+0. **`am agent`** — run it. One command, one page, no file to find: the four
+   rules that protect the human (never kill aio apps by process match, never
+   open windows on their desktop, never script around `am`, learn before
+   editing), the model, the new-app flow from `am create`, the whole API, every
+   verb, testing, debugging and shipping — each fact gated against the code
+   (`tests/am-agent-truth.test.ts`). `am agent --task=<slug>` for one section or
+   a deeper one. Everything below is what to read when the brief points you at
+   it.
 1. The app's own `CLAUDE.md` / `README.md`, if it has one.
 2. [`docs/content.md`](content.md) — the generated index of every page, by
    question. Search it before searching the source.
@@ -71,8 +79,8 @@ available. `am state` can be right while the page is wrong, and the reverse.
 - **Transport-boundary behaviour** (reconnects, acks, offline queues) needs a
   real socket: `deno task test:e2e`, or `aio.run` in-process plus a real client,
   as `tests/notify-loopback.test.ts` does.
-- `am record tests/x.test.ts --from=journal` writes a replay test you did not
-  write by hand; `am testgen` a typed client for the UI.
+- `am record tests/x.test.ts` writes a replay test you did not write by hand;
+  `am testgen` a typed client for the UI.
 
 ## Windows without stealing the keyboard
 

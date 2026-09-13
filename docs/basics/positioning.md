@@ -64,8 +64,14 @@ gap waiting on a patch.
   orchestration either: a compiled binary plus a data directory is the unit of
   deployment.
 - **CORS** — there are no `Access-Control-*` headers. Cross-origin is _refused_
-  by the `Origin` and `Host` checks rather than negotiated; an embedder or a
-  cross-origin caller is named in `allowedOrigins` or it is a 403. (Security
+  by the `Origin` and `Host` checks rather than negotiated: a WebSocket upgrade
+  from another origin is a 403 unless that origin is named in `allowedOrigins`,
+  and so is a state-changing HTTP request (app routes included) when it would
+  borrow authority — a cookie, or an unexposed/open app reached from this
+  machine. A cookieless cross-site form post to an exposed app's public route,
+  and any request with no `Origin` (a webhook sender, `curl`, a native client),
+  pass as before. See
+  [Cross-origin requests](../auth/auth.md#cross-origin-requests). (Security
   headers are NOT a non-goal since alpha72 — every response carries
   `X-Content-Type-Options`, `Referrer-Policy`, `X-Frame-Options` and a
   Content-Security-Policy, with `Strict-Transport-Security` behind an operator's

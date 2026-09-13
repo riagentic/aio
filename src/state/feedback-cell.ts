@@ -41,12 +41,64 @@ export type FeedbackRuntime = {
   count(): Promise<number>;
 };
 
-let runtime: FeedbackRuntime | null = null;
+/** One app's feedback: the runtime that captures and the cell that shows it.
+ *  Per app for the reason `UpdatesSlot` is: `feedback: true` on a SECOND app
+ *  in one process refused to boot ("[feedback] already bound — use a
+ *  factory") for a cell the app does not own. The process slot is the one
+ *  `installFeedbackRuntime` fills and a single-app process uses. @internal */
+export type FeedbackSlot = {
+  runtime: FeedbackRuntime | null;
+  cell: FeedbackCell | null;
+};
+const _process: FeedbackSlot = { runtime: null, cell: null };
 
 /** Install the platform half. Called once by the server at boot. */
 export function installFeedbackRuntime(r: FeedbackRuntime | null): void {
-  runtime = r;
+  _process.runtime = r;
   _reportTimes.length = 0;
+}
+
+/** Put `r` into `slot` — the process slot through `installFeedbackRuntime`.
+ *  @internal */
+export function _installFeedbackRuntimeIn(
+  slot: FeedbackSlot,
+  r: FeedbackRuntime | null,
+): void {
+  if (slot === _process) installFeedbackRuntime(r);
+  else slot.runtime = r;
+}
+
+/** A boot has taken the process slot and not yet bound its cell.
+ *
+ *  `bound` alone was read too late to be the claim: it flips inside
+ *  `bindCell`, many awaits after `aio.run()` picks a slot, so two apps booting
+ *  CONCURRENTLY both saw a free cell, both composed it, and the second bind
+ *  refused the whole boot ("[feedback] already bound"). The claim is taken
+ *  here, synchronously, and given back by `_releaseFeedbackClaim` once the
+ *  boot has either bound the cell (`bound` holds it from then on) or refused. */
+let _processClaimed = false;
+
+/** The slot `aio.run()` gives an app that configured `feedback`: the process
+ *  slot while its cell is free, a fresh one when another app in this process
+ *  already holds it — or is booting towards it. @internal */
+export function _feedbackForApp(): FeedbackSlot & { cell: FeedbackCell } {
+  const shared = createFeedbackCell();
+  if (
+    !_processClaimed &&
+    !(shared as unknown as { __aio: { bound?: boolean } }).__aio.bound
+  ) {
+    _processClaimed = true;
+    return _process as FeedbackSlot & { cell: FeedbackCell };
+  }
+  const slot: FeedbackSlot = { runtime: null, cell: null };
+  slot.cell = buildFeedbackCell(slot);
+  return slot as FeedbackSlot & { cell: FeedbackCell };
+}
+
+/** The boot that took `slot` is past the point of binding (it bound, or it
+ *  refused). A per-app slot holds no claim. @internal */
+export function _releaseFeedbackClaim(slot: FeedbackSlot | undefined): void {
+  if (slot === _process) _processClaimed = false;
 }
 
 // ── Rate limit ───────────────────────────────────────────────────────────────
@@ -113,8 +165,6 @@ export type FeedbackCell = Readonly<FeedbackState> & CellEntry & {
   dismiss(): void;
 };
 
-let _feedback: FeedbackCell | null = null;
-
 /** Create (once) the built-in `feedback` cell.
  *
  *  A FACTORY, not a module-level `cell(…)`, and that distinction is
@@ -132,8 +182,12 @@ let _feedback: FeedbackCell | null = null;
  *  exactly one app (D2): `aio/feedback` and the boot path must get the same
  *  object, not two. */
 export function createFeedbackCell(): FeedbackCell {
-  if (_feedback) return _feedback;
-  _feedback = cell("feedback", {
+  return _process.cell ??= buildFeedbackCell(_process);
+}
+
+/** The cell itself, reading `slot.runtime` — see `FeedbackSlot`. */
+function buildFeedbackCell(slot: FeedbackSlot): FeedbackCell {
+  return cell("feedback", {
     state: {
       enabled: false,
       status: "idle" as FeedbackStatus,
@@ -160,9 +214,17 @@ export function createFeedbackCell(): FeedbackCell {
     transaction: true,
 
     methods: {
-      async report(s, title: string, body?: string, contact?: string) {
-        s.enabled = runtime !== null;
-        if (!runtime) {
+      // Defaults in the SIGNATURE, not `body?`: the short-call guard reads
+      // `fn.length`, which stops only at a default — with `?` the documented
+      // `feedback.report(title)` warned that two arguments were missing.
+      async report(
+        s,
+        title: string,
+        body: string | undefined = undefined,
+        contact: string | undefined = undefined,
+      ) {
+        s.enabled = slot.runtime !== null;
+        if (!slot.runtime) {
           s.error = "feedback is not configured for this app";
           s.status = "error";
           return;
@@ -188,14 +250,14 @@ export function createFeedbackCell(): FeedbackCell {
         s.status = "capturing";
         s.error = null;
         try {
-          const saved = await runtime.capture({
+          const saved = await slot.runtime.capture({
             kind: "user",
             title,
             body,
             contact,
           });
           s.last = saved;
-          s.pending = await runtime.count();
+          s.pending = await slot.runtime.count();
           s.status = "saved";
         } catch (e) {
           s.status = "error";
@@ -208,10 +270,10 @@ export function createFeedbackCell(): FeedbackCell {
         // the server installed a runtime at boot (boot fires one refresh once
         // cells are bound — see beginFeedback). Never written anywhere else,
         // so an app gating its UI on it sees the truth, not `false` forever.
-        s.enabled = runtime !== null;
-        if (!runtime) return;
+        s.enabled = slot.runtime !== null;
+        if (!slot.runtime) return;
         try {
-          s.pending = await runtime.count();
+          s.pending = await slot.runtime.count();
           // A previous failure must not outlive its cause.
           if (s.status === "error") {
             s.status = "idle";
@@ -232,5 +294,4 @@ export function createFeedbackCell(): FeedbackCell {
       },
     },
   }) as unknown as FeedbackCell;
-  return _feedback;
 }

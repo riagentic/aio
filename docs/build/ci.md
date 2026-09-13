@@ -49,9 +49,9 @@ browser entry for the bundle. TypeScript checks the **union**; the bundle gets
 the **intersection**. So a server-only import reachable from a cell type-checks
 perfectly and then fails to build.
 
-`deno task check` is `deno check src/ && am check` — the second half walks the
-client graph and fails on exactly that. A CI that calls `deno check` on its own
-is green on the code path aio is most often reported for.
+`deno task check` is `deno check src/ tests/ && am check` — the second half
+walks the client graph and fails on exactly that. A CI that calls `deno check`
+on its own is green on the code path aio is most often reported for.
 
 The same shape applies to lint: `deno task lint` is `deno lint src/ && aiol`,
 and `aiol` is the half that knows about cells, `t=` handles and accessible

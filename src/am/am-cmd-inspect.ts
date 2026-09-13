@@ -6,7 +6,14 @@
 import { join } from "@std/path";
 import { appDirs } from "../server/app-dirs.ts";
 import type { GlobalFlags, OutputMode } from "./am-types.ts";
-import { detectMode, fail, formatUptime, out, outError } from "./am-output.ts";
+import {
+  detectMode,
+  fail,
+  formatUptime,
+  out,
+  outError,
+  outValue,
+} from "./am-output.ts";
 import {
   amCtx,
   parseNumArg,
@@ -200,7 +207,7 @@ export async function cmdClient(
     outError(result.error, mode);
     Deno.exit(1);
   }
-  out(result.data, mode);
+  outValue(result.data, mode);
 }
 
 // ── Database commands ───────────────────────────────────────
@@ -230,7 +237,7 @@ export async function cmdSql(
     outError(result.error, mode);
     Deno.exit(1);
   }
-  out(result.data, mode);
+  outValue(result.data, mode);
 }
 
 export async function cmdTables(
@@ -294,7 +301,18 @@ export function groupLogEvents(lines: readonly string[]): string[][] {
     if (cont) events[events.length - 1]!.push(line);
     else events.push([line]);
   }
-  return events;
+  // AN EMPTY LINE IS NOT AN EVENT. Every log file ends in a newline, so
+  // `split("\n")` hands back a trailing "" — and `LOG_EVENT_CONT` needs two
+  // spaces or a box-drawing character, so "" can never continue the event
+  // above it and always became an event of its own. `logEventMatches` then
+  // answers TRUE for any event whose head it cannot parse (deliberate: stack
+  // frames and raw writes must survive a filter), so the phantom passed every
+  // structured filter. `am logs --level=error --json | jq .total` — the
+  // natural health probe, and the reason `--level`/`--tag` were added — read
+  // 1 on an app with no errors at all, and disagreed with `am errors`, which
+  // said none. The substring `--filter` path escaped it only by luck
+  // (`"".includes(x)` is false).
+  return events.filter((e) => e.some((l) => l.length > 0));
 }
 
 /** Log levels, weakest first — `--level=warn` means "warn AND above", the
@@ -558,9 +576,34 @@ export async function cmdLog(
     if (mode === "json") {
       // deno-lint-ignore no-control-regex
       const clean = tail.map((l) => l.replace(/\x1b\[[0-9;]*m/g, ""));
+      // How many of these the FILTER actually matched, as opposed to how many
+      // it could not classify and therefore kept.
+      //
+      // `logEventMatches` deliberately keeps an event whose head it cannot
+      // parse — "dropping what we cannot classify is how a filter comes to
+      // hide the one line that mattered" — and that is right for the OUTPUT.
+      // It was wrong for the COUNT: every `deno` `Initialize npm:…` write has
+      // no aio header, so `am logs --level=error --json | jq .total` read 28
+      // on an app with zero errors, and disagreed with `am errors`, which said
+      // none. That probe is named in this file as the reason `--level` and
+      // `--tag` exist.
+      //
+      // ADDITIVE: `total` and `shown` keep their meaning for every script that
+      // already reads them; `matched` and `unclassified` are what a health
+      // probe wants, and they add up.
+      const classified = (level || tag || sinceRaw)
+        ? events.filter((e) => logEventHead(e[0] ?? "") !== null).length
+        : events.length;
       out({
         // Counts are of EVENTS — the unit `--lines=N` now selects.
         total: events.length,
+        /** Events the filter could READ and keep — what a health probe means
+         *  by "how many errors". */
+        matched: classified,
+        /** Events with no recognised header. Kept in `lines` on purpose (a
+         *  stack frame or a raw write must survive a filter) and counted
+         *  separately so they cannot read as matches. */
+        unclassified: events.length - classified,
         shown: Math.min(events.length, n),
         filter: filter ?? null,
         level: level ?? null,
@@ -1122,6 +1165,16 @@ function reportRects(
   if (!v.ok) Deno.exit(1);
 }
 
+/** The error a client's surface reply carries, or null for a real surface.
+ *  A surface is an array (or, with `--rects`, `{ roots, measured }`); a
+ *  `{ error }` object is the client saying why it has none. Pure, so the rule
+ *  is a unit test rather than a claim. */
+export function surfaceReplyError(data: unknown): string | null {
+  if (!data || typeof data !== "object" || Array.isArray(data)) return null;
+  const e = (data as { error?: unknown }).error;
+  return typeof e === "string" ? e : null;
+}
+
 /** `am surface [clientIdx]` — print the client's semantic UI surface: every
  *  component and its triggerable elements, named as the testUI API names them.
  *  What you see here is exactly what `am trigger` (and tests) can drive. */
@@ -1182,6 +1235,17 @@ function scopeSurface(
     roots = roots.map((r) => prune(r, opts.depth!));
   }
   return roots;
+}
+
+/** The staleness note a headless render carries on its roots, or null.
+ *  Exported for its test. */
+export function headlessSurfaceNote(roots: unknown): string | null {
+  if (!Array.isArray(roots)) return null;
+  for (const r of roots) {
+    const note = (r as { stale?: { note?: unknown } } | null)?.stale?.note;
+    if (typeof note === "string") return note;
+  }
+  return null;
 }
 
 export async function cmdSurface(
@@ -1262,6 +1326,20 @@ export async function cmdSurface(
       clientTimeout(flags.timeout),
     );
   let headlessRender = target === "server";
+  // A client that ANSWERED with an error — its UI never mounted (blank
+  // screen), its surface walk threw, or the server stopped waiting for it —
+  // replies `{ error }` inside a 200. That used to fall through to the
+  // printer, which found no roots and said "(no mounted UI surface)" under a
+  // green exit: a crashed page reported as an empty one. It is the answer,
+  // and it is not a reason to fall back to the headless render either — the
+  // page in front of you is the one that failed.
+  const clientSaid = result.ok && !headlessRender
+    ? surfaceReplyError(result.data)
+    : null;
+  if (clientSaid !== null) {
+    outError(`client ${target}: ${clientSaid}`, mode);
+    Deno.exit(1);
+  }
   if (!result.ok && explicit === undefined) {
     // No client connected and none requested → fall back to the headless
     // server-side render. Loud about it.
@@ -1310,6 +1388,17 @@ export async function cmdSurface(
     path: wantPath,
     depth: maxDepth,
   });
+  // A headless render is of the UI module the server imported, which it keeps
+  // (server-surface.ts). When a source file is newer, the answer says so: on
+  // stderr for a reader, and on every node a scoped `--json` answer returns —
+  // `--component`/`--path` drop the roots that carried it.
+  const staleNote = headlessRender ? headlessSurfaceNote(payload) : null;
+  if (staleNote !== null) {
+    const stale = (payload as ({ stale?: unknown } | null)[])
+      .find((r) => r?.stale)?.stale;
+    for (const n of scoped) (n as { stale?: unknown }).stale ??= stale;
+    if (mode !== "json") console.error(`note: ${staleNote}`);
+  }
   if (scoped.length === 0 && (wantComponent || wantPath)) {
     // Loud, and useful: an empty result from a filter is usually a typo, so say
     // what IS there rather than printing nothing.

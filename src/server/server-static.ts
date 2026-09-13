@@ -33,7 +33,7 @@ import { handleTrojan as _handleTrojanRoute } from "./server-trojan.ts";
 import { loadVendorImmer } from "./server-vendor.ts";
 import { BLOB_ID_RE, BLOB_URL_PREFIX, type BlobStore } from "./blobs.ts";
 import { appIconSvg } from "../build/app-icon.ts";
-import { etagMatches, etagOf } from "./http-encoding.ts";
+import { etagMatches, etagOf, MAX_BUFFER_BYTES } from "./http-encoding.ts";
 
 // Framework module URLs — this file lives in src/server/, so entry files at the
 // src/ root and folderized modules are one level up. The /__aio/ namespace
@@ -71,15 +71,44 @@ export function isProtectedPath(pathname: string, prod = false): boolean {
   // trailing slash) all opened the same file — while the rule looked at the
   // last RAW segment, saw "", and matched nothing. A production server handed
   // out `/App.tsx/` and `/secret.server.ts/` to anyone who typed the slash.
-  const segments = pathname.split("/").filter((seg) => seg !== "");
+  // …and on the DECODED spelling as well as the raw one. Every caller decodes
+  // before reaching the filesystem, so a rule that only reads what it was
+  // handed depends on being handed the right thing — which is exactly how the
+  // sibling `isShellAsset` came to answer "client route" for `/data/app%2Edb`.
+  // Checking both cannot under-match: a name that really contains a `%` is
+  // judged protected slightly more often, never less.
+  const decoded = _decodePathname(pathname);
+  const segments = [
+    ...pathname.split("/"),
+    ...(decoded === null ? [] : decoded.split("/")),
+  ].filter((seg) => seg !== "");
   if (segments.length === 0) return false;
+  // A path that cannot be decoded is not a file name — treat it as protected
+  // rather than let a malformed escape decide.
+  if (decoded === null) return true;
   for (const seg of segments) {
     if (seg === ".well-known") continue;
     if (seg.startsWith(".")) return true;
   }
-  const last = segments[segments.length - 1]!;
-  if (prod && /\.tsx?$/.test(last)) return true;
-  return SERVER_FILE_RE.test(last);
+  // LOWERCASED, because a filesystem's idea of "the same file" is not the
+  // regex's. On APFS and NTFS — both shipped desktop targets — `GET
+  // /secrets.server.TS` opens `secrets.server.ts`, and the case-sensitive
+  // patterns answered "not protected" for it. Even on Linux a file that really
+  // is named `secrets.Server.ts` walked past both rules: measured, `GET
+  // /secrets.server.ts` → 404 and `GET /secrets.Server.ts` → 200 with the
+  // file's contents. The prod `.ts`/`.tsx` denial is the same sentence: its
+  // comment says that without it "in prod every `.ts`/`.tsx` under baseDir was
+  // readable, unauthenticated".
+  // Both spellings' last segments, for the same reason.
+  const lasts = [
+    pathname.split("/").filter((x) => x !== "").pop() ?? "",
+    decoded.split("/").filter((x) => x !== "").pop() ?? "",
+  ].map((x) => x.toLowerCase());
+  for (const last of lasts) {
+    if (prod && /\.tsx?$/.test(last)) return true;
+    if (SERVER_FILE_RE.test(last)) return true;
+  }
+  return false;
 }
 
 /** File extensions an ANONYMOUS caller may fetch on a per-user-auth app: the
@@ -120,13 +149,19 @@ const SHELL_EXT: ReadonlySet<string> = new Set([
   ".eot",
   ".webmanifest",
   ".html",
-  ".txt",
+  // NOT `.txt`. It sat here beside `SHELL_FILES`' own `robots.txt` — an entry
+  // that only means something if `.txt` is data-ish, which is what that list's
+  // doc says it is. Nothing a sign-in page loads is a text file, and with it
+  // here every `notes.txt` / `export.txt` under baseDir was an anonymous read
+  // on an `auth: true` app. The public-by-convention text files are named in
+  // `SHELL_FILES`, and `/.well-known/` is public as a prefix.
 ]);
 
 /** The exact filenames a shell may name that carry a data-ish extension. */
 const SHELL_FILES: ReadonlySet<string> = new Set([
   "manifest.json",
   "robots.txt",
+  "humans.txt",
   "favicon.ico",
 ]);
 
@@ -136,21 +171,107 @@ const SHELL_FILES: ReadonlySet<string> = new Set([
  *  `.tsx`: the dev shell's import map makes the browser fetch sources BY NAME,
  *  so refusing them would make the sign-in page itself unrenderable — and in
  *  prod `isProtectedPath` denies them to everyone anyway. */
-export function isShellAsset(pathname: string, dev: boolean): boolean {
+export function isShellAsset(rawPathname: string, dev: boolean): boolean {
+  // DECIDE ON THE SAME SPELLING THE FILE LAYER READS.
+  //
+  // This gate ran on the RAW pathname and `serveFile` runs on the decoded one,
+  // so one `%2E` put them on opposite sides of the same question:
+  // `isShellAsset("/data/app%2Edb")` finds no `.` in the last segment, takes
+  // the "extensionless → a client route" branch, and answers true — while the
+  // file layer decodes it and happily serves `data/app.db`. Measured under
+  // `auth: true` with no credential:
+  //
+  //   GET /data/app.db     → 401   GET /data/app%2Edb   → 200, the database
+  //   GET /customers.csv   → 401   GET /customers%2Ecsv → 200, the rows
+  //
+  // That is verbatim the hole `SHELL_EXT`'s own header says it closed: "Worst
+  // case is `--expose` + `auth: true`, the recommended internet-facing config:
+  // an unauthenticated read of the project directory."
+  //
+  // A path that cannot be decoded is not a shell asset: fail CLOSED, so a
+  // malformed escape is authenticated like anything else rather than waved
+  // through as a client route.
+  const pathname = _decodePathname(rawPathname);
+  if (pathname === null) return false;
   // The framework runtime under /__aio/ is shell by definition; the control
   // plane inside it is denied by name before this is ever asked.
   if (pathname.startsWith("/__aio/")) return true;
+  // RFC 8615 well-known URIs exist to be fetched by strangers — ACME
+  // challenges, `security.txt`, Android's `assetlinks.json`, Apple's
+  // app-site association — so an extension rule must not decide them
+  // (`assetlinks.json` was a 401 on every `auth: true` app). Dotfiles
+  // elsewhere stay `isProtectedPath`'s refusal.
+  if (pathname.startsWith("/.well-known/")) return true;
   const segments = pathname.split("/").filter((s) => s !== "");
   const last = segments[segments.length - 1];
   // No file named at all → the SPA shell (a client route).
   if (!last) return true;
-  if (SHELL_FILES.has(last.toLowerCase())) return true;
-  const dot = last.lastIndexOf(".");
-  // Extensionless → a client route, served the shell.
-  if (dot <= 0) return true;
-  const ext = last.slice(dot).toLowerCase();
+  // Extensionless → a client route, served the shell. Only the SHELL, though:
+  // an extensionless FILE (`/uploads/3f9a2c`, `/LICENSE`) is refused by the
+  // file layer, which is the only place that can see whether one exists —
+  // see `_isShellFile` and `serveStatic`'s `anonymous` option.
+  if (fileExt(last) === "" && !SHELL_FILES.has(last.toLowerCase())) {
+    return true;
+  }
+  return _isShellFile(last, dev);
+}
+
+/** THE extension of a file name, lower-cased — one definition for every
+ *  question this file asks of an extension (MIME type, text-or-binary, shell
+ *  asset, blob type, route-or-file).
+ *
+ *  The anonymous gate lower-cased and the MIME and text lookups did not, so the
+ *  same file got two answers: `b.SVG` passed the gate as a shell image and was
+ *  then served `application/octet-stream` with `nosniff` — an `<img>` that
+ *  never renders, a stylesheet (`f.CSS`) the browser refuses. `""` for a name
+ *  with no extension, and for a dotfile (`.env` has none). Pure. */
+export function fileExt(name: string): string {
+  return extname(name).toLowerCase();
+}
+
+/** May an anonymous caller READ this existing file, by name? The shell's
+ *  files and nothing else — an extensionless file is never one (nothing a
+ *  sign-in page loads is named without an extension, and uploads saved under
+ *  an id are). Pure. */
+export function _isShellFile(name: string, dev: boolean): boolean {
+  if (SHELL_FILES.has(name.toLowerCase())) return true;
+  const ext = fileExt(name);
   if (dev && (ext === ".ts" || ext === ".tsx")) return true;
   return SHELL_EXT.has(ext);
+}
+
+/** Extensions that name a FILE, never a client route — a request for a
+ *  missing one is a 404, not the app shell. Everything else with a dot in its
+ *  last segment is route-shaped: `/u/john.doe`, `/blog/v1.2` and
+ *  `/sites/example.com` are ordinary client routes, and they 404'd on reload
+ *  because the fallback only covered paths with no dot at all — while
+ *  `docs/ui/air-routing.md` says "Deep links just work". A missing
+ *  `/lib/util.js` must stay a 404: the dev loader imports it, and an HTML page
+ *  in its place is a far worse error than "not found". */
+const FILE_EXT: ReadonlySet<string> = new Set([
+  ...Object.keys(MIME),
+  ...TEXT_EXTENSIONS,
+  ...SHELL_EXT,
+  ...[".jsx", ".mts", ".cts", ".wasm", ".bmp", ".tif", ".tiff", ".heic"],
+  ...[".ogg", ".oga", ".ogv", ".m4a", ".aac", ".flac", ".mov", ".mkv"],
+  ...[".csv", ".tsv", ".db", ".sqlite", ".sql", ".yaml", ".yml", ".toml"],
+  ...[".gz", ".tgz", ".tar", ".7z", ".rar", ".bin", ".apk", ".exe"],
+  ...[".doc", ".docx", ".xls", ".xlsx", ".ppt", ".pptx", ".rtf", ".log"],
+  ...[".pem", ".key", ".crt"],
+]);
+
+/** Does a request for a path that is NOT a file ask for the app shell? A
+ *  missing path with no extension or with an extension that does not name a
+ *  file type (`FILE_EXT`), or an existing DIRECTORY — `/docs`, `/settings/`
+ *  are client routes that happen to share a name with a project folder, and
+ *  aio serves no directory listings or index files, so a directory has
+ *  nothing else to answer with. Pure; exported for tests. */
+export function _isRouteShaped(
+  ext: string,
+  kind: "missing" | "directory",
+): boolean {
+  if (kind === "directory") return true;
+  return ext === "" || !FILE_EXT.has(ext);
 }
 
 /** A browser error report goes into a LOG LINE, so it is bounded like one —
@@ -219,7 +340,7 @@ const BLOB_INLINE_TYPES: ReadonlySet<string> = new Set([
 ]);
 
 export function blobContentType(name?: string): string {
-  const declared = name ? MIME[extname(name)] : undefined;
+  const declared = name ? MIME[fileExt(name)] : undefined;
   if (!declared) return "application/octet-stream";
   const base = declared.split(";")[0]!.trim().toLowerCase();
   if (BLOB_INLINE_TYPES.has(base)) return base;
@@ -431,6 +552,51 @@ export function parseByteRange(
   return { start, end: Math.min(endIncl + 1, size) };
 }
 
+/** `len` bytes from `file`'s current position, 64 KiB at a time, closing the
+ *  file when they are sent, on a read error, or when the client goes away. */
+function fileWindow(
+  file: Deno.FsFile,
+  len: number,
+): ReadableStream<Uint8Array> {
+  let remaining = len;
+  let closed = false;
+  const close = () => {
+    if (closed) return;
+    closed = true;
+    try {
+      file.close();
+    } catch { /* already closed */ }
+  };
+  return new ReadableStream<Uint8Array>({
+    async pull(controller) {
+      if (remaining <= 0) {
+        close();
+        controller.close();
+        return;
+      }
+      const buf = new Uint8Array(Math.min(64 * 1024, remaining));
+      let n: number | null;
+      try {
+        n = await file.read(buf);
+      } catch (e) {
+        close();
+        controller.error(e);
+        return;
+      }
+      if (n === null) {
+        close();
+        controller.close();
+        return;
+      }
+      remaining -= n;
+      controller.enqueue(buf.subarray(0, n));
+    },
+    cancel() {
+      close();
+    },
+  });
+}
+
 /** Dependencies injected from server.ts — no mutable state owned */
 export interface StaticDeps {
   prod: boolean;
@@ -548,8 +714,22 @@ type ErrorEntry = {
 /** Creates a static file handler bound to the given deps. Internal error tracking is module-private. */
 const _startedAt = Date.now();
 
+/** Per-request options for `serveStatic`. */
+export interface ServeStaticOptions {
+  /** The caller has NO credential on a per-user-auth app. The anonymous gate
+   *  (`isShellAsset`) decides on the NAME and waves every extensionless path
+   *  through as a client route — it cannot see the filesystem — so this is the
+   *  half only the file layer can do: an existing file that is not a shell
+   *  file answers 401 instead of its bytes. */
+  anonymous?: boolean;
+}
+
 export function createStaticHandler(deps: StaticDeps): {
-  serveStatic: (pathname: string, req?: Request) => Promise<Response>;
+  serveStatic: (
+    pathname: string,
+    req?: Request,
+    opts?: ServeStaticOptions,
+  ) => Promise<Response>;
   getRecentErrors: () => Array<
     {
       text: string;
@@ -661,8 +841,55 @@ export function createStaticHandler(deps: StaticDeps): {
   /** THE app shell — served at `/` and by the SPA deep-link fallback. Two
    *  hand-maintained generateHTML() calls already diverged once (the fallback
    *  missed `syncCells`, so a reloaded deep link silently lost local-first);
-   *  one closure makes the next added parameter a one-place change. */
-  function appShell(): Response {
+   *  one closure makes the next added parameter a one-place change.
+   *
+   *  The two refusals live here for the same reason. The headless-build check
+   *  sat in the `/` branch only, so a prod server with no `dist/app.js`
+   *  answered `/` with an honest 503 and every deep link with a 200 shell that
+   *  404s its own bundle — the blank page the 503 exists to prevent, on
+   *  exactly the URL a user reloads. */
+  async function appShell(): Promise<Response> {
+    const { prod, title, absDistDir, noCache } = deps;
+    const graphResult = deps.getGraphResult();
+    if (!prod && graphResult && !graphResult.valid) {
+      return new Response(
+        generateDiagnosticHTML(graphResult.errors, title),
+        { headers: { "Content-Type": "text/html", ...noCache } },
+      );
+    }
+    // Headless-build footgun: prod is serving the UI shell but the
+    // browser bundle was never built (a `--headless` build), so /app.js will
+    // 404 and the page breaks blank. Say so plainly instead.
+    if (prod && absDistDir) {
+      if (_uiBundlePresent === undefined) {
+        try {
+          await Deno.stat(join(absDistDir, BUNDLE_JS));
+          _uiBundlePresent = true;
+        } catch {
+          _uiBundlePresent = false;
+        }
+      }
+      if (!_uiBundlePresent) {
+        deps.debug(
+          "headless build has no browser bundle (dist/app.js) — the UI is " +
+            "unavailable; serve a UI target or use the app headlessly (API/CLI)",
+        );
+        const body =
+          `<!doctype html><meta charset=utf-8><title>${title} — headless` +
+          `</title><body style="font:15px/1.6 system-ui;max-width:38rem;` +
+          `margin:12vh auto;padding:0 1.25rem;color:#ddd;background:#0d1117">` +
+          `<h1 style="font-size:1.15rem">Headless build — no browser UI</h1>` +
+          `<p>This server was built <code>--headless</code>, so no web UI ` +
+          `bundle (<code>/app.js</code>) exists. The server, cells, API ` +
+          `routes and serverFns all work — only the page here is unavailable.` +
+          `</p><p style="color:#8b949e">Build a UI target (browser / electron` +
+          ` / android) to serve a page, or use the app headlessly.</p>`;
+        return new Response(body, {
+          status: 503,
+          headers: { "Content-Type": "text/html", ...noCache },
+        });
+      }
+    }
     // A NONCE, fresh for this response, when the app asked for one. It has to
     // be minted here rather than once at boot: a nonce reused across responses
     // is a nonce an attacker reads from one page and replays into another,
@@ -710,53 +937,12 @@ export function createStaticHandler(deps: StaticDeps): {
   async function serveStatic(
     pathname: string,
     req?: Request,
+    opts: ServeStaticOptions = {},
   ): Promise<Response> {
-    const { prod, debug, title, absDistDir, noCache } = deps;
+    const { prod, debug, absDistDir, noCache } = deps;
 
     // ── Root / SPA entry ──
-    if (pathname === "/") {
-      const graphResult = deps.getGraphResult();
-      if (!prod && graphResult && !graphResult.valid) {
-        return new Response(
-          generateDiagnosticHTML(graphResult.errors, title),
-          { headers: { "Content-Type": "text/html", ...noCache } },
-        );
-      }
-      // Headless-build footgun: prod is serving the UI shell but the
-      // browser bundle was never built (a `--headless` build), so /app.js will
-      // 404 and the page breaks blank. Say so plainly instead.
-      if (prod && absDistDir) {
-        if (_uiBundlePresent === undefined) {
-          try {
-            await Deno.stat(join(absDistDir, BUNDLE_JS));
-            _uiBundlePresent = true;
-          } catch {
-            _uiBundlePresent = false;
-          }
-        }
-        if (!_uiBundlePresent) {
-          deps.debug(
-            "headless build has no browser bundle (dist/app.js) — the UI is " +
-              "unavailable; serve a UI target or use the app headlessly (API/CLI)",
-          );
-          const body =
-            `<!doctype html><meta charset=utf-8><title>${title} — headless` +
-            `</title><body style="font:15px/1.6 system-ui;max-width:38rem;` +
-            `margin:12vh auto;padding:0 1.25rem;color:#ddd;background:#0d1117">` +
-            `<h1 style="font-size:1.15rem">Headless build — no browser UI</h1>` +
-            `<p>This server was built <code>--headless</code>, so no web UI ` +
-            `bundle (<code>/app.js</code>) exists. The server, cells, API ` +
-            `routes and serverFns all work — only the page here is unavailable.` +
-            `</p><p style="color:#8b949e">Build a UI target (browser / electron` +
-            ` / android) to serve a page, or use the app headlessly.</p>`;
-          return new Response(body, {
-            status: 503,
-            headers: { "Content-Type": "text/html", ...noCache },
-          });
-        }
-      }
-      return appShell();
-    }
+    if (pathname === "/") return await appShell();
 
     // ── Framework endpoints: the method table, before any handler ──
     if (req) {
@@ -982,7 +1168,7 @@ export function createStaticHandler(deps: StaticDeps): {
     }
 
     // ── Static file serving from baseDir ──
-    return await serveFile(pathname);
+    return await serveFile(pathname, req, opts);
   }
 
   // ── Helpers ──
@@ -1288,7 +1474,17 @@ export function createStaticHandler(deps: StaticDeps): {
         if (_iconCache) break;
       }
       _iconCache ??= {
-        body: appIconSvg(deps.title),
+        // The IDENTITY, not the window title — the same name the page's theme
+        // hue comes from. `themeName`'s own doc on this deps type says "the
+        // appId, so the UI and the icon are the same colour", and this line
+        // read `title` instead: the moment an author gave their app a human
+        // title (`appId: "notes-app"`, `ui.title: "My Notes"` — the normal
+        // case; the scaffold only matches because `am create` writes
+        // `title = name`) the favicon in the tab was a different hue from the
+        // page it labels. Measured: page `--aio-hue: 148`, icon gradient 190.
+        // CLAUDE.md and the `ui.theme` docs both promise "one app is one
+        // colour everywhere it appears".
+        body: appIconSvg(deps.themeName || deps.title),
         type: "image/svg+xml",
       };
     }
@@ -1377,9 +1573,99 @@ export function createStaticHandler(deps: StaticDeps): {
     }
   }
 
+  /** A file's bytes, straight from disk — never held whole in memory — with
+   *  byte ranges.
+   *
+   *  `docs/build/imports.md` promises `assets` mounts "range requests", and
+   *  the static path had none: every binary was `Deno.readFile`d whole on
+   *  every request and a `Range:` header was ignored. A video element seeks
+   *  with ranges, so a 300 MB mp4 cost 300 MB of heap PER request — measured,
+   *  four concurrent `Range: bytes=0-1023` requests took RSS to ~2.6 GB to
+   *  send 4 KB. Now: one open file per request, 64 KiB at a time, 206 for a
+   *  satisfiable range, 416 for one past the end — the blob route's contract
+   *  (`parseByteRange`), which already streamed.
+   *
+   *  `If-Range` is honoured by never letting it match: the validator here is
+   *  WEAK (mtime+size), and RFC 9110 §13.1.5 forbids a weak tag from
+   *  satisfying If-Range — so a client resuming against a changed file gets
+   *  the whole new file rather than a splice of two versions. A conditional
+   *  GET that matches serves the plain 200 path, which `encodeResponse` turns
+   *  into the 304. */
+  async function serveFromDisk(
+    filepath: string,
+    st: Deno.FileInfo,
+    ext: string,
+    isText: boolean,
+    req?: Request,
+  ): Promise<Response> {
+    const etag = `W/"${st.mtime?.getTime() ?? 0}-${st.size}"`;
+    const headers: Record<string, string> = {
+      "Content-Type": MIME[ext] ??
+        (isText ? "text/plain" : "application/octet-stream"),
+      // A VALIDATOR. Prod sets `Cache-Control: no-cache` on every static
+      // file, and `no-cache` means "you may cache, but revalidate" —
+      // revalidation needs a validator, and images, fonts, wasm and video had
+      // none: `encodeResponse` returns early for incompressible types, ABOVE
+      // its conditional-request block, so every one of them was a full
+      // re-download on every page load.
+      //
+      // Weak, and from `stat` — no read, no hash: the bytes are identical
+      // whenever mtime and size are, which is exactly what a weak validator
+      // asserts.
+      ETag: etag,
+      "Accept-Ranges": "bytes",
+      ...deps.noCache,
+    };
+    const method = req?.method.toUpperCase() ?? "GET";
+    // A conditional GET that will be answered 304 is not ranged — unless the
+    // response is `no-store` (dev), where `encodeResponse` never revalidates.
+    const revalidates =
+      !(headers["Cache-Control"] ?? "").includes("no-store") &&
+      etagMatches(req?.headers.get("if-none-match") ?? null, etag);
+    const ranged = (method === "GET" || method === "HEAD") &&
+      !req?.headers.has("if-range") && !revalidates;
+    const range = ranged
+      ? parseByteRange(req?.headers.get("range") ?? null, st.size)
+      : null;
+    if (range === "unsatisfiable") {
+      return new Response("Range Not Satisfiable", {
+        status: 416,
+        headers: { ...headers, "Content-Range": `bytes */${st.size}` },
+      });
+    }
+    let file: Deno.FsFile;
+    try {
+      file = await Deno.open(filepath, { read: true });
+    } catch (e) {
+      if (isNotServable(e)) return new Response("Not Found", { status: 404 });
+      log.error("server", `static: cannot open ${filepath} — ${e}`);
+      return new Response("Internal Server Error", { status: 500 });
+    }
+    const start = range ? range.start : 0;
+    const len = range ? range.end - range.start : st.size;
+    try {
+      if (start > 0) await file.seek(start, Deno.SeekMode.Start);
+    } catch (e) {
+      file.close();
+      log.error("server", `static: cannot seek ${filepath} — ${e}`);
+      return new Response("Internal Server Error", { status: 500 });
+    }
+    const body = fileWindow(file, len);
+    headers["Content-Length"] = String(len);
+    if (!range) return new Response(body, { status: 200, headers });
+    headers["Content-Range"] = `bytes ${range.start}-${
+      range.end - 1
+    }/${st.size}`;
+    return new Response(body, { status: 206, headers });
+  }
+
   /** Serve a file from baseDir — handles SPA fallback, transpilation, binary/text */
-  async function serveFile(rawPathname: string): Promise<Response> {
-    const { prod, debug, title, absBaseDir, noCache } = deps;
+  async function serveFile(
+    rawPathname: string,
+    req?: Request,
+    opts: ServeStaticOptions = {},
+  ): Promise<Response> {
+    const { prod, debug, absBaseDir, noCache } = deps;
 
     // DECODE FIRST. The request path was used as a literal filesystem path,
     // and `grep -rn decodeURI src/server` had exactly one hit (route.ts, for
@@ -1448,7 +1734,7 @@ export function createStaticHandler(deps: StaticDeps): {
     // requested path must be the same path, or every rule above it (the deny
     // list, an app's own routing) is checking a different name than the one
     // that gets opened. Directories still fall through: an extensionless
-    // `/about/` is a SPA route, and a real directory 404s as it always did.
+    // `/about/` is a SPA route, and so is a real directory (`_isRouteShaped`).
     if (rel.endsWith("/")) {
       try {
         if ((await Deno.stat(filepath)).isFile) {
@@ -1467,59 +1753,61 @@ export function createStaticHandler(deps: StaticDeps): {
         return new Response("Forbidden", { status: 403 });
       }
     } catch { /* file doesn't exist — later handlers 404 */ }
-    const ext = extname(filepath);
+    const ext = fileExt(filepath);
 
-    // SPA fallback: extensionless paths (not internal /__* APIs)
-    if (!ext && !pathname.startsWith("/__")) {
-      let exists = false;
-      try {
-        await Deno.stat(filepath);
-        exists = true;
-      } catch { /* not found */ }
-      if (!exists) {
-        const graphResult = deps.getGraphResult();
-        if (!prod && graphResult && !graphResult.valid) {
-          return new Response(
-            generateDiagnosticHTML(graphResult.errors, title),
-            { headers: { "Content-Type": "text/html", ...noCache } },
-          );
-        }
-        return appShell();
-      }
+    // SPA fallback (not internal /__* APIs): a path that names no FILE is a
+    // client route — see `_isRouteShaped`. An existing file always wins.
+    let kind: "file" | "directory" | "missing" = "missing";
+    try {
+      kind = (await Deno.stat(filepath)).isDirectory ? "directory" : "file";
+    } catch { /* not there (or unreadable) — a route candidate */ }
+    if (
+      !pathname.startsWith("/__") && kind !== "file" &&
+      _isRouteShaped(ext, kind)
+    ) {
+      return await appShell();
+    }
+    // Anonymous on a per-user-auth app: an existing file is served only when
+    // it is part of the shell. The gate upstream let every extensionless name
+    // through as a client route, and the shell fallback above is the whole of
+    // what that promise covers — `/uploads/3f9a2c` (an upload stored under its
+    // id) and `/LICENSE` were served, bytes and all, with no credential.
+    // `/.well-known/` is public by design (see `isShellAsset`): ACME tokens
+    // are extensionless files.
+    if (
+      opts.anonymous && kind === "file" &&
+      !pathname.startsWith("/.well-known/") &&
+      !_isShellFile(filepath.split(/[\\/]/).pop() ?? "", !prod)
+    ) {
+      return new Response(
+        `Unauthorized — ${rawPathname} is app DATA, and this app's public ` +
+          `surface is its SHELL (the code, styles and fonts the sign-in page ` +
+          `needs), not its directory. Sign in; publish a deliberately-public ` +
+          `file through \`serveDirs\`.`,
+        { status: 401 },
+      );
     }
 
     const isText = TEXT_EXTENSIONS.has(ext);
 
-    // Binary files
-    if (!isText) {
+    // Binary files — and text too large to hold (see `serveFromDisk`). Dev
+    // `.ts`/`.tsx` stay on the text path whatever their size: they are
+    // transpiled, not served.
+    const transpiled = !prod && (ext === ".ts" || ext === ".tsx");
+    let st: Deno.FileInfo | null = null;
+    if (!isText || !transpiled) {
       try {
-        const st = await Deno.stat(filepath);
-        const bytes = await Deno.readFile(filepath);
-        return new Response(bytes, {
-          headers: {
-            "Content-Type": MIME[ext] ?? "application/octet-stream",
-            // A VALIDATOR. Prod sets `Cache-Control: no-cache` on every static
-            // file, and `no-cache` means "you may cache, but revalidate" —
-            // revalidation needs a validator, and images, fonts, wasm and
-            // video had none: `encodeResponse` returns early for
-            // incompressible types, ABOVE its conditional-request block, so
-            // every one of them was a full re-download on every page load.
-            // That is verbatim the bug `http-encoding.ts`'s own header
-            // presents as fixed.
-            //
-            // Weak, and from `stat` — no read, no hash: the bytes are
-            // identical whenever mtime and size are, which is exactly what a
-            // weak validator asserts, and it costs the syscall the file read
-            // needs anyway.
-            ETag: `W/"${st.mtime?.getTime() ?? 0}-${st.size}"`,
-            ...noCache,
-          },
-        });
+        st = await Deno.stat(filepath);
       } catch {
-        return new Response("Not Found", { status: 404 });
+        if (!isText) return new Response("Not Found", { status: 404 });
       }
     }
-
+    if (!isText && !st?.isFile) {
+      return new Response("Not Found", { status: 404 });
+    }
+    if (st?.isFile && (!isText || st.size > MAX_BUFFER_BYTES)) {
+      return await serveFromDisk(filepath, st, ext, isText, req);
+    }
     let body: string;
     try {
       body = await Deno.readTextFile(filepath);

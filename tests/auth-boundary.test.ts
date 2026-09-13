@@ -376,7 +376,10 @@ Deno.test("cookie: a real session cookie still authenticates (no regression)", a
       const setCookie = su.headers.get("set-cookie") ?? "";
       await su.body?.cancel();
       const cookie = setCookie.split(";")[0] ?? "";
-      assert(cookie.startsWith("aio_session="), "login must set the cookie");
+      assert(
+        /^aio_session_[^=]+=/.test(cookie),
+        "login must set the (per-app) session cookie",
+      );
 
       const me = await fetch(`${BASE}/__aio/auth/me`, {
         headers: { Cookie: cookie },

@@ -54,11 +54,13 @@ let _count = 0;
 
 /** Dev mode flag */
 let _dev = false;
+/** Has an app set the mode since the last full reset? */
+let _appJoined = false;
 
 /** Listener set — O(1) add/delete */
 let _listeners: Set<DiagnosticListener> = new Set();
 
-/** Dedup map: event type → last-emitted timestamp (ms) */
+/** Dedup map: (app scope +) event type → last-emitted timestamp (ms) */
 let _dedup: Map<string, number> = new Map();
 /** Per-type count of events the window swallowed since the last one emitted.
  *  Reported on the next event of that type, then cleared — so nothing new is
@@ -66,6 +68,49 @@ let _dedup: Map<string, number> = new Map();
 let _suppressed: Map<string, number> = new Map();
 
 const DEDUP_WINDOW_MS = 5_000;
+
+// ---------------------------------------------------------------------------
+// App scope — which app emitted an event
+// ---------------------------------------------------------------------------
+//
+// A process can host several apps, and this bus is one per process. Untagged,
+// app B's `reduce-error` was filed by app A's feedback auto-capture (with A's
+// state in the report), and — dedup keying on TYPE alone — B's error inside
+// the 5 s window swallowed A's own `reduce-error`, so A's auto-capture never
+// saw it. The server installs how to ask "whose app is running this code?"
+// (the same AsyncLocalStorage the logger uses — this module stays isomorphic
+// and imports none); an event emitted outside any app stays unscoped and is
+// every subscriber's, exactly as before.
+
+let _scopeGetter: (() => object | undefined) | null = null;
+const _eventScope = new WeakMap<DiagnosticEvent, object>();
+const _scopeIds = new WeakMap<object, number>();
+let _nextScopeId = 1;
+
+/** Install the "which app is running this code" question. Server side, once.
+ *  @internal */
+export function _setDiagScope(get: (() => object | undefined) | null): void {
+  _scopeGetter = get;
+}
+
+/** The app scope running this code right now, or `undefined` outside any app.
+ *  An opaque identity — compare it, never read it. @internal */
+export function _diagScopeNow(): object | undefined {
+  return _scopeGetter?.() ?? undefined;
+}
+
+/** The app scope `event` was emitted in, or `undefined` when it was emitted
+ *  outside any app. @internal */
+export function _diagEventScope(event: DiagnosticEvent): object | undefined {
+  return _eventScope.get(event);
+}
+
+function _dedupKey(type: string, scope: object | undefined): string {
+  if (scope === undefined) return type;
+  let id = _scopeIds.get(scope);
+  if (id === undefined) _scopeIds.set(scope, id = _nextScopeId++);
+  return `${id}\u0000${type}`;
+}
 
 // ---------------------------------------------------------------------------
 // Public API
@@ -79,7 +124,15 @@ export function initDiagnosticBus(
   dev: boolean,
   opts: { keepListeners?: boolean } = {},
 ): void {
-  _dev = dev;
+  // The MODE is a process fact, and a process can host several apps (library
+  // mode, `testApps`). Last-writer-wins meant a prod app booting beside a dev
+  // app switched the DEV app's bus off — its diagnostics stopped with no line
+  // anywhere. An app joining (`keepListeners`, the server's call) can only
+  // turn the bus ON for the process; a full reset still sets it outright. The
+  // bus is observe-only, so a prod app sharing a dev app's process emitting
+  // diagnostics too is the harmless direction of the two.
+  _dev = opts.keepListeners && _appJoined ? _dev || dev : dev;
+  _appJoined = opts.keepListeners === true;
   _ring = new Array(RING_CAP);
   _head = 0;
   _count = 0;
@@ -113,17 +166,20 @@ export function diagEmit(event: Omit<DiagnosticEvent, "ts">): void {
   if (!_dev) return;
 
   const now = Date.now();
+  const scope = _diagScopeNow();
+  // Per app: one app's event must not suppress another app's of the same type.
+  const key = _dedupKey(event.type, scope);
 
   // Dedup check — suppress if same type seen within window
-  const last = _dedup.get(event.type);
+  const last = _dedup.get(key);
   if (last !== undefined && now - last < DEDUP_WINDOW_MS) {
     // Suppressed — but REMEMBER it. The next one through carries the count.
-    _suppressed.set(event.type, (_suppressed.get(event.type) ?? 0) + 1);
+    _suppressed.set(key, (_suppressed.get(key) ?? 0) + 1);
     return;
   }
-  _dedup.set(event.type, now);
-  const swallowed = _suppressed.get(event.type) ?? 0;
-  if (swallowed > 0) _suppressed.delete(event.type);
+  _dedup.set(key, now);
+  const swallowed = _suppressed.get(key) ?? 0;
+  if (swallowed > 0) _suppressed.delete(key);
 
   // Prune stale entries when Map grows beyond threshold
   if (_dedup.size > 50) {
@@ -140,6 +196,7 @@ export function diagEmit(event: Omit<DiagnosticEvent, "ts">): void {
   const full: DiagnosticEvent = swallowed > 0
     ? { ...event, ts: now, suppressed: swallowed }
     : { ...event, ts: now };
+  if (scope !== undefined) _eventScope.set(full, scope);
 
   // O(1) ring buffer insert
   _ring[_head] = full;
@@ -210,6 +267,10 @@ export function _diagDedupSize(): number {
 /**
  * Return all stored events in chronological order (oldest → newest).
  * Reconstructs order from ring buffer in O(n).
+ *
+ * Asked from inside an app, only that app's events and the unscoped ones: a
+ * feedback report (the reader of this) attached another app's crash to this
+ * app's report, beside this app's state.
  */
 export function diagRecent(): DiagnosticEvent[] {
   if (_count === 0) return [];
@@ -226,5 +287,10 @@ export function diagRecent(): DiagnosticEvent[] {
       out[i] = _ring[(_head + i) % RING_CAP]!;
     }
   }
-  return out;
+  const now = _diagScopeNow();
+  if (now === undefined) return out;
+  return out.filter((e) => {
+    const from = _eventScope.get(e);
+    return from === undefined || from === now;
+  });
 }

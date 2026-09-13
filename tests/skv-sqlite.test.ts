@@ -91,6 +91,30 @@ Deno.test("sqliteKv: prefixes never bleed into each other", async () => {
   assertEquals(await kv.get("cells"), "plain-key-not-multi");
 });
 
+Deno.test("sqliteKv: a key written by setMulti can always be read back", async () => {
+  // The prefix scan used to be bounded by `prefix + SEP + "\uFFFF"`, the
+  // highest BMP character — which looks like it bounds everything under the
+  // prefix and does not: a key whose FIRST character is itself `\uFFFF` sorts
+  // at or past that bound. It was written without complaint and then missing
+  // from every read. Silent loss, and unreachable through the framework only
+  // because cell names are validated as identifiers — which is exactly why
+  // nothing had ever asked.
+  const kv = sqliteKv(testDb());
+  const written: Record<string, unknown> = {
+    plain: 1,
+    "": 2,
+    "with space": 3,
+    "with\x1fsep": 4,
+    "\uFFFFhigh": 5,
+    "\uFFFF": 6,
+    "\uFFFF\uFFFF": 7,
+    "emoji😀": 8,
+    "~tilde": 9,
+  };
+  await kv.setMulti("p", written);
+  assertEquals(await kv.getMulti("p"), written);
+});
+
 Deno.test("migrateLegacyKv: idempotent + silent when no legacy store", async () => {
   const db = testDb();
   const logs: string[] = [];

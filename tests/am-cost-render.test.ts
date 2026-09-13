@@ -155,3 +155,21 @@ Deno.test("am cost: byte formatting stays readable at every scale", () => {
   assertEquals(fmtBytes(8123), "7.9 KB");
   assertEquals(fmtBytes(2_500_000), "2.4 MB");
 });
+
+Deno.test("am cost: the unattributed rate is on the SEND ring's clock, not the report window's", () => {
+  // The send ring covered 10s (249000 B at 24900 B/s); the report window is the
+  // widest series, 60s. 49800 B of "other" is 4980 B/s on its own clock —
+  // dividing by the 60s window claimed 830 B/s, six times too small, and hid
+  // exactly the "more than every cell combined" line this footer exists for.
+  const out = renderCost(report({
+    wire: {
+      ...report().wire,
+      bytesByKind: { patch: 180000, full: 19200, other: 49800 },
+    },
+    cells: [{ ...report().cells[0], bytesPerSec: 1000 }],
+  }) as never);
+  const line = out.split("\n").find((l) => l.includes("unattributed"));
+  assert(line, out);
+  assert(line.includes("4.9 KB/s"), line);
+  assert(out.includes("more than every cell combined"), out);
+});

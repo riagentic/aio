@@ -214,3 +214,74 @@ Deno.test("form.bind(): reset() puts the DOM back, and the value is a snapshot",
   _unmount(handle);
   await closeWindow(win);
 });
+
+// ── validate() and a form that has async rules ───────────────────────────
+//
+// `validate()` touches every field and then, on the very next line, treats
+// `f.validating` as invalid — so it failed on the flag it had just set.
+// `form.validate()` returned FALSE for a form whose rules all pass, and stayed
+// false: calling it again after everything had settled restarted the same
+// rules on the same unchanged value and failed again. `air-forms.md` documents
+// submit as `if (form.validate()) …`, so a form with ANY async rule could
+// never be submitted through the documented path, while `form.valid` said
+// true. Two deciders, disagreeing.
+Deno.test({
+  name: "form: validate() answers TRUE once the async verdict is in",
+  async fn() {
+    const form = useForm({
+      name: {
+        initial: "ada",
+        asyncRules: [async (v) => {
+          await delay(5);
+          return String(v) === "taken" ? "already taken" : null;
+        }],
+      },
+    });
+    // The realistic flow: the field settles (a blur, a keystroke on a touched
+    // field), then the user submits.
+    form.fields.name.touch();
+    await delay(30);
+    assertEquals(form.valid, true, "the async rule passed");
+    assertEquals(
+      form.validate(),
+      true,
+      "validate() must not restart a verdict it already has",
+    );
+    // …and twice in a row, because a submit button can be clicked twice.
+    assertEquals(form.validate(), true);
+  },
+});
+
+Deno.test({
+  name: "form: a CHANGED value still re-validates, and a failure still fails",
+  async fn() {
+    let runs = 0;
+    const form = useForm({
+      name: {
+        initial: "ada",
+        asyncRules: [async (v) => {
+          runs++;
+          await delay(5);
+          return String(v) === "taken" ? "already taken" : null;
+        }],
+      },
+    });
+    form.fields.name.touch();
+    await delay(30);
+    assertEquals(runs, 1);
+    assertEquals(form.validate(), true);
+    assertEquals(runs, 1, "an unchanged value is not re-run");
+
+    form.fields.name.set("taken");
+    await delay(30);
+    assertEquals(runs, 2, "a CHANGED value is re-run");
+    assertEquals(form.fields.name.error, "already taken");
+    assertEquals(form.validate(), false, "and a real failure still fails");
+
+    // reset() forgets the verdict, so the next touch really re-validates.
+    form.fields.name.reset();
+    form.fields.name.touch();
+    await delay(30);
+    assertEquals(runs, 3, "reset() clears the memo");
+  },
+});

@@ -1,5 +1,5 @@
 // tests/sync/integration/reconnect.test.ts
-import { assertEquals } from "@std/assert";
+import { assertEquals, assertRejects, assertStringIncludes } from "@std/assert";
 import { describe, it } from "@std/testing/bdd";
 import { createSyncEngine } from "../../../src/sync/sync-engine.ts";
 import { createOpBuffer } from "../../../src/sync/op-buffer.ts";
@@ -81,7 +81,7 @@ describe("Reconnection", () => {
     assertEquals(engine.getStatus("counter").lastSync > 0, true);
   });
 
-  it(">cap pending triggers blocked status", async () => {
+  it(">cap pending triggers blocked status AND tells the caller", async () => {
     const engine = createSyncEngine({
       clientId: "c1",
       cells: { counter: normalizeSyncConfig(true) },
@@ -96,8 +96,20 @@ describe("Reconnection", () => {
     engine.setOnline(false);
     await engine.handleLocalAction("counter", "increment", {});
     await engine.handleLocalAction("counter", "increment", {});
-    await engine.handleLocalAction("counter", "increment", {}); // exceeds cap=2
 
+    // The one over the cap is DISCARDED, so its caller is told. This used to
+    // `return`, which resolves — and `handleSyncLocalAction` turns a resolve
+    // into `_resolveAck(cid)`, so `await todos.add(item)` reported success
+    // for a change that was already gone. The console said so and `onDrop`
+    // fired, but the awaited promise is what app code branches on. The twin
+    // queue in `state/offline-queue.ts` had always rejected, for exactly this
+    // reason; two offline queues, one fact, two answers.
+    const err = await assertRejects(
+      () => engine.handleLocalAction("counter", "increment", {}),
+      Error,
+    );
+    assertStringIncludes(err.message, "DROPPED");
+    assertStringIncludes(err.message, "counter:increment");
     assertEquals(engine.getStatus("counter").status, "blocked");
   });
 });

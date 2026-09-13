@@ -2,6 +2,7 @@
 
 import { notifyMethodCancel } from "./method-cancel.ts";
 import { isDevMode } from "./dev-flag.ts";
+import { isFrozenWriteError } from "./immutable.ts";
 import { recordRejection } from "./rejection-tracker.ts";
 import {
   current,
@@ -14,9 +15,10 @@ import { log } from "../diagnostics/logger-api.ts";
 import { warnWireLoss } from "./wire-fidelity.ts";
 import { narrowPatches } from "./patch-compact.ts";
 import { applyWirePatches, type WirePatch } from "../protocol/patch-ops.ts";
-import type { ScheduleEffect } from "./schedule.ts";
+import { noteScheduleOwner, type ScheduleEffect } from "./schedule.ts";
 import type { OwnEffect } from "./own.ts";
 import { resolveCall } from "./cell-impl.ts";
+import { cloneExecEffect, isExecEffect } from "./exec-effect.ts";
 import type { AioError } from "../diagnostics/error.ts";
 import { createAioError } from "../diagnostics/error.ts";
 import { diagEmit } from "../diagnostics/diagnostic-bus.ts";
@@ -100,6 +102,33 @@ type CellPatches = { cell: string; ops: WirePatch[] };
 
 /** Internal action carrying a worker cell's committed patches into the main
  *  isolate's state. See src/server/cell-worker.ts. */
+/** The actionable half of a frozen-state throw.
+ *
+ *  Mutating frozen state throws a cryptic engine message ("not extensible" /
+ *  "read only property"). It means the method mutated something OTHER than its
+ *  own `s` draft — almost always another cell's state
+ *  (`otherCell.field.push(...)`) or a value captured from a read. Committed
+ *  state is frozen in dev AND prod, so it fails identically everywhere.
+ *
+ *  ONE decider, because there are two reduce paths: the simple one and the
+ *  machine one that `listensTo` synthesises. */
+function _frozenMutationHint(e: unknown): string {
+  const orig = e instanceof Error ? e.message : String(e);
+  // THE frozen-write decider (immutable.ts), not a private copy of it. This
+  // one matched a bare `read-only` — so an EROFS ("Read-only file system")
+  // thrown by a method that writes a file grew a paragraph about mutating
+  // another cell — and `not iterable`, which is not a write at all.
+  return isFrozenWriteError(orig)
+    ? ` — this looks like an in-place mutation of frozen state, or assigning a ` +
+      `draft-derived value back into state. A method may only mutate its own ` +
+      `\`s\` draft. To change another cell, call its method (e.g. ` +
+      `\`otherCell.add(...)\`), never \`otherCell.field.push(...)\`. When ` +
+      `composing new state from what you read (\`s.x = {...s.y}\`, spreading ` +
+      `\`s.arr\`), snapshot it to a plain copy first: ` +
+      `\`const y = JSON.parse(JSON.stringify(s.y))\`.`
+    : "";
+}
+
 export const WORKER_PATCH_ACTION = "__aioWorkerPatch";
 
 export type ReduceResult = {
@@ -316,9 +345,11 @@ export function reduceCell(
           if (isReturnEnvelope(result)) {
             methodReturn = snapshotReturn(readReturn(result));
             const fx = readReturnEffects(result);
-            if (fx.length > 0) effects = cloneEffects(fx, action.type);
+            if (fx.length > 0) {
+              effects = cloneEffects(fx, action.type, cellName);
+            }
           } else if (Array.isArray(result)) {
-            effects = cloneEffects(result, action.type);
+            effects = cloneEffects(result, action.type, cellName);
           }
           // AIO-380: function targets resolve at dispatch time, after the
           // reducer ran — sync methods see post-method state. A throwing or
@@ -359,14 +390,30 @@ export function reduceCell(
         },
       );
     } catch (e) {
-      throw methodThrew(cellName, ownKey ?? action.type, e);
+      // The SAME hint the simple path gives. It was only on that path, and
+      // `listensTo` synthesises a machine (`cell-methods-internals.ts`), so
+      // every cell with a listener lost the one message that turns "Cannot
+      // add property 2, object is not extensible" into "a method may only
+      // mutate its own `s` draft". That is the most common mistake a cell
+      // author makes, and this file already mirrors `narrowPatches` across
+      // both paths with a comment saying both must — the hint was the half
+      // that had not been done.
+      throw methodThrew(
+        cellName,
+        ownKey ?? action.type,
+        e,
+        _frozenMutationHint(e),
+      );
     }
     // A list the method appended to travels as its appends, not as the whole
     // list again, and a string that grew as its suffix (see narrowPatches).
     // Done HERE, at generation, because this is the last place the PREVIOUS
     // slice is in hand — by broadcast time only the new state is left, and
     // the prefix can no longer be proven.
-    cellPatches = narrowPatches(cellState, cellPatches as Patch[]);
+    // `nextSlice` lets it re-send a key whose POSITION moved (Immer reports a
+    // delete-then-re-add as a `replace`), so a client's `Object.entries` order
+    // matches the server's instead of only its values.
+    cellPatches = narrowPatches(cellState, cellPatches as Patch[], nextSlice);
     warnWireLoss(cellName, cellPatches as Patch[]);
     const tProduce = _perfCheck ? performance.now() - t0 : 0;
 
@@ -423,39 +470,21 @@ export function reduceCell(
         if (isReturnEnvelope(result)) {
           methodReturn = snapshotReturn(readReturn(result));
           const fx = readReturnEffects(result);
-          if (fx.length > 0) effects = cloneEffects(fx, action.type);
+          if (fx.length > 0) effects = cloneEffects(fx, action.type, cellName);
         } else if (Array.isArray(result)) {
-          effects = cloneEffects(result, action.type);
+          effects = cloneEffects(result, action.type, cellName);
         }
       },
     );
   } catch (e) {
     const methodName = ownKey ?? action.type;
-    const orig = e instanceof Error ? e.message : String(e);
-    // Antipattern hint: mutating frozen state throws a cryptic engine message
-    // ("not extensible" / "read only property"). It means the method mutated
-    // something OTHER than its own `s` draft — almost always another cell's
-    // state (`otherCell.field.push(...)`) or a value captured from a read.
-    // Committed state is frozen (dev + prod), so this fails identically
-    // everywhere. Turn the cryptic throw into an actionable one.
-    const frozen =
-      /not extensible|read only|read-only|already been frozen|Cannot delete|preventExtensions|not iterable/i
-        .test(orig);
-    const hint = frozen
-      ? ` — this looks like an in-place mutation of frozen state, or assigning a ` +
-        `draft-derived value back into state. A method may only mutate its own ` +
-        `\`s\` draft. To change another cell, call its method (e.g. ` +
-        `\`otherCell.add(...)\`), never \`otherCell.field.push(...)\`. When ` +
-        `composing new state from what you read (\`s.x = {...s.y}\`, spreading ` +
-        `\`s.arr\`), snapshot it to a plain copy first: ` +
-        `\`const y = JSON.parse(JSON.stringify(s.y))\`.`
-      : "";
+    const hint = _frozenMutationHint(e);
     throw methodThrew(cellName, methodName, e, hint);
   }
   // Same narrowing as the guarded path above — both paths produce patches, so
   // both must, or the optimisation would apply only to cells that happen to
   // declare a state machine.
-  cellPatches = narrowPatches(cellState, cellPatches as Patch[]);
+  cellPatches = narrowPatches(cellState, cellPatches as Patch[], nextSlice);
   warnWireLoss(cellName, cellPatches as Patch[]);
   const stProduce = _perfCheck ? performance.now() - st0 : 0;
 
@@ -545,16 +574,28 @@ function snapshotReturn(r: unknown): unknown {
 /** Clone effects array to detach from Immer draft (AIO-146).
  *  Audit F-8: a non-cloneable effect is logged and DROPPED — no JSON-roundtrip
  *  fallback. JSON loses undefined/NaN/Infinity/Date/Map/Set and silently
- *  corrupted the executor's payload contract. */
+ *  corrupted the executor's payload contract. That is the PROD answer; under
+ *  `__aioDev` the same effect never gets here — `s.$do` refuses it in the
+ *  method's own stack (cell-methods-internals.ts `refuseUncloneableEffect`). */
 function cloneEffects(
   effects: (Msg | ScheduleEffect | OwnEffect)[],
   actionType?: string,
+  /** The cell whose reduce emitted these. A schedule remembers it, so the
+   *  cell's timers stop when the cell is disabled — see `noteScheduleOwner`. */
+  owner?: string,
 ): (Msg | ScheduleEffect | OwnEffect)[] {
   if (!effects.length) return effects;
   const cloned: typeof effects = [];
   for (const eff of effects) {
     try {
-      cloned.push(structuredClone(eff));
+      // `__exec` keeps the caller's arguments (exec-effect.ts); any Immer
+      // draft among them is snapshotted here, while it is still alive — the
+      // same walk a sync method's return value gets.
+      const copy = isExecEffect(eff)
+        ? cloneExecEffect(eff, snapshotReturn)
+        : structuredClone(eff);
+      if (owner !== undefined) noteScheduleOwner(copy, owner);
+      cloned.push(copy);
     } catch (cloneErr) {
       const effType = (eff as Record<string, unknown> | null)?.type ?? "?";
       log.error(

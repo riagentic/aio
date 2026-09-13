@@ -13,6 +13,13 @@ import { LOG_FLAGS, logFlagError } from "../src/am/am-cmd-inspect.ts";
 Deno.test("an unrecognised --flag is refused, naming the accepted flags", () => {
   const e = logFlagError(["--levle=error"])!; // a typo, the realistic case
   assertStringIncludes(e, "unknown flag --levle=error");
+  // LOG_FLAGS is imported: if it were ever empty the loop below would check
+  // nothing and this test would pass on a refusal that named no flags at all.
+  assert(
+    Array.isArray(LOG_FLAGS) && LOG_FLAGS.length > 0,
+    "am logs accepts flags, and the refusal names them — an empty list would " +
+      "make the loop below check nothing",
+  );
   for (const f of LOG_FLAGS) assertStringIncludes(e, f);
   assertStringIncludes(e, "am logs error");
   assertEquals(logFlagError([]), null);

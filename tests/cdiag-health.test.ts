@@ -88,7 +88,7 @@ Deno.test("cdiag: server-side caps — names, errors and per-client entry count"
       failures: 1,
       since: 0,
       lastError: "e".repeat(1000),
-    });
+    }, { transport: "test", index: 1 });
   }
   const rows = clientDegradedReport();
   assertEquals(rows.length, 16, "per-client cap");

@@ -7,10 +7,14 @@ import { isPipePath, listenLocal } from "./local-listen.ts";
 import { serveHttpOverLocal } from "./http-over-conn.ts";
 import { enc } from "../protocol/envelope.ts";
 import { dirname, join, resolve } from "@std/path";
+import { AsyncLocalStorage } from "node:async_hooks";
+import { WS_BUFFER_HIGH_WATER } from "./write-backlog.ts";
 import { resolveShare } from "./app-dirs.ts";
 import { readDenoJsonSync } from "./deno-json.ts";
 import { DEFAULT_SYNC_INTERVAL_MS } from "./aio.ts";
 import {
+  _diagEventScope,
+  _diagScopeNow,
   diagEmit,
   diagSubscribe,
   initDiagnosticBus,
@@ -40,7 +44,13 @@ export { _timingSafeEqual } from "./server-auth.ts";
 
 // ── Internal imports ──
 import type { ServerConfig, ServerHandle } from "./server-types.ts";
-import { isReservedRoutePath, matchRoute, parseCookies } from "./route.ts";
+import {
+  isReservedRoutePath,
+  matchRoute,
+  parseCookies,
+  routePatternKey,
+  routeRequestPath,
+} from "./route.ts";
 import type { RawRouteHandler, RouteMatch } from "./route.ts";
 import {
   makeServerRequest,
@@ -59,9 +69,12 @@ import {
   authFailBudgetExceeded,
   bearerToken,
   clearSessionCookie,
+  crossOriginRefusal,
   hostRefusal,
   localControlAuthorized,
+  rawStateControlAllowed,
   recordAuthFail,
+  sessionCookieNameFor,
   TROJAN_PREFIX,
   trojanDenialForUserMode,
 } from "./server-auth.ts";
@@ -260,12 +273,35 @@ function malformedHost(req: Request): Response {
 /** True when a request originates from the SAME MACHINE — loopback TCP or a
  *  Unix socket. The trojan control plane uses this to stay off the network
  *  entirely: it is never reachable remotely, even under `--expose`. Unknown or
- *  absent origin fails CLOSED (treated as non-local). */
-export function _isLocalRequest(addr: Deno.Addr | undefined): boolean {
+ *  absent origin fails CLOSED (treated as non-local).
+ *
+ *  Pass the REQUEST as well wherever one exists. A loopback peer is only the
+ *  last hop: behind a reverse proxy on the same host — the nginx/Caddy setup
+ *  `docs/auth/auth.md` prescribes, with `trustProxyHeader` — EVERY internet
+ *  client arrives from 127.0.0.1. Measured with `trustProxyHeader` set and a
+ *  forwarded remote address: `GET /__aio/snapshot` returned raw state
+ *  (`visible.exclude`d secrets included) and `POST /__aio/snapshot?force=1`
+ *  overwrote it. A request carrying a forwarding header (the configured one,
+ *  or any header a proxy uses to say "the real client is someone else") was
+ *  relayed, so it is not a same-machine request, whatever the socket says.
+ *  Failing closed costs nothing: a local tool does not send those headers,
+ *  and a client that adds one only makes itself remote. */
+export function _isLocalRequest(
+  addr: Deno.Addr | undefined,
+  req?: Request,
+  trustProxyHeader?: string,
+): boolean {
   if (!addr) return false;
+  if (req && _isForwarded(req, trustProxyHeader)) return false;
   if (addr.transport === "unix") return true; // same-machine by construction
   if ("hostname" in addr) return _isLoopbackAddr(addr.hostname);
   return false;
+}
+
+/** Did a proxy relay this request? See `_isLocalRequest`. */
+function _isForwarded(req: Request, trustProxyHeader?: string): boolean {
+  if (trustProxyHeader && req.headers.has(trustProxyHeader)) return true;
+  return _FORWARD_HEADERS.some((h) => req.headers.has(h));
 }
 
 /** The peer a control request over the Unix socket presents. Named once so the
@@ -298,9 +334,15 @@ export function keyCookieNameFor(appId: string | undefined): string {
  *  from config so it is right per request. Session-scoped (no Max-Age): the
  *  credential lasts as long as the window, and a shared key is not something to
  *  persist on disk for a user who closed the app. */
-export function keyCookieHeader(url: URL, token: string): string {
+export function keyCookieHeader(
+  url: URL,
+  token: string,
+  /** The server's OWN cookie name. Defaults to the module-level appId, which
+   *  is whichever server was created LAST — see `createServer`'s call. */
+  name: string = keyCookieNameFor(_cookieAppId),
+): string {
   const secure = url.protocol === "https:" ? "; Secure" : "";
-  return `${keyCookieNameFor(_cookieAppId)}=${
+  return `${name}=${
     encodeURIComponent(token)
   }; Path=/; HttpOnly; SameSite=Strict${secure}`;
 }
@@ -322,6 +364,12 @@ export function createServer(config: ServerConfig): ServerHandle {
    *  goes through here, so a `port: 0` app never advertises port 0. */
   const livePort = (): number => boundPort ?? port;
   const keyCookieName = keyCookieNameFor(config.appId);
+  /** This app's session cookie — per app for the same reason the key cookie
+   *  is (see `sessionCookieNameFor`). */
+  const sessionCookieName = sessionCookieNameFor(config.appId);
+  const authFlows = config.authFlows
+    ? { ...config.authFlows, cookieName: sessionCookieName }
+    : undefined;
 
   // Diagnostic bus — dev-only event system for surfacing silent failures.
   //
@@ -621,6 +669,9 @@ export function createServer(config: ServerConfig): ServerHandle {
         return info ? { id: info.id, role: info.role } : null;
       }
       : undefined,
+    // Not only sessions die: an API key is deleted, a JWT expires. The same
+    // resolver the handshake used, re-asked by the sweep.
+    revalidateToken: _baseResolver ?? undefined,
     clientCounter: config.clientCounter ?? { value: 0 },
     bootId,
     vitalsSystem: config.vitalsSystem,
@@ -668,10 +719,62 @@ export function createServer(config: ServerConfig): ServerHandle {
     udsClientCount: config.udsClientCount,
   });
 
-  // Forward diagnostic bus events to all connected dev clients via WS
+  // Forward diagnostic bus events to all connected dev clients via WS.
+  //
+  // THIS app's events only (plus unscoped ones, emitted outside any app). The
+  // bus is one per process; with two apps in it, app B's reduce error — its
+  // thrown message verbatim — reached app A's dev overlay and A's client logs.
+  // Same filter as feedback auto-capture (feedback-boot.ts). `createServer`
+  // runs inside the app's boot, so the scope now is the app's.
+  //
+  // Unsubscribed at shutdown: the bus outlives any one server, and a closed
+  // server's relay stayed on it for the life of the process.
+  const _ownDiagScope = _diagScopeNow();
+  let _unsubDiag: (() => void) | undefined;
   if (!prod) {
-    diagSubscribe((ev) => {
-      broadcaster.broadcastRaw(enc("diag", ev));
+    _unsubDiag = diagSubscribe((ev) => {
+      const from = _diagEventScope(ev);
+      if (from !== undefined && from !== _ownDiagScope) return;
+      // A diag event is the SERVER's view of the app — a reduce error carries
+      // the thrown message, which is whatever the method put in it (a card
+      // number, another user's note). With per-user auth it went to every
+      // socket, so bob's dev overlay showed alice's failures verbatim. There
+      // it is operator telemetry, so it reaches admins only — the same bar as
+      // raw state. Without per-user auth there is no user boundary to cross.
+      //
+      // A peer holding more than the high-water mark of unread bytes is
+      // SKIPPED for this frame — the check every other broadcast loop makes
+      // (write-backlog.ts). The per-user loop made none, so a dev overlay that
+      // stopped reading had every diagnostic held for it on the server's heap;
+      // the shared path went through `broadcastRaw`, which CLOSES such a peer,
+      // because a sync op cannot be skipped without a gap. A diag frame can:
+      // it is observe-only, nothing is derived from the sequence, so one loop
+      // with one rule — skip, never close — serves both modes. The count goes
+      // to the debug channel, never back onto the bus (that would re-enter
+      // this subscriber).
+      const frame = enc("diag", ev);
+      let backlogged = 0;
+      for (const [ws, meta] of wsMgr.connections) {
+        if (_perUserAuth) {
+          if (!rawStateControlAllowed(meta.user)) continue;
+        }
+        if (ws.readyState !== WebSocket.OPEN) continue;
+        if (ws.bufferedAmount > WS_BUFFER_HIGH_WATER) {
+          backlogged++;
+          continue;
+        }
+        try {
+          ws.send(frame);
+        } catch {
+          /* aio-ok: a socket mid-close — the same skip broadcastRaw makes */
+        }
+      }
+      if (backlogged > 0) {
+        debug(
+          `diag: ${ev.type} skipped for ${backlogged} socket(s) not draining ` +
+            `(> ${WS_BUFFER_HIGH_WATER} bytes unread)`,
+        );
+      }
       if (ev.severity === "error" || ev.severity === "warning") {
         for (const meta of wsMgr.connections.values()) {
           writeClientLog(meta.index, {
@@ -888,11 +991,17 @@ export function createServer(config: ServerConfig): ServerHandle {
     secure: !!config.cert,
     operatorCert: config.operatorCert,
   });
+  // AS THIS APP. `Deno.serve` runs its handler outside the AsyncLocalStorage
+  // context `createServer` was called in, so with two apps in one process a
+  // route, a socket and everything they logged or reported belonged to no app
+  // — and fell back to the last one booted. The boot's own context, captured
+  // here, is put back around every request (and the sockets it upgrades).
+  const _asThisApp = AsyncLocalStorage.snapshot();
   const handleRequest = async (
     req: Request,
     info?: Deno.ServeHandlerInfo,
   ): Promise<Response> => {
-    const resp = await handleRequestInner(req, info);
+    const resp = await _asThisApp(handleRequestInner, req, info);
     // A 101 is a protocol switch: its headers are the handshake, and adding to
     // them is at best ignored and at worst a failed upgrade.
     if (resp.status === 101) return resp;
@@ -930,6 +1039,26 @@ export function createServer(config: ServerConfig): ServerHandle {
     // throw — a 500, before the gate above had even looked at it.
     const url = parseRequestUrl(req);
     if (!url) return malformedHost(req);
+    // ── THE Origin gate for state-changing HTTP — CSRF, one decider ──
+    // Second, for the same reason the Host gate is first: every surface below
+    // (app routes, auth flows, pairing, snapshot, the trojan) would otherwise
+    // have to remember it. App routes did not: a form POST from any other
+    // origin ran the handler, as the signed-in user when a cookie rode along.
+    // Refused only where that grants something — a cookie, or authority by
+    // network position (see `crossOriginRefusal`). The WS upgrade keeps its own
+    // Origin check (server-ws.ts).
+    const originDenied = crossOriginRefusal(req, info?.remoteAddr, {
+      secure: !!config.cert,
+      allowedOrigins: config.allowedOrigins,
+      exposed: !!config.expose,
+      authConfigured: !!config.token || _perUserAuth,
+      peerLocal: _isLocalRequest(
+        info?.remoteAddr,
+        req,
+        config.trustProxyHeader,
+      ),
+    });
+    if (originDenied) return originDenied;
     const { pathname } = url;
     // F-4: derive a stable client key for cross-connection abuse tracking
     // (denylist, per-IP auth-fail budget, lockout bucketing).
@@ -984,7 +1113,8 @@ export function createServer(config: ServerConfig): ServerHandle {
     // in server-static: the trojan answers only when the request is BOTH local
     // AND the build is dev.
     if (
-      pathname.startsWith(TROJAN_PREFIX) && !_isLocalRequest(addr)
+      pathname.startsWith(TROJAN_PREFIX) &&
+      !_isLocalRequest(addr, req, config.trustProxyHeader)
     ) {
       return new Response("Not Found", { status: 404 });
     }
@@ -1008,11 +1138,11 @@ export function createServer(config: ServerConfig): ServerHandle {
     // AUTH-2 login flows — mounted BEFORE the auth gates for the same reason
     // as pairing: the caller is asking FOR credentials, so it can't present
     // them. Each route does its own gating (origin check, fail budget).
-    if (config.authFlows) {
+    if (authFlows) {
       const authResp = await handleAuthFlow(
         req,
         url,
-        config.authFlows,
+        authFlows,
         clientKey,
       );
       if (authResp) return authResp;
@@ -1056,7 +1186,16 @@ export function createServer(config: ServerConfig): ServerHandle {
             { status: 400, headers: { "Content-Type": "application/json" } },
           );
         }
-        if (!verifyPin(body.pin, clientKey)) {
+        // The shared auth-failure ledger meters a wrong PIN like a wrong key:
+        // an address already over budget from key guesses gets no fresh
+        // allowance of PIN guesses, and vice versa.
+        if (authFailBudgetExceeded(clientKey)) {
+          return new Response("Too Many Requests", { status: 429 });
+        }
+        // Scoped to THIS app's key — see pairing.ts: one process-wide PIN let
+        // app B's code pair app A.
+        if (!verifyPin(body.pin, clientKey, config.token)) {
+          recordAuthFail(clientKey, "wrong pairing code");
           return new Response(
             JSON.stringify({
               error: "invalid or expired pairing code",
@@ -1119,7 +1258,11 @@ export function createServer(config: ServerConfig): ServerHandle {
       // Resolution is not free (a `resolveUser` hook may hit a DB/JWKS) —
       // but it is exactly one credential check, the same one a legitimate
       // request performs, and refusing to make it was refusing service.
-      const { token, fromUrl, source } = _extractTokenWithSource(url, req);
+      const { token, fromUrl, source, legacyCookie } = _extractTokenWithSource(
+        url,
+        req,
+        sessionCookieName,
+      );
       // AUTH-2: with the login flows enabled, the app SHELL is public — a
       // browser must load the UI (code, not state) to show SignIn before it
       // has a session. Everything stateful stays gated: /ws requires a valid
@@ -1133,7 +1276,8 @@ export function createServer(config: ServerConfig): ServerHandle {
       // handshake, which has no header channel (see the resolver above).
       //
       // COOKIE CLAMP: a cookie may authenticate a SESSION and nothing else.
-      // The login flow is the only thing that ever sets `aio_session`, and it
+      // The login flow is the only thing that ever sets the session cookie
+      // (`aio_session_<app>`, or the legacy `aio_session`), and it
       // only ever puts a session token in it — so falling through to the
       // static `users:` map / `resolveUser` for a cookie value bought nothing
       // and cost the one thing that makes the budget exemption below safe:
@@ -1154,9 +1298,14 @@ export function createServer(config: ServerConfig): ServerHandle {
           recordAuthFail(clientKey, "invalid token (per-user mode)");
         }
         // Fail LOUD rather than silently forever: tell the browser to drop the
-        // dead cookie so the next request is a clean anonymous one.
-        const extra = source === "cookie"
-          ? { "Set-Cookie": clearSessionCookie(!!config.cert) }
+        // dead cookie so the next request is a clean anonymous one. Only THIS
+        // app's cookie: a value under the legacy shared name that this app's
+        // store does not know is most likely another app's live session on
+        // the same host, and clearing it would log that app out.
+        const extra = source === "cookie" && !legacyCookie
+          ? {
+            "Set-Cookie": clearSessionCookie(!!config.cert, sessionCookieName),
+          }
           : undefined;
         // Over budget AND presenting a bad credential → "back off", not
         // "wrong token". A request that presented NOTHING is not an attack
@@ -1249,7 +1398,11 @@ export function createServer(config: ServerConfig): ServerHandle {
             { status: 401, headers: extra },
           );
         }
-        const anonResp = await staticHandler.serveStatic(pathname, req);
+        // `anonymous`: the name passed, but an existing extensionless FILE
+        // is not the shell the gate waved through — the file layer refuses it.
+        const anonResp = await staticHandler.serveStatic(pathname, req, {
+          anonymous: true,
+        });
         anonResp.headers.set("X-Content-Type-Options", "nosniff");
         if (extra) anonResp.headers.set("Set-Cookie", extra["Set-Cookie"]);
         return anonResp;
@@ -1259,7 +1412,16 @@ export function createServer(config: ServerConfig): ServerHandle {
         // Sockets outlive the credential that opened them, so the socket keeps
         // the session token and re-validates it (see `revalidateSession`).
         const sessionToken = _sessionResolver?.(token!) ? token! : undefined;
-        return wsMgr.handleWs(req, user, clientKey, sessionToken);
+        // …and a `users:`/`resolveUser` token is kept for the same reason:
+        // an API key or a JWT dies too (see `_revalidateResolved`).
+        const resolverToken = sessionToken ? undefined : token!;
+        return wsMgr.handleWs(
+          req,
+          user,
+          clientKey,
+          sessionToken,
+          resolverToken,
+        );
       }
       // Snapshot dumps/overwrites RAW state — it bypasses ui include/exclude
       // and forUser filtering, so only admins may touch it in per-user mode.
@@ -1333,7 +1495,13 @@ export function createServer(config: ServerConfig): ServerHandle {
       // additionally requires the `X-AIO` header, which a cross-origin form
       // post cannot set — so the cookie widens READS to the browser, not the
       // ability to drive the app from another site.
-      if (validQ && !validC) setKeyCookie = keyCookieHeader(url, config.token);
+      // THIS server's name, never the module-level one: with two apps in one
+      // process (tests, a multi-app host) that was whichever booted LAST, so
+      // app A handed out `aio_key_<B>` — a cookie A itself never reads, and
+      // the browser's follow-up assets 401'd exactly as before the cookie.
+      if (validQ && !validC) {
+        setKeyCookie = keyCookieHeader(url, config.token, keyCookieName);
+      }
     }
 
     // Snapshot dumps/overwrites RAW unfiltered state (bypasses ui.exclude /
@@ -1341,7 +1509,10 @@ export function createServer(config: ServerConfig): ServerHandle {
     // where an admin may act remotely); in shared-token and public modes there
     // is no role boundary, so it is same-machine-only — a shared token must not
     // grant a network client a raw-state read or a full-state overwrite.
-    if (pathname === "/__aio/snapshot" && !_isLocalRequest(addr)) {
+    if (
+      pathname === "/__aio/snapshot" &&
+      !_isLocalRequest(addr, req, config.trustProxyHeader)
+    ) {
       return new Response(
         "Forbidden — /__aio/snapshot exposes unfiltered state; localhost or an authenticated admin only",
         { status: 403 },
@@ -1464,14 +1635,77 @@ export function createServer(config: ServerConfig): ServerHandle {
   } | null {
     if (!config.routes) return null;
     if (isReservedRoutePath(pathname)) return null;
-    const exact = config.routes[pathname];
-    if (exact) return { pattern: pathname, handler: exact, params: {} };
-    for (const [pattern, handler] of Object.entries(config.routes)) {
-      if (!pattern.includes(":") && !pattern.includes("*")) continue;
-      const params = matchRoute(pattern, pathname);
-      if (params) return { pattern, handler, params };
+    const table = routeTable(config.routes);
+    // As requested first, then without its trailing slash — `/api/get/` is
+    // `/api/get`, the client router's rule (see `routeRequestPath`). The
+    // spelling as requested wins, so an app that declared BOTH `/a` and `/a/`
+    // keeps both answering exactly as they did.
+    const exact = table.exact.get(pathname) ??
+      table.exact.get(routeRequestPath(pathname));
+    if (exact) {
+      return { pattern: exact, handler: config.routes[exact]!, params: {} };
+    }
+    for (const [pattern, canon] of table.patterns) {
+      const params = matchRoute(canon, pathname);
+      if (params) {
+        return { pattern, handler: config.routes[pattern]!, params };
+      }
     }
     return null;
+  }
+
+  /** The routes as the matcher compares them: every key in the form a request
+   *  pathname ARRIVES in. `url.pathname` is percent-encoded — `/café` arrives
+   *  as `/caf%C3%A9` — while a key is written as text, so a literal route with
+   *  a non-ASCII (or space, `"`, `<`…) character never matched and the request
+   *  fell through to the app shell: 200 text/html. Canonicalised with the SAME
+   *  parser that produced the pathname (`new URL`), never by decoding the
+   *  request, so `/a%2Fb` still cannot reach a route written `/a/b`. Rebuilt
+   *  only when the routes object is replaced. */
+  let _routeTableFor: Record<string, RawRouteHandler> | undefined;
+  let _routeTable: {
+    exact: Map<string, string>;
+    patterns: [string, string][];
+  } = { exact: new Map(), patterns: [] };
+  function routeTable(routes: Record<string, RawRouteHandler>) {
+    if (routes === _routeTableFor) return _routeTable;
+    const canon = (key: string): string => {
+      try {
+        // Concatenated, not resolved against a base: `//x` must stay a path,
+        // not become a host. `:` and `*` are not in the path percent-encode
+        // set, so a pattern's params and wildcard survive untouched.
+        const c = new URL(`http://route.invalid${key}`).pathname;
+        // Percent-encoding is the ONLY difference allowed. `/a/../b`, `/a?b`
+        // or a backslash would canonicalise to a DIFFERENT path, and a key
+        // must never start answering a path its author did not write.
+        return decodeURI(c) === key ? c : key;
+      } catch {
+        return key;
+      }
+    };
+    const exact = new Map<string, string>();
+    const patterns: [string, string][] = [];
+    for (const key of Object.keys(routes)) {
+      if (key.includes(":") || key.includes("*")) {
+        patterns.push([key, canon(key)]);
+      } else {
+        // The key as written wins a tie with another key's canonical form.
+        exact.set(key, key);
+      }
+    }
+    for (const key of [...exact.keys()]) {
+      const c = canon(key);
+      if (!exact.has(c)) exact.set(c, key);
+    }
+    // …and each literal key without its trailing slash, so a key written
+    // `/api/` answers `/api` — never displacing a key written that way.
+    for (const [form, key] of [...exact.entries()]) {
+      const bare = routePatternKey(form);
+      if (!exact.has(bare)) exact.set(bare, key);
+    }
+    _routeTableFor = routes;
+    _routeTable = { exact, patterns };
+    return _routeTable;
   }
 
   // ── Start HTTP server ──
@@ -1566,100 +1800,139 @@ export function createServer(config: ServerConfig): ServerHandle {
           trojanPort = addr.port;
         },
       },
-      async (req, info) => {
-        // Every response off this listener carries the SAME headers the main
-        // one adds. It bypassed the `_securityHeaders` + `nosniff` wrapper
-        // entirely — a second listener serving the same routes with different
-        // hardening is the shape this file keeps closing elsewhere.
-        const harden = (r: Response): Response => {
-          for (const [k, v] of Object.entries(_securityHeaders)) {
-            if (!r.headers.has(k)) r.headers.set(k, v);
-          }
-          r.headers.set("X-Content-Type-Options", "nosniff");
-          return r;
-        };
-        // The Host gate is a security rule, so it holds on BOTH listeners —
-        // this one is plain HTTP on loopback, which is exactly what a rebound
-        // domain reaches. Same decider, no second copy of the rule.
-        const denied = hostRefusal(req, info?.remoteAddr, {
-          bindHost: "127.0.0.1",
-          allowedOrigins: config.allowedOrigins,
-        });
-        if (denied) return harden(denied);
-        // Same rule as the main listener: a Host that does not parse is the
-        // client's 400, never this server's 500.
-        const url = parseRequestUrl(req);
-        if (!url) return harden(malformedHost(req));
-        // Authenticate trojan requests on localhost — same rules as main server
-        if (config.token) {
-          const qToken = url.searchParams.get("token");
-          // THE reader — "same rules as main server" has to mean the same
-          // code, or this listener quietly grows its own. It did: this spelled
-          // the Bearer rule for itself, so a client sending `bearer <token>`
-          // was accepted by the app and refused by its control plane.
-          const hToken = bearerToken(req);
-          const validQ = qToken !== null &&
-            _timingSafeEqual(qToken, config.token);
-          const validH = hToken !== null &&
-            _timingSafeEqual(hToken, config.token);
-          if (!validQ && !validH) {
-            // METERED, like the main listener. This one verified credentials
-            // and never called `recordAuthFail`, so it was an unmetered
-            // guessing oracle for any local process — the one gate the whole
-            // budget exists to be.
-            recordAuthFail(peerKeyOf(info), "invalid token (control listener)");
-            return harden(new Response("Unauthorized", { status: 401 }));
-          }
-        } else if (_userResolver) {
-          // users/resolveUser mode: config.token is unset — still require a
-          // valid user token, and gate snapshot to admins like the main server
-          const { token, fromUrl, source } = _extractTokenWithSource(url, req);
-          // Same cookie clamp as the main listener: a cookie carries a
-          // session, never a static `users:`/`resolveUser` token.
-          const user = token
-            ? (source === "cookie"
-              ? (_sessionResolver?.(token) ?? null)
-              : await _userResolver(token, fromUrl && url.pathname !== "/ws"))
-            : null;
-          if (!user) {
-            if (token) {
-              recordAuthFail(
-                peerKeyOf(info),
-                "invalid token (control listener, per-user)",
-              );
-            }
-            return harden(new Response("Unauthorized", { status: 401 }));
-          }
-          if (url.pathname === "/__aio/snapshot" && user.role !== "admin") {
-            return harden(
-              new Response(
-                'Forbidden — /__aio/snapshot exposes unfiltered state and requires role "admin"',
-                { status: 403 },
-              ),
-            );
-          }
-          const denied = trojanDenialForUserMode(url.pathname, user);
-          if (denied) return harden(denied);
-        }
-        const { pathname } = url;
-        if (pathname.startsWith("/__aio/")) {
-          return harden(await staticHandler.serveStatic(pathname, req));
-        }
-        if (pathname === "/") {
-          return harden(new Response("ok", { status: 200 }));
-        }
-        return harden(new Response("Not Found", { status: 404 }));
-      },
+      // AS THIS APP, like the main listener's `handleRequest`: this handler is
+      // just as far outside the boot's context, so with two apps in one
+      // process a `/__aio/health` asked through app A's control listener
+      // listed degraded rows only app B had tripped, and what it logged went
+      // to whichever app booted last.
+      (req, info) => _asThisApp(handleControlRequest, req, info),
     );
   }
 
-  // A revoked session must disarm sockets that are ALREADY open. The periodic
+  async function handleControlRequest(
+    req: Request,
+    info: Deno.ServeHandlerInfo,
+  ): Promise<Response> {
+    // Every response off this listener carries the SAME headers the main
+    // one adds. It bypassed the `_securityHeaders` + `nosniff` wrapper
+    // entirely — a second listener serving the same routes with different
+    // hardening is the shape this file keeps closing elsewhere.
+    const harden = (r: Response): Response => {
+      for (const [k, v] of Object.entries(_securityHeaders)) {
+        if (!r.headers.has(k)) r.headers.set(k, v);
+      }
+      r.headers.set("X-Content-Type-Options", "nosniff");
+      return r;
+    };
+    // The Host gate is a security rule, so it holds on BOTH listeners —
+    // this one is plain HTTP on loopback, which is exactly what a rebound
+    // domain reaches. Same decider, no second copy of the rule.
+    const denied = hostRefusal(req, info?.remoteAddr, {
+      bindHost: "127.0.0.1",
+      allowedOrigins: config.allowedOrigins,
+    });
+    if (denied) return harden(denied);
+    // Same rule as the main listener: a Host that does not parse is the
+    // client's 400, never this server's 500.
+    const url = parseRequestUrl(req);
+    if (!url) return harden(malformedHost(req));
+    // …and so does the Origin gate: this listener speaks plain http.
+    const originDenied = crossOriginRefusal(req, info?.remoteAddr, {
+      secure: false,
+      allowedOrigins: config.allowedOrigins,
+      // Loopback-only by construction: its authority is position.
+      exposed: false,
+      authConfigured: !!config.token || _perUserAuth,
+      peerLocal: true,
+    });
+    if (originDenied) return harden(originDenied);
+    // Authenticate trojan requests on localhost — same rules as main server
+    if (config.token) {
+      const qToken = url.searchParams.get("token");
+      // THE reader — "same rules as main server" has to mean the same
+      // code, or this listener quietly grows its own. It did: this spelled
+      // the Bearer rule for itself, so a client sending `bearer <token>`
+      // was accepted by the app and refused by its control plane.
+      const hToken = bearerToken(req);
+      const validQ = qToken !== null &&
+        _timingSafeEqual(qToken, config.token);
+      const validH = hToken !== null &&
+        _timingSafeEqual(hToken, config.token);
+      if (!validQ && !validH) {
+        // METERED, like the main listener. This one verified credentials
+        // and never called `recordAuthFail`, so it was an unmetered
+        // guessing oracle for any local process — the one gate the whole
+        // budget exists to be.
+        recordAuthFail(peerKeyOf(info), "invalid token (control listener)");
+        // …and REFUSED once over budget, like the main listener. Recording
+        // a failure that nothing ever reads is a meter with no breaker:
+        // the budget filled and the guessing carried on at full speed.
+        if (authFailBudgetExceeded(peerKeyOf(info))) {
+          return harden(
+            new Response("Too Many Requests", { status: 429 }),
+          );
+        }
+        return harden(new Response("Unauthorized", { status: 401 }));
+      }
+    } else if (_userResolver) {
+      // users/resolveUser mode: config.token is unset — still require a
+      // valid user token, and gate snapshot to admins like the main server
+      const { token, fromUrl, source } = _extractTokenWithSource(
+        url,
+        req,
+        sessionCookieName,
+      );
+      // Same cookie clamp as the main listener: a cookie carries a
+      // session, never a static `users:`/`resolveUser` token.
+      const user = token
+        ? (source === "cookie"
+          ? (_sessionResolver?.(token) ?? null)
+          : await _userResolver(token, fromUrl && url.pathname !== "/ws"))
+        : null;
+      if (!user) {
+        if (token) {
+          recordAuthFail(
+            peerKeyOf(info),
+            "invalid token (control listener, per-user)",
+          );
+          if (authFailBudgetExceeded(peerKeyOf(info))) {
+            return harden(
+              new Response("Too Many Requests", { status: 429 }),
+            );
+          }
+        }
+        return harden(new Response("Unauthorized", { status: 401 }));
+      }
+      if (url.pathname === "/__aio/snapshot" && user.role !== "admin") {
+        return harden(
+          new Response(
+            'Forbidden — /__aio/snapshot exposes unfiltered state and requires role "admin"',
+            { status: 403 },
+          ),
+        );
+      }
+      const denied = trojanDenialForUserMode(url.pathname, user);
+      if (denied) return harden(denied);
+    }
+    const { pathname } = url;
+    if (pathname.startsWith("/__aio/")) {
+      return harden(await staticHandler.serveStatic(pathname, req));
+    }
+    if (pathname === "/") {
+      return harden(new Response("ok", { status: 200 }));
+    }
+    return harden(new Response("Not Found", { status: 404 }));
+  }
+
+  // An identity change must disarm sockets that are ALREADY open. The periodic
   // sweep in the WS manager is the universal backstop (it also catches TTL
   // expiry and out-of-band deletes); this subscription removes the latency for
-  // the deliberate revocations — logout, kick, password change, reset.
-  const _unsubRevoke = config.authFlows?.sessions.onRevoked(
-    () => wsMgr.sweepSessions(),
-  );
+  // the deliberate ones — logout, kick, password change, reset, demotion.
+  //
+  // Through `config.onIdentityChange`, NOT `config.authFlows.sessions`: that
+  // reached the session store only under `auth: true`, and only for
+  // revocation. See the field on ServerConfig for what each half missed.
+  const _unsubRevoke = config.onIdentityChange?.(() => wsMgr.sweepSessions());
 
   // ── Zombie-server guard (watcher-loop field report #4) ──
   // Event-loop starvation once killed the HTTP listener while the process kept
@@ -1735,8 +2008,9 @@ export function createServer(config: ServerConfig): ServerHandle {
       clearInterval(_stallTimer);
       watcher?.shutdown();
       broadcaster.shutdown();
-      resetTrojanRateLimit();
+      resetTrojanRateLimit({ appId: config.appId });
       _unsubRevoke?.();
+      _unsubDiag?.();
       wsMgr.shutdown();
       if (graphValidation) await graphValidation.done.catch(() => {});
       // The boot CSS run, if the app declared one — a subprocess and two

@@ -163,7 +163,31 @@ export function composeCells(
       const cellId = action.type.slice(0, -"__error".length - 1);
       if (cells.some((c) => c.__aio.id === cellId)) countCellError(cellId);
     }
-    return _innerReduce(state, action);
+    try {
+      return _innerReduce(state, action);
+    } catch (e) {
+      // A SYNC method that throws is a cell error too, and it was counted
+      // nowhere: the `:__error` branch above is the ASYNC path, and the
+      // effect-executor catch covers effects. A reduce throw propagates
+      // straight out of here, so the most common failure there is — a
+      // reducer that throws on every dispatch — was invisible to every
+      // health surface and immune to the circuit breaker. Measured: three
+      // sync throws left `/__aio/health` "healthy" with `errors: 0` and
+      // `aio_cell_errors_total` at 0, while ONE async throw moved both; ten
+      // sync throws never tripped a `maxErrors: 3` breaker that the same ten
+      // async throws tripped on the third.
+      //
+      // `docs/debugging/troubleshooting.md` tells operators to diagnose
+      // exactly this with "high error counts" at `/__aio/health`. The
+      // existing coverage uses `async crash()` only, which is why the gap
+      // survived.
+      const ci = action.type.indexOf(":");
+      const cellId = ci > 0 ? action.type.slice(0, ci) : "";
+      if (cellId && cells.some((c) => c.__aio.id === cellId)) {
+        countCellError(cellId);
+      }
+      throw e;
+    }
   };
 
   // ── Root executor ──
@@ -177,15 +201,17 @@ export function composeCells(
   // ── Lifecycle ──
   const initAllFn = (
     app: { dispatch: (a: Msg) => void; getState: () => unknown },
+    skip?: (cellId: string) => boolean,
   ): void => {
     setCbApp(app);
-    _initAll(cells, app, _reportError, countCellError);
+    _initAll(cells, app, _reportError, countCellError, skip);
   };
 
   const destroyAllFn = (
     app: { dispatch: (a: Msg) => void; getState: () => unknown },
+    skip?: (cellId: string) => boolean,
   ): void => {
-    _destroyAll(cells, app, _reportError, countCellError, clearCell);
+    _destroyAll(cells, app, _reportError, countCellError, clearCell, skip);
   };
 
   return {
@@ -195,8 +221,12 @@ export function composeCells(
     execute: rootExecute,
     cells,
     cellNames: cells.map((f) => f.__aio.id),
-    initAll: initAllFn,
-    destroyAll: destroyAllFn,
+    // One implementation, two doors. The `Except` pair is a NEW name rather
+    // than a parameter on the frozen ones — see `ComposedCells`.
+    initAll: (app) => initAllFn(app),
+    destroyAll: (app) => destroyAllFn(app),
+    initAllExcept: initAllFn,
+    destroyAllExcept: destroyAllFn,
     registry,
     ...(_perfCheck ? { lastBreakdown: () => _lastBreakdown } : {}),
   };

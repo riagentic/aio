@@ -166,7 +166,13 @@ export function renderCost(
   const bk = r.wire.bytesByKind;
   if (bk && bk.other > 0) {
     const attributed = r.cells.reduce((n, c) => n + c.bytesPerSec, 0);
-    const otherRate = bk.other / r.windowSec;
+    // The send ring's OWN rate, scaled to this kind's share of its bytes.
+    // `r.windowSec` is the widest series with rows — often the attribution
+    // ring's span, not the send ring's — so dividing by it mixed two clocks
+    // (the class d40db0652 closed inside the meter).
+    const otherRate = r.wire.totalBytes > 0
+      ? r.wire.bytesPerSec * (bk.other / r.wire.totalBytes)
+      : 0;
     lines.push(
       `${pad("unattributed", w.cell)}  ${padL("", w.pushes)}  ${
         padL(fmtRate(otherRate), w.bytes)

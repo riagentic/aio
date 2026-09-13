@@ -9,7 +9,12 @@
 // 2. One integer beyond ±2^53 in a table poisoned every read of it —
 //    `node:sqlite` throws `RangeError: Value is too large…`, and at boot
 //    `loadTables` re-threw a message naming neither table nor column.
-import { assert, assertEquals, assertRejects } from "@std/assert";
+import {
+  assert,
+  assertEquals,
+  assertRejects,
+  assertStringIncludes,
+} from "@std/assert";
 import { createDB } from "../src/db/async-db.ts";
 import {
   countSqlStatements,
@@ -40,11 +45,81 @@ Deno.test("sql: statement counting ignores literals, identifiers and comments", 
     ),
     1,
   );
+  // …and what follows its END is counted. `CREATE TRIGGER` used to return a
+  // flat 1 WITHOUT looking past the body, so anything after it rode in free:
+  // SQLite prepared the trigger, discarded the rest, reported `changes` for
+  // the trigger alone and raised nothing. That is the partial-migration
+  // failure the rejection message describes AND the property that keeps the
+  // `am sql` route from being a multi-statement injection surface.
+  assertEquals(
+    countSqlStatements(
+      "CREATE TRIGGER t AFTER INSERT ON x BEGIN SELECT 1; END; DROP TABLE x;",
+    ),
+    2,
+  );
+  assertEquals(
+    countSqlStatements(
+      "CREATE TEMP TRIGGER t AFTER INSERT ON x BEGIN SELECT 1; END; DROP TABLE x; DROP TABLE y;",
+    ),
+    3,
+  );
+  // A CASE … END inside the body does not close it early.
+  assertEquals(
+    countSqlStatements(
+      "CREATE TRIGGER t AFTER INSERT ON x BEGIN UPDATE y SET n = CASE WHEN 1 THEN 2 ELSE 3 END; END;",
+    ),
+    1,
+  );
+  // An `END` inside a string or a comment is text, not the body's close.
+  assertEquals(
+    countSqlStatements(
+      "CREATE TRIGGER t AFTER INSERT ON x BEGIN INSERT INTO z VALUES ('END; DROP TABLE q;'); END;",
+    ),
+    1,
+  );
+  // A malformed trigger whose body never closes falls through to the ordinary
+  // count — ≥2, so it is REFUSED. The safe direction for this guard.
+  assert(
+    countSqlStatements(
+      "CREATE TRIGGER t AFTER INSERT ON x SELECT 1; SELECT 2;",
+    ) >
+      1,
+  );
   assertEquals(multiStatementRejection("SELECT 1"), null);
+  assert(
+    multiStatementRejection(
+      "CREATE TRIGGER t AFTER INSERT ON x BEGIN SELECT 1; END; DROP TABLE x;",
+    ),
+    "a statement smuggled in after a trigger body must be refused",
+  );
   const msg = multiStatementRejection(
     "CREATE TABLE a (id INT); CREATE TABLE b (id INT)",
   );
   assert(msg && msg.includes("db.transaction("), `names the fix: ${msg}`);
+});
+
+// ── A closed handle stays closed ──────────────────────────────────────
+//
+// `close()` ends with `ready = null; writerWorker = null`, which is exactly
+// what `ensureWorkers()` reads as "never opened" — so one late `db.query()`
+// (an effect, a timer, an `onStop` hook racing shutdown) spawned the whole
+// worker pool again, answered happily, and left a live Worker holding the
+// event loop open forever: 14 ms of work, then a `timeout` kill at 20 s. On
+// `:memory:` the resurrected pool is a DIFFERENT, empty database, so the
+// answer comes from nothing at all. This file already documents fixing that
+// same "a live worker keeps the event loop open" failure on the OPEN path.
+Deno.test("db: a query after close() is refused, not answered by a new pool", async () => {
+  const db = createDB(":memory:");
+  await db.execute("CREATE TABLE t (v TEXT)");
+  await db.execute("INSERT INTO t VALUES ('a')");
+  await db.close();
+  const err = await assertRejects(() => db.query("SELECT v FROM t"));
+  assertStringIncludes((err as Error).message, "CLOSED");
+  assertStringIncludes((err as Error).message, "SELECT v FROM t");
+  // Writes too — the same gate, so neither door re-opens it.
+  await assertRejects(() => db.execute("INSERT INTO t VALUES ('b')"));
+  // …and closing twice is still a no-op, not an error.
+  await db.close();
 });
 
 // ── The real thing ────────────────────────────────────────────────────

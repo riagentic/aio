@@ -209,10 +209,13 @@ export type { MethodDraftMeta } from "./src/state/cell-impl.ts";
 /** `s.$call.sibling(args)` — one cell method calling another on the SAME
  *  draft, in the same commit, with no second dispatch.
  *
- *  `async run(s: State & MethodDraftCalls) { s.$call.bench("cold") }`. Served
- *  at runtime on every draft, sync and async; this type is how a method SAYS
- *  so to the type-checker. Pass the cell's method map — `MethodDraftCalls<
- *  typeof methods>` — for precise argument and return types. */
+ *  `async run(s: State & Partial<MethodDraftCalls>) { s.$call!.bench("cold") }`.
+ *  Served at runtime on every draft, sync and async; this type is how a method
+ *  SAYS so to the type-checker — inside `Partial<>`, because the draft type a
+ *  method receives does not declare `$call` and a method that requires it is
+ *  not a `Method<S>` (TS2322). For precise argument and return types pass an
+ *  interface of the calls, `Partial<MethodDraftCalls<Calls>>` — not
+ *  `typeof methods`, which is circular inside the method map (TS7022). */
 export type { MethodCalls, MethodDraftCalls } from "./src/state/cell-impl.ts";
 /** The draft members served on EVERY method invocation (alpha52) — intersect
  *  it when you annotate `s` yourself and call `s.$do(...)`:
@@ -388,8 +391,13 @@ export type { Selector } from "./src/selector.ts";
  *  export default function App(): JSX.Element { … }
  *  ```
  *  `JsxElement`/`JsxNode` are the same shapes as standalone aliases, for code
- *  that would rather not carry a namespace. */
+ *  that would rather not carry a namespace.
+ *
+ *  `AirEvent` too: it is the type every handler error names
+ *  (`(e: AirEvent<HTMLInputElement, Event>) => void`), so it has to be
+ *  importable from where `JSX` is — report 9b §6 guessed `"aio"` first. */
 export type {
+  AirEvent,
   JSX,
   JsxElement,
   JsxIntrinsicAttributes,

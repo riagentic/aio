@@ -156,7 +156,7 @@ async function trojanOverUds(
   // and say exactly what failed when it has no other wire.
   if ("error" in r) return { transportError: r.error };
   if (r.status < 200 || r.status >= 300) {
-    const extra = credentialDiagnosis(r.status, creds, appId) +
+    const extra = credentialDiagnosis(r.status, creds, appId, r.body) +
       prodDiagnosis(r.status, r.body);
     try {
       return { ok: false, error: (JSON.parse(r.body).error ?? r.body) + extra };
@@ -413,14 +413,38 @@ function localCreds(
   return { headers, controlError, appKeyPath: keyPath };
 }
 
+/** Was this reply the AUTH layer refusing the caller — as opposed to a route
+ *  that let the caller in and then refused the request?
+ *
+ *  A 401 always is. A 403 is ambiguous, and treating every one as a credential
+ *  problem sent people after the wrong fix: `am sql "delete from kv"` got the
+ *  route's own "trojan SQL is read-only" and then two paragraphs about a
+ *  stale control key and a shared-key file to delete. The two are told apart
+ *  by who wrote the body. Every trojan ROUTE answers through its `err()`
+ *  helper — a JSON `{"error": …}` — and it only runs after authorisation
+ *  passed. The auth gates (`trojanDenialForUserMode`, the snapshot admin bar,
+ *  the control listener) answer in plain text. Pure. */
+export function isAuthRefusal(status: number, body: string): boolean {
+  if (status === 401) return true;
+  if (status !== 403) return false;
+  try {
+    const parsed = JSON.parse(body) as unknown;
+    return !(parsed !== null && typeof parsed === "object" &&
+      typeof (parsed as { error?: unknown }).error === "string");
+  } catch {
+    return true;
+  }
+}
+
 /** Turn a control-plane refusal into something the operator can act on.
  *  A bare 401 with no path forward is what makes people disable auth in dev. */
 function credentialDiagnosis(
   status: number,
   creds: LocalCreds,
   appId: string | undefined,
+  body: string,
 ): string {
-  if (status !== 401 && status !== 403) return "";
+  if (!isAuthRefusal(status, body)) return "";
   const lines: string[] = [];
   if (creds.controlError) {
     lines.push(
@@ -757,7 +781,7 @@ export async function trojanGet(
     });
     if (!resp.ok) {
       const body = await resp.text();
-      const extra = credentialDiagnosis(resp.status, creds, appId) +
+      const extra = credentialDiagnosis(resp.status, creds, appId, body) +
         prodDiagnosis(resp.status, body);
       try {
         return { ok: false, error: (JSON.parse(body).error ?? body) + extra };
@@ -839,7 +863,7 @@ export async function trojanPost(
     });
     if (!resp.ok) {
       const text = await resp.text();
-      const extra = credentialDiagnosis(resp.status, creds, appId) +
+      const extra = credentialDiagnosis(resp.status, creds, appId, text) +
         prodDiagnosis(resp.status, text);
       try {
         return { ok: false, error: (JSON.parse(text).error ?? text) + extra };

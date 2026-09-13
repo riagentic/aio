@@ -202,6 +202,12 @@ compression the rest of the static path already does — and every guard `baseDi
 has: traversal, symlink escape, dotfiles, `*.server.ts`. An extra root is never
 a weaker root.
 
+Binary files (and text files over 8 MB) are streamed from disk, never read
+whole: a `Range: bytes=…` request answers `206` with `Content-Range`, a range
+past the end answers `416`, and every response says `Accept-Ranges: bytes` — so
+a `<video>` seeking through a 300 MB file costs a 64 KiB buffer, not 300 MB of
+memory per request.
+
 **Declare it in `deno.json` and the build embeds it.** `deno compile` cannot
 trace a directory nobody imports, so a mount declared only in code serves in dev
 and 404s from the binary. Declared in deno.json there is nothing to keep in sync

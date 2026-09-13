@@ -5,24 +5,16 @@ How data flows from server to browser and how to optimize it.
 ## Data flow
 
 ```
-dispatch(action)
-  → reduce(state, action) → new state
-  → getUIState(state, user) → per-client view
-  → _computeDelta(current, previous) → full | delta | skip
-  → filter by client __subs paths → subscribed keys only
-  → ws.send(json) → browser
-  → _applyPatch(prev, delta) → merged state
-  → Proxy (useAio) tracks reads → __subs sent back to server
-  → UI re-render
+method call → reduce → Immer patches for the cell
+  → narrowed (a grown array → its adds, a grown string → its suffix)
+  → coalesced with the round's other patches (microtask + syncIntervalMs)
+  → per client: visible/forUser view, filtered to the cells it reads
+  → patch smaller than fullStateThreshold × full state?
+       yes → {"v":2,"t":"patches","d":[…ops]}
+       no  → {"v":2,"t":"state","d":{…whole view}}
+  → browser applies the ops (Immer, structural sharing) → cell signals
+  → components that read a changed cell re-render
 ```
-
-> **Array tracking limitation**: The client-side subscription proxy tracks
-> object property paths (e.g., `orders.items`) but does not track into array
-> elements (e.g., `orders.items.0.name`). If your component accesses
-> `items[0].name`, the server will send updates for the entire `items` key
-> rather than just the accessed element. This is an optimization gap, not a
-> correctness issue — the state is always accurate, just potentially broader
-> than necessary.
 
 ## Cell-level UI filtering
 
@@ -33,6 +25,7 @@ type Order = { id: string; userId: string };
 
 const orders = cell("orders", {
   state: { items: [] as Order[], internal: [] as string[] },
+  methods: {},
   visible: {
     exclude: ["internal"],
     forUser: (exposed, user?) => {
@@ -46,85 +39,115 @@ const orders = cell("orders", {
 });
 ```
 
-Each cell declares its own `ui` config. `include`/`exclude` control which keys
-are sent. `forUser` runs per unique user per state change — memoized per user
-ID. Never do expensive computation here — use `createSelector`.
+Each cell declares its own `visible` config
+([cell visibility](../state/cell-visibility.md)). `include`/`exclude` control
+which keys are sent. `forUser` runs per distinct user per state change —
+memoized on the whole user record, not just its id. A change to a `forUser` cell
+cannot be a patch: it sends each client its **whole** view (every cell it reads,
+not just that one). Never do expensive computation here.
 
 ## Delta compression
 
-Automatic — no configuration required for basic operation.
+Automatic — no configuration required.
 
-1. **First broadcast**: always full state
-2. **Subsequent**: each top-level key is JSON-stringified and compared to cached
-3. Fewer changed keys than threshold → **delta patch**
-4. More changed → **full state**
-5. Nothing changed → **skip**
+1. **On connect**: a full `state` frame — the client's whole view.
+2. **Every broadcast round after that**: the Immer patches of every commit in
+   the round, compacted (an op a later whole-value `replace` overwrites is
+   dropped) and filtered to the cells the client reads.
+3. **Patch or full state**: the patch is sent unless its JSON is larger than
+   `fullStateThreshold` × the JSON of the client's full view — then the full
+   view is sent instead. The comparison is in **bytes**, not changed keys.
+4. **A lost round** (backpressure, a frozen client, a snapshot that failed)
+   makes that client's next frame a full state, never a patch that assumes the
+   skipped one landed. A frozen client that recovers is sent it at once.
 
-### Patch format
+### Wire format
+
+Every frame is one JSON envelope `{ "v": 2, "t": "<kind>", "d": <payload> }`
+(`src/protocol/envelope.ts`). State travels as two kinds:
+
+```json
+{ "v": 2, "t": "state", "d": { "fleet": { "members": [], "count": 0 } } }
+```
 
 ```json
 {
-  "$p": { "counter": { "count": 42 }, "prices": { "BTC": 67000 } },
-  "$d": ["removedCell"]
+  "v": 2,
+  "t": "patches",
+  "d": [
+    { "op": "replace", "path": ["fleet", "members", 16, "price"], "value": 17 },
+    { "op": "add", "path": ["fleet", "candidates", 103], "value": 2007 },
+    { "op": "remove", "path": ["fleet", "candidates", 50] },
+    { "op": "append", "path": ["chat", "reply"], "value": " next chunk" }
+  ]
 }
 ```
+
+`d` is a list of Immer patch ops whose path starts with the cell name, plus
+aio's `append` (a string of 256+ characters that grew, sent as just the new
+suffix). Every client applies them through the one applier in
+`src/protocol/patch-ops.ts`; an op it cannot apply makes it ask for a full state
+(`resync`) instead of rendering a diverged copy.
 
 ### Tuning threshold
 
 ```ts
 await aio.run({
-  fullStateThreshold: 0.5, // >50% keys changed → full state
+  fullStateThreshold: 0.5, // default: patch JSON > 50% of full-state JSON → send full state
 });
 ```
 
-`1.0` = always delta. `0.0` = always full (disables delta).
+`0` always sends full state. `1` sends a patch unless it is larger than the full
+state itself.
 
-### Reference preservation
+### What a write costs on the wire
 
-`_applyPatch` preserves object references for unchanged slices — critical for
-AIR's signal subscriptions and `memo()` components.
+Measured on a 117 KB cell (160 rows of ~700 B each, plus a 100-number list and a
+100-key map), one method call each, default threshold:
 
-**Identity-keyed arrays** (objects with string `id`) get per-element delta
-patching automatically:
+| Write                                               | Frame                            |
+| --------------------------------------------------- | -------------------------------- |
+| `s.members[i].price += 1` on 10 of the 160 rows     | `patches`, 691 B                 |
+| `s.candidates.push(x)` for 3 new items              | `patches`, 207 B                 |
+| `s.candidates = [...s.candidates, x, y, z]`         | `patches`, 207 B — the same adds |
+| `s.candidates = s.candidates.filter(…)` (3 removed) | `patches`, 174 B                 |
+| `s.candidates.splice(10, 1)`                        | `patches`, 5.7 KB                |
+| `s.map.k5 = v`                                      | `patches`, 100 B                 |
+| `delete s.map.k7`                                   | `patches`, 67 B                  |
+| `s.map = { ...s.map, k6: v }`                       | `patches`, 12 KB — the whole map |
+| rewrite a field on every row                        | `state`, 117 KB — over threshold |
 
-```json
-{
-  "$p": {
-    "fleet": {
-      "members": {
-        "$arr": true,
-        "$id:SOL_15m": { "price": 142.5 },
-        "$rm": ["$id:ETH_old"]
-      }
-    }
-  }
-}
-```
+The client keeps object identity for everything a patch did not touch, which is
+what lets AIR's signal subscriptions and `memo()` components skip unchanged
+slices.
 
-A 160-element array with 10 changes per tick: **120KB → ~7.5KB** per broadcast.
+## Arrays and objects: what gets re-sent
 
-**Non-identity arrays** use `_preserveArrayRefs`: same length + shallow-equal
-elements → old reference kept.
-
-## Append in place, don't replace
-
-Immer patches describe _what changed_. Mutating an array in place produces one
-`add` patch; replacing the binding produces a `replace` patch carrying the whole
-array — which then goes over the wire, into persistence, and through every
-client's diff, on every commit.
+Immer patches describe _what changed_, and aio narrows a whole-array replacement
+back to the edit it was. So for **arrays**, spreading and filtering cost the
+same as pushing:
 
 ```ts
-// ⚠️ re-ships the ENTIRE array every time it grows
-s.candidates = [...s.candidates, ...batch];
-
-// ✅ one `add` patch per element — the wire carries only the new items
-for (const c of batch) s.candidates.push(c);
+s.candidates = [...s.candidates, ...batch]; // ✅ sent as one `add` per new item
+s.candidates = s.candidates.filter((c) => c.ok); // ✅ sent as one `remove` per dropped item
+s.candidates.splice(10, 1); // ⚠️ Immer shifts every later index: one `replace` each
 ```
 
-The same holds for objects (`s.map[id] = v` beats
-`s.map = { ...s.map, [id]: v }`) and for removals (`splice` beats `filter` into
-a new array). A growing list built by replacement is the usual cause of a
-`PRESSURE` vitals warning on an otherwise small cell.
+Narrowing matches elements **by identity**, so it keeps the whole-array
+`replace` when it cannot be sure: a reorder (`sort`, `reverse`), duplicate
+elements (the same primitive twice counts), rebuilt objects (`map` returning new
+objects), or an edit whose ops would carry as much as the array itself.
+
+**Objects** are not narrowed. Replacing the binding re-ships the whole object:
+
+```ts
+s.map = { ...s.map, [id]: v }; // ⚠️ the entire map, every commit
+s.map[id] = v; // ✅ one `replace` of that key
+delete s.map[id]; // ✅ one `remove`
+```
+
+A dictionary rebuilt by spreading is the usual cause of a `PRESSURE` vitals
+warning on an otherwise small cell.
 
 ## Broadcast throttling
 
@@ -173,8 +196,19 @@ Per-client, automatic. Server reads render staleness from browser pings:
 
 **Recovery**: gradual (4x → 2x → 1x), any spike resets counter.
 
-**Frozen clients** (staleness >= 5x threshold): server skips entirely. On
-recovery, normal delta mechanism handles catch-up.
+**Frozen clients** (no heartbeat for `transport.frozen`, default 2s): server
+skips their rounds entirely. The moment one is heard from again it is sent the
+whole state its skipped rounds carried, without waiting for the app's next
+change: an idle app has none, and a background tab or a closed laptop lid would
+otherwise stay stale until something else moved.
+
+**Peers that stop reading** (more than 4 MB of unread frames held for one
+socket, `WS_BUFFER_HIGH_WATER`): state rounds to them are skipped and owed a
+full state, like a frozen client's. A sync `op` frame or server-write push has
+no such in-band repair (a peer that misses op N and receives N+1 moves past N
+for good), so a peer that would miss one is closed with `1013` instead; it
+reconnects, and the handshake and sync catch-up bring it back to the server's
+state. `/__aio/health` reports the backlog as `ws:write-backlog`.
 
 ## Memoized selectors
 
@@ -202,16 +236,6 @@ const selectFiltered = createSelector(
 Inputs compared by reference (`===`). Supports 1-6 input selectors. Compose by
 passing selectors as inputs to other selectors.
 
-### `useAio` — client-side (recommended)
-
-Returns a deep Proxy that tracks property access during render. Tracked paths
-sent to server as `__subs` — server only sends deltas for those paths.
-
-```tsx
-const { state } = useAio();
-return <div>{state.counter.count}</div>;
-```
-
 ### Direct cell access — re-render scoping
 
 ```tsx
@@ -223,58 +247,71 @@ export function Count() {
 ```
 
 Reading `counter.count` auto-tracks via the cell signal. Only components that
-read a specific cell's state re-render when it changes.
+read a specific cell's state re-render when it changes — and the read is also
+what subscribes this client to the `counter` cell on the server (below).
 
-## Proxy-tracked subscriptions
+`useAio()` hands back the whole state instead, and subscribes the client to
+**every** cell. Prefer direct cell reads.
 
-1. Component renders — Proxy records accessed paths
-2. After render — client sends `__subs` with deduplicated paths
-3. Server filters — only subscribed paths in delta broadcasts
-4. Paths accumulate as user navigates; unmounted paths pruned after grace period
+## Subscriptions: only the cells a client reads
 
-First connect always sends full state. Old clients without `__subs` get
-unfiltered broadcast (backward compatible).
+1. A component reads `counter.count` — the client records the `counter` cell
+2. Within ~16 ms it sends a `subs` frame
+   (`{"v":2,"t":"subs","d":{"subs":["counter"]}}`)
+3. The server sends that client only patches and full-state slices for the cells
+   in its list; the paths accumulate for the life of the page
+4. `useAio()` (or anything that walks the whole state) records `*` — everything
+
+Filtering is per **cell**: a subscription to `orders.items` still receives every
+patch for the `orders` cell. A client that has sent no `subs` frame yet — and
+any client that never sends one (`connectCli`, a raw WebSocket) — receives all
+cells. A `subs` list over 1024 paths, or an empty one, is refused whole with a
+server warning, and the client keeps the list it had (initially: every cell).
 
 ## State shape design
 
-### Keep state flat
+### Split cells by who reads them
+
+Subscription filtering, `forUser` full sends and the patch-vs-full comparison
+all work at the **cell** level. A hot ticker in the same cell as a large, rarely
+read catalog reaches every client that shows either; two cells reach each only
+the clients that read them.
+
+### Keep `forUser` cells quiet
+
+Every change to a cell with `forUser` sends each client its **whole** view —
+every cell it reads, as a `state` frame — because a per-user projection has no
+patch. Measured: one counter bump in a `forUser` cell re-sent 18 KB, where the
+same bump in a plain cell was a 71 B patch. Keep fast-changing fields out of
+`forUser` cells.
+
+### Use IDs, not embedded copies
 
 ```ts
-// Bad — changing one order re-sends the entire nested tree
-type State = { users: { [id: string]: { profile: Profile; orders: Order[] } } };
-
-// Good — each slice independent
-type State = {
-  profiles: Record<string, Profile>;
-  orders: Record<string, Order[]>;
-};
-```
-
-### Separate hot and cold data
-
-Hot data (prices, ticks) in its own top-level key. Cold data (config, profile)
-separate. Prevents cold data re-sending on every hot update.
-
-### Use IDs, not embedded objects
-
-```ts
-// Bad — user name change re-sends every order
+// Bad — a user rename has to rewrite every order that embeds the user
 type Order = { user: User; items: Item[] };
-// Good
+// Good — one write to the user, orders untouched
 type Order = { userId: string; items: Item[] };
 ```
 
 ## Action batching
 
-One method call = one action = one broadcast:
+One method call = one commit = one set of patches. Write the fields on the draft
+— a sync method's return value is a value for the caller, never the new state:
 
 ```ts
 methods: {
-  incrementAndTrack: (s) => ({
-    ...s, count: s.count + 1, total: s.total + 1, lastAction: "increment",
-  }),
+  incrementAndTrack(s) {
+    s.count += 1;
+    s.total += 1;
+    s.lastAction = "increment";
+  },
 },
 ```
 
-Multiple synchronous dispatches from effects coalesce into one broadcast.
-Debounce high-frequency client actions (typing, dragging) with 100-200ms delay.
+Returning `{ ...s, count: s.count + 1 }` instead changes nothing: the caller's
+`await` resolves with that object and the state stays as it was.
+
+Commits in the same tick coalesce into one broadcast (see
+[Broadcast throttling](#broadcast-throttling)). Debounce high-frequency client
+actions (typing, dragging) with a 100–200 ms delay.

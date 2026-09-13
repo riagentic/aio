@@ -408,9 +408,16 @@ Deno.test("renames: Access is the one access type; StateOf the one state-extract
   // Type-level: assignability in BOTH directions (aliases, not lookalikes).
   const rule: Access = (user, method) =>
     user?.role === "admin" && method !== "nuke";
-  assert(typeof rule === "function");
+  // CALL it: `typeof rule === "function"` was true of every arrow ever
+  // written, so it proved the type annotation compiled and nothing else.
+  assertEquals(rule({ role: "admin" } as never, "read"), true);
+  assertEquals(rule({ role: "admin" } as never, "nuke"), false);
+  assertEquals(rule(undefined as never, "read"), false);
   const { serverFns } = await import("../src/server/server-fns.ts");
-  assert(typeof serverFns === "function"); // Access accepted in its opts type
+  // The fact under test is that `Access` is accepted in serverFns' OPTS TYPE,
+  // which is a compile-time fact; calling it here would start a server.
+  // aio-ok: vacuous — a compile-time fact, see the two lines above.
+  assert(typeof serverFns === "function");
 
   const c = cell(uname("types"), {
     state: { count: 0 },
@@ -426,6 +433,10 @@ Deno.test("renames: Access is the one access type; StateOf the one state-extract
   type AppState = { counter: { count: number } };
   type TypedApp = Awaited<ReturnType<typeof aio.run<AppState>>>;
   const _read: (a: TypedApp) => number = (a) => a.getState().counter.count;
+  // The assertion is that `aio.run<AppState>` TYPED its return, which this
+  // line pins by compiling; calling `_read` would need a booted app and would
+  // test `getState`, not the overload.
+  // aio-ok: vacuous — a compile-time fact, see the three lines above.
   assert(typeof _read === "function");
 });
 
@@ -439,6 +450,9 @@ Deno.test("renames: air NodeAction is the one name (the bare `Action` alias went
   const mod = await import("../src/air/vdom-types.ts");
   assert(mod, "module loads");
   const na: import("../src/air/vdom-types.ts").NodeAction = () => {};
+  // `NodeAction` is a TYPE, so the only runtime thing an annotation can leave
+  // behind is this binding; the name's real proof is the source scan below.
+  // aio-ok: vacuous — a compile-time fact, see the two lines above.
   assert(typeof na === "function");
   // The alias is gone from the SOURCE, not just undocumented.
   const src = await Deno.readTextFile("src/air/vdom-types.ts");

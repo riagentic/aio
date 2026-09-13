@@ -130,10 +130,17 @@ Deno.test("isolate: never returns an empty cell list (property)", () => {
       // it is what sent readers to their schema instead of their flag.
       assert(refusal !== null, `accepted ${JSON.stringify(unknown)}`);
       for (const u of unknown) assertStringIncludes(refusal, u);
+      // The generator always builds 1..4 cells, so this is an invariant of
+      // the fixture rather than a hope — say it, so the loop below cannot
+      // quietly check nothing if the generator ever changes.
+      assert(have.length > 0, "the generated app always has a cell");
       for (const h of have) assertStringIncludes(refusal, h);
       const near = unknown
         .map((u) => [u, nearestOf(u, have)] as const)
         .filter((p): p is readonly [string, string] => p[1] !== null);
+      // `near` is legitimately empty when no unknown name is close to a real
+      // one, and that round is already checked by the two loops above.
+      // aio-ok: vacuous — a did-you-mean that does not exist is not missing.
       for (const [u, m] of near) assertStringIncludes(refusal, `${u} → ${m}`);
       continue;
     }

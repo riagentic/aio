@@ -24,7 +24,7 @@ import { resolve } from "@std/path";
 import { runtimeCount } from "./shutdown.ts";
 import { launchElectronClient } from "../electron/electron.ts";
 import { getLogger, log } from "../diagnostics/logger-api.ts";
-import { snapshotCellsError } from "./server-static.ts";
+import { snapshotCellsError, snapshotShapeError } from "./server-static.ts";
 import { findUnserializable, PersistSerializeError } from "./persist-guard.ts";
 
 /** Cache key for a user — a STABLE serialization of everything `ui.forUser`
@@ -52,7 +52,7 @@ import { findUnserializable, PersistSerializeError } from "./persist-guard.ts";
  *  Returns null when the user cannot be serialized (cycles, exotic values) —
  *  the caller then SKIPS the cache entirely and recomputes. A cache miss costs
  *  time; a wrong cache hit costs someone else's data. */
-function userMemoKey(user?: AioUser): string | null {
+export function userMemoKey(user?: AioUser): string | null {
   // "no user" is its OWN bucket, and cannot be spelled by any serialized user:
   // every JSON.stringify of an object starts with "{".
   if (user === undefined || user === null) return "no-user";
@@ -126,10 +126,17 @@ export function buildReportOpts<S>(opts: {
 }): ReportErrorOpts {
   return {
     onError: opts.onError,
+    // Asked AT EACH REPORT, like the getter below — and never asserted. In one
+    // process a `logging: false` app falls back to another app's logger, and
+    // when that app closes there is none: `getLogger()!.pub` threw inside
+    // reportError, whose catch then skipped this app's onError hook, TT mark
+    // and error count. With no logger the report is not lost — reportError's
+    // console box already went out through `log.error`'s console fallback —
+    // so the file write is simply skipped.
     logger: getLogger()
       ? {
         error: (msg: string, data?: Record<string, unknown>) =>
-          getLogger()!.pub("error", "aio", msg, data),
+          getLogger()?.pub("error", "aio", msg, data),
       }
       : undefined,
     // The shim is ALWAYS installed and asks the getter each time. Deciding once,
@@ -243,11 +250,14 @@ export function buildAppObject<S, A>(refs: {
     },
     loadSnapshot: (json: string, opts?: { force?: boolean }) => {
       const parsed = JSON.parse(json);
-      if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
-        throw new Error(
-          "loadSnapshot: snapshot must be a JSON object — pass the exact string returned by app.snapshot()",
-        );
-      }
+      // The SAME shape decider every snapshot door calls. This door checked
+      // only "is it an object", so `app.loadSnapshot('{"counter":42}')`
+      // loaded without a word and the next `counter` method threw
+      // REDUCE_ERROR on a state that is a number — the HTTP and trojan routes
+      // refuse that very string. `force` overrides the CELL SET, never the
+      // shape: a cell whose state is not an object is broken either way.
+      const shape = snapshotShapeError(parsed);
+      if (shape) throw new Error(shape);
       // The cell set is checked BEFORE the swap and REFUSED, not warned about.
       // `setState` replaces the whole state object: a snapshot missing a
       // declared cell deletes that cell's data, and the old code said so with

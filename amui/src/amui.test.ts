@@ -977,3 +977,64 @@ Deno.test("StateOverview: every field shows its JSON size beside it (SSR)", asyn
   assertStringIncludes(bad, "unserializable");
   assertStringIncludes(bad, "1 B");
 });
+
+// ── the arguments box sends the arguments it asks for ────────────────────────
+//
+// The Cells tab's box is labelled `["ada@example.com"] — JSON arguments`, and
+// amui handed the parsed value to `envelopePayload`, the NAMED-PAIRS rule,
+// which wraps whatever it gets as ONE argument. So the spelling the UI itself
+// documents sent `args: [["ada@example.com"]]`: the method's string parameter
+// was an Array, the wrong value was persisted, and the trojan answered ok so
+// amui reported "dispatched". Wrong data, reported as success.
+//
+// Driven through `manager.dispatch` against a REAL app, because the defect was
+// never in the envelope function — it was in which one this call site picked.
+testCell(
+  manager,
+  "dispatch: a JSON array is the argument LIST, not one argument",
+  async (t) => {
+    const { aio, cell } = await import("../../mod.ts");
+    const appId = `amui-args-${crypto.randomUUID().slice(0, 8)}`;
+    const target = cell("prefs", {
+      state: { email: "" },
+      methods: {
+        setEmail(s: { email: string }, email: string) {
+          s.email = email;
+        },
+      },
+    });
+    const port = freePort();
+    const app = await aio.run({
+      cells: [target],
+      appId,
+      client: "server-only",
+      persist: false,
+      libraryMode: true,
+      port,
+    });
+    try {
+      t.init({
+        projects: [{
+          path: "/fake/prefs-app",
+          name: "prefs-app",
+          meta: {} as never,
+          running: { appId, pid: Deno.pid, port, status: "started" },
+          git: false,
+        }] as never,
+      });
+      await t.send.dispatch(
+        "/fake/prefs-app",
+        "prefs:setEmail",
+        '["ada@example.com"]',
+      );
+      assertEquals(
+        target.email,
+        "ada@example.com",
+        "the method must receive the array's ELEMENTS as its arguments — " +
+          `got ${JSON.stringify(target.email)}`,
+      );
+    } finally {
+      await app.close();
+    }
+  },
+);

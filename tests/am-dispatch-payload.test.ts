@@ -10,7 +10,10 @@
 // never there.
 import { assertEquals } from "@std/assert";
 import { parseGlobalFlags } from "../src/am/am-utils.ts";
-import { envelopePayload } from "../src/am/am-cmd-state.ts";
+import {
+  envelopeJsonPayload,
+  envelopePayload,
+} from "../src/am/am-cmd-state.ts";
 
 Deno.test("am dispatch: a cell method gets positional args, an action gets its payload", () => {
   // `cell:method` is unambiguous in the type itself — no app lookup needed.
@@ -58,5 +61,49 @@ Deno.test("am flags: a trailing value flag with nothing after it is not a crash"
     t.args,
     ["x", "--body"],
     "left as-is rather than eating undefined",
+  );
+});
+
+// The OTHER envelope: a raw JSON VALUE, which is what a text box holds.
+//
+// amui's arguments box says `["ada@example.com"]` in its own placeholder, then
+// handed the parsed value to `envelopePayload` — the NAMED-PAIRS rule, which
+// wraps whatever it is given as one argument. So the spelling the UI documents
+// produced `args: [["ada@example.com"]]`: a method expecting a string got an
+// Array, persisted it, and the trojan answered ok so the UI said "dispatched".
+// Wrong data, reported as success, with the UI's own instructions to blame.
+Deno.test("envelopeJsonPayload: a JSON ARRAY is the positional argument list", () => {
+  assertEquals(
+    envelopeJsonPayload("user:setEmail", ["ada@example.com"]),
+    { args: ["ada@example.com"] },
+    "an array is the arguments, not the single first argument",
+  );
+  assertEquals(
+    envelopeJsonPayload("cart:add", ["sku-1", 3]),
+    { args: ["sku-1", 3] },
+    "…including more than one of them",
+  );
+});
+
+Deno.test("envelopeJsonPayload: a non-array value is still ONE argument", () => {
+  assertEquals(
+    envelopeJsonPayload("user:configure", { host: "h", port: 8000 }),
+    { args: [{ host: "h", port: 8000 }] },
+    "an object is a method's single named-options argument",
+  );
+  assertEquals(
+    envelopeJsonPayload("user:setName", "ada"),
+    { args: ["ada"] },
+    "and so is a bare primitive",
+  );
+});
+
+Deno.test("envelopeJsonPayload: a plain action carries its payload verbatim", () => {
+  assertEquals(envelopeJsonPayload("Increment", { by: 1 }), { by: 1 });
+  assertEquals(
+    envelopeJsonPayload("Increment", [1, 2]),
+    [1, 2],
+    "nothing to decide for a plain action — inventing a wrapper would be the " +
+      "same guess this function exists to end",
   );
 });

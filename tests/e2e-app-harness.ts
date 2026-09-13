@@ -138,10 +138,34 @@ export function childEnv(
 }
 
 /** One sandbox per test PROCESS, under `<tmp>/aio/`. Lazy: a test file that
- *  never spawns an app never creates it. */
+ *  never spawns an app never creates it.
+ *
+ *  THE PARENT ADOPTS IT TOO, and that is the load-bearing half.
+ *
+ *  A lock lives under `AIO_APPS_DIR`. `deno task test` sets one, so the test
+ *  process and the app it spawns resolve the same directory and a test can
+ *  watch the lock of its own child. Run that same file the way CLAUDE.md
+ *  documents — `deno test -A tests/x.test.ts` — and there is no such variable:
+ *  the child got this sandbox, the parent kept resolving the default, and
+ *  `readLock()` looked in a directory nothing would ever write to. The test
+ *  then failed as "app never started", 30 seconds after an app that had
+ *  started perfectly well.
+ *
+ *  Measured on `tests/lock-lifetime.test.ts`, which could not pass standalone
+ *  at all. A test that only works under one runner is a test that stops being
+ *  run, and the failure it reports points at the product rather than at
+ *  itself — the most expensive shape a harness bug can take.
+ *
+ *  Setting it here means the two sides agree BY CONSTRUCTION rather than by
+ *  the caller remembering. When the variable already exists (the suite) this
+ *  changes nothing: the value is read, not replaced. */
 let _childApps: string | undefined;
 function _childAppsDir(): string {
-  return _childApps ??= aioTestDir("spawned-apps-");
+  if (_childApps) return _childApps;
+  _childApps = aioTestDir("spawned-apps-");
+  // The parent resolves locks, sockets and homes through the same variable.
+  Deno.env.set("AIO_APPS_DIR", _childApps);
+  return _childApps;
 }
 
 /** Spawn a long-running process; drain stderr in the background so it can't

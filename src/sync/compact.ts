@@ -22,6 +22,14 @@ export interface CompactDeps {
   /** `sync.offline.retention` for this cell, in ms — the longest a client may
    *  hold an op before re-sending it. Sizes the id-tombstone window. */
   retentionMs?: number;
+  /** Extra statements that must commit IN the snapshot's own transaction —
+   *  a log position that is true only if this snapshot is on disk (the fold
+   *  watermark, `SyncFoldWatermark` in server-handler.ts). Called once, after
+   *  `getState()` captured the state and immediately before the transaction
+   *  runs; never called when the op count is below the threshold, so being
+   *  called means "this fold is committing". If the transaction throws,
+   *  `compactSyncOps` throws, and none of the statements landed. */
+  alsoWrite?: () => { sql: string; params?: unknown[] }[];
   log: {
     debug: (msg: string, data?: Record<string, unknown>) => void;
     warn: (msg: string, data?: Record<string, unknown>) => void;
@@ -99,6 +107,7 @@ export async function compactSyncOps(deps: CompactDeps): Promise<void> {
   const state = deps.getState();
   const stateJson = JSON.stringify(state);
   const now = Date.now();
+  const also = deps.alsoWrite?.() ?? [];
 
   await deps.db.transaction([
     {
@@ -161,6 +170,7 @@ export async function compactSyncOps(deps: CompactDeps): Promise<void> {
         deps.cell,
       ],
     },
+    ...also,
   ]);
 
   deps.log.debug(

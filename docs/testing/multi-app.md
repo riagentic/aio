@@ -118,6 +118,37 @@ The service binds one instance; `link.bind(makeLedger())` binds another. A
 client that only wants to _read_ another app's cell binds it on the `connect()`
 link, which is exactly what a rich client does in production.
 
+## What stays per app in one process
+
+Two apps in one process share every module — the logger, the diagnostic bus, the
+`degraded()` registry are each one object. Each `aio.run()` runs **as its app**,
+and everything its boot starts (routes, sockets, timers armed in `onStart` or in
+a method, the control listener) carries that app with it, so these facts stay
+the app's own:
+
+| Fact                           | Per app                                                                                                                                                     |
+| ------------------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Log files                      | each app's lines land in its own `logs/` — including route handlers, timers, and lines logged before its logger existed; closing one app leaves the other's |
+| Budgets                        | one budget ledger per app: B's `budgets: { cellState }` never turns A's `/health` degraded                                                                  |
+| `/health` uptime               | measured from that app's own boot, not the last one                                                                                                         |
+| `/health` degraded rows        | trackers tripped by that app's code, and failures its own clients reported — also through the plain-HTTP control listener under TLS                         |
+| Feedback reports               | the feedback and updates cells are bound per app; auto-capture files only that app's errors                                                                 |
+| Dev `diag` frames              | a socket receives its own app's diagnostics, never another app's                                                                                            |
+| Control credential, rate limit | closing one app leaves the other's credential armed; the trojan rate limit is counted per app                                                               |
+
+Code that runs outside **any** app — a module's top level, a test calling `log`
+directly — has no app to belong to: its log lines go to the most recently booted
+app that is still running, and a diagnostic or `degraded()` failure it records
+is visible to every app.
+
+`feedback` and `updates` are off under `libraryMode`, which `testApps` sets —
+the per-app feedback guarantees are pinned in a child process
+(`tests/two-apps-concurrent-isolation.test.ts`). The rest:
+`tests/two-apps-app-scope.test.ts`,
+`tests/two-apps-one-process-singletons.test.ts`,
+`tests/two-apps-diag-relay.test.ts`,
+`tests/tls-control-listener-app-scope.test.ts`.
+
 ## Which harness
 
 | Harness                     | Boots      | Use it for                                      |

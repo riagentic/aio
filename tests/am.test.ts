@@ -11,6 +11,7 @@ import {
 } from "../src/am/am-utils.ts";
 import { formatUptime } from "../src/am/am-output.ts";
 import { resolveControlPort } from "../src/am/am-http.ts";
+import { dropTempDir, tempDir } from "../src/testing/temp-dir.ts";
 import {
   instances,
   isProcessAlive,
@@ -306,7 +307,7 @@ Deno.test("am: resolvePort — refuses rather than inventing 8000", () => {
 // guessed-form half has to stand somewhere else to be about the rung at all.)
 Deno.test("am: resolvePort — an explicit --app never falls back to another app", async () => {
   const other = TEST_APP + "-other";
-  const bare = await Deno.makeTempDir({ prefix: "aio-am-noproject-" });
+  const bare = await tempDir("aio-am-noproject-");
   const cwd = Deno.cwd();
   writePid(makePf({ appId: other, pid: Deno.pid, port: 3456, startedAt: 0 }));
   try {
@@ -332,7 +333,7 @@ Deno.test("am: resolvePort — an explicit --app never falls back to another app
     Deno.chdir(cwd);
     _resetTargetGuess();
     removePid(other);
-    await Deno.remove(bare, { recursive: true }).catch(() => {});
+    await dropTempDir(bare);
   }
 });
 
@@ -478,7 +479,7 @@ async function withTrojanServer(
   fn: (url: string) => Promise<void>,
 ): Promise<void> {
   lastLoaded = null;
-  const dir = await Deno.makeTempDir();
+  const dir = await tempDir("aio-am-");
   await Deno.writeTextFile(join(dir, "App.tsx"), "export default () => null");
   const appState = { count: 10, items: ["a", "b"] };
   const server = createServer({
@@ -514,7 +515,7 @@ async function withTrojanServer(
     await fn(`http://127.0.0.1:${AM_TEST_PORT}`);
   } finally {
     await server.shutdown();
-    await Deno.remove(dir, { recursive: true });
+    await dropTempDir(dir);
   }
 }
 
@@ -748,7 +749,7 @@ Deno.test("am-cli: logs — reads .aio.log", async () => {
   // `logPathFor` returns when neither current file exists, and intermittently
   // got this one instead. A test must not leave shared state where another
   // test's answer changes because of it.
-  const cwd = await Deno.makeTempDir({ prefix: "aio-amlog-cwd-" });
+  const cwd = await tempDir("aio-amlog-cwd-");
   const logContent = "line1 hello\nline2 world\nline3 error found\n";
   await Deno.writeTextFile(join(cwd, ".aio.log"), logContent);
   try {
@@ -761,15 +762,17 @@ Deno.test("am-cli: logs — reads .aio.log", async () => {
     const dec = new TextDecoder();
     const stdout = dec.decode(result.stdout).trim();
     const data = JSON.parse(stdout);
-    assertEquals(data.total, 4); // 3 lines + trailing empty
+    // Counts are of EVENTS (the unit `--lines=N` selects): the file's final
+    // newline ends line 3, it does not start an empty fourth event.
+    assertEquals(data.total, 3);
     assertEquals(data.lines.length > 0, true);
   } finally {
-    await Deno.remove(cwd, { recursive: true }).catch(() => {});
+    await dropTempDir(cwd);
   }
 });
 
 Deno.test("am-cli: logs — filter works", async () => {
-  const cwd = await Deno.makeTempDir({ prefix: "aio-amlog-cwd2-" });
+  const cwd = await tempDir("aio-amlog-cwd2-");
   await Deno.writeTextFile(
     join(cwd, ".aio.log"),
     "info: ok\nerror: bad\ninfo: fine\n",
@@ -787,7 +790,7 @@ Deno.test("am-cli: logs — filter works", async () => {
     assertEquals(data.filter, "error");
     assertEquals(data.lines.every((l: string) => l.includes("error")), true);
   } finally {
-    await Deno.remove(cwd, { recursive: true }).catch(() => {});
+    await dropTempDir(cwd);
   }
 });
 
@@ -889,7 +892,7 @@ Deno.test("am-cli: snapshot save — writes file", async () => {
   // CREATES the file, and `snapshot save` now refuses to write over one (the
   // same rule `am backup` has always had); using it here tested the refusal
   // by accident and called it a failure.
-  const dir = await Deno.makeTempDir();
+  const dir = await tempDir("aio-am-");
   const tmp = `${dir}/snap.json`;
   try {
     await withTrojanServer(async () => {
@@ -906,7 +909,7 @@ Deno.test("am-cli: snapshot save — writes file", async () => {
       assertEquals(forced.code, 0);
     });
   } finally {
-    await Deno.remove(dir, { recursive: true }).catch(() => {});
+    await dropTempDir(dir);
   }
 });
 
@@ -971,7 +974,7 @@ Deno.test("am-cli: snapshot load — error on missing file", async () => {
 const AM_TT_PORT = freePort();
 
 async function withTTServer(fn: (url: string) => Promise<void>): Promise<void> {
-  const dir = await Deno.makeTempDir();
+  const dir = await tempDir("aio-am-");
   await Deno.writeTextFile(join(dir, "App.tsx"), "export default () => null");
   const ttCmds: { cmd: string; arg?: number }[] = [];
   const server = createServer({
@@ -996,7 +999,7 @@ async function withTTServer(fn: (url: string) => Promise<void>): Promise<void> {
     await fn(`http://127.0.0.1:${AM_TT_PORT}`);
   } finally {
     await server.shutdown();
-    await Deno.remove(dir, { recursive: true });
+    await dropTempDir(dir);
   }
 }
 

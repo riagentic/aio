@@ -283,34 +283,38 @@ Move large collections to SQLite and query on demand.
 | `persist: { exclude: [...] }` | exclude UI-only fields     | Reduce persist write frequency |
 | `perfCheck: 'on'`             | log violations to perf.log | Catch desktop-specific issues  |
 
-Time-travel history is capped at 200 entries (dev mode only, zero in prod).
+Time-travel history is capped at 2000 entries (dev mode only, zero in prod) —
+`MAX_ENTRIES` in `src/diagnostics/time-travel.ts`, and the number
+[time-travel.md](../debugging/time-travel.md) states.
 
 ### Production monitoring
+
+There is no `onPerf` config key — `aio.run()` refuses an unknown key by name, so
+a copied snippet that used one exited 1 before serving anything. Budget
+violations go to `perf.log` (`perfCheck`/`perfBudget`), and the callback that
+exists is `vitals.onVitalAlert`:
 
 ```ts
 await aio.run({
   cells: [...],
-  perfCheck: 'on',
+  perfCheck: "on", // budget violations → perf.log
   perfBudget: { reduce: 50, effect: 10 },
-  onPerf: (metric) => {
-    if (metric.reduce > 50) {
-      const bd = metric.breakdown
-      alertSlack(`Slow reduce: ${metric.actionType} ${metric.reduce}ms` +
-        (bd ? ` (produce=${bd.produce.toFixed(0)}ms clone=${bd.clone.toFixed(0)}ms)`: ''))
-    }
+  features: {
+    all: {
+      vitals: {
+        onVitalAlert: (alert) => {
+          if (alert.status === "frozen") {
+            alertSlack(`${alert.layer} ${alert.status}: ${alert.hint?.cause}`);
+          }
+        },
+      },
+    },
   },
-})
+});
 ```
 
-The `breakdown` field on `PerfMetric` provides phase-level timing:
-
-| Field       | What it measures                             |
-| ----------- | -------------------------------------------- |
-| `produce`   | Immer `produce()` — reducer execution (ms)   |
-| `clone`     | `structuredClone()` — effect detachment (ms) |
-| `spread`    | State object construction (ms)               |
-| `routing`   | Owner cell lookup + reduce (ms)              |
-| `listeners` | Foreign action listener fan-out (ms)         |
+See [vitals](../debugging/vitals.md) for the alert shape and the thresholds that
+produce one.
 
 ## Limitations
 

@@ -34,6 +34,7 @@ export default function App(): JSX.Element {
           value={input}
           onChange={(e) => setInput(e.currentTarget.value)}
           placeholder="What needs to be done?"
+          aria-label="What needs to be done?"
           style={{ flex: 1 }}
         />
         <button type="submit">Add</button>

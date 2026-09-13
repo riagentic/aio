@@ -99,6 +99,47 @@ export function parseRgb(v: string | null | undefined): RGBA | null {
     }
     return null; // #12345 and #1234567 are not colours
   }
+  // `hsl()`/`hsla()`, because the kit itself writes one: `<Avatar>` colours
+  // its circle `hsl(${hueFor(name)}, 55%, 45%)`. A real browser normalises
+  // that to `rgb()` in a computed style, happy-dom hands back what was
+  // authored, and `testUI` runs on happy-dom — so the environment this
+  // project calls the strictest was the one that could not read it.
+  const hsl =
+    /^hsla?\(\s*([-\d.]+)(?:deg)?[\s,]+([\d.]+)%[\s,]+([\d.]+)%(?:[\s,/]+([\d.%]+))?\s*\)$/
+      .exec(t);
+  if (hsl) {
+    const h = ((Number(hsl[1]) % 360) + 360) % 360;
+    const sat = Number(hsl[2]) / 100;
+    const li = Number(hsl[3]) / 100;
+    const a = hsl[4] === undefined
+      ? 1
+      : hsl[4].endsWith("%")
+      ? Number(hsl[4].slice(0, -1)) / 100
+      : Number(hsl[4]);
+    if (![h, sat, li, a].every(Number.isFinite)) return null;
+    // The standard conversion, written out rather than pulled in.
+    const c = (1 - Math.abs(2 * li - 1)) * sat;
+    const x = c * (1 - Math.abs(((h / 60) % 2) - 1));
+    const mm = li - c / 2;
+    const seg = Math.floor(h / 60) % 6;
+    const [r1, g1, b1] = seg === 0
+      ? [c, x, 0]
+      : seg === 1
+      ? [x, c, 0]
+      : seg === 2
+      ? [0, c, x]
+      : seg === 3
+      ? [0, x, c]
+      : seg === 4
+      ? [x, 0, c]
+      : [c, 0, x];
+    return {
+      r: Math.round((r1 + mm) * 255),
+      g: Math.round((g1 + mm) * 255),
+      b: Math.round((b1 + mm) * 255),
+      a,
+    };
+  }
   const m =
     /^rgba?\(\s*([\d.]+)[\s,]+([\d.]+)[\s,]+([\d.]+)(?:[\s,/]+([\d.%]+))?\s*\)$/
       .exec(t);
@@ -126,13 +167,36 @@ export function over(fg: RGBA, bg: RGBA): RGBA {
   };
 }
 
+/** Does this computed value MEAN "paints nothing"?
+ *
+ *  The empty string (no rule applies), and the keywords a UA can hand back for
+ *  a background that is not a colour. Everything else that `parseRgb` refuses
+ *  is a colour we could not read, which is not the same answer. */
+function isTransparent(v: string | null | undefined): boolean {
+  const t = (v ?? "").trim().toLowerCase();
+  return t === "" || t === "transparent" || t === "none" || t === "initial" ||
+    t === "inherit" || t === "unset" || t === "revert";
+}
+
 /** The first ANCESTOR background that actually paints, composited down.
  *
  *  Climbing to the first non-transparent background is not enough: a
  *  half-opaque panel over a dark page is neither of its two colours, and
  *  reporting either would be a confident wrong answer. Layers are composited in
  *  paint order until one is opaque; the page falls back to white, which is what
- *  a UA canvas is when nothing says otherwise. */
+ *  a UA canvas is when nothing says otherwise.
+ *
+ *  `null` when a layer cannot be READ, which is a different thing from
+ *  transparent and used to be treated as the same thing. `parseRgb` answers
+ *  `rgb()`/`rgba()`/hex and nothing else, so an `hsl()`, a named colour or an
+ *  `oklch()` returned null, the loop climbed straight past an opaque panel and
+ *  landed on the white page fallback — and reported white-on-white, 1.00:1,
+ *  in the framework's own dev console. Measured on one colour in three
+ *  spellings: `rgb(114,52,178)` silent, `hsl(275,55%,45%)` and
+ *  `rebeccapurple` each a false alarm. It fires on the kit's own `<Avatar>`,
+ *  which writes `hsl(...)` — markup the app author did not write and cannot
+ *  fix. This file's docstring says reporting "could not look" as "no findings"
+ *  is a confident wrong answer; this was the louder mirror image. */
 function effectiveBackground(
   el: Element,
   win: {
@@ -143,9 +207,9 @@ function effectiveBackground(
   let node: Element | null = el;
   let hops = 0;
   while (node && hops++ < 40) {
-    const bg = parseRgb(
-      win.getComputedStyle(node).getPropertyValue("background-color"),
-    );
+    const raw = win.getComputedStyle(node).getPropertyValue("background-color");
+    const bg = parseRgb(raw);
+    if (!bg && !isTransparent(raw)) return null; // a layer we cannot read
     if (bg && bg.a > 0) {
       layers.push(bg);
       if (bg.a >= 0.999) break;
@@ -203,7 +267,17 @@ export function auditContrast(root: Element | null | undefined): number {
   // point of having the predicate: "no findings" and "could not look" are not
   // the same answer, and reporting the second as the first is the wrong-answer
   // shape this file exists to remove.
-  if (!canAuditContrast(root)) return 0;
+  if (!canAuditContrast(root)) {
+    // "Could not look" said as such, never passed off as "no findings" —
+    // and only where there IS a window, whose computed colours would
+    // otherwise have been believed.
+    const why = windowOf(root) ? _cascadeProbe?.(root) : null;
+    if (why && !_saidCannotResolve) {
+      _saidCannotResolve = true;
+      console.warn(why);
+    }
+    return 0;
+  }
   const win = windowOf(root)!;
 
   let scanned = 0;
@@ -290,12 +364,38 @@ function windowOf(root: Element | null | undefined): Win | null {
  *  answer differently. "No findings" and "could not look" are different
  *  answers, and reporting the second as the first is a confident wrong one. */
 export function canAuditContrast(root: Element | null | undefined): boolean {
-  return windowOf(root) !== null;
+  return windowOf(root) !== null && !(root && _cascadeProbe?.(root));
 }
 
-/** @internal Test seam — forget what has been reported. */
-export function _resetContrastAudit(): void {
+/** Why this engine's computed colours cannot be believed, or null.
+ *
+ *  A HOOK, installed by the test harness, rather than an import: the probe
+ *  (`contrast-cascade.ts`) walks the CSSOM to prove a cascade broken, and a
+ *  real browser never needs it — happy-dom, which `testUI` runs on, does
+ *  (report 9 §1). Imported here it would put ~0.9 KB gz on every production
+ *  page for a test DOM's defect. The harness installs it on every mount, so
+ *  every test that renders through `testUI`/`testComponent` is covered. */
+let _cascadeProbe: ((root: Element) => string | null) | null = null;
+
+/** @internal Install (or clear, with null) the cascade probe. */
+export function _setContrastCascadeProbe(
+  probe: ((root: Element) => string | null) | null,
+): void {
+  _cascadeProbe = probe;
+}
+
+/** Said once per process: the same engine answers the same way every pass,
+ *  and a line per test would bury the one finding a reader needs. */
+let _saidCannotResolve = false;
+
+/** @internal Test seam — forget what has been reported. `cascadeNotice`
+ *  also forgets that "could not be resolved" was said; `testUI` calls this on
+ *  every mount WITHOUT it, so that line stays once per process. */
+export function _resetContrastAudit(
+  opts: { cascadeNotice?: boolean } = {},
+): void {
   _reported.clear();
   _lastRun = 0;
   _findings = 0;
+  if (opts.cascadeNotice) _saidCannotResolve = false;
 }

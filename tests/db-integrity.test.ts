@@ -10,9 +10,11 @@ import { assert, assertEquals, assertStringIncludes } from "@std/assert";
 import { createDB } from "../src/server-entry.ts";
 import {
   checkAndRecover,
+  QUARANTINE_KEEP,
   quarantinePathFor,
   snapshotPathFor,
 } from "../src/server/db-integrity.ts";
+import { tempDir } from "../src/testing/temp-dir.ts";
 
 function logs() {
   const out: string[] = [];
@@ -207,6 +209,76 @@ Deno.test("boot: checkIntegrityOnBoot recovers a corrupt app database", async ()
       1,
       "the damaged file is quarantined, not deleted",
     );
+  } finally {
+    await Deno.remove(dir, { recursive: true }).catch(() => {});
+  }
+});
+
+// ── the quarantine keeps the copies it says it keeps ─────────────────────────
+//
+// This module's header promises the corrupt file is "QUARANTINED, never
+// deleted … so a human (or a real recovery tool) still has every byte", and
+// the prune's own log line names the number it keeps.
+//
+// It counted FILES. `moveSidecars` deliberately parks the crash-left
+// `-wal`/`-shm` beside each quarantined database, and all three share the
+// prefix the scan matched — so one copy counted as up to three, and keeping
+// "the newest three" kept the newest COPY plus its two sidecars. Measured over
+// four successive corruptions: exactly one database copy survived, while the
+// log said three generations were kept. The ones it deleted were the older
+// ones — which, after a corruption, are the ones a recovery tool wants.
+Deno.test("db integrity: pruning keeps QUARANTINE_KEEP COPIES, sidecars and all", async () => {
+  const dir = await tempDir("aio-quarantine-keep");
+  try {
+    const dbPath = `${dir}/state.db`;
+    const enc = new TextEncoder();
+    for (let i = 0; i < 5; i++) {
+      // A corrupt database, with the crash-left sidecars a real one has.
+      await Deno.writeTextFile(dbPath, `corrupt-${i}${"-".repeat(200)}`);
+      await Deno.writeFile(`${dbPath}-wal`, enc.encode(`wal-${i}`));
+      await Deno.writeFile(`${dbPath}-shm`, enc.encode(`shm-${i}`));
+      const { log } = logs();
+      const db = createDB(dbPath);
+      await checkAndRecover({
+        db,
+        dbPath,
+        log,
+        now: new Date(Date.UTC(2026, 0, 1 + i)),
+      });
+      await db.close().catch(() => {});
+    }
+
+    const names: string[] = [];
+    for await (const e of Deno.readDir(dir)) {
+      if (e.isFile && e.name.startsWith("state.db.corrupt-")) {
+        names.push(e.name);
+      }
+    }
+    // A COPY is the bare `.corrupt-<ts>` name; `-wal`/`-shm` belong to it.
+    const copies = names.filter((n) => !/-(?:wal|shm)$/.test(n)).sort();
+    assertEquals(
+      copies.length,
+      QUARANTINE_KEEP,
+      `the prune says it keeps ${QUARANTINE_KEEP} copies; it kept ` +
+        `${copies.length}: ${JSON.stringify(names.sort())}`,
+    );
+    // …and the ones kept are the NEWEST, not whichever the sort happened to
+    // leave behind.
+    assertEquals(
+      copies,
+      [
+        "state.db.corrupt-2026-01-03T00-00-00-000Z",
+        "state.db.corrupt-2026-01-04T00-00-00-000Z",
+        "state.db.corrupt-2026-01-05T00-00-00-000Z",
+      ],
+    );
+    // A deleted copy takes its sidecars with it — a `-wal` with no database
+    // beside it is a file nothing can ever read.
+    const orphans = names.filter((n) =>
+      /-(?:wal|shm)$/.test(n) &&
+      !copies.includes(n.replace(/-(?:wal|shm)$/, ""))
+    );
+    assertEquals(orphans, [], "a sidecar outlived the copy it belongs to");
   } finally {
     await Deno.remove(dir, { recursive: true }).catch(() => {});
   }

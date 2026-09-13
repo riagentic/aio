@@ -14,6 +14,7 @@ import type { CellPatches } from "./aio-dispatch.ts";
 import type { TableDef } from "./sql.ts";
 import {
   createAioError,
+  PERSIST_WRITTEN_ANYWAY,
   reportError as reportAioError,
 } from "../diagnostics/error.ts";
 import type { ReportErrorOpts } from "../diagnostics/error.ts";
@@ -341,7 +342,15 @@ export function createPersistenceManager(
           `broadcast now pays this size. ${CELL_SIZE_TIER_HINT}`,
       );
       log.error(err.message);
-      _reportPersistError(err);
+      // `{ fatal: false }` — this message SAYS "The write is NOT dropped
+      // (state is never lost)" two lines up. `_cycleError` is what
+      // `flushPersist()` rethrows and what the `persist` route answers 500
+      // with, so setting it here made `am persist` report failure, and
+      // shutdown log "the FINAL persist was refused — state since the last
+      // successful write is NOT on disk", for data that WAS on disk. The
+      // wire-fidelity path learned this exact lesson (see
+      // `_reportPersistError`); this half of the pair had not.
+      _reportPersistError(err, { fatal: false });
     } else if (
       size > PERSIST_CELL_WARN_BYTES && !_warnedBigCells.has(cellName)
     ) {
@@ -371,7 +380,7 @@ export function createPersistenceManager(
   //
   // A `BigInt` (or a cyclic reference) anywhere in state made `JSON.stringify`
   // THROW before the guard could name it. The throw escaped the whole per-cell
-  // loop, `_planKv` returned null, and EVERY cell's write was lost — on every
+  // loop, the snapshot plan returned null, and EVERY cell's write was lost — on every
   // window and on the shutdown flush, forever, under a message that named
   // neither the cell nor the path and blamed `getDBState`. The write is planned
   // per cell now, so one refused value costs exactly that cell's row.
@@ -407,9 +416,7 @@ export function createPersistenceManager(
     const err = new Error(
       `persist: cell "${cellName}" was NOT written — ${
         se ? se.message : e instanceof Error ? e.message : String(e)
-      }\n  Its stored row keeps the last value that was written successfully; ` +
-        `every OTHER cell still persists. This repeats on every persist ` +
-        `window until the value is fixed.`,
+      }\n  ${_heldSentence(cellName)}`,
       { cause: e },
     );
     if (first) {
@@ -419,7 +426,7 @@ export function createPersistenceManager(
     _reportPersistError(err, { report: first });
   }
 
-  /** Thrown out of `_planKv` when single mode cannot write the document
+  /** Thrown out of `_buildKv` when single mode cannot write the document
    *  without first learning what the store already holds for `cells`. */
   class NeedsStoredFallback extends Error {
     constructor(readonly cells: string[]) {
@@ -465,7 +472,20 @@ export function createPersistenceManager(
     e: unknown,
     opts: { fatal?: boolean; report?: boolean } = {},
   ): void {
-    const err = createAioError("PERSIST_ERROR", e, {});
+    // An observation keeps its code (it must still reach `onError`) but is
+    // marked, so its tip says the write landed instead of "persist failed —
+    // lost on restart" (see PERSIST_WRITTEN_ANYWAY). Wrapped, never renamed
+    // in place: `e` may be the store's own error object.
+    const err = createAioError(
+      "PERSIST_ERROR",
+      opts.fatal === false
+        ? Object.assign(
+          new Error(e instanceof Error ? e.message : String(e), { cause: e }),
+          { name: PERSIST_WRITTEN_ANYWAY },
+        )
+        : e,
+      {},
+    );
     // `_cycleError` is what `flushPersist()` rethrows and what the `persist`
     // route answers 500 with — so it must mean "the write did NOT happen".
     // A wire-fidelity issue (a Date, a Map, a NaN in state) is OBSERVE-ONLY
@@ -522,7 +542,10 @@ export function createPersistenceManager(
           `version stamp is skipped this cycle rather than risk stamping a ` +
           `newer file with older versions.`,
       );
-      _reportPersistError(e);
+      // Same rule, same sentence: "State is still written". A stamp that was
+      // skipped is not a write that failed, and the durability verdict must
+      // not say it is.
+      _reportPersistError(e, { fatal: false });
     }
   }
 
@@ -588,14 +611,80 @@ export function createPersistenceManager(
     return cfg.planPersisted(seq);
   }
 
-  /** The `db:` table writes for ONE state read — built, not executed, so they
-   *  can ride in the same transaction as the snapshot row below. `commit()`
-   *  advances the diff baseline and is called only after that transaction
-   *  lands; a throw here (a bad row) leaves both halves of the baseline put,
-   *  so the next attempt still sees those tables as changed and retries. */
+  /** Journal on: a window's snapshot is only ever written WHOLE.
+   *
+   *  Replay re-reduces every journal entry past the watermark over the WHOLE
+   *  restored state — it has no per-cell watermark. So the moment any cell's
+   *  write is refused, there is exactly one consistent move: write nothing
+   *  (no snapshot row, no table, no watermark) and let the journal, which
+   *  already holds every one of those actions durably, carry them to the next
+   *  boot. Writing the healthy cells while holding the watermark back would
+   *  replay their actions a second time; advancing the watermark past the
+   *  refused cell's actions is the torn cell this rule exists to prevent. */
+  const _journaled = cfg.getJournalSeq !== undefined ||
+    cfg.planPersisted !== undefined || cfg.onPersisted !== undefined;
+
+  // ── A cell is ONE unit on disk: its snapshot row AND its bound tables ──
+  //
+  // A cell whose method appends a row and bumps a counter keeps the two
+  // halves in two places — the row in its `db:` table, the counter in the
+  // snapshot — and they are only meaningful together. The table half used to
+  // fail ALONE: a row the planner refused (a NUL in a TEXT column) or SQLite
+  // refused (UNIQUE, NOT NULL) rolled back the tables while the snapshot
+  // committed without them. Measured through a real reboot: before shutdown
+  // `{counter:5, nextId:5, ids:[2,3,4]}`, after it `{counter:5, nextId:5,
+  // ids:[1,2]}` — a deleted row back, a valid row gone, a counter describing
+  // neither — identically with `journal: true`, whose watermark advanced
+  // past the refused actions and compacted them away.
+  //
+  // Now a refused table HOLDS ITS CELL: the cell's snapshot row keeps the
+  // last value that landed together with its rows (the same fallback a cell
+  // JSON refuses already had), so the next boot restores an older but
+  // coherent cell. Every OTHER cell still persists — unless the journal is on
+  // (see `_journaled`).
+  const _ownerOfTable = new Map<string, string>();
+  for (const b of cfg.tableBindings ?? []) {
+    if (b.path.length > 0) _ownerOfTable.set(b.table, b.path[0]!);
+  }
+  /** The cell a bound table belongs to. With no binding list (an engine-level
+   *  caller over raw state) a table name IS the root key it mirrors. */
+  const _ownerOf = (table: string): string => _ownerOfTable.get(table) ?? table;
+
+  // The planner emits this per plan; each tx here carries it once, first, so a
+  // reference between two cells' tables is still checked over the FINISHED
+  // transaction (see planTablesIncremental).
+  const FK_DEFER = "PRAGMA defer_foreign_keys = ON";
+  const _hasRefs = !!dbSchema &&
+    Object.values(dbSchema).some((d) =>
+      Object.values(d.columns).some((c) => c.ref)
+    );
+  const _withFk = (stmts: SkvStmt[]): SkvStmt[] =>
+    _hasRefs && stmts.length ? [{ sql: FK_DEFER }, ...stmts] : stmts;
+
+  /** One cell's table writes: built, not executed. `commit()` advances ONLY
+   *  these tables' baselines, so a cell held this window is still seen as
+   *  changed by the next one. */
+  type TableGroup = {
+    cell: string;
+    tables: string[];
+    stmts: SkvStmt[];
+    commit: () => void;
+  };
+
+  /** The next window walks THESE tables whole — the narrow twin of
+   *  `_forceFullTablePass`, for a cell whose plan was refused while the rest
+   *  of the window went on. */
+  function _forceFullPassFor(tables: readonly string[]): void {
+    if (_dirty === null) return;
+    for (const t of tables) _dirty[t] = "all";
+  }
+
+  /** The `db:` table writes for ONE state read, grouped by owning cell. A
+   *  group the planner refuses (a bad row) is returned in `refused` and costs
+   *  its own cell — never another cell's tables. */
   function _planSqlite(
     snap: Record<string, unknown>,
-  ): { stmts: SkvStmt[]; commit: () => void } | null {
+  ): { groups: TableGroup[]; refused: Set<string> } | null {
     if (!asyncDb || !dbSchema) return null;
     // Clone only what moved (see prevLiveTables). Unchanged tables carry their
     // existing baseline object through by reference, so planTables' identity
@@ -630,22 +719,83 @@ export function createPersistenceManager(
       if (dirty?.[name] instanceof Set) _passes.hinted++;
       else _passes.full++;
     }
-    const plan = planTablesIncremental(
-      dbSchema,
-      stateSnapshot,
-      prevDbState,
-      _tableIndex,
-      dirty,
-    );
-    return {
-      stmts: plan.stmts,
-      commit: () => {
-        prevDbState = stateSnapshot;
-        prevLiveTables = nextLive;
-        plan.commit();
-        log.debug("persist: sqlite synced");
-      },
+    // Keys the projection carries that no table declares (raw state, for an
+    // engine-level caller) are never written, so their baseline has nothing
+    // to wait for.
+    const advance = (names: readonly string[]) => {
+      const nextPrev = { ...prevDbState };
+      const nextLiveRefs = { ...prevLiveTables };
+      for (const n of names) {
+        nextPrev[n] = stateSnapshot[n];
+        nextLiveRefs[n] = nextLive[n];
+      }
+      prevDbState = nextPrev;
+      prevLiveTables = nextLiveRefs;
     };
+    advance(Object.keys(live).filter((n) => !(n in dbSchema)));
+
+    const byCell = new Map<string, string[]>();
+    for (const name of Object.keys(dbSchema)) {
+      const cell = _ownerOf(name);
+      byCell.set(cell, [...(byCell.get(cell) ?? []), name]);
+    }
+    const groups: TableGroup[] = [];
+    const refused = new Set<string>();
+    for (const [cell, tables] of byCell) {
+      const schema: Record<string, TableDef> = {};
+      for (const t of tables) schema[t] = dbSchema[t]!;
+      try {
+        const plan = planTablesIncremental(
+          schema,
+          stateSnapshot,
+          prevDbState,
+          _tableIndex,
+          dirty,
+        );
+        groups.push({
+          cell,
+          tables,
+          stmts: plan.stmts.filter((s) => s.sql !== FK_DEFER),
+          commit: () => {
+            advance(tables);
+            plan.commit();
+            log.debug(`persist: sqlite synced (${tables.join(", ")})`);
+          },
+        });
+      } catch (e) {
+        refused.add(cell);
+        _forceFullPassFor(tables);
+        log.error(
+          `persist: sqlite sync failed — ${e}\n  ${_heldSentence(cell)}`,
+        );
+        _reportPersistError(
+          new Error(
+            `${e instanceof Error ? e.message : String(e)} — ${
+              _heldSentence(cell)
+            }`,
+            { cause: e },
+          ),
+        );
+      }
+    }
+    return { groups, refused };
+  }
+
+  /** What a refused cell keeps, said the same way everywhere — and TRUE for
+   *  the mode this manager runs in, because a shutdown line quotes it. */
+  function _heldSentence(cell: string): string {
+    return _journaled
+      ? `NOTHING is written this window (journal: true): cell "${cell}"'s ` +
+        `snapshot, its tables, every other cell and the journal watermark ` +
+        `all stay at the last clean write, and the actions since stay in ` +
+        `the journal on disk, which replays them at the next boot — where ` +
+        `this is refused again until the value is fixed. This repeats on ` +
+        `every persist window.`
+      : `Cell "${cell}" is NOT on disk past its last clean write: its ` +
+        `snapshot row and its tables are held there TOGETHER, so the next ` +
+        `boot restores that older, consistent cell; every OTHER cell still ` +
+        `persists. This repeats on every persist window until the value is ` +
+        `fixed.`;
   }
 
   // Exclude sync cells from KV — they use their own SQLite op-log
@@ -657,19 +807,23 @@ export function createPersistenceManager(
     }
     : (s: Record<string, unknown>) => s;
 
-  /** The snapshot-row write for the SAME state read. `stmts` is null only for
-   *  a store that cannot express itself as SQL (there is none today) — then
-   *  `write()` is the old direct path. */
-  function _planKv(snap: Record<string, unknown>): {
-    stmts: SkvStmt[] | null;
-    write: () => Promise<boolean>;
-    commit: () => Promise<void>;
-  } | null {
+  /** What ONE state read's snapshot document holds, scanned ONCE per cycle:
+   *  every cell serialized (or found in the cache), issues and sizes reported,
+   *  and the cells JSON refuses named. Building the statements from it is
+   *  `_buildKv`, which may run more than once in a cycle (a held cell, a
+   *  retried subset) without paying serialization again. */
+  type KvScan = {
+    seq: number;
+    dbState: unknown;
+    doc: Record<string, unknown>;
+    perCell: boolean;
+    changed: Record<string, unknown>;
+    pendingSer: [string, { ref: unknown; size: number }][];
+    refused: string[];
+  };
+
+  function _scanKv(snap: Record<string, unknown>, seq: number): KvScan | null {
     if (!kvDb) return null;
-    // Journal watermark: the seq the ABOUT-TO-BE-WRITTEN snapshot
-    // reflects. Captured before the (synchronous) state read so no action can
-    // slip between; advanced only AFTER the write commits. No-op when off.
-    const seq = cfg.getJournalSeq?.() ?? 0;
     const dbState = cfg.orphanCells
       ? {
         ...cfg.orphanCells,
@@ -746,7 +900,25 @@ export function createPersistenceManager(
         _reportPersistError(err, { fatal: false });
       }
     }
+    return { seq, dbState, doc, perCell, changed, pendingSer, refused };
+  }
 
+  /** The snapshot-row write for a scanned document, with the cells in `held`
+   *  kept at their last committed value. `stmts` is null only for a store
+   *  that cannot express itself as SQL (there is none today) — then `write()`
+   *  is the old direct path. */
+  function _buildKv(scan: KvScan, held: ReadonlySet<string>): {
+    stmts: SkvStmt[] | null;
+    write: () => Promise<boolean>;
+    commit: () => Promise<void>;
+  } {
+    const kv = kvDb!;
+    const { seq, doc, perCell, dbState } = scan;
+    // The journal rule (see `_journaled`): a window that holds any cell never
+    // reaches here with the journal on, and the watermark is only ever
+    // planned for a window that writes every cell.
+    const whole = held.size === 0;
+    const pendingSer = scan.pendingSer.filter(([k]) => !held.has(k));
     if (persistMode === "multi") {
       // Multi mode: one SQLite row per top-level cell, and ONLY the changed
       // cells are rewritten (the cache above). No size ceiling — the store is
@@ -761,20 +933,27 @@ export function createPersistenceManager(
       // full prev list next to the narrowed object would delete every
       // unchanged cell's row.
       const removedKeys = prevPersistedKeys.filter((k) => !(k in doc));
-      const toWrite = perCell ? changed : doc;
-      const rows = kvDb.planSetMulti?.(persistKey, toWrite, removedKeys) ??
+      // A held cell is simply not rewritten: its row keeps the bytes of its
+      // last committed write, which is exactly the hold.
+      let toWrite = perCell ? scan.changed : doc;
+      if (perCell && held.size) {
+        toWrite = Object.fromEntries(
+          Object.entries(scan.changed).filter(([k]) => !held.has(k)),
+        );
+      }
+      const rows = kv.planSetMulti?.(persistKey, toWrite, removedKeys) ??
         null;
       const stamp = _versionStamp();
       const planned = asyncDb !== null && rows !== null;
-      const wm = planned ? _planWatermark(seq) : [];
+      const wm = planned && whole ? _planWatermark(seq) : [];
       return {
         stmts: rows === null ? null : [
           ...rows,
-          ...stamp.pairs.flatMap(([k, v]) => kvDb.planSet!(k, v)),
+          ...stamp.pairs.flatMap(([k, v]) => kv.planSet!(k, v)),
           ...wm,
         ],
         write: async () =>
-          (await kvDb!.setMulti(persistKey, toWrite, removedKeys)).ok,
+          (await kv.setMulti(persistKey, toWrite, removedKeys)).ok,
         commit: async () => {
           prevPersistedKeys = keys;
           for (const [k, e] of pendingSer) {
@@ -788,7 +967,8 @@ export function createPersistenceManager(
           if (planned) stamp.commit(); // stamped inside the transaction above
           else await _stampVersions();
           if (wm.length) _committedWm = seq;
-          cfg.onPersisted?.(seq); // watermark advances only on a committed write
+          // The watermark advances only on a committed write of EVERY cell.
+          if (whole) cfg.onPersisted?.(seq);
           log.debug(
             `persist: saved multi (${
               Object.keys(toWrite).length
@@ -801,36 +981,39 @@ export function createPersistenceManager(
     // is the whole document by contract (one row), so only the scan above
     // benefits from the cache.
     //
-    // One row means a refused cell cannot simply be left out of the write: the
-    // document REPLACES what is stored, so omitting the cell would delete its
-    // data. Each refused cell is written back as its last known good value
-    // instead — from this process's own last committed write, or read once
-    // from the store. Only a cell the store has never held is omitted, and
-    // that omits nothing.
+    // One row means a refused or held cell cannot simply be left out of the
+    // write: the document REPLACES what is stored, so omitting the cell would
+    // delete its data. Each such cell is written back as its last known good
+    // value instead — from this process's own last committed write, or read
+    // once from the store. Only a cell the store has never held is omitted,
+    // and that omits nothing.
     let toStore = dbState;
-    if (refused.length) {
-      const need = refused.filter((c) => !_lastGood.has(c));
+    const keep = perCell
+      ? [...new Set([...scan.refused, ...held])].filter((c) => c in doc)
+      : [];
+    if (keep.length) {
+      const need = keep.filter((c) => !_lastGood.has(c));
       if (need.length) throw new NeedsStoredFallback(need);
       const out = { ...doc };
-      for (const c of refused) {
+      for (const c of keep) {
         const good = _lastGood.get(c);
         if (good === NO_STORED) delete out[c];
         else out[c] = good;
       }
       toStore = out;
     }
-    const row = kvDb.planSet?.(persistKey, toStore) ?? null;
+    const row = kv.planSet?.(persistKey, toStore) ?? null;
     const stamp = _versionStamp();
     const planned = asyncDb !== null && row !== null;
-    const wm = planned ? _planWatermark(seq) : [];
+    const wm = planned && whole ? _planWatermark(seq) : [];
     return {
       stmts: row === null ? null : [
         ...row,
-        ...stamp.pairs.flatMap(([k, v]) => kvDb.planSet!(k, v)),
+        ...stamp.pairs.flatMap(([k, v]) => kv.planSet!(k, v)),
         ...wm,
       ],
       write: async () => {
-        await kvDb!.set(persistKey, toStore);
+        await kv.set(persistKey, toStore);
         return true;
       },
       commit: async () => {
@@ -841,10 +1024,36 @@ export function createPersistenceManager(
         if (planned) stamp.commit(); // stamped inside the transaction above
         else await _stampVersions();
         if (wm.length) _committedWm = seq;
-        cfg.onPersisted?.(seq); // watermark advances only on a committed write
+        // The watermark advances only on a committed write of EVERY cell.
+        if (whole) cfg.onPersisted?.(seq);
         log.debug("persist: saved single");
       },
     };
+  }
+
+  /** `_buildKv`, allowed to ask (exactly once) for what the store already
+   *  holds for a cell it must carry through untouched. Null when the plan
+   *  could not be built — already reported. */
+  async function _buildKvSeeded(
+    scan: KvScan,
+    held: ReadonlySet<string>,
+  ): Promise<ReturnType<typeof _buildKv> | null> {
+    for (let attempt = 0; attempt < 2; attempt++) {
+      try {
+        return _buildKv(scan, held);
+      } catch (e) {
+        if (e instanceof NeedsStoredFallback && attempt === 0) {
+          await _seedLastGood(e.cells);
+          continue;
+        }
+        // Not "getDBState threw" — that named one of several things this plan
+        // does, and was wrong for every failure anyone actually hit.
+        log.error(`persist: could not plan the state write — ${e}`);
+        _reportPersistError(e);
+        return null;
+      }
+    }
+    return null;
   }
 
   /** ONE persist cycle: ONE read of live state, ONE transaction.
@@ -876,10 +1085,8 @@ export function createPersistenceManager(
    *
    *  Reachable from every transient refusal SQLite has: UNIQUE, NOT NULL, a
    *  dangling `ref()`, "too many SQL variables", "database is locked",
-   *  "database or disk is full". And it is exactly the failure the comment
-   *  below claims to have closed ("the table half — whose baseline is
-   *  deliberately NOT advanced — is retried WHOLE on the next window"). It was
-   *  not retried whole; a full pass is what makes that sentence true.
+   *  "database or disk is full". A full pass is what makes "a refused table is
+   *  retried whole on the next window" true.
    *
    *  The two tests named for this could not see it: `db-dirty-tracking.test.ts`
    *  ("a refused window is retried whole") calls the planner with NO dirty
@@ -889,51 +1096,91 @@ export function createPersistenceManager(
     _dirty = null;
   }
 
+  // One log line per distinct held set — the per-cause refusal is already
+  // logged, and this repeats every window. The verdict is never deduped.
+  let _heldLogged = "";
+
   async function _persistOnce(): Promise<void> {
     _cycleError = null;
     // Before anything is planned: the version stamp rides in the SAME
     // transaction as the snapshot, and building it needs the stored map.
     await _loadStoredVersions();
+    // Journal watermark: the seq the ABOUT-TO-BE-WRITTEN snapshot reflects.
+    // Read in the same synchronous turn as the state it describes, so no
+    // action can slip between — and never re-read after an await (a stored-
+    // value fallback below awaits, and the seq it would re-read could name
+    // actions this snapshot does not hold).
+    const seq = cfg.getJournalSeq?.() ?? 0;
     const snap = getState();
 
-    let sql: { stmts: SkvStmt[]; commit: () => void } | null = null;
+    // Table plans are grouped by owning cell; a group the planner refuses is
+    // reported inside and its cell held.
+    const tables = _planSqlite(snap);
+
+    let scan: KvScan | null = null;
+    let scanFailed = false;
     try {
-      sql = _planSqlite(snap);
+      scan = _scanKv(snap, seq);
+      scanFailed = kvDb !== null && scan === null;
     } catch (e) {
-      // A row SQLite refuses must not take the state snapshot down with it —
-      // the table half fails alone and is retried, exactly as before.
-      log.error(`persist: sqlite sync failed — ${e}`);
-      _forceFullTablePass();
+      scanFailed = true;
+      log.error(`persist: could not plan the state write — ${e}`);
       _reportPersistError(e);
     }
+    // No snapshot this window means no tables either: rows written without
+    // the snapshot beside them are the torn cell.
+    if (scanFailed) {
+      _forceFullTablePass();
+      return;
+    }
 
-    let kv: ReturnType<typeof _planKv> = null;
-    // Two attempts at most: the first can ask (exactly once) for what the
-    // store already holds for a cell whose value JSON refuses, so the
-    // single-mode document can carry that cell through untouched.
-    for (let attempt = 0; attempt < 2; attempt++) {
-      try {
-        kv = _planKv(snap);
-        break;
-      } catch (e) {
-        if (e instanceof NeedsStoredFallback && attempt === 0 && kvDb) {
-          await _seedLastGood(e.cells);
-          continue;
-        }
-        // Not "getDBState threw" — that named one of several things this plan
-        // does, and was wrong for every failure anyone actually hit.
-        log.error(`persist: could not plan the state write — ${e}`);
-        _reportPersistError(e);
-        break;
+    const held = new Set<string>([
+      ...(tables?.refused ?? []),
+      ...(scan?.refused ?? []),
+    ]);
+    if (_journaled && held.size > 0) {
+      const key = [...held].sort().join(",");
+      const msg =
+        `persist: NOTHING was written this window — ${
+          [...held].map((c) => `"${c}"`).join(", ")
+        } refused (above). journal: true replays EVERY action past the ` +
+        `watermark over the whole restored state, so writing the other ` +
+        `cells would replay theirs twice: the snapshot, the tables and the ` +
+        `watermark all stay at the last clean write, and the journal on ` +
+        `disk keeps every action since for the next boot.`;
+      if (_heldLogged !== key) {
+        _heldLogged = key;
+        log.error(msg);
       }
+      // The verdict stays the CAUSE (it already carries the journal-hold
+      // sentence), so `am persist` and the shutdown line name what was
+      // refused, not only that something was.
+      if (!_cycleError) _reportPersistError(new Error(msg), { report: false });
+      _forceFullTablePass();
+      return;
+    }
+    _heldLogged = "";
+    const live = (tables?.groups ?? []).filter((g) => !held.has(g.cell));
+    for (const g of tables?.groups ?? []) {
+      if (held.has(g.cell)) _forceFullPassFor(g.tables);
+    }
+    const sql: { stmts: SkvStmt[] } | null = tables
+      ? { stmts: _withFk(live.flatMap((g) => g.stmts)) }
+      : null;
+
+    const kv = scan ? await _buildKvSeeded(scan, held) : null;
+    if (kvDb && !kv) {
+      _forceFullTablePass(); // planned tables must not land without it
+      return;
     }
 
     // The atomic path — one file, one transaction. This is the path every
     // real app takes (`kvDb` is always `sqliteKv(asyncDb)`).
     if (asyncDb && kv && kv.stmts) {
+      const verdict = _cycleError; // what planning already refused
       try {
         await asyncDb.transaction([...(sql?.stmts ?? []), ...kv.stmts]);
-        sql?.commit();
+        for (const g of live) g.commit();
         await kv.commit();
         return;
       } catch (e) {
@@ -960,30 +1207,93 @@ export function createPersistenceManager(
       // rebuilt and refused on every debounce window from then on.
       //
       // Sharing the transaction turned that from "this table stops syncing"
-      // into "the app never persists anything again" — every other cell's
-      // state, every session, every other table, gone at the next restart.
-      // The atomicity this path exists for is a guarantee about a process
-      // that DIES mid-write; it was never a reason to throw away the writes
-      // that are perfectly valid. So the snapshot goes in alone, and the
-      // table half — whose baseline is deliberately NOT advanced — is retried
-      // whole on the next window, and lands the moment the row is fixed.
+      // into "the app never persists anything again". The atomicity this path
+      // exists for is a guarantee about a CELL — its rows and its snapshot
+      // describe one moment — never a reason to throw away every other
+      // cell's perfectly valid writes. So each cell with table writes is
+      // retried as its own unit (its tables + the snapshot, the cells not yet
+      // landed held at their last write), a cell SQLite still refuses stays
+      // held — rows and snapshot together — and the rest land.
       if (!sql?.stmts.length) return; // the snapshot itself is what failed
-      try {
-        await asyncDb.transaction(kv.stmts);
-        await kv.commit();
-      } catch (e) {
-        log.error(`persist: failed to save state snapshot — ${e}`);
-        _reportPersistError(e);
+      if (_journaled) {
+        // No subset is consistent under replay (see `_journaled`).
+        const msg = `persist: NOTHING was written this window (journal: ` +
+          `true) — the snapshot, the tables and the watermark stay at the ` +
+          `last clean write, and the journal on disk keeps every action ` +
+          `since for the next boot.`;
+        log.error(msg);
+        // Set by the report just above — TS cannot see through that call.
+        const cause = (_cycleError as Error | null)?.message ?? "";
+        _reportPersistError(new Error(`${cause}\n  ${msg}`), {
+          report: false,
+        });
+        return;
       }
+      const pending = live.filter((g) => g.stmts.length);
+      const refusedNow = new Set(held);
+      let landedLast = false;
+      for (let i = 0; i < pending.length; i++) {
+        const g = pending[i]!;
+        const holdNow = new Set([
+          ...refusedNow,
+          ...pending.slice(i + 1).map((x) => x.cell),
+        ]);
+        const unit = await _buildKvSeeded(scan!, holdNow);
+        if (!unit?.stmts) {
+          refusedNow.add(g.cell);
+          landedLast = false;
+          continue;
+        }
+        try {
+          await asyncDb.transaction([..._withFk(g.stmts), ...unit.stmts]);
+          g.commit();
+          await unit.commit();
+          landedLast = true;
+        } catch (e) {
+          refusedNow.add(g.cell);
+          landedLast = false;
+          log.error(
+            `persist: cell "${g.cell}" was NOT written — ${e}${
+              refusedWriteDetail(g.stmts)
+            }\n  ${_heldSentence(g.cell)}`,
+          );
+          _reportPersistError(
+            new Error(
+              `${e instanceof Error ? e.message : String(e)} — ${
+                _heldSentence(g.cell)
+              }`,
+              { cause: e },
+            ),
+          );
+        }
+      }
+      if (!landedLast) {
+        // The last unit did not land, so the cells without tables (and every
+        // cell that did land, re-stated) still need this window's snapshot.
+        const rest = await _buildKvSeeded(scan!, refusedNow);
+        if (!rest?.stmts) return;
+        try {
+          await asyncDb.transaction(rest.stmts);
+          await rest.commit();
+        } catch (e) {
+          log.error(`persist: failed to save state snapshot — ${e}`);
+          _reportPersistError(e);
+          return;
+        }
+      }
+      // Every unit landed after all (a transient refusal): the verdict is
+      // what planning refused, not the combined attempt that was retried.
+      if (refusedNow.size === held.size) _cycleError = verdict;
       return;
     }
 
-    // Fallback for a store that cannot plan (none ships today) — the two
-    // halves as they were, each reporting its own failure.
+    // Fallback for a store that cannot plan (none ships today), and for an
+    // engine-level caller with tables but no snapshot store — the two halves
+    // as they were, each reporting its own failure.
     if (sql) {
       try {
         if (sql.stmts.length) await asyncDb!.transaction(sql.stmts);
-        sql.commit();
+        for (const g of live) g.commit();
       } catch (e) {
         log.error(
           `persist: sqlite sync failed — ${e}${

@@ -262,6 +262,8 @@ Deno.test({
       Object.keys(cli).sort(),
       [
         ".gitignore",
+        "AGENTS.md",
+        "CLAUDE.md",
         "README.md",
         "deno.json",
         "src/app.ts",
@@ -270,8 +272,10 @@ Deno.test({
       ],
       "the cli scaffold's files",
     );
-    // Commands resolve the RUNNING instance (the lock am reads), not a port.
-    assertStringIncludes(cli["src/app.ts"]!, "instances(resolveAppId())");
+    // Commands resolve the RUNNING instance (the lock am reads), not a port —
+    // under the identity the tool's OWN deno.json names, never the cwd's.
+    assertStringIncludes(cli["src/app.ts"]!, "resolveAppId(config.title)");
+    assertStringIncludes(cli["src/app.ts"]!, "instances(APP_ID)");
     for (const [rel, content] of Object.entries(cli)) {
       assert(
         !/["'`]ws:\/\/localhost:8000/.test(content),

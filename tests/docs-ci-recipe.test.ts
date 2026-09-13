@@ -54,7 +54,7 @@ Deno.test("the two-halves claims match the tasks they describe", () => {
   assertStringIncludes(tasks.check!, "am check");
   assertStringIncludes(tasks.lint!, "deno lint");
   assertStringIncludes(tasks.lint!, "aiol");
-  assertStringIncludes(DOC, "deno check src/ && am check");
+  assertStringIncludes(DOC, "deno check src/ tests/ && am check");
   assertStringIncludes(DOC, "deno lint src/ && aiol");
 });
 

@@ -315,7 +315,7 @@ function _diffNode(
   if (
     nv.tag === ErrorBoundary || nv.tag === Suspense || nv.tag === Fragment
   ) {
-    const firstDom = getDom(ov) ?? oldDom;
+    const firstDom = _liveRegionFirst(parent, ov, oldDom);
     const startAnchor = firstDom && isChildOf(firstDom, parent)
       ? firstDom.previousSibling
       : null;
@@ -377,6 +377,44 @@ function _diffNode(
   return nv._dom ?? null;
 }
 
+/** Where a region's old content starts in `parent`, for a region whose own
+ *  `_dom` may be STALE.
+ *
+ *  A container's `_dom` is refreshed only when the CONTAINER is diffed. A child
+ *  component re-renders on its own — `<Outlet>` hands its route children
+ *  through as the same vnode objects, and each one reads `routePath` itself —
+ *  and when its first node is replaced (a `null` placeholder becoming a `<p>`,
+ *  the index route giving way to `:id`) the fragment around it still points at
+ *  the detached node. The start anchor then came out null, which reads as "the
+ *  region starts at the parent's FIRST child": the fragment adopted the
+ *  `<h1>` before it as its `_dom`, and the alignment tripwire rightly said the
+ *  region "holds the wrong node at child 0" on the docs' own nested-route
+ *  example. The DOM survived only because nothing moved in that pass; a diff
+ *  that did move nodes would have walked from the wrong place.
+ *
+ *  The children know better than the container: an old child's `_dom` is
+ *  kept current by its own re-render. Only the FIRST child that occupies
+ *  nodes can say where the region starts (a bare text child has no `_dom`, so
+ *  it says nothing), and only while it is still in `parent`. A fallback
+ *  boundary's children are not realized, so it is not asked. */
+function _liveRegionFirst(
+  parent: Node,
+  ov: VNode,
+  oldDom: Node | null,
+): Node | null {
+  const own = getDom(ov);
+  if (own && isChildOf(own, parent)) return own;
+  if (ov._rendered === undefined) {
+    for (const child of ov.children) {
+      if (_domNodeCount(child) === 0) continue;
+      const d = getDom(child);
+      if (d && isChildOf(d, parent)) return d;
+      break;
+    }
+  }
+  return own ?? oldDom;
+}
+
 function _diffComponent(
   parent: Node,
   nv: VNode,
@@ -406,7 +444,18 @@ function _diffComponent(
     });
   } catch (e) {
     ctx.hooks?.abortComponent?.(nv, hookState);
-    if (e !== _LAZY_PENDING) _tagComponentError(e, nv.tag);
+    if (e !== _LAZY_PENDING) {
+      _tagComponentError(e, nv.tag);
+      // Contained (no boundary inside this re-render pass): the component's
+      // body threw BEFORE its subtree was touched, so its old output is still
+      // exactly what is on screen — keep it, and let the rest of the pass
+      // finish. Unwinding instead abandoned the parent's diff half-applied.
+      if (ctx.hooks?.isolateComponentError?.(nv, ov, e, hookState)) {
+        nv._rendered = ov._rendered;
+        nv._dom = ov._dom;
+        return nv._dom ?? null;
+      }
+    }
     throw e;
   }
   // Same rule as the create path: nothing to render is still a POSITION.

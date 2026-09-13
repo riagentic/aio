@@ -955,7 +955,7 @@ export async function awaitPredecessor(
     await new Promise((r) => setTimeout(r, 100));
   }
   log.warn(
-    `[aio] update: previous instance (pid ${pid}) has not exited after ` +
+    `update: previous instance (pid ${pid}) has not exited after ` +
       `${timeout / 1000}s — starting anyway`,
   );
 }

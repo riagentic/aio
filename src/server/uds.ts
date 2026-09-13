@@ -34,8 +34,8 @@ const _broadcastRound = degraded("uds:broadcast-round");
  *  connection belongs to. */
 
 import {
+  _clearClientDegraded,
   _recordClientDegraded,
-  type DegradedChange,
 } from "../diagnostics/degraded.ts";
 import {
   _isFrameworkInternalActionType,
@@ -165,6 +165,14 @@ function _settlePendingForGone(
   pending.resolve({
     error: `client ${client.index} disconnected before answering`,
   });
+}
+
+/** A peer left the roster: what it reported through `cdiag` is no longer live
+ *  signal. The WS close handler always did this; this transport never did, so
+ *  a closed Electron window's report stayed on /__aio/health as "degraded"
+ *  until the process restarted. */
+function _forgetClientDegraded(client: UDSClient | undefined): void {
+  if (client) _clearClientDegraded(client.id);
 }
 
 export type UDSHandle = {
@@ -395,6 +403,7 @@ export function createUDSListener(
       _writeDepth.delete(conn);
       connSet.delete(conn);
       _settlePendingForGone(pendingState, clientMap.get(conn));
+      _forgetClientDegraded(clientMap.get(conn));
       clientMap.delete(conn);
       try {
         conn.close();
@@ -449,8 +458,11 @@ export function createUDSListener(
       // 83,000 rows in a cell, reached a 17 GB heap, and wrote "it is a bug aio
       // makes easy and gives no feedback about". The feedback existed and was
       // blind on their transport.
+      // `getUIState` is the latch owner, as on the WS path: one warning per
+      // cell per APP, so a second app in the process still hears about its own
+      // oversized cell after the first app's same-named one was reported.
       const snapshot = uiState;
-      warnBigFullState(json, () => snapshot);
+      warnBigFullState(json, () => snapshot, getUIState);
       return json;
     } catch (e) {
       // NOT a log line only. The caller's response to `undefined` is
@@ -837,7 +849,10 @@ function _handleUDSConn(
               // broadcasts it will never render. `clientMap` keys BOTH the
               // roster and the broadcast loop, so leaving it is the whole fix.
               const kind = (frame.d as { kind?: string } | undefined)?.kind;
-              if (kind === "control") clientMap.delete(conn);
+              if (kind === "control") {
+                _forgetClientDegraded(clientMap.get(conn));
+                clientMap.delete(conn);
+              }
               continue;
             }
             case "tt-cmd": {
@@ -901,25 +916,19 @@ function _handleUDSConn(
               continue;
             }
             case "cdiag": {
-              // A client's degraded() escalation — mirrors server-ws.ts.
-              // Electron speaks UDS, so a health escalation from its renderer
-              // MUST land here too, or /__aio/health reports "healthy" while
-              // the window's subsystem is failing forever (the exact silent
-              // fork the cdiag frame exists to close). Values are capped
-              // inside _recordClientDegraded; malformed frames are dropped.
+              // A client's degraded() escalation. Electron speaks UDS, so a
+              // health escalation from its renderer MUST land here too, or
+              // /__aio/health reports "healthy" while the window's subsystem
+              // is failing forever (the exact silent fork the cdiag frame
+              // exists to close). `_recordClientDegraded` is the one
+              // definition, shared with server-ws.ts — this router used to
+              // keep its own copy, which stored `failures: 1e400` (Infinity)
+              // as fact and never named the peer that sent it.
               const client = clientMap.get(conn);
-              const d = frame.d as DegradedChange | undefined;
-              if (
-                client && d && typeof d.name === "string" &&
-                d.name.length > 0 &&
-                (d.kind === "down" || d.kind === "up")
-              ) {
-                _recordClientDegraded(client.id, {
-                  name: d.name,
-                  kind: d.kind,
-                  failures: typeof d.failures === "number" ? d.failures : 0,
-                  since: typeof d.since === "number" ? d.since : Date.now(),
-                  lastError: typeof d.lastError === "string" ? d.lastError : "",
+              if (client) {
+                _recordClientDegraded(client.id, frame.d, {
+                  transport: "uds",
+                  index: client.index,
                 });
               }
               continue;
@@ -1202,6 +1211,7 @@ function _handleUDSConn(
     } catch { /* stream may be errored (AIO-149) */ }
     connections.delete(conn);
     _settlePendingForGone(pendingState, clientMap.get(conn));
+    _forgetClientDegraded(clientMap.get(conn));
     clientMap.delete(conn);
     try {
       conn.close();

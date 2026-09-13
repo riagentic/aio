@@ -9,6 +9,7 @@ import {
 import { join } from "@std/path";
 import { clearPairing, generatePin } from "../src/server/pairing.ts";
 import { freePort } from "../src/testing/server-test.ts";
+import { dropTempDir, tempDir } from "../src/testing/temp-dir.ts";
 
 const TEST_PORT = freePort();
 const TEST_PORT_7 = freePort();
@@ -16,7 +17,7 @@ const TEST_PORT_8 = freePort();
 
 // Use prod: true to skip file watcher (avoids resource leaks in tests)
 async function withServer(fn: (url: string) => Promise<void>): Promise<void> {
-  const dir = await Deno.makeTempDir();
+  const dir = await tempDir("aio-server-");
   await Deno.writeTextFile(join(dir, "hello.txt"), "world");
   await Deno.mkdir(join(dir, "dist"), { recursive: true });
   await Deno.writeTextFile(
@@ -39,7 +40,7 @@ async function withServer(fn: (url: string) => Promise<void>): Promise<void> {
   } finally {
     await server.shutdown();
   }
-  await Deno.remove(dir, { recursive: true });
+  await dropTempDir(dir);
 }
 
 Deno.test("server: index returns HTML with title", async () => {
@@ -109,7 +110,7 @@ Deno.test("server: path traversal normalized by URL parser returns app shell", a
 const META_PORT = freePort();
 
 Deno.test("server: HTML includes aio:width meta tag when configured", async () => {
-  const dir = await Deno.makeTempDir();
+  const dir = await tempDir("aio-server-");
   await Deno.mkdir(join(dir, "dist"), { recursive: true });
   await Deno.writeTextFile(
     join(dir, "dist", "app.js"),
@@ -137,7 +138,7 @@ Deno.test("server: HTML includes aio:width meta tag when configured", async () =
   } finally {
     await server.shutdown();
   }
-  await Deno.remove(dir, { recursive: true });
+  await dropTempDir(dir);
 });
 
 // ── Expose / token auth tests ──────────────────────────────────
@@ -147,7 +148,7 @@ const EXPOSE_PORT = freePort();
 async function withExposedServer(
   fn: (url: string, token: string) => Promise<void>,
 ): Promise<void> {
-  const dir = await Deno.makeTempDir();
+  const dir = await tempDir("aio-server-");
   await Deno.mkdir(join(dir, "dist"), { recursive: true });
   await Deno.writeTextFile(
     join(dir, "dist", "app.js"),
@@ -172,7 +173,7 @@ async function withExposedServer(
   } finally {
     await server.shutdown();
   }
-  await Deno.remove(dir, { recursive: true });
+  await dropTempDir(dir);
 }
 
 Deno.test("server: expose rejects request without token", async () => {
@@ -230,7 +231,7 @@ Deno.test("server: expose rejects wrong token with 401", async () => {
 
 Deno.test("server: /__aio/pair returns the profile for a valid PIN (bypasses key gate)", async () => {
   await withExposedServer(async (url, token) => {
-    const pin = generatePin();
+    const pin = generatePin(token);
     try {
       // No token on the request — the whole point of pairing is to obtain it.
       const resp = await fetch(`${url}/__aio/pair`, {
@@ -251,8 +252,8 @@ Deno.test("server: /__aio/pair returns the profile for a valid PIN (bypasses key
 });
 
 Deno.test("server: /__aio/pair rejects a wrong PIN with 401", async () => {
-  await withExposedServer(async (url) => {
-    generatePin();
+  await withExposedServer(async (url, token) => {
+    generatePin(token);
     try {
       const resp = await fetch(`${url}/__aio/pair`, {
         method: "POST",
@@ -268,8 +269,8 @@ Deno.test("server: /__aio/pair rejects a wrong PIN with 401", async () => {
 });
 
 Deno.test("server: /__aio/pair rejects a malformed body with 400", async () => {
-  await withExposedServer(async (url) => {
-    generatePin();
+  await withExposedServer(async (url, token) => {
+    generatePin(token);
     try {
       const resp = await fetch(`${url}/__aio/pair`, {
         method: "POST",
@@ -333,7 +334,7 @@ Deno.test("server: WS rejects non-localhost origin", async () => {
 const ORIGINS_PORT = freePort();
 
 Deno.test("server: allowedOrigins accepts custom origin", async () => {
-  const dir = await Deno.makeTempDir();
+  const dir = await tempDir("aio-server-");
   await Deno.mkdir(join(dir, "dist"), { recursive: true });
   await Deno.writeTextFile(
     join(dir, "dist", "app.js"),
@@ -380,7 +381,7 @@ Deno.test("server: allowedOrigins accepts custom origin", async () => {
   } finally {
     await server.shutdown();
   }
-  await Deno.remove(dir, { recursive: true });
+  await dropTempDir(dir);
 });
 
 // ── Users (multi-user) auth tests ──────────────────────────────────
@@ -395,7 +396,7 @@ const TEST_USERS: Record<string, { id: string; role: string }> = {
 async function withUsersServer(
   fn: (url: string) => Promise<void>,
 ): Promise<void> {
-  const dir = await Deno.makeTempDir();
+  const dir = await tempDir("aio-server-");
   await Deno.mkdir(join(dir, "dist"), { recursive: true });
   await Deno.writeTextFile(
     join(dir, "dist", "app.js"),
@@ -418,7 +419,7 @@ async function withUsersServer(
   } finally {
     await server.shutdown();
   }
-  await Deno.remove(dir, { recursive: true });
+  await dropTempDir(dir);
 }
 
 Deno.test("server: users auth — rejects missing token with 401", async () => {
@@ -486,7 +487,7 @@ Deno.test("server: a foreign IPv6 loopback origin is refused, allowlisted is not
     await resp.body?.cancel();
   });
 
-  const dir = await Deno.makeTempDir();
+  const dir = await tempDir("aio-server-");
   const port = freePort();
   const server = createServer({
     port,
@@ -508,7 +509,7 @@ Deno.test("server: a foreign IPv6 loopback origin is refused, allowlisted is not
     await resp.body?.cancel();
   } finally {
     await server.shutdown();
-    await Deno.remove(dir, { recursive: true });
+    await dropTempDir(dir);
   }
 });
 
@@ -541,7 +542,7 @@ Deno.test("timingSafeEqual: different lengths return false", () => {
 const CSRF_PORT = freePort();
 
 Deno.test("server: POST /__aio/snapshot without X-AIO header returns 403", async () => {
-  const dir = await Deno.makeTempDir();
+  const dir = await tempDir("aio-server-");
   await Deno.mkdir(join(dir, "dist"), { recursive: true });
   await Deno.writeTextFile(
     join(dir, "dist", "app.js"),
@@ -581,7 +582,7 @@ Deno.test("server: POST /__aio/snapshot without X-AIO header returns 403", async
     await resp2.body?.cancel();
   } finally {
     await server.shutdown();
-    await Deno.remove(dir, { recursive: true });
+    await dropTempDir(dir);
   }
 });
 
@@ -590,7 +591,7 @@ Deno.test("server: POST /__aio/snapshot without X-AIO header returns 403", async
 const RATE_PORT = freePort();
 
 Deno.test("server: WS rate limiting drops messages over 100/sec", async () => {
-  const dir = await Deno.makeTempDir();
+  const dir = await tempDir("aio-server-");
   await Deno.mkdir(join(dir, "dist"), { recursive: true });
   await Deno.writeTextFile(
     join(dir, "dist", "app.js"),
@@ -641,7 +642,7 @@ Deno.test("server: WS rate limiting drops messages over 100/sec", async () => {
     ws.close();
   } finally {
     await server.shutdown();
-    await Deno.remove(dir, { recursive: true });
+    await dropTempDir(dir);
   }
 });
 
@@ -650,7 +651,7 @@ Deno.test("server: WS rate limiting drops messages over 100/sec", async () => {
 const CUSTOM_RATE_PORT = freePort();
 
 Deno.test("server: wsLimits.messagesPerSec overrides the default rate cap", async () => {
-  const dir = await Deno.makeTempDir();
+  const dir = await tempDir("aio-server-");
   await Deno.mkdir(join(dir, "dist"), { recursive: true });
   await Deno.writeTextFile(
     join(dir, "dist", "app.js"),
@@ -693,7 +694,7 @@ Deno.test("server: wsLimits.messagesPerSec overrides the default rate cap", asyn
     ws.close();
   } finally {
     await server.shutdown();
-    await Deno.remove(dir, { recursive: true });
+    await dropTempDir(dir);
   }
 });
 
@@ -704,7 +705,7 @@ const TROJAN_PORT = freePort();
 async function withTrojanServer(
   fn: (url: string) => Promise<void>,
 ): Promise<void> {
-  const dir = await Deno.makeTempDir();
+  const dir = await tempDir("aio-server-");
   await Deno.writeTextFile(join(dir, "App.tsx"), "export default () => null");
   let appState = { count: 42, name: "test" };
   const dispatched: unknown[] = [];
@@ -739,7 +740,7 @@ async function withTrojanServer(
     await fn(`http://127.0.0.1:${TROJAN_PORT}`);
   } finally {
     await server.shutdown();
-    await Deno.remove(dir, { recursive: true });
+    await dropTempDir(dir);
   }
 }
 
@@ -791,7 +792,7 @@ Deno.test("trojan: same-machine guard — loopback + UDS local, everything else 
 Deno.test("trojan: DEV-ONLY — prod build serves no trojan route even when wired", async () => {
   // The trojan reads full state, runs SQL, and loads snapshots. A release
   // build must not expose it, regardless of `trojan:` being configured.
-  const dir = await Deno.makeTempDir();
+  const dir = await tempDir("aio-server-");
   await Deno.writeTextFile(join(dir, "App.tsx"), "export default () => null");
   await Deno.mkdir(join(dir, "dist"), { recursive: true });
   await Deno.writeTextFile(
@@ -850,7 +851,7 @@ Deno.test("trojan: DEV-ONLY — prod build serves no trojan route even when wire
     }
   } finally {
     await server.shutdown();
-    await Deno.remove(dir, { recursive: true });
+    await dropTempDir(dir);
   }
 });
 
@@ -1019,7 +1020,7 @@ const TT_PORT_2 = freePort();
 const TT_PORT_5 = freePort();
 
 Deno.test("trojan: POST /tt routes undo command to onTTCommand", async () => {
-  const dir = await Deno.makeTempDir();
+  const dir = await tempDir("aio-server-");
   await Deno.writeTextFile(join(dir, "App.tsx"), "export default () => null");
   const ttCmds: { cmd: string; arg?: number }[] = [];
   const server = createServer({
@@ -1065,7 +1066,7 @@ Deno.test("trojan: POST /tt routes undo command to onTTCommand", async () => {
     assertEquals(ttCmds[1]!.arg, 3);
   } finally {
     await server.shutdown();
-    await Deno.remove(dir, { recursive: true });
+    await dropTempDir(dir);
   }
 });
 
@@ -1084,7 +1085,7 @@ Deno.test("trojan: POST /tt without onTTCommand returns 501", async () => {
 // ── SQL read-only enforcement ──────────────────────────────
 
 Deno.test("trojan: POST /sql blocks INSERT", async () => {
-  const dir = await Deno.makeTempDir();
+  const dir = await tempDir("aio-server-");
   await Deno.writeTextFile(join(dir, "App.tsx"), "export default () => null");
   const server = createServer({
     port: TT_PORT_1,
@@ -1210,14 +1211,14 @@ Deno.test("trojan: POST /sql blocks INSERT", async () => {
     await respHidden.body?.cancel();
   } finally {
     await server.shutdown();
-    await Deno.remove(dir, { recursive: true });
+    await dropTempDir(dir);
   }
 });
 
 // ── Identity provenance: network actions can't spoof _user ────
 
 Deno.test("security: a network action cannot spoof the _user identity", async () => {
-  const dir = await Deno.makeTempDir();
+  const dir = await tempDir("aio-server-");
   await Deno.writeTextFile(join(dir, "App.tsx"), "export default () => null");
   await Deno.mkdir(join(dir, "dist"), { recursive: true });
   await Deno.writeTextFile(
@@ -1290,14 +1291,14 @@ Deno.test("security: a network action cannot spoof the _user identity", async ()
     );
   } finally {
     await server.shutdown();
-    await Deno.remove(dir, { recursive: true });
+    await dropTempDir(dir);
   }
 });
 
 // ── POST /shutdown triggers callback ─────────────────────────
 
 Deno.test("trojan: POST /shutdown returns ok and triggers callback", async () => {
-  const dir = await Deno.makeTempDir();
+  const dir = await tempDir("aio-server-");
   await Deno.writeTextFile(join(dir, "App.tsx"), "export default () => null");
   let shutdownCalled = false;
   const server = createServer({
@@ -1331,7 +1332,7 @@ Deno.test("trojan: POST /shutdown returns ok and triggers callback", async () =>
     assertEquals(shutdownCalled, true);
   } finally {
     await server.shutdown();
-    await Deno.remove(dir, { recursive: true });
+    await dropTempDir(dir);
   }
 });
 
@@ -1396,7 +1397,7 @@ const MAX_CONN_PORT_1 = freePort();
 const MAX_CONN_PORT_2 = freePort();
 
 Deno.test("server: maxConnections — 503 when limit exceeded", async () => {
-  const dir = await Deno.makeTempDir();
+  const dir = await tempDir("aio-server-");
   await Deno.mkdir(join(dir, "dist"), { recursive: true });
   await Deno.writeTextFile(
     join(dir, "dist", "app.js"),
@@ -1440,14 +1441,14 @@ Deno.test("server: maxConnections — 503 when limit exceeded", async () => {
   } finally {
     ws1.close();
     await server.shutdown();
-    await Deno.remove(dir, { recursive: true });
+    await dropTempDir(dir);
   }
 });
 
 // ── clientCount reflects live connections ────────────────────
 
 Deno.test("server: clientCount is 0 before any connection", async () => {
-  const dir = await Deno.makeTempDir();
+  const dir = await tempDir("aio-server-");
   await Deno.mkdir(join(dir, "dist"), { recursive: true });
   await Deno.writeTextFile(
     join(dir, "dist", "app.js"),
@@ -1477,7 +1478,7 @@ Deno.test("server: clientCount is 0 before any connection", async () => {
     assertEquals(server.clientCount(), 0);
   } finally {
     await server.shutdown();
-    await Deno.remove(dir, { recursive: true });
+    await dropTempDir(dir);
   }
 });
 
@@ -1516,7 +1517,7 @@ Deno.test("server: text file served with correct Content-Type", async () => {
 
 Deno.test("server: WS invalid JSON dropped — dispatch not called", async () => {
   let dispatched = false;
-  const dir = await Deno.makeTempDir();
+  const dir = await tempDir("aio-server-");
   await Deno.mkdir(join(dir, "dist"), { recursive: true });
   await Deno.writeTextFile(
     join(dir, "dist", "app.js"),
@@ -1561,7 +1562,7 @@ Deno.test("server: WS invalid JSON dropped — dispatch not called", async () =>
     ws.close();
   } finally {
     await server.shutdown();
-    await Deno.remove(dir, { recursive: true });
+    await dropTempDir(dir);
   }
 });
 
@@ -1598,7 +1599,7 @@ const DEV_UI_PORT = freePort();
 async function withDevServer(
   fn: (url: string) => Promise<void>,
 ): Promise<void> {
-  const dir = await Deno.makeTempDir();
+  const dir = await tempDir("aio-server-");
   await Deno.writeTextFile(
     join(dir, "App.tsx"),
     "export default function App() { return null }",
@@ -1618,7 +1619,7 @@ async function withDevServer(
     await fn(`http://127.0.0.1:${DEV_UI_PORT}`);
   } finally {
     await server.shutdown();
-    await Deno.remove(dir, { recursive: true });
+    await dropTempDir(dir);
   }
 }
 
@@ -1628,7 +1629,7 @@ async function withDevServer(
 Deno.test({
   name: "dev: UI endpoints — ui.js, import map, App.tsx, error, client-error",
   fn: async () => {
-    const dir = await Deno.makeTempDir();
+    const dir = await tempDir("aio-server-");
     // App that imports react — common case where npm: specifier could leak.
     //
     // The mapping is DECLARED, and the import is USED. Both matter now that
@@ -1809,7 +1810,7 @@ Deno.test({
       }
     } finally {
       await server.shutdown();
-      await Deno.remove(dir, { recursive: true });
+      await dropTempDir(dir);
     }
   },
 });
@@ -1959,7 +1960,7 @@ Deno.test("server: /__aio/metrics serves Prometheus text", async () => {
 });
 
 Deno.test("server: custom routes — exact, wildcard, reserved namespaces", async () => {
-  const dir = await Deno.makeTempDir();
+  const dir = await tempDir("aio-server-");
   await Deno.mkdir(join(dir, "dist"), { recursive: true });
   await Deno.writeTextFile(
     join(dir, "dist", "app.js"),
@@ -2001,11 +2002,11 @@ Deno.test("server: custom routes — exact, wildcard, reserved namespaces", asyn
   } finally {
     await server.shutdown();
   }
-  await Deno.remove(dir, { recursive: true });
+  await dropTempDir(dir);
 });
 
 Deno.test("server: reserved route namespaces throw at boot", async () => {
-  const dir = await Deno.makeTempDir();
+  const dir = await tempDir("aio-server-");
   let threw = "";
   try {
     createServer({
@@ -2022,7 +2023,7 @@ Deno.test("server: reserved route namespaces throw at boot", async () => {
     threw = String(e);
   }
   assertStringIncludes(threw, "reserved");
-  await Deno.remove(dir, { recursive: true });
+  await dropTempDir(dir);
 });
 
 Deno.test("buildBrowserImportMap: framework runtime dep immer always resolves", () => {

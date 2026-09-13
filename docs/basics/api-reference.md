@@ -85,7 +85,7 @@ Everything below is the full reference, organized by category.
 | Key               | Description                                                                                                                                                                                                                                                     |
 | ----------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `freezeState`     | Deep-freeze committed state after every reduce so an illegal mutation throws (default: `true` in dev, `false` in prod)                                                                                                                                          |
-| `guardDispatches` | Supervised runtime: an unhandled promise rejection is logged, checkpointed and the process SURVIVES (default `true` since alpha61; `false` = fail-fast)                                                                                                         |
+| `guardDispatches` | Supervised runtime: an unhandled promise rejection is logged, checkpointed and the process SURVIVES (default `true` since alpha61; `false` = fail-fast). A rejected top-level `await` of the script itself still exits 1                                        |
 | `childWindows`    | Let the Electron client open CHILD windows to arbitrary http(s) URLs via `__aioIPC.openWindow` (default `false` -- real attack surface, opt in)                                                                                                                 |
 | `refusalsReject`  | A write the reduce REFUSED (a `validate` hook) rejects `await cell.method()` in process, the way the wire already answers it (`ACTION_REFUSED`). Default `false`, because it changes what an in-process `await` does; dev warns once per method while it is off |
 
@@ -143,7 +143,7 @@ Method-native workflow tools — see
 | `methods`               | Sync/async methods -- `(s, ...args) => void \| Promise`                                                                                                              |
 | `selectors`             | Derived state -- `{ getName: s => s.name }` (auto-scoped)                                                                                                            |
 | `cancelOn`              | Abort triggers per async method -- `{ method: [actions] }`                                                                                                           |
-| `listensTo`             | Observed foreign actions -- `[otherCell.action]`                                                                                                                     |
+| `listensTo`             | Run a sync method on foreign actions -- `{ onX: otherCell.method }` (the array form was REMOVED in alpha70: dev and every test throw)                                |
 | `validate`              | State validator -- `(s) => true \| string`                                                                                                                           |
 | `persist`               | Persistence config -- `{ exclude: ['tempCache'] }`                                                                                                                   |
 | `visible`               | READ side: what a client may see -- `"all" \| "none" \| { include \| exclude, forUser }` ([visibility](../state/cell-visibility.md))                                 |
@@ -338,10 +338,10 @@ the pre-boot fallback used before the home is resolved.
 
 ## Utility
 
-| API                   | Description                                                      |
-| --------------------- | ---------------------------------------------------------------- |
-| `VERSION`             | Framework version string                                         |
-| `parseCli(args)`      | Parse CLI flags                                                  |
-| `checkCells(cells)`   | Validate cell definitions (its `lint` alias went out in alpha70) |
-| `instances()`         | List running aio instances                                       |
-| `resolveAppId(appId)` | Canonical app slug from the appId string (throws if missing)     |
+| API                                  | Description                                                                                                                                                                                                                        |
+| ------------------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `VERSION`                            | Framework version string                                                                                                                                                                                                           |
+| `parseCli(args)`                     | Parse CLI flags                                                                                                                                                                                                                    |
+| `checkCells(state, config, baseDir)` | Validate an app's configuration without booting — the same findings `aio.run()` prints at boot. NOT `checkCells(cells)`: the first argument is the initial STATE, the second the run config (its `lint` alias went out in alpha70) |
+| `instances()`                        | List running aio instances                                                                                                                                                                                                         |
+| `resolveAppId(appId)`                | Canonical app slug from the appId string (throws if missing)                                                                                                                                                                       |

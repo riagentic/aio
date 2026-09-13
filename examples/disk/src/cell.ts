@@ -6,7 +6,13 @@
 // exists is the dynamic `./disk.server.ts` import (docs/build/imports.md §2).
 import { cell, type MethodDraftMeta } from "aio";
 
-export type Entry = { name: string; path: string; bytes: number };
+/** `partial`: that folder's own walk hit the budget — `bytes` is a floor. */
+export type Entry = {
+  name: string;
+  path: string;
+  bytes: number;
+  partial: boolean;
+};
 
 type DiskState = {
   path: string;
@@ -16,6 +22,9 @@ type DiskState = {
   /** True when the scan hit its budget (see `ScanLimits` in disk.server.ts)
    *  and these numbers are a floor, not a total. Shown, never swallowed. */
   partial: boolean;
+  /** Children the scan never reached. `more()` goes on from there — a capped
+   *  answer the user cannot get past is only a politer kind of wrong. */
+  hasMore: boolean;
 };
 
 export const disk = cell("disk", {
@@ -40,12 +49,17 @@ export const disk = cell("disk", {
     scanning: false,
     error: null as string | null,
     partial: false,
+    hasMore: false,
   },
 
   // "self": opening a new folder aborts the scan still running — newest wins.
   // "disk:stop" is the Cancel button. Both are plain strings here because a
-  // cell's own bound methods don't exist yet inside its own literal.
-  cancelOn: { open: ["self", "disk:stop"] },
+  // cell's own bound methods don't exist yet inside its own literal. `more`
+  // goes on with the CURRENT folder, so opening another one ends it too.
+  cancelOn: {
+    open: ["self", "disk:stop", "disk:more"],
+    more: ["self", "disk:stop", "disk:open"],
+  },
 
   // A filesystem walk is long-running BY NATURE, so say it here, on the
   // method, where a rename follows it and `cell()` checks it against the
@@ -55,7 +69,7 @@ export const disk = cell("disk", {
   // and two field reports copied it into their apps (one of them accumulating
   // three entries one runtime failure at a time, on a project started AFTER
   // `long:` existed). Examples are what people copy.
-  long: ["open"],
+  long: ["open", "more"],
 
   methods: {
     /** Scan a folder. Minutes-long on a big tree — hence everything below.
@@ -64,9 +78,21 @@ export const disk = cell("disk", {
      *  cancelled or superseded call's buffered writes are discarded wholesale:
      *  no stale write can land, by construction, and the old "check the signal,
      *  then carefully un-write" dance is gone. */
-    async open(s: DiskState & MethodDraftMeta, path?: string) {
+    //
+    // `= undefined` rather than `path?:`: a TS `?` is erased at runtime, so
+    // aio's arity tripwire counts the parameter and warns on every call that
+    // omits it. A default is what makes the optionality visible there — which
+    // is exactly what that warning asks for.
+    async open(
+      s: DiskState & MethodDraftMeta,
+      path: string | undefined = undefined,
+    ) {
       const io = await import("./disk.server.ts");
-      const target = path ?? io.homeDir();
+      // `||`, not `??`. Rescan passes the CURRENT path, which is `""` before
+      // the first scan — and `??` lets an empty string through, so the button
+      // answered `readdir '': No such file or directory` instead of opening
+      // the home directory. An empty string is not a path.
+      const target = path || io.homeDir();
 
       // Already cancelled or superseded during the import await? Then this
       // call owns nothing — publishing its spinner would overwrite the state
@@ -79,6 +105,7 @@ export const disk = cell("disk", {
       s.entries = [];
       s.error = null;
       s.partial = false;
+      s.hasMore = false;
       s.scanning = true;
       s.$commit();
 
@@ -93,6 +120,41 @@ export const disk = cell("disk", {
         // a floor as if it were a total — is the quiet failure this whole
         // example is a lesson against.
         s.partial = r.partial;
+        s.hasMore = r.more;
+      } catch (e) {
+        if (s.$signal.aborted) return;
+        s.error = e instanceof Error ? e.message : String(e);
+      }
+      s.scanning = false;
+    },
+
+    /** "Scan more": size the children the last scan did not reach and ADD
+     *  them. Rescanning cannot do this — it repeats the same walk and stops at
+     *  the same child — so the folders already listed are handed back as the
+     *  names to skip. */
+    async more(s: DiskState & MethodDraftMeta<DiskState>) {
+      const io = await import("./disk.server.ts");
+      // Read through `$live`: under `transaction: true` a plain `s.x` read is
+      // pinned at entry, and this one is decided AFTER the import await — a
+      // pinned read of `scanning` there would be a conflict waiting for the
+      // first click that overlaps a scan.
+      const now = s.$live;
+      if (s.$signal.aborted || !now.hasMore || now.scanning) return;
+      const path = now.path;
+      const listed = now.entries;
+      s.scanning = true;
+      s.$commit();
+      try {
+        const r = await io.scanFolders(
+          path,
+          s.$signal,
+          io.DEFAULT_LIMITS,
+          new Set(listed.map((e) => e.name)),
+        );
+        if (s.$signal.aborted) return;
+        s.entries = [...listed, ...r.entries].sort((a, b) => b.bytes - a.bytes);
+        s.hasMore = r.more;
+        s.partial = r.more || s.entries.some((e) => e.partial);
       } catch (e) {
         if (s.$signal.aborted) return;
         s.error = e instanceof Error ? e.message : String(e);

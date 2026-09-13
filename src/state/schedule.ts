@@ -9,6 +9,9 @@ import { selfMethodOf } from "./self.ts";
 import { removalOf, retiredSpellingLine } from "./removals-core.ts";
 import { teachableError } from "../diagnostics/error.ts";
 import { nearestOf } from "./cell-helpers.ts";
+import { callTimeoutFor, registerCall, resolveCall } from "./cell-impl.ts";
+import { pendingCount } from "../protocol/pending-calls.ts";
+import { randomUuid } from "../rand.ts";
 
 // ── Types ────────────────────────────────────────────────────────────
 
@@ -45,6 +48,38 @@ export type ScheduleEffect =
     action: { type: string; payload?: unknown };
   }
   | { type: "__schedule"; kind: "cancel"; id: string };
+
+/** Which cell issued a schedule effect — recorded by the reduce that emitted
+ *  it, read by the manager that arms it.
+ *
+ *  Disabling a cell cancels its schedules, and that used to be decided by the
+ *  schedule's ID alone — `cancelByPrefix("poller")` stopped `poller:poll` and
+ *  kept `poll` ticking. Nothing makes a cell prefix its ids, and
+ *  docs/state/scheduling.md writes them bare (`schedule.every("poll", …)`), so
+ *  the documented spelling survived the disable that docs/state/lifecycle.md
+ *  says cancels it. The id is the app's; who issued it is the framework's to
+ *  record.
+ *
+ *  A side table keyed by the effect OBJECT, not a field on it: an effect is
+ *  something a test reads (`t.getEffects()`) and may compare whole, so its
+ *  shape stays exactly what `schedule.every(...)` built. Every copy the
+ *  framework makes on the way to the manager carries the entry across
+ *  ({@linkcode carryScheduleOwner}). */
+const _scheduleOwners = new WeakMap<object, string>();
+
+/** Record `owner` as the issuer of `effect`. @internal */
+export function noteScheduleOwner(effect: unknown, owner: string): void {
+  if (isScheduleEffect(effect)) _scheduleOwners.set(effect, owner);
+}
+
+/** Copy the issuer of `from` (if recorded) onto its copy `to`. @internal */
+export function carryScheduleOwner(from: unknown, to: unknown): void {
+  if (from === null || typeof from !== "object") return;
+  const owner = _scheduleOwners.get(from);
+  if (owner !== undefined && to !== null && typeof to === "object") {
+    _scheduleOwners.set(to, owner);
+  }
+}
 
 /** Config-level schedule definition — passed to aio.run({ schedules: [...] }) */
 export type ScheduleDef =
@@ -342,6 +377,114 @@ const EVERY_CEILING_HINT =
   `longer to 1ms — a hot loop, not a monthly job). For cadences past ` +
   `24.85 days use cron ("0 9 1 * *"), or at/after re-armed from the action.`;
 
+// ── Call-site checks — ONE home, two callers ───────────────────────
+
+/** The checks every `schedule.*` builder runs on its own arguments, and the
+ *  manager runs again on whatever effect reaches it.
+ *
+ *  They used to live in the manager ONLY. The manager runs when the effect is
+ *  EXECUTED — after the method has returned, its state committed and its call
+ *  answered `ok` — so `schedule.cron("c", "0 0 30 2 *", …)` in a method
+ *  passed `await cell.method()` and `am dispatch` alike and surfaced later as
+ *  an `EFFECT_ERROR` on `__schedule`, naming no line of the app. The docs
+ *  promised the opposite: "a typo should fail where it is written". A builder
+ *  is where it is written — so the builder throws, inside the method, and the
+ *  call that wrote the typo is the call that fails. The manager keeps the same
+ *  checks for effects built by hand and for `aio.run({ schedules })`, in the
+ *  same words. Pure and Deno-free: this file ships to the browser. */
+function _checkId(id: unknown): void {
+  if (typeof id !== "string" || !id || !VALID_SCHEDULE_ID.test(id)) {
+    throw new Error(
+      `invalid schedule id: ${
+        JSON.stringify(id)
+      } — use alphanumeric, hyphens, colons, dots`,
+    );
+  }
+}
+
+/** A duration that is not a number slips past every comparison below —
+ *  `"1s" < 10` is false, `Number.isFinite("1s")` reports only the coerced
+ *  NaN, and `setInterval` turns the string into a 1ms hot loop. The type
+ *  says `number`, but the dev server is transpile-only: a string reaches here
+ *  from any app that never ran `deno check`, including the `schedules:`
+ *  entries the framework arms itself at boot. aio's CLI does take `60s`
+ *  spellings (`am cost --window=60s`), so reaching for one here is the
+ *  natural mistake — name the accepted form instead of reporting the
+ *  coercion. */
+function _requireMs(api: string, id: string, ms: unknown): void {
+  if (typeof ms !== "number") {
+    throw new Error(
+      `schedule.${api} '${id}': ms is a plain NUMBER of milliseconds, got ` +
+        `${typeof ms} ${JSON.stringify(ms)} — write 300_000, not "5m"`,
+    );
+  }
+}
+
+function _checkAfterMs(id: string, ms: unknown): void {
+  _requireMs("after", id, ms);
+  // 0 is a real delay ("next tick" — schedule.next arms it); negatives are a
+  // caller bug. The old floor of 1 forced `next` to carry a 1ms sentinel.
+  if ((ms as number) < 0) {
+    throw new Error(`schedule.after '${id}': ms must be >= 0, got ${ms}`); // AIO-252
+  }
+  if (!Number.isFinite(ms)) {
+    throw new Error(`schedule.after '${id}': ms must be finite, got ${ms}`);
+  }
+}
+
+function _checkEveryMs(id: string, ms: unknown): void {
+  _requireMs("every", id, ms);
+  if ((ms as number) < 10) {
+    throw new Error(`schedule.every '${id}': ms must be >= 10, got ${ms}`); // AIO-252
+  }
+  // NaN passes every comparison above ("NaN < 10" is false) and setInterval
+  // coerces it to a 1ms hot loop; Infinity never fires. Both are a caller
+  // bug, and both are silent without this.
+  if (!Number.isFinite(ms)) {
+    throw new Error(`schedule.every '${id}': ms must be finite, got ${ms}`);
+  }
+  // `armDeadline` clamps after/at/cron; an interval has no deadline to
+  // re-check, so it is refused instead — see EVERY_CEILING_HINT.
+  if ((ms as number) > MAX_TIMER_DELAY) {
+    throw new Error(
+      `schedule.every '${id}': ${ms}ms is past the setInterval ceiling ` +
+        `(${MAX_TIMER_DELAY}ms) — ${EVERY_CEILING_HINT}`,
+    );
+  }
+}
+
+/** The target time in ms, or a throw naming the accepted form. */
+function _checkAt(time: unknown): number {
+  const target = new Date(time as string).getTime();
+  if (Number.isNaN(target)) {
+    throw new Error(
+      `invalid schedule.at time: ${
+        JSON.stringify(time)
+      } — use an ISO 8601 string (e.g. "2026-07-08T12:00:00Z") or a Date`,
+    );
+  }
+  return target;
+}
+
+/** The parsed fields, or a throw. A pattern that can NEVER match is a typo,
+ *  and it is knowable here, in O(months × doms) — so it fails at the call
+ *  site like every other invalid schedule instead of being discovered at the
+ *  first fire attempt and silently deleted. (`cronDayReachable` is exact: the
+ *  old code printed this hint whenever the one-year search window ran out,
+ *  which is what a perfectly valid leap-day cron does.) */
+function _checkCron(id: string, pattern: string): CronFields {
+  const fields = parseCron(pattern);
+  if (!cronDayReachable(fields)) {
+    throw new Error(
+      `schedule.cron '${id}': "${pattern}" can never fire — day-of-month ` +
+        `${fields.dom.join(",")} does not exist in month ${
+          fields.month.join(",")
+        } (e.g. "0 0 30 2 *": February has no 30th).`,
+    );
+  }
+  return fields;
+}
+
 // ── Effect creators (pure) ──────────────────────────────────────────
 
 /** The action a schedule fires — a plain `{ type, payload }` object.
@@ -505,6 +648,7 @@ const _backoff: BackoffFn = ((
   a4: unknown,
 ): ScheduleEffect => {
   if (!_isAction(a3)) _refuseOldOrder("backoff", id);
+  _checkId(id);
   return _backoffEffect(id, attempt, a4 as BackoffOpts, a3);
 }) as BackoffFn;
 
@@ -515,6 +659,7 @@ const _poll: PollFn = ((
   a4: unknown,
 ): ScheduleEffect => {
   if (!_isAction(a3)) _refuseOldOrder("poll", id);
+  _checkId(id);
   return _pollEffect(id, attempt, a4 as PollOpts, a3);
 }) as PollFn;
 
@@ -531,21 +676,26 @@ export const schedule = {
     id: string,
     ms: number,
     action: ScheduleAction & SA<A> | A & SA<A>,
-  ): ScheduleEffect => ({
-    type: "__schedule",
-    kind: "after",
-    id,
-    ms,
-    action: action as ScheduleAction,
-  }),
+  ): ScheduleEffect => {
+    _checkId(id);
+    _checkAfterMs(id, ms);
+    return {
+      type: "__schedule",
+      kind: "after",
+      id,
+      ms,
+      action: action as ScheduleAction,
+    };
+  },
   /** Repeat `action` every `ms`.
    *
    *  `{ skipIfRunning: true }` drops a tick while the previous one is still in
    *  flight — the guard every polling cell otherwise opens with
    *  (`if (s.refreshing) return`). Hand-rolled, that guard needs a state field,
    *  a reset in a `finally`, and it leaks a stuck `true` if the method throws
-   *  between them; the scheduler already knows when the dispatch settles, so it
-   *  can own the whole thing.
+   *  between them; the scheduler can see when the tick's METHOD settles (the
+   *  call registration `await cell.method()` waits on), so it can own the
+   *  whole thing.
    *
    *  Opt-in, not the default: silently skipping a tick that used to fire would
    *  be a behaviour change for existing apps, and a schedule that overlaps ON
@@ -555,36 +705,48 @@ export const schedule = {
     ms: number,
     action: ScheduleAction & SA<A> | A & SA<A>,
     opts?: { skipIfRunning?: boolean },
-  ): ScheduleEffect => ({
-    type: "__schedule",
-    kind: "every",
-    id,
-    ms,
-    action: action as ScheduleAction,
-    ...(opts?.skipIfRunning ? { skipIfRunning: true } : {}),
-  }),
+  ): ScheduleEffect => {
+    _checkId(id);
+    _checkEveryMs(id, ms);
+    return {
+      type: "__schedule",
+      kind: "every",
+      id,
+      ms,
+      action: action as ScheduleAction,
+      ...(opts?.skipIfRunning ? { skipIfRunning: true } : {}),
+    };
+  },
   at: <A>(
     id: string,
     time: string,
     action: ScheduleAction & SA<A> | A & SA<A>,
-  ): ScheduleEffect => ({
-    type: "__schedule",
-    kind: "at",
-    id,
-    time,
-    action: action as ScheduleAction,
-  }),
+  ): ScheduleEffect => {
+    _checkId(id);
+    _checkAt(time);
+    return {
+      type: "__schedule",
+      kind: "at",
+      id,
+      time,
+      action: action as ScheduleAction,
+    };
+  },
   cron: <A>(
     id: string,
     pattern: string,
     action: ScheduleAction & SA<A> | A & SA<A>,
-  ): ScheduleEffect => ({
-    type: "__schedule",
-    kind: "cron",
-    id,
-    pattern,
-    action: action as ScheduleAction,
-  }),
+  ): ScheduleEffect => {
+    _checkId(id);
+    _checkCron(id, pattern);
+    return {
+      type: "__schedule",
+      kind: "cron",
+      id,
+      pattern,
+      action: action as ScheduleAction,
+    };
+  },
   /** Exponential backoff — a one-shot `after` whose delay grows
    *  with `attempt`: `min(base * factor^attempt, max)` ms. Track `attempt` in
    *  cell state (bump on failure, reset to 0 on success) and re-issue this each
@@ -629,18 +791,14 @@ export const schedule = {
   next: (
     id: string,
     action: { type: string; payload?: unknown },
-  ): ScheduleEffect => ({
-    type: "__schedule",
-    kind: "after",
-    id,
-    ms: 0,
-    action,
-  }),
-  cancel: (id: string): ScheduleEffect => ({
-    type: "__schedule",
-    kind: "cancel",
-    id,
-  }),
+  ): ScheduleEffect => {
+    _checkId(id);
+    return { type: "__schedule", kind: "after", id, ms: 0, action };
+  },
+  cancel: (id: string): ScheduleEffect => {
+    _checkId(id);
+    return { type: "__schedule", kind: "cancel", id };
+  },
   // Off-thread work is `blocking(id, fn, arg)` — a top-level export of `aio`
   // and server-only. It is deliberately NOT a member here: `schedule` ships to
   // every runtime (browser bundle, android), and a member that throws
@@ -901,11 +1059,20 @@ export function createScheduleManager(
   const clock = opts.timers ?? realTimers;
   const timers = new Map<string, TimerEntry>();
   const staticIds = new Set<string>(); // ids from start() — aio.run({ schedules })
+  /** id → the cell that issued it (noteScheduleOwner), for cancel-on-disable. */
+  const owners = new Map<string, string>();
   const warnedCollisions = new Set<string>();
   // Schedules whose latest tick has not settled — see `skipIfRunning`.
   const inFlight = new Set<string>();
   // Consecutive skipped ticks per id — a wedged poller has to be audible.
   const skips = new Map<string, number>();
+  // id → drops the in-flight `skipIfRunning` tick's call registration (see
+  // `trackTick`). That registration arms the call ceiling and its heartbeat
+  // on the REAL clock, and a hung tick holds them for the whole ceiling — so a
+  // cancelled, replaced or shut-down schedule left two live timers behind that
+  // kept the process (or a test) alive and fired into a torn-down app. The
+  // owner of a timer has to be the one that clears it: cancel drops these.
+  const ticks = new Map<string, () => void>();
   // Liveness generation per id. A one-shot deletes its timer entry when it
   // FIRES, so "cancelled" and "already fired" were indistinguishable and the
   // failed-dispatch retry re-armed either one — resurrecting a schedule
@@ -915,15 +1082,7 @@ export function createScheduleManager(
   const epochs = new Map<string, number>();
   let epochSeq = 0;
 
-  function validateId(id: string): void {
-    if (!id || !VALID_SCHEDULE_ID.test(id)) {
-      throw new Error(
-        `invalid schedule id: ${
-          JSON.stringify(id)
-        } — use alphanumeric, hyphens, colons, dots`,
-      );
-    }
-  }
+  const validateId = _checkId;
 
   function cancelTimer(id: string): void {
     const entry = timers.get(id);
@@ -942,9 +1101,21 @@ export function createScheduleManager(
     epochs.delete(id);
     inFlight.delete(id);
     skips.delete(id);
+    dropTick(id);
     // Not the collision warning: that is "once per id, ever", and a replace is
     // exactly what it warns about — clearing it here would make it warn on
     // every replace. It is bounded by `spentId()` and `cancelAll()` instead.
+  }
+
+  /** Settle `id`'s in-flight tick registration, disarming its timers. The
+   *  method may still be running: its own settle later finds no registration
+   *  and is a no-op, and the orphaned tick's `release` is already stale by
+   *  epoch — nothing waits on a schedule that no longer exists. */
+  function dropTick(id: string): void {
+    const drop = ticks.get(id);
+    if (!drop) return;
+    ticks.delete(id);
+    drop();
   }
 
   /** Every per-id bookkeeping map, for an id that no longer exists at all. */
@@ -952,6 +1123,20 @@ export function createScheduleManager(
     cancelTimer(id);
     warnedCollisions.delete(id);
     staticIds.delete(id);
+    owners.delete(id);
+  }
+
+  /** Record (or clear) who issued `id`. A fired one-shot leaves nothing in
+   *  `timers` or `epochs` but would leave its owner here, so entries for ids
+   *  that no longer exist are swept once the map outgrows the live ones. */
+  function noteOwner(id: string, owner: unknown): void {
+    if (typeof owner === "string" && owner !== "") owners.set(id, owner);
+    else owners.delete(id);
+    if (owners.size > 2 * (timers.size + epochs.size) + 16) {
+      for (const k of [...owners.keys()]) {
+        if (!timers.has(k) && !epochs.has(k)) owners.delete(k);
+      }
+    }
   }
 
   function setTimer(
@@ -1059,6 +1244,9 @@ export function createScheduleManager(
     action: { type: string; payload?: unknown },
     kind: "after" | "every" | "at" | "cron",
     retryCount = 0,
+    /** Told when the dispatch door REFUSES the tick — nothing ran, so a call
+     *  registration riding it would otherwise wait out its whole ceiling. */
+    onRefused?: (e: unknown) => void,
   ): Promise<unknown> {
     // Captured BEFORE the await: everything below runs in a microtask, long
     // after the tick that started it (a rejection arrives at least one turn
@@ -1089,6 +1277,7 @@ export function createScheduleManager(
       }
       return result;
     } catch (e) {
+      onRefused?.(e);
       // CLASSIFY BEFORE REPORTING. The dispatch loop being gone is a normal
       // shutdown race, not a failure: `dispatch()` already reports it, at warn,
       // once per action type, with the rest suppressed. Logging at error above
@@ -1145,38 +1334,12 @@ export function createScheduleManager(
     }
   }
 
-  /** A duration that is not a number slips past every comparison below —
-   *  `"1s" < 10` is false, `Number.isFinite("1s")` reports only the coerced
-   *  NaN, and `setInterval` turns the string into a 1ms hot loop. The type
-   *  says `number`, but the dev server is transpile-only: a string reaches here
-   *  from any app that never ran `deno check`, including the `schedules:`
-   *  entries the framework arms itself at boot. aio's CLI does take `60s`
-   *  spellings (`am cost --window=60s`), so reaching for one here is the
-   *  natural mistake — name the accepted form instead of reporting the
-   *  coercion. */
-  function requireMs(api: string, id: string, ms: number): void {
-    if (typeof ms !== "number") {
-      throw new Error(
-        `schedule.${api} '${id}': ms is a plain NUMBER of milliseconds, got ` +
-          `${typeof ms} ${JSON.stringify(ms)} — write 300_000, not "5m"`,
-      );
-    }
-  }
-
   function handleAfter(
     id: string,
     ms: number,
     action: { type: string; payload?: unknown },
   ): void {
-    requireMs("after", id, ms);
-    // 0 is a real delay ("next tick" — schedule.next arms it); negatives are a
-    // caller bug. The old floor of 1 forced `next` to carry a 1ms sentinel.
-    if (ms < 0) {
-      throw new Error(`schedule.after '${id}': ms must be >= 0, got ${ms}`); // AIO-252
-    }
-    if (!Number.isFinite(ms)) {
-      throw new Error(`schedule.after '${id}': ms must be finite, got ${ms}`);
-    }
+    _checkAfterMs(id, ms); // again: an effect built by hand, or config
     armDeadline(id, "after", clock.now() + ms, () => {
       timers.delete(id);
       log.debug(`schedule: after '${id}' fired`);
@@ -1185,30 +1348,111 @@ export function createScheduleManager(
     log.debug(`schedule: after '${id}' set for ${ms}ms`);
   }
 
+  /** How long a `skipIfRunning` tick is "running" — the METHOD's lifetime,
+   *  not the dispatch's.
+   *
+   *  The dispatch promise settles when the trigger has been reduced and its
+   *  effects have run — for an ASYNC method that is the `__exec` effect
+   *  STARTING the body, i.e. its first `await`. The guard used to be released
+   *  there, so it never skipped a real async tick: a 1300 ms poll every
+   *  500 ms ran three copies at once in a dev app (six under bootCells), while
+   *  the manager's own test stayed green on a stub whose dispatch promise
+   *  lasted the whole tick.
+   *
+   *  The method's end is already observable: the `_callId` registration that
+   *  `await cell.method()` waits on, settled by the reduce for a sync method,
+   *  by the executor for an async one, and refused by the reduce when no cell
+   *  handled the action. The tick rides one of its own. A dispatcher with no
+   *  executor behind it (nothing running under that method key once the
+   *  dispatch has settled) keeps its old meaning — the dispatch promise IS
+   *  the tick — and its registration is dropped rather than left to expire. */
+  function trackTick(action: { type: string; payload?: unknown }): {
+    action: { type: string; payload?: unknown };
+    refuse: (e: unknown) => void;
+    /** Settle the registration now, with no result (cancel/replace/stop). */
+    drop: () => void;
+    afterDispatch: (id: string, release: () => void) => void;
+  } {
+    const p = action.payload;
+    // `_callId` rides the framework's own `{ args }` envelope. A payload that
+    // is not a plain object is not a method call at all — nothing to track.
+    if (
+      p !== undefined &&
+      (p === null || typeof p !== "object" || Array.isArray(p))
+    ) {
+      return {
+        action,
+        refuse: () => {},
+        drop: () => {},
+        afterDispatch: (_id, release) => release(),
+      };
+    }
+    const callId = randomUuid();
+    const started = Date.now();
+    let settled = false;
+    const done = registerCall(callId, action.type);
+    const outcome = done.then(
+      () => ({ error: undefined as unknown }),
+      (error: unknown) => ({ error }),
+    ).finally(() => {
+      settled = true;
+    });
+    return {
+      action: {
+        ...action,
+        payload: {
+          ...(p as Record<string, unknown> | undefined),
+          _callId: callId,
+        },
+      },
+      // Nothing ran: settle the registration now (its timers go with it).
+      refuse: (e) =>
+        resolveCall(
+          callId,
+          undefined,
+          e instanceof Error ? e : new Error(String(e)),
+        ),
+      drop: () => resolveCall(callId, undefined),
+      afterDispatch: (id, release) => {
+        if (settled) return release();
+        if (pendingCount(action.type) === 0) {
+          // Dispatched, not settled, and no call of that method in flight
+          // here — no executor will ever answer it. A late settle is a no-op.
+          void outcome.then(release);
+          resolveCall(callId, undefined);
+          return;
+        }
+        void outcome.then(({ error }) => {
+          const ceiling = callTimeoutFor(action.type);
+          if (
+            error !== undefined && ceiling > 0 &&
+            Date.now() - started >= ceiling
+          ) {
+            // The call ceiling gave up on the tick, not the method — it may
+            // still be running. Holding the guard past this point could never
+            // be released (the registration is gone), so the next tick is let
+            // through, out loud.
+            log.warn(
+              `schedule: every '${id}' — tick ${action.type} still running ` +
+                `after its ${ceiling}ms call ceiling; skipIfRunning stops ` +
+                `waiting for it, so the next tick may overlap it. Mark the ` +
+                `method \`long\` or raise perfBudget.methods[` +
+                `${JSON.stringify(action.type)}].timeout.`,
+            );
+          }
+          release();
+        });
+      },
+    };
+  }
+
   function handleEvery(
     id: string,
     ms: number,
     action: { type: string; payload?: unknown },
     skipIfRunning = false,
   ): void {
-    requireMs("every", id, ms);
-    if (ms < 10) {
-      throw new Error(`schedule.every '${id}': ms must be >= 10, got ${ms}`); // AIO-252
-    }
-    // NaN passes every comparison above ("NaN < 10" is false) and setInterval
-    // coerces it to a 1ms hot loop; Infinity never fires. Both are a caller
-    // bug, and both are silent without this.
-    if (!Number.isFinite(ms)) {
-      throw new Error(`schedule.every '${id}': ms must be finite, got ${ms}`);
-    }
-    // `armDeadline` clamps after/at/cron; an interval has no deadline to
-    // re-check, so it is refused instead — see EVERY_CEILING_HINT.
-    if (ms > MAX_TIMER_DELAY) {
-      throw new Error(
-        `schedule.every '${id}': ${ms}ms is past the setInterval ceiling ` +
-          `(${MAX_TIMER_DELAY}ms) — ${EVERY_CEILING_HINT}`,
-      );
-    }
+    _checkEveryMs(id, ms); // again: an effect built by hand, or config
     const timerId = clock.setInterval(() => {
       // The previous tick is still working: drop this one rather than stacking
       // a second copy of the same poll on top of it. `inFlight` is cleared in a
@@ -1238,28 +1482,32 @@ export function createScheduleManager(
       }
       skips.delete(id);
       log.debug(`schedule: every '${id}' fired`);
-      const r = safeDispatch(id, action, "every");
-      if (
-        skipIfRunning && r && typeof (r as Promise<unknown>).then === "function"
-      ) {
-        inFlight.add(id);
-        // The guard belongs to THIS arming of the schedule, so the epoch rides
-        // along with it. Without that, an orphaned tick — one whose schedule
-        // was cancelled or replaced while it was still running — cleared the
-        // guard of the schedule that took its place, letting a poll overlap
-        // with itself exactly once per replacement. (Found by
-        // tests/schedule-program-fuzz.ts: 250ms replace, 600ms tick.)
-        const epoch = epochs.get(id);
-        // Settle on BOTH outcomes, and swallow here: a rejected tick is already
-        // reported by the dispatch layer, and attaching a bare `.finally()` to
-        // someone else's promise re-raises it as an unhandled rejection that
-        // kills the process. Clearing the guard is this code's only job.
-        (r as Promise<unknown>)
-          .then(() => {}, () => {})
-          .finally(() => {
-            if (epochs.get(id) === epoch) inFlight.delete(id);
-          });
+      if (!skipIfRunning) {
+        safeDispatch(id, action, "every");
+        return;
       }
+      // The guard belongs to THIS arming of the schedule, so the epoch rides
+      // along with it. Without that, an orphaned tick — one whose schedule
+      // was cancelled or replaced while it was still running — cleared the
+      // guard of the schedule that took its place, letting a poll overlap
+      // with itself exactly once per replacement. (Found by
+      // tests/schedule-program-fuzz.ts: 250ms replace, 600ms tick.)
+      inFlight.add(id);
+      const epoch = epochs.get(id);
+      const tick = trackTick(action);
+      ticks.set(id, tick.drop);
+      const release = (): void => {
+        if (ticks.get(id) === tick.drop) ticks.delete(id);
+        if (epochs.get(id) === epoch) inFlight.delete(id);
+      };
+      // Settle on BOTH outcomes, and swallow here: a rejected tick is already
+      // reported by the dispatch layer, and attaching a bare `.finally()` to
+      // someone else's promise re-raises it as an unhandled rejection that
+      // kills the process. Clearing the guard is this code's only job.
+      safeDispatch(id, tick.action, "every", 0, tick.refuse).then(
+        () => tick.afterDispatch(id, release),
+        release,
+      );
     }, ms);
     setTimer(id, "every", timerId);
     log.debug(`schedule: every '${id}' set for ${ms}ms`);
@@ -1270,14 +1518,7 @@ export function createScheduleManager(
     time: string,
     action: { type: string; payload?: unknown },
   ): void {
-    const target = new Date(time).getTime();
-    if (Number.isNaN(target)) {
-      throw new Error(
-        `invalid schedule.at time: ${
-          JSON.stringify(time)
-        } — use an ISO 8601 string (e.g. "2026-07-08T12:00:00Z") or a Date`,
-      );
-    }
+    const target = _checkAt(time);
     // AIO-236: a target in the past never fires. Said out loud, not at debug:
     // the id also never shows up in `active()`, so "my 09:00 job did nothing"
     // had no observable trace anywhere — and the usual cause is a UTC/local
@@ -1317,21 +1558,7 @@ export function createScheduleManager(
     pattern: string,
     action: { type: string; payload?: unknown },
   ): void {
-    const fields = parseCron(pattern);
-    // A pattern that can NEVER match is a typo, and it is knowable here, in
-    // O(months × doms) — so it fails at the call site like every other invalid
-    // schedule instead of being discovered at the first fire attempt and
-    // silently deleted. (`cronDayReachable` is exact: the old code printed
-    // this hint whenever the one-year search window ran out, which is what a
-    // perfectly valid leap-day cron does.)
-    if (!cronDayReachable(fields)) {
-      throw new Error(
-        `schedule.cron '${id}': "${pattern}" can never fire — day-of-month ` +
-          `${fields.dom.join(",")} does not exist in month ${
-            fields.month.join(",")
-          } (e.g. "0 0 30 2 *": February has no 30th).`,
-      );
-    }
+    const fields = _checkCron(id, pattern);
     function scheduleNext(first = false): void {
       let next: Date;
       try {
@@ -1441,6 +1668,12 @@ export function createScheduleManager(
         break;
       }
     }
+    // AFTER the handler: arming replaces the id, and a replace starts from a
+    // clean slate. The latest issuer owns the id; a cancel owns nothing.
+    if (effect.kind === "cancel") owners.delete(effect.id);
+    else {
+      noteOwner(effect.id, _scheduleOwners.get(effect));
+    }
   }
 
   function start(defs: ScheduleDef[]): void {
@@ -1471,11 +1704,17 @@ export function createScheduleManager(
     epochs.clear();
     inFlight.clear();
     skips.clear();
+    owners.clear();
   }
 
-  /** Cancel all timers whose ID starts with prefix + ":" (e.g. cell name).
+  /** Cancel all timers whose ID starts with prefix + ":" (e.g. cell name),
+   *  AND every schedule the cell named `prefix` issued, whatever its id — see
+   *  noteScheduleOwner.
    *  AIO-198: match delimiter to avoid "user" cancelling "userProfile" timers. */
   function cancelByPrefix(prefix: string): void {
+    for (const [id, owner] of [...owners]) {
+      if (owner === prefix) forgetId(id);
+    }
     const match = prefix + ":";
     // Epoch keys as well as timer keys: an in-flight one-shot is only in the
     // former, and a disabled cell must not have a retry come back to life.
@@ -1502,8 +1741,8 @@ export function createScheduleManager(
     cancelByPrefix,
     active,
     _bookkeepingSize: () =>
-      timers.size + epochs.size + inFlight.size + skips.size +
-      staticIds.size + warnedCollisions.size,
+      timers.size + epochs.size + inFlight.size + skips.size + ticks.size +
+      staticIds.size + warnedCollisions.size + owners.size,
   };
 }
 
@@ -1526,12 +1765,29 @@ async function _drainMicrotasks(): Promise<void> {
  *  @internal */
 export function createVirtualTimers(
   start = Date.now(),
+  opts: {
+    /** Where `now()` reads the wall clock from. Omitted, `now()` is `start`
+     *  plus the time advanced — a clock that stands still between advances,
+     *  which is what a unit test of the manager wants. A harness that runs
+     *  APP code passes the real wall clock instead, so `now()` stays the time
+     *  app code sees (`Date.now()`, moved by the same advances): an absolute
+     *  `schedule.at(Date.now() + 5000)` written after `advance(10_000)` was
+     *  otherwise "in the past" against a clock that had drifted ten seconds
+     *  ahead of the app's. */
+    wall?: () => number;
+  } = {},
 ): ScheduleTimers & {
   /** Move time forward, firing everything that comes due, in order — and
    *  draining microtasks between fires, as the real event loop does. */
   advance: (ms: number) => Promise<void>;
   /** Number of armed timers — a leak check for a harness teardown. */
   pending: () => number;
+  /** Virtual milliseconds advanced so far — how far this clock is ahead of
+   *  the wall clock it was started from. */
+  elapsed: () => number;
+  /** Is any timer due at the current virtual time — what `advance(0)` would
+   *  fire? Synchronous, so a caller can skip the await when nothing is. */
+  hasDue: () => boolean;
 } {
   type VTimer = { id: number; due: number; fn: () => void; every: number };
   let now = start;
@@ -1561,8 +1817,14 @@ export function createVirtualTimers(
     setInterval: (fn, ms) =>
       arm(fn, ms, ms > MAX_TIMER_DELAY ? 1 : Math.max(1, ms)),
     clearInterval: clear,
-    now: () => now,
+    // Timers are due in VIRTUAL time either way; only the reading changes.
+    now: opts.wall ? () => opts.wall!() + (now - start) : () => now,
     pending: () => q.size,
+    elapsed: () => now - start,
+    hasDue: () => {
+      for (const t of q.values()) if (t.due <= now) return true;
+      return false;
+    },
     async advance(ms: number): Promise<void> {
       const target = now + Math.max(0, ms);
       // A guard, but a LOUD one: a runaway re-arming schedule (an interval of

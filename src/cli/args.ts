@@ -104,9 +104,17 @@ export function args<const S extends ArgsSpec>(
 
   const flags: Record<string, unknown> = {};
   for (const [k, f] of Object.entries(flagSpecs)) {
-    flags[k] = f.default ??
+    // A COPY of an array default. The spec's own array used to be the value,
+    // so `--tag a` pushed into the spec: the next `args(spec)` call (a REPL,
+    // a test file, a long-running tool re-parsing) started with the previous
+    // call's tags as its "default".
+    flags[k] = Array.isArray(f.default) ? [...f.default] : f.default ??
       (f.type === "boolean" ? false : f.type === "string[]" ? [] : undefined);
   }
+  // A repeatable flag's default is what you get when you DON'T pass it. The
+  // first explicit value replaces it rather than appending to it — `--tag a`
+  // with `default: ["x"]` is `["a"]`, not `["x", "a"]`.
+  const explicit = new Set<string>();
   const shorts = new Map<string, string>();
   for (const [k, f] of Object.entries(flagSpecs)) {
     if (f.short) shorts.set(f.short, k);
@@ -137,7 +145,13 @@ export function args<const S extends ArgsSpec>(
     const eq = long ? a.indexOf("=") : -1;
     const rawName = long ? a.slice(2, eq === -1 ? undefined : eq) : a.slice(1);
     const name = long ? rawName : shorts.get(rawName);
-    const f = name ? flagSpecs[name] : undefined;
+    // OWN keys only. `flagSpecs[name]` found `--constructor` and `--toString`
+    // on Object.prototype — a function, taken as a flag spec whose `type`
+    // matched nothing, so the value was accepted as a string flag nobody
+    // declared, where every other unknown flag is refused.
+    const f = name && Object.hasOwn(flagSpecs, name)
+      ? flagSpecs[name]
+      : undefined;
     // The aio process parses its own flags (`--port`, `--client`, …) out of
     // the same argv; they are not this tool's to refuse.
     if (!f && long && AIO_RUNTIME_FLAGS.has(`--${rawName}`)) continue;
@@ -165,8 +179,10 @@ export function args<const S extends ArgsSpec>(
       }
       flags[name] = n;
     } else if (f.type === "string[]") {
+      if (!explicit.has(name)) flags[name] = [];
       (flags[name] as string[]).push(value);
     } else flags[name] = value;
+    explicit.add(name);
   }
 
   for (const [k, f] of Object.entries(flagSpecs)) {
@@ -179,7 +195,9 @@ export function args<const S extends ArgsSpec>(
   if (spec.commands) {
     command = positionals.shift();
     if (command === undefined) return refuse("missing command");
-    if (!(command in spec.commands)) {
+    // `in` walks the prototype: `constructor`, `toString` and `__proto__`
+    // were accepted as commands and handed to the app's dispatch.
+    if (!Object.hasOwn(spec.commands, command)) {
       const near = nearestOf(command, Object.keys(spec.commands));
       return refuse(
         `unknown command: ${command}` +

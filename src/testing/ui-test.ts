@@ -12,14 +12,19 @@
 // faithful to a user, never calling handlers directly.
 
 import {
+  _abandonedCallsWarning,
   _armTestStrict,
+  _DISPOSE_DRAIN_MS,
   _recordCalls,
   _watchUnobservedCalls,
   type CallFailureLedger,
 } from "./test-strict.ts";
 import { closeWindow } from "./close-window.ts";
+import { repairProxiedSiblings } from "./happy-dom-repair.ts";
 // Server-touching, so NOT in test-strict.ts — see boot-refusals.ts.
 import {
+  _callAcrossWorkerBoundary,
+  _isolateWorkerCellsInProcess,
   _refuseUnsafeCells,
   type HarnessBootOptions,
 } from "./boot-refusals.ts";
@@ -33,14 +38,20 @@ import {
 } from "../state/method-cancel.ts";
 import type { AioUser, AuthFeatures } from "../protocol/protocol-types.ts";
 import { _setDocument, _unmount, mount } from "../air/aio-renderer.ts";
-import { _resetContrastAudit } from "../air/contrast-audit.ts";
+import { _installRouterListeners } from "../air/router-core.ts";
+import {
+  _resetContrastAudit,
+  _setContrastCascadeProbe,
+} from "../air/contrast-audit.ts";
+import { contrastCascadeNotice } from "../air/contrast-cascade.ts";
 import { _resetSelectorAudit } from "../air/selector-audit.ts";
 import { _resetUntrackedReadWarnings } from "../air/untracked-read.ts";
-import { getRegisteredCells } from "../state/cell-reactive.ts";
+import { _readAsClient, getRegisteredCells } from "../state/cell-reactive.ts";
 import type { ComponentFn } from "../air/vdom-types.ts";
 import type { MountHandle, RootState } from "../air/renderer-types.ts";
 import { _rootStateMap } from "../air/renderer-state.ts";
 import { _setRenderErrorSink } from "../air/renderer-rerender.ts";
+import { _setContainedErrorSink } from "../air/hook-error.ts";
 import {
   _isForwardedHandle,
   _resetSurfaceWarnings,
@@ -96,6 +107,18 @@ export interface TestUIOptions {
   cellDefaults?: HarnessBootOptions["cellDefaults"];
   /** The app's `aio.run({ localFirst })` — same reason. */
   localFirst?: boolean;
+  /** Let a CONTAINED failure stay contained, instead of failing the test.
+   *
+   *  A hook that throws (`onMount`, a returned cleanup, a rAF callback) and an
+   *  event handler that throws are caught on purpose: the render is kept and
+   *  production logs and carries on. `testUI` surfaces them, because a
+   *  `TypeError` in an `onClick` reported as a PASS is the green-test-broken-
+   *  prod shape the harness exists to prevent.
+   *
+   *  Set this only when the throw IS the subject — a test proving that a
+   *  broken hook does not collapse the surface, or that an error boundary
+   *  catches what it should. The console line is printed either way. */
+  allowContainedErrors?: boolean;
   /** The app's `aio.run({ perfBudget })` — same reason. Without it every
    *  budget is the DEFAULT, so a method the app has already budgeted trips a
    *  ceiling it does not have in production, and the warning recommends the
@@ -833,6 +856,93 @@ function _installViewport(win: AnyDoc, width: number, height: number): void {
   }
 }
 
+/** Make Back/Forward a SAME-DOCUMENT traversal, as it is in a browser.
+ *
+ *  MEASURED (happy-dom 17.6.3): `history.back()` between two `pushState`
+ *  entries treats the step as a whole-document navigation. On a `new
+ *  Window()` (a detached frame) that navigation is refused and it falls back
+ *  to rewriting `location` — so the URL moves, but no `popstate` fires and
+ *  `history.state` still answers the entry it left. A router listens for
+ *  exactly that event, so under testUI a routed app's Back button changed
+ *  the address bar and left the old page on screen, while the same app in a
+ *  browser re-rendered. A test of "Back returns to the list" could not pass
+ *  against a correct app.
+ *
+ *  So the harness keeps the session history itself, for this window only:
+ *  `pushState`/`replaceState` still go through happy-dom (it validates the
+ *  origin and moves `location`), and each is recorded here. A traversal is
+ *  what the HTML spec makes it: queued as a TASK (never synchronous — code
+ *  right after `back()` still reads the old URL, as in a browser), a no-op
+ *  past either end, then `location`/`state` move and `popstate` fires on the
+ *  window, followed by `hashchange` when only the fragment differs. Every
+ *  navigation the app can make stays a real happy-dom call; only the part
+ *  happy-dom gets wrong is replaced, so this is never more permissive than a
+ *  browser. `go(0)` (a reload) is left to happy-dom. */
+function _installSameDocumentHistory(win: AnyDoc): void {
+  const h = win?.history;
+  if (!h || typeof h.pushState !== "function") return;
+  const push = h.pushState.bind(h);
+  const replace = h.replaceState.bind(h);
+  const reload = h.go.bind(h);
+  const entries: { href: string; state: unknown }[] = [
+    { href: win.location.href, state: h.state },
+  ];
+  let index = 0;
+  const current = () => ({ href: win.location.href, state: h.state });
+  const traverse = (delta: number) => {
+    win.setTimeout(() => {
+      if (win.closed) return;
+      const target = entries[index + delta];
+      if (!target) return;
+      const oldURL = win.location.href;
+      index += delta;
+      replace(target.state, "", target.href);
+      const ev = new win.Event("popstate");
+      Object.defineProperty(ev, "state", { value: h.state });
+      win.dispatchEvent(ev);
+      const [oldBase, oldHash = ""] = oldURL.split("#");
+      const [newBase, newHash = ""] = target.href.split("#");
+      if (oldBase === newBase && oldHash !== newHash) {
+        win.dispatchEvent(
+          new win.HashChangeEvent("hashchange", {
+            oldURL,
+            newURL: target.href,
+          }),
+        );
+      }
+    }, 0);
+  };
+  Object.defineProperties(h, {
+    pushState: {
+      configurable: true,
+      value(state: unknown, title: string, url?: string | URL | null) {
+        push(state, title, url);
+        entries.length = index + 1;
+        entries.push(current());
+        index++;
+      },
+    },
+    replaceState: {
+      configurable: true,
+      value(state: unknown, title: string, url?: string | URL | null) {
+        replace(state, title, url);
+        entries[index] = current();
+      },
+    },
+    go: {
+      configurable: true,
+      value(delta = 0) {
+        const d = Math.trunc(Number(delta)) || 0;
+        if (d === 0) return reload(0);
+        traverse(d);
+      },
+    },
+    back: { configurable: true, value: () => traverse(-1) },
+    forward: { configurable: true, value: () => traverse(1) },
+    length: { configurable: true, get: () => entries.length },
+  });
+}
+
 /** Say out loud that there is no layout engine here.
  *
  *  `getBoundingClientRect()` returns all zeros and `clientWidth` is 0 for
@@ -980,6 +1090,10 @@ async function _buildTestUI(
   partial: PartialMount,
 ): Promise<TestUI> {
   let doc: AnyDoc = opts.document ?? (globalThis as AnyDoc).document;
+  // The contrast walk stands down, SAYING so, on a DOM whose style cascade is
+  // not a browser's — happy-dom's is not (report 9 §1). Installed here, not
+  // imported by the renderer: production pages never need the CSSOM walk.
+  _setContrastCascadeProbe(contrastCascadeNotice);
   // Auto-DOM: create a happy-dom window when none was provided — and own its
   // lifecycle (closed on dispose). Lazy import keeps the DOM dep out of
   // production code paths entirely.
@@ -1008,7 +1122,13 @@ async function _buildTestUI(
       });
       doc = ownedWindow.document;
       partial.window = ownedWindow; // so a later throw still closes it
+      // BEFORE anything renders: happy-dom answers `null` for a `<form>` or
+      // `<select>`'s siblings, and the reconciler's positional cursor walks
+      // siblings. See happy-dom-repair.ts — it proves the defect first, so a
+      // fixed happy-dom is left untouched.
+      repairProxiedSiblings(ownedWindow);
       _installViewport(ownedWindow, vw, vh);
+      _installSameDocumentHistory(ownedWindow);
       _warnOnFakeLayout(ownedWindow);
       // `document` and `window` as GLOBALS, from the same owned window.
       //
@@ -1018,12 +1138,20 @@ async function _buildTestUI(
       // hooks are error-guarded by design, and the result was a handler that
       // simply never ran: no error, no clue. testUI's whole job is to BE a
       // browser for the component under test, and a browser has these.
+      //
+      // `CSS` for the same reason, and it was live in this repo: aio's own
+      // `<Tabs>` called `CSS.escape` to find the tab to focus, and under
+      // testUI the handler threw `CSS is not defined` — contained by design,
+      // so the arrow keys just did nothing. A browser has it; the owned window
+      // has it; only `globalThis` did not.
       for (
         const [key, value] of [
           ["document", ownedWindow.document],
           ["window", ownedWindow],
+          ["CSS", ownedWindow.CSS],
         ] as const
       ) {
+        if (value === undefined) continue;
         if ((globalThis as AnyDoc)[key]) continue;
         Object.defineProperty(globalThis, key, {
           get: () => value,
@@ -1049,6 +1177,13 @@ async function _buildTestUI(
         { cause: e },
       );
     }
+  } else {
+    // The caller's OWN document needs the same repair as the window above —
+    // `testComponent` has always done it, and this path did not, so
+    // `testUI(App, { document })` still stopped AIR's cursor at a `<form>` and
+    // printed a false "ran out of DOM nodes" (report 9b §4). It proves the
+    // defect first, so a browser-faithful DOM is left untouched.
+    repairProxiedSiblings(doc.defaultView);
   }
   const maxIter = opts.settleIterations ?? 20;
 
@@ -1141,6 +1276,26 @@ async function _buildTestUI(
       ),
     );
   });
+  // …and the two channels beside it. A hook that throws (`onMount`, a
+  // returned cleanup, a rAF callback) and an event handler that throws are
+  // CONTAINED on purpose — the render is kept and production logs and carries
+  // on — so both reached `console.error` and nothing else. A `TypeError` in
+  // an `onClick`, which is the single most common app bug there is, was
+  // reported by `testUI` as a PASS. Same channel as the render sink above,
+  // same delivery point: the next observation raises it.
+  _setContainedErrorSink((kind, e, component) => {
+    if (opts.allowContainedErrors) return;
+    const msg = e instanceof Error ? e.message : String(e);
+    _globalListenerFailures.push(
+      new Error(
+        `[aio:testUI] ${kind}${
+          component ? ` in <${component}>` : ""
+        } threw. The framework CONTAINS this so production keeps rendering; ` +
+          `a test must not pass on it: ${msg}`,
+        e instanceof Error ? { cause: e } : undefined,
+      ),
+    );
+  });
   globalThis.addEventListener = function (
     this: unknown,
     type: string,
@@ -1213,6 +1368,7 @@ async function _buildTestUI(
   // all; pass { cells } only to restrict the set.
   let resetRuntime: (() => void) | undefined;
   let advanceSchedules: ((ms: number) => Promise<void>) | undefined;
+  let fireDueSchedules: (() => Promise<void> | null) | undefined;
   // The standalone (server-authoritative) app handle — exposed via
   // ui.serverState()/ui.fullState() so a test can read UNFILTERED state,
   // including `ui.exclude`d fields a server route legitimately reads.
@@ -1245,6 +1401,7 @@ async function _buildTestUI(
     // runtime ships on Android, where the default must be real timers.
     standalone._useVirtualSchedules();
     advanceSchedules = standalone._advanceSchedules;
+    fireDueSchedules = standalone._fireDueSchedules;
     // Hermetic by default: cells are module singletons, so both their signal
     // state AND the standalone dispatch store survive across mounts. Reset the
     // runtime state (keeping the registry) so this mount re-composes from the
@@ -1284,6 +1441,11 @@ async function _buildTestUI(
       persistKey: `testui:${crypto.randomUUID().slice(0, 8)}`,
       cellDefaults: opts.cellDefaults,
       localFirst: opts.localFirst,
+      // The app's budgets — the effect budget AND the per-method call
+      // ceiling: a method budgeted at 300 ms must reject at 300 here too, not
+      // wait the built-in 30 s. (It was handed to the boot refusals above and
+      // never to the runtime.)
+      perfBudget: opts.perfBudget,
     }) as unknown as { getState: () => Record<string, unknown> };
     // Seed BEFORE the first render, so the component's very first pass already
     // sees the fixture (a seed applied after mount would test the re-render path
@@ -1305,8 +1467,23 @@ async function _buildTestUI(
     if (opts.enforceAccess !== false) {
       partial.restore.push(_enforceCellAccess(cells, opts.user ?? undefined));
     }
-    ledger = _watchUnobservedCalls(cells);
+    // What this user's SOCKET would carry, not the server's whole state: a
+    // real client only ever holds the `visible.forUser` view, so a component
+    // under testUI must read that view too — anonymous when no `user` is
+    // given, which is exactly what an unsigned connection receives. Reading
+    // the server's state instead passed a UI test that showed every user's
+    // rows. Same identity `_enforceCellAccess` gates calls with.
+    partial.restore.push(
+      _readAsClient(opts.user ?? undefined, (def) => def.__aio.uiForUser),
+    );
+    // What a real worker refuses — a peer read, any method call — refused in
+    // process too (boot-refusals.ts). Installed BEFORE the ledger so the
+    // ledger wraps it, and undone AFTER the ledger's restore (restores run in
+    // push order), so each identity-checked undo finds its own wrapper.
+    const unisolate = _isolateWorkerCellsInProcess(cells);
+    ledger = _watchUnobservedCalls(cells, _callAcrossWorkerBoundary);
     partial.restore.push(() => ledger?.restore());
+    partial.restore.push(unisolate);
     // The call ring a failure trace reads. Installed beside the ledger and
     // torn down with it, so the two cannot disagree about which methods are
     // wrapped.
@@ -1381,6 +1558,13 @@ async function _buildTestUI(
     partial.restore.push(restoreTransport);
   }
   _setDocument(doc);
+  // The router's `popstate` listener goes on the window THIS mount renders
+  // into. Both runtime entries attach it once, when they load: `aio/air` at
+  // import (a browser has its window by then) and the standalone boot when it
+  // runs. Under testUI an `aio/air` import happens before any window exists,
+  // and a cell-less app never boots the standalone runtime — so Back moved the
+  // URL and the routed page never followed. Idempotent per window.
+  _installRouterListeners();
   const root = doc.createElement("div");
   doc.body.appendChild(root);
   const handle: MountHandle = mount(root, App);
@@ -1404,6 +1588,15 @@ async function _buildTestUI(
   async function settle(strict = false): Promise<void> {
     let prev = "";
     for (let i = 0; i < maxIter; i++) {
+      // Timers ALREADY DUE fire, as the event loop would fire them: a
+      // `schedule.next` (a true 0 ms timer, "right after the current method
+      // returns") ran within milliseconds on a real server and never here
+      // until the test advanced the clock — so `settle()` claimed quiet while
+      // work was queued, and `waitFor` timed out on it. Only what is due NOW:
+      // anything later is still the test's to drive with `advance(ms)`.
+      // No await when nothing is due: the rounds keep their exact ordering.
+      const due = fireDueSchedules?.();
+      if (due) await due;
       handle._flush();
       await tick();
       // A cell-method dispatch set in motion WITHOUT an await (an outer
@@ -1415,7 +1608,13 @@ async function _buildTestUI(
       // progressive UI) is REPORTED rather than silently called settled.
       const pending = _pendingCallPromises();
       if (pending.length > 0) {
-        await Promise.race([Promise.allSettled(pending), tick()]);
+        // Same wake-timer rule as `settle()` in cell-test.ts: cleared when the
+        // calls win, or it outlives this wait and a sanitized test reports it.
+        let wake: ReturnType<typeof setTimeout> | undefined;
+        await Promise.race([
+          Promise.allSettled(pending),
+          new Promise((r) => wake = setTimeout(r, 5)),
+        ]).finally(() => clearTimeout(wake));
         prev = "in-flight"; // never valid HTML — forces ≥1 more quiet round
         continue;
       }
@@ -2352,6 +2551,18 @@ async function _buildTestUI(
       // test, not vanish in teardown. Teardown runs regardless.
       try {
         await drain();
+        // …and the un-awaited CALLS. `drain()` waits for the test's own action
+        // queue, not for a method one of those actions (or the test body)
+        // started: `c.save(); }` — or `onClick={() => c.save()}` clicked on
+        // the last line — reached teardown with the call a microtask from
+        // failing, the ledger still empty, and the reset about to orphan it.
+        // Green test, method blew up. Bounded, and a call still running after
+        // the budget is named rather than failed (see the warning's text).
+        const still = await ledger?.drain(_DISPOSE_DRAIN_MS) ?? [];
+        ledger?.raise();
+        if (still.length > 0) {
+          console.warn(_abandonedCallsWarning("testUI", still, "ui"));
+        }
       } finally {
         _unmount(handle);
         ledger?.restore(); // put the cells' own methods back before the reset
@@ -2396,7 +2607,6 @@ async function _buildTestUI(
         return (target as AnyDoc)[prop];
       }
       const name = prop as string;
-      // A component by that name wins (ui.App / ui.TodoRow).
       let surf: UISurfaceNode | undefined;
       try {
         surf = currentSurface();
@@ -2405,6 +2615,26 @@ async function _buildTestUI(
         // on screen yet BY DEFINITION, so the lazy handle below (which
         // re-resolves at use time) is the correct answer, not an error.
       }
+      // A FULL PATH is addressable too. `uiNames(ui)` returns
+      // `Component…:Element` paths — documented as "the same form `am trigger`
+      // takes, and the only form that can say WHICH instance" — and `ui[…]`
+      // refused every one of them ("no component or element named
+      // \"App:SaveButton\""). So the discovery list this very harness
+      // produces was not usable in it, and the doc page that teaches
+      // `uiNames(ui)` teaches it beside a `testUI` example. A path names one
+      // element exactly, which is the disambiguation a bare name cannot do.
+      if (surf && name.includes(":")) {
+        let found = false;
+        const visit = (n: UISurfaceNode) => {
+          for (const e of n.elements) if (e.path === name) found = true;
+          n.children.forEach(visit);
+        };
+        visit(surf);
+        if (found) {
+          return elementHandle(() => resolveElement(name, lastSegment(name)));
+        }
+      }
+      // A component by that name wins (ui.App / ui.TodoRow).
       if (surf && findComponents(surf, name).length > 0) {
         // Shadow rule: if the name ALSO uniquely addresses an
         // interactive element, the returned handle acts as the ELEMENT

@@ -106,6 +106,13 @@ export function _isAckWritten(cid: string): boolean {
   return _registry.isWritten(cid);
 }
 
+/** The server refused `cid`'s frame before running it and the transport will
+ *  re-send it: back to "queued" (clock stopped, not in flight). See
+ *  `AckRegistry.unwrite`. */
+export function _unwriteAck(cid: string): void {
+  _registry.unwrite(cid);
+}
+
 /** Settle a pending ack with the method's transported return value (undefined
  *  for void). Returns true if a pending entry was found. */
 export function _resolveAck(cid: string, value?: unknown): boolean {

@@ -25,7 +25,11 @@ Deno.test("afterRender: a throwing hook does not collapse the surface", async ()
       h("footer", null, "foot"),
     );
 
-  const ui = await testUI(App);
+  // The throw IS the subject here, so it stays contained. Without this,
+  // `settle()` now raises it — a hook that throws is reported by testUI
+  // rather than only logged, because an `onClick` TypeError reported as a
+  // PASS is exactly what the harness exists to prevent.
+  const ui = await testUI(App, { allowContainedErrors: true });
   await ui.settle();
   const html = ui.html();
   // The whole tree still rendered — NOT collapsed to just <App/>.

@@ -12,11 +12,8 @@
 // discoverability.
 import { assert, assertEquals, assertThrows } from "@std/assert";
 import {
-  budgetReport,
-  declaredBudgets,
   parseRate,
   parseSize,
-  recordBudgetBreach,
   resetBudgets,
   resolveBudgets,
   setBudgets,
@@ -78,11 +75,11 @@ Deno.test("resolveBudgets carries only what was declared", () => {
 
 Deno.test("a breach is recorded once, keeping the WORST reading", () => {
   try {
-    setBudgets(resolveBudgets({ cellState: "1KB" }));
-    recordBudgetBreach("cellState", 2048, 'cell "big"');
-    recordBudgetBreach("cellState", 8192, 'cell "bigger"');
-    recordBudgetBreach("cellState", 3000, 'cell "middling"');
-    const r = budgetReport()!;
+    const l = setBudgets(resolveBudgets({ cellState: "1KB" }));
+    l.record("cellState", 2048, 'cell "big"');
+    l.record("cellState", 8192, 'cell "bigger"');
+    l.record("cellState", 3000, 'cell "middling"');
+    const r = l.report()!;
     assertEquals(r.ok, false);
     assertEquals(r.breaches.length, 1, "one budget, one row");
     assertEquals(
@@ -99,34 +96,40 @@ Deno.test("a breach is recorded once, keeping the WORST reading", () => {
 
 Deno.test("a reading UNDER the limit is not a breach", () => {
   try {
-    setBudgets(resolveBudgets({ cellState: "1KB" }));
-    recordBudgetBreach("cellState", 1024, "exactly at it");
-    recordBudgetBreach("cellState", 1, "well under");
-    assertEquals(budgetReport(), { ok: true, breaches: [] });
+    const l = setBudgets(resolveBudgets({ cellState: "1KB" }));
+    l.record("cellState", 1024, "exactly at it");
+    l.record("cellState", 1, "well under");
+    assertEquals(l.report(), { ok: true, breaches: [] });
   } finally {
     resetBudgets();
   }
 });
 
 Deno.test("an app that declared NOTHING gets null, never a green tick", () => {
-  resetBudgets();
+  const l = setBudgets(resolveBudgets(undefined));
   // A breach against an undeclared budget is not a breach — aio's own numbers
   // are hints, not commitments, and reporting them would make /health degraded
   // on every app that never opted in.
-  recordBudgetBreach("cellState", 999_999_999, "huge");
+  l.record("cellState", 999_999_999, "huge");
+  resetBudgets();
   assertEquals(
-    budgetReport(),
+    l.report(),
     null,
     "a green field for a promise nobody made reads as assurance",
   );
 });
 
-Deno.test("the registry is per-app: setBudgets REPLACES", () => {
+Deno.test("the registry is per-app: each setBudgets is its own ledger", () => {
   try {
-    setBudgets(resolveBudgets({ cellState: "1MB" }));
-    setBudgets(resolveBudgets({ broadcastRate: "5/s" }));
-    assertEquals(declaredBudgets().cellState, undefined);
-    assertEquals(declaredBudgets().broadcastRate, 5);
+    const a = setBudgets(resolveBudgets({ cellState: "1MB" }));
+    const b = setBudgets(resolveBudgets({ broadcastRate: "5/s" }));
+    assertEquals(b.declared().cellState, undefined);
+    assertEquals(b.declared().broadcastRate, 5);
+    // …and the first app keeps ITS limits and its own breaches.
+    assertEquals(a.declared().cellState, 1024 * 1024);
+    a.record("cellState", 2 * 1024 * 1024, 'cell "a"');
+    assertEquals(a.report()?.ok, false);
+    assertEquals(b.report(), { ok: true, breaches: [] });
   } finally {
     resetBudgets();
   }
@@ -160,7 +163,7 @@ Deno.test("the declared cellState limit replaces aio's hard-coded one", async ()
     new URL("../src/server/server-broadcast.ts", import.meta.url),
   );
   assert(
-    /const limit = declaredBudgets\(\)\.cellState \?\? BROADCAST_FULL_WARN_BYTES/
+    /const limit = budgets\.declared\(\)\.cellState \?\? BROADCAST_FULL_WARN_BYTES/
       .test(src),
     "the broadcaster must prefer the declared budget over its own constant",
   );

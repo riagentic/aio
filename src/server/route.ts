@@ -112,6 +112,21 @@ function decodeSafe(s: string): string {
   }
 }
 
+/** A route KEY as matching compares it: trailing slashes dropped, except the
+ *  root's. `"/api/"` and `"/api"` describe one path. Pure. */
+export function routePatternKey(pattern: string): string {
+  return pattern.replace(/\/+$/, "") || "/";
+}
+
+/** A request path as matching compares it: ONE trailing slash dropped, except
+ *  the root's — `/users/` is `/users`, the rule the client router applies
+ *  (`\/?$`). One, not all: `/users//` names an empty segment on both sides. */
+export function routeRequestPath(pathname: string): string {
+  return pathname.length > 1 && pathname.endsWith("/")
+    ? pathname.slice(0, -1)
+    : pathname;
+}
+
 /** Match a route pattern (with `:param` segments and a trailing `*`) against a
  *  pathname. Returns the captured params, or null when it doesn't match. Pure
  *  + exported for tests.
@@ -125,9 +140,17 @@ function decodeSafe(s: string): string {
  *  The trailing `*` capture is deliberately NOT decoded: it is a path, not a
  *  value, and decoding it would invent segment boundaries. */
 export function matchRoute(
-  pattern: string,
-  pathname: string,
+  rawPattern: string,
+  rawPathname: string,
 ): Record<string, string> | null {
+  // The SAME path answers the same way on both sides of the page: the client
+  // router (`matchPath`) has always taken `/users/` as `/users`, and this
+  // matcher did not — so `GET /api/get/` fell through to the app shell (200
+  // text/html) while `<Route path="/api/get">` matched it, and `/files/*`
+  // matched `/files` here and not there. Pinned side by side over one table
+  // in tests/route-matching-parity.test.ts.
+  const pattern = routePatternKey(rawPattern);
+  const pathname = routeRequestPath(rawPathname);
   // Fast path: a literal pattern (no ':' or '*') is a plain equality check.
   if (!pattern.includes(":") && !pattern.includes("*")) {
     return pattern === pathname ? {} : null;

@@ -116,7 +116,11 @@ process, each with a disjoint `cells:` list, and binding one def to two apps
 throws. Embedding = `libraryMode: true` (no singleton lock) + explicit cells +
 `dbPath` for storage isolation; `tests/multi-instance.test.ts` and
 `tests/torture-app.test.ts` pin this. The global registry is a design decision,
-not a leftover.
+not a leftover. Process-wide modules (logger, diagnostic bus, `degraded()`) stay
+per app too: each `aio.run()` runs as its app, so logs, budgets, `/health`
+(uptime, degraded rows), feedback reports and diagnostics are each app's own —
+see
+[What stays per app](../testing/multi-app.md#what-stays-per-app-in-one-process).
 
 ## Module Boundaries (CI-enforced)
 

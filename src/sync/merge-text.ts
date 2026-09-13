@@ -38,6 +38,35 @@ export interface TextMergeResult {
  *  a conflict, which is exactly what `lww` would have done anyway. */
 export const MAX_TOKENS = 4000;
 
+/** …and a cap on the TABLE, which is what actually costs.
+ *
+ *  `MAX_TOKENS` measures each side; the work is the PRODUCT. A 4000-character
+ *  single-line field — a title, a URL list, a serialized blob — tokenizes per
+ *  character, so it sits exactly on the per-side limit and builds a
+ *  4000×4000 table. MEASURED: 72.5 MB of RSS and 84ms for one merge, and
+ *  `mergeText3` runs `hunksOf` twice (local AND remote), so a single field
+ *  peaks near 128 MB. This runs in the browser tab, on the sync path.
+ *
+ *  Measured allocation against the two predictions:
+ *    n=m= 500   6.6 MB   (O(m) would be ~0.004 MB, O(n·m) ~1.0 MB)
+ *    n=m=1000   3.5 MB   (O(m) ~0.008 MB,          O(n·m) ~4.0 MB)
+ *    n=m=2000  17.6 MB   (O(m) ~0.016 MB,          O(n·m) ~16.0 MB)
+ *    n=m=4000  45.5 MB   (O(m) ~0.032 MB,          O(n·m) ~64.0 MB)
+ *
+ *  It tracks O(n·m), because the backtrack needs every row and `lcsMatches`
+ *  keeps them all — whatever the comment there used to say.
+ *
+ *  Set at FOUR million (a 2000×2000 diff, ~16 MB of rows) rather than lower,
+ *  because the bail costs a peer's edit and that trade is only worth making at
+ *  the extreme. Measured at the boundary: a 1500×1500 single-line field merges
+ *  BOTH edits correctly in 0.4 ms, and a budget that refused it would have
+ *  turned an affordable merge into silent data loss — which is a worse bug
+ *  than the one it was fixing. Past this, the merge does what `MAX_TOKENS`
+ *  already does for bigger inputs, and what the strategy's own doc says it
+ *  does when a diff "is not worth its own cost": falls back to LWW, reported
+ *  as a conflict. */
+export const MAX_LCS_CELLS = 4_000_000;
+
 /** Split text the way a human edits it.
  *
  *  Lines when there ARE lines: prose and documents are edited a paragraph at a
@@ -58,14 +87,18 @@ export function tokenize(s: string): string[] {
 
 /** Longest common subsequence, as pairs of matched indices.
  *
- *  Classic O(n·m) table. Bounded by `MAX_TOKENS` at the call site, and both
- *  inputs have their common prefix and suffix stripped first, so the table is
- *  built only over what actually differs — for the common edit (one paragraph
- *  in a long document) that is a handful of tokens, not the whole text. */
+ *  Classic O(n·m) table, in BOTH time and space: the backtrack below needs
+ *  every row, so every row is kept. (The comment here used to say the
+ *  row-at-a-time loop made the allocation O(m); it does not, and measuring it
+ *  says so — see `MAX_LCS_CELLS`.) Bounded by `MAX_TOKENS` per side and by
+ *  `MAX_LCS_CELLS` on the product at the call site, and both inputs have
+ *  their common prefix and suffix stripped first, so the table is built only
+ *  over what actually differs — for the common edit (one paragraph in a long
+ *  document) that is a handful of tokens, not the whole text. */
 function lcsMatches(a: string[], b: string[]): Array<[number, number]> {
   const n = a.length, m = b.length;
   if (n === 0 || m === 0) return [];
-  // Row-at-a-time to keep the allocation O(m) rather than O(n·m).
+  // One row at a time, all of them kept: the backtrack walks them.
   const prev = new Uint32Array(m + 1);
   const rows: Uint32Array[] = [];
   let cur = new Uint32Array(m + 1);
@@ -184,8 +217,21 @@ export function mergeText3(
   const lT = tokenize(local);
   const rT = tokenize(remote);
   const localWins = compareHLC(localHlc, remoteHlc) >= 0;
+  // Two ceilings, because they measure different things. `MAX_TOKENS` bounds
+  // each SIDE; the work is the PRODUCT, and a 4000-character single-line field
+  // sits exactly on the per-side limit while asking for a 4000×4000 table.
+  //
+  // The bail is the SAME one, deliberately: LWW, reported as a conflict. A
+  // partial diff would be worse than no diff — the first version of this bailed
+  // inside `hunksOf` by returning a whole-field replacement hunk, and that
+  // hunk did not overlap the other side's small one, so the merge spliced them
+  // and produced a value NEITHER peer had written, with `conflict: false`.
+  // Falling back to a documented answer beats inventing an undocumented one.
   if (
-    bT.length > MAX_TOKENS || lT.length > MAX_TOKENS || rT.length > MAX_TOKENS
+    bT.length > MAX_TOKENS || lT.length > MAX_TOKENS ||
+    rT.length > MAX_TOKENS ||
+    bT.length * lT.length > MAX_LCS_CELLS ||
+    bT.length * rT.length > MAX_LCS_CELLS
   ) {
     return { value: localWins ? local : remote, conflict: true };
   }

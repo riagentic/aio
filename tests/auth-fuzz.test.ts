@@ -244,7 +244,10 @@ Deno.test({
                 200,
                 `${a.id} current password answered ${r.status} ${r.body?.error}`,
               );
-              a.fails = 0;
+              // With a factor enrolled the password is half a login and does
+              // NOT reset the counter — wrong codes feed it too; the completed
+              // `totp` step clears it (see totp-login).
+              if (!a.totp?.enabled) a.fails = 0;
               if (a.totp?.enabled) {
                 assertEquals(r.body.totpRequired, true, "factor not bypassed");
                 a.pendings.push(r.body.pending);
@@ -402,8 +405,16 @@ Deno.test({
                 pending,
                 code: await code(a.totp.secret),
               });
+              // A lock that landed after the pending was minted still holds:
+              // a locked account completes no login, by either factor.
+              if (a.locked) {
+                assertEquals(r.status, 423, `${a.id} locked → totp 423`);
+                note(`totp-login ${a.id} → 423 (locked)`);
+                return;
+              }
               assertEquals(r.status, 200, `totp: ${r.body?.error}`);
               a.live.add(r.body.token);
+              a.fails = 0; // the completed login clears the counter
               // I6 — the pending is spent.
               const again = await post("totp", {
                 pending,
@@ -597,7 +608,9 @@ Deno.test({
               200,
               `${free.id} was collateral damage of another account's failures`,
             );
-            free.fails = 0; // a success clears the counter, server-side too
+            // A success clears the counter, server-side too — unless a factor
+            // is enrolled, where only the completed code step does.
+            if (!free.totp?.enabled) free.fails = 0;
             if (free.totp?.enabled) free.pendings.push(r.body.pending);
             else free.live.add(r.body.token);
           }

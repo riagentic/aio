@@ -20,18 +20,27 @@ the part you back up is one subdirectory of it.
   launch.json ← ② the flags `am` started it with, so `am restart` replays them
 
 $XDG_RUNTIME_DIR/aio/   ← ③ must NOT survive a reboot
-  wallet.sock  wallet.pid  wallet.lock
+  wallet.lock           the instance: pid, port, status, home (no separate .pid)
+  wallet.sock           ┐ only on the socket transport — a desktop app
+  wallet.http.sock      ┘ running with no TCP port
 ```
+
+`$XDG_RUNTIME_DIR` unset (containers, no systemd, plain ssh) → `/tmp/aio/`;
+Windows → `%TEMP%\aio\`, with named pipes instead of socket files. Under
+`AIO_APPS_DIR` the directory is scoped to it — `aio-<that path, as a slug>` — so
+a sandboxed instance never shares a lock with the real one. If the shared
+directory belongs to another user, a private `aio-u<uid>` sibling is used and
+boot says so.
 
 Four tiers, and the only question that separates them is **what a backup
 contains**:
 
-| Tier         | Lose it and…                          | Where                                   |
-| ------------ | ------------------------------------- | --------------------------------------- |
-| ① critical   | the data is gone                      | `~/.<appId>/data/`                      |
-| ② expendable | the app recreates it                  | `~/.<appId>/logs⎪cache/`, `launch.json` |
-| ②b payload   | it re-unpacks — but not while it runs | `~/.<appId>/app/`                       |
-| ③ temporary  | it must not survive a reboot at all   | `$XDG_RUNTIME_DIR/aio/`                 |
+| Tier         | Lose it and…                          | Where                                    |
+| ------------ | ------------------------------------- | ---------------------------------------- |
+| ① critical   | the data is gone                      | `~/.<appId>/data/`                       |
+| ② expendable | the app recreates it                  | `~/.<appId>/logs⎪cache/`, `launch.json`  |
+| ②b payload   | it re-unpacks — but not while it runs | `~/.<appId>/app/`                        |
+| ③ temporary  | it must not survive a reboot at all   | `$XDG_RUNTIME_DIR/aio/` (or `/tmp/aio/`) |
 
 **Why tier ③ isn't in the app directory** — it's the one deliberate split, and
 it buys three things: a `.sock`/`.lock` must NOT survive a reboot (in `$HOME`
@@ -244,6 +253,22 @@ all of them. `appDir` always outranks it.
 Note the dot appears only in the default: `~/.wallet` hides in a home directory,
 `/srv/aio/wallet` has no reason to.
 
+Because the NAME picks that directory, a name can pick one that already belongs
+to another program: appId `ssh` is `~/.ssh`. Boot refuses a derived home (the
+`~/.<appId>` or `AIO_APPS_DIR` rows) that already exists, is not empty, and
+holds none of aio's own `data/`, `logs/`, `cache/`, `app/`, `backups/` or
+`launch.json` — naming what it found and the fix (another `appId`, or an
+explicit `appDir`). An existing app always carries `data/` and `logs/`, so it is
+never refused; an `appDir` is a path somebody chose, so it is not checked.
+
+A directory that does not exist YET cannot be recognised that way, so the names
+`am create` refuses (`aio`, `ssh`, `gnupg`, `config`, `local`, `cache`, `kube`,
+`aws`, `docker`, … — `RESERVED_APP_NAMES`) are refused at boot too when they
+would derive `~/.<name>`: appId `kube` on a machine without kubectl would
+otherwise create `~/.kube` and put its state where the cluster credentials land
+later. An app already living there (`data/` and `logs/` both present) still
+boots, and under `AIO_APPS_DIR` (`<root>/kube`) the name is nobody else's.
+
 `dbPath` still overrides the state database alone, for the case where state
 belongs on a different disk from everything else.
 
@@ -346,8 +371,9 @@ data: back up /home/me/.wallet/data — everything outside it is disposable
 ```
 
 It never overwrites an existing file, moves each SQLite database with its
-`-wal`/`-shm` sidecars as one set, and refuses entirely while the app is
-running. `--no-data-migrate` skips it.
+`-wal`/`-shm` sidecars as one set (and the journal with its `.wm` watermark, so
+nothing already applied is replayed twice), and refuses entirely while the app
+is running. `--no-data-migrate` skips it.
 
 ## Related
 

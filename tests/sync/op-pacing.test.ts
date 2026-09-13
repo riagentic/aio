@@ -43,6 +43,7 @@ function shimLocalStorage(): void {
 function engineWith(advertisedRate: number | undefined) {
   shimLocalStorage();
   const sent: string[] = [];
+  const at: number[] = [];
   rememberPeerHello(
     {
       v: 3,
@@ -55,7 +56,10 @@ function engineWith(advertisedRate: number | undefined) {
     clientId: "seeder",
     cells: { [CELL]: normalizeSyncConfig(true) },
     buffer: createOpBuffer(createLocalStorageOpStorage()),
-    send: (m: string) => sent.push(m),
+    send: (m: string) => {
+      sent.push(m);
+      at.push(Date.now());
+    },
     reducer: (s: D, _a: string, p: D) => ({
       ...s,
       items: [...(s.items as unknown[]), p],
@@ -67,45 +71,63 @@ function engineWith(advertisedRate: number | undefined) {
     onStateUpdate: () => {},
   } as D);
   engine.setOnline?.(true);
-  return { engine, sent };
+  return { engine, sent, at };
+}
+
+/** The most frames sent inside any one-second span — what a server counting
+ *  in one-second windows can see, wherever its window happens to start. A
+ *  rate averaged over the run is NOT that: it depends on how long the run
+ *  took against the pacer's own refill, i.e. on the machine. */
+function maxInAnySecond(at: number[]): number {
+  let max = 0;
+  for (let i = 0, j = 0; j < at.length; j++) {
+    while (at[j]! - at[i]! >= 1000) i++;
+    max = Math.max(max, j - i + 1);
+  }
+  return max;
 }
 
 Deno.test("a 1000-op seed never exceeds the rate the server advertised", async () => {
   const RATE = 100;
-  const { engine, sent } = engineWith(RATE);
+  const { engine, sent, at } = engineWith(RATE);
   const started = Date.now();
   try {
     for (let i = 0; i < 1000; i++) {
-      engine.handleLocalAction(CELL, "add", { id: i });
+      // Past `pendingCap` the engine REJECTS the caller rather than dropping
+      // the change silently, and these calls are deliberately unawaited —
+      // this test is about send pacing, not about the buffer being full.
+      engine.handleLocalAction(CELL, "add", { id: i }).catch(() => {});
     }
-    await new Promise((r) => setTimeout(r, 400));
+    // Long enough to cross the pacer's refill at least once past the burst,
+    // however long the enqueue took.
+    await new Promise((r) => setTimeout(r, 1200));
     const elapsedSec = (Date.now() - started) / 1000;
     assert(sent.length > 0, "nothing was sent at all");
-    // The RATE, not a frame count. The first draft asserted "at most RATE in
-    // the first window" and read 120 — which is correct pacing across two
-    // windows, because a thousand ops through a real op buffer take longer
-    // than a second to enqueue. Measuring a window while not controlling the
-    // clock is measuring the machine.
-    const perSec = sent.length / Math.max(elapsedSec, 0.001);
+    // The RATE in any second, not frames over the run. This asserted
+    // `sent / elapsed` and flipped with the machine: the enqueue of a
+    // thousand ops took ~1.1s, then ~0.65s once the engine stopped a second
+    // prune-and-add per refused op, which moved the end of the 400ms wait
+    // onto the old fixed window's rollover — 60 frames in 1.05s (57/sec) or
+    // 120 in 1.1s (109/sec), run to run.
+    const peak = maxInAnySecond(at);
     assert(
-      perSec <= RATE,
-      `${perSec.toFixed(0)} frames/sec against an advertised ${RATE}/sec — ` +
+      peak <= RATE,
+      `${peak} frames inside one second against an advertised ${RATE}/sec — ` +
         `this is the burst that closed the socket after 50 consecutive drops ` +
         `(report 1 §10)`,
     );
-    // …and it uses HEADROOM rather than sending at the ceiling, because
-    // sending at it races the server's own window boundary. 0.6 is the
-    // declared safety factor; anything at or above the ceiling means the
-    // headroom is gone.
+    // …and it keeps HEADROOM rather than sending at the ceiling: the server
+    // counts a frame when its loop READS it, so a stall reads a backlog at
+    // once. The bucket's bound is burst + perSec = 80% of the rate.
     assert(
-      perSec < RATE * 0.9,
-      `${perSec.toFixed(0)} frames/sec is effectively the ceiling — "paced" ` +
-        `has to mean "never refused", not "usually"`,
+      peak <= RATE * 0.8,
+      `${peak} frames in one second is past the 80% bound — "paced" has to ` +
+        `mean "never refused", not "usually"`,
     );
     // And it is genuinely draining, not stalled: a pacer that sent nothing
-    // after the first window would also pass a rate check.
+    // after the first burst would also pass a rate check.
     assert(
-      sent.length > RATE * 0.3,
+      sent.length > RATE * 0.6,
       `only ${sent.length} frames in ${
         elapsedSec.toFixed(2)
       }s — the queue is ` +
@@ -116,10 +138,35 @@ Deno.test("a 1000-op seed never exceeds the rate the server advertised", async (
   }
 });
 
+Deno.test("ops trickling in late in a second, then a burst, still never exceed the rate in any second", async () => {
+  // The shape a fixed per-window counter gets wrong: room left at the END of
+  // one window is spent, then the next window opens with its full count, and
+  // both land inside the same second of the server's clock. MEASURED on the
+  // old fixed-window pacer: 119 frames inside one second against 100.
+  const RATE = 100;
+  const { engine, at } = engineWith(RATE);
+  try {
+    engine.handleLocalAction(CELL, "add", { id: -1 }).catch(() => {});
+    await new Promise((r) => setTimeout(r, 900));
+    for (let i = 0; i < 200; i++) {
+      engine.handleLocalAction(CELL, "add", { id: i }).catch(() => {});
+    }
+    await new Promise((r) => setTimeout(r, 1300));
+    const peak = maxInAnySecond(at);
+    assert(
+      peak <= RATE * 0.8,
+      `${peak} frames inside one second against an advertised ${RATE}/sec`,
+    );
+    assert(at.length > RATE * 0.6, `only ${at.length} frames — not draining`);
+  } finally {
+    engine.setOnline?.(false);
+  }
+});
+
 Deno.test("a single op is still instant — ordinary use is not slowed", async () => {
   const { engine, sent } = engineWith(100);
   try {
-    engine.handleLocalAction(CELL, "add", { id: 1 });
+    engine.handleLocalAction(CELL, "add", { id: 1 }).catch(() => {});
     await new Promise((r) => setTimeout(r, 10));
     assertEquals(sent.length, 1, "one op should not wait for a timer tick");
   } finally {
@@ -134,7 +181,10 @@ Deno.test("a peer that advertises NOTHING is paced as a default one, never faste
   const { engine, sent } = engineWith(undefined);
   try {
     for (let i = 0; i < 500; i++) {
-      engine.handleLocalAction(CELL, "add", { id: i });
+      // Past `pendingCap` the engine REJECTS the caller rather than dropping
+      // the change silently, and these calls are deliberately unawaited —
+      // this test is about send pacing, not about the buffer being full.
+      engine.handleLocalAction(CELL, "add", { id: i }).catch(() => {});
     }
     await new Promise((r) => setTimeout(r, 30));
     assert(
@@ -152,7 +202,10 @@ Deno.test("the queue is DROPPED offline — a reconnect re-sends from the buffer
   // before it is ever sent. Holding them would send each one twice.
   const { engine, sent } = engineWith(100);
   for (let i = 0; i < 400; i++) {
-    engine.handleLocalAction(CELL, "add", { id: i });
+    // Past `pendingCap` the engine REJECTS the caller rather than dropping
+    // the change silently, and these calls are deliberately unawaited —
+    // this test is about send pacing, not about the buffer being full.
+    engine.handleLocalAction(CELL, "add", { id: i }).catch(() => {});
   }
   await new Promise((r) => setTimeout(r, 20));
   const before = sent.length;

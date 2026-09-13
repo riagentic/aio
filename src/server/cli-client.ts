@@ -30,6 +30,11 @@ import {
   SETTLES_CALLS,
 } from "../protocol/ack-registry.ts";
 import { ACK_TIMEOUT_MS } from "../protocol/protocol-types.ts";
+import {
+  createSendPacer,
+  type PacedFrame,
+  type SendPacer,
+} from "../protocol/send-pacer.ts";
 import { VERSION } from "./aio-cli.ts";
 import { readBuildStamp } from "./app-version.ts";
 import { appDenoJsonLocated } from "./aio-run-helpers.ts";
@@ -58,6 +63,24 @@ import { count } from "../diagnostics/fmt.ts";
  *  interval; the server's `frozen` threshold is 2000 ms, so this has to be
  *  comfortably inside it. */
 const CLI_HEARTBEAT_MS = 1000;
+
+/** How many times one call is re-sent after the server answers "dropped,
+ *  retry after N ms" before its caller gets that refusal — the browser
+ *  transport's bound (`MAX_BUDGET_RETRIES` in browser-air-transport.ts). A
+ *  paced client should need none; this bounds a server that keeps its window
+ *  shut (the global fuse, tripped by OTHER clients) so a call cannot wait
+ *  forever. */
+const CLI_MAX_BUDGET_RETRIES = 8;
+
+/** A frame waiting on a socket's pacer. `action` is set for an action frame,
+ *  so a frame still waiting when its socket dies goes back to the offline
+ *  queue instead of being lost; `tries` counts server refusals it was re-sent
+ *  after. Heartbeats, hellos and resync requests carry no action and are
+ *  dropped with the socket — the next one sends its own. */
+type CliOutFrame = PacedFrame & {
+  action?: { type: string; payload?: unknown; cid?: string };
+  tries?: number;
+};
 
 enablePatches();
 
@@ -123,7 +146,7 @@ function _readyDeadline<S>(
   ms: number | undefined,
   resolve: (s: S) => void,
   reject: (e: Error) => void,
-): (s: S) => void {
+): { settle: (s: S) => void; abandon: () => void } {
   let done = false;
   let timer: number | undefined;
   if (ms && ms > 0) {
@@ -144,11 +167,28 @@ function _readyDeadline<S>(
       Deno.unrefTimer(timer);
     } catch { /* not Deno (browser bundle) — nothing to unref */ }
   }
-  return (s: S) => {
-    if (done) return;
-    done = true;
-    if (timer !== undefined) clearTimeout(timer);
-    resolve(s);
+  return {
+    settle: (s: S) => {
+      if (done) return;
+      done = true;
+      if (timer !== undefined) clearTimeout(timer);
+      resolve(s);
+    },
+    // close() before the first state. The deadline used to stay armed past
+    // close(): it fired later and told an already-closed client to "call
+    // close() to stop it" (and held a timer the sanitizers report), while
+    // without a deadline `await ready` after close() never returned. A client
+    // closed before it connected will never connect — say so now.
+    abandon: () => {
+      if (done) return;
+      done = true;
+      if (timer !== undefined) clearTimeout(timer);
+      reject(
+        new Error(
+          `[aio:cli] client closed before the first connection to ${what}`,
+        ),
+      );
+    },
   };
 }
 
@@ -173,9 +213,41 @@ function _pushDroppingOldest(
   pending: { reject(cid: string, err: Error): boolean },
   transport: string,
   action: { type: string; payload?: unknown },
+  /** Actions this client already ACCEPTED for sending — handed to a socket's
+   *  pacer, then taken back unsent when that socket closed. The cap bounds
+   *  calls made while offline and never evicts one of these: the pacer holds
+   *  any number of them while online, so evicting them made a blip, not the
+   *  app, decide which calls failed — and it evicted the EARLIEST. Measured:
+   *  300 calls, a 0.5 s blip at 1 s, 121 rejected "offline queue full" while
+   *  later calls applied. When only accepted actions are left to evict, the
+   *  NEW call is the one refused, at its call. */
+  accepted?: WeakSet<object>,
 ): void {
   while (queue.length >= WS_MAX_QUEUE) {
-    const dropped = queue.shift()!;
+    const at = accepted ? queue.findIndex((a) => !accepted.has(a)) : 0;
+    if (at < 0) {
+      const cid = (action as { cid?: string }).cid;
+      if (cid) {
+        pending.reject(
+          cid,
+          new Error(
+            `action NOT sent — the offline queue is full (${WS_MAX_QUEUE}) ` +
+              `of ${queue.length} earlier calls that were accepted before ` +
+              `the connection dropped; they replay first, and this one was ` +
+              `refused rather than evict them`,
+          ),
+        );
+      }
+      log.warn(
+        "cli",
+        `${transport} queue full (${WS_MAX_QUEUE}) of calls accepted before ` +
+          `the connection dropped — refused the new action ("${action.type}")`,
+      );
+      return;
+    }
+    const [dropped] = queue.splice(at, 1) as [
+      { type: string; payload?: unknown },
+    ];
     const cid = (dropped as { cid?: string }).cid;
     if (cid) {
       pending.reject(
@@ -193,6 +265,37 @@ function _pushDroppingOldest(
     );
   }
   queue.push(action);
+}
+
+/** Refuse, at the call, a URL no retry can ever connect to.
+ *
+ *  `connectCli("localhost:8000")` parses — as protocol `localhost:` with an
+ *  EMPTY host — so the client dialled `ws:///ws` and logged "still retrying"
+ *  forever; `ftp://host:8000` was quietly dialled as `ws://`. Both are a typo
+ *  that the retry loop turned into an apparent hang. Only the four schemes the
+ *  socket URL is derived from are accepted, and the refusal shows the spelling
+ *  that works. */
+function assertCliUrl(url: string): void {
+  let parsed: URL | undefined;
+  try {
+    parsed = new URL(url);
+  } catch { /* reported below, with the fix */ }
+  const ok = parsed !== undefined && parsed.host !== "" &&
+    ["http:", "https:", "ws:", "wss:"].includes(parsed.protocol);
+  if (ok) return;
+  const bare = /^[A-Za-z0-9.-]+:\d+(\/.*)?$/.test(url) ||
+    /^[A-Za-z0-9.-]+(\/.*)?$/.test(url);
+  throw new TypeError(
+    `connectCli: ${JSON.stringify(url)} is not an app URL — ` +
+      (parsed && parsed.host !== "" && !bare
+        ? `the scheme "${parsed.protocol}" is not one a client can connect ` +
+          `with (use http:, https:, ws: or wss:). `
+        : `it needs a scheme and a host. `) +
+      `Write it the way the app's boot banner prints it, e.g. ` +
+      `connectCli("http://${
+        bare ? url : parsed?.host ? parsed.host : "localhost:8000"
+      }").`,
+  );
 }
 
 /** Connect a CLI process to a running aio app as a real client: live state,
@@ -228,6 +331,7 @@ export function connectCli<S>(
     readyTimeoutMs?: number;
   },
 ): CliApp<S> {
+  assertCliUrl(url);
   let state: S | null = null;
   let ws: WebSocket | null = null;
   let closed = false;
@@ -261,6 +365,145 @@ export function connectCli<S>(
   // dispatcher, and until now there was no way to give it back).
   const _bound: import("../state/cell-types.ts").CellDef[] = [];
 
+  // ── one paced writer per socket ────────────────────────────────────────────
+  //
+  // EVERY frame this client writes goes through the open socket's pacer: bound
+  // calls, `send()`, the offline flush, the hello, the heartbeat, resync. The
+  // server counts all of them against one per-connection budget and says what
+  // it is in its hello (`rate`), so one writer honouring it is the only shape
+  // that CAN honour it.
+  //
+  // MEASURED before this (a real server in a subprocess, the default 100/sec):
+  // `Promise.allSettled` over 150 bound `inc()` calls gave ok 99 / rejected 51
+  // — 50 "frame dropped", 1 "connection lost" — and the server closed the
+  // socket with 1008 and denylisted the address. The hello was read for its
+  // version and nothing else. Same design as the browser transport
+  // (browser-air-transport.ts), which had the same bug.
+
+  /** The pacer for the socket that is open now; null while there is none. */
+  let pacer: SendPacer<CliOutFrame> | null = null;
+  /** The `rate` this client's server last advertised. Per client, not the
+   *  module-level `peerHello()`: one process may hold clients to two servers
+   *  with different budgets. */
+  let peerRate: number | undefined;
+  /** Arrival order across the offline queue and the pacer, so a re-sent call
+   *  goes back where it was rather than to the back of the line. */
+  let _seq = 0;
+  /** Action frames written and not yet acked — kept so a frame the server
+   *  drops with a retry hint can be sent again. Cleared on ack and on close. */
+  const _written = new Map<string, CliOutFrame>();
+  /** Actions taken back unsent from a closed socket's pacer — never evicted
+   *  by the offline cap (`_pushDroppingOldest`). Weak: an entry goes with its
+   *  action once it is sent and settled. */
+  const _accepted = new WeakSet<object>();
+
+  function _pacerFor(socket: WebSocket): SendPacer<CliOutFrame> {
+    return createSendPacer<CliOutFrame>({
+      write: (entry) => {
+        // A CLOSING socket is offline for this frame. Refuse rather than write
+        // into a socket that will never deliver it and arm a clock for a call
+        // that never left; the frame goes back to the offline queue.
+        if (socket.readyState !== WebSocket.OPEN) {
+          throw new Error("the socket is no longer open");
+        }
+        socket.send(entry.frame);
+        const cid = entry.action?.cid;
+        if (!cid) return;
+        // The call's ack clock starts HERE, when its frame actually leaves —
+        // never while it waits on the pacer or in the offline queue.
+        _pending.armTimer(cid);
+        _written.set(cid, entry);
+        // A call settled some other way (timed out) leaves its entry behind;
+        // sweep those rather than grow with a long-lived client.
+        if (_written.size > 2048) {
+          for (const k of _written.keys()) {
+            if (!_pending.isWritten(k)) _written.delete(k);
+          }
+        }
+      },
+      onRefused: (entries, err) => {
+        const back = _requeuePaced(entries);
+        if (back > 0) {
+          log.warn(
+            "cli",
+            `the WebSocket refused a paced write (${err}) — ` +
+              `${count(back, "action")} back in the offline queue, in order`,
+          );
+        }
+      },
+      rate: () => peerRate,
+    });
+  }
+
+  /** Frames never written (still paced, or refused by the socket): actions go
+   *  back into the offline queue AHEAD of anything queued after them, under
+   *  the queue's one cap policy; other frames are dropped. None was written,
+   *  so no caller is in flight and none is rejected for it here. Returns how
+   *  many actions went back. */
+  function _requeuePaced(entries: CliOutFrame[]): number {
+    const actions = entries.flatMap((e) => e.action ? [e.action] : []);
+    if (actions.length === 0) return 0;
+    // Ahead of everything queued after them, and OUTSIDE the cap: each was
+    // already accepted (see `_pushDroppingOldest`'s `accepted`), and pushing
+    // them back through the cap evicted the oldest of them.
+    for (const a of actions) _accepted.add(a);
+    queue.unshift(...actions);
+    _noteQueued();
+    return actions.length;
+  }
+
+  /** The server dropped a call's frame before running it and said when a
+   *  re-send will be taken (`AckPayload.retryAfterMs`). Hold the call and send
+   *  it again, instead of failing a write that was never attempted. Returns
+   *  true when the ack was consumed that way; false settles the caller as
+   *  usual. */
+  let _retryNoted = false;
+  function _retryRefusedCall(d: AckPayload): boolean {
+    const { cid, ok, retryAfterMs } = d;
+    if (typeof cid !== "string") return false;
+    const entry = _written.get(cid);
+    _written.delete(cid);
+    if (
+      ok !== false || !entry?.action || typeof retryAfterMs !== "number" ||
+      !Number.isFinite(retryAfterMs) || retryAfterMs < 0 ||
+      // Still awaited: a call that already timed out was told it failed, and
+      // re-sending it would land a write its caller gave up on.
+      !_pending.isWritten(cid)
+    ) return false;
+    if ((entry.tries ?? 0) >= CLI_MAX_BUDGET_RETRIES) return false;
+    // Not in flight any more — the server said so. A close from here on must
+    // re-queue this call, not reject it as "connection lost".
+    _pending.unwrite(cid);
+    const again: CliOutFrame = { ...entry, tries: (entry.tries ?? 0) + 1 };
+    if (!_retryNoted) {
+      _retryNoted = true;
+      log.warn(
+        "cli",
+        // The server's own reason, not a guess at it: a budget drop is per
+        // message, per byte or the server-wide fuse, and naming the wrong
+        // knob sends the reader to raise a limit that was never hit.
+        `the server dropped a call and asked for a re-send in ${
+          Math.round(retryAfterMs)
+        }ms (${d.error ?? "over a per-second budget"}) — held and re-sent, ` +
+          `not failed. If this repeats, raise the budget it names in ` +
+          `aio.run({ wsLimits: { messagesPerSec, bytesPerSec } }) or batch ` +
+          `the calls. Further re-sends are not repeated here.`,
+      );
+    }
+    if (pacer) {
+      // Nothing this socket sends can be taken before the window reopens.
+      pacer.hold(Math.min(retryAfterMs, 10_000));
+      try {
+        pacer.push(again);
+      } catch {
+        _requeuePaced([again]);
+      }
+    } else {
+      _requeuePaced([again]);
+    }
+    return true;
+  }
+
   /** Write an action, or queue it while the socket is down.
    *
    *  Returns which happened, because the caller must be able to tell a real
@@ -275,12 +518,20 @@ export function connectCli<S>(
     // encode, so a value JSON cannot carry threw at the call site when
     // connected and was queued in silence when not — the same action, two
     // answers, and the queued one poisoned the drain below for good.
+    //
+    // "written" means handed to the open socket's pacer: it leaves on THIS
+    // socket at the advertised pace, and its call's clock starts when it does.
     const frame = encodeAction(action);
-    if (ws && ws.readyState === WebSocket.OPEN) {
-      ws.send(frame);
-      return { written: true, queued: false };
+    if (pacer && ws && ws.readyState === WebSocket.OPEN) {
+      try {
+        pacer.push({ frame, action, seq: _seq++ });
+        return { written: true, queued: false };
+      } catch {
+        // The socket says OPEN and refuses the write — offline in every way
+        // that matters to this action. Queue it like the no-socket path.
+      }
     }
-    _pushDroppingOldest(queue, _pending, "offline", action);
+    _pushDroppingOldest(queue, _pending, "offline", action, _accepted);
     _noteQueued();
     return { written: false, queued: true };
   }
@@ -302,8 +553,11 @@ export function connectCli<S>(
   }
 
   let _readyResolve: ((s: S) => void) | null = null;
+  let _readyAbandon: (() => void) | null = null;
   const ready = new Promise<S>((r, j) => {
-    _readyResolve = _readyDeadline<S>(url, opts?.readyTimeoutMs, r, j);
+    const d = _readyDeadline<S>(url, opts?.readyTimeoutMs, r, j);
+    _readyResolve = d.settle;
+    _readyAbandon = d.abandon;
   });
   // An unhandled rejection is not the point of the deadline — a caller that
   // never awaits `ready` (the normal UI case) must not crash the process.
@@ -451,14 +705,32 @@ export function connectCli<S>(
       retry = 0;
       wasConnected = true;
       _rememberPeer(explicitToken);
+      // A fresh budget per socket — the server's counters are per connection.
+      // `peerRate` is deliberately KEPT from the last hello: a reconnect
+      // flushes the offline queue before this socket's hello can arrive, and
+      // the same app's last advertised budget is a far better guess than the
+      // default (which a 5/sec server answers by dropping most of the flush).
+      // The pacer reads it live, so the new hello re-paces what still waits.
+      const paced = _pacerFor(socket);
+      pacer = paced;
       // A3: announce our wire-protocol version before anything else.
-      socket.send(enc("proto", protoHello(VERSION, stampedAppVersion())));
+      paced.push({
+        frame: enc("proto", protoHello(VERSION, stampedAppVersion())),
+        seq: _seq++,
+      });
       stopHeartbeat();
       heartbeat = setInterval(() => {
         if (socket.readyState !== WebSocket.OPEN) return;
+        // Frames already waiting prove liveness when they land (the server
+        // refreshes it on ANY frame); a ping queued behind a burst would only
+        // spend budget the burst is waiting for.
+        if (paced.length > 0) return;
         // No render meter on a CLI client, so nothing is ever "unpainted".
         try {
-          socket.send(enc("vitals-ping", { t1: Date.now(), ms: 0 }));
+          paced.push({
+            frame: enc("vitals-ping", { t1: Date.now(), ms: 0 }),
+            seq: _seq++,
+          });
         } catch {
           /* aio-ok: the socket closed between the check and the send */
         }
@@ -466,10 +738,10 @@ export function connectCli<S>(
       // A heartbeat must never be the reason a CLI process refuses to exit.
       if (heartbeat !== undefined) Deno.unrefTimer?.(heartbeat);
 
-      // Drain queued actions. Each frame's ack clock starts HERE, when it is
-      // actually written — not at dispatch time, or an action queued for
-      // longer than the ceiling times out while still sitting in the queue and
-      // is then delivered anyway.
+      // Drain queued actions into the pacer, in order. Each frame's ack clock
+      // starts when the pacer actually writes it — not at dispatch time, or an
+      // action queued for longer than the ceiling times out while still
+      // sitting in the queue and is then delivered anyway.
       const q = [...queue];
       queue.length = 0;
       _queueNoted = false;
@@ -494,7 +766,7 @@ export function connectCli<S>(
           continue;
         }
         try {
-          socket.send(frame);
+          paced.push({ frame, action: a, seq: _seq++ });
         } catch (err) {
           queue.unshift(...q.slice(i));
           log.warn(
@@ -505,7 +777,6 @@ export function connectCli<S>(
           );
           return;
         }
-        if (cid) _pending.armTimer(cid);
       }
     };
 
@@ -555,6 +826,9 @@ export function connectCli<S>(
           const d = (frame.d ?? {}) as AckPayload;
           const { cid, ok, value } = d;
           if (typeof cid !== "string") return;
+          // Dropped over a budget that reopens by itself: re-sent, not failed.
+          if (_retryRefusedCall(d)) return;
+          _written.delete(cid);
           if (ok === false) {
             // `wireError`, not `new Error(error)`: it carries the server's
             // `code` through onto `err.code`, so `errorCode(err)` tells an
@@ -573,6 +847,8 @@ export function connectCli<S>(
           const theirs = parseProtoHello(frame.d);
           if (theirs) rememberPeerHello(theirs);
           if (!theirs) return;
+          // The budget this socket's writes are paced to.
+          peerRate = theirs.rate;
           const result = negotiateProtocol(protoHello(VERSION), theirs);
           if (!result.ok) {
             log.error("cli", `protocol version mismatch: ${result.reason}`);
@@ -594,8 +870,10 @@ export function connectCli<S>(
         case "patches": {
           state = applyServerFrame(state, frame, () => {
             // desync — request full state from server
-            if (socket.readyState === WebSocket.OPEN) {
-              socket.send(enc("resync"));
+            if (socket.readyState === WebSocket.OPEN && pacer) {
+              try {
+                pacer.push({ frame: enc("resync"), seq: _seq++ });
+              } catch { /* aio-ok: closing — the reconnect sends full state */ }
             }
           }) as S;
           // Resolve ready on first state
@@ -615,6 +893,17 @@ export function connectCli<S>(
 
     socket.onclose = (ev) => {
       stopHeartbeat();
+      // Frames still waiting on this socket's pacer were never written:
+      // actions go back to the offline queue, at their place in line, and
+      // replay on the next open. Before the in-flight rejection below, which
+      // does not touch them (none was written). After close() the pacer was
+      // already emptied and its callers rejected — nothing to take back.
+      if (pacer && ws === socket) {
+        const left = pacer.take();
+        pacer = null;
+        if (!closed) _requeuePaced(left);
+      }
+      _written.clear();
       // A dropped connection can never ack. These calls did NOT demonstrably
       // succeed, so they must not resolve: resolving them reported success for
       // work whose fate is unknown, and an app that awaited one carried on as
@@ -699,16 +988,16 @@ export function connectCli<S>(
         // succeeded (see SETTLES_CALLS in protocol/ack-registry.ts).
         const dispatch = (action: Msg): Promise<unknown> => {
           const cid = crypto.randomUUID();
-          // deferTimer: the clock belongs to the FRAME, not to the call. It
-          // starts in `armTimer` below when the write happens (here, or at the
-          // queue drain in `onopen`) — never while the action is still queued.
+          // deferTimer: the clock belongs to the FRAME, not to the call. The
+          // pacer arms it when the frame actually leaves (now, a moment later
+          // at the advertised pace, or after the drain in `onopen`) — never
+          // while the action is still waiting.
           const ackd = _pending.register(cid, {
             methodKey: ackMethodKey(action),
             deferTimer: true,
           });
-          let sent: { written: boolean; queued: boolean };
           try {
-            sent = _trySend(
+            _trySend(
               { ...action, cid } as { type: string; payload?: unknown },
             );
           } catch (err) {
@@ -721,17 +1010,17 @@ export function connectCli<S>(
             );
             return ackd;
           }
-          if (sent.written) _pending.armTimer(cid);
-          // Queued while offline: the ack clock must not run against a call
-          // that has not been written yet, and if we close still holding it,
+          // Paced or queued, the ack clock must not run against a call that
+          // has not been written yet, and if we close still holding it,
           // close() rejects it rather than reporting a success that never
           // happened.
           //
           // There is no third outcome to handle here any more. `_trySend`
-          // either writes or queues — a full queue now evicts the OLDEST entry
-          // and rejects THAT caller inside `_pushDroppingOldest`, so the branch
-          // that used to reject this one was unreachable dead code the moment
-          // the policy changed. The only other failure, a frame that cannot be
+          // either writes or queues — a full queue evicts the OLDEST entry
+          // and rejects THAT caller inside `_pushDroppingOldest` (or, when
+          // every entry was accepted before a blip, rejects THIS one there),
+          // so the branch that used to reject this one here was unreachable
+          // dead code the moment the policy changed. The only other failure, a frame that cannot be
           // built, is rejected in the `catch` above.
           return ackd;
         };
@@ -758,6 +1047,22 @@ export function connectCli<S>(
       if (reconnectTimer) {
         clearTimeout(reconnectTimer);
         reconnectTimer = undefined;
+      }
+      // Disarms the readyTimeoutMs deadline; a no-op once ready resolved.
+      _readyAbandon?.();
+      _readyResolve = _readyAbandon = null;
+      // Frames still paced were never sent; their callers are rejected below
+      // with everything else outstanding. `take()` also disarms the timer, so
+      // a closed client holds no handle open.
+      const unsent = pacer?.take().length ?? 0;
+      pacer = null;
+      _written.clear();
+      if (unsent > 0) {
+        log.warn(
+          "cli",
+          `closed with ${count(unsent, "frame")} still waiting on the send ` +
+            `pacer — never sent; their callers reject`,
+        );
       }
       ws?.close();
       ws = null;
@@ -818,8 +1123,11 @@ export function connectCliUDS<S>(
   const decoder = new TextDecoder();
 
   let _readyResolve: ((s: S) => void) | null = null;
+  let _readyAbandon: (() => void) | null = null;
   const ready = new Promise<S>((r, j) => {
-    _readyResolve = _readyDeadline<S>(socketPath, opts?.readyTimeoutMs, r, j);
+    const d = _readyDeadline<S>(socketPath, opts?.readyTimeoutMs, r, j);
+    _readyResolve = d.settle;
+    _readyAbandon = d.abandon;
   });
   ready.catch(() => {}); // see connectCli — an unawaited ready must not crash
 
@@ -873,6 +1181,15 @@ export function connectCliUDS<S>(
     if (conn || closed) return;
     connectLocal(socketPath)
       .then((c) => {
+        // close() ran while this dial was in flight. Adopting the connection
+        // kept a live socket and a read loop on a closed client, open until
+        // the SERVER hung up — hang up here instead.
+        if (closed) {
+          try {
+            c.close();
+          } catch { /* already closed */ }
+          return;
+        }
         conn = c;
         writer = c.writable.getWriter();
         retry = 0;
@@ -1135,6 +1452,9 @@ export function connectCliUDS<S>(
         clearTimeout(reconnectTimer);
         reconnectTimer = undefined;
       }
+      // See connectCli.close — the deadline must not outlive the client.
+      _readyAbandon?.();
+      _readyResolve = _readyAbandon = null;
       try {
         conn?.close();
       } catch { /* already closed */ }

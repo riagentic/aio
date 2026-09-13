@@ -4,6 +4,7 @@
 import { dirname, join } from "@std/path";
 import { homedir, hostname } from "node:os";
 import { log } from "../diagnostics/logger-api.ts";
+import { appsDirEnv } from "./app-dirs.ts";
 
 export type TlsCert = {
   cert: string;
@@ -149,7 +150,7 @@ function joinChain(leaf: string, ca: string): string {
  *  not reach into the developer's real trust material and not require the
  *  developer to trust a CA a test invented. */
 export function aioRootDir(): string {
-  const root = Deno.env.get("AIO_APPS_DIR");
+  const root = appsDirEnv(); // normalized: one data root, one CA
   return root ? join(root, ".aio-ca") : join(homedir(), ".aio", "ca");
 }
 

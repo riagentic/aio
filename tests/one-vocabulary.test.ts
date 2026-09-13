@@ -8,6 +8,7 @@
 //     compiles.
 import { assert, assertEquals, assertStringIncludes } from "@std/assert";
 import { join } from "@std/path";
+import { dropTempDir, tempDir } from "../src/testing/temp-dir.ts";
 import { legacyStandardTasks, standardTasks } from "../src/am/am-cmd-create.ts";
 import {
   cmdFix,
@@ -108,7 +109,7 @@ Deno.test("cmdFix --migrate-tasks: converts an old scaffold, keeps the customize
   const orig = Deno.cwd();
   const realLog = console.log;
   console.log = () => {};
-  const dir = await Deno.makeTempDir({ prefix: "am-migrate-" });
+  const dir = await tempDir("am-migrate-");
   try {
     const old = legacyStandardTasks(false, "browser");
     // Drop the electron tasks: their presence makes cmdFix (correctly) try a
@@ -166,7 +167,7 @@ Deno.test("cmdFix --migrate-tasks: converts an old scaffold, keeps the customize
   } finally {
     console.log = realLog;
     Deno.chdir(orig);
-    await Deno.remove(dir, { recursive: true }).catch(() => {});
+    await dropTempDir(dir);
   }
 });
 
@@ -175,7 +176,7 @@ Deno.test("cmdFix: plain fix leaves old tasks alone and points at --migrate-task
   const logs: string[] = [];
   const realLog = console.log;
   console.log = (...a: unknown[]) => logs.push(a.map(String).join(" "));
-  const dir = await Deno.makeTempDir({ prefix: "am-oldvocab-" });
+  const dir = await tempDir("am-oldvocab-");
   try {
     await Deno.writeTextFile(
       join(dir, "deno.json"),
@@ -203,7 +204,7 @@ Deno.test("cmdFix: plain fix leaves old tasks alone and points at --migrate-task
   } finally {
     console.log = realLog;
     Deno.chdir(orig);
-    await Deno.remove(dir, { recursive: true }).catch(() => {});
+    await dropTempDir(dir);
   }
 });
 
@@ -215,7 +216,7 @@ async function probeClientKey(
   keys: Record<string, unknown>,
   opts: { dev?: boolean } = {},
 ): Promise<{ client: string | null; output: string }> {
-  const proj = await Deno.makeTempDir({ prefix: "aio-client-key-" });
+  const proj = await tempDir("aio-client-key-");
   try {
     await Deno.mkdir(join(proj, "src"), { recursive: true });
     await Deno.writeTextFile(
@@ -230,7 +231,15 @@ console.log(JSON.stringify({ client: _denoJsonTargetClient() ?? null }));
 `,
     );
     const r = await new Deno.Command(Deno.execPath(), {
-      args: ["run", "-A", join(proj, "src", "probe.ts")],
+      // Prod is `--prod` (or a compiled binary), not merely "no __aioDev": a
+      // source run without it IS dev, and importing the server stamps
+      // `__aioDev` for it (aio-boot.ts), so the prod case must say `--prod`.
+      args: [
+        "run",
+        "-A",
+        join(proj, "src", "probe.ts"),
+        ...(opts.dev ? [] : ["--prod"]),
+      ],
       cwd: proj,
       env: { ...Deno.env.toObject(), AIO_PROBE_DEV: opts.dev ? "1" : "0" },
       stdout: "piped",
@@ -244,7 +253,7 @@ console.log(JSON.stringify({ client: _denoJsonTargetClient() ?? null }));
     // The hint flows through the framework logger (stdout) — search both.
     return { client: JSON.parse(line).client, output: out + stderr };
   } finally {
-    await Deno.remove(proj, { recursive: true }).catch(() => {});
+    await dropTempDir(proj);
   }
 }
 
@@ -281,7 +290,7 @@ Deno.test("am add cell: generates src/cell/<name>.ts in scaffold style, and it t
   const orig = Deno.cwd();
   const realLog = console.log;
   console.log = () => {};
-  const dir = await Deno.makeTempDir({ prefix: "am-add-check-" });
+  const dir = await tempDir("am-add-check-");
   try {
     await Deno.writeTextFile(
       join(dir, "deno.json"),
@@ -315,7 +324,7 @@ Deno.test("am add cell: generates src/cell/<name>.ts in scaffold style, and it t
   } finally {
     console.log = realLog;
     Deno.chdir(orig);
-    await Deno.remove(dir, { recursive: true }).catch(() => {});
+    await dropTempDir(dir);
   }
 });
 
@@ -351,7 +360,7 @@ Deno.test("cmdFix --migrate-tasks: derives build.targets from the tasks it delet
   const orig = Deno.cwd();
   const realLog = console.log;
   console.log = () => {};
-  const dir = await Deno.makeTempDir({ prefix: "am-derive-" });
+  const dir = await tempDir("am-derive-");
   try {
     const legacy = legacyStandardTasks(false, "electron");
     // The wallet shape: NO build key, no client/target key — the four pristine
@@ -415,7 +424,7 @@ Deno.test("cmdFix --migrate-tasks: derives build.targets from the tasks it delet
   } finally {
     console.log = realLog;
     Deno.chdir(orig);
-    await Deno.remove(dir, { recursive: true }).catch(() => {});
+    await dropTempDir(dir);
   }
 });
 
@@ -423,7 +432,7 @@ Deno.test("cmdFix --migrate-tasks: an electron-only app migrates to an electron-
   const orig = Deno.cwd();
   const realLog = console.log;
   console.log = () => {};
-  const dir = await Deno.makeTempDir({ prefix: "am-derive-el-" });
+  const dir = await tempDir("am-derive-el-");
   try {
     const legacy = legacyStandardTasks(false, "electron");
     await Deno.writeTextFile(
@@ -453,7 +462,7 @@ Deno.test("cmdFix --migrate-tasks: an electron-only app migrates to an electron-
   } finally {
     console.log = realLog;
     Deno.chdir(orig);
-    await Deno.remove(dir, { recursive: true }).catch(() => {});
+    await dropTempDir(dir);
   }
 });
 
@@ -461,7 +470,7 @@ Deno.test("cmdFix --migrate-tasks: an existing build.targets is authoritative �
   const orig = Deno.cwd();
   const realLog = console.log;
   console.log = () => {};
-  const dir = await Deno.makeTempDir({ prefix: "am-derive-keep-" });
+  const dir = await tempDir("am-derive-keep-");
   try {
     const legacy = legacyStandardTasks(false, "browser");
     await Deno.writeTextFile(
@@ -488,7 +497,7 @@ Deno.test("cmdFix --migrate-tasks: an existing build.targets is authoritative �
   } finally {
     console.log = realLog;
     Deno.chdir(orig);
-    await Deno.remove(dir, { recursive: true }).catch(() => {});
+    await dropTempDir(dir);
   }
 });
 
@@ -496,7 +505,7 @@ Deno.test("cmdFix --migrate-tasks: install:electron is dropped when the fleet ha
   const orig = Deno.cwd();
   const realLog = console.log;
   console.log = () => {};
-  const dir = await Deno.makeTempDir({ prefix: "am-drop-el-" });
+  const dir = await tempDir("am-drop-el-");
   try {
     const legacy = legacyStandardTasks(false, "browser");
     // A pure browser app that carries the old scaffold's electron RESIDUE:
@@ -534,7 +543,7 @@ Deno.test("cmdFix --migrate-tasks: install:electron is dropped when the fleet ha
       "matrix residue on a browser-only fleet must go with the matrix",
     );
     // A CUSTOMIZED install:electron is the user's — it must survive.
-    const dir2 = await Deno.makeTempDir({ prefix: "am-drop-el2-" });
+    const dir2 = await tempDir("am-drop-el2-");
     try {
       await Deno.writeTextFile(
         join(dir2, "deno.json"),
@@ -555,18 +564,18 @@ Deno.test("cmdFix --migrate-tasks: install:electron is dropped when the fleet ha
         "deno install my-pinned-electron",
       );
     } finally {
-      await Deno.remove(dir2, { recursive: true }).catch(() => {});
+      await dropTempDir(dir2);
     }
   } finally {
     console.log = realLog;
     Deno.chdir(orig);
-    await Deno.remove(dir, { recursive: true }).catch(() => {});
+    await dropTempDir(dir);
   }
 });
 
 Deno.test("aiol safe-fix: the target→client rename keeps the key's position", async () => {
   const { fixRenameTargetToClient } = await import("../aiol/fixes.ts");
-  const dir = await Deno.makeTempDir({ prefix: "aiol-pos-" });
+  const dir = await tempDir("aiol-pos-");
   try {
     await Deno.writeTextFile(
       join(dir, "deno.json"),
@@ -586,7 +595,7 @@ Deno.test("aiol safe-fix: the target→client rename keeps the key's position", 
       "the renamed key must not sink to the end of the file",
     );
   } finally {
-    await Deno.remove(dir, { recursive: true }).catch(() => {});
+    await dropTempDir(dir);
   }
 });
 

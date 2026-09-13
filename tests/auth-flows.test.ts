@@ -118,7 +118,8 @@ Deno.test("auth e2e: shell public, signup→login→ws→logout lifecycle", asyn
     });
     assertEquals(su.status, 201);
     const cookie = su.headers.get("set-cookie") ?? "";
-    assertStringIncludes(cookie, "aio_session=");
+    // Per app (`aio_session_<appId>`): cookies ignore the port.
+    assert(/^aio_session_[^=]+=/.test(cookie), cookie);
     assertStringIncludes(cookie, "HttpOnly");
     assertStringIncludes(cookie, "SameSite=Strict");
     const { token, user } = await su.json();

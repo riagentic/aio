@@ -150,12 +150,11 @@ Deno.test("browser-storage: boot sweeps the corrupt-chain garbage the old scan l
   assertEquals(store.get("__aio_sync:clientId.corrupt"), undefined);
 });
 
-// The offline queue's ONLY job is to survive a reload, and `read` goes back to
-// localStorage on every call — nothing is held in memory. So a refused
-// `setItem` (quota full, or storage disabled in a private/blocked context)
-// loses every unsent change at the next reload while `saveOp` resolves and the
-// engine goes on believing the op is queued. That was a bare `catch {}`
-// annotated "degrade to memory-only semantics", which is not what happens.
+// The offline queue's job is to survive a reload. A refused `setItem` (quota
+// full, or storage disabled in a private/blocked context) cannot give it that,
+// so it must be LOUD — it used to be a bare `catch {}`. The adapter now also
+// keeps that cell's document in memory, so the page itself still sees its
+// writes (tests/sync/storage-memory-mirror.test.ts); a reload still loses them.
 Deno.test("browser-storage: a refused write is LOUD, once per cell", async () => {
   shimLocalStorage({ refuseWrites: true });
   const errors: string[] = [];

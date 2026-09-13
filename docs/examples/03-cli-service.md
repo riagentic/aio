@@ -154,6 +154,7 @@ Create `src/cli.ts` -- a separate process that connects to the running server:
 ```ts
 // src/cli.ts
 import { connectCli } from "aio/server";
+import { instances } from "aio/extras";
 import type { Job } from "./cell/queue/index.ts";
 
 export type QueueState = {
@@ -165,7 +166,15 @@ export type QueueState = {
   };
 };
 
-const url = Deno.args[0] ?? "http://localhost:8000";
+// No hard-coded URL: `aio.run()` binds a FREE port unless one is named, so a
+// fixed one connects to nothing — or to another app. The lock file that
+// `aio.run({ appId })` writes knows the port; it is what `am` reads too.
+const live = instances("task-queue").find((i) => i.alive && i.port > 0);
+if (!live) {
+  console.error("no task-queue server running — start it: deno task dev");
+  Deno.exit(1);
+}
+const url = `ws://localhost:${live.port}/ws`;
 const cli = connectCli<QueueState>(url);
 
 console.log("Connecting to", url);
@@ -184,7 +193,7 @@ cli.subscribe((s) => {
 });
 
 // Enqueue from CLI args
-const task = Deno.args[1];
+const task = Deno.args[0];
 if (task) {
   cli.send({ type: "queue:enqueue", payload: { args: [task] } });
   console.log(`Enqueued: ${task}`);
@@ -199,22 +208,27 @@ the connection — same import the server uses:
 ```ts
 // src/cli.ts
 import { connectCli } from "aio/server";
+import { instances } from "aio/extras";
 import { queue } from "./cell/queue/index.ts";
 
-const cli = connectCli("http://localhost:8000");
-const task = Deno.args[1] ?? "build v2.0";
+// The running server's port, from its lock file (see above).
+const live = instances("task-queue").find((i) => i.alive && i.port > 0);
+if (!live) throw new Error("no task-queue server — start it: deno task dev");
+const cli = connectCli(`ws://localhost:${live.port}/ws`);
+const task = Deno.args[0] ?? "build v2.0";
 
 cli.bind(queue);
 
 await queue.enqueue(task); // dispatches over the socket, resolves on ack
 console.log(queue.jobs.length); // reads live server state
+cli.close(); // the socket keeps the process alive until closed
 ```
 
 Run it in a second terminal while the server is up:
 
 ```sh
-deno run -A src/cli.ts                                     # connect and watch
-deno run -A src/cli.ts http://localhost:8000 "build v2.0"  # connect + enqueue
+deno run -A src/cli.ts               # find the running server and watch
+deno run -A src/cli.ts "build v2.0"  # find it + enqueue
 ```
 
 `connectCli` uses the same WebSocket delta protocol as the browser. It

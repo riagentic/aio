@@ -96,10 +96,52 @@ export function _resetMarkdownWarnings(): void {
 
 // ── Inline parsing (bold, italic, code, links, images) ──────────────────────
 
+/** `nextAt(from)` — the first index ≥ `from` that `find` reports, remembered.
+ *
+ *  The inline parser asks "where is the next closer?" at every position, and a
+ *  closer that is not there was searched for to the end of the line EVERY time:
+ *  `"*a ".repeat(n)` or `"[a](".repeat(n)` cost O(n²) — a 200 KB comment held
+ *  an SSR render for 11 s. The answer for `from` also answers every later
+ *  `from` up to the index it found (nothing matched in between), and "none" (−1)
+ *  answers every later `from` at all. The parser's positions only move forward,
+ *  so each stretch of the line is searched once. A query behind the remembered
+ *  one is searched afresh — slower, never wrong. */
+function ahead(find: (from: number) => number): (from: number) => number {
+  let lo = Infinity;
+  let res = -1;
+  return (from) => {
+    if (from >= lo && (res === -1 || from <= res)) return res;
+    lo = from;
+    return (res = find(from));
+  };
+}
+
+/** `\s` as the block patterns and `(?!\s)` read it — Unicode spaces included. */
+const SPACE = /\s/;
+/** What `.` does not match without the `s` flag. A line split on "\n" can
+ *  still hold "\r"-less U+2028/U+2029. */
+const LINE_END = /[\n\r\u2028\u2029]/g;
+/** Where an `(href)` stops: `[^)\s]+` runs to the first `)` or space. */
+const HREF_END = /[)\s]/g;
+
+/** First index ≥ `from` matching the global `re`, or −1. */
+function searchFrom(text: string, re: RegExp, from: number): number {
+  re.lastIndex = from;
+  const m = re.exec(text);
+  return m ? m.index : -1;
+}
+
 /** Parse inline markdown in one line of text → an array of VChild. Order of
- *  the alternatives matters (code first so `*` inside code isn't italicized). */
+ *  the alternatives matters (code first so `*` inside code isn't italicized).
+ *
+ *  A scanner, not a regex per position: each alternative is the anchored
+ *  pattern named above it, decided by looking up the one closer that pattern
+ *  can end on (every `(.+?)` and `[^x]+` here ends at the FIRST candidate), and
+ *  every lookup goes through {@link ahead}. `ui-markdown-inline-linear.test.ts`
+ *  holds it to the regex version on random input and to linear growth. */
 function parseInline(text: string): VChild[] {
   const out: VChild[] = [];
+  const n = text.length;
   let i = 0;
   let plain = "";
   const flush = () => {
@@ -108,71 +150,119 @@ function parseInline(text: string): VChild[] {
       plain = "";
     }
   };
-  while (i < text.length) {
-    const rest = text.slice(i);
-
-    // inline code `...`
-    let m = /^`([^`]+)`/.exec(rest);
-    if (m) {
-      flush();
-      out.push(h("code", { class: "aio-md__code" }, m[1]!));
-      i += m[0].length;
-      continue;
-    }
-    // image ![alt](src)
-    m = /^!\[([^\]]*)\]\(([^)\s]+)\)/.exec(rest);
-    if (m) {
-      flush();
-      const src = normalizeHref(m[2]!);
-      if (src) {
-        out.push(h("img", { src, alt: m[1]!, class: "aio-md__img" }));
-      } else {
-        warnDroppedHref(m[2]!);
-        out.push(m[1]!); // unsafe src → keep the alt text only
+  const nextOf = (s: string) => ahead((from) => text.indexOf(s, from));
+  const nextTick = nextOf("`");
+  const nextBracketClose = nextOf("]");
+  const nextBold = { "**": nextOf("**"), __: nextOf("__") };
+  const nextLineEnd = ahead((from) => searchFrom(text, LINE_END, from));
+  const nextHrefEnd = ahead((from) => searchFrom(text, HREF_END, from));
+  // A `*`/`_` closer is one NOT preceded by a space — `(?<!\s)\1`.
+  const italicCloser = (c: string) =>
+    ahead((from) => {
+      for (
+        let k = text.indexOf(c, from);
+        k !== -1;
+        k = text.indexOf(c, k + 1)
+      ) {
+        if (!SPACE.test(text[k - 1]!)) return k;
       }
-      i += m[0].length;
-      continue;
-    }
-    // link [text](href)
-    m = /^\[([^\]]+)\]\(([^)\s]+)\)/.exec(rest);
-    if (m) {
-      flush();
-      const href = normalizeHref(m[2]!);
-      if (href) {
+      return -1;
+    });
+  const nextItalic = { "*": italicCloser("*"), _: italicCloser("_") };
+  // `(.+?)` from `start` closing at `close`: at least one character, none of
+  // them a line end.
+  const dotRun = (start: number, close: number) =>
+    close > start && !(nextLineEnd(start) !== -1 && nextLineEnd(start) < close);
+  // `\]\(([^)\s]+)\)` at `j` (the `]`): the href's end, or −1.
+  const hrefAt = (j: number): number => {
+    if (text[j + 1] !== "(") return -1;
+    const end = nextHrefEnd(j + 2);
+    return end > j + 2 && text[end] === ")" ? end : -1;
+  };
+
+  while (i < n) {
+    const c = text[i]!;
+
+    // inline code `...` — /^`([^`]+)`/
+    if (c === "`") {
+      const close = nextTick(i + 1);
+      if (close > i + 1) {
+        flush();
         out.push(
-          h("a", {
-            href,
-            class: "aio-md__a",
-            ...(/^https?:/i.test(href)
-              ? { target: "_blank", rel: "noopener noreferrer" }
-              : {}),
-          }, ...parseInline(m[1]!)),
+          h("code", { class: "aio-md__code" }, text.slice(i + 1, close)),
         );
-      } else {
-        warnDroppedHref(m[2]!);
-        out.push(...parseInline(m[1]!)); // drop the href, keep the text
+        i = close + 1;
+        continue;
       }
-      i += m[0].length;
-      continue;
     }
-    // bold **...** or __...__
-    m = /^(\*\*|__)(.+?)\1/.exec(rest);
-    if (m) {
-      flush();
-      out.push(h("strong", null, ...parseInline(m[2]!)));
-      i += m[0].length;
-      continue;
+    // image ![alt](src) — /^!\[([^\]]*)\]\(([^)\s]+)\)/
+    if (c === "!" && text[i + 1] === "[") {
+      const j = nextBracketClose(i + 2);
+      const end = j === -1 ? -1 : hrefAt(j);
+      if (end !== -1) {
+        flush();
+        const alt = text.slice(i + 2, j);
+        const raw = text.slice(j + 2, end);
+        const src = normalizeHref(raw);
+        if (src) {
+          out.push(h("img", { src, alt, class: "aio-md__img" }));
+        } else {
+          warnDroppedHref(raw);
+          out.push(alt); // unsafe src → keep the alt text only
+        }
+        i = end + 1;
+        continue;
+      }
     }
-    // italic *...* or _..._
-    m = /^(\*|_)(?!\s)(.+?)(?<!\s)\1/.exec(rest);
-    if (m) {
-      flush();
-      out.push(h("em", null, ...parseInline(m[2]!)));
-      i += m[0].length;
-      continue;
+    // link [text](href) — /^\[([^\]]+)\]\(([^)\s]+)\)/
+    if (c === "[") {
+      const j = nextBracketClose(i + 1);
+      const end = j > i + 1 ? hrefAt(j) : -1;
+      if (end !== -1) {
+        flush();
+        const label = text.slice(i + 1, j);
+        const raw = text.slice(j + 2, end);
+        const href = normalizeHref(raw);
+        if (href) {
+          out.push(
+            h("a", {
+              href,
+              class: "aio-md__a",
+              ...(/^https?:/i.test(href)
+                ? { target: "_blank", rel: "noopener noreferrer" }
+                : {}),
+            }, ...parseInline(label)),
+          );
+        } else {
+          warnDroppedHref(raw);
+          out.push(...parseInline(label)); // drop the href, keep the text
+        }
+        i = end + 1;
+        continue;
+      }
+    }
+    // bold **...** or __...__ — /^(\*\*|__)(.+?)\1/
+    if ((c === "*" || c === "_") && text[i + 1] === c) {
+      const close = nextBold[c === "*" ? "**" : "__"](i + 3);
+      if (close !== -1 && dotRun(i + 2, close)) {
+        flush();
+        out.push(h("strong", null, ...parseInline(text.slice(i + 2, close))));
+        i = close + 2;
+        continue;
+      }
+    }
+    // italic *...* or _..._ — /^(\*|_)(?!\s)(.+?)(?<!\s)\1/
+    if ((c === "*" || c === "_") && i + 1 < n && !SPACE.test(text[i + 1]!)) {
+      const close = nextItalic[c](i + 2);
+      if (close !== -1 && dotRun(i + 1, close)) {
+        flush();
+        out.push(h("em", null, ...parseInline(text.slice(i + 1, close))));
+        i = close + 1;
+        continue;
+      }
     }
 
-    plain += text[i];
+    plain += c;
     i++;
   }
   flush();
@@ -181,15 +271,51 @@ function parseInline(text: string): VChild[] {
 
 // ── Block parsing ───────────────────────────────────────────────────────────
 
+// ONE set of block patterns, read by both deciders: the dispatcher below ("which
+// block is this line?") and the paragraph loop ("does this line end the
+// paragraph?"). They used to be two spellings of the same question — the
+// paragraph loop had its own looser regex — and wherever they disagreed a line
+// was neither: "```js title=\"x\"" started a block for the paragraph loop
+// (prefix "```") and not for the fence parser (which wanted only `\w*` after the
+// backticks), so the loop consumed zero lines, pushed an empty <p>, and went
+// round again forever — an out-of-memory crash, on the server under SSR, from
+// one line of user-supplied text. The paragraph also always consumes its first
+// line now, so no future disagreement can stop the parse from advancing.
+
+/** Opening code fence: three or more backticks, then an info string. The info
+ *  string may not contain a backtick (CommonMark) — "```a`b" is inline code in a
+ *  paragraph, not a fence. */
+const FENCE = /^(`{3,})([^`]*)$/;
+/** `.` does not match U+2028/U+2029, and a line split on "\n" can still hold
+ *  them — the `s` flag keeps "# a\u2028b" a heading instead of a non-match. */
+const HEADING = /^(#{1,6})\s+(.*)$/s;
+const HR = /^(---+|\*\*\*+|___+)\s*$/;
+const QUOTE = /^>\s?/;
+const UL = /^(\s*)[-*+]\s+(.*)$/s;
+const OL = /^(\s*)\d+\.\s+(.*)$/s;
+
+/** How deep blockquotes nest before the rest is read as paragraph text. Each
+ *  level is a recursive parse of the quote's body, so `">".repeat(20000)` was
+ *  20000 frames deep — a stack overflow from one line. No reader follows 32
+ *  levels of quoting. */
+const MAX_QUOTE_DEPTH = 32;
+
+/** Does `line` start a block other than a paragraph, at this quote depth? */
+function startsBlock(line: string, depth: number): boolean {
+  return FENCE.test(line) || HEADING.test(line) || HR.test(line) ||
+    (depth < MAX_QUOTE_DEPTH && QUOTE.test(line)) || UL.test(line) ||
+    OL.test(line);
+}
+
 /** Parse markdown source → an array of block VNodes. */
-function parseBlocks(src: string): VChild[] {
+function parseBlocks(src: string, depth = 0): VChild[] {
   const lines = src.replace(/\r\n?/g, "\n").split("\n");
   const blocks: VChild[] = [];
   let i = 0;
 
   const listItems = (ordered: boolean): VNode => {
     const items: VNode[] = [];
-    const re = ordered ? /^(\s*)\d+\.\s+(.*)$/ : /^(\s*)[-*+]\s+(.*)$/;
+    const re = ordered ? OL : UL;
     while (i < lines.length) {
       const m = re.exec(lines[i]!);
       if (!m) break;
@@ -206,12 +332,17 @@ function parseBlocks(src: string): VChild[] {
       i++;
       continue;
     }
-    // fenced code ```lang … ```
-    const fence = /^```(\w*)\s*$/.exec(line);
+    // fenced code ```lang … ``` — closed by a fence at least as long as the
+    // opener (so a ```` block can show a ``` inside it); unclosed runs to the end
+    const fence = FENCE.exec(line);
     if (fence) {
+      const ticks = fence[1]!.length;
+      const lang = fence[2]!.trim().split(/\s+/)[0] ?? "";
       i++;
       const code: string[] = [];
-      while (i < lines.length && !/^```\s*$/.test(lines[i]!)) {
+      while (i < lines.length) {
+        const close = /^(`{3,})\s*$/.exec(lines[i]!);
+        if (close && close[1]!.length >= ticks) break;
         code.push(lines[i]!);
         i++;
       }
@@ -222,7 +353,7 @@ function parseBlocks(src: string): VChild[] {
           { class: "aio-md__pre" },
           h(
             "code",
-            fence[1] ? { "data-lang": fence[1] } : null,
+            lang ? { "data-lang": lang } : null,
             code.join("\n"),
           ),
         ),
@@ -230,7 +361,7 @@ function parseBlocks(src: string): VChild[] {
       continue;
     }
     // heading # … ######
-    const head = /^(#{1,6})\s+(.*)$/.exec(line);
+    const head = HEADING.exec(line);
     if (head) {
       blocks.push(
         h(`h${head[1]!.length}`, null, ...parseInline(head[2]!.trim())),
@@ -239,43 +370,43 @@ function parseBlocks(src: string): VChild[] {
       continue;
     }
     // horizontal rule
-    if (/^(---+|\*\*\*+|___+)\s*$/.test(line)) {
+    if (HR.test(line)) {
       blocks.push(h("hr", { class: "aio-md__hr" }));
       i++;
       continue;
     }
-    // blockquote (one level)
-    if (/^>\s?/.test(line)) {
+    // blockquote — nested up to MAX_QUOTE_DEPTH
+    if (depth < MAX_QUOTE_DEPTH && QUOTE.test(line)) {
       const quote: string[] = [];
-      while (i < lines.length && /^>\s?/.test(lines[i]!)) {
-        quote.push(lines[i]!.replace(/^>\s?/, ""));
+      while (i < lines.length && QUOTE.test(lines[i]!)) {
+        quote.push(lines[i]!.replace(QUOTE, ""));
         i++;
       }
       blocks.push(
         h(
           "blockquote",
           { class: "aio-md__quote" },
-          ...parseBlocks(quote.join("\n")),
+          ...parseBlocks(quote.join("\n"), depth + 1),
         ),
       );
       continue;
     }
     // lists
-    if (/^\s*[-*+]\s+/.test(line)) {
+    if (UL.test(line)) {
       blocks.push(listItems(false));
       continue;
     }
-    if (/^\s*\d+\.\s+/.test(line)) {
+    if (OL.test(line)) {
       blocks.push(listItems(true));
       continue;
     }
-    // paragraph — gather consecutive non-blank, non-block lines
-    const para: string[] = [];
+    // paragraph — this line (no block claimed it), then every following
+    // non-blank line that does not start a block
+    const para: string[] = [line];
+    i++;
     while (
       i < lines.length && lines[i]!.trim() !== "" &&
-      !/^(#{1,6}\s|>|```|\s*[-*+]\s|\s*\d+\.\s|---+\s*$|\*\*\*+\s*$)/.test(
-        lines[i]!,
-      )
+      !startsBlock(lines[i]!, depth)
     ) {
       para.push(lines[i]!);
       i++;

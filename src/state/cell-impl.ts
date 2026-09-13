@@ -97,7 +97,7 @@ export type AsyncMethod<S> = (
  *  the draft parameter `$call` supplies for you.
  *
  *  Use it when you HAVE a method map to derive from —
- *  `MethodDraftCalls<MethodCalls<typeof helpers>>`. Note that
+ *  `Partial<MethodDraftCalls<MethodCalls<typeof helpers>>>`. Note that
  *  `typeof methods` inside the same object literal is circular (TS7022,
  *  "referenced directly or indirectly in its own initializer"), so the
  *  everyday spelling is an interface: see {@linkcode MethodDraftCalls}. */
@@ -117,11 +117,18 @@ export type MethodCalls<M> = {
  *
  *  methods: {
  *    bench(s: State, kind: string) { … },
- *    async run(s: State & MethodDraftCalls<Calls>) {
- *      s.$call.bench("cold")          // same draft, same commit
+ *    async run(s: State & Partial<MethodDraftCalls<Calls>>) {
+ *      s.$call!.bench("cold")         // same draft, same commit
  *    },
  *  }
  *  ```
+ *
+ *  `Partial<>` is not optional. The draft type a method receives does not
+ *  declare `$call`, so `s: State & MethodDraftCalls<Calls>` makes the method
+ *  demand a member it is never promised, and it is not a `Method<S>` (TS2322,
+ *  "Property '$call' is missing"). The docs taught that spelling until
+ *  report 9b §1; `tests/doc-method-draft-types-typecheck.test.ts` now checks
+ *  every spelling the docs teach.
  *
  *  `C` is what the table CALLS — the methods without their draft parameter,
  *  because `$call` supplies it. An interface, not `typeof methods`: that is
@@ -240,6 +247,9 @@ const _pending = new Map<
     timeoutMs?: number;
     /** Fires the deadline rejection — kept so a resume can re-arm it. */
     expire?: () => void;
+    /** What the value goes through on its way to the caller — see
+     *  `_mapCallResult`. A throw rejects the caller with it. */
+    map?: (value: unknown) => unknown;
   }
 >();
 
@@ -616,8 +626,56 @@ export function resolveCall(
   if (!pending) return;
   _pending.delete(callId);
   disarm(pending);
-  if (error) pending.reject(error);
-  else pending.resolve(value);
+  if (error) return pending.reject(error);
+  if (pending.map) {
+    try {
+      value = pending.map(value);
+    } catch (e) {
+      return pending.reject(e instanceof Error ? e : new Error(String(e)));
+    }
+  }
+  pending.resolve(value);
+}
+
+/** Send a registered call's RESULT through `map` before its caller sees it.
+ *
+ *  The one seam every async method's return value passes: the executor settles
+ *  the call here, not through the dispatch promise (which resolves `undefined`
+ *  the moment the method is queued). A worker cell running in-isolate clones
+ *  its return value at this seam, as a real worker's `postMessage` does —
+ *  cloning the dispatch promise's value instead cloned `undefined`, so a class
+ *  instance came back intact and a function came back callable in the test,
+ *  and production handed back a plain object and threw. An unknown id (already
+ *  settled, or never registered) is a no-op. @internal */
+export function _mapCallResult(
+  callId: string,
+  map: (value: unknown) => unknown,
+): void {
+  const pending = _pending.get(callId);
+  if (pending) pending.map = map;
+}
+
+/** Structured-clone `value` the way a worker cell's `postMessage` does, and
+ *  say so by name when it cannot — for a `worker: true` cell that runs in this
+ *  isolate (a test, or libraryMode), where a reference would have worked and
+ *  production throws. `what` is "action payload" or "return value". @internal */
+export function _cloneAcrossWorkerBoundary(
+  value: unknown,
+  what: string,
+  cellId: string,
+): unknown {
+  try {
+    return structuredClone(value);
+  } catch (e) {
+    throw new Error(
+      `cell "${cellId}" is a worker cell, and its ${what} cannot cross a ` +
+        `worker boundary: ${e instanceof Error ? e.message : String(e)}.\n` +
+        `In this test it runs in-isolate, so a reference would have worked ` +
+        `— in production it is reached by postMessage and this throws. ` +
+        `Pass plain data (no functions, class instances, or live cell ` +
+        `proxies); \`{ ...obj }\` off a proxy is already materialised.`,
+    );
+  }
 }
 
 /** Clear a registration's timers — the deadline AND the heartbeat — from the
@@ -1072,11 +1130,29 @@ function deleteNestedKey(
  *  fuzzer). Deep-clone on install; primitives pass through. */
 function ownedValue(v: unknown): unknown {
   if (v === null || typeof v !== "object") return v;
+  // ONE recorded object installed twice in one pass is installed as ONE clone.
+  // `const o = { v: 1 }; s.obj.p = o; s.obj.q = o; s.obj.p.v = 2` puts the
+  // same object at two paths — in plain JavaScript and on the Immer draft a
+  // sync method runs on, where `q.v` reads 2. Cloning each install separately
+  // silently de-aliased it: the identical async body committed `q.v === 1`.
+  // Memoized per `applyMutations` pass (the overlay replay and the commit are
+  // each one pass), so the alias lives exactly as long as it does on the sync
+  // side — until the commit — and a clone never leaks between passes.
+  const memo = _ownedMemo;
+  if (memo !== null) {
+    const hit = memo.get(v);
+    if (hit !== undefined) return hit;
+  }
   // Say what the clone below is about to LOSE — the same notice the sync
   // path's `deepFreeze` gives. See `noteMaterialized`.
   noteMaterialized(v);
-  return cloneState(v, "shallow");
+  const clone = cloneState(v, "shallow");
+  memo?.set(v, clone);
+  return clone;
 }
+/** The identity memo of the `applyMutations` pass in progress — see
+ *  `ownedValue`. `null` outside a pass. */
+let _ownedMemo: Map<object, unknown> | null = null;
 
 /** Identity through which a live proxy exposes its current underlying value. */
 export const LIVE_RAW = Symbol("aio.liveRaw");
@@ -1293,6 +1369,27 @@ function setNestedValue(
   );
 }
 
+/** The op a recorded `sort` replays as: a permutation of the array it was
+ *  recorded against, not the comparator.
+ *
+ *  A read-your-writes recompute replays the whole pending batch, so a recorded
+ *  `sort(cmp)` re-ran `cmp` on every later READ inside the same async method.
+ *  Measured: the identical body called the comparator 4 times as a sync method
+ *  and 28 as an async one, and 8,536 vs 102,432 at n=1000 with ten reads. A
+ *  PURE comparator only made that slow; one that counts, logs, memoises or
+ *  pushes to a captured array DIVERGED — sync committed `["1","2","2"]`, async
+ *  committed it twice over.
+ *
+ *  `CLAUDE.md` promises a method body "behaves identically whether it is sync
+ *  or async", and `tests/proxy-differential.test.ts` is the stated proof —
+ *  which could not see this, because every sort op in `tests/fuzz-ops.ts` uses
+ *  a pure `(a, b) => a - b`. The fix is to record the ANSWER rather than the
+ *  question: the comparator runs exactly once, where the author wrote it.
+ *
+ *  It also makes a sorted array crossable: a comparator is a function, and a
+ *  function cannot be structured-cloned to a `worker: true` cell. */
+const REORDER_OP = "__aioReorder";
+
 function applyArrayOp(
   obj: Record<string, unknown>,
   m: Mutation,
@@ -1318,6 +1415,24 @@ function applyArrayOp(
     (m.args ?? []).map(ownedValue),
     m.refs,
   ) as unknown[];
+  // A recorded ORDER, replayed as a pure permutation — see the `sort` branch
+  // in the mutator interception. Never the comparator again.
+  if (m.op === REORDER_OP) {
+    const order = args[0] as number[] | undefined;
+    if (!Array.isArray(order) || order.length !== arr.length) {
+      _warnDroppedMutation(
+        `reorder does not describe this array (${
+          order?.length ?? "?"
+        } positions for ${arr.length} items)`,
+        m,
+        strict,
+      );
+      return;
+    }
+    const next = order.map((i) => arr[i]);
+    for (let i = 0; i < next.length; i++) arr[i] = next[i];
+    return;
+  }
   // deno-lint-ignore no-explicit-any
   (arr as any)[m.op as string](...args);
 }
@@ -1339,6 +1454,20 @@ export function applyMutations(
       { path: [], value: mutations } as Mutation,
     );
   }
+  const outerMemo = _ownedMemo;
+  _ownedMemo = new Map();
+  try {
+    applyMutationsPass(s, mutations, strict);
+  } finally {
+    _ownedMemo = outerMemo;
+  }
+}
+
+function applyMutationsPass(
+  s: Record<string, unknown>,
+  mutations: Mutation[],
+  strict: boolean,
+): void {
   for (const m of mutations) {
     if (!m || typeof m !== "object") {
       _rejectUnsafeMutation("mutation entry is not an object", {
@@ -1375,7 +1504,14 @@ export function applyMutations(
     if (m.op === "delete") {
       deleteNestedKey(s, m, strict);
     } else if (m.op !== undefined) {
-      if (typeof m.op !== "string" || !ARRAY_MUTATORS.has(m.op)) {
+      // `REORDER_OP` is what a recorded `sort` becomes — framework-generated,
+      // never something an action carries in from the wire. It is checked by
+      // `applyArrayOp` (the order must describe the array it lands on), which
+      // is the same standard the named mutators are held to.
+      if (
+        typeof m.op !== "string" ||
+        (m.op !== REORDER_OP && !ARRAY_MUTATORS.has(m.op))
+      ) {
         _rejectUnsafeMutation(
           `unsupported array op "${String(m.op)}" — only ${
             [...ARRAY_MUTATORS].join("/")
@@ -1647,6 +1783,19 @@ type StaleLedger = {
    *  the one object threaded through every proxy of one method call, and its
    *  `log.length` is exactly the invalidation cursor the memo checks. */
   live?: Map<string, { src: unknown[]; live: unknown[]; birth: number }>;
+  /** Array iterators open in this invocation — see `liveIndices`. */
+  iters?: Set<LiveIter>;
+};
+
+/** One open `for…of` / `values()` / `keys()` / `entries()` walk over a state
+ *  array. `snap` is set, once, when this method OVERWRITES the array (or a
+ *  container of it) mid-walk: from then on the walk continues over the array
+ *  as it was at that write, which is what the Immer draft's iterator does —
+ *  it holds the old array object, and a reassignment only detaches it. */
+type LiveIter = {
+  readonly key: string;
+  readonly capture: () => unknown[];
+  snap?: unknown[];
 };
 
 /** Array mutators that re-address existing indexes — a captured element proxy
@@ -1716,6 +1865,51 @@ function throwStaleCapture(
       `(a sync method keeps the old object). Copy what you need before overwriting ` +
       `(const x = ${ref}?.field) or snapshot first (const v = { ...${ref} }).`,
   );
+}
+
+/** A row a walk handed out AFTER the method replaced the array it walks —
+ *  see `LiveIter`. Readable like the old row; unwritable, by name.
+ *
+ *  The sync draft's detached row is the old OBJECT, and whether a write to it
+ *  lands depends on whether the replacement kept it (`s.items = s.items
+ *  .filter(…)` keeps the survivors, so a write lands; `s.items = []` does not).
+ *  A copy cannot know which, so a write to one is refused rather than
+ *  silently dropped. `LIVE_RAW` hands out the plain copy, so returning or
+ *  storing the row materializes it like any other state read. */
+function detachedRow(
+  cellName: string,
+  methodName: string,
+  ref: string,
+  row: object,
+  seen: WeakMap<object, object>,
+): object {
+  const hit = seen.get(row);
+  if (hit) return hit;
+  const refuse = (): never => {
+    throw new Error(
+      `[${cellName}:${methodName}] ${ref} came from a loop over an array ` +
+        `this method REPLACED mid-loop, so the loop is walking the old ` +
+        `array's rows — a write to one cannot land in state. Write through ` +
+        `the array as it is now (find the row in it and set it there), or ` +
+        `replace the array after the loop.`,
+    );
+  };
+  const view = new Proxy(row, {
+    get(t, p) {
+      if (p === LIVE_RAW) return t;
+      const v = Reflect.get(t, p);
+      return typeof p === "string" && v !== null && typeof v === "object"
+        ? detachedRow(cellName, methodName, `${ref}.${p}`, v, seen)
+        : v;
+    },
+    set: refuse,
+    deleteProperty: refuse,
+    defineProperty: refuse,
+    setPrototypeOf: refuse,
+    preventExtensions: refuse,
+  });
+  seen.set(row, view);
+  return view;
 }
 
 /** The "copy it first" spelling that actually applies to THIS value.
@@ -1884,6 +2078,20 @@ export function createLiveProxy<S extends Record<string, unknown>>(
   const noteOverwrite = (writeKey: string): void => {
     if (_proxyCache.has(writeKey)) _stale.log.push({ p: writeKey });
   };
+  /** BEFORE a write replaces `writeKey`: every open array walk at or below it
+   *  keeps the array as it is now — see `LiveIter`. */
+  const noteDetach = (writeKey: string): void => {
+    const iters = _stale.iters;
+    if (iters === undefined || iters.size === 0) return;
+    for (const it of iters) {
+      if (
+        it.snap === undefined &&
+        (it.key === writeKey || it.key.startsWith(writeKey + PATH_SEP))
+      ) {
+        it.snap = it.capture();
+      }
+    }
+  };
   /** Fetch a nested proxy through the cache, rebuilding it when the cached one
    *  predates an overwrite of its container — a fresh fetch through the parent
    *  is a NEW capture and must stay legal. */
@@ -1928,6 +2136,108 @@ export function createLiveProxy<S extends Record<string, unknown>>(
     }
     return cached.px;
   };
+  /** The array as it is NOW, re-resolved only when something that could
+   *  change it has moved: the committed root, or the pending write-set (a
+   *  flush swaps the array, a write grows it). Cheap enough to ask per step. */
+  let curBase: unknown = undefined;
+  let curPending: unknown = undefined;
+  let curCount = -1;
+  let curArr: unknown[] = [];
+  const currentArray = (): unknown[] => {
+    const base = getState();
+    const pending = batcher.pending();
+    if (
+      base !== curBase || pending !== curPending || pending.length !== curCount
+    ) {
+      const cur = effectiveAt();
+      curArr = Array.isArray(cur) ? cur : [];
+      curBase = base;
+      curPending = pending;
+      curCount = pending.length;
+    }
+    return curArr;
+  };
+  /** Walk the array the way `%ArrayIteratorPrototype%.next` does: the length
+   *  is read at EVERY step, not once at the start. The spec says so, the Immer
+   *  draft a sync method iterates does it, and a worklist depends on it —
+   *
+   *      for (const n of s.queue) if (n < 100) s.queue.push(n * 10);
+   *
+   *  visited `[1,2,10,20,100,200]` as a sync method and stopped at `[1,2,10,20]`
+   *  as an async one, because the length was captured when the loop began.
+   *  `entries()`/`keys()`/`values()` walk the same way for the same reason.
+   *  Each element is exactly what `s.items[i]` gives — the same freshness
+   *  check, the same read record, the same cached child proxy — resolved
+   *  without a trip through the `get` trap per step.
+   *
+   *  A walk whose array this method REPLACES mid-loop —
+   *
+   *      for (const x of s.items.values()) s.items = s.items.filter(…)
+   *
+   *  — goes on over the array it started on, as the sync draft's iterator
+   *  does (it holds the old array; the assignment only detaches it). Walking
+   *  by path, the next step read the NEW array through a stale reference and
+   *  threw half-way, after the first reassignment had already committed: the
+   *  async twin ended `[1,3,4]` and rejected where sync ended `[1]`. The
+   *  detached remainder is a private copy: its primitives and reads are the
+   *  sync answer, and a write to one of its rows is refused by name — see
+   *  `detachedRow`. */
+  function liveIndices(
+    shape: "values" | "keys" | "entries",
+  ): Generator<unknown> {
+    const iters = (_stale.iters ??= new Set());
+    // Registered at CREATION, not first `next()`: `const it = s.items.keys();
+    // s.items = []; it.next()` walks the old array in a sync method too.
+    const entry: LiveIter = {
+      key: pathKey,
+      capture: () => cloneState(currentArray()),
+    };
+    iters.add(entry);
+    return walkIndices(shape, entry, iters);
+  }
+  function* walkIndices(
+    shape: "values" | "keys" | "entries",
+    entry: LiveIter,
+    iters: Set<LiveIter>,
+  ): Generator<unknown> {
+    const childPrefix = pathKey + PATH_SEP;
+    const rows = new WeakMap<object, object>();
+    try {
+      for (let i = 0;; i++) {
+        const snap = entry.snap;
+        if (snap === undefined) assertFresh();
+        const arr = snap ?? currentArray();
+        if (i >= arr.length) return;
+        if (shape === "keys") {
+          yield i;
+          continue;
+        }
+        let v: unknown = arr[i];
+        if (v !== null && typeof v === "object") {
+          if (snap === undefined) {
+            const idx = String(i);
+            const childKey = path.length === 0 ? idx : childPrefix + idx;
+            noteRead?.(childKey);
+            v = nestedProxy(idx, childKey);
+          } else {
+            v = detachedRow(
+              cellName,
+              methodName,
+              `s.${path.join(".")}[${i}]`,
+              v,
+              rows,
+            );
+          }
+        } else if (snap === undefined) {
+          const idx = String(i);
+          noteRead?.(path.length === 0 ? idx : childPrefix + idx);
+        }
+        yield shape === "values" ? v : [i, v];
+      }
+    } finally {
+      iters.delete(entry);
+    }
+  }
   /** Committed root state with pending writes overlaid (read-your-writes). */
   function effectiveRoot(): S {
     const committed = getState();
@@ -2000,12 +2310,7 @@ export function createLiveProxy<S extends Record<string, unknown>>(
           const fresh = effectiveAt();
           if (Array.isArray(fresh)) {
             noteRead?.(pathKey);
-            const len = fresh.length;
-            return function* () {
-              for (let i = 0; i < len; i++) {
-                yield (receiver as Record<number, unknown>)[i];
-              }
-            };
+            return () => liveIndices("values");
           }
         }
         return undefined;
@@ -2053,6 +2358,15 @@ export function createLiveProxy<S extends Record<string, unknown>>(
         // a rebuilt array) is the SAME live proxy `s.items[i]` gives. A write
         // through one therefore batches exactly like `s.items[i].q = 0`, which
         // is what the Immer draft does on the sync side.
+        // The iterator-returning three walk live, index by index — see
+        // `liveIndices`. The rebuilt-array path below would hand back an
+        // iterator over a FIXED copy, blind to a push made inside the loop.
+        if (key === "values" || key === "keys" || key === "entries") {
+          return () => {
+            noteRead?.(pathKey);
+            return liveIndices(key);
+          };
+        }
         if (!ARRAY_SNAPSHOT_READ_METHODS.has(key)) {
           return (...args: unknown[]) => {
             // The whole array feeds the result — watch it as one read.
@@ -2134,17 +2448,59 @@ export function createLiveProxy<S extends Record<string, unknown>>(
           // argument (`s.items.push(s.items[0])`) is recorded as an alias of
           // its path, addressed by argument index — the same thing the sync
           // draft does when a nested draft is pushed into its own array.
-          const rec = recordValue(args);
-          // The `refs` key exists only when there IS an alias: a mutation
-          // carrying `refs: undefined` is a different object to every
-          // structural comparison (and to structuredClone across a worker
-          // boundary) than the one this recorded before aliases existed.
-          const m: Mutation = {
-            path: [...path],
-            op: key,
-            args: rec.value as unknown[],
-          };
-          if (rec.refs) m.refs = rec.refs;
+          // A SORT records its ANSWER, not its question — the permutation it
+          // produced, replayed comparator-free. See REORDER_OP for what that
+          // costs and what it fixes. Positions are consumed left to right, so
+          // equal elements keep the order the sort gave them.
+          let m: Mutation;
+          if (key === "sort") {
+            const src = fresh as unknown[];
+            const taken = new Array<boolean>(src.length).fill(false);
+            const order: number[] = [];
+            for (const el of copy as unknown[]) {
+              let at = -1;
+              for (let i = 0; i < src.length; i++) {
+                if (!taken[i] && src[i] === el) {
+                  at = i;
+                  break;
+                }
+              }
+              // Object.is, so NaN finds its own slot rather than none.
+              if (at < 0) {
+                for (let i = 0; i < src.length; i++) {
+                  if (!taken[i] && Object.is(src[i], el)) {
+                    at = i;
+                    break;
+                  }
+                }
+              }
+              if (at < 0) break; // not a permutation — fall back below
+              taken[at] = true;
+              order.push(at);
+            }
+            m = order.length === src.length
+              ? { path: [...path], op: REORDER_OP, args: [order] }
+              // A comparator that mutated the array under the sort is not a
+              // permutation of what we read. Record the op itself and accept
+              // the replay cost rather than write an order that is a lie.
+              : { path: [...path], op: key, args: args };
+          } else {
+            // recordValue over the whole argument LIST: a live reference in an
+            // argument (`s.items.push(s.items[0])`) is recorded as an alias of
+            // its path, addressed by argument index — the same thing the sync
+            // draft does when a nested draft is pushed into its own array.
+            const rec = recordValue(args);
+            m = {
+              path: [...path],
+              op: key,
+              args: rec.value as unknown[],
+            };
+            // The `refs` key exists only when there IS an alias: a mutation
+            // carrying `refs: undefined` is a different object to every
+            // structural comparison (and to structuredClone across a worker
+            // boundary) than the one this recorded before aliases existed.
+            if (rec.refs) m.refs = rec.refs;
+          }
           batcher.add(methodName, m);
           // Index-moving mutators re-address existing elements — a captured
           // element proxy would silently read a DIFFERENT element afterwards.
@@ -2165,6 +2521,37 @@ export function createLiveProxy<S extends Record<string, unknown>>(
               to = t + Math.max(en - st, 0) - 1;
             }
             _stale.log.push({ p: pathKey, from, to });
+          }
+          // WHAT JS HANDS BACK, MADE LIVE AGAIN. `copy` is a detached plain
+          // array — no proxy, no `noteWrite`, no batcher behind it — and
+          // returning it raw was the framework's worst silent divergence in
+          // the one place `ARRAY_SNAPSHOT_READ_METHODS` had not reached. Two
+          // shapes, both wrong, both invisible:
+          //
+          //  • `sort`/`reverse`/`fill`/`copyWithin` return the RECEIVER in
+          //    JS, so `result === copy`. `const ordered = s.items.sort(by);
+          //    ordered[0].pinned = true` wrote into the throwaway, and the
+          //    method READ ITS OWN WRITE BACK from it — so neither side of the
+          //    author's code could notice, and the commit silently dropped it.
+          //    A sync method returns the draft and gets this right.
+          //  • `pop`/`shift`/`splice` return ELEMENTS of the committed state,
+          //    which is frozen. The ordinary queue idiom — `const job =
+          //    s.queue.shift(); job.status = "done"; s.done.push(job)` — threw
+          //    "Cannot assign to read only property", blamed the author for
+          //    writing "from outside a method", and the shift had ALREADY been
+          //    recorded: the row was gone. Hand back a mutable clone; it is
+          //    detached from state, which is exactly what a removed row is,
+          //    and pushing it somewhere else records its value as written.
+          if (result === copy) return receiver;
+          if (key === "pop" || key === "shift") {
+            return result !== null && typeof result === "object"
+              ? cloneState(result)
+              : result;
+          }
+          if (key === "splice") {
+            return (result as unknown[]).map((v) =>
+              v !== null && typeof v === "object" ? cloneState(v) : v
+            );
           }
           return result;
         };
@@ -2212,8 +2599,10 @@ export function createLiveProxy<S extends Record<string, unknown>>(
       const rec = recordValue(value);
       const m: Mutation = { path: [...path, prop as string], value: rec.value };
       if (rec.refs) m.refs = rec.refs;
+      const writeKey = path.length === 0 ? prop : pathKey + PATH_SEP + prop;
+      noteDetach(writeKey);
       batcher.add(methodName, m);
-      noteOverwrite(path.length === 0 ? prop : pathKey + PATH_SEP + prop);
+      noteOverwrite(writeKey);
       return true;
     },
 
@@ -2222,6 +2611,7 @@ export function createLiveProxy<S extends Record<string, unknown>>(
       if (typeof prop === "symbol") symbolKeyRefused(prop, "deleted");
       assertFresh();
       noteWrite?.(path.length === 0 ? prop : pathKey + PATH_SEP + prop);
+      noteDetach(path.length === 0 ? prop : pathKey + PATH_SEP + prop);
       batcher.add(methodName, {
         path: [...path, prop as string],
         value: undefined,
@@ -2389,12 +2779,13 @@ export const DRAFT_DO_TARGET = Symbol("aio.draftDoTarget");
 export function withDraftDo<S extends object>(
   draft: S,
   doFn: (...effects: unknown[]) => void,
-  callFns?: Record<string, (...args: unknown[]) => unknown>,
+  /** The `$call` table, built when first read — see runSync. */
+  callFns?: () => Record<string, (...args: unknown[]) => unknown>,
 ): S {
   const wrapper: S = new Proxy(draft, {
     get(t, p, _r) {
       if (p === "$do") return doFn;
-      if (p === "$call" && callFns) return callFns;
+      if (p === "$call" && callFns) return callFns();
       if (p === DRAFT_DO_TARGET) return t;
       if (p === "$commit") return _noCommit;
       if (p === "$live") return wrapper;

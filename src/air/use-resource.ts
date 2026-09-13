@@ -18,7 +18,15 @@
 // Logically correct and genuinely surprising, which is the definition of a
 // missing primitive.
 
-import { batch, effect, signal, untrack } from "../state/signal.ts";
+import {
+  _effectCollectEnd,
+  _effectCollectStart,
+  batch,
+  effect,
+  signal,
+  untrack,
+} from "../state/signal.ts";
+import { _inRender, _onUnmount, useRef } from "./renderer-lifecycle.ts";
 import type { Signal } from "../state/signal.ts";
 
 /** Stop reacting / release the resource. Safe to call more than once. */
@@ -201,6 +209,66 @@ export function _openResourceCount(): number {
  *    one device.
  */
 export function useResource<T>(cfg: UseResourceConfig<T>): ResourceHandle<T> {
+  // A `use*` HOOK, which it was named like and did not behave like.
+  //
+  // It registered no cleanup and was not idempotent across renders, so it had
+  // two failure modes and no correct way to call it. Left alone, the resource
+  // outlived the component FOREVER — measured, three renders and an unmount
+  // left `opens 1 closes 0` and `_openResourceCount()` stuck at 1, against
+  // that counter's own doc: "Zero is the healthy answer once every holder has
+  // disposed." Wired to `onCleanup(dispose)` the way the docs show, a body
+  // cleanup fires before EVERY re-render, so three renders opened and closed
+  // the camera three times — "two pipelines fighting over one device", which
+  // is the exact thing this module says it exists to refuse.
+  //
+  // One handle per component INSTANCE (`useRef`), disposed at unmount and only
+  // at unmount (the unmount-only cleanup list, not the per-render one).
+  // Outside a render it behaves exactly as before: the caller
+  // owns it and calls `dispose()`.
+  if (_inRender()) {
+    const slot = useRef<
+      { handle: ResourceHandle<T>; cfg: UseResourceConfig<T> } | null
+    >(null);
+    if (slot.current === null) {
+      // The LATEST config is read through the ref, so a later render's `key`
+      // closure (one that captured a prop, say) is the one that runs — while
+      // the resource itself, and the `effect` watching the key, are created
+      // exactly once.
+      const box = { handle: null as unknown as ResourceHandle<T>, cfg };
+      // OUT OF THE RENDER'S EFFECT COLLECTOR. The renderer disposes every
+      // `effect()` a render created at the NEXT re-render — right for a
+      // per-render effect, fatal for this one, which is created once and must
+      // live until unmount. Collected, the key reaction died on the first
+      // re-render for any reason (the opened value landing, say), and a key
+      // read only inside `key()` never re-keyed again: opened ["a"], closed
+      // [], the page stuck on the old camera. A private collector catches the
+      // dispose instead; the handle's own unmount cleanup below owns it.
+      const detached = _effectCollectStart();
+      try {
+        box.handle = _createResource<T>(() => box.cfg);
+      } finally {
+        _effectCollectEnd(detached);
+      }
+      slot.current = box;
+      // Released when the component goes away — and ALSO when this render
+      // never commits. It was `onMount(() => onCleanup(dispose))`, and a
+      // render that throws (the component itself, or a child an
+      // `<ErrorBoundary>` above catches) never runs its onMount: the resource
+      // stayed open for good, measured `opened ["cam"] closed []` after the
+      // boundary recovered and the panel unmounted.
+      _onUnmount(() => box.handle.dispose());
+    } else {
+      slot.current.cfg = cfg;
+    }
+    return slot.current.handle;
+  }
+  return _createResource<T>(() => cfg);
+}
+
+function _createResource<T>(
+  getCfg: () => UseResourceConfig<T>,
+): ResourceHandle<T> {
+  const cfg = getCfg();
   const scope = cfg.scope ?? "";
   const value = signal<T | undefined>(undefined);
   const loading = signal(false);
@@ -231,10 +299,11 @@ export function useResource<T>(cfg: UseResourceConfig<T>): ResourceHandle<T> {
     // landed; `close` then runs only for a value that exists.
     e.abort.abort();
     _open.delete(slot);
-    if (e.value !== undefined && cfg.close) {
+    const cfgClose = getCfg().close;
+    if (e.value !== undefined && cfgClose) {
       const [, rawKey] = splitSlot(slot);
       try {
-        const out = cfg.close(e.value, rawKey);
+        const out = cfgClose(e.value, rawKey);
         if (out && typeof (out as Promise<void>).then === "function") {
           e.closing = (out as Promise<void>).catch(() => {
             // aio-ok: an async `close` that rejects has still released this
@@ -270,11 +339,12 @@ export function useResource<T>(cfg: UseResourceConfig<T>): ResourceHandle<T> {
       const gen = e.generation;
       void (async () => {
         try {
-          const v = await cfg.open(raw, { signal: entry.abort.signal });
+          const v = await getCfg().open(raw, { signal: entry.abort.signal });
           // Landed late? The slot has moved on (or gone), so this value is
           // nobody's — close it rather than leaking it, and do not install it.
           if (_open.get(slot) !== entry || entry.generation !== gen) {
-            if (cfg.close) await cfg.close(v, raw);
+            const close = getCfg().close;
+            if (close) await close(v, raw);
             return;
           }
           entry.value = v;
@@ -295,7 +365,7 @@ export function useResource<T>(cfg: UseResourceConfig<T>): ResourceHandle<T> {
   };
 
   // The rule itself, as a reaction rather than a handler — see `onChange`.
-  const stop = onChange(cfg.key, (next) => {
+  const stop = onChange(() => getCfg().key(), (next) => {
     release();
     if (next === null || next === undefined) {
       keySig.set(null);

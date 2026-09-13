@@ -161,6 +161,23 @@ export function handleSyncLocalAction(
   if (!_syncCells.has(cell)) return false;
   const method = action.type.slice(idx + 1);
   if (method.startsWith("__")) return false; // framework-internal — plain path
+  // An ASYNC method is not claimed here, and the reason is the same one that
+  // keeps it out of the replay reducer two files over: it has no local
+  // reduction, and it has a RETURN VALUE.
+  //
+  // This path resolves the caller's ack the moment the op is queued, with no
+  // value, because that IS the honest settle point for a local-first write.
+  // For an async method it is not a settle point at all — the answer comes
+  // from the server, correlated by the `_callId` the plain action path
+  // stamps. So `const id = await notes.create(…)` resolved `undefined` in a
+  // BROWSER TAB while the very same call over `am`/CLI returned the value:
+  // one call, two answers, decided by which kind of client you were. Under
+  // `localFirst: true` every methods-style cell is adopted, so it was every
+  // async method in the app.
+  const syncDef = _syncCells.get(cell) as
+    | { __aio?: { asyncMethods?: Set<string> } }
+    | undefined;
+  if (syncDef?.__aio?.asyncMethods?.has(method)) return false;
   const cid = typeof action.cid === "string" ? action.cid : undefined;
   if (cid) _armAckTimer(cid);
   _engine.handleLocalAction(cell, method, action.payload).then(
@@ -306,6 +323,9 @@ export function initBrowserSync(
 
   // One reducer for all sync cells: replay the op through the cell's own
   // reducer (the same code the server dispatch runs) on an Immer draft.
+  /** What the last REDUCER_FAILED stood for — the method's own error, handed
+   *  to the caller whose call it was (`lastReducerError` below). */
+  let lastReducerError: unknown = undefined;
   const reducer = (
     state: Record<string, unknown>,
     action: string,
@@ -330,6 +350,7 @@ export function initBrowserSync(
       // the server had the change, this client never would, and no
       // re-delivery could reach it again. The two facts get two values.
       console.warn(`[aio:sync] reducer failed for ${cell}:${action}: ${e}`);
+      lastReducerError = e;
       return REDUCER_FAILED;
     }
   };
@@ -373,6 +394,11 @@ export function initBrowserSync(
     ),
     send,
     reducer,
+    // `produce` over the method: same input, same output, input untouched —
+    // which is what lets the engine run a fold twice to catch a method that
+    // reads a clock or a random source (see `reduceChecked`).
+    pureReducer: true,
+    lastReducerError: () => lastReducerError,
     getConfirmedState: () => confirmed,
     setConfirmedState: (cell, state) => {
       confirmed[cell] = state;
@@ -398,6 +424,12 @@ export function setSyncOnline(online: boolean): void {
 
 /** Test hook — drop the engine so a fresh init can run. */
 export function _resetBrowserSync(): void {
+  // STOP it, then drop it. Dropping the reference alone left the catch-up
+  // watchdog armed, and Deno's sanitizer then blamed whichever test ran next
+  // for "2 timers were started in this test, but never completed" — nineteen
+  // sync tests, none of which had started a timer, and every one of them green
+  // on its own.
+  _engine?.dispose();
   _engine = null;
   _syncCells = null;
   _storageWarned = false;

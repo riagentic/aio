@@ -16,6 +16,7 @@ import { join } from "@std/path";
 import type { Log } from "../diagnostics/logger-api.ts";
 import {
   keyFingerprint,
+  SAFE_TOKEN,
   type ShipExpectations,
   type ShipManifest,
   type UpdateTarget,
@@ -26,6 +27,7 @@ import {
   type CheckOptions,
   type CheckResult,
   createUpdatesCell,
+  type UpdatesCell,
   type UpdatesRuntime,
 } from "../state/updates-cell.ts";
 import {
@@ -35,6 +37,7 @@ import {
   type LocalData,
   manifestUrl,
   type ResolvedUpdates,
+  withChannel,
 } from "./updates-core.ts";
 import {
   currentCommit,
@@ -74,6 +77,10 @@ const KEEP_OLD = 3;
 
 export type UpdatesRuntimeDeps = {
   config: ResolvedUpdates;
+  /** The `updates` cell this runtime reports progress, phase and backup path
+   *  into. Absent ⇒ the process-wide one; a second app in the process passes
+   *  its own (see `UpdatesSlot`). */
+  cell?: UpdatesCell;
   /** The app's `data/` directory — the trust store and backups live here. */
   dataDir: string;
   appVersion: string;
@@ -487,7 +494,9 @@ export function createUpdatesRuntime(deps: UpdatesRuntimeDeps): UpdatesRuntime {
       // never breaks the thing it reports on.
       onProgress: (f) => {
         try {
-          void Promise.resolve(createUpdatesCell().setProgress(f))
+          void Promise.resolve(
+            (deps.cell ?? createUpdatesCell()).setProgress(f),
+          )
             .catch(() => {});
         } catch { /* not bound — the download continues either way */ }
       },
@@ -693,7 +702,8 @@ export function createUpdatesRuntime(deps: UpdatesRuntimeDeps): UpdatesRuntime {
    *  thing it reports on. */
   function phase(next: "downloading" | "applying"): void {
     try {
-      void Promise.resolve(createUpdatesCell().setPhase(next)).catch(() => {});
+      void Promise.resolve((deps.cell ?? createUpdatesCell()).setPhase(next))
+        .catch(() => {});
     } catch { /* not bound — the install continues either way */ }
   }
 
@@ -707,7 +717,9 @@ export function createUpdatesRuntime(deps: UpdatesRuntimeDeps): UpdatesRuntime {
   function noteBackup(path: string | undefined): void {
     if (!path) return;
     try {
-      void Promise.resolve(createUpdatesCell().setBackupPath(path)).catch(
+      void Promise.resolve(
+        (deps.cell ?? createUpdatesCell()).setBackupPath(path),
+      ).catch(
         () => {},
       );
     } catch {
@@ -886,7 +898,14 @@ export function createUpdatesRuntime(deps: UpdatesRuntimeDeps): UpdatesRuntime {
       // Crossing channels can legitimately move the version backwards, and a
       // dismissal on one channel says nothing about another — so everything
       // derived from the old channel is dropped, and the pinned ETag with it.
+      const why = channelNameReason(config.kind, next);
+      if (why) throw new Error(`[updates] setChannel: ${why}`);
       channel = next;
+      // The derived settings follow the channel too (see `withChannel`). In
+      // place, because this object IS the live config: the poller in
+      // updates-boot.ts reads `intervalMs` from it on every reschedule, and
+      // `check` reads `prerelease` from it on every check.
+      Object.assign(config, withChannel(config, next));
       offered = null;
       blocked = null;
       // `etagCurrent` is the field that is READ. Clearing the legacy `etag`
@@ -902,6 +921,40 @@ export function createUpdatesRuntime(deps: UpdatesRuntimeDeps): UpdatesRuntime {
       await Promise.resolve();
     },
   } as UpdatesRuntime;
+}
+
+/** Why `next` cannot be followed as a channel, or `null` when it can.
+ *
+ *  A manifest channel is a PATH segment (`<source>/<channel>/<os-arch>.json`),
+ *  so `"../prod"` pointed the install at a directory outside the source and
+ *  `""` at the source root — and both were pinned into the trust store, where
+ *  they outlived the restart. `aio ship` only ever publishes a channel matching
+ *  SAFE_TOKEN, so nothing else can verify anyway: refusing here says so at the
+ *  call instead of as a check that fails forever. A git channel is a REF, where
+ *  `/` is ordinary (`release/2.x`), so it gets git's own shape instead. */
+function channelNameReason(
+  kind: ResolvedUpdates["kind"],
+  next: unknown,
+): string | null {
+  const shown = JSON.stringify(next);
+  if (typeof next !== "string" || next === "") {
+    return `${shown} is not a channel name — pass one, e.g. "prod".`;
+  }
+  if (kind === "manifest") {
+    return SAFE_TOKEN.test(next) ? null : `${shown} is not a channel \`aio ` +
+      `ship\` can publish — a manifest channel is a path segment, so it must ` +
+      `match ${SAFE_TOKEN.source} (letters, digits and . _ + -, starting ` +
+      `alphanumeric, at most 64 characters).`;
+  }
+  // git check-ref-format, the parts that matter: no leading `-` (an option),
+  // no `..`, no control/space/`~^:?*[\\`, no `//`, no trailing `/` or `.lock`.
+  const bad = next.startsWith("-") || next.includes("..") ||
+    next.includes("//") || next.endsWith("/") || next.endsWith(".lock") ||
+    next.startsWith("/") || /[~^:?*[\\]/.test(next) ||
+    [...next].some((ch) => ch.charCodeAt(0) <= 0x20 || ch === "\x7f");
+  return bad
+    ? `${shown} is not a git ref — pass a branch or tag name, e.g. "main".`
+    : null;
 }
 
 /** Does this install put a window in front of a person?

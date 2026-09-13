@@ -310,20 +310,66 @@ function scanBlock(
       if (!id) continue;
       // Body of the loop: the next `{` (or the callback's `{`) after the head.
       const after = hit.index + hit[0].length;
+      const isCallback = /\.\s*(?:forEach|map)\s*\($/.test(hit[0]);
       const brace = body.indexOf("{", after);
-      if (brace === -1 || brace - after > 60) continue;
-      // For `xs.map(` / `xs.forEach(` the brace must be the CALLBACK's own
-      // block. Without this, `push(a.map(String).join(" "));` followed a few
-      // characters later by an unrelated `try {` reads as a loop whose body is
-      // that try block — and every assertion inside it gets blamed on a `map`
-      // that never had a callback at all.
-      const between = body.slice(after, brace);
-      if (
-        /\.\s*(?:forEach|map)\s*\($/.test(hit[0]) &&
-        !/(?:=>|\bfunction\b[^)]*\))\s*$/.test(between)
-      ) continue;
-      const close = matchAt(body, brace);
-      const inner = body.slice(brace, close);
+      let inner: string;
+      let close: number;
+      if (brace !== -1 && brace - after <= 60) {
+        // For `xs.map(` / `xs.forEach(` the brace must be the CALLBACK's own
+        // block. Without this, `push(a.map(String).join(" "));` followed a few
+        // characters later by an unrelated `try {` reads as a loop whose body
+        // is that try block — and every assertion inside it gets blamed on a
+        // `map` that never had a callback at all.
+        const between = body.slice(after, brace);
+        if (isCallback && !/(?:=>|\bfunction\b[^)]*\))\s*$/.test(between)) {
+          continue;
+        }
+        close = matchAt(body, brace);
+        inner = body.slice(brace, close);
+      } else {
+        // A BRACELESS body — `for (const o of orders) assertEquals(o.x, 1);`
+        // — is the same test with the same hole, and the rule could not see
+        // it: it demanded a `{` and gave up when there was none. Twenty-five
+        // of them were in the tree, including the exact shape the rule exists
+        // for. A callback is never braceless in a way this can read (an arrow
+        // with an expression body is its own shape), so only the two `for`
+        // forms take this branch.
+        if (isCallback) continue;
+        // The head's closing paren, found by MATCHING from the `for (` — not
+        // taken from where the pattern happened to stop. Neither pattern ends
+        // at the real closer: the C-style one stops at `.length`, and the
+        // for-of one's collection group excludes `)`, so
+        // `for await (const e of Deno.readDir(dir))` ends it at the INNER
+        // paren. Trusting that started the scanner one `)` early, ran the
+        // bracket depth negative, missed the statement's own `;` and swallowed
+        // the assertions after the loop — clean tests reported as holes.
+        const openParen = body.indexOf("(", hit.index);
+        if (openParen === -1) continue;
+        const headEnd = matchAt(body, openParen) + 1;
+        if (headEnd <= 0 || headEnd > body.length) continue;
+        // One statement, to the first `;` outside any bracket.
+        let depth = 0;
+        let end = -1;
+        for (let i = headEnd; i < body.length; i++) {
+          const ch = body[i];
+          if (ch === "(" || ch === "[" || ch === "{") depth++;
+          else if (ch === ")" || ch === "]" || ch === "}") depth--;
+          else if (ch === ";" && depth === 0) {
+            end = i;
+            break;
+          }
+          // A newline at depth 0 before any `;` means the "body" was never a
+          // statement at all (a `{` further down that the 60-char window
+          // rejected, say) — do not guess.
+          if (ch === "\n" && depth === 0 && body.slice(headEnd, i).trim()) {
+            end = i;
+            break;
+          }
+        }
+        if (end === -1) continue;
+        close = end;
+        inner = body.slice(headEnd, end);
+      }
       if (!ASSERT.test(inner)) continue;
       // Proof that the collection is non-empty. Any of:
       //   • an assertion naming `<coll>.length` / `.size` anywhere in the test
@@ -343,8 +389,17 @@ function scanBlock(
           id.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")
         }\\b[^;]{0,300}?\\[\\s*[^\\]\\s]`,
       );
+      // …or a GUARD around the loop: `if (unknown.length > 0) { … for (const
+      // u of unknown) assert… }` proves non-emptiness exactly as well as an
+      // assertion on the length does, and is the natural spelling when the
+      // empty case is handled separately in the same test.
+      const guarded = new RegExp(
+        `\\bif\\s*\\(\\s*${
+          id.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")
+        }\\b[\\w$.\\[\\]()]*\\.(length|size)\\b\\s*(?:>\\s*0|>=\\s*1|!==?\\s*0|\\))`,
+      );
       if (
-        nonEmpty.test(body) || vsLiteral.test(body) ||
+        nonEmpty.test(body) || vsLiteral.test(body) || guarded.test(body) ||
         counter.test(body.slice(close)) || boundToLiteral(coll, m)
       ) continue;
       add(
@@ -395,11 +450,19 @@ function scanBlock(
   }
 
   // ── typeof-function: proves an export exists, never that it works.
+  //
+  //    Reads `raw`, not `body`, and that is the whole reason this rule works
+  //    at all: the pattern ends in the STRING LITERAL `"function"`, and
+  //    `mask()` blanks string contents — so against the masked copy the rule
+  //    was matching `=== "        "` and could never fire. It sat in the
+  //    published list of six rules with zero offenders and zero ledger
+  //    entries while thirteen real sites existed. A rule whose subject is a
+  //    literal has to read the literal (the note on `raw` above says so).
   {
     const re =
       /\bassert[A-Za-z]*\s*\(\s*typeof\s+([\w$.\[\]"'`]+)\s*===\s*["'`]function["'`]/g;
     let hit: RegExpExecArray | null;
-    while ((hit = re.exec(body))) {
+    while ((hit = re.exec(raw))) {
       add(
         "typeof-function",
         hit.index,

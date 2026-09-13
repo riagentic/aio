@@ -19,6 +19,8 @@
 // It is a net, not a guarantee: a process killed with SIGKILL (an outer
 // `timeout` on a hung test) never runs it. That case is `deno task clean:tmp`.
 
+import { aioTestRoot } from "./test-strict.ts";
+
 const registry = new Set<string>();
 let sweepArmed = false;
 
@@ -53,14 +55,29 @@ export function keepTempDir(dir: string): string {
 }
 
 /** A throwaway directory that is removed at process exit even if this test
- *  throws first. Same signature as `Deno.makeTempDir({ prefix })`. */
+ *  throws first. Same signature as `Deno.makeTempDir({ prefix })`.
+ *
+ *  UNDER `aioTestRoot()`, not `/tmp`. This module calls itself the one decider
+ *  for "this test needs a throwaway directory" and there were two: it used
+ *  `/tmp` while `test-strict.ts` — which argues the case at length — puts every
+ *  directory a test creates under `~/tmp/aio/`, and honours `AIO_TEST_ROOT`.
+ *  Its argument applies here word for word: a test's scratch holds real
+ *  application data (an `auth.db`, an `app.key`, TLS material, a scaffolded
+ *  app), and `/tmp` is world-writable with a parent that is not ours, which is
+ *  what makes the classic symlink and pre-creation races possible at all.
+ *
+ *  The measured cost of the split was the gate going blind: `check-orphans.ts`
+ *  swept `/tmp/aio-*` only, so the other tree was ungated and had grown to 151
+ *  directories, 122 of them over a day old. One root, one sweep, one `ls`. */
 export async function tempDir(prefix: string): Promise<string> {
-  return keepTempDir(await Deno.makeTempDir({ prefix }));
+  return keepTempDir(
+    await Deno.makeTempDir({ dir: aioTestRoot(), prefix }),
+  );
 }
 
 /** Sync twin of {@linkcode tempDir} — for module-scope fixtures. */
 export function tempDirSync(prefix: string): string {
-  return keepTempDir(Deno.makeTempDirSync({ prefix }));
+  return keepTempDir(Deno.makeTempDirSync({ dir: aioTestRoot(), prefix }));
 }
 
 /** Remove a temp dir now. Best effort: a directory a live child still holds

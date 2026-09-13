@@ -9,6 +9,7 @@ import type { HLC, SyncOp } from "./types.ts";
 import { STALE_OP_REASON, SYNC_DEFAULTS } from "./types.ts";
 import { createHLC, type HLClock } from "./hlc.ts";
 import { compactSyncOps, tombstoneWindowMs } from "./compact.ts";
+import { diffState, stateDigest } from "./state-patch.ts";
 import {
   getCompactedTs,
   getLowWater,
@@ -117,7 +118,41 @@ export interface ServerSyncHandler {
   /** Flush pending noteServerWrite debounces — called on shutdown so the last
    *  write of a clean exit is never inside the debounce window. */
   flushServerWrites: () => Promise<void>;
+  /** Record, INSIDE every snapshot fold's transaction, how far a write log is
+   *  folded in — see {@linkcode SyncFoldWatermark}. `null` detaches. Optional
+   *  so a handler double in a test stays valid. */
+  setFoldWatermark?: (w: SyncFoldWatermark | null) => void;
 }
+
+/** A write log whose position rides in the fold that makes it durable.
+ *
+ *  A server-origin write to a sync cell is folded into the cell's snapshot up
+ *  to 500 ms after it is acked (see `noteServerWrite`). `journal: true` closes
+ *  that window by journalling the write — but replaying it on the next boot is
+ *  only correct when the snapshot does NOT already hold it (replay re-reduces;
+ *  `items.push(id)` twice is a duplicate). So the journal's position is taken
+ *  at the instant the fold captures state, and written by the fold's own
+ *  transaction: the snapshot and "it holds up to seq N" commit together or not
+ *  at all.
+ *
+ *  @internal Engine/framework wiring — not public API. */
+export interface SyncFoldWatermark {
+  /** The log position the state being captured holds. Called synchronously,
+   *  at the capture. */
+  capture: (cell: string) => number;
+  /** The statements that record `at`, run inside the fold's transaction. */
+  plan: (cell: string, at: number) => { sql: string; params?: unknown[] }[];
+  /** The fold that recorded `at` committed. */
+  folded: (cell: string, at: number) => void;
+}
+
+/** Unread bytes one sync peer may hold before it is closed instead of written
+ *  to — see `sendTo`. The SAME number as `WS_BUFFER_HIGH_WATER`
+ *  (server/write-backlog.ts), which the WS broadcaster applies to the very
+ *  same sockets; `sync/` may not import `server/` (check-boundaries), so it
+ *  is spelled here and pinned equal by tests/sync-send-high-water.test.ts.
+ *  @internal */
+export const SYNC_SOCKET_HIGH_WATER = 4 * 1024 * 1024;
 
 const FORBIDDEN = ["__proto__", "constructor", "prototype"];
 
@@ -204,6 +239,33 @@ export function createServerSyncHandler(
    *  that was lost. */
   const sendTo = (socket: WebSocket, frame: string, what: string): void => {
     const gone = socket.readyState !== WebSocket.OPEN;
+    // A peer that has stopped reading. Every frame this file sends is one a
+    // client cannot do without — a `sync-res`, an op's ack or refusal, a
+    // legacy client's whole-cell server-write push — so it cannot be SKIPPED
+    // the way a state round is (no in-band repair: a missed ack is an op
+    // resent forever, a missed push a cell that silently stays behind). And
+    // it cannot be queued without limit either: the runtime holds it on the
+    // server's heap for as long as the peer does not read. The repair a sync
+    // client does have is the reconnect (catch-up resumes from its own
+    // cursor), so it is closed — the same rule, code and reason as
+    // `broadcastRaw` (server-broadcast.ts `_closeNotDraining`).
+    const held = (socket as { bufferedAmount?: number }).bufferedAmount ?? 0;
+    if (!gone && held > SYNC_SOCKET_HIGH_WATER) {
+      deps.log.warn(
+        `[sync:server] closing a sync client that is not draining its socket ` +
+          `(${
+            (held / 1048576).toFixed(1)
+          } MB of unread frames held on the server) — ${what} cannot be ` +
+          `skipped without leaving a gap, so it reconnects and catches up ` +
+          `from its own cursor instead`,
+      );
+      try {
+        socket.close(1013, "not draining: reconnect and resync");
+      } catch {
+        /* aio-ok: already closing — the next send sees it gone */
+      }
+      return;
+    }
     try {
       socket.send(frame);
     } catch (e) {
@@ -431,50 +493,273 @@ export function createServerSyncHandler(
       );
       return;
     }
+    // The fold watermark rides in the snapshot's own transaction
+    // (`alsoWrite`, planned after the state capture). A fold that never reaches
+    // it (below the op threshold, or it threw) records nothing and advances
+    // nothing.
+    const fw = _foldWatermark;
+    let at: number | undefined;
+    let planned = false;
     try {
       await compactSyncOps({
         db: deps.db,
         cell,
-        getState: () => deps.getCellState(cell),
+        getState: () => {
+          const s = deps.getCellState(cell);
+          // Same synchronous turn as the read: nothing can commit between.
+          if (fw !== null) at = fw.capture(cell);
+          return s;
+        },
         serverHlc: clock.now(),
         cellVersion: deps.cellVersion?.(cell) ?? 0,
         retentionMs: deps.opRetentionMs?.(cell),
+        alsoWrite: fw === null ? undefined : () => {
+          planned = true;
+          return fw.plan(cell, at!);
+        },
         log: deps.log,
         // force: fold current state into the snapshot regardless of op count —
         // the durability path for server-origin writes (see noteServerWrite).
         ...(force ? { compactOps: 0 } : {}),
       });
+      if (fw !== null && planned) fw.folded(cell, at!);
     } catch (e) {
       deps.log.error(`[sync:server] compact failed for ${cell}: ${e}`);
     }
   }
 
+  let _foldWatermark: SyncFoldWatermark | null = null;
+
   // ── Server-origin write durability ─────────────────────────────────
-  // Same debounce scale as KV persistence (100ms): a crash inside the window
-  // loses at most the last write — identical exposure to KV cells — and a
-  // clean shutdown flushes (aio-lifecycle calls flushServerWrites).
+  // Same debounce scale as KV persistence (100ms), and a clean shutdown flushes
+  // (aio-lifecycle calls flushServerWrites). A crash inside the window loses
+  // every write in it — up to the max wait below, not "the last write": the
+  // r3 chaos hunt lost 28 acked writes, the oldest 465 ms old. `journal: true`
+  // closes it (see `SyncFoldWatermark`).
+  //
+  // With a MAX WAIT. A pure debounce restarts on every write, so a cell
+  // written more often than every 100ms — a price feed, a cron at 50ms, a
+  // progress counter — never settled at all: no compaction (a restart rewound
+  // every one of those writes) and no push (measured: server at price 40,
+  // every tab still at 0, for as long as the writes kept coming). The first
+  // unsettled write starts a clock the later ones cannot reset.
   const SERVER_WRITE_DEBOUNCE_MS = 100;
-  const _pendingWrites = new Map<string, ReturnType<typeof setTimeout>>();
+  const SERVER_WRITE_MAX_WAIT_MS = 500;
+  const _pendingWrites = new Map<
+    string,
+    { timer: ReturnType<typeof setTimeout>; since: number }
+  >();
 
   function noteServerWrite(cell: string): void {
     if (!syncCells.has(cell)) return;
+    // Synchronous with the commit (the afterAction hook): from here until a
+    // push captures the cell's state, live clients do not have this write.
+    _dirty.add(cell);
+    const now = Date.now();
     const existing = _pendingWrites.get(cell);
-    if (existing !== undefined) clearTimeout(existing);
-    _pendingWrites.set(
-      cell,
-      setTimeout(() => {
-        _pendingWrites.delete(cell);
-        void withLock(cell, () => tryCompact(cell, true));
-      }, SERVER_WRITE_DEBOUNCE_MS),
+    if (existing !== undefined) clearTimeout(existing.timer);
+    const since = existing?.since ?? now;
+    const delay = Math.max(
+      0,
+      Math.min(
+        SERVER_WRITE_DEBOUNCE_MS,
+        since + SERVER_WRITE_MAX_WAIT_MS - now,
+      ),
     );
+    _pendingWrites.set(cell, {
+      since,
+      timer: setTimeout(() => {
+        _pendingWrites.delete(cell);
+        void withLock(cell, () => settleServerWrite(cell));
+      }, delay),
+    });
+  }
+
+  /** Make a server-origin write durable AND tell every live client about it.
+   *  Caller holds the cell lock. */
+  async function settleServerWrite(cell: string): Promise<void> {
+    await tryCompact(cell, true);
+    // Already pushed — a catch-up served meanwhile carried it out (see
+    // `pushCaptured` in handleSync) — and nothing written since.
+    if (!_dirty.has(cell)) return;
+    await pushServerState(cell);
+  }
+
+  // ── Server-origin writes reach LIVE clients ─────────────────────────
+  // Durability alone was half the fix. A client's confirmed state is folded
+  // from ops, and a server-origin write (an `am dispatch`, an effect, cron, a
+  // serverFn, an ASYNC method — the browser sends those as plain actions)
+  // produces no op. The plain `state` frame painted the change, and the very
+  // next sync op rebased the view onto the engine's confirmed state, which had
+  // never heard of it: the write vanished from every tab and STAYED gone while
+  // the server kept it (measured: `am dispatch board:add from-cli`, then a
+  // click in the tab → the tab showed only the tab's note). Only a reconnect's
+  // catch-up snapshot ever brought it back.
+  //
+  // So the write is pushed as what it is: a state at a position. Taken under
+  // the cell's lock, right after the reservation, it is exactly the shape a
+  // catch-up snapshot has — every op already persisted is at or below the
+  // position and inside the state, every later op is strictly above — so the
+  // client folds it with the rules it already has for snapshots (the ack
+  // watermark, the held-frame ordering). It rides a `sync-res` frame marked
+  // `push`, the one frame kind every client transport already routes to the
+  // engine; `reqId: 0` keeps a client built before `push` from treating it as
+  // the answer to its outstanding catch-up.
+  //
+  // And it travels as a PATCH (see `pushCaptured`), because it first shipped
+  // as the whole cell: five one-number writes to a 2000-note cell with ten
+  // tabs open were 50 frames and 5.25 MB, where the plain state stream had
+  // sent a few hundred bytes. The cost of a server write is now the size of
+  // the write.
+  async function pushServerState(cell: string): Promise<void> {
+    // A quarantined cell's live state is not its data — never serve it (same
+    // rule as the catch-up snapshot below).
+    if (deps.isQuarantined?.(cell)) return;
+    try {
+      const serverTs = await reserveServerTs(deps.db);
+      const state = deps.getClientCellState(cell);
+      if (state === null) {
+        deps.log.error(
+          `[sync:server] a server-side write to "${cell}" cannot be pushed to ` +
+            `clients — its ui config hides it, and sync clients then keep a ` +
+            `state without it. Drop sync or drop the ui filter.`,
+        );
+        return;
+      }
+      pushCaptured(cell, serverTs, state);
+    } catch (e) {
+      deps.log.error(
+        `[sync:server] could not push a server-side write to "${cell}" to ` +
+          `live clients (${e}) — they catch up at their next reconnect.`,
+      );
+    }
+  }
+
+  // ── What a push costs ──────────────────────────────────────────────
+  /** Same rule as the state broadcast (`fullStateThreshold` in
+   *  server-broadcast.ts): a patch bigger than half the whole state goes as
+   *  the whole state. */
+  const PUSH_FULL_FRACTION = 0.5;
+  /** Per cell, the client-visible state the last push carried — what the
+   *  next patch is taken against. Committed state is frozen, so holding the
+   *  reference costs nothing. */
+  const _pushed = new Map<string, Record<string, unknown>>();
+  /** Cells with a server write committed since the last push captured their
+   *  state (see `noteServerWrite`). */
+  const _dirty = new Set<string>();
+  /** Sockets whose engine predates the patch push (`SyncRequest.pushPatch`
+   *  absent). A patch frame means nothing to them — worse, it cannot carry the
+   *  position they would read as a cursor — so each is sent the whole cell,
+   *  as it always was. Pruned of closed sockets on every use; capped so a
+   *  transport whose sockets never report closing cannot grow it forever. */
+  const _legacySockets = new Set<WebSocket>();
+  const LEGACY_SOCKETS_CAP = 1024;
+  const _undiffableWarned = new Set<string>();
+  let _legacyCapWarned = false;
+  function pruneLegacySockets(): void {
+    for (const s of _legacySockets) {
+      if (
+        s.readyState === WebSocket.CLOSING || s.readyState === WebSocket.CLOSED
+      ) {
+        _legacySockets.delete(s);
+      }
+    }
+  }
+  function noteSyncSocket(socket: WebSocket, patches: boolean): void {
+    if (patches) {
+      _legacySockets.delete(socket);
+      return;
+    }
+    if (_legacySockets.has(socket)) return;
+    pruneLegacySockets();
+    _legacySockets.add(socket);
+    if (_legacySockets.size > LEGACY_SOCKETS_CAP) {
+      // Sets iterate in insertion order — the oldest goes.
+      _legacySockets.delete(_legacySockets.values().next().value!);
+      if (!_legacyCapWarned) {
+        _legacyCapWarned = true;
+        deps.log.warn(
+          `[sync:server] more than ${LEGACY_SOCKETS_CAP} open sync clients run ` +
+            `an engine older than this server — the oldest no longer receive ` +
+            `server-side writes until they reconnect. Reload those clients.`,
+        );
+      }
+    }
+  }
+
+  /** Push `state`, captured at `ts` under the cell's lock, to every live
+   *  client. Synchronous: nothing may commit to the push base between the
+   *  capture and the bookkeeping. */
+  function pushCaptured(
+    cell: string,
+    ts: number,
+    state: Record<string, unknown>,
+  ): void {
+    _dirty.delete(cell);
+    const base = _pushed.get(cell);
+    _pushed.set(cell, state);
+    const whole = () =>
+      enc("sync-res", {
+        mode: "snapshot",
+        push: true,
+        reqId: 0,
+        snapshot: { [cell]: state },
+        ops: [],
+        lowWater: {},
+        lastServerTs: { [cell]: ts },
+      });
+    // The first push of a cell has nothing to be a patch against.
+    let patchFrame: string | null = null;
+    if (base !== undefined) {
+      try {
+        const sum = stateDigest(state);
+        if (sum === null) {
+          throw new TypeError("it holds a value JSON cannot carry");
+        }
+        const frame = enc("sync-res", {
+          mode: "push",
+          push: true,
+          reqId: 0,
+          ops: [],
+          lowWater: {},
+          patch: {
+            [cell]: { ts, set: diffState(base, state), digest: sum.digest },
+          },
+        });
+        if (frame.length <= sum.bytes * PUSH_FULL_FRACTION) patchFrame = frame;
+      } catch (e) {
+        // Not patchable: the whole cell, which is what the push always was —
+        // and the reason, once per cell.
+        if (!_undiffableWarned.has(cell)) {
+          _undiffableWarned.add(cell);
+          deps.log.warn(
+            `[sync:server] server-side writes to "${cell}" are pushed as the ` +
+              `whole cell — its state could not be diffed (${e}). Sync state ` +
+              `must be plain JSON. (logged once per cell)`,
+          );
+        }
+      }
+    }
+    if (patchFrame === null) {
+      deps.broadcastRaw.fn(whole());
+      return;
+    }
+    pruneLegacySockets();
+    if (_legacySockets.size > 0) {
+      const frame = whole();
+      for (const s of _legacySockets) {
+        sendTo(s, frame, `server-write push for "${cell}"`);
+      }
+    }
+    deps.broadcastRaw.fn(patchFrame);
   }
 
   async function flushServerWrites(): Promise<void> {
     const cells = [..._pendingWrites.keys()];
-    for (const t of _pendingWrites.values()) clearTimeout(t);
+    for (const p of _pendingWrites.values()) clearTimeout(p.timer);
     _pendingWrites.clear();
     await Promise.all(
-      cells.map((cell) => withLock(cell, () => tryCompact(cell, true))),
+      cells.map((cell) => withLock(cell, () => settleServerWrite(cell))),
     );
   }
 
@@ -486,6 +771,9 @@ export function createServerSyncHandler(
   return {
     noteServerWrite,
     flushServerWrites,
+    setFoldWatermark(w) {
+      _foldWatermark = w;
+    },
     async handleOp(raw, meta, socket) {
       if (!isValidSyncOp(raw)) {
         deps.log.warn(`[sync:server] invalid op from ${meta.id} — dropping`);
@@ -713,6 +1001,25 @@ export function createServerSyncHandler(
         (r.pendingOps !== undefined && !Array.isArray(r.pendingOps))
       ) {
         deps.log.warn("[sync:server] handleSync: invalid envelope — dropping");
+        // ANSWER it. The `.catch` at the bottom of this method already states
+        // the contract — "Notify client so it can back off and retry instead
+        // of hanging in 'syncing'" — and only that exit honoured it. A
+        // request refused AT THE DOOR sent nothing at all, and the client's
+        // catch-up gate has no timeout and only three things that reopen it:
+        // engine boot, going offline→online, and a `sync-err` frame. So on a
+        // still-open connection the cell stopped receiving peer changes and
+        // stopped confirming its own ops, permanently and silently: status
+        // stuck at "syncing", the pending buffer growing toward `pendingCap`,
+        // and past it the user's own mutations start throwing.
+        sendTo(
+          socket,
+          enc("sync-err", {
+            reason:
+              "invalid sync request envelope — `clientId` must be a non-empty " +
+              "string, `cells` an object and `pendingOps` an array",
+          }),
+          "sync-err",
+        );
         return;
       }
       // …and every ENTRY of `cells`, here, where the envelope is checked —
@@ -734,6 +1041,17 @@ export function createServerSyncHandler(
           }" — dropping the request. A cell entry must be ` +
             `{ lastHlc: [number, number, string] | null, lastServerTs?: number }.`,
         );
+        // Same rule as the envelope refusal above: a refused request must be
+        // ANSWERED, or the client waits for a frame that is never coming.
+        sendTo(
+          socket,
+          enc("sync-err", {
+            reason: `invalid cursor for cell "${badCell[0]}" — a cell entry ` +
+              `must be { lastHlc: [number, number, string] | null, ` +
+              `lastServerTs?: number }`,
+          }),
+          "sync-err",
+        );
         return;
       }
       const sync = r as {
@@ -746,7 +1064,18 @@ export function createServerSyncHandler(
         session?: string;
         cells: Record<string, { lastHlc: HLC | null; lastServerTs?: number }>;
         pendingOps: SyncOp[];
+        /** Cells the client asks to be served as a SNAPSHOT whatever its
+         *  cursor says (see SyncRequest.resync). */
+        resync?: unknown;
+        /** The engine folds patch pushes (see SyncRequest.pushPatch). */
+        pushPatch?: unknown;
       };
+      noteSyncSocket(socket, sync.pushPatch === true);
+      const resyncCells = new Set(
+        Array.isArray(sync.resync)
+          ? sync.resync.filter((c): c is string => typeof c === "string")
+          : [],
+      );
       // "Ops of the client asking" — by SESSION when it says which, because
       // the client id alone is a persisted UUID that two clones of one profile
       // share, and filtering on it made each clone's ops invisible to the
@@ -1088,9 +1417,24 @@ export function createServerSyncHandler(
               }
             }
 
+            // The first base a push can be a patch against. With no server
+            // write unpushed, every live client holds this state plus the ops
+            // after this position — the same thing a push base is — whether
+            // this client is served a snapshot or the log. Without it the
+            // first server write of a process went out as the whole cell.
+            if (!_pushed.has(cell) && !_dirty.has(cell)) {
+              const seen = deps.getClientCellState(cell);
+              if (seen !== null) _pushed.set(cell, seen);
+            }
+
             // Client's lastHlc older than low_water → compacted, send snapshot
+            // The client KNOWS its confirmed state for this cell cannot be
+            // trusted — it re-ran a method that does not give the same answer
+            // twice (see the engine's `reduceChecked`) — and no cursor rule can
+            // see that: its cursor is perfectly current, its state is not.
+            const resync = resyncCells.has(cell);
             if (
-              cursorBelowCompaction || snapshotUnnamed || foreign ||
+              cursorBelowCompaction || snapshotUnnamed || foreign || resync ||
               (cellLW && lastHlc &&
                 (lastHlc[0] < cellLW[0] ||
                   (lastHlc[0] === cellLW[0] && lastHlc[1] < cellLW[1])))
@@ -1131,6 +1475,19 @@ export function createServerSyncHandler(
               }
               useSnapshot = true;
               snapshot[cell] = clientState;
+              // A server write this state holds that the live clients have
+              // not been pushed yet goes out NOW, at this same position and
+              // state. Otherwise the next patch — taken against the last
+              // push — would describe the write to a client whose snapshot
+              // already has it, and a write that was then set back would be
+              // missing from that patch while this client kept it: a re-sync
+              // for this client, every time a catch-up lands in a write
+              // burst. Pushed at one position with one state, the snapshot
+              // and the push are the same fact (the held push is skipped as
+              // covered by the snapshot).
+              if (_dirty.has(cell)) {
+                pushCaptured(cell, serverTsMap[cell], clientState);
+              }
             } else {
               // server_ts cursor when the client has one (strictly monotonic,
               // no concurrency ambiguity); HLC cursor as legacy fallback.

@@ -122,10 +122,17 @@ testUI(App, "add a todo end-to-end", async (ui) => {
   virtual clock and dispatches every **cell** `schedule.after`/`every` now due,
   which makes debounce, `backoff` and `poll` unit-testable without real timers.
   `schedule.at` and `schedule.cron` fire on it too (they used to be dropped with
-  a warning — see `tests/harness-schedule-parity.test.ts`). What it does NOT
-  move is anything on a raw `setTimeout`, including `aio/ui`'s `toast()`
-  auto-dismiss: give that a short `duration` and
-  `await ui.waitFor(() => ui.absent("…"))`.
+  a warning — see `tests/harness-schedule-parity.test.ts`). It is ONE clock:
+  after the first advance, `Date.now()`, `new Date()` and `Date()` in app code
+  read real time plus the time advanced, so `schedule.at(Date.now() + 5000)`
+  written after `advance(10_000)` fires 5 s later, and a TTL checked against
+  `Date.now()` expires. The real `Date` is back when the mount is disposed;
+  `performance.now()` is never moved. What it does NOT move is anything on a raw
+  `setTimeout`, including `aio/ui`'s `toast()` auto-dismiss: give that a short
+  `duration` and `await ui.waitFor(() => ui.absent("…"))`.
+- **`settle()`, `waitFor` and `expectCell` run what is already due** — a
+  `schedule.next` or `schedule.after(id, 0, …)` runs right after the method, as
+  a real server runs it. Anything later still waits for `advance(ms)`.
 
 For **multi-cell logic tests without a component**, `bootCells([a, b])` from
 `aio/testing` boots several cells on the same runtime and returns a handle with
@@ -154,6 +161,7 @@ Options — only when you need control (all optional):
 | `settleIterations` | `20`                           | very slow cascades             |
 | `seed`             | —                              | pin machine-dependent state    |
 | `user`             | — (identity unresolved)        | mount an authenticated app     |
+| `perfBudget`       | the defaults                   | the app's budgets and ceilings |
 | `authFeatures`     | all `false`                    | `<SignIn/>` feature adaptation |
 
 ### `settle()` never guesses
@@ -183,7 +191,19 @@ surfaces at the next observation point (`settle`, `expectCell`, `waitFor`,
 Awaiting the call — including `await assertRejects(() => todo.add())` — counts
 as observing it, and it is not reported a second time. This is the rule
 `testCell` has always used; `testUI` and `bootCells` now use it too, so the same
-app code cannot pass one harness and fail another.
+app code cannot pass one harness and fail another. It covers every method, sync
+ones included — a reducer that throws under a fire-and-forget click fails the
+test just as an async method's rejection does, and so does a click the `access`
+rule denies.
+
+Teardown waits for it too. `ui.dispose()` (and so the callback form and
+`await using`) gives un-awaited calls a short, bounded moment to finish before
+it looks, so a failing call fired on the test's last line still fails the test.
+`bootCells` does the same under `await using h = await bootCells([…])`. Its
+synchronous `h.dispose()` / `using` cannot wait: it throws what has already
+landed, and prints a warning naming any call still in flight, because the reset
+orphans that call and its outcome can no longer be seen. Await the call, or
+`await h.settle()` before teardown, when the outcome matters.
 
 ### Testing an authenticated app (`user`)
 
@@ -202,6 +222,13 @@ if (ui.present("AdminPanel")) throw new Error("customer saw admin");
 shape what it offers). The identity resets on dispose, so the next mount cannot
 inherit this test's user. Omit `user` entirely for today's behaviour (identity
 unresolved until a real `/me` answers).
+
+The cells read as **that user's socket** would carry them: a cell with
+`visible.forUser` renders the per-user view, not the server's whole state — and
+with no `user` (or `null`) it renders the anonymous view, exactly what an
+unsigned connection receives. A filter that throws or returns a non-object fails
+closed, as the broadcast does: the cell reads its declared state, and the error
+is logged naming it.
 
 ### Modified clicks, and the viewport
 
@@ -269,9 +296,12 @@ Setup now undoes exactly what it installed, in the same order `dispose()` does.
 `testUI` owns one happy-dom `Window` per mount (`http://localhost/`, the
 configured viewport) and publishes, on `globalThis`, `document`, `window`,
 `location` and `history` from it — restored on teardown, so files share nothing.
-The same objects are on the handle: `ui.window` and `ui.document`. Use them for
-what the component's own code would reach —
-`ui.window.dispatchEvent(new ui.window.Event("resize"))`,
+`history.back()`/`forward()`/`go(n)` (and `navigate(-1)`) behave as a browser's
+same-document traversal: queued, not synchronous (`await ui.settle()` after it),
+then `location` and `history.state` move and `popstate` fires — so a routed app
+re-renders on Back exactly as it does in a browser. The same objects are on the
+handle: `ui.window` and `ui.document`. Use them for what the component's own
+code would reach — `ui.window.dispatchEvent(new ui.window.Event("resize"))`,
 `ui.document.activeElement`, a listener registered where the component's one
 lives. `localStorage` is a fresh in-memory store per mount (`{ persist: true }`
 keeps it). Nothing is installed twice: a `document` you pass in is used as-is.
@@ -325,6 +355,11 @@ comes from an explicit `role` first, then the tag/type (a clickable `div.button`
 is a Button). The `t` prop also puts **non-interactive** elements on the surface
 (assertion targets) and is the stable handle to use where visible copy may
 change — it's typed and stripped from the DOM.
+
+"Visible text" is the element's OWN text: `<button><span>Save</span></button>`
+and `<input type="submit" value="Send">` get the bare numbered role (`Button2`).
+Give them a `t` or an `aria-label`. (Reading nested text would rename elements
+that existing tests already address by number — see `future/v2.md`.)
 
 Names match **exactly**. There is no prefix or substring matching anywhere in
 the surface — `toggle-negative` and `negative` are two unrelated handles.
@@ -836,6 +871,18 @@ console.log(uiNames(ui));
 Full `Component…:Element` paths — the same form `am trigger` takes, and the only
 form that can say _which_ instance. On a running app, `am surface --names` is
 the same answer.
+
+`ui[…]` takes a path as well as a bare name, so a name from this list is usable
+as it stands, and the path reaches the instance the bare name cannot:
+
+```ts
+ui["TodoList/TodoRow#2:DeleteButton"].click(); // the SECOND row's button
+ui.DeleteButton.click(); // refuses: two elements match
+```
+
+Child COMPONENTS are not in the list — its shape is `Component…:Element` and a
+component is not one. They are addressed by name (`ui.TodoRow`, `ui.TodoRow2`),
+and they are visible in the list as the prefix of the paths beneath them.
 
 An element with no accessible name is not addressable and will not appear. That
 is the same rule the `[aio-dev] <input> has no label association` warning states

@@ -12,6 +12,7 @@ function makeCtx(tsxFiles: SourceFile[]): LintContext & { _issues: Issue[] } {
     cssFiles: [],
     skipped: [],
     unscannedDirs: [],
+    testHelpers: [],
     // Hand-built context: app-shaped rules apply here (see looksLikeApp).
     isApp: true,
     tsxFiles,

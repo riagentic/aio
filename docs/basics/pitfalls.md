@@ -75,10 +75,13 @@ misreading moved/renamed fields — re-deploy the newer build, or add an
 
 Boot also detects **shape drift** without any version machinery: if stored data
 holds a field your cell's `initialState` no longer declares (a rename/removal
-you forgot to bump `version` for), boot warns and `deno task am migrations`
-lists it — `deepMerge` would otherwise keep the stale value and you'd read it
-forever. `initialState` is the declared shape; the drift check diffs storage
-against it.
+you forgot to bump `version` for), a prod boot warns and
+`deno task am migrations` lists it; a dev boot refuses to start, naming the
+cell, the key, the data directory it opened, and the way out (`am backup`, then
+remove that directory) when the stored data is simply stale. Restore does NOT
+keep that value: the field is dropped from memory and the first write after boot
+removes it from disk, so rename with `version` + `onMigrate` before you ship.
+`initialState` is the declared shape; the drift check diffs storage against it.
 
 ## Scheduling & effects
 

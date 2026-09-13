@@ -58,7 +58,7 @@
 
 ## UI — AIR renderer — components, signals, routing, forms
 
-- [Rendering & UI](ui/README.md) — AIO uses AIR — a built-in signal-based renderer (71 KB gzipped with the
+- [Rendering & UI](ui/README.md) — AIO uses AIR — a built-in signal-based renderer (81 KB gzipped with the
 - [AIR Advanced Patterns](ui/air-advanced.md) — SSR, portals, islands, code splitting, virtual scrolling, dimensions, deferred
 - [AIR Animation](ui/air-animation.md) — CSS-first declarative transitions for enter/exit animations, imperative spring
 - [AIR vs React vs Best-in-Class — Full Comparison](ui/air-comparison.md) — Reference frameworks: React 19, Solid.js 1.9 (signal pioneer), Svelte
@@ -162,10 +162,10 @@
 
 ## Upgrade guides — version-to-version migration notes
 
-- [Upgrade Guides](upgrade/README.md) — every one, newest first (75 pages)
+- [Upgrade Guides](upgrade/README.md) — every one, newest first (76 pages)
+- [Upgrading from 1.0.0-beta to 1.0.1-beta](upgrade/from-1.0.0-beta-to-1.0.1-beta.md) — check:api reports no drift — so there is no step to perform.
 - [Upgrading from alpha77 to 1.0.0-beta](upgrade/from-alpha77-to-1.0.0-beta.md) — (docs/basics/semver-policy.md): every export, signature, flag, config key and
 - [Upgrading from alpha76 to alpha77](upgrade/from-alpha76-to-alpha77.md) — (docs/basics/semver-policy.md): every export, signature, flag, config key and
-- [Upgrading from alpha75 to alpha76](upgrade/from-alpha75-to-alpha76.md) — compatibility.
 - [The aio restructure — alpha27/alpha28 breaking changes](upgrade/restructure.md) — This guide tracks every breaking change of the restructure
 
 ## Design specs — decision records — background, not manuals

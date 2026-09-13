@@ -280,10 +280,15 @@ Deno.test('android runtime: ui.theme "auto" enables it; nothing else does', asyn
   const opened: Array<() => Promise<void>> = [];
   try {
     for (
+      // `"none"` REMOVES the sheet rather than leaving it disabled: the word
+      // means "no aio CSS on the page at all… not even the two-rule box-model
+      // baseline", and a packaged shell emits that baseline before it can know
+      // the answer. Leaving an inert sheet behind was harmless; leaving the
+      // always-on baseline was not, and both go the same way.
       const [theme, want] of [
         [undefined, "not all"],
         ["tokens", "not all"],
-        ["none", "not all"],
+        ["none", "gone"],
         ["auto", null],
         ["full", null],
       ] as [string | undefined, string | null][]
@@ -292,10 +297,9 @@ Deno.test('android runtime: ui.theme "auto" enables it; nothing else does', asyn
       opened.push(close);
       g.document = doc;
       _applyShellUi({ theme });
+      const sheet = doc.querySelector("style[data-aio-theme-deferred]");
       assertEquals(
-        doc.querySelector("style[data-aio-theme-deferred]")!.getAttribute(
-          "media",
-        ),
+        sheet === null ? "gone" : sheet.getAttribute("media"),
         want,
         `ui.theme: ${theme}`,
       );

@@ -95,6 +95,32 @@ export function out(
   else console.log(describe(data));
 }
 
+/** Print a DATA VALUE — what a command was ASKED FOR, not what it has to say.
+ *
+ *  Identical to {@linkcode out} except that a string stays a string. `out`
+ *  wraps one as `{ message: … }`, which is right for a command with a human
+ *  sentence to deliver and wrong for a value the caller requested: `am state
+ *  counter.count --json` answered `0`, `--json` on a boolean answered `true`,
+ *  on an array an array — and on a STRING it answered `{"message":"ada"}`.
+ *  So `--json` was not a superset of plain mode (which prints `ada`), it was a
+ *  different shape for one type. Worse, it was AMBIGUOUS: a string field and
+ *  an object field `{ message: "hello" }` produced byte-identical output, so a
+ *  script could not tell them apart. `am state` is the primary scripting
+ *  surface, and `out`'s own comment promises "`--json` output is a superset of
+ *  plain mode, never a mode that loses information". */
+export function outValue(
+  data: unknown,
+  mode: OutputMode,
+  pretty?: string | (() => string),
+): void {
+  if (mode === "quiet") return;
+  if (mode === "json") {
+    console.log(jsonText(data));
+    return;
+  }
+  out(data, mode, pretty);
+}
+
 /** Multi-line USAGE text — always plain, unless `--json` was asked for.
  *
  *  `out()` picks its mode from the terminal, so `am auth | less` printed the

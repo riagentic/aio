@@ -6,7 +6,13 @@
 // the import only ever executes there.
 import { basename, join } from "@std/path";
 
-export type Entry = { name: string; path: string; bytes: number };
+/** `partial`: this folder's walk hit the budget, so `bytes` is a floor. */
+export type Entry = {
+  name: string;
+  path: string;
+  bytes: number;
+  partial: boolean;
+};
 
 /** What ONE scan is allowed to cost.
  *
@@ -38,8 +44,13 @@ export const DEFAULT_LIMITS: ScanLimits = {
 
 /** A scan's answer, plus whether it is the WHOLE answer. `partial` is not a
  *  detail: showing capped numbers as if they were final is the kind of quiet
- *  lie this example exists to teach against. */
-export type ScanResult = { entries: Entry[]; partial: boolean };
+ *  lie this example exists to teach against.
+ *
+ *  `more`: children this scan never reached. A capped answer has to come with
+ *  a way to the rest of it — pass the names already listed back in as `skip`
+ *  and the next scan starts where this one stopped. Re-running the same scan
+ *  cannot: same limits, same readDir order, the same first 200 every time. */
+export type ScanResult = { entries: Entry[]; partial: boolean; more: boolean };
 
 /** Size of one directory subtree, in bytes.
  *
@@ -85,7 +96,8 @@ async function subtreeSize(
   return { bytes: total, partial };
 }
 
-/** Immediate children of `path`, largest first, within `limits`.
+/** Immediate children of `path`, largest first, within `limits`, skipping the
+ *  children named in `skip` (the ones an earlier scan of `path` already listed).
  *
  *  Long-running by nature — which is why the cell gives it a cancel path and a
  *  "scanning" flag — but never unbounded: see {@link ScanLimits}. */
@@ -93,23 +105,27 @@ export async function scanFolders(
   path: string,
   signal: AbortSignal,
   limits: ScanLimits = DEFAULT_LIMITS,
+  skip: ReadonlySet<string> = new Set(),
 ): Promise<ScanResult> {
   const deadline = Date.now() + limits.budgetMs;
   const out: Entry[] = [];
-  let partial = false;
+  let floors = false;
   for await (const e of Deno.readDir(path)) {
-    if (signal.aborted) return { entries: sorted(out), partial: true };
-    if (!e.isDirectory || e.isSymlink) continue;
+    if (signal.aborted) {
+      return { entries: sorted(out), partial: true, more: true };
+    }
+    if (!e.isDirectory || e.isSymlink || skip.has(e.name)) continue;
+    // Checked BEFORE sizing the next child, so `more` means "a folder is
+    // waiting", never "we happened to stop on the last one".
     if (out.length >= limits.maxEntries || Date.now() >= deadline) {
-      partial = true;
-      break;
+      return { entries: sorted(out), partial: true, more: true };
     }
     const child = join(path, e.name);
     const r = await subtreeSize(child, signal, deadline, limits);
-    partial ||= r.partial;
-    out.push({ name: e.name, path: child, bytes: r.bytes });
+    floors ||= r.partial;
+    out.push({ name: e.name, path: child, bytes: r.bytes, partial: r.partial });
   }
-  return { entries: sorted(out), partial };
+  return { entries: sorted(out), partial: floors, more: false };
 }
 
 const sorted = (e: Entry[]): Entry[] =>

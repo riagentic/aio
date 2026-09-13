@@ -1,9 +1,10 @@
 // Shared dispatch loop — used by both aio.ts (server) and standalone.ts (Android)
 // Re-entrant-safe: effects can call dispatch(), actions are queued and drained in order
 import { WHERE_HINT } from "../diagnostics/contexts.ts";
-import type { ScheduleEffect } from "./schedule.ts";
+import { carryScheduleOwner, type ScheduleEffect } from "./schedule.ts";
 import type { OwnEffect } from "./own.ts";
 import { isFrameworkCell } from "./framework-cells.ts";
+import { pendingCalls } from "./method-cancel.ts";
 import type { ReduceBreakdown } from "../diagnostics/time-travel.ts";
 import {
   type AioError,
@@ -177,12 +178,35 @@ const DEFAULT_EFFECT_BUDGET = 5;
  *  "feels instant" budget. */
 export const DEV_FRAME_BUDGET_MS = 16;
 
+/** Why a paused time-travel refusal is TAGGED.
+ *
+ *  An async method still running when the developer presses pause has its
+ *  later writes refused here, and its executor used to report that as
+ *  `ERROR EFFECT_ASYNC_ERROR` ("catch inside the method") — an error-severity
+ *  diagnostic, so feedback auto-capture filed a bug report against the app for
+ *  a click in the debug panel. `reason: "tt-paused"` lets a reporter tell the
+ *  developer's pause from an app failure without matching message text.
+ *  @internal */
+export const TT_PAUSED = "tt-paused" as const;
+
+function _tagTTPaused(err: AioError): AioError {
+  (err as AioError & { reason?: string }).reason = TT_PAUSED;
+  return err;
+}
+
+/** Is `e` the paused-time-travel door refusal? @internal */
+export function _isTTPausedRefusal(e: unknown): boolean {
+  return typeof e === "object" && e !== null &&
+    (e as { reason?: unknown }).reason === TT_PAUSED;
+}
+
 /** Deep freeze for dev mode immutability checking.
  *
  *  Re-exported, not reimplemented: this was one of THREE hand-written
  *  `deepFreeze`s that had drifted apart (see `state/immutable.ts`). */
 export { deepFreeze } from "./immutable.ts";
 import { deepFreeze } from "./immutable.ts";
+import { cloneExecEffect, isExecEffect } from "./exec-effect.ts";
 import { count } from "../diagnostics/fmt.ts";
 
 /** Queue depth limit — prevents unbounded memory growth from burst dispatches.
@@ -539,12 +563,12 @@ export function createDispatch<S, A, E>(
             `this type suppressed). Resume time travel to dispatch again.`,
         );
       }
-      return rejectDropped(createAioError(
+      return rejectDropped(_tagTTPaused(createAioError(
         "DISPATCH_CLOSED",
         "time travel is paused — action dropped, not applied. Resume time " +
           "travel (or close the debug panel) to dispatch again.",
         { actionType: (action as Record<string, unknown>)?.type as string },
-      ));
+      )));
     }
     if (phase !== "open") {
       const t = String(
@@ -792,7 +816,14 @@ export function createDispatch<S, A, E>(
             const cloned: (E | ScheduleEffect | OwnEffect)[] = [];
             for (const eff of reduced.effects) {
               try {
-                cloned.push(structuredClone(eff));
+                // `__exec` carries the caller's arguments by reference —
+                // see exec-effect.ts.
+                const copy = isExecEffect(eff)
+                  ? cloneExecEffect(eff) as unknown as E
+                  : structuredClone(eff);
+                // The issuing cell rides beside the effect, not in it.
+                carryScheduleOwner(eff, copy);
+                cloned.push(copy);
               } catch (cloneErr) {
                 const effType = (eff as Record<string, unknown> | null)?.type as
                   | string
@@ -1162,6 +1193,21 @@ export function createDispatch<S, A, E>(
   };
   dispatch.errorCount = () => errors;
   dispatch.getQueueDepth = () => queue.length;
-  dispatch.getEffectBacklog = () => effectsInFlight;
+  // `effectsInFlight` counts effects whose executor RETURNED a promise — and
+  // no production executor does: `buildRootExecutor` is declared `=> void` and
+  // discards what the cell's `execute` returns, as do the server dispatch
+  // loop, the standalone loop, and both the schedule and own managers. So this
+  // gauge could never leave zero, while `docs/debugging/vitals.md` documents
+  // it as "Pending effects awaiting execution", `GET /__aio/vitals` advertises
+  // it, and amui renders it yellow when it is above zero. A dial that cannot
+  // move is worse than no dial: it reads as proof there is no backlog.
+  //
+  // The framework DOES know — it just knows it somewhere else. Async method
+  // calls are tracked by `method-cancel.ts` (`trackPending`), which is what
+  // shutdown drains; `method-cancel.ts` already notes the executor returns
+  // nothing and was fixed that way. So the gauge answers from the register
+  // that has the fact, plus the promise-returning effects it was already
+  // counting for the runtimes that do return one.
+  dispatch.getEffectBacklog = () => effectsInFlight + pendingCalls();
   return dispatch as DispatchFn<A>;
 }

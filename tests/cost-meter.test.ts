@@ -25,7 +25,7 @@ Deno.test("cost: rates are per measured second, not per requested window", () =>
   const { m, tick, now } = meterAt();
   // Four pushes, then 2s of observed time, asked for a 60s window: the app has
   // only been running 2s, and dividing by 60 would under-report by 30×. The
-  // divisor is the span actually observed — first sample to now.
+  // divisor is the span actually observed — meter start to now.
   for (let i = 0; i < 4; i++) {
     m.recordSend(1000, "c0", "patch");
     m.recordAttribution("hw", "cpu", 800, m.beginRound());
@@ -35,6 +35,71 @@ Deno.test("cost: rates are per measured second, not per requested window", () =>
   assertAlmostEquals(r.windowSec, 2, 0.01, "the span actually observed");
   assertAlmostEquals(r.wire.bytesPerSec, 4000 / 2, 1);
   assertAlmostEquals(r.cells[0]!.bytesPerSec, 3200 / 2, 1);
+});
+
+Deno.test("cost: --cell changes WHAT is totalled, never how long we watched", () => {
+  // `attribRows`/`reduceRows` are filtered by `--cell` and `sendRows` are not,
+  // and one shared denominator was taken as the min across all three. So
+  // narrowing to one cell shrank the divisor of a numerator that still
+  // covered every cell: the SAME traffic reported one rate unfiltered and a
+  // ten-times-larger one with `--cell=b`. The global wire figures must not
+  // move when a filter is applied.
+  const { m, tick, now } = meterAt();
+  // `a` is attributed from the start and `b` only at the end, while the SENDS
+  // all happen late. Unfiltered, the earliest row of any series is `a`'s, so
+  // the shared span was 10s; with `--cell=b` the attribution rows start at
+  // 9s, the shared span collapsed to 1s — and the wire numerator, which is
+  // never filtered, stayed the same. Ten times the rate for the same bytes.
+  m.recordAttribution("a", "k", 500, m.beginRound());
+  tick(9000);
+  for (let i = 0; i < 10; i++) {
+    m.recordSend(1000, "c0", "patch");
+    m.recordAttribution("b", "k", 500, m.beginRound());
+    tick(100);
+  }
+  const all = m.report({ windowSec: 60, now: now() });
+  const one = m.report({ windowSec: 60, now: now(), cell: "b" });
+  assertEquals(
+    all.wire.bytesPerSec,
+    one.wire.bytesPerSec,
+    "the wire total is not per-cell, so a cell filter cannot change its rate",
+  );
+  assertEquals(all.windowSec, one.windowSec, "nor how long we were watching");
+});
+
+Deno.test("cost: a wrapped ring is divided by ITS OWN span, not another's", () => {
+  // The rings fill at different rates — sends far faster than reduces, which
+  // is the normal state of a busy server. One shared `Math.min` span divided
+  // a wrapped send ring's bytes (1s of history) by the reduce ring's 10s: a
+  // ten-times UNDER-report of the wire, with only `truncated: true` to hint.
+  //
+  // The send ring has to actually WRAP for this. It used to be a ten-sample
+  // burst in a 4096-slot ring after 9 quiet seconds — which only "covered 1s"
+  // because the span was taken from the oldest sample, the bug
+  // tests/cost-rates-from-observation-start.test.ts pins. An unwrapped ring
+  // has watched the whole 10s, and 10 KB over 10s IS 1000 B/s.
+  let t = 1_000_000;
+  const m = createCostMeter({ sends: 10, now: () => t });
+  const tick = (ms: number) => void (t += ms);
+  const now = () => t;
+  // One reduce at the start, so the reduce ring spans the whole 10s…
+  m.recordReduce("c0", 1);
+  // …while the send ring wraps: 20 frames in the last second, 10 retained,
+  // so what it still holds spans 0.5s.
+  tick(9000);
+  for (let i = 0; i < 20; i++) {
+    m.recordSend(1000, "c0", "patch");
+    tick(50);
+  }
+  const r = m.report({ windowSec: 60, now: now() });
+  assertEquals(r.truncated, true, "the send ring wrapped");
+  // 10 retained KB over 0.5s. Divided by the reduce ring's 10s it read ~1000.
+  assertEquals(
+    r.wire.bytesPerSec > 16000,
+    true,
+    `the wire rate was divided by another ring's span: ${r.wire.bytesPerSec}`,
+  );
+  assertAlmostEquals(r.windowSec, 10, 0.2, "the report still covers 10s");
 });
 
 Deno.test("cost: the window excludes older samples", () => {

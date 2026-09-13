@@ -326,19 +326,48 @@ export function resolveEntryPath(
  *
  *  Scheme is inferred, not required: `192.168.1.50:8000` is what people write in
  *  a config file, and demanding `http://` there is the kind of ceremony that
- *  gets an option abandoned. An explicit scheme is always honoured. */
+ *  gets an option abandoned. An explicit scheme is always honoured —
+ *  case-insensitively, and a WebSocket scheme names the same server: `ws://`
+ *  is `http://`, `wss://` is `https://`. The test used to be a case-sensitive
+ *  `^https?://`, so everything else got `http://` glued on the front and the
+ *  URL parser read the old scheme as a HOSTNAME: `wss://relay.example.com:8443`
+ *  baked `http://wss` into the APK, `HTTP://Host:8000` baked `http://http`.
+ *
+ *  A declared value that is not an address THROWS, naming it. It used to come
+ *  back null — exactly what "declared nothing" returns — so `host:99999` built
+ *  a client that silently asked the user for the address it had been given. */
 export function bakedServerUrl(
   declared: string | null | undefined,
 ): string | null {
+  if (declared != null && typeof declared !== "string") {
+    throw new Error(
+      `[aio] build.server must be a string like "192.168.1.50:8000", got ` +
+        `${JSON.stringify(declared)}.`,
+    );
+  }
   const raw = (declared ?? "").trim();
   if (!raw) return null;
-  const withScheme = /^https?:\/\//.test(raw) ? raw : `http://${raw}`;
+  const refuse = (why: string): never => {
+    throw new Error(
+      `[aio] build.server "${raw}" is not a server address (${why}). Write ` +
+        `it as host:port (192.168.1.50:8000) or a URL (https://relay.example); ` +
+        `ws:// and wss:// are accepted as http:// and https://.`,
+    );
+  };
+  const scheme = /^([a-z][a-z0-9+.-]*):\/\//i.exec(raw)?.[1]?.toLowerCase();
+  const as = scheme === undefined
+    ? "http"
+    : ({ http: "http", https: "https", ws: "http", wss: "https" } as const)[
+      scheme as "http"
+    ] ?? refuse(`unsupported scheme "${scheme}://"`);
+  const rest = scheme === undefined ? raw : raw.slice(scheme.length + 3);
+  let u: URL;
   try {
-    const u = new URL(withScheme);
-    if (!u.hostname) return null;
-    // No trailing slash: it is concatenated with paths downstream.
-    return u.origin;
+    u = new URL(`${as}://${rest}`);
   } catch {
-    return null;
+    return refuse("it does not parse as host[:port]");
   }
+  if (!u.hostname) refuse("it names no host");
+  // No trailing slash: it is concatenated with paths downstream.
+  return u.origin;
 }

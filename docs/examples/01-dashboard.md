@@ -229,8 +229,8 @@ export const metrics = cell("metrics", {
 
 `ui.forUser` runs per client on every broadcast. Viewers get live numbers but no
 history -- the sparkline will be empty for them. Connect as admin at
-`http://localhost:8000?token=admin-token-123` or viewer at
-`?token=viewer-token-456`.
+`http://localhost:$PORT?token=admin-token-123` (the URL the server prints at
+boot) or viewer at `?token=viewer-token-456`.
 
 > **Warning:** In production, load tokens from environment variables:
 > `Deno.env.get('ADMIN_TOKEN')!`.

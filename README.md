@@ -9,7 +9,7 @@
 </p>
 
 <p align="center">
-  <code>v1.0.0-beta</code> · <a href="LICENSE">MIT</a> ·
+  <code>v1.0.1-beta</code> · <a href="LICENSE">MIT</a> ·
   <a href="docs/content.md">Docs</a> ·
   <a href="docs/basics/quickstart.md">Quickstart</a> ·
   <a href="CHANGELOG.md">Changelog</a>
@@ -23,6 +23,12 @@
 curl -fsSL https://raw.githubusercontent.com/riagentic/aio/main/install.sh | sh
 am create my-app && cd my-app && deno task dev
 ```
+
+> 🤖 **Working on this with an AI agent?** Have it run **`am agent`** first. One
+> command prints the whole contract — the model, the verbs, and the habits that
+> make an agent hostile to the machine it is running on — so it does not have to
+> decide to open a doc. Every scaffolded app gets an `AGENTS.md` that says the
+> same.
 
 That is a running app — persisted, synced, testable — and one flag from the
 rest:
@@ -118,8 +124,8 @@ screen, `am trigger` acts on it.
 | 🚚 **Ship**    | browser · Electron · Android · iOS client · CLI · service · signed updates |
 | 🛠️ **Operate** | `am` — status, health, logs, state, dispatch, pins, installs               |
 
-A whole client — renderer, protocol, offline queue, CRDT merge — is **71 KB
-gzipped**, 62 KB brotli. `deno task bench:bundle` prints it, and
+A whole client — renderer, protocol, offline queue, CRDT merge — is **81 KB
+gzipped**, 70 KB brotli. `deno task bench:bundle` prints it, and
 `tests/bundle-size.test.ts` keeps this sentence true — both numbers.
 
 ## 🏃 Run any aio app, from its repo

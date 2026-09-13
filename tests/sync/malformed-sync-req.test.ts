@@ -107,3 +107,67 @@ Deno.test("sync-req: a well-formed cursor still answers", async () => {
     r.close();
   }
 });
+
+// ── a refused request must be ANSWERED, or the client freezes forever ────────
+//
+// `handleSync`'s own `.catch` states the contract — "Notify client so it can
+// back off and retry instead of hanging in 'syncing'" — and only that exit
+// honoured it. A request refused AT THE DOOR sent nothing back at all.
+//
+// That matters because the client's catch-up gate has no timeout and only
+// three things reopened it: engine boot, going offline→online, and a
+// `sync-err` frame. On a still-open connection none of those happens, so the
+// cell stopped receiving peer changes and stopped confirming its own ops,
+// permanently and silently: status stuck at "syncing", the pending buffer
+// growing toward `pendingCap`, and past it the user's own mutations throw.
+//
+// Measured before the fix: `frames the server sent back: []`.
+Deno.test("sync server: a refused envelope is answered with sync-err", async () => {
+  const r = rig();
+  try {
+    // No clientId — refused by the envelope check.
+    r.handler.handleSync(
+      { cells: {}, pendingOps: [] },
+      { id: "c1" } as never,
+      r.socket,
+    );
+    await macro();
+    const kinds = r.sent.map((f) => (JSON.parse(f) as { t: string }).t);
+    assertEquals(
+      kinds,
+      ["sync-err"],
+      `a refused request must be answered; the client is waiting: ` +
+        JSON.stringify(r.sent),
+    );
+    assert(
+      JSON.parse(r.sent[0]!).d.reason.includes("clientId"),
+      "…and it must say what was wrong: " + r.sent[0],
+    );
+  } finally {
+    r.close();
+  }
+});
+
+Deno.test("sync server: a refused cell cursor is answered with sync-err", async () => {
+  const r = rig();
+  try {
+    r.handler.handleSync(
+      { clientId: "c1", cells: { [CELL]: null }, pendingOps: [] },
+      { id: "c1" } as never,
+      r.socket,
+    );
+    await macro();
+    const kinds = r.sent.map((f) => (JSON.parse(f) as { t: string }).t);
+    assertEquals(
+      kinds,
+      ["sync-err"],
+      `a refused cursor must be answered too: ${JSON.stringify(r.sent)}`,
+    );
+    assert(
+      JSON.parse(r.sent[0]!).d.reason.includes(CELL),
+      "…naming the cell whose cursor was wrong: " + r.sent[0],
+    );
+  } finally {
+    r.close();
+  }
+});

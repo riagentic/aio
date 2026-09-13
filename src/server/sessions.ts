@@ -86,6 +86,9 @@ export interface SessionStoreOptions {
 }
 
 /** Open (or create) a session store at `path` (":memory:" for tests). */
+/** The largest expiry SQLite can hand back as a JavaScript number. */
+const MAX_EXPIRY = Number.MAX_SAFE_INTEGER;
+
 export function openSessionStore(
   path: string,
   defaultTtlMs = DEFAULT_TTL_MS,
@@ -132,13 +135,26 @@ export function openSessionStore(
     issue(user, opts) {
       const token = newToken();
       const now = Date.now();
-      ins.run(
-        hash(token),
-        user.id,
-        user.role,
-        now,
-        now + (opts?.ttlMs ?? defaultTtlMs),
-      );
+      // A TTL that cannot become a timestamp is refused HERE, not discovered
+      // later. `now + ttlMs` goes into an INTEGER column and comes back as a
+      // JavaScript number, so `Number.MAX_SAFE_INTEGER` made the write succeed
+      // and every read throw `RangeError: Value is too large to be
+      // represented as a JavaScript number` — the app issued a real-looking
+      // token and then answered 500 for every request that presented it.
+      // `Infinity` issued an IMMORTAL session no sweep can expire; `NaN` hit a
+      // NOT NULL constraint; a negative one handed back a token already dead.
+      // The config gate refuses these at boot; this is the door a caller
+      // holding the store directly comes through.
+      const ttl = opts?.ttlMs ?? defaultTtlMs;
+      if (!Number.isFinite(ttl) || ttl <= 0 || now + ttl > MAX_EXPIRY) {
+        throw new Error(
+          `sessions.issue: ttlMs ${ttl} cannot become an expiry — a session ` +
+            `expires at \`now + ttlMs\`, and this value does not survive the ` +
+            `round trip through SQLite. Use a positive number of ` +
+            `milliseconds under a century.`,
+        );
+      }
+      ins.run(hash(token), user.id, user.role, now, now + ttl);
       return token;
     },
     get(token) {

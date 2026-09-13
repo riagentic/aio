@@ -4,6 +4,7 @@ const _encoder = new TextEncoder();
 // Extracted from server.ts — no side effects, pure functions.
 import type { AioUser } from "./aio.ts";
 import { parseCookies } from "./route.ts";
+import { slugify } from "./single-instance-lock.ts";
 
 // Constant-time string comparison — prevents timing attacks on token auth
 // Compares full length even on mismatch to avoid leaking token length
@@ -37,8 +38,44 @@ export function bearerToken(req: Request): string | null {
   return m ? m[1]!.trim() || null : null;
 }
 
-/** Session cookie name (AUTH-2 browser flow). */
+/** The LEGACY session cookie name (AUTH-2 browser flow) — one name for every
+ *  app. Still READ, as a fallback, so sessions issued before the per-app name
+ *  survive an upgrade; never WRITTEN. See `sessionCookieNameFor`. */
 export const SESSION_COOKIE = "aio_session";
+
+/** The session cookie's name, scoped to the app.
+ *
+ *  Cookies ignore the PORT (RFC 6265 §8.5), so every aio app on one host shared
+ *  one `aio_session`: signing in to app B on :8081 overwrote app A's cookie on
+ *  :8080 — A logged out, and B's server received A's HttpOnly session token on
+ *  every request. The shared-key cookie was already per app
+ *  (`keyCookieNameFor` in server.ts); the session cookie, the one carrying a
+ *  per-USER credential, was the one that was not. Same slug rule as the key
+ *  cookie and the instance lock, so one appId is one name everywhere. */
+export function sessionCookieNameFor(appId: string | undefined): string {
+  return `${SESSION_COOKIE}_${slugify(appId ?? "app", "app")}`;
+}
+
+/** The session token a request's cookies carry for THIS app, and whether it
+ *  came from the legacy shared name.
+ *
+ *  The app's own name wins outright. The legacy name is consulted only when
+ *  the app's own is absent — a session issued before the upgrade — and the
+ *  caller is told, because a legacy value may belong to ANOTHER app on the
+ *  host: it may authenticate here only if this app's store knows it, and it
+ *  must never be cleared on a mere mismatch (that would log the other app
+ *  out, which is the bug the per-app name exists to end). */
+export function sessionCookieFrom(
+  req: Request,
+  name: string = SESSION_COOKIE,
+): { token: string; legacy: boolean } | null {
+  const jar = parseCookies(req.headers.get("cookie"));
+  const own = jar[name];
+  if (own) return { token: own, legacy: name === SESSION_COOKIE };
+  if (name === SESSION_COOKIE) return null;
+  const old = jar[SESSION_COOKIE];
+  return old ? { token: old, legacy: true } : null;
+}
 
 /** Read the session token from the Cookie header (browser flow).
  *
@@ -49,8 +86,11 @@ export const SESSION_COOKIE = "aio_session";
  *  two answers — and a browser sending two `aio_session` cookies (one set on
  *  the host, one on a parent domain) is ordinary, not exotic. Last-wins is the
  *  rule that survives, because it is the one an app's handler already gets. */
-export function sessionTokenFromCookie(req: Request): string | null {
-  return parseCookies(req.headers.get("cookie"))[SESSION_COOKIE] || null;
+export function sessionTokenFromCookie(
+  req: Request,
+  name: string = SESSION_COOKIE,
+): string | null {
+  return sessionCookieFrom(req, name)?.token ?? null;
 }
 
 /** Extract token from query param, Authorization header, or session cookie.
@@ -73,16 +113,24 @@ export type TokenSource = "url" | "header" | "cookie";
 export function _extractTokenWithSource(
   url: URL,
   req: Request,
-): { token: string | null; fromUrl: boolean; source: TokenSource | null } {
+  cookieName: string = SESSION_COOKIE,
+): {
+  token: string | null;
+  fromUrl: boolean;
+  source: TokenSource | null;
+  /** The cookie was the legacy shared name — see `sessionCookieFrom`. */
+  legacyCookie?: boolean;
+} {
   const qToken = url.searchParams.get("token");
   if (qToken) return { token: qToken, fromUrl: true, source: "url" };
   const bearer = bearerToken(req);
   if (bearer) return { token: bearer, fromUrl: false, source: "header" };
-  const cookie = sessionTokenFromCookie(req);
-  return {
-    token: cookie,
+  const cookie = sessionCookieFrom(req, cookieName);
+  return cookie === null ? { token: null, fromUrl: false, source: null } : {
+    token: cookie.token,
     fromUrl: false,
-    source: cookie === null ? null : "cookie",
+    source: "cookie",
+    legacyCookie: cookie.legacy,
   };
 }
 
@@ -106,8 +154,11 @@ export const _isPresented = (source: TokenSource | null): boolean =>
 /** Header that tells a browser to drop a dead session cookie. Sent with the
  *  refusal, so the stale value stops riding along on every later request
  *  instead of failing silently forever. */
-export const clearSessionCookie = (secure: boolean): string =>
-  `${SESSION_COOKIE}=; Path=/; HttpOnly; SameSite=Strict; Max-Age=0` +
+export const clearSessionCookie = (
+  secure: boolean,
+  name: string = SESSION_COOKIE,
+): string =>
+  `${name}=; Path=/; HttpOnly; SameSite=Strict; Max-Age=0` +
   (secure ? "; Secure" : "");
 
 /** User resolver function — built once from resolveUser hook or static users map */
@@ -584,6 +635,38 @@ function _charge(
 
 /** Charge one EXPENSIVE verification (PBKDF2-class) to this client key.
  *  `false` ⇒ over budget: answer 429 without doing the work. */
+/** Give back a unit charged by {@linkcode chargeAuthWork} — the work is done,
+ *  and the credential turned out to be VALID.
+ *
+ *  `docs/auth/auth.md` states the contract: "Successful requests never consume
+ *  budget. The budget throttles failed authentication, never service. A
+ *  request that presents a valid credential is served regardless of the
+ *  budget." The work meter charged every attempt and never gave any back, so
+ *  it was 30 CORRECT logins per minute and then `429` for everyone. Measured:
+ *  40 consecutive logins with the right password, all for an unlocked account
+ *  — the first 29 answered 200, the last 11 answered 429. And the same page
+ *  notes that behind a reverse proxy without `trustProxyHeader` every client
+ *  shares ONE bucket, so a team of more than 30 people signing in within a
+ *  minute takes the whole app's login offline from purely legitimate traffic
+ *  — which is precisely the outage `chargeAuthWork` was introduced to fix,
+ *  arriving from the other direction.
+ *
+ *  Refunding a SUCCESS costs an attacker nothing: they do not have the valid
+ *  credential that earns the refund. What the meter still caps is exactly what
+ *  it was built to cap — PBKDF2 work spent on attempts that turn out wrong. */
+export function refundAuthWork(
+  clientKey: string | undefined,
+  now = Date.now(),
+): void {
+  const key = clientKey ?? "*";
+  const stamps = _authWork.get(key);
+  if (!stamps || stamps.length === 0) return;
+  // Drop the most recent stamp — the one this request just charged.
+  stamps.pop();
+  if (stamps.length === 0) _authWork.delete(key);
+  void now;
+}
+
 export function chargeAuthWork(
   clientKey: string | undefined,
   now = Date.now(),
@@ -810,18 +893,194 @@ export function allowlistAdmits(
     if (e === what.hostname) return true;
     if (what.hostPort && e === what.hostPort) return true;
     if (what.origin && e === what.origin.trim().toLowerCase()) return true;
-    // A full origin entry is matched by what it MEANS, not by its text: an
-    // `https://app.example.com` entry admits that host whether the request
-    // carried a port or not.
+    // A full origin entry is matched by what it MEANS, not by its text.
+    //
+    // Against an ORIGIN (the WebSocket and HTTP Origin checks) it means that
+    // origin: scheme, host AND port, an omitted port being the scheme's
+    // default (`new URL` elides it on both sides, so `https://x` and
+    // `https://x:443` are one origin). It used to be compared by hostname
+    // alone, so `https://dash.corp:8443` also admitted `http://dash.corp` and
+    // every other port on that host — and a cookie ignores ports, so any other
+    // service on that machine could open an authenticated socket as the
+    // victim. A BARE hostname entry keeps its meaning: any port, any scheme.
+    //
+    // Against a Host header (the DNS-rebinding gate) there is no scheme to
+    // compare, and the question is only "is this app served as that name", so
+    // the hostname — or the exact host:port — answers it, as before.
     if (e.includes("://")) {
       try {
         const u = new URL(e);
+        if (what.origin !== undefined) {
+          const o = new URL(what.origin.trim());
+          if (u.protocol === o.protocol && u.host === o.host) return true;
+          continue;
+        }
         if (u.hostname === what.hostname) return true;
         if (what.hostPort && u.host === what.hostPort) return true;
       } catch { /* not a URL — the literal compares above already ran */ }
     }
   }
   return false;
+}
+
+/** Why an `Origin` is NOT admitted, or null when it is. THE Origin decider.
+ *
+ *  Admitted: the server's own origin (same host as the `Host` header AND the
+ *  scheme this server speaks — an https app is not same-origin with an http
+ *  page of the same name), anything `allowedOrigins` admits, and `aio://app`
+ *  — the privileged scheme only aio's own Electron shell registers, which no
+ *  web page can put in an Origin header (its forced-protocol dev window
+ *  proxies the app's page to this TCP listener; the packaged window reaches
+ *  the app over its Unix socket, which never meets this check).
+ *
+ *  A SUBMITTED origin cannot certify itself: no loopback exemption. A port is
+ *  not part of a "site", so `SameSite=Strict` sends the session cookie to
+ *  every loopback port, and any other local dev server or tool UI would
+ *  otherwise act as the victim.
+ *
+ *  `status` 400 is an Origin that does not even parse (`null` from a sandboxed
+ *  frame or a cross-site redirect chain included); 403 is a foreign one. */
+export function originVerdict(
+  origin: string,
+  opts: {
+    hostHeader: string | null;
+    secure: boolean;
+    allowedOrigins?: readonly string[];
+  },
+): { status: 400 | 403; reason: string } | null {
+  let u: URL;
+  try {
+    u = new URL(origin);
+  } catch {
+    return {
+      status: 400,
+      reason: `Origin "${origin}" is not an origin this server can admit ` +
+        `(an opaque "null" origin comes from a sandboxed frame, a file: page ` +
+        `or a cross-site redirect)`,
+    };
+  }
+  if (u.protocol === "aio:" && u.host === "app") return null;
+  if (
+    allowlistAdmits(opts.allowedOrigins, {
+      hostname: u.hostname,
+      hostPort: u.host,
+      origin,
+    })
+  ) return null;
+  const scheme = opts.secure ? "https" : "http";
+  const schemeOk = u.protocol === `${scheme}:`;
+  const sameHost = opts.hostHeader !== null && u.host === opts.hostHeader;
+  if (sameHost && schemeOk) return null;
+  return {
+    status: 403,
+    reason: `Origin ${origin} is not this server's own origin (${scheme}://${
+      opts.hostHeader ?? "no Host header"
+    })${
+      sameHost
+        ? ` — the host matches but the SCHEME does not; this server speaks ${scheme}`
+        : ""
+    } and is not listed in allowedOrigins`,
+  };
+}
+
+/** Methods that change nothing by HTTP's own contract — never Origin-gated. */
+const SAFE_METHODS = new Set(["GET", "HEAD", "OPTIONS"]);
+/** Origins already reported (attacker-chosen, so bounded like `_hostWarned`). */
+const _originWarned = new Set<string>();
+
+/** Refuse a STATE-CHANGING request that a browser sent from another origin,
+ *  where that request could borrow authority. `null` when the caller may
+ *  proceed.
+ *
+ *  The WebSocket upgrade has always checked `Origin`; plain HTTP never did. So
+ *  an app ROUTE took a cross-origin POST — a form or a `text/plain` fetch,
+ *  which need no CORS preflight — from any page the user visited: anonymously
+ *  on an open loopback app, and AS the signed-in user on an `auth: true` or
+ *  shared-key app, whose cookie the browser attaches (SameSite does not stop a
+ *  sibling loopback port, which is the same site).
+ *
+ *  Refused only where the cross-site request GRANTS something:
+ *   (a) it carries a Cookie. aio's cookies are SameSite=Strict, so a cookie on
+ *       a foreign-Origin request is a same-site sibling (another localhost
+ *       port) or an app cookie with SameSite=None — the CSRF cases exactly;
+ *   (b) its authority is NETWORK POSITION: the app is not exposed (nothing but
+ *       this machine reaches it, so a page in this machine's browser is the
+ *       only way in), or the peer is this machine (no proxy relayed it) and
+ *       the app has no auth at all.
+ *  Everything else passes as before — above all an EXPOSED app's route
+ *  receiving a cookieless cross-site form POST (a payment return URL, a SAML
+ *  or OIDC `form_post`): a public endpoint, and the page gains nothing `curl`
+ *  could not do. A header credential (`Authorization`) is not ambient, and a
+ *  page cannot attach one cross-site without a preflight aio never grants.
+ *
+ *  Only a PRESENT Origin is judged. A request with none is not a browser
+ *  acting for someone else's page — a webhook sender, `curl`, `am`, the aio
+ *  client's pairing call — so it passes exactly as before. A Unix-socket peer
+ *  is same-machine and same-user by construction (the same exemption the Host
+ *  gate makes). */
+export function crossOriginRefusal(
+  req: Request,
+  addr: Deno.Addr | undefined,
+  opts: {
+    secure: boolean;
+    allowedOrigins?: readonly string[];
+    /** `expose` is on — the app is meant to be reached over the network. */
+    exposed: boolean;
+    /** A shared key or per-user auth is configured. */
+    authConfigured: boolean;
+    /** The peer is this machine and no proxy relayed it (`_isLocalRequest`). */
+    peerLocal: boolean;
+  },
+): Response | null {
+  if (SAFE_METHODS.has(req.method.toUpperCase())) return null;
+  if (addr?.transport === "unix") return null;
+  const origin = req.headers.get("origin");
+  if (origin === null) return null;
+  const ambientCookie = (req.headers.get("cookie") ?? "").trim() !== "";
+  const byPosition = !opts.exposed || (opts.peerLocal && !opts.authConfigured);
+  if (!ambientCookie && !byPosition) return null;
+  const verdict = originVerdict(origin, {
+    hostHeader: req.headers.get("host"),
+    secure: opts.secure,
+    allowedOrigins: opts.allowedOrigins,
+  });
+  if (!verdict) return null;
+  const path = (() => {
+    try {
+      return new URL(req.url).pathname;
+    } catch {
+      return "?";
+    }
+  })();
+  const hint =
+    (verdict.status === 400
+      ? `An opaque origin cannot be allowlisted — send the request from a page ` +
+        `this app served, or from a page on an origin named in allowedOrigins.`
+      : `If that page is meant to call this app, name it once: ` +
+        `aio.run({ allowedOrigins: ["${origin}"] }).`) +
+    ` Requests that carry no Origin (webhooks, curl, native clients) are not ` +
+    `affected.`;
+  if (!_originWarned.has(origin) && _originWarned.size < HOST_WARN_MAX) {
+    _originWarned.add(origin);
+    log.warn(
+      "auth",
+      `refused a cross-origin ${req.method} ${path} — ${verdict.reason}. A ` +
+        `page on another origin must not change this app's state ${
+          ambientCookie
+            ? "with the visitor's cookie"
+            : "on the strength of where the request comes from (this machine)"
+        } (CSRF). ${hint} Said once per Origin.`,
+    );
+  }
+  return new Response(
+    `Forbidden — ${verdict.reason}.\n\nA ${req.method} from another origin ` +
+      `is refused: a page elsewhere must not drive this app ${
+        ambientCookie
+          ? "with the visitor's cookie"
+          : "from inside this machine's network position"
+      }.\n\n${hint}`,
+    { status: 403, headers: { "Content-Type": "text/plain; charset=utf-8" } },
+  );
 }
 
 /** Hosts already reported, so a rebinding attempt cannot flood the log. Bounded:
@@ -890,4 +1149,5 @@ function _reportHostRefusal(hostHeader: string | null): void {
 // aio-ok: a test-only reset for once-per-process state; forgetting in production is what would make this log floodable.
 export function _resetHostWarnings(): void {
   _hostWarned.clear();
+  _originWarned.clear();
 }

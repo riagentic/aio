@@ -22,6 +22,7 @@ import {
   setDevMode as _setDevModeVdom,
 } from "./vdom.ts";
 import { _resetHeadSsr } from "./head.ts";
+import { _resetSsrSelect } from "./ssr-utils.ts";
 import { _detachRef } from "./vdom-create.ts";
 import { _cleanupActions, _unbindSignalText } from "./vdom-helpers.ts";
 import { _componentName } from "./hook-error.ts";
@@ -263,6 +264,9 @@ _setGroupAfterRender(afterRender, useRef);
 _setSsrStartHook(() => {
   _resetSsrIdCounter();
   _resetHeadSsr();
+  // …and the <select> scope stack, for the same reason: a render that threw
+  // partway leaves one open, and the next request's options would inherit it.
+  _resetSsrSelect();
 });
 
 // -- Mount -------------------------------------------------------------

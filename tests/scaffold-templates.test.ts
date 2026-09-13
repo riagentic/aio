@@ -162,8 +162,11 @@ Deno.test({
         await Deno.mkdir(`${dir}/dep`, { recursive: true });
         await Deno.symlink(repo, `${dir}/dep/aio`);
 
+        // The scaffold's OWN `check` task's type-check half — `src/ tests/`
+        // (report 9b §7) — so the starter test must compile too.
+        const check = String(JSON.parse(f["deno.json"]!).tasks.check);
         const out = await new Deno.Command(Deno.execPath(), {
-          args: ["check", "src/"],
+          args: check.split("&&")[0]!.trim().split(/\s+/).slice(1),
           cwd: dir,
           stdout: "piped",
           stderr: "piped",

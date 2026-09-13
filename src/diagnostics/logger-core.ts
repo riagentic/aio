@@ -29,6 +29,15 @@ import { noRedaction } from "./redact.ts";
 import type { Redactor } from "./redact.ts";
 import { logPerf, logVitals, logVitalsSummary } from "./logger-vitals.ts";
 import { count } from "./fmt.ts";
+/** The local socket an app's `started` line names — set by the boot before
+ *  `onStart`. A side channel, not a parameter: `AioLogger` is public surface
+ *  (`aio/log`) and its `onStart` signature is frozen. Not re-exported from
+ *  logger.ts. @internal */
+const _startSocket = new WeakMap<AioLogger, string>();
+export function _setStartSocket(logger: AioLogger, socketPath: string): void {
+  _startSocket.set(logger, socketPath);
+}
+
 /** Structured file logger — routes entries to app.log, debug.log, error.log, warning.log, and perf.log. */
 export class AioLogger {
   private cfg: Required<LogConfig>;
@@ -176,12 +185,17 @@ export class AioLogger {
     }
   }
 
-  /** Called once after aio.run() completes boot */
+  /** Called once after aio.run() completes boot. `port` is the TCP port the
+   *  app BOUND (none for a zero-port app); the local socket it listens on, if
+   *  any, comes from `_setStartSocket` — the line names what a client can
+   *  actually reach. */
   onStart(cellNames: string[], port?: number): void {
     for (const n of cellNames) this.lastStatus.set(n, "");
+    const socket = _startSocket.get(this);
     this.emit("info", "app", "started", {
       cells: cellNames.join(", "),
       ...(port ? { port } : {}),
+      ...(socket ? { socket } : {}),
     });
   }
 

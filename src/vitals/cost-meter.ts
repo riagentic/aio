@@ -153,6 +153,10 @@ class Ring<T> {
   get wrapped(): boolean {
     return this.#wrapped;
   }
+  /** The oldest element still held, without copying the buffer. */
+  oldest(): T | undefined {
+    return this.#wrapped ? this.#items[this.#head] : this.#items[0];
+  }
   clear(): void {
     this.#items = [];
     this.#head = 0;
@@ -200,6 +204,8 @@ export function createCostMeter(opts: {
   let knownCells: string[] = [];
   let clients = 0;
   let round = 0;
+  /** When this meter started watching (creation, or the last `reset()`). */
+  let observedSince = now();
 
   const p95 = (xs: number[]): number => {
     if (xs.length === 0) return 0;
@@ -230,6 +236,7 @@ export function createCostMeter(opts: {
       sends.clear();
       attribs.clear();
       reduces.clear();
+      observedSince = now();
     },
     report(o = {}) {
       const t = o.now ?? now();
@@ -246,16 +253,70 @@ export function createCostMeter(opts: {
         !o.cell || r.cell === o.cell
       );
 
-      // The measured span: with a partly-filled ring the true window is the
-      // age of the oldest sample, and reporting per-second rates over a window
-      // that never happened would inflate every number.
-      const oldest = Math.min(
-        ...[sendRows, attribRows, reduceRows]
-          .flatMap((rows) => (rows.length > 0 ? [rows[0]!.at] : [])),
-        t,
-      );
-      const spanSec = Math.max((t - oldest) / 1000, 0.001);
-      const effectiveSec = Math.min(windowSec, Math.max(spanSec, 0.001));
+      // THE MEASURED SPAN, PER SERIES. A meter younger than the requested
+      // window has not watched that long, and dividing by a window that never
+      // happened would under-report every number.
+      //
+      // It used to be ONE span, `Math.min` across all three rings — which
+      // divided each numerator by somebody else's denominator. Two measured
+      // consequences, both silent:
+      //
+      //  • the rings fill at different rates (sends far faster than reduces,
+      //    which is the normal state of a busy server), so a WRAPPED send
+      //    ring covering 1s was divided by the reduce ring's 10s:
+      //    `wire.bytesPerSec` read 1000 where the truth was 10000. A 10x
+      //    under-report, with only `truncated: true` to hint at it.
+      //  • `attribRows`/`reduceRows` are filtered by `--cell` and `sendRows`
+      //    are not, so narrowing to one cell shrank the denominator of a
+      //    numerator that still covered every cell: the SAME traffic reported
+      //    1000 B/s unfiltered and 10000 B/s with `--cell=b`.
+      //
+      // So each rate divides by the span of the series it came from, and by
+      // the UNFILTERED span — `--cell` selects which rows to total, never how
+      // long we were watching. This module's header says a
+      // plausible-but-wrong number is worse than no number.
+      //
+      // And the span STARTS where observation started, not at the oldest
+      // sample. A ring that never dropped anything has seen every event since
+      // the meter began, so a quiet stretch before a burst is part of the
+      // window: dividing by `t - oldest` instead turned one 500 B send on a
+      // long-running server into "500000 B/s" (the span collapsed to the 1ms
+      // floor), and a single send read half a second later into 200 B/s over
+      // a 10 s window whose truth was 10. Only a WRAPPED ring has a later
+      // start — its oldest retained sample, since everything before it is gone.
+      const allAttribRows = inWindow(attribs.all());
+      const allReduceRows = inWindow(reduces.all());
+      const spanOf = <T extends { at: number }>(ring: Ring<T>) => {
+        const start = ring.wrapped
+          ? (ring.oldest()?.at ?? observedSince)
+          : observedSince;
+        return Math.min(windowSec, Math.max((t - start) / 1000, 0.001));
+      };
+      // A WRAPPED ring still estimates: N samples spanning `t - oldest`
+      // over-states the rate by N/(N-1), because the oldest sample marks
+      // where observation began rather than an event inside the span. Under
+      // 1% at the hundreds of frames a busy server produces, and `truncated`
+      // says the window was cut — but it is an estimate, not a measurement,
+      // and worth knowing before anyone treats the last digit as exact.
+      /** Denominator for everything counted out of the SEND ring. */
+      const sendSec = spanOf(sends);
+      /** …and for everything counted out of the ATTRIBUTION ring. */
+      const attribSec = spanOf(attribs);
+      // Reported as the window this answer covers: the widest series that has
+      // something in it. An EMPTY series has watched since the meter started
+      // and would always be the widest, so the report would claim the
+      // meter's whole uptime while its every number came from a wrapped ring
+      // covering a second.
+      const withRows = [
+        [sendRows, sendSec],
+        [allAttribRows, attribSec],
+        [allReduceRows, spanOf(reduces)],
+      ] as const;
+      const effectiveSec = withRows.some(([rows]) => rows.length > 0)
+        ? Math.max(
+          ...withRows.filter(([rows]) => rows.length > 0).map(([, sec]) => sec),
+        )
+        : Math.min(windowSec, Math.max((t - observedSince) / 1000, 0.001));
 
       const byCell = new Map<string, {
         bytes: number;
@@ -303,8 +364,8 @@ export function createCostMeter(opts: {
         const pushes = e ? e.pushes.size : 0;
         return {
           cell,
-          pushesPerSec: pushes / effectiveSec,
-          bytesPerSec: (e?.bytes ?? 0) / effectiveSec,
+          pushesPerSec: pushes / attribSec,
+          bytesPerSec: (e?.bytes ?? 0) / attribSec,
           meanBytes: pushes > 0 ? (e!.bytes / pushes) : 0,
           p95ReduceMs: p95(ms),
           meanReduceMs: ms.length > 0
@@ -315,7 +376,7 @@ export function createCostMeter(opts: {
             .map(([key, v]) => ({
               key,
               bytes: v.bytes,
-              bytesPerSec: v.bytes / effectiveSec,
+              bytesPerSec: v.bytes / attribSec,
               pushes: v.pushes,
             }))
             .sort((a, b) => b.bytes - a.bytes),
@@ -351,11 +412,11 @@ export function createCostMeter(opts: {
         truncated: sends.wrapped || attribs.wrapped || reduces.wrapped,
         cells,
         wire: {
-          bytesPerSec: totalBytes / effectiveSec,
+          bytesPerSec: totalBytes / sendSec,
           bytesPerSecPerClient: clients > 0
-            ? totalBytes / effectiveSec / clients
-            : totalBytes / effectiveSec,
-          framesPerSec: sendRows.length / effectiveSec,
+            ? totalBytes / sendSec / clients
+            : totalBytes / sendSec,
+          framesPerSec: sendRows.length / sendSec,
           fullResendShare: pushes > 0 ? byKind.full / pushes : 0,
           byKind,
           bytesByKind,

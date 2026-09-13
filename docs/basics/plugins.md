@@ -20,7 +20,14 @@ export const audit = definePlugin({
   name: "audit",
   cells: [auditLog],
   routes: { "/audit.json": () => Response.json(auditLog.entries) },
-  onAction: (a) => auditLog.record((a as { type: string }).type),
+  onAction: (a) => {
+    const { type } = a as { type: string };
+    // Not its own cell: `record` is an action too, so recording it would
+    // record forever. Not `__init`/`__destroy`: those arrive before any cell
+    // method can be called (boot) and after dispatch has closed (stop).
+    if (type.startsWith("audit:") || /:__(init|destroy)$/.test(type)) return;
+    return auditLog.record(type);
+  },
 });
 ```
 
@@ -56,7 +63,9 @@ plugins   2 (audit, metrics)
 ## The four rules
 
 **1. The app always wins.** An app's own `routes`, hooks and cells are applied
-over the plugins'. Adding a plugin can never take a behaviour away.
+over the plugins'. Adding a plugin can never take a behaviour away. That holds
+for patterns too: every app pattern is tried before any plugin pattern, so a
+plugin's `/*` or `/files/:name` never answers the app's `/files/*`.
 
 ```ts
 // The app's /health is served; the plugin's is not.
@@ -78,7 +87,8 @@ plugin collision: route "/health" is claimed by both "metrics" and "probes".
   a different route.
 ```
 
-Cells, routes and named schedules are all checked this way.
+Cells, routes and named schedules are all checked this way. Routes are compared
+by shape: `/u/:id` and `/u/:name` match the same requests, so they collide.
 
 **3. Hooks compose, they never replace.** Every `onAction` runs — plugins in
 declaration order, the app last. One throwing never stops the next: lifecycle
@@ -150,14 +160,29 @@ export default definePlugin({
         { headers: { "Content-Type": "text/plain; version=0.0.4" } },
       ),
   },
-  onAction: () => stats.action(),
+  onAction: (a) => {
+    const { type } = a as { type: string };
+    if (type.startsWith("metrics:") || /:__(init|destroy)$/.test(type)) return;
+    return stats.action();
+  },
 });
 ```
 
-Two rules for a plugin author:
+Three rules for a plugin author:
 
 - **Namespace what you own.** A cell called `state` or a route called `/api`
   will collide with somebody. `metrics`, `/metrics` — say your own name.
+- **A hook that calls your own cell skips your own cell's actions.** `onAction`
+  sees every action — the plugin's own cells' too, exactly as an app's hook
+  does. A method call is an action, so `onAction: () => stats.action()` fires
+  itself until the dispatch ceiling stops it with `DISPATCH_LOOP`. Filter on the
+  cell-id prefix (`metrics:`), and on the framework's `__init`/`__destroy`,
+  which fire at boot before cell methods are callable and at stop after dispatch
+  has closed. A method called from a hook during `__init` throws
+  `called while the app is still booting` — skip `__init` and make the call on
+  the first real action, or from `onStart`. A hook may return the call's
+  promise: a rejection is reported like a throw (`plugin hook error: …`), never
+  left unhandled.
 - **Do not surprise.** A plugin's hooks are observe-only by contract. If yours
   needs to change behaviour, contribute a cell with methods the app calls, so
   the app stays the thing that decides.

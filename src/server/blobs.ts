@@ -48,7 +48,8 @@ export interface BlobStore {
   ): Promise<BlobInfo>;
   /** Stream a blob's bytes. `start`/`end` select a byte window
    *  (end EXCLUSIVE, like `Array.slice`) — the seam HTTP Range serving uses.
-   *  Throws (loudly, naming the id) when the blob does not exist. */
+   *  Both must be non-negative integers (a TypeError names the one that is
+   *  not). Throws (loudly, naming the id) when the blob does not exist. */
   stream(
     id: string,
     opts?: { start?: number; end?: number },
@@ -270,11 +271,26 @@ function makeStore(dir: string): BlobStore {
     return { id, size: st.size, ...(name !== undefined ? { name } : {}) };
   }
 
+  function assertByteBound(arg: "start" | "end", v: number | undefined) {
+    if (v === undefined || (Number.isSafeInteger(v) && v >= 0)) return;
+    throw new TypeError(
+      `blobs: stream() ${arg} must be a non-negative integer byte offset — ` +
+        `got ${String(v)}. Round it (Math.floor) before passing it.`,
+    );
+  }
+
   async function stream(
     id: string,
     opts?: { start?: number; end?: number },
   ): Promise<ReadableStream<Uint8Array>> {
     assertBlobId(id);
+    // Checked before the open, so a refused window leaks no file handle. A
+    // fractional bound left `remaining` stuck between 0 and 1: `pull` kept
+    // enqueuing empty chunks forever and the reader ran out of memory. A
+    // negative start skipped the seek and served bytes from offset 0 while
+    // claiming the window the caller asked for.
+    assertByteBound("start", opts?.start);
+    assertByteBound("end", opts?.end);
     let file: Deno.FsFile;
     try {
       file = await Deno.open(join(dir, id), { read: true });

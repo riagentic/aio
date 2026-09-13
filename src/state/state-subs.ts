@@ -117,6 +117,9 @@ function _scheduleSyncSubs(): void {
     _subsTimer = null;
     if (_accessedPaths.size === 0) return;
     const collapsed = collapsePaths(_accessedPaths);
+    // Once the server has refused a set, stop narrowing: the wildcard is
+    // already in place and every later attempt would be refused the same way.
+    if (_serverRefusedNarrowing) return;
     if (
       collapsed.length !== _currentSubs.length ||
       collapsed.some((s, i) => s !== _currentSubs[i])
@@ -170,6 +173,35 @@ export function trackPath(path: string): void {
   _scheduleSyncSubs();
 }
 
+/** The server refused this page's subscription set.
+ *
+ *  The client's own write SUCCEEDED, so nothing here could tell: the set was
+ *  recorded as accepted, every later comparison found "no change", and the
+ *  server went on serving the PREVIOUS, narrower subscription. Cells outside
+ *  it stopped updating for the life of the connection — a UI rendering
+ *  confidently stale data, loud on the server and silent in the browser.
+ *
+ *  The fallback is the WILDCARD, not a retry: the set was refused for being
+ *  too large, so re-sending it loops. `["*"]` is what a fresh connection has,
+ *  so it can only deliver more than the client is getting, never less — the
+ *  page is correct again, at the cost of the narrowing. Sticky for the page
+ *  (the cap is a property of the server, not of this connection), and said
+ *  out loud so the cost is visible rather than mysterious.
+ *  @internal */
+export function subsRefusedByServer(): void {
+  if (_serverRefusedNarrowing) return;
+  _serverRefusedNarrowing = true;
+  log.warn(
+    "subs",
+    "the server refused this page's subscription set — receiving ALL state " +
+      "from now on. Narrow it yourself (subscribe to cells or short paths) " +
+      "to get the bandwidth back.",
+  );
+  _currentSubs = ["*"];
+  _sendSubsMessage(["*"]);
+}
+let _serverRefusedNarrowing = false;
+
 /** Re-send current subscription paths (call after reconnect).
  *  @internal Engine/framework wiring (alpha52 sweep) — not public API.
  */
@@ -195,5 +227,6 @@ export function _resetSubs(): void {
   _currentSubs = [];
   _sendFailedAt = 0;
   _sendFailures = 0;
+  _serverRefusedNarrowing = false;
   cancelSubsTimer();
 }

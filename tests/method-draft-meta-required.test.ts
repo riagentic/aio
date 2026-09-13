@@ -71,9 +71,16 @@ const spellings = cell("draft-meta-spellings", {
 Deno.test("draft meta: every spelling of a cancellable method compiles", () => {
   // The assertion is that this module type-checked at all; this keeps the test
   // from being vacuous and proves the cell really composed.
+  // Four METHOD SPELLINGS that must all compile against the draft-meta types;
+  // calling them is the next test's job ("the runtime serves all four"), and
+  // doing it here would test dispatch rather than the types.
+  // aio-ok: vacuous — a compile-time fact, see the three lines above.
   assert(typeof spellings.plain === "function");
+  // aio-ok: vacuous — see above.
   assert(typeof spellings.legacyBang === "function");
+  // aio-ok: vacuous — see above.
   assert(typeof spellings.legacyOptional === "function");
+  // aio-ok: vacuous — see above.
   assert(typeof spellings.cancellable === "function");
 });
 

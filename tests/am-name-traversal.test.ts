@@ -211,14 +211,16 @@ Deno.test("am remove --data: unrecoverable, so it is never one word in a script"
 Deno.test("am remove --data in a script refuses, and names the flag", async () => {
   const home = await fakeHome();
   try {
-    // A real data dir for a real app name.
-    await Deno.mkdir(join(home, ".demo"), { recursive: true });
-    await Deno.writeTextFile(join(home, ".demo", "state.db"), "x");
+    // A real data dir for a real app name — in aio's own layout
+    // (`<home>/data/state.db`): `am remove --data` refuses to delete a
+    // directory that does not carry it, whatever the flags.
+    await Deno.mkdir(join(home, ".demo", "data"), { recursive: true });
+    await Deno.writeTextFile(join(home, ".demo", "data", "state.db"), "x");
     const r = await am(home, ["remove", "demo", "--data"]);
     assert(r.code !== 0, "a script must not delete data on one word");
     assertMatch(r.out, /--data --force/);
     assert(
-      present(join(home, ".demo", "state.db")),
+      present(join(home, ".demo", "data", "state.db")),
       "the data was deleted without confirmation",
     );
   } finally {

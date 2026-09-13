@@ -40,6 +40,7 @@ import {
   _registerLazyListeners,
   nullSlot,
 } from "./vdom-create.ts";
+import { _fallbackSlot } from "./vdom-render.ts";
 import { _removeDomCleanup } from "./vdom-remove.ts";
 import { _cleanupActions } from "./vdom-helpers.ts";
 import { applyChildDependentProps } from "./vdom-props.ts";
@@ -51,6 +52,7 @@ import { _getGroupExitHandler } from "./transition-group.ts";
 import type { MountHandle, RootState } from "./renderer-types.ts";
 import {
   _activeRoot,
+  _noteDiscard,
   _registerRoot,
   _setActiveRoot,
 } from "./renderer-state.ts";
@@ -92,6 +94,7 @@ export function hydrate(root: any, App: ComponentFn): MountHandle {
     App,
     afterRenderQueue: [],
     _idCounter: 0,
+    _ssrIds: true,
     _renderCounts: new Map(),
   };
 
@@ -163,11 +166,17 @@ export function hydrate(root: any, App: ComponentFn): MountHandle {
         }
       }
       root.innerHTML = "";
+      // The server markup is gone, so there is no sequence left to match.
+      state._ssrIds = false;
       _render(root, vnode, null, state.ctx);
     }
     state.vnode = vnode;
     _flushAfterRender(state);
   } finally {
+    // Hydration is over: later ids (a component this root mounts on a
+    // re-render) come from the client sequence, which is spelled apart from
+    // the server's, so it cannot repeat one of the ids just taken.
+    state._ssrIds = false;
     _setActiveRoot(null);
     _setDelegationRoot(null);
   }
@@ -310,6 +319,10 @@ function _hydrateNodeInner(
         idx += consumed;
       }
     } catch (thrown) {
+      // The children hydrated before the throw are discarded — retired by the
+      // region's owner (`_sweepDiscarded`), exactly as on mount and diff. A
+      // throw that was not a component body's passes no `abortComponent`.
+      _noteDiscard();
       // `createDom` and `renderToString` both catch here; hydrate did not, so a
       // boundary that WORKS on the server and WORKS on a client mount let the
       // error escape `hydrate()` on the one path that matters most. The server
@@ -317,10 +330,12 @@ function _hydrateNodeInner(
       // never booted: no handlers, no updates, a dead screenshot of itself.
       // The markup at `childIndex` IS the fallback, so it is hydrated in place.
       const claimFallback = (
-        fb: VNode | string | number | null,
+        shown: VNode | string | number | null,
       ): number => {
+        // Nothing to show is the placeholder both SSR writers emitted a
+        // comment for — see `_fallbackSlot`.
+        const fb = _fallbackSlot(shown);
         vnode._rendered = fb;
-        if (fb == null) return 0;
         const n = _hydrateNode(parent, fb, ctx, isSvg, childIndex);
         if (n >= 0) {
           vnode._dom = getDom(fb) ?? parent.childNodes[childIndex] ?? undefined;
@@ -369,6 +384,7 @@ function _hydrateNodeInner(
   }
 
   // Element — consume exactly 1 DOM node, hydrate children inside it
+  _unwrapImpliedTableSection(parent, childIndex, vnode.tag as string);
   const domNode = parent.childNodes[childIndex];
   if (!domNode || domNode.nodeType !== 1) return -1;
   const el = domNode as HTMLElement;
@@ -405,6 +421,47 @@ function _hydrateNodeInner(
   applyChildDependentProps(el, vnode.props, {});
 
   return 1;
+}
+
+/** The wrapper the HTML parser INVENTS around a table child, keyed by the child
+ *  it wraps: a `<tr>` written straight into `<table>` is parsed into an
+ *  implied `<tbody>`, a `<col>` into an implied `<colgroup>`. */
+const _IMPLIED_TABLE_SECTION: Readonly<Record<string, string>> = {
+  tr: "TBODY",
+  col: "COLGROUP",
+};
+
+/** Undo the parser's implied table section in front of the element being
+ *  claimed, so the DOM is the one `createDom` builds.
+ *
+ *  `<table><tr>` is the ordinary way to write a table, and both SSR writers
+ *  emit exactly that. The DOM API keeps a `<tr>` where it is put, so mount
+ *  builds `table > tr`; the HTML parser does not — it wraps the rows in a
+ *  `<tbody>` that no vnode describes. Hydration then met `TBODY` where the
+ *  vnode said `tr`, reported a mismatch, and threw the whole server page away
+ *  for a client render (a dev warning; in prod, silently): every server-
+ *  rendered table cost its app its SSR.
+ *
+ *  Only a wrapper that is unmistakably the parser's is unwrapped: directly in a
+ *  `<table>`, holding the element the vnode names, with no attributes (an
+ *  authored `<tbody class>` is markup, not an implication). Its children move
+ *  up into its place — they are the rows the vnodes describe, claimed one by
+ *  one after it, so the walk stays in step. */
+function _unwrapImpliedTableSection(
+  parent: Node,
+  childIndex: number,
+  tag: string,
+): void {
+  const section = _IMPLIED_TABLE_SECTION[tag];
+  if (!section || (parent as Element).tagName !== "TABLE") return;
+  const node = parent.childNodes[childIndex] as Element | undefined;
+  if (
+    !node || node.nodeType !== 1 || node.tagName !== section ||
+    node.attributes.length > 0 ||
+    (node.firstChild as Element | null)?.tagName?.toLowerCase() !== tag
+  ) return;
+  while (node.firstChild) parent.insertBefore(node.firstChild, node);
+  parent.removeChild(node);
 }
 
 /** Claim the text node at `childIndex` for a child whose text is `want`.
@@ -522,6 +579,15 @@ function _impliedAttrs(
 ): Set<string> {
   const tag = el.tagName.toLowerCase();
   const out = new Set<string>();
+  // `selected` on an <option> is the SERVER's spelling of the parent select's
+  // `value`, and it has no client spelling at all: mount sets `select.value`,
+  // which flips the option's selected PROPERTY and writes no attribute. So it
+  // can never be implied by the option's own props — and without this the
+  // sweep below would strip the server's choice back to the first option, and
+  // the divergence check would report correct markup as a server/client
+  // disagreement, in the framework's loudest dev warning. Same shape as the
+  // `readOnly` and `style` cases this file already carries.
+  if (tag === "option") out.add("selected");
   for (const k of Object.keys(props)) {
     if (_RESERVED_PROPS.has(k) || k.startsWith("on")) continue;
     if (k === "dangerouslySetInnerHTML") continue;

@@ -29,7 +29,7 @@ third-party widgets) works directly. Children mount before their parents
 (bottom-up, like React).
 
 ```tsx
-import { onCleanup, onMount, signal, useRef } from "aio/air";
+import { onCleanup, onMount, useRef, useSignal } from "aio/air";
 import { draw } from "./draw.ts";
 
 const Chart = () => {
@@ -46,7 +46,7 @@ const Chart = () => {
 
 ```tsx
 const Timer = () => {
-  const elapsed = signal(0);
+  const elapsed = useSignal(0); // one signal for the life of this instance
 
   onMount(() => {
     const id = setInterval(() => elapsed.set(elapsed.peek() + 1), 1000);
@@ -56,6 +56,13 @@ const Timer = () => {
   return <span>{elapsed.value}s</span>;
 };
 ```
+
+`useSignal`, not `signal`. A component body runs again on every re-render, so a
+`signal(0)` written there is a **new** signal each time: the first tick updates
+the first render's signal, the component re-renders, the body renders a fresh
+`0`, and every later tick writes a signal nobody reads — `0s` forever. Use
+`useSignal` for per-instance state, or a module-scope `signal()` for state that
+outlives the component.
 
 ---
 
@@ -153,7 +160,8 @@ For element size, see [`useDimensions`](air-reference.md)
 function useId(): string;
 ```
 
-Generate a unique, SSR-stable ID. Format: `:r{N}:`.
+Generate a unique, SSR-stable ID. Format: `:r{N}:` for server-rendered and
+hydrated IDs, `:rc{N}:` for IDs a client root generates itself.
 
 ```tsx
 const FormField = ({ label }: { label: string }) => {
@@ -167,8 +175,13 @@ const FormField = ({ label }: { label: string }) => {
 };
 ```
 
-IDs are deterministic — same component tree produces same IDs on server and
-client. Each `mount()` root has its own counter.
+IDs are deterministic where they have to be: `hydrate()` produces the same IDs
+the server rendered for the same tree. Every other ID — any `mount()` root, and
+a component a hydrated root mounts later — comes from one `:rc{N}:` sequence per
+document, so two roots on the same page never hand out the same ID, in whichever
+order they mount or hydrate. (Two roots hydrated from two separate server
+renders each reproduce their own server's `:r0:`, `:r1:`… — the markup already
+contains them.)
 
 ---
 
@@ -249,7 +262,9 @@ function useContextSelector<T, R>(
 ): R;
 ```
 
-Select a subset of context — re-renders only when the selected value changes.
+Select a subset of context — re-renders only when the selected value changes
+(compared with `Object.is`, so select a primitive or a stable reference; a
+selector that builds a new object re-renders on every context change).
 
 ```tsx
 const AppCtx = createContext({ theme: "light", locale: "en", count: 0 });
@@ -296,10 +311,13 @@ its failed render read, so when one of them changes the component is rendered
 again — the boundary is not a one-way door, and you need no reset callback or
 key change.
 
-**With no boundary above it**, a component whose own re-render throws keeps its
-last good output and logs the error; everything beside it keeps updating. A
-`fallback` that itself throws degrades to that same behaviour rather than
-looping.
+**With no boundary above it**, a component whose re-render throws keeps its last
+good output and logs the error; everything beside it keeps updating. That holds
+whether the component re-rendered on its own or because its parent did — the
+parent's update still lands around it. A component that throws on its first
+render during a re-render (it just appeared) holds an empty slot until a signal
+it read changes. A `fallback` that itself throws degrades to that same behaviour
+rather than looping. A throw on the very first `mount()` still propagates.
 
 ---
 

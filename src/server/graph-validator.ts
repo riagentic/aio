@@ -748,6 +748,19 @@ export async function validateGraph(
         importMap,
         fileExists,
       );
+      // A DYNAMIC import of a `*.server.ts` module is where the client graph
+      // ENDS — the builder marks it external (esbuild-plugin.ts) and the dev
+      // server 404s it to a browser. Walking into it judged server code by
+      // browser rules: `am check` warned "Deno.hostname is server-only" INSIDE
+      // a `.server.ts` file, and again for every helper that file imports,
+      // contradicting the one rule the suffix exists to state. A STATIC import
+      // is still followed: that one is judged (and refused when eager) above.
+      if (
+        resolution.kind === "local" && !staticSpecs.has(spec) &&
+        SERVER_FILE_RE.test(resolution.path)
+      ) {
+        continue;
+      }
       if (resolution.kind === "local") {
         deps.push(resolution.path);
         if (staticSpecs.has(spec)) staticDeps.push(resolution.path);

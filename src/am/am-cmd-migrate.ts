@@ -20,33 +20,18 @@
  * from the app's own pin, because the version the app is actually on is a fact
  * the tool can look up and a person has to remember.
  */
-import { join, relative } from "@std/path";
+import { relative } from "@std/path";
 import { parseVersion } from "./am-versions.ts";
 import type { GlobalFlags } from "./am-types.ts";
 import { detectMode, out } from "./am-output.ts";
 import {
-  _cellCallSpans,
   isFixturePath,
   type Removal,
   REMOVALS,
-  removalsInSource,
+  removalsInFile,
 } from "../state/removals.ts";
-import { codeText } from "../diagnostics/code-mask.ts";
+import { appSourceFiles } from "./app-source-scope.ts";
 import { readFrameworkPinSync } from "../server/deno-json.ts";
-
-/** Source files an app's own code lives in — the ones a removal can be in.
- *
- *  `dep/`, `node_modules/` and `dist/` are somebody else's code or a build
- *  product, and a hit in one of them is not something the reader can act on. */
-const SKIP_DIRS = new Set([
-  "node_modules",
-  "dist",
-  "dep",
-  ".git",
-  ".aio",
-  "build",
-  "target",
-]);
 
 /** Order a release series so `--from` can mean "after this".
  *
@@ -79,44 +64,6 @@ export function removalsAfter(from: string | undefined): Removal[] {
   return REMOVALS.filter((r) => seriesRank(r.removedIn) > floor);
 }
 
-/** Every `.ts`/`.tsx` file under `dir` that is the app's own. */
-async function* sourceFiles(dir: string): AsyncGenerator<string> {
-  let entries: Deno.DirEntry[];
-  try {
-    entries = [...Deno.readDirSync(dir)];
-  } catch {
-    return; // aio-ok: an unreadable directory is not a migration finding
-  }
-  for (const e of entries) {
-    const full = join(dir, e.name);
-    if (e.isDirectory) {
-      if (SKIP_DIRS.has(e.name) || e.name.startsWith(".")) continue;
-      yield* sourceFiles(full);
-    } else if (e.isFile && /\.tsx?$/.test(e.name)) yield full;
-  }
-}
-
-/** The file with everything OUTSIDE a `cell(…)` argument list blanked.
- *
- *  Same length and same newlines, so a line number from the blanked text is a
- *  line number in the original. When the file declares no cell at all the
- *  result is entirely blank, which is the right answer: no cell, no cell
- *  config. */
-export function cellConfigOnly(text: string): string {
-  const code = codeText(text);
-  const spans = _cellCallSpans(code);
-  const out = text.split("");
-  for (let i = 0; i < out.length; i++) {
-    if (spans.some(([s, e]: [number, number]) => i >= s && i < e)) continue;
-    if (out[i] !== "\n") out[i] = " ";
-  }
-  // A file with a `cell(` whose argument list never closes yields one span to
-  // end-of-file — the same fallback `_cellCallSpans` documents — so this can
-  // still over-report there. Over-reporting inside a cell call is the safe
-  // direction; under-reporting is an app that boots and then explodes.
-  return out.join("");
-}
-
 export type MigrateFinding = {
   /** A test or fixture path: the old spelling is probably deliberate there. */
   fixture: boolean;
@@ -139,32 +86,22 @@ export async function scanMigrations(
 ): Promise<MigrateFinding[]> {
   const wanted = new Set(removalsAfter(from).map((r) => r.key));
   const found: MigrateFinding[] = [];
-  for await (const file of sourceFiles(root)) {
+  // The same scope `am pin` reads (app-source-scope.ts): never deps or build
+  // output, never what the app declares is not its code.
+  for await (const file of appSourceFiles(root)) {
     let text: string;
     try {
       text = await Deno.readTextFile(file);
     } catch {
       continue; // aio-ok: a file that vanished mid-scan is not a finding
     }
-    // A whole file is NOT what `removalsInSource` documents itself as taking.
-    // Its contract: with no `cell(` in the text, every line counts as cell
-    // config, because `aiol` hands it one already-extracted config block.
-    // Given whole files it reported `{ seed: number; actions: string[] }` and
+    // A whole file, so `removalsInFile`: a cell-config key counts only inside
+    // a cell config literal. Given whole files, the block-shaped
+    // `removalsInSource` reported `{ seed: number; actions: string[] }` and
     // `perf: { reduce: 0.4 }` as retired cell keys — a migration report full
     // of things that are not migrations is one nobody finishes reading, and
     // the real row goes unread with them.
-    //
-    // So the file is handed over TWICE, each time as the thing the contract
-    // describes. Everything outside a `cell(…)` argument list is blanked (same
-    // length, newlines kept, so line numbers survive) for the cell-config
-    // rows; the untouched text serves the rows that carry their own pattern,
-    // which are ordinary API shapes and correctly found anywhere.
-    const hits = [
-      ...removalsInSource(text).filter((h) => h.removal.kind !== "cell-config"),
-      ...removalsInSource(cellConfigOnly(text)).filter((h) =>
-        h.removal.kind === "cell-config"
-      ),
-    ];
+    const hits = removalsInFile(text);
     for (const hit of hits) {
       if (!wanted.has(hit.removal.key)) continue;
       const rel = relative(root, file) || file;
