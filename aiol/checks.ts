@@ -2242,6 +2242,12 @@ export const checkPatterns: Checker = (ctx) => {
         const method = m[1] ?? m[3]!;
         const param = m[2] ?? m[4]!;
         const startIdx = codeSrc.slice(0, m.index).split("\n").length - 1;
+        // A marker on the METHOD line (or the comment line above it) discharges
+        // the whole method. The hint is once per method on the first read, so a
+        // per-line marker only moved it to the next read: an observer method —
+        // one whose job is to report state that moved while it awaited — needed
+        // a marker on every line (llama.master, v1.0.0-beta pin).
+        if (isSuppressed(file.lines, startIdx)) continue;
         const readLines = readLinesFor(param);
         let depth = 0;
         let entered = false;
@@ -2287,7 +2293,7 @@ export const checkPatterns: Checker = (ctx) => {
               "patterns",
               `${file.relative}:${
                 i + 1
-              } — "${method}" reads ${param}.* after an await — every await is a commit point and other actions may have run while suspended; re-read deliberately or gather-then-write (docs/state/methods.md); suppress a deliberate read with \`// aio-ok\` on this line or the comment line above`,
+              } — "${method}" reads ${param}.* after an await — every await is a commit point and other actions may have run while suspended; re-read deliberately or gather-then-write (docs/state/methods.md); suppress a deliberate read with \`// aio-ok\` on this line or the comment line above, or a whole method that reads on purpose (an observer) with \`// aio-ok\` on the method line`,
               { file: file.relative, line: i + 1 },
             );
             break; // once per method
@@ -5207,6 +5213,13 @@ export const checkScanCoverage: Checker = (ctx) => {
   // the coverage stays stated rather than silently narrowed.
   for (const { dir, by } of ctx.excludedDirs ?? []) {
     pass(`${dir}/ not read — not this app's code (${by})`);
+  }
+  // A directory with its own deno.json is its own project: "move it under
+  // src/" would merge two apps. Answered with the remedy that is right.
+  for (const { dir, config } of ctx.ownProjectDirs ?? []) {
+    pass(
+      `${dir}/ not read — its own project (${dir}/${config}); run aiol there`,
+    );
   }
 
   if (unscannedDirs.length > 0) {
