@@ -29,6 +29,7 @@ import {
   type HarnessBootOptions,
 } from "./boot-refusals.ts";
 import { formatCellState } from "./test-format.ts";
+import { openUiVideo, type UiVideoRecorder } from "./ui-video.ts";
 import { frozenWriteMessage, isFrozenWriteError } from "../state/immutable.ts";
 import { _resetRootSignals } from "../state/signal.ts";
 import { _resetAioRuntime } from "../state/runtime-reset.ts";
@@ -796,7 +797,7 @@ export function testUI(
       throw new Error('testUI(App, "name", fn): missing test function');
     }
     Deno.test(optsOrName, async () => {
-      const ui = await _mountTestUI(App as ComponentFn, namedOpts);
+      const ui = await _mountTestUI(App as ComponentFn, namedOpts, optsOrName);
       let bodyErr: { e: unknown } | null = null;
       try {
         await fn(ui);
@@ -1072,12 +1073,13 @@ async function _teardownPartialMount(p: PartialMount): Promise<void> {
 async function _mountTestUI(
   App: ComponentFn,
   opts: TestUIOptions,
+  name?: string,
 ): Promise<TestUI> {
   // A throw anywhere in setup must leave the process exactly as it found it —
   // see PartialMount.
   const partial: PartialMount = { owned: [], restore: [], window: null };
   try {
-    return await _buildTestUI(App, opts, partial);
+    return await _buildTestUI(App, opts, partial, name);
   } catch (e) {
     await _teardownPartialMount(partial);
     throw e;
@@ -1088,6 +1090,7 @@ async function _buildTestUI(
   App: ComponentFn,
   opts: TestUIOptions,
   partial: PartialMount,
+  name?: string,
 ): Promise<TestUI> {
   let doc: AnyDoc = opts.document ?? (globalThis as AnyDoc).document;
   // The contrast walk stands down, SAYING so, on a DOM whose style cascade is
@@ -1567,6 +1570,19 @@ async function _buildTestUI(
   _installRouterListeners();
   const root = doc.createElement("div");
   doc.body.appendChild(root);
+  // `--video` / AIO_VIDEO: a recording made from the command line. Opened
+  // BEFORE the mount so a bad flag or a missing browser fails here, loudly;
+  // it only ever READS the DOM, synchronously, so the run it records is the
+  // run it would have been (see ui-video.ts).
+  let video: UiVideoRecorder | null = openUiVideo({
+    name,
+    doc,
+    root,
+    viewport: {
+      width: opts.viewport?.width ?? 1024,
+      height: opts.viewport?.height ?? 768,
+    },
+  });
   const handle: MountHandle = mount(root, App);
   partial.unmount = () => _unmount(handle);
   const state: RootState | undefined = _rootStateMap.get(handle);
@@ -1798,12 +1814,49 @@ async function _buildTestUI(
     // verb: user-gesture actions guard against disabled at action time
     // (queue-time, so un-awaited sequences fail at the next drain point).
     // `write` marks the value-mutating gestures, which readonly also refuses.
+    // A step, as the video sees it: framed (with its target ringed and a
+    // caption) before it acts, and framed again once it has settled — even
+    // when it fails, because the frame of a failing step is the useful one.
+    const step = (caption: string, fn: () => Promise<void>) => {
+      if (!video) return enqueue(fn);
+      return enqueue(async () => {
+        let target: AnyDoc = null;
+        let label = "";
+        try {
+          const i = resolveInfo();
+          target = i._el;
+          label = `${i.name} · `;
+        } catch {
+          // aio-ok: the element does not resolve — `fn` is about to fail with
+          // the real message; the frame just goes without a ring.
+        }
+        video?.before(target, label + caption);
+        try {
+          await fn();
+        } finally {
+          video?.after();
+        }
+      });
+    };
+    const modsLabel = (mods?: KeyModifiers) =>
+      (["ctrlKey", "metaKey", "altKey", "shiftKey"] as const)
+        .filter((k) => mods?.[k])
+        .map((k) =>
+          ({
+            ctrlKey: "Ctrl+",
+            metaKey: "Meta+",
+            altKey: "Alt+",
+            shiftKey: "Shift+",
+          })[k]
+        )
+        .join("");
     const act = (
       verb: string | null,
       fn: (e: AnyDoc) => void,
       write = false,
+      caption = verb ?? "",
     ) =>
-      enqueue(async () => {
+      step(caption, async () => {
         if (verb) assertEnabled(verb, write);
         fn(el());
         await settle();
@@ -1816,16 +1869,20 @@ async function _buildTestUI(
         return act(
           "click",
           (e) => triggerAction(e, "click", undefined, mods),
+          false,
+          `${modsLabel(mods)}click`,
         );
       },
       dblclick(mods?: KeyModifiers) {
         return act(
           "dblclick",
           (e) => triggerAction(e, "dblclick", undefined, mods),
+          false,
+          `${modsLabel(mods)}double-click`,
         );
       },
       type(text: string) {
-        return enqueue(async () => {
+        return step(`type ${JSON.stringify(text)}`, async () => {
           assertEnabled("type into", true);
           el().focus?.();
           for (const ch of text) {
@@ -1839,31 +1896,47 @@ async function _buildTestUI(
         return act(
           "press a key on",
           (e) => triggerAction(e, "press", key, mods),
+          false,
+          `press ${modsLabel(mods)}${key}`,
         );
       },
       keyDown(key: string, mods?: KeyModifiers) {
         return act(
           "hold a key on",
           (e) => triggerAction(e, "keyDown", key, mods),
+          false,
+          `hold ${modsLabel(mods)}${key}`,
         );
       },
       keyUp(key: string, mods?: KeyModifiers) {
         return act(
           "release a key on",
           (e) => triggerAction(e, "keyUp", key, mods),
+          false,
+          `release ${modsLabel(mods)}${key}`,
         );
       },
       hover(mods?: KeyModifiers) {
-        return act(null, (e) => triggerAction(e, "hover", undefined, mods));
+        return act(
+          null,
+          (e) => triggerAction(e, "hover", undefined, mods),
+          false,
+          `${modsLabel(mods)}hover`,
+        );
       },
       focus() {
-        return act(null, (e) => triggerAction(e, "focus"));
+        return act(null, (e) => triggerAction(e, "focus"), false, "focus");
       },
       blur() {
-        return act(null, (e) => triggerAction(e, "blur"));
+        return act(null, (e) => triggerAction(e, "blur"), false, "blur");
       },
       select(value: string) {
-        return act("select on", (e) => triggerSelect(e, value), true);
+        return act(
+          "select on",
+          (e) => triggerSelect(e, value),
+          true,
+          `select ${JSON.stringify(value)}`,
+        );
       },
       // check()/uncheck() only mean something on a checkbox/radio — and the
       // rule lives in ui-trigger.ts, so the live tier (`am trigger … check`)
@@ -1877,6 +1950,8 @@ async function _buildTestUI(
               name: resolveInfo().name,
               prefix: "testUI: ",
             }),
+          false,
+          "check",
         );
       },
       uncheck() {
@@ -1887,13 +1962,15 @@ async function _buildTestUI(
               name: resolveInfo().name,
               prefix: "testUI: ",
             }),
+          false,
+          "uncheck",
         );
       },
       clear() {
         return act("clear", (e) => triggerClear(e), true);
       },
       setValue(text: string) {
-        return enqueue(async () => {
+        return step(`set ${JSON.stringify(text)}`, async () => {
           assertEnabled("set value on", true);
           triggerClear(el()); // replace, don't append
           handle._flush();
@@ -1906,10 +1983,10 @@ async function _buildTestUI(
         });
       },
       scroll(to?: { top?: number; left?: number }) {
-        return act(null, (e) => triggerScroll(e, to));
+        return act(null, (e) => triggerScroll(e, to), false, "scroll");
       },
       dragTo(target: UIElementHandle) {
-        return enqueue(async () => {
+        return step("drag", async () => {
           const dst = target.info._el! as AnyDoc;
           triggerDragTo(el(), dst);
           await settle();
@@ -2420,6 +2497,7 @@ async function _buildTestUI(
       // strict: this IS the observation point. "Quiesced" and "gave up" must
       // not be the same answer here.
       await settle(true);
+      video?.observe();
     },
     // Advance the virtual schedule clock by `ms` and fire everything now due —
     // drives toast auto-dismiss / debounce / backoff / poll deterministically
@@ -2428,6 +2506,7 @@ async function _buildTestUI(
       await advanceSchedules?.(ms);
       await drain();
       await settle(true); // an observation point too — see settle above
+      video?.observe();
     },
     html: () => String(root.innerHTML),
     present: (name: string, kind?: UIKind): boolean => showing(name, kind),
@@ -2455,7 +2534,7 @@ async function _buildTestUI(
       while (true) {
         await settle();
         try {
-          if (pred(subject)) return;
+          if (pred(subject)) return video?.observe();
           lastErr = undefined; // it ran; it was merely false
         } catch (e) {
           lastErr = e;
@@ -2504,7 +2583,7 @@ async function _buildTestUI(
       while (Date.now() < deadline) {
         await settle();
         try {
-          if (pred()) return;
+          if (pred()) return video?.observe();
           lastErr = undefined; // it ran; it was merely false
         } catch (e) {
           lastErr = e;
@@ -2526,6 +2605,16 @@ async function _buildTestUI(
       );
     },
     unmount() {
+      if (video) {
+        // Synchronous teardown cannot wait for a video to be drawn — say so
+        // rather than let a requested recording silently not exist.
+        video = null;
+        console.warn(
+          "[aio:video] ui.unmount() cannot wait for the video to be written, " +
+            "so this mount has none — use `await ui.dispose()` (or " +
+            "`await using ui = …`) to record it.",
+        );
+      }
       _unmount(handle);
       ledger?.restore(); // put the cells' own methods back before the reset
       resetRuntime?.();
@@ -2548,7 +2637,9 @@ async function _buildTestUI(
     },
     async dispose() {
       // Drain first — a failure from an un-awaited action must fail the
-      // test, not vanish in teardown. Teardown runs regardless.
+      // test, not vanish in teardown. Teardown runs regardless: the drain's
+      // error is re-thrown once teardown (and the video) are done.
+      let drainErr: { e: unknown } | null = null;
       try {
         await drain();
         // …and the un-awaited CALLS. `drain()` waits for the test's own action
@@ -2563,21 +2654,39 @@ async function _buildTestUI(
         if (still.length > 0) {
           console.warn(_abandonedCallsWarning("testUI", still, "ui"));
         }
-      } finally {
-        _unmount(handle);
-        ledger?.restore(); // put the cells' own methods back before the reset
-        resetRuntime?.();
-        _resetAioRuntime(); // see unmount() — process-global residue
-        if (ownedWindow) {
-          await closeWindow(ownedWindow);
-          ownedWindow = null;
-          partial.window = null;
-        }
-        for (const key of _ownedGlobals.splice(0)) {
-          delete (globalThis as AnyDoc)[key];
-        }
-        for (const restore of _restoreGlobals.splice(0)) restore();
+      } catch (e) {
+        drainErr = { e };
       }
+      video?.observe(); // the final state, before the unmount clears it
+      _unmount(handle);
+      ledger?.restore(); // put the cells' own methods back before the reset
+      resetRuntime?.();
+      _resetAioRuntime(); // see unmount() — process-global residue
+      if (ownedWindow) {
+        await closeWindow(ownedWindow);
+        ownedWindow = null;
+        partial.window = null;
+      }
+      for (const key of _ownedGlobals.splice(0)) {
+        delete (globalThis as AnyDoc)[key];
+      }
+      for (const restore of _restoreGlobals.splice(0)) restore();
+      // The video is drawn AFTER teardown, from what was recorded: nothing
+      // it does can reach the app. A failed test still gets its video —
+      // that is the one most worth watching — and a video that cannot be
+      // made fails a passing test rather than vanishing; behind a failing
+      // one it is reported and the test's own error stands.
+      const rec = video;
+      video = null;
+      if (rec) {
+        try {
+          await rec.finish();
+        } catch (e) {
+          if (!drainErr) throw e;
+          console.error(`[aio:video] no video for this failed test: ${e}`);
+        }
+      }
+      if (drainErr) throw drainErr.e;
     },
     [Symbol.asyncDispose]() {
       return this.dispose();
@@ -2600,6 +2709,7 @@ async function _buildTestUI(
   // recorded and the first real observation point reports it with its own
   // context.
   await settle(false);
+  video?.observe(); // the first frame: the app as it mounted
 
   return new Proxy(api as AnyDoc, {
     get(target, prop: string | symbol) {

@@ -580,6 +580,54 @@ If the trace cannot be written — a read-only checkout, a full disk — the
 assertion's own error is unchanged and simply names no file. The failure is the
 point; the trace is a convenience.
 
+## A video of the test: `--video`
+
+Any `testUI` test can be recorded **from the command line** — the test itself
+does not change:
+
+```sh
+deno test -A tests/todo.test.tsx -- --video=videos/          # one .mp4 per test
+deno test -A tests/todo.test.tsx --filter "adds" -- --video=demo.webm
+AIO_VIDEO=videos/ AIO_VIDEO_PACE=400 deno test -A tests/
+```
+
+| Flag / env                             | Meaning                                                    |
+| -------------------------------------- | ---------------------------------------------------------- |
+| `--video=<dir/>` · `AIO_VIDEO`         | one file per test, named after it (`adds-an-item.mp4`)     |
+| `--video=<file.mp4\|.webm>`            | one file — the extension picks H.264 MP4 or VP8 WebM       |
+| `--video-pace=<ms>` · `AIO_VIDEO_PACE` | how long each step stays on screen (default 800, 50–60000) |
+
+The flags go after `--`: they are the test run's arguments. Each video shows
+every action (`click`, `type`, `check`, …) as a frame **before** it — the
+element outlined, a caption such as `AddButton · click` — and a frame after it,
+plus a frame at each `settle`/`waitFor`/`expectCell` where the page changed. A
+test that fails its assertion still gets its video; that is where it is most
+useful. One line per video is printed:
+
+```
+[aio:video] look from /app/src/app.ts: theme "auto", appId "ex-todo", no style.css
+[aio:video] adds an item → videos/adds-an-item.mp4 (7 frames, 4.8s video, 1918ms to make)
+```
+
+**How.** `testUI` runs in happy-dom, which has a DOM and no pixels. After each
+step the recorder copies the page as HTML — synchronously, so the app cannot
+notice and the test runs exactly as it would without the flag. When the test is
+over, a headless Chromium draws those pages with the app's real stylesheet (the
+same `<head>` the app's own page gets, from its
+`aio.run({ appId, ui: { theme }
+})` and `style.css`) and encodes them with its
+built-in encoder. No ffmpeg.
+
+**Needs** a headless Chromium or Chrome (`$CHROMIUM_BIN` to point at one). With
+`--video` and none installed, the test fails at mount and says so. Without
+`--video`, nothing is looked for.
+
+**Not in the picture:** hover styles, the text caret, `<canvas>` content, and
+theme or layout options that are not literals in `aio.run` (the look line names
+them). Mistakes are refused, never skipped: an unknown `--video-*` flag, a
+missing value, a pace with no video, `--video` and `AIO_VIDEO` naming different
+places, and two tests writing one file.
+
 ## Geometry: `uiRects`
 
 happy-dom measures everything **0×0**. That is not merely unhelpful — it makes a

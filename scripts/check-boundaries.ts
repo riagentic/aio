@@ -141,6 +141,9 @@ const ALLOWED: Record<string, string[]> = {
     // obtains that surface from the SERVER (`renderHeadlessSurface`), so this
     // adds a type, not a renderer.
     "air",
+    // `am shot --video`: records the live window with the SAME CDP client and
+    // encoder the test recorder uses — one of each, not an am copy.
+    "media",
   ],
   // testing may boot a real server — `testServer()`/`testBrowser()`
   // (aio/testing) run in Deno test processes, never in a browser bundle, so
@@ -157,7 +160,15 @@ const ALLOWED: Record<string, string[]> = {
     // via the src/standalone-air.ts conduit only: testUI boots the standalone
     // runtime, which re-exports useLocal from adapters/.
     "adapters",
+    // `--video=` on a test run: the recorder turns testUI's steps into a file
+    // with the SAME encoder and CDP client `am shot --video` uses.
+    "media",
   ],
+  // ── media — video bytes: the CDP client, the in-page WebCodecs encoder, and
+  // the MP4/WebM writers. A LEAF on purpose: it knows pixels and containers,
+  // nothing about cells, apps or tests, so the test recorder (testing) and the
+  // window recorder (am) share ONE encoder and ONE CDP client.
+  media: [],
   adapters: [
     "air", // hook/render integration
     "state", // signals + the state-core conduit

@@ -10,8 +10,10 @@ import {
   _isolateWorkerCellsInProcess,
   _refuseWorkerCells,
 } from "./boot-refusals.ts";
-import { testDisplayEnv } from "./test-display.ts";
 import { dropTempDir, tempDir } from "./temp-dir.ts";
+import { chromiumBin, findChromium, launchChromium } from "./chromium.ts";
+
+export { findChromium };
 import type { AioApp, CellsConfig } from "../server/aio-types.ts";
 
 /** A booted test app — its URL, the app handle, and fetch/state/close helpers.
@@ -243,33 +245,6 @@ export interface TestBrowser {
   [Symbol.asyncDispose](): Promise<void>;
 }
 
-const CHROMIUM_PATHS = [
-  "/usr/bin/chromium",
-  "/usr/bin/chromium-browser",
-  "/usr/bin/google-chrome",
-  "/usr/bin/google-chrome-stable",
-  "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
-];
-
-/** Locate a headless-capable Chromium/Chrome binary, or null. */
-export function findChromium(): string | null {
-  const env = Deno.env.get("CHROMIUM_BIN") ?? Deno.env.get("CHROME_BIN");
-  if (env) return env;
-  for (const c of CHROMIUM_PATHS) {
-    try {
-      Deno.statSync(c);
-      return c;
-    } catch {
-      // aio-ok: this is a PROBE of a list of well-known install paths, and
-      // "not here" is the answer for all but one of them on every machine.
-      // The absence is the information; the caller's `null` (and the clear
-      // "no headless Chromium/Chrome found" throw above it) is where a real
-      // miss is reported.
-    }
-  }
-  return null;
-}
-
 /** Launch a headless Chromium tab against `url` and OWN its lifecycle — the
  *  process is killed and its profile removed on `close()`, and an `unload`
  *  backstop kills it even if Deno dies mid-test (the orphaned-chrome leak).
@@ -280,67 +255,9 @@ export function testBrowser(
   url: string,
   opts: { browserPath?: string; extraArgs?: string[] } = {},
 ): Promise<TestBrowser> {
-  const bin = opts.browserPath ?? findChromium();
-  if (!bin) {
-    throw new Error(
-      "testBrowser: no headless Chromium/Chrome found — install one, set " +
-        "$CHROMIUM_BIN, or pass { browserPath }.",
-    );
-  }
-  return (async () => {
-    const profile = await tempDir("aio-test-browser-");
-    const proc = new Deno.Command(bin, {
-      args: [
-        "--headless=new",
-        "--no-sandbox",
-        "--disable-gpu",
-        "--disable-dev-shm-usage",
-        `--password-store=basic`,
-        `--use-mock-keychain`,
-        `--user-data-dir=${profile}`,
-        ...(opts.extraArgs ?? []),
-        url,
-      ],
-      stdin: "null",
-      stdout: "null",
-      stderr: "null",
-      // Contained even though `--headless=new` opens nothing today: the day
-      // someone drops that flag to debug a test, the window must land in the
-      // nested display and not on the developer's desktop. Cheap now,
-      // impossible to remember later.
-      env: { ...Deno.env.toObject(), ...testDisplayEnv() },
-    }).spawn();
-
-    let killed = false;
-    const kill = () => {
-      if (killed) return;
-      killed = true;
-      try {
-        proc.kill();
-      } catch (e) {
-        // A browser that already exited is the ordinary case — `close()` runs
-        // after the tab may well have gone by itself, and Deno answers that
-        // with "child process has already terminated". ANY other failure
-        // means a live browser this harness did not kill, which is precisely
-        // the orphaned-chrome leak the `unload` backstop above exists to
-        // prevent — so it is never swallowed.
-        if (!/already terminated/i.test(String(e))) {
-          console.error(
-            `[testBrowser] could not kill the browser (pid ${proc.pid}): ${e}`,
-          );
-        }
-      }
-    };
-    // Backstop: if the Deno process unloads without close(), don't leak chrome.
-    const onUnload = () => kill();
-    addEventListener("unload", onUnload);
-
-    const close = async () => {
-      removeEventListener("unload", onUnload);
-      kill();
-      await proc.status;
-      await dropTempDir(profile);
-    };
-    return { proc, close, [Symbol.asyncDispose]: close };
-  })();
+  // Resolved SYNCHRONOUSLY: a missing browser throws at the call, not later.
+  const bin = chromiumBin("testBrowser", opts.browserPath);
+  return launchChromium(bin, [...(opts.extraArgs ?? []), url]).then((
+    { proc, close },
+  ) => ({ proc, close, [Symbol.asyncDispose]: close }));
 }
