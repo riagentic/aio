@@ -120,6 +120,18 @@ Fires `action` every `ms` milliseconds until cancelled.
 s.$do(schedule.every("sync", 30_000, data.sync.action()));
 ```
 
+**A scheduled action passes no arguments**, so a method on a schedule gives its
+optional parameters a **default**, not a `?`:
+
+```ts
+refresh(s, force = false) { … }      // ✅ the tick calls refresh() — force is false
+refresh(s, force?: boolean) { … }    // ⚠️ force is undefined, and the first tick warns
+```
+
+TypeScript erases `?`, so the method still counts `force` as required and the
+first tick logs `hw:refresh declares 1 argument and this call passed 0`. A
+default is what makes the parameter optional at runtime.
+
 > Intervals fire on a fixed clock and can't be deferred per-tick. If the poller
 > must slow itself down (rate-limit backoff), use a self-scheduling `after`
 > chain instead — see
