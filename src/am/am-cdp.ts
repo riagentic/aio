@@ -1,8 +1,8 @@
 /**
  * @module
- * A minimal Chrome DevTools Protocol client — `am shot` and any test that
- * drives an Electron window through `--cdp`. Target list over HTTP, commands
- * over the target's WebSocket; every protocol error is thrown, never swallowed.
+ * The Chrome DevTools Protocol as `am shot` / `am eval` reach it: the target
+ * list over HTTP, and which targets are the app's windows. Commands and events
+ * go through the one client in `media/cdp.ts`.
  */
 
 /** One entry of `GET /json` — the page targets Chromium exposes. */
@@ -48,59 +48,6 @@ export function appPageTargets(
   );
 }
 
-/** A CDP session: `call(method, params)` resolves with the command's result
- *  and rejects with the protocol's error message. */
-export async function cdpConnect(
-  wsUrl: string,
-  timeoutMs = 5000,
-): Promise<{
-  call: (method: string, params?: Record<string, unknown>) => Promise<unknown>;
-  close: () => void;
-}> {
-  const ws = new WebSocket(wsUrl);
-  const pending = new Map<
-    number,
-    { resolve: (v: unknown) => void; reject: (e: Error) => void }
-  >();
-  let id = 0;
-  await new Promise<void>((resolve, reject) => {
-    const t = setTimeout(
-      () => reject(new Error(`CDP connect timed out after ${timeoutMs}ms`)),
-      timeoutMs,
-    );
-    ws.onopen = () => {
-      clearTimeout(t);
-      resolve();
-    };
-    ws.onerror = () => {
-      clearTimeout(t);
-      reject(new Error(`CDP connect failed: ${wsUrl}`));
-    };
-  });
-  ws.onmessage = (e) => {
-    const m = JSON.parse(String(e.data)) as {
-      id?: number;
-      result?: unknown;
-      error?: { message: string };
-    };
-    if (m.id === undefined) return; // an event — not ours
-    const p = pending.get(m.id);
-    pending.delete(m.id);
-    if (!p) return;
-    if (m.error) p.reject(new Error(`CDP: ${m.error.message}`));
-    else p.resolve(m.result);
-  };
-  ws.onclose = () => {
-    for (const p of pending.values()) p.reject(new Error("CDP socket closed"));
-    pending.clear();
-  };
-  return {
-    call: (method, params = {}) =>
-      new Promise((resolve, reject) => {
-        const n = ++id;
-        pending.set(n, { resolve, reject });
-        ws.send(JSON.stringify({ id: n, method, params }));
-      }),
-    close: () => ws.close(),
-  };
-}
+/** A CDP session — THE client in `media/cdp.ts`, re-exported so `am shot`,
+ *  `am eval` and the video recorders speak through one implementation. */
+export { cdpConnect, type CdpSession } from "../media/cdp.ts";

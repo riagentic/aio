@@ -9,6 +9,7 @@ import { detectMode, out, outError } from "./am-output.ts";
 import { liveLock, resolveAmAppId } from "./am-utils.ts";
 import { appPageTargets, cdpConnect, cdpTargets } from "./am-cdp.ts";
 import { comparePng, type PngDiffOptions } from "./png-compare.ts";
+import { recordShotVideo, shotVideoOptions } from "./am-cmd-shot-video.ts";
 
 /** Pure: the output path — `--out`, or `<appId>-<stamp>.png` in the cwd. */
 export function shotOutPath(
@@ -17,9 +18,13 @@ export function shotOutPath(
   now: Date = new Date(),
 ): string {
   if (outFlag) return outFlag;
-  const stamp = now.toISOString().replace(/[-:]/g, "").replace(/\..+$/, "")
+  return `${appId}-${shotStamp(now)}.png`;
+}
+
+/** Pure: the timestamp a default shot/video file name carries. */
+export function shotStamp(now: Date): string {
+  return now.toISOString().replace(/[-:]/g, "").replace(/\..+$/, "")
     .replace("T", "-");
-  return `${appId}-${stamp}.png`;
 }
 
 /** Clients with a desktop window. Everything else has nothing to screenshot,
@@ -79,6 +84,14 @@ export async function cmdShot(
     );
     Deno.exit(1);
   }
+  // Parsed before anything is contacted: a flag a video cannot honour is a
+  // refusal now, not after the window has been found.
+  const videoOpts = shotVideoOptions(args, appId, shotStamp(new Date()));
+  if (!videoOpts.ok) {
+    outError(videoOpts.error, mode);
+    Deno.exit(1);
+  }
+  const video = videoOpts.value;
   const pf = liveLock(appId); // wherever the instance's home is
   if (!pf) {
     outError(`${appId} is not running (no lock) — am start first`, mode);
@@ -184,6 +197,14 @@ export async function cmdShot(
     Deno.exit(1);
   }
   const cdp = await cdpConnect(target.webSocketDebuggerUrl, timeout);
+  if (video) {
+    try {
+      await recordShotVideo(cdp, target.url, video, mode);
+    } finally {
+      await cdp.close();
+    }
+    return;
+  }
   try {
     // Wait for the window to actually PAINT before capturing.
     //

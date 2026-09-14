@@ -1006,6 +1006,7 @@ ui       am surface [idx|server] [--component=X] [--path=App/Main] [--depth=N] [
          am preview src/ui/Card.tsx --export=Card --props='{"title":"x"}'   path as your shell completes it
          am clients · am client <idx> (component tree) · am eval '<js>' [--window=N]
          am shot [--out=F] [--full] [--selector=css] [--update=B] [--check=B]   (shot/eval: am start --cdp)
+         am shot --video[=F.mp4|.webm] [--duration=S]   record the window until Ctrl-C
 inspect  am logs [substr] [--level=warn] [--tag=cell:notes] [--since=15m] [--lines=N] [--follow]
          am errors [--lines=N] · am health · am metrics · am heap · am top · am config
          am cost [--keys] [--cell=X] [--window=5m] · am doctor (running app vs aio on disk)
@@ -1133,6 +1134,8 @@ Pixels (screenshots, geometry, a real Electron frame):
   am start --cdp                  devtools port on 127.0.0.1; am instances shows cdpPort
   am shot [--out=F.png] [--full] [--selector='.card']   PNG of the live window
   am shot --update=base.png / --check=base.png [--threshold=N] [--max-diff=R]   visual regression
+  am shot --video[=demo.mp4|.webm] [--duration=S]   video of the live window (Ctrl-C stops)
+  deno test -A t.test.tsx -- --video=videos/   a video of each testUI test (no test change)
   am eval 'document.title' [--window=N]   JSON back; promises awaited
 Where the window goes (am start --display=…, env AIO_AM_DISPLAY):
   auto (default)  no human on the terminal → nested X display :77 (Xephyr), tabs suppressed

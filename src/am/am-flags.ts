@@ -133,6 +133,10 @@ export const VERB_FLAGS: Readonly<Record<string, readonly string[]>> = {
     "--check",
     "--threshold",
     "--max-diff",
+    // `--video[=file.mp4|.webm]` records the window until Ctrl-C;
+    // `--duration=<s>` stops it by itself.
+    "--video",
+    "--duration",
   ],
   eval: ["--window"],
   sql: [],
