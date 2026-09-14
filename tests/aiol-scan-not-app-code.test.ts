@@ -79,3 +79,37 @@ Deno.test("aiol scan: only the excluded directory is answered — a second, unde
   assertStringIncludes(hints[0]!.message, "app/");
   assert(!hints[0]!.message.includes("examples/"), hints[0]!.message);
 });
+
+// llama.master (v1.0.0-beta pin): `client/` is a second, standalone aio app in
+// the same repo with its own deno.json and its own `deno task aiol` — the
+// arrangement the docs describe for a companion app. The hint was right about
+// the scan and wrong about the remedy ("move shipped code under src/" would
+// merge two apps). A directory with its own deno.json is its own project.
+for (const config of ["deno.json", "deno.jsonc"]) {
+  Deno.test(`aiol scan: a directory with its own ${config} is its own project — answered, not hinted`, async () => {
+    const { hints, passed } = await scan({
+      "deno.json": "{}",
+      "src/cell.ts": `export const x = 1;\n`,
+      [`client/${config}`]: "{}",
+      "client/src/app.ts": `export const client = 1;\n`,
+    });
+    assertEquals(hints, [], JSON.stringify(hints));
+    const line = passed.find((p) => p.includes("client/"));
+    assert(line, `expected a pass line naming client/: ${passed.join(" | ")}`);
+    assertStringIncludes(line, `its own project (client/${config})`);
+    assertStringIncludes(line, "run aiol there");
+  });
+}
+
+Deno.test("aiol scan: beside an own-project directory, one with no deno.json is still hinted", async () => {
+  const { hints } = await scan({
+    "deno.json": "{}",
+    "src/cell.ts": `export const x = 1;\n`,
+    "client/deno.json": "{}",
+    "client/src/app.ts": `export const client = 1;\n`,
+    "app/main.ts": `export const shipped = 1;\n`,
+  });
+  assertEquals(hints.length, 1, JSON.stringify(hints));
+  assertStringIncludes(hints[0]!.message, "app/");
+  assert(!hints[0]!.message.includes("client/"), hints[0]!.message);
+});

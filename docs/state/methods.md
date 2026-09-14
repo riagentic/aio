@@ -1176,6 +1176,10 @@ methods: {
   method that REQUIRES a member the draft type does not declare is not a
   `Method<State>`. It is the same shape as `Partial<MethodDraftMeta>`. A bare `s.$call`,
   with no annotation, is TS2339.
+- **Without `Partial`, the error also shows up in other files.** Every method of
+  that cell reads as possibly undefined where it is called (TS2722, "Cannot
+  invoke an object which is possibly 'undefined'"). Look for the TS2322 at the
+  annotation; adding `Partial<>` clears both.
 - **Or cast at the call**, leaving `s` un-annotated:
   `(s as typeof s & MethodDraftCalls<Calls>).$call.bench("cold")`.
 - **The interface lists what you call** — the methods without the draft
@@ -1218,6 +1222,23 @@ methods: {
 `cancelOn`, `transaction` and access rules are the CALLER's. If you want the
 sibling to be its own action with its own draft — its own access check, its own
 journal entry — call it the ordinary way: `myCell.bench(kind)`.
+
+**`s.$commit()` does not fix a second dispatch.** In an async method,
+`s.ref = "new"; s.$commit(); await myCell.start()` still runs `start` against
+the state from before the write: it reads the old `ref`, measured on a real
+server. Only the shared draft sees it: `await s.$call.start()`.
+
+**The sibling runs under your `cancelOn`, not its own.** `start`'s
+`cancelOn: { start: [...] }` does not apply when `update` reaches it with
+`$call`, because `s.$signal` is `update`'s signal. Give the caller the entry
+too, or Cancel stops a direct `start()` and does nothing to an `update()`:
+
+```ts
+cancelOn: {
+  start: [self("cancel")],
+  update: [self("cancel")], // update → $call.start reads update's $signal
+},
+```
 
 ## Selectors
 

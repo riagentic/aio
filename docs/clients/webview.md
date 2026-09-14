@@ -106,6 +106,12 @@ things follow:
   gated by `childWindows`. The preload must live inside the app directory
   (symlinks are resolved first), and the sandbox stays on unless you pass
   `sandbox: false`. A refused request logs which rule it broke.
+- **A guest's navigation cannot be refused from the renderer.** Electron
+  documents that `event.preventDefault()` on a `<webview>`'s `will-navigate`
+  event has no effect, and aio sets no navigation policy on guests (only their
+  popup policy: `target=_blank` opens http(s) in the system browser). The page
+  loads; `onNavigate` / `did-navigate` is where you learn of it, so an app that
+  restricts where a guest may go steps back after the fact.
 
 ## See also
 

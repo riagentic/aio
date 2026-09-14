@@ -365,14 +365,15 @@ export function removalsInSource(text: string): RemovalHit[] {
   // scope-label map, and matching it anywhere in a file that happens to call
   // `cell(` somewhere refused `am pin` on a false positive with `--force` as
   // the only way past (report 9 §5.2). When the text contains cell() calls, only
-  // offsets inside their argument lists count; when it contains none — aiol
-  // hands over one cell's config BLOCK, already extracted — every line does.
-  // A WHOLE FILE is not a block: callers holding one use `removalsInFile`.
+  // TOP-LEVEL keys of the config object inside their argument lists count
+  // (`isConfigKeyAt`); when it contains none — aiol hands over one cell's
+  // config BLOCK, already extracted — every line does. A WHOLE FILE is not a
+  // block: callers holding one use `removalsInFile`.
   const spans = _cellCallSpans(code);
   return scanRemovals(
     text,
     code,
-    (at) => spans.length === 0 || spans.some(([s, e]) => at >= s && at < e),
+    (at) => spans.length === 0 || isConfigKeyAt(code, spans, at),
   );
 }
 
@@ -380,9 +381,10 @@ export function removalsInSource(text: string): RemovalHit[] {
  * `removalsInSource` for a WHOLE source file — what `am pin` and `am migrate`
  * hold.
  *
- * The difference is one rule: a cell-config key counts only inside a cell
- * config literal — a `cell(…)` argument list, or an object literal bound to a
- * name that a `cell(…)` call receives (`cell("c", config)`, `{ ...base }`). A
+ * The difference is one rule: a cell-config key counts only as a TOP-LEVEL key
+ * of a cell config literal — the object in a `cell(…)` argument list, or an
+ * object literal bound to a name that a `cell(…)` call receives
+ * (`cell("c", config)`, `{ ...base }`). A
  * file with no `cell(` has no cell config at all. `removalsInSource`'s "no
  * `cell(` → every line counts" is right for aiol's pre-extracted block and was
  * wrong for a file: a table of the names models invent for the shell tool
@@ -396,11 +398,36 @@ export function removalsInSource(text: string): RemovalHit[] {
 export function removalsInFile(text: string): RemovalHit[] {
   const code = codeText(text);
   const spans = _cellConfigSpans(code);
-  return scanRemovals(
-    text,
-    code,
-    (at) => spans.some(([s, e]) => at >= s && at < e),
-  );
+  return scanRemovals(text, code, (at) => isConfigKeyAt(code, spans, at));
+}
+
+/** Is the key at offset `at` a TOP-LEVEL key of a cell config literal — not
+ *  merely somewhere inside one? `perfBudget: { reduce: 100 }` is the current
+ *  reduce budget and `state: { machine: {…}, execute: 2 }` is app data; both
+ *  sit inside `cell(...)`, and reading any key in the span as config refused
+ *  `am pin` on a compatible upgrade (llama-master). A removed key was only
+ *  ever a key of the config object itself.
+ *
+ *  Judged on MASKED code by the bracket stack between the span's start and
+ *  `at`: exactly one open `{`, reached through nothing but `(` — a call span
+ *  starts after `cell(` (`cell("c", {` → `{`), a bound literal starts AT its
+ *  `{`, and a wrapper (`cell("c", withX({`) or a parenthesised cast
+ *  (`cell("c", ({ … }) as C)`) still hands the object over. */
+function isConfigKeyAt(
+  code: string,
+  spans: readonly (readonly [number, number])[],
+  at: number,
+): boolean {
+  return spans.some(([s, e]) => {
+    if (at < s || at >= e) return false;
+    const stack: string[] = [];
+    for (let i = s; i < at; i++) {
+      const ch = code[i];
+      if (ch === "(" || ch === "[" || ch === "{") stack.push(ch);
+      else if (ch === ")" || ch === "]" || ch === "}") stack.pop();
+    }
+    return /^\(*\{$/.test(stack.join(""));
+  });
 }
 
 /** THE matcher both entry points share: one hit per row, first line it is on,

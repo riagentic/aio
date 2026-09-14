@@ -163,3 +163,64 @@ export const probe = cell("probe", {
 `);
   assertEquals(found.length, 1, "this one really did cross a commit point");
 });
+
+// llama.master (v1.0.0-beta pin): the hint is once per method, on the first
+// post-await read — so a per-line `// aio-ok` only moved it to the NEXT read.
+// An observer method (its job is to report state that moved while it awaited)
+// needed a marker on every line. A marker on the METHOD line discharges it.
+const OBSERVER = (marker: { trailing?: string; above?: string }) =>
+  `import { cell } from "aio";
+export const srv = cell("srv", {
+  state: { a: 1, b: 2, c: 3, seen: 0 },
+  methods: {${marker.above ? `\n    ${marker.above}` : ""}
+    async poll(s) {${marker.trailing ? ` ${marker.trailing}` : ""}
+      await fetch("/x");
+      s.seen = s.a;
+      s.seen = s.b;
+      s.seen = s.c;
+    },
+    async other(s) {
+      await fetch("/y");
+      s.seen = s.a + 1;
+    },
+  },
+});`;
+
+Deno.test("post-await: without a method marker, both methods report (the control)", async () => {
+  const hints = await hintsFor(OBSERVER({}));
+  assertEquals(hints.length, 2, hints.join("\n"));
+});
+
+for (
+  const [where, marker] of [
+    ["trailing the method line", { trailing: "// aio-ok: observer" }],
+    ["on the comment line above the method", { above: "// aiol-ok: observer" }],
+  ] as const
+) {
+  Deno.test(`post-await: a marker ${where} discharges every read in that method — and only that method`, async () => {
+    const hints = await hintsFor(OBSERVER(marker));
+    assertEquals(hints.length, 1, hints.join("\n"));
+    assert(hints[0]!.includes(`"other"`), hints[0]);
+  });
+}
+
+Deno.test("post-await: a per-line marker still moves the hint to the next read (unchanged)", async () => {
+  const hints = await hintsFor(`import { cell } from "aio";
+export const c = cell("c", {
+  state: { a: 1, b: 2 },
+  methods: {
+    async go(s) {
+      await fetch("/x");
+      s.b = s.a; // aio-ok
+      s.a = s.b;
+    },
+  },
+});`);
+  assertEquals(hints.length, 1, hints.join("\n"));
+  assert(hints[0]!.includes("c.ts:8"), hints[0]);
+});
+
+Deno.test("post-await: the hint names the method-line marker", async () => {
+  const hints = await hintsFor(OBSERVER({}));
+  assert(hints[0]!.includes("on the method line"), hints[0]);
+});

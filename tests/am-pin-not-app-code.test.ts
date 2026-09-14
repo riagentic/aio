@@ -182,3 +182,60 @@ Deno.test("pin refusal: the hit count per top-level directory comes BEFORE the l
   assert(summary < text.indexOf("examples/a/x.ts:3"), "summary precedes list");
   assertStringIncludes(text, "--force");
 });
+
+Deno.test("removalsInFile: a removed key NESTED inside a cell config is not a hit (llama-master)", () => {
+  // `perfBudget.reduce` is the current reduce budget and `state.machine` is app
+  // data. Both sit inside `cell(...)`; neither is a top-level config key.
+  const nested = `import { cell } from "aio";
+export const c = cell("x", {
+  state: { machine: { a: 1 }, execute: 2 },
+  perfBudget: { reduce: 100 },
+  methods: { go(s) { s.state = { generators: [] }; } },
+});
+`;
+  assertEquals(removalsInFile(nested), []);
+  const oneLine =
+    `export const c = cell("x", { state: { machine: { a: 1 }, execute: 2 }, perfBudget: { reduce: 100 }, methods: {} });\n`;
+  assertEquals(removalsInFile(oneLine), []);
+  const byName = `import { cell } from "aio";
+const config = { state: { actions: [] as string[] }, perfBudget: { reduce: 50 } };
+export const c = cell("c", config);
+`;
+  assertEquals(removalsInFile(byName), []);
+});
+
+Deno.test("removalsInFile: a TOP-LEVEL removed key still hits beside nested look-alikes", () => {
+  // Control: the narrowing must not turn a real legacy config into a miss.
+  const inline = `import { cell } from "aio";
+export const c = cell("x", {
+  state: { machine: 1 },
+  perfBudget: { reduce: 100 },
+  reduce: { inc: (s) => s },
+});
+`;
+  assertEquals(removalsInFile(inline).map((h) => [h.removal.key, h.line]), [[
+    "reduce",
+    5,
+  ]]);
+  const oneLine =
+    `export const c = cell("x", { state: { execute: 2 }, machine: { initial: "a" } });\n`;
+  assertEquals(removalsInFile(oneLine).map((h) => h.removal.key), ["machine"]);
+  const byName = `import { cell } from "aio";
+const config = {
+  perfBudget: { reduce: 50 },
+  machine: { initial: "idle" },
+};
+export const c = cell("c", config);
+`;
+  assertEquals(removalsInFile(byName).map((h) => [h.removal.key, h.line]), [[
+    "machine",
+    4,
+  ]]);
+  // A wrapper or a parenthesised cast still hands the object over.
+  assertEquals(
+    removalsInFile(`cell("x", ({ execute: {} }) as C);\n`).map((h) =>
+      h.removal.key
+    ),
+    ["execute"],
+  );
+});

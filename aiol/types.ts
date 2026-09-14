@@ -95,6 +95,10 @@ export type CellInfo = {
  *  declaration that says so (report 9 §4). */
 export type ExcludedDir = { dir: string; by: string };
 
+/** A code directory outside the scan that holds its own deno.json — a project
+ *  root of its own (a companion app in the same repo), linted from there. */
+export type OwnProjectDir = { dir: string; config: string };
+
 export type LintContext = {
   projectDir: string;
   denoJson: DenoJsonConfig | null;
@@ -114,6 +118,9 @@ export type LintContext = {
    *  `exclude` / `fmt.exclude`, `.gitignore`) — answered, never hinted.
    *  Optional so a hand-built context stays valid. */
   excludedDirs?: ExcludedDir[];
+  /** …and the ones that are their own project (their own deno.json) —
+   *  answered with "run aiol there", never hinted. Optional, like above. */
+  ownProjectDirs?: OwnProjectDir[];
   /** Files under `tests/` that are NOT test files — fixtures, helpers, shared
    *  factories. They are read and then dropped: no app-code check runs on them
    *  (sweeping tests into the app-code set trades one class of false positive

@@ -1,7 +1,7 @@
 // aiol — project scanner: reads files, extracts cells, builds LintContext
 
 import { basename, extname, join, relative } from "@std/path";
-import { codeMatches } from "./scan.ts";
+import { codeMatches, topLevelKeyOffsets } from "./scan.ts";
 import { removalsInSource } from "../src/state/removals.ts";
 import { appSourceScope } from "../src/am/app-source-scope.ts";
 import type {
@@ -11,6 +11,7 @@ import type {
   Issue,
   LintContext,
   LintReport,
+  OwnProjectDir,
   SourceFile,
 } from "./types.ts";
 
@@ -226,7 +227,9 @@ async function collectFiles(
  *  couple of `readDir`s, not a walk of the vendored framework. */
 async function unscannedCodeDirs(
   projectDir: string,
-): Promise<{ unscanned: string[]; excluded: ExcludedDir[] }> {
+): Promise<
+  { unscanned: string[]; excluded: ExcludedDir[]; ownProjects: OwnProjectDir[] }
+> {
   // "Not this app's code" is ONE answer, shared with `am pin` / `am migrate`
   // (src/am/app-source-scope.ts): deno.json `exclude` / `fmt.exclude` and
   // `.gitignore`. A vendored copy of another project under `examples/` was
@@ -247,8 +250,22 @@ async function unscannedCodeDirs(
     } catch { /* unreadable */ }
     return false;
   };
+  // A directory with its OWN deno.json is a project root of its own — a
+  // second standalone app in the same repo (a companion client, with its own
+  // `deno task aiol`), the arrangement the docs describe. "Move shipped code
+  // under src/" is the wrong remedy for it; linting it from its own root is
+  // the right one (llama.master, v1.0.0-beta pin).
+  const ownConfig = async (dir: string): Promise<string | null> => {
+    for (const name of ["deno.json", "deno.jsonc"]) {
+      try {
+        if ((await Deno.stat(join(dir, name))).isFile) return name;
+      } catch { /* absent */ }
+    }
+    return null;
+  };
   const unscanned: string[] = [];
   const excluded: ExcludedDir[] = [];
+  const ownProjects: OwnProjectDir[] = [];
   try {
     for await (const e of Deno.readDir(projectDir)) {
       if (!e.isDirectory || e.name.startsWith(".")) continue;
@@ -257,13 +274,19 @@ async function unscannedCodeDirs(
       }
       if (!await holdsCode(join(projectDir, e.name), 1)) continue;
       const by = scope.excludedBy(e.name, true);
-      if (by) excluded.push({ dir: e.name, by });
+      if (by) {
+        excluded.push({ dir: e.name, by });
+        continue;
+      }
+      const config = await ownConfig(join(projectDir, e.name));
+      if (config) ownProjects.push({ dir: e.name, config });
       else unscanned.push(e.name);
     }
   } catch { /* root unreadable */ }
   return {
     unscanned: unscanned.sort(),
     excluded: excluded.sort((a, b) => a.dir.localeCompare(b.dir)),
+    ownProjects: ownProjects.sort((a, b) => a.dir.localeCompare(b.dir)),
   };
 }
 
@@ -423,7 +446,16 @@ function parseCellConfig(source: string): {
   const hasMachine = /\bmachine\s*:/.test(block);
   // Removed 1.x config keys, sourced from the framework's removal registry so a
   // future removal is caught here the day its row lands — never a second list.
-  const removedKeys = removalsInSource(block).map((h) => h.removal.key);
+  // A cell-config row counts only as a TOP-LEVEL key of this block:
+  // `perfBudget: { reduce: 100 }` is the current budget and
+  // `state: { machine: {…} }` is app data — both errored as removed keys
+  // (llama-master). `am pin`'s file scan draws the same line.
+  const removedKeys = removalsInSource(block)
+    .filter((h) =>
+      h.removal.kind !== "cell-config" ||
+      topLevelKeyOffsets(block, 0, h.removal.key).length > 0
+    )
+    .map((h) => h.removal.key);
   const hasSelectors = /\bselectors\s*:/.test(block);
   const isWorker = /\bworker\s*:\s*true\b/.test(block);
   const hasVersion = /\bversion\s*:\s*\d+/.test(block);
@@ -749,6 +781,7 @@ export async function buildContext(
     skipped,
     unscannedDirs: scanScope.unscanned,
     excludedDirs: scanScope.excluded,
+    ownProjectDirs: scanScope.ownProjects,
     testHelpers,
     isApp: looksLikeApp(denoJson),
     tsxFiles,
