@@ -1089,6 +1089,24 @@ deno task am shot --check=baseline/cart.png    # assert — exits 1 if it moved
   resized window would otherwise send you hunting a visual change that never
   happened.
 
+**Video (`--video`).** Records the window until Ctrl-C, then writes a video:
+
+```sh
+deno task am shot --video                     # → <appId>-<stamp>.mp4, Ctrl-C to stop
+deno task am shot --video=demo.webm           # the extension picks MP4 (H.264) or WebM (VP8)
+deno task am shot --video=demo.mp4 --duration=20   # stops by itself (SIGTERM stops it too)
+```
+
+While recording, the window's own screencast sends a JPEG each time it paints,
+saved to a temp folder — nothing is encoded yet, so the app runs at its real
+speed. After it stops, the window's built-in encoder turns them into the file
+(no ffmpeg). So a window that is hidden or never changes gives a one-picture
+video, and says so in a `warning`. If the window closes while recording, nothing
+is written and the frames' folder is named. `--full`, `--selector`, `--check`,
+`--update`, `--threshold`, `--max-diff` and `--out` shape one picture and are
+refused with `--video`. To record a UI **test** instead, see
+[A video of the test](../testing/ui-testing.md#a-video-of-the-test---video).
+
 ### Evaluate in the live window (`am eval`)
 
 `am surface` reads the UI **semantically** — components, names, text, values.

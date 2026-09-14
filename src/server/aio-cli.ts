@@ -193,6 +193,21 @@ export function declareAppFlags(names: readonly string[] | undefined): void {
   _parsedDefault = null;
 }
 
+/** Flags the TEST HARNESS answers (`--video=` for `testUI`), spelled like
+ *  `AIO_RUNTIME_FLAG_SPECS`. A test process's `Deno.args` are the harness's
+ *  arguments, and every boot inside that process (`testUI`'s refusals,
+ *  `testServer`'s `aio.run`) parses them — so without this, asking a test run
+ *  for a video was refused as an unknown APP flag. Declared by the harness
+ *  module that owns the flag; process-wide and never reset, because the
+ *  arguments they describe are process-wide too.
+ *
+ *  @internal */
+let _harnessFlags: string[] = [];
+export function declareHarnessFlags(names: readonly string[]): void {
+  _harnessFlags = [...new Set([..._harnessFlags, ...names])];
+  _parsedDefault = null;
+}
+
 /** Test seam: forget the memoized default parse. @internal */
 export function _resetParsedCli(): void {
   _parsedDefault = null;
@@ -325,7 +340,7 @@ function _parseCliUncached(args: readonly string[]): CliFlags {
   const r: CliFlags = { verbose: false };
   // aio's own flags plus whatever the app declared — one vocabulary, so a
   // typo in an app flag gets the same did-you-mean as a typo in aio's.
-  const known = [...AIO_RUNTIME_FLAG_SPECS, ..._appFlags];
+  const known = [...AIO_RUNTIME_FLAG_SPECS, ..._appFlags, ..._harnessFlags];
   for (const arg of args) {
     if (arg === "--") break; // everything after `--` belongs to the app
     // ONE rule for an empty value. `--host=` was refused while `--title=`,

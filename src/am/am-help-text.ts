@@ -245,6 +245,9 @@ Inspect:
                           and writes base.actual.png when it does not. Compares
                           PIXELS, not bytes, with a tolerance (--threshold=N per
                           channel, default 2; --max-diff=RATIO, default 0).
+  shot --video[=F.mp4|.webm]  RECORD the window until Ctrl-C (or --duration=S),
+                          then encode it in the window — no ffmpeg; the
+                          extension picks H.264 MP4 or VP8 WebM
                           Deterministic state: am snapshot load, then am dispatch
   eval '<js>'             Evaluate JS in the live renderer, get JSON back —
                           geometry, computed styles, a fetch from the page's own
