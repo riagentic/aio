@@ -6,6 +6,8 @@
 // discovered is indistinguishable from a missing feature, and it is worse than
 // one: the cost was already paid, and the user still writes the workaround.
 import { assert, assertEquals } from "@std/assert";
+// deno-lint-ignore no-control-regex — help paints glyphs; the contract is the words
+const stripAnsi = (s: string) => s.replace(/\u001b\[[0-9;]*m/g, "");
 
 const REPO = new URL("..", import.meta.url).pathname.replace(/\/$/, "");
 
@@ -48,7 +50,7 @@ async function helpText(): Promise<string> {
 }
 
 Deno.test("am: every command appears in `am help`", async () => {
-  const help = await helpText();
+  const help = stripAnsi(await helpText());
   const missing: string[] = [];
   for (const cmd of await amCommands()) {
     if (ALIASES.has(cmd)) continue;
@@ -71,7 +73,7 @@ Deno.test("am: help does not advertise commands that do not exist", async () => 
   // The other direction, and the reason this file exists twice over: the first
   // draft of the new help block listed `auth reset` and `auth sessions`, which
   // are not real subcommands. Help that lies is worse than help that is short.
-  const help = await helpText();
+  const help = stripAnsi(await helpText());
   const known = new Set(await amCommands());
   const advertised = [...help.matchAll(/^\s{2}([a-z][\w-]*)\b/gm)]
     .map((m) => m[1]!)

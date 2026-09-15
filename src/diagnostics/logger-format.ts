@@ -151,17 +151,21 @@ const LEVEL_COLOR: Record<string, string> = {
 };
 
 // Keyword colorization for console output
+// A keyword that is also a CONFIG KEY must stay contiguous with its `: …`
+// so a documented spelling like `timeout: "warn"` still greps as itself in a
+// coloured console (agents and tests assert on that exact phrase). `(?!\s*:)`
+// keeps painting "a timeout fired" while leaving `timeout: "warn"` alone.
 const KEYWORD_COLORS: [RegExp, string][] = [
-  [/\bstarted\b/i, C.green],
-  [/\bready\b/i, C.green],
-  [/\bdone\b/i, C.green],
-  [/\brecovered\b/i, C.green],
-  [/\bstopped\b/i, C.yellow],
-  [/\bfailed\b/i, C.red],
-  [/\berror\b/i, C.red],
-  [/\btimeout\b/i, C.red],
-  [/\bexceeded\b/i, C.magenta],
-  [/\bheartbeat\b/i, C.cyan],
+  [/\bstarted\b(?!\s*:)/i, C.green],
+  [/\bready\b(?!\s*:)/i, C.green],
+  [/\bdone\b(?!\s*:)/i, C.green],
+  [/\brecovered\b(?!\s*:)/i, C.green],
+  [/\bstopped\b(?!\s*:)/i, C.yellow],
+  [/\bfailed\b(?!\s*:)/i, C.red],
+  [/\berror\b(?!\s*:)/i, C.red],
+  [/\btimeout\b(?!\s*:)/i, C.red],
+  [/\bexceeded\b(?!\s*:)/i, C.magenta],
+  [/\bheartbeat\b(?!\s*:)/i, C.cyan],
 ];
 
 function colorizeMsg(msg: string, lvl: string): string {

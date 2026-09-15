@@ -42,17 +42,32 @@ export const _DELEGATED_EVENTS = new Set([
 
 // ── Per-element wrapped listener storage ───────────────────────────
 // Per-element map of { eventName -> handler } for delegated event dispatch.
-const _wrappedListeners = new WeakMap<Element, Map<string, EventListener>>();
+//
+// Stored as a Symbol EXPANDO on the element, not a WeakMap keyed by identity.
+// happy-dom's `HTMLFormElement` is a Proxy (named controls as indexed props):
+// `createElement("form")` and the FORM node in `event.composedPath()` are
+// distinct objects that share the underlying target. A WeakMap set on one
+// misses the other, so `onClick` / `onKeyDown` / `onInput` on a `<form>`
+// silently never fired under testUI (risoto field report) while the same
+// handlers on a wrapping `<div>` worked. Expandos write through the Proxy, so
+// both identities see the map. Real browsers keep a single identity; the
+// Symbol path is a no-op change there.
+const _HANDLERS = Symbol("aio.wrappedListeners");
+const _OWNER = Symbol("aio.handlerOwner");
+
+type HandlerBag = {
+  [_HANDLERS]?: Map<string, EventListener>;
+  [_OWNER]?: Element;
+};
 
 /** Which delegation root OWNS an element's delegated handlers.
  *
- *  `_wrappedListeners` is global, so it answered "does this element have an
- *  onClick" without ever answering "whose onClick". Mount a second root into a
- *  container that sits INSIDE a live root — which `island()` does by
- *  construction — and both roots' listeners walked the same composedPath and
- *  both found the inner element's handler: every inner click fired twice.
+ *  Handlers are global per element, so the map answered "does this element
+ *  have an onClick" without ever answering "whose onClick". Mount a second
+ *  root into a container that sits INSIDE a live root — which `island()` does
+ *  by construction — and both roots' listeners walked the same composedPath
+ *  and both found the inner element's handler: every inner click fired twice.
  *  Ownership is recorded at registration, and the dispatch loop honours it. */
-const _handlerOwner = new WeakMap<Element, Element>();
 
 // Tracks which delegation roots have listeners registered per event type,
 // and the actual listener references for proper cleanup (AIO-197).
@@ -98,9 +113,10 @@ export function _ensureDelegation(root: Element, evt: string): void {
         // Only the root that REGISTERED this element's handlers may dispatch
         // them — otherwise a root nested inside another live root fires every
         // inner handler twice.
-        const owner = _handlerOwner.get(el);
+        const bag = el as unknown as HandlerBag;
+        const owner = bag[_OWNER];
         if (owner !== undefined && owner !== root) continue;
-        const handler = _wrappedListeners.get(el)?.get(evt);
+        const handler = bag[_HANDLERS]?.get(evt);
         if (handler) {
           // SPA default: a handled form submit never navigates — no more
           // `e.preventDefault()` boilerplate in every onSubmit. Opt back
@@ -162,7 +178,7 @@ export function _getWrapped(
   el: Element,
   evt: string,
 ): EventListener | undefined {
-  return _wrappedListeners.get(el)?.get(evt);
+  return (el as unknown as HandlerBag)[_HANDLERS]?.get(evt);
 }
 
 export function _setWrapped(
@@ -173,22 +189,34 @@ export function _setWrapped(
    *  Recorded so a nested root cannot dispatch another root's handlers. */
   owner?: Element | null,
 ): void {
-  let map = _wrappedListeners.get(el);
+  const bag = el as unknown as HandlerBag;
+  let map = bag[_HANDLERS];
   if (!map) {
     map = new Map();
-    _wrappedListeners.set(el, map);
+    Object.defineProperty(el, _HANDLERS, {
+      value: map,
+      configurable: true,
+      writable: true,
+    });
   }
   map.set(evt, fn);
-  if (owner) _handlerOwner.set(el, owner);
+  if (owner) {
+    Object.defineProperty(el, _OWNER, {
+      value: owner,
+      configurable: true,
+      writable: true,
+    });
+  }
 }
 
 export function _deleteWrapped(el: Element, evt: string): void {
-  const map = _wrappedListeners.get(el);
+  const bag = el as unknown as HandlerBag;
+  const map = bag[_HANDLERS];
   if (!map) return;
   map.delete(evt);
   if (map.size === 0) {
-    _wrappedListeners.delete(el);
-    _handlerOwner.delete(el);
+    delete bag[_HANDLERS];
+    delete bag[_OWNER];
   }
 }
 
