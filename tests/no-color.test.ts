@@ -73,6 +73,18 @@ Deno.test("no-color: a pipe is not a terminal, so it gets no colour", async () =
   );
 });
 
+
+Deno.test("no-color: FORCE_COLOR=0 is off, not on", async () => {
+  // Hosts (CI runners, agent sandboxes) often export FORCE_COLOR=0 to mean
+  // "do not paint". A truthy-string check treated that as force-ON and every
+  // piped `am help` came out coloured.
+  const piped = await run({ FORCE_COLOR: "0", NO_COLOR: "" }, PRINT_LINE);
+  assert(
+    !piped.includes(ESC),
+    `FORCE_COLOR=0 must be plain on a pipe, got: ${piped}`,
+  );
+});
+
 Deno.test("no-color: the decision has ONE home", async () => {
   // Every module that emits a colour escape imports the decider. A second copy
   // of the rule is how one surface keeps colouring after the user said not to

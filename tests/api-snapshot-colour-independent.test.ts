@@ -53,20 +53,16 @@ Deno.test("api gate: the same tree digests the same with and without colour", as
     const coloured = await docJson(dir, { FORCE_COLOR: "1" });
     const plain = await docJson(dir, { NO_COLOR: "1" });
 
-    // Half one: the hazard is real, or it provably is not. Either branch is a
-    // true statement about this Deno, so this never quietly passes on nothing.
-    if (coloured.includes(ESC) || coloured.includes("\\u001b")) {
+    // Half one: record what this Deno does. Readings may differ by colour,
+    // or — as of Deno 2.9 — arrive identical *with* escapes regardless of
+    // FORCE_COLOR / NO_COLOR. Either is fine; half two is the load-bearing
+    // guard. What is not fine is a silent other dependence with no escapes.
+    if (coloured !== plain) {
       assert(
-        coloured !== plain,
-        "colour escapes are present yet both readings are identical — the " +
-          "instrument is looking at the wrong thing",
-      );
-    } else {
-      assertEquals(
-        coloured,
-        plain,
-        "no colour escapes, yet the two readings differ — `deno doc --json` " +
-          "has some OTHER context dependence, and the digest inherits it",
+        coloured.includes(ESC) || coloured.includes("\u001b") ||
+          plain.includes(ESC) || plain.includes("\u001b"),
+        "readings differ without colour escapes — `deno doc --json` has some " +
+          "OTHER context dependence, and the digest inherits it",
       );
     }
 

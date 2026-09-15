@@ -21,7 +21,12 @@ export const colorEnabled: boolean = (() => {
     // deno-lint-ignore no-explicit-any
     const D = (globalThis as any).Deno;
     if (!D?.env) return false;
-    if (D.env.get("FORCE_COLOR")) return true;
+    // FORCE_COLOR="0" (and "") must NOT force colour on — several hosts export
+    // FORCE_COLOR=0 to mean "off", and a truthy-string check painted every pipe
+    // and every `am help | …` under that env (commands "missing" from help
+    // because ANSI sat between the indent and the verb).
+    const force = D.env.get("FORCE_COLOR");
+    if (force !== undefined && force !== "" && force !== "0") return true;
     if (D.env.get("NO_COLOR")) return false;
     return D.stdout?.isTerminal?.() ?? false;
   } catch {

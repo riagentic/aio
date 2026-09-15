@@ -7,6 +7,8 @@
 // told readers to serve `dist/app.js`. `compiled()` already solved exactly
 // this for the binary itself; the inputs were left behind.
 import { assert, assertStringIncludes } from "@std/assert";
+// deno-lint-ignore no-control-regex -- SGR only; glyph must be the visible mark
+const stripAnsi = (s: string) => s.replace(/\u001b\[[0-9;]*m/g, "");
 import { compiled, ok, staged } from "../src/build/build-say.ts";
 import { BUILD_VERSION_ENV } from "../src/server/app-version.ts";
 
@@ -42,7 +44,7 @@ Deno.test("build log: an intermediate artifact is never announced as a finished 
   assertStringIncludes(line, "not in the final dist/");
   // The ✓ is reserved for a thing that exists — it is what a reader scans for.
   const check = said(() => ok("dist/whatever"));
-  const glyph = check.trim()[0]!;
+  const glyph = stripAnsi(check).trim()[0]!;
   assert(
     !line.includes(glyph),
     `a staged file must not wear the "it exists" glyph: ${line}`,
@@ -58,7 +60,7 @@ Deno.test("build log: a standalone build (no fleet) still says ✓ — nothing m
   Deno.env.delete(BUILD_VERSION_ENV);
   try {
     const line = said(() => staged("dist/app.js", "214 KB"));
-    const glyph = said(() => ok("x")).trim()[0]!;
+    const glyph = stripAnsi(said(() => ok("x"))).trim()[0]!;
     assert(line.includes(glyph), `standalone, the file is the answer: ${line}`);
     assert(!line.includes("not in the final dist/"), line);
   } finally {
