@@ -6323,8 +6323,60 @@ export const checkStyles: Checker = (ctx) => {
   }
 };
 
+// ══════════════════════════════════════════════════════════════════════
+// CELL STATE TYPED AS `interface` (field report: TS2322 far from cause)
+// ══════════════════════════════════════════════════════════════════════
+
+/** A cell whose `state` is cast to (or annotated with) an `interface` fails
+ *  TypeScript far from the call site — inside aio — because an interface is
+ *  not assignable to `Record<string, unknown>` / `CellState`. The useful
+ *  error is one line at the cause: rename it to a `type` alias. */
+export const checkCellStateInterface: Checker = (ctx) => {
+  for (const file of ctx.sourceFiles) {
+    if (isTestPath(file.relative) || isToolingPath(file.relative)) continue;
+    if (!file.content.includes("cell(")) continue;
+    // Interfaces declared in this file (and re-exports are out of scope —
+    // the common failure is `export interface St` next to the cell).
+    const interfaces = new Set<string>();
+    for (
+      const m of codeMatches(
+        file.content,
+        /\b(?:export\s+)?interface\s+([A-Za-z_][\w]*)\b/g,
+      )
+    ) {
+      interfaces.add(m[1]!);
+    }
+    if (interfaces.size === 0) continue;
+    // `state: {…} as Name` (common) or `state: expr as Name`.
+    // Cannot use `[^}]*` — the object literal itself contains `}`.
+    for (
+      const m of codeMatches(
+        file.content,
+        /\bstate\s*:\s*(?:\{(?:[^{}]|\{[^{}]*\})*\}\s*|[A-Za-z_][\w.]*\s+)as\s+([A-Za-z_][\w]*)\b/g,
+      )
+    ) {
+      const name = m[1]!;
+      if (!interfaces.has(name)) continue;
+      const line = file.content.slice(0, m.index).split("\n").length;
+      // Which cell? Best-effort: nearest preceding cell("…").
+      const before = file.content.slice(0, m.index);
+      const cells = [...before.matchAll(/\bcell\s*\(\s*["']([^"']+)["']/g)];
+      const cellName = cells.length ? cells[cells.length - 1]![1]! : "?";
+      ctx.report(
+        "error",
+        "cells",
+        `cell "${cellName}": state type \`${name}\` is an interface; ` +
+          `make it \`type ${name} = {…}\` (an interface is not a CellState — ` +
+          `TS points inside aio and every \`s.field\` becomes unknown)`,
+        { file: file.relative, line },
+      );
+    }
+  }
+};
+
 export const ALL_CHECKS: Checker[] = [
   checkScanCoverage,
+  checkCellStateInterface,
   checkConfig,
   checkStructure,
   checkCells,

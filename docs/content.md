@@ -22,7 +22,7 @@
 
 ## Start here — install, first app, concepts, architecture
 
-- [Basics](basics/README.md) — Getting started with AIO — concepts, setup, and reference.
+- [Basics](basics/README.md) — Getting started with aio — concepts, setup, and reference.
 - [Building an aio app without a human in the loop](AGENTS.md) — Five verbs.
 - [aio for AI agents](ai.md) — How to work on an aio app when you are a model — and, it turns out, how a
 - [API Reference](basics/api-reference.md) — Universal: import { aio, cell, log } from "aio" (state, lifecycle, logging)
@@ -101,6 +101,7 @@
 - [Testing a canvas or 3D app](testing/canvas-and-3d.md) — testUI drives a DOM.
 - [Cassettes — record once, replay forever](testing/cassettes.md) — Some async calls cannot be made in CI.
 - [Cell Testing](testing/cell-testing.md) — Test harness that wraps Deno.test with typed helpers.
+- [Testing lanes — more confidence, less wall-clock](testing/lanes.md) — Coverage counts what ran.
 - [aiol — AIO Project Linter](testing/linter.md) — Static analysis tool for aio projects.
 - [Testing two apps at once — `testApps`](testing/multi-app.md) — aio documents two architectures.
 - [The onboarding lab — testing on a machine that is not yours](testing/onboarding-lab.md) — Needs docker or podman.
@@ -162,10 +163,10 @@
 
 ## Upgrade guides — version-to-version migration notes
 
-- [Upgrade Guides](upgrade/README.md) — every one, newest first (76 pages)
+- [Upgrade Guides](upgrade/README.md) — every one, newest first (77 pages)
+- [Upgrading from 1.0.1-beta to 1.0.2-beta](upgrade/from-1.0.1-beta-to-1.0.2-beta.md) — step to perform.
 - [Upgrading from 1.0.0-beta to 1.0.1-beta](upgrade/from-1.0.0-beta-to-1.0.1-beta.md) — check:api reports no drift — so there is no step to perform.
 - [Upgrading from alpha77 to 1.0.0-beta](upgrade/from-alpha77-to-1.0.0-beta.md) — (docs/basics/semver-policy.md): every export, signature, flag, config key and
-- [Upgrading from alpha76 to alpha77](upgrade/from-alpha76-to-alpha77.md) — (docs/basics/semver-policy.md): every export, signature, flag, config key and
 - [The aio restructure — alpha27/alpha28 breaking changes](upgrade/restructure.md) — This guide tracks every breaking change of the restructure
 
 ## Design specs — decision records — background, not manuals

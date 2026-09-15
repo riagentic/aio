@@ -8,6 +8,10 @@ import { childCoverageDir } from "../src/testing/temp-dir.ts";
 const _childCovDir = childCoverageDir();
 
 const ROOT = new URL("..", import.meta.url).pathname;
+
+function stripAnsi(s: string): string {
+  return s.replace(/\x1b\[[0-9;]*m/g, "");
+}
 const dir = (t: string) => `${ROOT}examples/${t}`;
 
 function freePort(): number {
@@ -75,7 +79,12 @@ function spawnExample(
   opts: { stdin?: "piped"; stdout?: "piped" } = {},
 ): Deno.ChildProcess {
   const proc = new Deno.Command(Deno.execPath(), {
-    env: { DENO_COVERAGE_DIR: _childCovDir },
+    env: {
+      ...Deno.env.toObject(),
+      DENO_COVERAGE_DIR: _childCovDir,
+      NO_COLOR: "1",
+      FORCE_COLOR: "0",
+    },
     args: ["run", "-A", "--unstable-kv", entry, ...args],
     cwd: dir(target),
     stdin: opts.stdin ?? "null",
@@ -334,7 +343,7 @@ Deno.test({
         while (true) {
           const { value, done } = await reader.read();
           if (done) break;
-          out += decoder.decode(value);
+          out += stripAnsi(decoder.decode(value));
         }
       })();
       await waitFor(

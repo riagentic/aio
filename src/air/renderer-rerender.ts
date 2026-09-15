@@ -77,17 +77,15 @@ export function _scheduleComponentRender(inst: ComponentInstance): void {
   }
   inst.selfTriggered = true;
   // What asked for this render, for the dev burst tripwire below. A write made
-  // by an event handler — outside any render, mount or flush — is input, and
-  // input is allowed to be fast: `testUI`'s `setValue` types a 118-character
-  // value as 118 synchronous handler→render steps, and every one of them was
-  // counted as a loop, telling the author to move a write that was already in
-  // a handler (risoto §11). Anything else — a write during a render or an
-  // afterRender, a promise continuation, a socket frame — still counts, so a
-  // render → fetch → write cycle is caught exactly as before.
-  if (
-    isDevMode() &&
-    (!_inEventHandler() || root.flushing || _currentCollector !== null)
-  ) {
+  // by an event handler is INPUT and is allowed to be fast: typing 95 chars
+  // (testUI / `am trigger … type`) is 95 handler→render steps in under a
+  // second, and none of them is a render writing what it read (risoto §3).
+  // The old `root.flushing || _currentCollector` clause punched through that
+  // exemption — schedules queued while the event's flush ran were still
+  // counted, so a fast typist got "move the write into an event handler" for
+  // a write that was already there. Non-handler writes (render body,
+  // afterRender, promise, socket) still count.
+  if (isDevMode() && !_inEventHandler()) {
     inst._devLoopCandidate = true;
   }
   root.pendingComponents.add(inst);

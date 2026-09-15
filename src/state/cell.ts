@@ -34,7 +34,7 @@ export {
 
 export { bindCell } from "./cell-catalog.ts";
 
-export { cell, type MethodsCellConfig } from "./cell-create.ts";
+export { cell, type CellState, type MethodsCellConfig } from "./cell-create.ts";
 
 export {
   type CellStatus,

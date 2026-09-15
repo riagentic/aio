@@ -110,3 +110,28 @@ Deno.test("the operability guard does not catch a plain text input", () => {
     assert(threw, `the guard let a ${why} element through`);
   }
 });
+
+Deno.test("press Enter does not submit when keydown was preventDefault'd", async () => {
+  let submitted = 0;
+  const App = () =>
+    h(
+      "form",
+      { onSubmit: () => submitted++ },
+      h("input", {
+        "aria-label": "Pick",
+        type: "text",
+        onKeyDown: (e: { key: string; preventDefault: () => void }) => {
+          if (e.key === "Enter") e.preventDefault();
+        },
+      }),
+    );
+  await using ui = await testUI(App);
+  await ui.settle();
+  const r = await runUITrigger({
+    path: "App:PickInput",
+    action: "press",
+    key: "Enter",
+  }) as { ok: boolean; error?: string };
+  assertEquals(r.ok, true, r.error);
+  assertEquals(submitted, 0, "preventDefault'd Enter must not submit the form");
+});

@@ -55,6 +55,22 @@ import type { SyncConfig } from "../sync/types.ts";
 import type { ArgSchemas } from "./arg-schema.ts";
 import type { ConcurrencyMode } from "./method-policy.ts";
 
+/**
+ * Shape every cell `state` must satisfy — the documented name of
+ * `Record<string, unknown>`.
+ *
+ * Use a `type` alias, not an `interface`:
+ *   type St = { n: number }          // ✓
+ *   interface St { n: number }       // ✗ TS2322 (no index signature)
+ *
+ * An `interface` is not assignable under TypeScript's rules, so `state: St`
+ * fails far from the call — inside aio — and every `s.field` reads as
+ * `unknown`. Import `CellState` when you want to name the constraint; aiol
+ * flags `state: {…} as SomeInterface` at the cause. The MethodsCellConfig
+ * type-parameter bound stays `Record<string, unknown>` (frozen surface).
+ */
+export type CellState = Record<string, unknown>;
+
 /** Methods-based config (reactive style) */
 export type MethodsCellConfig<
   N extends string,

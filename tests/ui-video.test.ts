@@ -7,6 +7,7 @@ import {
   assertThrows,
 } from "@std/assert";
 import { Window } from "happy-dom";
+import { closeWindow } from "../src/testing/close-window.ts";
 import {
   readRunLook,
   snapshotDocument,
@@ -146,7 +147,7 @@ Deno.test("snapshotDocument: live values, checked state, marks, and no scripts o
       snap.body,
     );
   } finally {
-    await win.happyDOM.close();
+    await closeWindow(win);
   }
 });
 

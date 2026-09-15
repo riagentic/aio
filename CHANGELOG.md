@@ -1,5 +1,73 @@
 # Changelog
 
+## v1.0.2-beta — harness honesty, cell DX, window size (2026-09-15)
+
+> **Nothing breaks.** Additive fixes and clearer tooling. `am pin --latest` is
+> the whole upgrade.
+
+### Harness matches the window
+
+- **`testUI` / `am trigger` Enter** skips implicit form submit when keydown was
+  `preventDefault`'d — same as a real browser (combobox pick, etc.).
+- **Form submit handlers under `testUI`** attach correctly on happy-dom
+  (delegated handlers as expandos, not a WeakMap the Proxy could not see).
+- **Symbol expandos use assignment**, not `Object.defineProperty` — happy-dom
+  `<select>` / `<form>` Proxies reject Symbol defineProperty; assignment keeps
+  form handlers and controlled selects working under `testUI`.
+- **Render-burst tripwire** no longer counts event-handler-driven schedules
+  during a flush — fast typing is input, not a "move the write into a handler"
+  false alarm. A render that writes what it reads still trips it.
+
+### Cell DX
+
+- **`CellState`** is exported from `aio` as the readable name of the cell
+  `state` shape (`Record<string, unknown>`). Prefer a `type` alias, not an
+  `interface`.
+- **`aiol` / `am check`** flag `state: {…} as SomeInterface` at the cause, with
+  the `type` alias fix in one line (TypeScript's own error still points inside
+  aio — aiol is the line that names the fix).
+
+### Electron window size
+
+- Declared `ui.width` / `ui.height` (or an explicit `--width` / `--height`) wins
+  when the declaration changes. A leftover `window-state.json` keeps a user
+  resize only while the declared size is unchanged; position is preserved.
+
+### Agent and scaffold flow
+
+- **`am agent` / `AGENTS.md`**: order is **check → run → test**. Run the app
+  before inventing tests.
+- Scaffold starter tests say they belong to the template cell — delete or
+  rewrite them when you replace the cell.
+- Docs: clear map of `am doctor` / `deno task doctor` / `am fix` / `am link` /
+  `am migrate`; window-size rules; CellState trap updated.
+
+### Testing lanes
+
+- **`deno task test:fast`** — ratchets + lie detectors (seconds). Default edit
+  loop.
+- **`deno task test:seam`** — harness≠wire differentials, prod-parity,
+  hunter-seed catalogue (minutes). Before push when touching those seams.
+- **`deno task test:hunters`** — seed catalogue + audit pins without a full
+  audit sweep. Catalogue in `tests/hunter-seeds.json`; membership gated by
+  `check:test-lanes`.
+- Docs: [Testing lanes](docs/testing/lanes.md).
+
+### Internals (simpler, same surface)
+
+- **One walker for addressable element paths** (`collectElementPaths`):
+  `uiNames`, miss `available:`, and `am surface --names` share it — discovery
+  and failure lists cannot drift.
+- **`BUDGET_EFFECT` tip** names the async read-your-writes overlay when a loop
+  that reads its own writes is the real cost (do not reach for `blocking()` for
+  that case).
+
+### Diagnostics
+
+- **`FORCE_COLOR=0`** (and empty) does not force colour on.
+- Log colouring no longer paints keywords followed by `:` (keeps
+  `timeout: "warn"` readable).
+
 ## v1.0.1-beta — hunted, not read (2026-09-13)
 
 > **Nothing breaks.** The surface is byte-identical to 1.0.0-beta (`check:api`

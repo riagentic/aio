@@ -45,13 +45,14 @@ export const _DELEGATED_EVENTS = new Set([
 //
 // Stored as a Symbol EXPANDO on the element, not a WeakMap keyed by identity.
 // happy-dom's `HTMLFormElement` is a Proxy (named controls as indexed props):
-// `createElement("form")` and the FORM node in `event.composedPath()` are
-// distinct objects that share the underlying target. A WeakMap set on one
-// misses the other, so `onClick` / `onKeyDown` / `onInput` on a `<form>`
-// silently never fired under testUI (risoto field report) while the same
-// handlers on a wrapping `<div>` worked. Expandos write through the Proxy, so
-// both identities see the map. Real browsers keep a single identity; the
-// Symbol path is a no-op change there.
+// a WeakMap keyed by `createElement("form")` misses the FORM node in
+// `event.composedPath()`, so form handlers silently never fired under testUI
+// (risoto field report). Expandos write through the Proxy. IMPORTANT: set them
+// with assignment (`el[sym] = …`), never `Object.defineProperty` — happy-dom's
+// `<select>` and `<form>` traps reject Symbol defineProperty (select: "Cannot
+// convert a Symbol value to a number"; form: falsish trap). Assignment works
+// on both. Real browsers keep a single identity; the Symbol path is a no-op
+// change there.
 const _HANDLERS = Symbol("aio.wrappedListeners");
 const _OWNER = Symbol("aio.handlerOwner");
 
@@ -193,19 +194,12 @@ export function _setWrapped(
   let map = bag[_HANDLERS];
   if (!map) {
     map = new Map();
-    Object.defineProperty(el, _HANDLERS, {
-      value: map,
-      configurable: true,
-      writable: true,
-    });
+    // Assignment, not defineProperty — see Symbol EXPANDO comment above.
+    bag[_HANDLERS] = map;
   }
   map.set(evt, fn);
   if (owner) {
-    Object.defineProperty(el, _OWNER, {
-      value: owner,
-      configurable: true,
-      writable: true,
-    });
+    bag[_OWNER] = owner;
   }
 }
 

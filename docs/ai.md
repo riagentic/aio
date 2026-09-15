@@ -30,6 +30,20 @@ specifically.
 
 ## Start with the app, not the framework
 
+**check → run → test.** `deno task check` (and `am check` for the bundle), then
+`am start`, then write tests for the methods you kept. Do not rewrite the
+scaffold test five times before the app has ever run — that is the most common
+agent time sink on a fresh app.
+
+A cell's `state` type must be a **`type` alias, not an `interface`**. An
+interface is not a `CellState`; TypeScript fails inside aio and every `s.field`
+becomes `unknown`. `aiol` flags it at the cause; the TS error names `CellState`.
+
+Electron window size: `aio.run({ ui: { width, height } })` is the declaration.
+An explicit `--width` / `--height` overrides it. A leftover `window-state.json`
+keeps a _user resize_ only while the declared size is unchanged — change
+`ui.width` and the new size wins (position is kept).
+
 ```sh
 am instances                 # what is already running on this machine
 am pin                       # which aio this app builds against

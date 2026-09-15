@@ -10,6 +10,7 @@
 import { _liveRoots } from "./renderer-state.ts";
 import {
   buildUISurface,
+  collectElementPaths,
   measureSurface,
   serializeSurface,
   type SurfaceMeasurement,
@@ -132,12 +133,7 @@ function findByPath(path: string): UIElementInfo | undefined {
 function allPaths(): string[] {
   const out: string[] = [];
   for (const root of getLiveSurfaces()) {
-    const stack: UISurfaceNode[] = [root];
-    while (stack.length) {
-      const n = stack.pop()!;
-      for (const e of n.elements) out.push(e.path);
-      stack.push(...n.children);
-    }
+    out.push(...collectElementPaths(root));
   }
   return out;
 }

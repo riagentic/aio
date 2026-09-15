@@ -522,12 +522,27 @@ browser and Android targets ignore the key, with nothing to configure away.
 Linux needs the desktop's status-notifier support (GNOME: the AppIndicator
 extension); without it the icon is simply absent.
 
-## Window state persistence
+## Window size and persistence
 
-Electron remembers window size and position across runs. Bounds are saved to
-`window-state.json` in the app's `userData` directory. The directory is derived
-from the slugified title (e.g. "My Dashboard" → `my-dashboard`), ensuring each
-app gets its own persistent state.
+Declare the initial size on the app:
+
+```ts
+await aio.run({ ui: { width: 420, height: 620 } });
+```
+
+Priority:
+
+1. Explicit CLI `--width=` / `--height=` (only when you pass them — there is no
+   silent default that shadows `ui.width`)
+2. `ui.width` / `ui.height`
+3. Framework fallback `800×600` when neither is set
+
+Across runs, Electron saves bounds to `window-state.json` under the app's
+`userData` directory (slugified title, e.g. "My Dashboard" → `my-dashboard`). A
+_user resize_ is kept while the declared size is unchanged. If you change
+`ui.width` / `ui.height` (or pass a new `--width`), the new declaration wins for
+size; position is kept. Delete `window-state.json` only if you want a clean
+slate for both.
 
 ## Thin client (`--server-url=X` / `--connect`)
 

@@ -20,6 +20,10 @@ app, that is a bug in aio, not a step you missed.
 - **[The aio restructure (alpha27+)](restructure.md)** — every restructure
   breaking change with before → after recipes (methods-only cells, instances,
   SQLite-only persistence, `aio/extras`, wire catalog)
+- [1.0.1-beta → **1.0.2-beta**](from-1.0.1-beta-to-1.0.2-beta.md) — nothing
+  breaks. Harness matches the window (Enter/`preventDefault`, form handlers,
+  render-burst), `CellState` + aiol at the cause, Electron honours a changed
+  `ui.width`, agents steered to check → run → test
 - [1.0.0-beta → **1.0.1-beta**](from-1.0.0-beta-to-1.0.1-beta.md) — nothing
   breaks. A fix round: acked writes to sync and worker cells survive a crash,
   cross-origin state changes are refused, a flooding or non-reading socket

@@ -311,12 +311,20 @@ export function triggerPress(
   mods?: KeyModifiers,
 ): void {
   assertOperable(el, "press a key on");
-  el.dispatchEvent(keyEv(el, "keydown", key, mods));
+  // Keep the keydown Event — a browser skips implicit form submit when the
+  // keydown was preventDefault'd (combobox: Enter picks an option). The
+  // harness used to dispatch submit unconditionally after keyup, so testUI
+  // submitted while the real window did not (risoto §2).
+  const down = keyEv(el, "keydown", key, mods);
+  el.dispatchEvent(down);
   el.dispatchEvent(keyEv(el, "keyup", key, mods));
   const modified = mods
     ? (mods.ctrlKey || mods.metaKey || mods.altKey || mods.shiftKey)
     : false;
-  if (key === "Enter" && !modified && typeof el.closest === "function") {
+  if (
+    key === "Enter" && !modified && !down.defaultPrevented &&
+    typeof el.closest === "function"
+  ) {
     const form = el.closest("form");
     if (form) form.dispatchEvent(ev(el, "submit"));
   }

@@ -26,7 +26,9 @@ export const colorEnabled: boolean = (() => {
     // and every `am help | …` under that env (commands "missing" from help
     // because ANSI sat between the indent and the verb).
     const force = D.env.get("FORCE_COLOR");
-    if (force !== undefined && force !== "" && force !== "0") return true;
+    // FORCE_COLOR=0 means off (CI/agent hosts); any other non-empty value forces on.
+    if (force === "0") return false;
+    if (force !== undefined && force !== "") return true;
     if (D.env.get("NO_COLOR")) return false;
     return D.stdout?.isTerminal?.() ?? false;
   } catch {

@@ -14,6 +14,7 @@ import {
   classifyBrowserError,
   setUiRootProbe,
 } from "../src/server/server-html-classify.ts";
+import { dropTempDir, tempDir } from "../src/testing/temp-dir.ts";
 
 /** Run `fn` with the console captured, tagged by level. `log.info` goes to
  *  `console.info` (the level decides the method — logger-format.ts), so a
@@ -77,7 +78,7 @@ Deno.test("watcher: deleting the root component is an ERROR, never a 'reloaded' 
     );
     assertEquals(sent.length, 1, "the browser still gets told to re-fetch");
   } finally {
-    await Deno.remove(tmp, { recursive: true }).catch(() => {});
+    await dropTempDir(tmp);
   }
 });
 
@@ -117,7 +118,7 @@ Deno.test("watcher: a removed (non-root) file is 'removed', not 'reloaded'", {
       `Got: ${JSON.stringify(out.info)}`,
     );
   } finally {
-    await Deno.remove(tmp, { recursive: true }).catch(() => {});
+    await dropTempDir(tmp);
   }
 });
 
@@ -163,7 +164,7 @@ Deno.test("watcher: an unparseable deno.json is an ERROR that names the conseque
       `the recovery must be visible too. Got: ${JSON.stringify(fixed.info)}`,
     );
   } finally {
-    await Deno.remove(tmp, { recursive: true }).catch(() => {});
+    await dropTempDir(tmp);
   }
 });
 
@@ -172,7 +173,7 @@ Deno.test("watcher: an entry that was NEVER at the configured path is not a dele
   // and telling its author that their root component was deleted is an
   // invention. It also must not cost hot reload: a css-only burst is still a
   // style swap. (Both were live regressions of the deletion message.)
-  const tmp = await Deno.makeTempDir({ prefix: "aio-watch-noroot-" });
+  const tmp = await tempDir("aio-watch-noroot-");
   try {
     const css = join(tmp, "style.css");
     await Deno.writeTextFile(css, "body{}\n");
@@ -216,7 +217,7 @@ Deno.test("watcher: an entry that was NEVER at the configured path is not a dele
       "dynamic-import-failed",
     );
   } finally {
-    await Deno.remove(tmp, { recursive: true }).catch(() => {});
+    await dropTempDir(tmp);
   }
 });
 
