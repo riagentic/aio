@@ -12,6 +12,10 @@ import { childEnv, freePort, kill, waitForHttp } from "./e2e-app-harness.ts";
 const ROOT = resolve(import.meta.dirname!, "..");
 const dec = new TextDecoder();
 
+function stripAnsi(s: string): string {
+  return s.replace(/\x1b\[[0-9;]*m/g, "");
+}
+
 /** Run a client from a FOREIGN cwd, killed if it outlives `ms` — a client
  *  that hangs is the failure under test, so the test must not hang with it. */
 async function client(
@@ -32,7 +36,13 @@ async function client(
       ...args,
     ],
     cwd,
-    env: { ...childEnv(), NO_COLOR: "1", ...env },
+    env: {
+      ...Deno.env.toObject(),
+      ...childEnv(),
+      NO_COLOR: "1",
+      FORCE_COLOR: "0",
+      ...env,
+    },
     stdin: "null",
     stdout: "piped",
     stderr: "piped",
@@ -49,8 +59,8 @@ async function client(
   await Deno.remove(cwd, { recursive: true }).catch(() => {});
   return {
     code: hung ? "hung" : r.code,
-    out: dec.decode(r.stdout),
-    err: dec.decode(r.stderr),
+    out: stripAnsi(dec.decode(r.stdout)),
+    err: stripAnsi(dec.decode(r.stderr)),
   };
 }
 

@@ -57,6 +57,7 @@ import {
   _isForwardedHandle,
   _resetSurfaceWarnings,
   buildUISurface,
+  collectElementPaths,
   findComponents,
   findElementsDeep,
   serializeSurface,
@@ -571,7 +572,9 @@ function fail(msg: string, available: string[], target?: string): never {
  *  sibling components with their count and the ordinal escape hatch:
  *  `Button ×2 — use Button2 for the 2nd`. */
 function listNames(node: UISurfaceNode): string[] {
-  const out = node.elements.map((e) => e.name);
+  // Element half = the same paths uiNames / am surface --names use. Local
+  // short names here used to disagree with discovery in both directions.
+  const out = collectElementPaths(node);
   const counts = new Map<string, number>();
   for (const c of node.children) {
     counts.set(c.component, (counts.get(c.component) ?? 0) + 1);
@@ -2476,19 +2479,14 @@ async function _buildTestUI(
       return standaloneApp?.getState()?.[cell?.__aio?.id as string];
     },
     names: (): string[] => {
-      const acc: string[] = [];
-      const walk = (n: UISurfaceNode) => {
-        n.elements.forEach((e) => acc.push(e.path));
-        n.children.forEach(walk);
-      };
       try {
-        walk(currentSurface());
+        return collectElementPaths(currentSurface());
       } catch {
         // aio-ok: `currentSurface()` throws before the first mount, and "no
         // names yet" is the honest answer to asking early — not an error worth
         // failing a test over, and the empty array says it.
+        return [];
       }
-      return acc;
     },
     // Public settle is an observation point: drains the action queue first
     // (surfacing failures from un-awaited actions), then waits quiescence.

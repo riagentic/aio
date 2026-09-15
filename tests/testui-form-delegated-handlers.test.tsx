@@ -23,18 +23,22 @@ function F() {
   );
 }
 
-testUI(F, "testUI: form onKeyDown/onClick/onInput fire (happy-dom Proxy)", async (ui) => {
-  seen.length = 0;
-  await ui.C.press("4");
-  await ui.C.click();
-  await ui.I.type("x");
-  // press/type may synthesise more than one key event; the contract is that
-  // each form handler KIND runs at least once (the pre-fix silence was []).
-  for (const kind of ["form keydown", "form click", "form input"]) {
-    assertEquals(
-      seen.includes(kind),
-      true,
-      `missing ${kind}; saw ${JSON.stringify(seen)}`,
-    );
-  }
-});
+testUI(
+  F,
+  "testUI: form onKeyDown/onClick/onInput fire (happy-dom Proxy)",
+  async (ui) => {
+    seen.length = 0;
+    await ui.C.press("4");
+    await ui.C.click();
+    await ui.I.type("x");
+    // press/type may synthesise more than one key event; the contract is that
+    // each form handler KIND runs at least once (the pre-fix silence was []).
+    for (const kind of ["form keydown", "form click", "form input"]) {
+      assertEquals(
+        seen.includes(kind),
+        true,
+        `missing ${kind}; saw ${JSON.stringify(seen)}`,
+      );
+    }
+  },
+);

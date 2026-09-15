@@ -66,14 +66,15 @@ effects run → deltas broadcast back.
 
 > ### ⚠️ Three TypeScript traps to know first
 >
-> **State types are `type` aliases, not `interface`.** `state` is typed
-> `Record<string, unknown>`, and an interface has no index signature, so
-> `interface State { count: number }` is refused — and the error does not say
-> why:
+> **State types are `type` aliases, not `interface`.** The shape is
+> `Record<string, unknown>` (exported as `CellState` for a readable name). An
+> interface has no index signature, so `interface State { count: number }` is
+> refused — and the TypeScript error points _inside aio_, not at your file:
 > `TS2322 Type 'State' is not assignable to type 'Record<string, unknown>'`,
-> then `TS18046 's.count' is of type 'unknown'` on every field in every method.
-> Casting to `State & Record<string, unknown>` only moves the error. The same
-> shape as a `type` checks clean:
+> then `TS18046 's.count' is of type 'unknown'` on every field. Casting to
+> `State & Record<string, unknown>` only moves the error. `aiol` / `am check`
+> flags `state: {…} as SomeInterface` at the cause with the `type` alias fix.
+> The same shape as a `type` checks clean:
 >
 > ```ts
 > // ❌ interface State { count: number }

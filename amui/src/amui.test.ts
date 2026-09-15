@@ -96,9 +96,15 @@ testCell(
   "select a discovered project populates detail (no proxy/reduce error)",
   async (t) => {
     await t.send.discover();
-    // Select a real discovered project out of live (proxy) state — the exact
-    // path that triggered the 'preventExtensions on proxy' rejection.
-    const path = t.getState().projects[0]?.path;
+    // Wait for the scan to land in state — `send.discover()` can resolve
+    // before `projects` is visible on a loaded machine, and reading
+    // `projects[0]` then fails the assert in tens of ms (flaky under suite).
+    t.expect.state((s) =>
+      s.scanning === false && Array.isArray(s.projects) && s.projects.length > 0
+    );
+    // Prefer a real aio app if the scan ordered a non-aio neighbor first.
+    const path = t.getState().projects.find((p) => p.meta?.isAio)?.path ??
+      t.getState().projects[0]?.path;
     assert(path, "discovery found at least one project to select");
     await t.send.select(path);
     t.expect.state((s) =>

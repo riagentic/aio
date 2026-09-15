@@ -104,6 +104,7 @@ if (import.meta.main) {
         `that turns a sanitizer off says why: \`// aio-ok: <reason>\` on the ` +
         `line or the line above.`,
     );
+    for (const loc of unjustified) console.error(`  ${loc}`);
     Deno.exit(1);
   }
   console.log(

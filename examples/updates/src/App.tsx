@@ -138,7 +138,7 @@ export default function App() {
 
       <h1>Notes</h1>
       <ul>
-        {notes.items.map((t) => <li>{t}</li>)}
+        {notes.items.map((t, i) => <li key={i}>{t}</li>)}
       </ul>
       <button type="button" onClick={() => notes.add(`note ${Date.now()}`)}>
         Add a note

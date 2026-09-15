@@ -454,6 +454,13 @@
             "326291dd83527440"
           ]
         },
+        "CellState": {
+          "kind": "typeAlias",
+          "sig": "6fc1002dbe708b0a",
+          "sigs": [
+            "6fc1002dbe708b0a"
+          ]
+        },
         "CellStatus": {
           "kind": "typeAlias",
           "sig": "006638935f472535",

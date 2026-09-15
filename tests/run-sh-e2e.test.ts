@@ -20,6 +20,10 @@ import {
 const GATE = Deno.env.get("AIO_ONBOARD_E2E") === "1";
 const dec = new TextDecoder();
 
+function stripAnsi(s: string): string {
+  return s.replace(/\x1b\[[0-9;]*m/g, "");
+}
+
 /** One sandbox for the whole file: am installed from this checkout. */
 async function sandbox(): Promise<
   { env: Record<string, string>; root: string }
@@ -162,7 +166,7 @@ Deno.test({
         stdout: "piped",
         stderr: "piped",
       }).output();
-      const out = dec.decode(p.stdout) + dec.decode(p.stderr);
+      const out = stripAnsi(dec.decode(p.stdout) + dec.decode(p.stderr));
       assertEquals(p.code, 0, `run.sh --git failed:\n${out.slice(-4000)}`);
 
       const cloneName = appDir.split("/").pop()!;
@@ -274,7 +278,7 @@ Deno.test({
         stdout: "piped",
         stderr: "piped",
       }).output();
-      const out = dec.decode(p.stdout) + dec.decode(p.stderr);
+      const out = stripAnsi(dec.decode(p.stdout) + dec.decode(p.stderr));
       assert(
         !out.includes(SENTINEL),
         `run.sh built with the INSTALLED aio instead of the app's pin:\n${
@@ -380,7 +384,7 @@ Deno.test({
         stdout: "piped",
         stderr: "piped",
       }).output();
-      const out = dec.decode(p.stdout) + dec.decode(p.stderr);
+      const out = stripAnsi(dec.decode(p.stdout) + dec.decode(p.stderr));
       assert(
         !out.includes(SENTINEL),
         `the fallback built with $AIO_HOME instead of the app's dep/aio:\n${

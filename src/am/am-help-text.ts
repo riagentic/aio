@@ -270,7 +270,6 @@ Inspect:
                           lock, data home and logs, beside anyone else's.
                           An agent and a human stop sharing one session
   testgen [entry] [--out=F]  GENERATE A TYPED TEST CLIENT from what the app actually renders — ui.App.SaveButton.click() autocompletes and a renamed button breaks tests at COMPILE time, instead of a string key whose typo is a runtime undefined. Re-run after a UI change (default out: tests/ui.gen.ts)
-  migrate [--from=X]      MIGRATE / UPGRADE: which retired spellings THIS app still uses, with the fix and the guide for each. --from narrows to what was removed AFTER that release (default: the app's own pin). Exits 1 when anything is found, so it works in CI
   feedback [app]          Where THIS app's findings about aio go — a stable
                           path outside the version store, so \`am pin\` and
                           pruning an old version cannot delete them. Report,
@@ -297,7 +296,8 @@ Inspect:
                           it SERVES; this says what it is holding on to
   top [secs]              Live runtime view (per-cell state sizes); --json = one shot
   health                  HTTP health check
-  doctor                  running instances vs dep/aio on disk (fix: am restart)
+  doctor                  DIAGNOSE running process vs dep/aio on disk (→ am restart).
+                          Not config (that is \`deno task doctor\`) and not migrate.
   open [--print]          Open THIS app in a browser (--print writes the URL)
   discover [--timeout=ms] Find exposed aio apps on the LAN (UDP broadcast)
   profile [--out=file]    Export this app's .aioapp profile (cert + key) for the client
@@ -315,12 +315,13 @@ Scaffold:
                           (serverFns) AND the import line that registers it —
                           a namespace nobody imports is registered nowhere
 
-Repair (a clone that does not run yet):
-  fix                     Full repair: dep/aio symlink, env, electron, config,
-                          tasks — the one to run after a git clone.
-                          --dry-run reports without writing; --no-download
-                          skips the network steps (Electron, deno cache)
+Diagnose / repair / migrate (three different questions — do not conflate):
+  doctor                  running process vs aio on disk? → am restart if stale
+  fix                     clone/checkout repair: symlink, env, electron, tasks
+                          (--dry-run / --no-download). Not an API migrator.
   link                    Just the dep/aio symlink (fix does this and more)
+  migrate [--from=X]      which retired APIs THIS app still uses (CI exits 1).
+                          Rewrites: aiol --safe-fix. Not a clone repairer.
 
 Auth (apps running with auth: true) — run "am auth" for all of them:
   auth users              List accounts

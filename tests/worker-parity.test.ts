@@ -19,6 +19,7 @@
 import { assertEquals } from "@std/assert";
 import { join } from "@std/path";
 import { freePort } from "../src/testing/server-test.ts";
+import { dropTempDir, tempDir } from "../src/testing/temp-dir.ts";
 
 const REPO = new URL("../", import.meta.url).pathname;
 
@@ -177,7 +178,7 @@ Deno.test({
   name:
     "worker parity: a worker cell behaves as a normal one — state, returns, throws, effects",
   async fn() {
-    const dir = await Deno.makeTempDir({ prefix: "aio-wparity-" });
+    const dir = await tempDir("aio-wparity-");
     const port = freePort();
     await writeApp(dir, port);
     const app = await boot(dir, port);
@@ -210,7 +211,7 @@ Deno.test({
       assertEquals(later.wk, "fired", "the schedule effect never fired");
     } finally {
       await app.stop();
-      await Deno.remove(dir, { recursive: true }).catch(() => {});
+      await dropTempDir(dir);
     }
   },
 });

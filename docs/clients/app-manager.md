@@ -36,6 +36,21 @@ app that points here — and a one-line `CLAUDE.md` importing it, because Claude
 Code loads that file and not `AGENTS.md` — so an agent that never opens a doc
 still finds it.
 
+## Diagnose, repair, migrate — which verb?
+
+Three verbs people conflate. Each answers a different question:
+
+| Question                                                               | Verb               | Mutates the tree?                                               |
+| ---------------------------------------------------------------------- | ------------------ | --------------------------------------------------------------- |
+| Is the _running_ process on the aio that is on disk right now?         | `am doctor`        | No — names `am restart` when stale                              |
+| Is _deno.json / pin / tasks_ healthy?                                  | `deno task doctor` | No (config diagnosis)                                           |
+| Make a clone/checkout runnable (symlink, env, electron, missing tasks) | `am fix`           | Yes — safe, reversible, mostly machine-local; `--dry-run` first |
+| Only the `dep/aio` symlink                                             | `am link`          | Yes — the tiny sibling of `fix`                                 |
+| What _retired APIs_ does this app still use?                           | `am migrate`       | No — inventory; rewrites live in `aiol --safe-fix`              |
+
+`am fix` is not an API migrator. `am migrate` is not a clone repairer.
+`am doctor` is not either.
+
 ## Building a cloned aio app (`am fix`)
 
 A freshly cloned aio app usually **won't build yet** — the framework link,

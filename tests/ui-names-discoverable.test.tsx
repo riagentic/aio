@@ -109,17 +109,10 @@ Deno.test("uiNames(ui): the list AGREES with what a miss reports as available", 
   // Two producers of one fact is how they come to disagree. If a miss can see a
   // name that `names()` cannot, the discovery list is quietly incomplete.
   //
-  // They report different SCOPES on purpose — `names()` gives the full
-  // `Component:Element` path an `am trigger` takes, a miss lists the names
-  // relative to the component it searched — so the comparison is on the last
-  // segment, which is the part both are naming.
-  // The NESTED fixture, not the flat one. With no child components in the
-  // tree, the component half of a miss listing never appeared, so this test
-  // compared elements against elements and called that agreement.
+  // Element paths share one producer (`collectElementPaths`). The NESTED
+  // fixture is required so the component half of a miss listing appears too.
   await using ui = await testUI(Nested);
   await ui.settle();
-  const fromNames = uiNames(ui).map((n) => n.split(":").pop()!).sort();
-
   let available: string[] = [];
   try {
     // deno-lint-ignore no-explicit-any
@@ -140,20 +133,18 @@ Deno.test("uiNames(ui): the list AGREES with what a miss reports as available", 
     "the miss reported no `available:` list, so there was nothing to compare " +
       "— the comparison this test exists for did not happen",
   );
-  // A miss lists TWO kinds of thing, and they are addressed differently:
-  //   • an ELEMENT, by name — and `uiNames` carries it as the last segment of
-  //     a path;
-  //   • a child COMPONENT, by name or ordinal (`Row ×2 — use Row2 …`), which
-  //     `uiNames` does NOT list, because its documented shape is
-  //     `Component…:Element` and a component is not one.
-  // So the agreement to check is: every ELEMENT a miss offers is in the list,
-  // and every COMPONENT it offers is reachable the way the miss says.
+  // A miss lists TWO kinds of thing:
+  //   • an ELEMENT path — the SAME `Component…:Element` string uiNames uses
+  //     (one producer: collectElementPaths);
+  //   • a child COMPONENT, by name or ordinal (`Row ×2 — use Row2 …`).
+  // Elements must match uiNames exactly; components must resolve on ui.
   const components: string[] = [];
   const elements: string[] = [];
+  const nameSet = new Set(uiNames(ui));
   for (const a of available) {
     const m = /^(\w+) ×\d+/.exec(a);
     if (m) components.push(m[1]!);
-    else if (fromNames.includes(a)) elements.push(a);
+    else if (nameSet.has(a) || a.includes(":")) elements.push(a);
     else components.push(a); // a single child component, listed bare
   }
   assert(
@@ -163,7 +154,7 @@ Deno.test("uiNames(ui): the list AGREES with what a miss reports as available", 
   );
   for (const a of elements) {
     assert(
-      fromNames.includes(a),
+      nameSet.has(a),
       `a miss offers element "${a}" but uiNames(ui) does not list it — two ` +
         `producers of one fact, and they already disagree`,
     );

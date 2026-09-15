@@ -4,6 +4,19 @@ Common questions about what aio does, doesn't do, and why.
 
 ---
 
+### `am doctor` vs `am fix` vs `am migrate` — which one?
+
+| Verb               | Answers                                                                        | Changes your project?                                   |
+| ------------------ | ------------------------------------------------------------------------------ | ------------------------------------------------------- |
+| `am doctor`        | Is the _running_ process still on the aio that is on disk?                     | No — tells you to `am restart` if stale                 |
+| `deno task doctor` | Is _config_ (pin, tasks, layout) healthy?                                      | No                                                      |
+| `am fix`           | Can this clone/checkout build and run? (symlink, env, electron, missing tasks) | Yes — safe repairs; `--dry-run` first                   |
+| `am link`          | Only the `dep/aio` symlink                                                     | Yes — subset of `fix`                                   |
+| `am migrate`       | Which _retired APIs_ does this app still use?                                  | No — lists them; `aiol --safe-fix` rewrites what it can |
+
+Full map:
+[App manager — diagnose, repair, migrate](../clients/app-manager.md#diagnose-repair-migrate--which-verb).
+
 ### When NOT to use aio
 
 aio is designed for **state-centric tools** — dashboards, trading desks, control

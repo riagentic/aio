@@ -621,6 +621,20 @@ export function serializeSurface(node: UISurfaceNode): UISurfaceNode {
   };
 }
 
+/** Every element path under `node`, depth-first — the ONE list `uiNames`,
+ *  `am surface --names`, and a miss's `available:` share for elements.
+ *  Component names are not paths; callers that also list children do that
+ *  separately. */
+export function collectElementPaths(node: UISurfaceNode): string[] {
+  const out: string[] = [];
+  const walk = (n: UISurfaceNode) => {
+    for (const e of n.elements) out.push(e.path);
+    for (const c of n.children) walk(c);
+  };
+  walk(node);
+  return out;
+}
+
 /** Find component instances by name (and optionally key) anywhere in a surface. */
 export function findComponents(
   node: UISurfaceNode,
