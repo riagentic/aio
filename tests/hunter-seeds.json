@@ -1,0 +1,49 @@
+{
+  "version": 1,
+  "purpose": "Seeds that once killed a differential or hunter round. Replay must stay green in seconds \u2014 full sweeps stay in check:audit / FUZZ_ROUNDS.",
+  "seeds": [
+    {
+      "id": "wire-compact-777007",
+      "what": "collapsed replace never orphans an op under it",
+      "file": "tests/wire-patch-differential.test.ts",
+      "pinIncludes": [
+        "seed 777007",
+        "collapsed replace never orphans"
+      ]
+    },
+    {
+      "id": "wire-same-index-shift",
+      "what": "later replace at the SAME index never cancels a shift",
+      "file": "tests/wire-patch-differential.test.ts",
+      "pinIncludes": [
+        "SAME index never cancels a shift"
+      ]
+    },
+    {
+      "id": "proxy-arr-fill-object",
+      "what": "live-proxy rebuilt array writes \u2014 found by sync/async differential",
+      "file": "tests/live-proxy-rebuilt-array-writes.test.ts",
+      "pinIncludes": [
+        "differential fuzzer",
+        "objarr_filter_write"
+      ]
+    },
+    {
+      "id": "audit-hlc-monotonic",
+      "what": "HLC now() strictly monotonic within one millisecond",
+      "file": "tests/audit-regression-pins.test.ts",
+      "pinIncludes": [
+        "HLC now() is strictly monotonic"
+      ]
+    },
+    {
+      "id": "transport-undefined-member",
+      "what": "undefined object members vanish on the wire",
+      "file": "tests/transport-differential.test.ts",
+      "pinIncludes": [
+        "undefined member",
+        "wireBecomes"
+      ]
+    }
+  ]
+}

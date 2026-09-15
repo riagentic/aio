@@ -141,6 +141,7 @@ export type {
   CellAio,
   CellDef,
   CellEntry,
+  CellState,
   CellStatus,
   CircuitBreakerConfig,
   ComposedCells,

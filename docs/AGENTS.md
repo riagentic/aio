@@ -31,19 +31,27 @@ origin — everything `am surface` cannot see). Both need the app started with
 
 ## The loop that works
 
+Order: **check → run → test**. Types and aiol first, a running app second, tests
+last. A green window beats a green suite you invented before anything booted.
+The scaffold's starter test imports the template cell — delete or rewrite it in
+the same step you replace the cell, or `deno task check` stays red on a stale
+import.
+
 ```sh
+deno task check && deno task lint   # types + aiol — before you invent tests
 am start --cdp                      # daemonised — `deno task dev` follows your
                                     # terminal and dies when your shell exits
 am surface --json                   # what is on screen, by NAME
 am dispatch todo:add --args='["x"]' # drive the state machine
 am expect todo.items[0].text eq x   # assert, don't parse
 am timeline --lines=10              # what happened, with state diffs
+deno task test                      # last — after it runs
 ```
 
 **Observe → act → observe, one call per step.** The reply to `am trigger`
 already contains the fresh surface, so you rarely need a second read.
 
-## Three things that will cost you an hour each
+## Things that will cost you an hour each
 
 1. **The app mounts into `#root`.** Style that, not a wrapper of your own. A
    `#id` in your stylesheet that matches no element warns in dev — read it.
@@ -52,6 +60,14 @@ already contains the fresh surface, so you rarely need a second read.
    the most expensive mistake available.
 3. **`deno task dev` follows your terminal.** Every command you run is a fresh
    short-lived shell, so the app vanishes. Use `am start`.
+4. **`interface` for cell state.** Use a `type` alias. TypeScript fails inside
+   aio; `aiol` names the fix. See `CellState`.
+5. **Window stuck at 800×600.** `ui.width`/`ui.height` win when the declaration
+   changes; only an explicit `--width` overrides. See Electron window docs.
+6. **Writing tests before the app runs.** check → run → test. Delete or rewrite
+   the scaffold `tests/cell.test.ts` when you replace the cell.
+7. **`am doctor` vs `am fix` vs `am migrate`.** Running vs disk · clone repair ·
+   retired APIs. Three questions — see the app-manager verb map.
 
 ## Write tests you did not write by hand
 

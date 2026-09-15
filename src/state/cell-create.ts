@@ -21,12 +21,13 @@ import {
 import { nearestOf } from "./cell-helpers.ts";
 import { log } from "../diagnostics/logger-api.ts";
 import type {
+  CellState,
   MethodsCellConfig,
   SelectorAccessors,
   SelectorDef,
 } from "./cell-config-types.ts";
 
-export type { MethodsCellConfig };
+export type { CellState, MethodsCellConfig };
 
 /** Every key `cell()` reads. Kept beside the type it mirrors
  *  ({@linkcode MethodsCellConfig}) — `tests/cell-config-keys.test.ts` fails the

@@ -1,0 +1,129 @@
+{
+  "version": 1,
+  "purpose": "Lane A (fast) = seconds on every edit. Lane B (seam) = harness\u2260wire, prod-parity, hunter seeds. Lane C = full/nightly. Full `deno task test` stays the release gate.",
+  "fast": [
+    "tests/no-vacuous-tests.test.ts",
+    "tests/no-dead-wiring.test.ts",
+    "tests/mutation-ledger.test.ts",
+    "tests/no-color.test.ts",
+    "tests/happy-dom-window-hygiene.test.ts",
+    "tests/temp-dir-hygiene.test.ts",
+    "tests/one-fact-one-spelling.test.ts",
+    "tests/am-help-flags-are-accepted.test.ts",
+    "tests/am-agent-truth.test.ts",
+    "tests/am-agent-brief.test.ts",
+    "tests/am-answers-are-true.test.ts",
+    "tests/api-snapshot-colour-independent.test.ts",
+    "tests/error-format.test.ts",
+    "tests/budget-worker-hint.test.ts",
+    "tests/scaffold-check-covers-tests.test.ts",
+    "tests/ui-names-discoverable.test.tsx",
+    "tests/trigger-press-enter.test.ts",
+    "tests/testui-form-delegated-handlers.test.tsx",
+    "tests/electron.test.ts",
+    "tests/aiol-cell-state-interface.test.ts",
+    "tests/sanitizer-leak-floor.test.ts",
+    "tests/docs-truth-gate.test.ts",
+    "tests/am-advice-is-runnable.test.ts",
+    "tests/am-surface-rects.test.ts"
+  ],
+  "seam": [
+    "tests/transport-differential.test.ts",
+    "tests/wire-patch-differential.test.ts",
+    "tests/proxy-differential.test.ts",
+    "tests/transaction-differential.test.ts",
+    "tests/offline-queue-differential.test.ts",
+    "tests/renderer-differential.test.ts",
+    "tests/timeline-diff-differential.test.ts",
+    "tests/foruser-view-differential.test.ts",
+    "tests/app-identity-differential.test.ts",
+    "tests/prod-parity-harness-strictness.test.ts",
+    "tests/prod-parity-client-sync-call.test.ts",
+    "tests/prod-parity-worker-boundary.test.ts",
+    "tests/prod-parity-real-workers.test.ts",
+    "tests/transport-chaos-fuzz.test.ts",
+    "tests/transport-exactly-once.test.ts",
+    "tests/return-value-transport.test.ts",
+    "tests/air-transport-send-throw-queue.test.ts",
+    "tests/air-transport-stale-close.test.ts",
+    "tests/air-transport-terminal-mismatch.test.ts",
+    "tests/client-transport-refusals.test.ts",
+    "tests/browser-transport-guards.test.ts",
+    "tests/local-transport-decision.test.ts",
+    "tests/broadcast-degraded-both-transports.test.ts",
+    "tests/state-transport-handler.test.ts",
+    "tests/seam-paths.test.ts",
+    "tests/audit-regression-pins.test.ts",
+    "tests/audit-silent-outcomes.test.ts",
+    "tests/audit-residual-guards.test.ts",
+    "tests/ws-origin-one-decider.test.ts",
+    "tests/action-ack-honesty.test.ts",
+    "tests/ack-async-bare-frame.test.ts",
+    "tests/ws-dropped-frame-settles-call.test.ts",
+    "tests/ws-burst-no-lost-writes.test.ts",
+    "tests/seam-method-differential.test.ts",
+    "tests/hunter-seeds-replay.test.ts"
+  ],
+  "demoted": [
+    {
+      "file": "tests/db-state-differential.test.ts",
+      "lane": "full",
+      "why": "~28s randomized SQL/array differential \u2014 seam-capable but too slow for test:fast; keep in full + optional FUZZ sweep"
+    },
+    {
+      "file": "tests/install-deno-version.test.ts",
+      "lane": "nightly",
+      "why": "~51s network/version install \u2014 not a seam pin"
+    },
+    {
+      "file": "tests/cli-client-burst-no-lost-writes.test.ts",
+      "lane": "full",
+      "why": "~51s load/burst \u2014 Lane B under load, not every edit"
+    },
+    {
+      "file": "tests/examples.test.ts",
+      "lane": "full",
+      "why": "example matrix boots \u2014 Lane C-ish; covered by test:build/onboard paths"
+    },
+    {
+      "file": "tests/examples-boot.test.ts",
+      "lane": "full",
+      "why": "example boots wall-clock"
+    },
+    {
+      "file": "tests/electron-main-relay.test.ts",
+      "lane": "full",
+      "why": "~29s electron relay surface"
+    },
+    {
+      "file": "tests/e2e-bundle-smoke.test.ts",
+      "lane": "nightly",
+      "why": "bundle smoke \u2014 test:e2e / matrix"
+    },
+    {
+      "file": "tests/onboarding-e2e.test.ts",
+      "lane": "nightly",
+      "why": "deno task test:onboard"
+    },
+    {
+      "file": "tests/build-e2e.test.ts",
+      "lane": "nightly",
+      "why": "deno task test:build"
+    },
+    {
+      "file": "tests/am-lab.test.ts",
+      "lane": "nightly",
+      "why": "lab container / long"
+    },
+    {
+      "file": "tests/cron-differential-fuzz.test.ts",
+      "lane": "full",
+      "why": "randomized cron differential \u2014 keep in full; not required on every edit"
+    }
+  ],
+  "budget": {
+    "fastWallMs": 120000,
+    "seamWallMs": 600000,
+    "note": "Advisory ceilings for the lane tasks; check:test-lanes verifies membership, not wall clock."
+  }
+}

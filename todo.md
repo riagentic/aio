@@ -75,26 +75,13 @@ they are here rather than in the round's commits. The round's fixes are in
 `git log v1.0.0-beta..`, and what would need a major version is in
 `future/v2.md`.
 
-- **`uiNames(ui)` and the miss listing are two producers of one fact, and they
-  disagree in both directions.** `uiNames` returns full `Component:Element`
-  paths — which `ui["App:SaveButton"]` then REFUSES ("no component or element
-  named…") — and omits every child COMPONENT name, which the miss listing
-  includes. Its guard, `tests/ui-names-discoverable.test.tsx`, cannot catch
-  either: its fixture has no child components, so the component half can never
-  appear, and it compares only `n.split(":").pop()`, which hides that the full
-  string is not addressable. A vacuous guard, same class as the `check-vacuous`
-  holes this round closed. `docs/testing/ui-testing.md` sells the list as the
-  pre-flight discovery step for agents.
-- **Two deciders for "where does a test's scratch directory go".**
-  `src/testing/test-strict.ts` argues at length that `/tmp` is the wrong place
-  and puts everything under `~/tmp/aio/`; `src/testing/temp-dir.ts` — which
-  calls itself "ONE decider for 'this test needs a throwaway directory'" — calls
-  `Deno.makeTempDir()` with no `dir`, i.e. `/tmp`. Only one honours
-  `AIO_TEST_ROOT`. Measured consequence: `scripts/check-orphans.ts` and
-  `deno task clean:tmp` sweep `/tmp/aio-*` only, so `~/tmp/aio` is ungated — 151
-  directories, 122 of them over a day old, back to 2026-09-02. The gate built
-  because of 5,612 leaked `/tmp/aio-*` dirs is blind to the tree that replaced
-  them.
+- ~~**`uiNames(ui)` and the miss listing are two producers of one fact**~~ —
+  **DONE (1.0.2-beta).** `collectElementPaths` is the one walker; miss
+  `available:` lists the same element paths as `uiNames` / `am surface --names`
+  (components stay as ordinal hints). Guard covers nested components.
+- ~~**Two deciders for test scratch directories**~~ — **DONE.** `tempDir()`
+  creates under `aioTestRoot()` (`AIO_TEST_ROOT` / `~/tmp/aio`); orphans sweep
+  covers that tree.
 
 ### 1.0.1-beta — per-page head (proposed 2026-09-11)
 

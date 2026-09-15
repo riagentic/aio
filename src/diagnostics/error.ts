@@ -606,8 +606,12 @@ export function generateTip(err: AioError): string | undefined {
       }ms (budget: ${
         err.context.budget ?? 5
       }ms). An effect must return immediately: kick off async I/O without ` +
-        `awaiting it here, or hand CPU work to blocking("id", fn, ` +
-        `arg).` + workerHint(err) + ` See docs/debugging/performance.md.`;
+        `awaiting it here, or hand CPU work to blocking("id", fn, arg). ` +
+        `If this was an ASYNC method that reads its own writes in a loop, ` +
+        `the cost may be the read-your-writes overlay (quadratic today) — ` +
+        `prefer a sync method for that body, or batch then commit once; ` +
+        `blocking() will not fix an overlay that re-clones on every write.` +
+        workerHint(err) + ` See docs/debugging/performance.md.`;
     case "PERSIST_ERROR": {
       // An OBSERVATION about a write that still landed (a value JSON changes
       // on the way, a cell over the size guardrail, a skipped version stamp)

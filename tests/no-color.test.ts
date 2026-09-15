@@ -73,7 +73,6 @@ Deno.test("no-color: a pipe is not a terminal, so it gets no colour", async () =
   );
 });
 
-
 Deno.test("no-color: FORCE_COLOR=0 is off, not on", async () => {
   // Hosts (CI runners, agent sandboxes) often export FORCE_COLOR=0 to mean
   // "do not paint". A truthy-string check treated that as force-ON and every

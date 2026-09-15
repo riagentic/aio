@@ -37,7 +37,7 @@ const BROWSER = args.get("browser") ?? "";
 const APP_ID = args.get("app-id") ?? "";
 const LOG_DIR = args.get("log-dir") ?? null;
 const TIMEOUT_MS = Number(args.get("timeout") ?? 90_000);
-const VERBOSE = args.has("verbose");
+const _VERBOSE = args.has("verbose");
 const INTERACT = args.has("interact");
 const EXPECT = args.get("expect") ?? "";
 

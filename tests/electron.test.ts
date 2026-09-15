@@ -393,3 +393,15 @@ Deno.test("electron: generated main.cjs is syntactically valid JS", () => {
     new Function(s);
   }
 });
+
+Deno.test("electron bounds: declared size change beats a leftover window-state.json", () => {
+  const s = electronMainScript("http://127.0.0.1:1/", {
+    title: "x",
+    width: 420,
+    height: 620,
+  });
+  assertStringIncludes(s, "declaredWidth");
+  assertStringIncludes(s, "declaredHeight");
+  assertStringIncludes(s, "d.declaredWidth === dw");
+  assertStringIncludes(s, "loadBounds(420, 620)");
+});

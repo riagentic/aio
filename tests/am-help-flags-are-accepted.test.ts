@@ -70,6 +70,8 @@ function advertised(): Map<string, Set<string>> {
 const PROSE_ONLY: Record<string, readonly string[]> = {
   shot: ["--cdp"],
   eval: ["--cdp"],
+  // migrate's block points at aiol's rewriter; migrate itself does not take it.
+  migrate: ["--safe-fix"],
 };
 
 Deno.test("am: every flag the help text offers is accepted by the gate", () => {

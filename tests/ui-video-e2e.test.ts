@@ -9,6 +9,10 @@ import { assert, assertEquals, assertStringIncludes } from "@std/assert";
 import { findChromium } from "../src/testing/server-test.ts";
 import { dropTempDir, tempDir } from "../src/testing/temp-dir.ts";
 
+function stripAnsi(s: string): string {
+  return s.replace(/\x1b\[[0-9;]*m/g, "");
+}
+
 const CHROME = findChromium();
 const TODO = new URL("../examples/todo/", import.meta.url).pathname;
 
@@ -44,12 +48,13 @@ async function run(
   const o = await new Deno.Command(Deno.execPath(), {
     args: ["test", "-A", "--config", `${TODO}deno.json`, file, ...args],
     cwd: TODO,
-    env: { NO_COLOR: "1", ...env },
+    env: { ...Deno.env.toObject(), NO_COLOR: "1", FORCE_COLOR: "0", ...env },
     stdout: "piped",
     stderr: "piped",
   }).output();
-  const text = new TextDecoder().decode(o.stdout) +
-    new TextDecoder().decode(o.stderr);
+  const text = stripAnsi(
+    new TextDecoder().decode(o.stdout) + new TextDecoder().decode(o.stderr),
+  );
   return { code: o.code, text };
 }
 
@@ -97,7 +102,7 @@ Deno.test({
   name:
     "testUI --video=<dir>/: one MP4 per test, named after it, with no change to the test",
   ignore: !CHROME,
-  sanitizeResources: false, // the child process is awaited; its pipes are ours
+  sanitizeResources: false, // aio-ok: the child process is awaited; its pipes are ours
   async fn() {
     const dir = await tempDir("ui-video-e2e-");
     try {
@@ -134,7 +139,7 @@ Deno.test({
   name:
     "AIO_VIDEO=<file>.webm: VP8 WebM; a second test claiming the same file is refused, not overwritten",
   ignore: !CHROME,
-  sanitizeResources: false,
+  sanitizeResources: false, // aio-ok: the child process is awaited; its pipes are ours
   async fn() {
     const dir = await tempDir("ui-video-e2e-");
     try {
@@ -159,7 +164,7 @@ Deno.test({
   name:
     "a test that FAILS its assertion still gets its video — that is where it is most wanted",
   ignore: !CHROME,
-  sanitizeResources: false,
+  sanitizeResources: false, // aio-ok: the child process is awaited; its pipes are ours
   async fn() {
     const dir = await tempDir("ui-video-e2e-");
     try {

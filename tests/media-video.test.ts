@@ -259,6 +259,7 @@ Deno.test("muxWebm: cues come before the clusters and each points at a keyframe 
   });
   // CueClusterPosition is relative to the segment's data start, and must
   // land on a Cluster's id (the element header, not its data).
+  assert(positions.length > 0, "muxed webm must carry at least one cue point");
   for (const p of positions) {
     const at = segStart + p;
     assertEquals([...webm.subarray(at, at + 4)], [0x1F, 0x43, 0xB6, 0x75]);

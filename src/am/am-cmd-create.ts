@@ -722,12 +722,11 @@ export default function App(): JSX.Element {
 `;
 
 const CANVAS_TEST =
-  `// The half of a canvas app that CAN be tested — which is nearly all of it.
-//
-// \`step()\` is a pure function of the world, so bouncing is an ordinary
-// assertion. See docs/testing/canvas-and-3d.md.
-// It imports the cell by name, so rewrite or delete this when you replace the cell
-// (\`deno task check\` reads tests/ too, so a stale import fails there first).
+  `// Starter for THIS canvas cell only. Replace the cell → delete or rewrite
+// this file in the same step (\`deno task check\` reads tests/, so a stale
+// import fails there first). The half that CAN be tested — nearly all of it —
+// is below: \`step()\` is pure, so bouncing is an ordinary assertion. See
+// docs/testing/canvas-and-3d.md.
 import { assertEquals } from "@std/assert";
 import { testCell } from "aio/testing";
 import { step, world } from "../src/cell.ts";
@@ -1598,10 +1597,10 @@ export default function App(): JSX.Element {
 `;
 
 const COUNTER_TEST =
-  `// A starter test — \`deno task test\`. Cells are pure, so they test in isolation
-// (no server, no DOM) with the testCell harness. It imports the cell by name:
-// rewrite or delete this when you replace the cell (\`deno task check\` reads
-// tests/ too, so a stale import fails there first).
+  `// Starter for THIS counter cell only. Replace the cell → delete or rewrite
+// this file in the same step (\`deno task check\` reads tests/, so a stale
+// import fails there first). Order that works: check → run the app → then
+// write tests for YOUR methods. Do not invent a test API before the app runs.
 import { testCell } from "aio/testing";
 import { counter } from "../src/cell.ts";
 
@@ -1656,10 +1655,10 @@ export const view = cell("view", {
 `;
 
 const TODO_TEST =
-  `// A starter test — \`deno task test\`. Cells are pure, so they test in isolation
-// (no server, no DOM) with the testCell harness. It imports the cell by name:
-// rewrite or delete this when you replace the cell (\`deno task check\` reads
-// tests/ too, so a stale import fails there first).
+  `// Starter for THIS todo cell only. Replace the cell → delete or rewrite
+// this file in the same step (\`deno task check\` reads tests/, so a stale
+// import fails there first). Order that works: check → run the app → then
+// write tests for YOUR methods. Do not invent a test API before the app runs.
 import { testCell } from "aio/testing";
 import { todo, view } from "../src/cell.ts";
 
@@ -1838,10 +1837,9 @@ if (Deno.args[0] === "serve") {
 `;
 
 const CLI_TEST =
-  `// A starter test — \`deno task test\`. Cells are pure, so they test in isolation
-// (no server, no DOM) with the testCell harness. It imports the cell by name:
-// rewrite or delete this when you replace the cell (\`deno task check\` reads
-// tests/ too, so a stale import fails there first).
+  `// Starter for THIS scaffold cell only. Replace the cell → delete or rewrite
+// this file in the same step (\`deno task check\` reads tests/, so a stale
+// import fails there first). Order that works: check → run → then test.
 import { testCell } from "aio/testing";
 import { todos } from "../src/cell.ts";
 

@@ -195,6 +195,8 @@ Deno.test("am agent: every flag anywhere in the brief is parsed by something", (
   const sources = [
     ...new Set(Object.values(PASSTHROUGH_SOURCES).flat()),
     "src/server/aio-cli.ts",
+    // Brief documents `aiol --safe-fix` on purpose; that flag lives here.
+    "aiol/mod.ts",
   ].map(read);
   // Flags that belong to OTHER programs, shown on purpose: Electron's own
   // switch (passed through AIO_ELECTRON_ARGS).

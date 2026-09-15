@@ -1,6 +1,6 @@
 {
   "name": "@riagentic/aio",
-  "version": "1.0.1-beta",
+  "version": "1.0.2-beta",
   "appId": "aio",
   "exports": {
     ".": "./mod.ts",
@@ -138,7 +138,7 @@
     "check:boundaries": "deno run --allow-read scripts/check-boundaries.ts",
     "check:silent-catch": "deno run --allow-read scripts/check-silent-catch.ts",
     "check:tempdirs": "deno run --allow-read scripts/check-temp-dirs.ts",
-    "check:ratchets": "deno run --allow-read scripts/check-temp-dirs.ts && deno run --allow-read scripts/check-vacuous.ts && deno run --allow-read scripts/check-dead-wiring.ts && deno run --allow-read scripts/check-silent-catch.ts && deno run --allow-read scripts/check-log-prefix.ts && deno run --allow-read scripts/check-gated-tests.ts && deno run --allow-read scripts/check-placeholders.ts",
+    "check:ratchets": "deno run --allow-read scripts/check-temp-dirs.ts && deno run --allow-read scripts/check-vacuous.ts && deno run --allow-read scripts/check-dead-wiring.ts && deno run --allow-read scripts/check-silent-catch.ts && deno run --allow-read scripts/check-log-prefix.ts && deno run --allow-read scripts/check-gated-tests.ts && deno run --allow-read scripts/check-placeholders.ts && deno run --allow-read scripts/check-test-lanes.ts",
     "check:placeholders": "deno run --allow-read scripts/check-placeholders.ts",
     "check:gated-tests": "deno run --allow-read scripts/check-gated-tests.ts",
     "check:lock": "deno run --allow-read scripts/check-lock.ts",
@@ -169,6 +169,10 @@
     "update:api-ref": "deno doc --html --name=aio --output=docs/api-ref mod.ts",
     "update:docs": "deno run --allow-read --allow-write scripts/gen-doc-index.ts",
     "update:examples": "deno run -A scripts/sync-examples.ts",
-    "check:matrix": "AIO_APPS_DIR=$INIT_CWD/.aio-test-home deno test -A tests/examples.test.ts tests/examples-ui.test.ts && AIO_APPS_DIR=$INIT_CWD/.aio-test-home AIO_ONBOARD_E2E=1 deno test -A --no-check=remote tests/onboarding-e2e.test.ts && AIO_BUILD_SMOKE=1 deno test -A tests/am-onboard.test.ts"
+    "check:matrix": "AIO_APPS_DIR=$INIT_CWD/.aio-test-home deno test -A tests/examples.test.ts tests/examples-ui.test.ts && AIO_APPS_DIR=$INIT_CWD/.aio-test-home AIO_ONBOARD_E2E=1 deno test -A --no-check=remote tests/onboarding-e2e.test.ts && AIO_BUILD_SMOKE=1 deno test -A tests/am-onboard.test.ts",
+    "check:test-lanes": "deno run --allow-read scripts/check-test-lanes.ts",
+    "test:fast": "deno task check:ratchets && AIO_APPS_DIR=$INIT_CWD/.aio-test-home deno run -A scripts/run-test-lane.ts fast",
+    "test:seam": "deno task check:test-lanes && AIO_APPS_DIR=$INIT_CWD/.aio-test-home deno run -A scripts/run-test-lane.ts seam",
+    "test:hunters": "AIO_APPS_DIR=$INIT_CWD/.aio-test-home deno test -A --sanitize-ops --sanitize-resources tests/hunter-seeds-replay.test.ts tests/audit-regression-pins.test.ts"
   }
 }

@@ -122,18 +122,34 @@ if (__aioParent > 0) {
 /** Window bounds persistence: stateFile, loadBounds, saveBounds.
  *  @param async Use async fs/promises variant (UDS) vs sync writeFileSync (standard) */
 export function tmplBounds(async = false): string {
+  // Persist bounds WITH the size the app declared at launch. On the next
+  // start, if ui.width/height (or an explicit --width/--height) changed, the
+  // new declaration wins; if it is unchanged, the user's resize is kept.
+  // Without that, a leftover window-state.json silently ate every declared
+  // size after the first launch (field report: window sizing).
+  const payload =
+    `Object.assign({}, win.getBounds(), { declaredWidth: __aioDw, declaredHeight: __aioDh })`;
   const save = async
-    ? `  try { require('fs/promises').writeFile(stateFile, JSON.stringify(win.getBounds())).catch(() => {}); } catch {}`
+    ? `  try { require('fs/promises').writeFile(stateFile, JSON.stringify(${payload})).catch(() => {}); } catch {}`
     : `  // AIO-272: window state persistence failures should be visible
-  try { fs.writeFileSync(stateFile, JSON.stringify(win.getBounds())); }
+  try { fs.writeFileSync(stateFile, JSON.stringify(${payload})); }
   catch (e) { console.error("[aio:electron] saveBounds failed:", e); }`;
   return `
 const stateFile = path.join(app.getPath('userData'), 'window-state.json');
+let __aioDw = 800, __aioDh = 600;
 
 function loadBounds(dw, dh) {
+  __aioDw = dw; __aioDh = dh;
   try {
     const d = JSON.parse(fs.readFileSync(stateFile, 'utf8'));
-    if (d.width > 0 && d.height > 0) return d;
+    if (d.width > 0 && d.height > 0) {
+      if (d.declaredWidth === dw && d.declaredHeight === dh) return d;
+      // Declared size changed — keep position, take the new size.
+      const out = { width: dw, height: dh };
+      if (typeof d.x === 'number') out.x = d.x;
+      if (typeof d.y === 'number') out.y = d.y;
+      return out;
+    }
   } catch {}
   return { width: dw, height: dh };
 }

@@ -23,6 +23,7 @@ import {
 } from "../src/protocol/envelope.ts";
 import { freePort } from "../src/testing/server-test.ts";
 import { createAioError } from "../src/diagnostics/error.ts";
+import { dropTempDir, tempDir } from "../src/testing/temp-dir.ts";
 
 type Ack = {
   cid: string;
@@ -110,6 +111,7 @@ async function rig() {
   const ns = `secrets${++_ns}`;
   serverFns(ns, { peek: () => "s3cret" }, { access: "admin" });
   const port = freePort();
+  const baseDir = await tempDir("wire-error-code-");
   const app = await aio.run({
     cells: [vault, open],
     appId: "test-wire-error-code",
@@ -117,7 +119,7 @@ async function rig() {
     persist: false,
     libraryMode: true,
     port,
-    baseDir: await Deno.makeTempDir(),
+    baseDir,
   });
   const acks: Ack[] = [];
   const sfnrs: Ack[] = [];
@@ -144,6 +146,7 @@ async function rig() {
     close: async () => {
       ws.close();
       await app.close();
+      await dropTempDir(baseDir);
     },
   };
 }

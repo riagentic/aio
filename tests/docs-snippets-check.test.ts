@@ -26,6 +26,14 @@
 // line `// snippet: fragment` for true fragments.
 import { assert } from "@std/assert";
 
+/** Deno still paints `deno check` diagnostics even under `NO_COLOR` + a pipe
+ *  (2.9.x). The stub-pass regex and the doc-line remapper both key on plain
+ *  `file://…:line:col` text — escapes between the pieces make zero matches,
+ *  so pass 2 never runs and every elided name looks like an API lie. */
+function stripAnsi(s: string): string {
+  return s.replace(/\x1b\[[0-9;]*m/g, "");
+}
+
 const ROOT = new URL("..", import.meta.url);
 
 const FENCE_RE = /```(ts|tsx)\b([^\n]*)\n([\s\S]*?)```/g;
@@ -433,14 +441,14 @@ Deno.test("doc ts/tsx code blocks type-check against the real API", async () => 
         args: ["check", "--config", `${tmp}/deno.json`, ...checkFiles],
         // NO_COLOR: the report is remapped by regex, and ANSI escapes sit
         // between the path and its `:line:col`.
-        env: { NO_COLOR: "1" },
+        env: { ...Deno.env.toObject(), NO_COLOR: "1", FORCE_COLOR: "0" },
         stdout: "piped",
         stderr: "piped",
       }).output();
 
     // ONE batched check — the aio graph is type-checked once for all snippets.
     let out = await check();
-    let stderr = new TextDecoder().decode(out.stderr);
+    let stderr = stripAnsi(new TextDecoder().decode(out.stderr));
 
     // Pass 2, for import-less snippets only: a doc block routinely uses a cell
     // an EARLIER block defined (`counter`, `myCell`, `wallet`), or a helper the
@@ -482,7 +490,7 @@ Deno.test("doc ts/tsx code blocks type-check against the real API", async () => 
           );
         }
         out = await check();
-        stderr = new TextDecoder().decode(out.stderr);
+        stderr = stripAnsi(new TextDecoder().decode(out.stderr));
       }
     }
 

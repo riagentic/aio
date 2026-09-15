@@ -58,9 +58,12 @@ Deno.test("api gate: the same tree digests the same with and without colour", as
     // FORCE_COLOR / NO_COLOR. Either is fine; half two is the load-bearing
     // guard. What is not fine is a silent other dependence with no escapes.
     if (coloured !== plain) {
+      // deno doc may embed SGR as real ESC bytes, or as the six characters
+      // `\u001b` inside the JSON text (before parse). Both are colour.
+      const lit = "\\" + "u001b";
       assert(
-        coloured.includes(ESC) || coloured.includes("\u001b") ||
-          plain.includes(ESC) || plain.includes("\u001b"),
+        coloured.includes(ESC) || coloured.includes(lit) ||
+          plain.includes(ESC) || plain.includes(lit),
         "readings differ without colour escapes — `deno doc --json` has some " +
           "OTHER context dependence, and the digest inherits it",
       );

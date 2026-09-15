@@ -761,18 +761,18 @@ function renderRunKeys(): string {
 
 /** First on purpose: a model that reads only the top still gets these. */
 const RULES =
-  `RULES — four that protect the human (break one = damage outside your task)
-1 NEVER kill by process match. NO: pkill -f app.ts · killall deno · kill $(pgrep -f deno) — matches
-  EVERY aio app on the machine. YES: am stop · am stop --app=<id> · am stop --all (this project
-  only) · am kill --stale (orphans) · am instances first. am stop fails? report it; never escalate.
-2 NEVER take over the screen. No window/tab unless pixels are needed: am start --client=server-only;
-  read UI with am surface (no window). am start already contains windows (nested X display) and
-  suppresses tabs when no human is on the terminal — don't undo it, don't launch around am.
-  Human wants it back: am start --display=current.
-3 NEVER script around am. python/jq/curl/bash loops against an app = a worse copy of a verb.
-  Assert: am expect. Watch: am state <path> --watch. Every command takes --json (auto when piped).
-4 LEARN BEFORE EDITING. aio is not React/Express/Next: a cell is not a store, a method is not a
-  handler. Guessed code type-checks, boots, and is wrong. Read this page; ask am, not the source.`;
+  `RULES — protect the human AND don't burn the clock (break one = damage or an hour lost)
+1 NEVER kill by process match. NO: pkill -f app.ts · killall deno. YES: am stop · am stop --all ·
+  am kill --stale · am instances first. am stop fails? report it; never escalate.
+2 NEVER take over the screen. am start --client=server-only; am surface (no window). Contained
+  display is the default — don't launch around am. Human wants the desk: --display=current.
+3 NEVER script around am. Assert: am expect. Watch: am state --watch. Every command takes --json.
+4 LEARN BEFORE EDITING. Not React/Express/Next. Guessed code type-checks and is wrong. Read this page.
+5 check → run → test. am start before inventing tests. Replace the cell → rewrite tests/cell.test.ts.
+6 state = \`type\` alias, NEVER \`interface\` (aiol names the fix). Window: ui.width/height wins when
+  the declaration changes; only an explicit --width/--height overrides a leftover window-state.json.
+7 Repair verbs: am doctor = running vs disk (→ am restart) · deno task doctor = config ·
+  am fix = clone repair · am link = symlink · am migrate = retired APIs (aiol --safe-fix).`;
 
 const MODEL = `MODEL — one cell drives everything
 cell(name, { state, methods }) = server state + SQLite persistence (~/.<appId>/data/state.db)
@@ -823,10 +823,13 @@ ${
 3 tasks     deno task test | check (deno check + am check) | lint (deno lint + aiol) | fmt | doctor
             (config + pin sanity) | dev (FOREGROUND) | compile (default target) | build (all
             build.targets) | publish | ship | am
-4 verify    cd <name> && deno task test && deno task check && deno task lint
+4 check     cd <name> && deno task check && deno task lint
+            (types + aiol first. The scaffold test imports the template cell — delete or rewrite
+            it in the SAME step you replace the cell, or check stays red on a stale import.)
 5 run       am start --client=server-only   (daemon; waits for health; survives your shell)
             am status (0 up · 1 down · 2 transitional) · am instances (port, dataDir, stopWith)
             NO: deno task dev from a tool shell — it dies with the shell.
+            RUN BEFORE YOU WRITE TESTS — a green window beats a green suite you invented.
 6 state     edit src/cell.ts (CELL section). Another cell: am add cell <n> → src/cell/<n>.ts, then
             IMPORT it (app.ts or a component). Server-only module: am add server <n> →
             src/server/<n>.server.ts + import wired into app.ts (serverFns come from "aio").
@@ -835,13 +838,14 @@ ${
 8 observe   save → dev reloads (cell/entry change = server restart, persisted state kept)
             am logs --level=warn · am errors · am state notes · am dispatch notes:add milk n1 1
             am expect notes.items[0].text eq milk · am timeline --lines=10 · am surface
-9 test      tests/<area>.test.ts(x): testCell for EVERY method, testUI for every user flow → TEST
+9 test      ONLY AFTER it runs: tests/<area>.test.ts(x) — testCell for each method you kept,
+            testUI for each user flow. Use the harness in am agent --task=test; do not invent APIs.
 10 gates    deno task check && deno task lint && deno task test && deno task fmt
 11 ship      deno task compile → dist/<name>-0.1.<commits>[-dirty.<hash>] + dist/manifest.json → SHIP
 12 stop      am stop
-DONE = every method dispatch-tested · each user flow in testUI · check+lint+test green · am logs
-  --level=warn and am errors clean · secrets behind visible · state small (rows→db, bytes→blobs)
-  · deno task compile builds · the artifact boots (run it, am status) · am stop.
+DONE = the app runs (am start + am status) · check+lint+test green · each kept method in testCell ·
+  each user flow in testUI · am logs --level=warn and am errors clean · secrets behind visible ·
+  state small (rows→db, bytes→blobs) · deno task compile builds · the artifact boots · am stop.
 ${show(APP_TS)}`;
 
 const CELL =
@@ -1048,6 +1052,10 @@ field back to default after restart   → shape change w/o version; row field wi
                                                                              → version+onMigrate; column
 testUI/am: no "XButton"               → nested text / copy change / dup     → aria-label or t="x"
 testCell: "no clock"                  → schedule effect in testCell         → bootCells + h.advance
+TS2322 inside aio / s.field unknown   → state typed as interface            → type St = {…}; aiol says so
+window wrong size vs ui.width         → stale window-state / no ui.width   → set ui.width (wins) or --width
+check red after replacing the cell    → scaffold test still imports counter → rewrite tests/cell.test.ts
+hours on tests, app never run         → wrote tests before am start         → check → run → test
 green in-process, wrong in browser    → JSON over the wire (Date→string)    → JSON-safe; testMultiClient
 am: "does not know which app"         → wrong cwd / not running             → cd app; --app; am instances
 old numbers from am state             → orphan still serving                → am kill --stale
@@ -1456,7 +1464,7 @@ One command, one page: the model, the full API, every \`am\` verb, how to add
 state/UI/tests, debug and ship. \`am agent --task=<slug>\` for one section
 (\`--list\` for all; \`--task=new\` is the build flow).
 
-## Four rules
+## Rules
 
 - **Never end an app by process match.** \`pkill -f app.ts\` matches EVERY aio
   app on the machine. Use \`am stop\` (\`am stop --all\` for this project);
@@ -1465,15 +1473,21 @@ state/UI/tests, debug and ship. \`am agent --task=<slug>\` for one section
   the UI with \`am surface\` — it needs no window.
 - **Never script around \`am\`.** Python, jq or curl against this app is a worse
   copy of a verb. Every command takes \`--json\`.
-- **Learn before editing.** \`am agent\` first.
+- **Learn before editing.** \`am agent\` first — aio is not React/Next.
+- **check → run → test.** Types first, running app second, tests last. Rewrite
+  or delete the scaffold \`tests/cell.test.ts\` when you replace the cell.
+- **\`type\` alias for cell state, never \`interface\`.**
 
 ## The loop
 
+Order that works: **check → run → test** (do not write tests before the app runs).
+
+    deno task check && deno task lint
     am start --client=server-only  # daemonised; deno task dev dies with your shell
     am surface --json              # what is on screen, by NAME
     am dispatch <cell:method> args # drive the state machine
     am expect <path> eq <value>    # assert — do not pipe state to a parser
     am timeline --lines=20         # what happened, with state diffs
-    deno task test && deno task check && deno task lint
+    deno task test                 # last — after it runs
 `;
 }

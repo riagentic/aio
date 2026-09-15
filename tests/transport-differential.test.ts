@@ -16,6 +16,7 @@
 import { assertEquals, assertNotEquals } from "@std/assert";
 import { enc } from "../src/protocol/envelope.ts";
 import { freePort } from "../src/testing/server-test.ts";
+import { dropTempDir, tempDir } from "../src/testing/temp-dir.ts";
 
 /** One scenario: a payload, dispatched both ways. */
 type Case = {
@@ -155,6 +156,78 @@ for (const c of CASES) {
     );
   });
 }
+
+// Date: show() JSON-ifies both sides to the same ISO string, which HIDES the
+// real seam — in-process `got.when instanceof Date` is true; over the wire it
+// is a string. Harness tests that branch on Date are green-test-broken-prod.
+Deno.test("transport differential: Date is an instance in-process and a string on the wire", async () => {
+  const when = new Date("2026-09-15T10:00:00.000Z");
+  const { aio, cell } = await import("../mod.ts");
+  const { _resetAioRuntime } = await import("../src/state/runtime-reset.ts");
+  const { bootCells } = await import("../src/testing/cell-test.ts");
+  const { freePort } = await import("../src/testing/server-test.ts");
+  const { enc } = await import("../src/protocol/envelope.ts");
+
+  _resetAioRuntime();
+  const a = cell("xdati", {
+    state: { got: null as unknown },
+    methods: {
+      take(s: { got: unknown }, v: unknown) {
+        s.got = v;
+      },
+    },
+  });
+  await bootCells([a] as never);
+  (a as unknown as { take: (v: unknown) => void }).take({ when });
+  await new Promise((r) => setTimeout(r, 20));
+  const directWhen = (a as unknown as { got: { when: unknown } }).got?.when;
+  assertEquals(directWhen instanceof Date, true, "in-process must keep Date");
+
+  _resetAioRuntime();
+  const b = cell("xdatw", {
+    state: { got: null as unknown },
+    methods: {
+      take(s: { got: unknown }, v: unknown) {
+        s.got = v;
+      },
+    },
+  });
+  const port = freePort();
+  const dir = await tempDir("xdat-");
+  try {
+    const app = await aio.run({
+      cells: [b],
+      appId: `xdat-${Deno.pid}`,
+      client: "server-only",
+      persist: false,
+      libraryMode: true,
+      singleton: false,
+      port,
+      baseDir: dir,
+      dbPath: ":memory:",
+    } as never);
+    const handle = app as unknown as {
+      port: number;
+      close: () => Promise<void>;
+    };
+    const ws = new WebSocket(`ws://localhost:${handle.port}/ws`);
+    await new Promise<void>((res, rej) => {
+      ws.onopen = () => res();
+      ws.onerror = () => rej(new Error("ws never opened"));
+    });
+    ws.send(
+      enc("action", { type: "xdatw:take", payload: { args: [{ when }] } }),
+    );
+    await new Promise((r) => setTimeout(r, 250));
+    const wireWhen = (b as unknown as { got: { when: unknown } }).got?.when;
+    assertEquals(typeof wireWhen, "string", "wire must JSON-encode Date");
+    assertEquals(wireWhen, when.toISOString());
+    ws.close();
+    await handle.close();
+  } finally {
+    await dropTempDir(dir);
+  }
+});
 
 // ── the RETURN value, which travels the other way ───────────────────────────
 //

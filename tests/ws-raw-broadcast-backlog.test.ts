@@ -27,6 +27,7 @@ import { join } from "@std/path";
 import { createServer } from "../src/server/server.ts";
 import { WS_BUFFER_HIGH_WATER } from "../src/server/write-backlog.ts";
 import { freePort } from "../src/testing/server-test.ts";
+import { dropTempDir, tempDir } from "../src/testing/temp-dir.ts";
 
 const FRAME_BYTES = 200_000;
 const FRAMES = 200; // 40 MB offered — 10× the high-water mark
@@ -106,7 +107,7 @@ Deno.test({
     "ws backlog: broadcastRaw stops feeding a peer that never reads, and closes it so it resyncs",
   // The test owns a raw TCP conn the server half-closes; it is closed below.
   fn: async () => {
-    const dir = await Deno.makeTempDir();
+    const dir = await tempDir("ws-raw-backlog-");
     await Deno.mkdir(join(dir, "dist"), { recursive: true });
     await Deno.writeTextFile(
       join(dir, "dist", "app.js"),
@@ -196,7 +197,7 @@ Deno.test({
       healthy?.close();
       await new Promise((r) => setTimeout(r, 50));
       await server.shutdown();
-      await Deno.remove(dir, { recursive: true });
+      await dropTempDir(dir);
     }
   },
 });

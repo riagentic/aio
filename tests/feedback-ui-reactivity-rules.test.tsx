@@ -418,7 +418,12 @@ testUI(
     const listed = /available: (.*)/.exec(err.message)?.[1] ?? "";
     const names = listed.split(", ");
     assert(names.length <= 8, `capped, got ${names.length}: ${listed}`);
-    assertEquals(names[0], "orientation-picker", "the one they meant is first");
+    assert(
+      names[0] === "orientation-picker" ||
+        names[0]!.endsWith(":orientation-picker") ||
+        names[0]!.endsWith("/orientation-picker"),
+      `the one they meant is first, got ${names[0]}`,
+    );
     assert(
       /closest \d+ of \d+ shown/.test(err.message),
       `says what was withheld: ${err.message}`,

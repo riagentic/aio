@@ -9,6 +9,8 @@ Verifying cells and UIs work correctly.
   rich-client shape, where the client is itself an aio app
 - [Cassettes](cassettes.md) — `openCassette`: record a real device/network
   session once, replay it in CI forever
+- [Testing lanes](lanes.md) — `test:fast` / `test:seam` / hunter seeds: more
+  confidence without lengthening every edit loop
 - [Proving the tests](proving-the-tests.md) — `check:mutations` breaks each
   load-bearing invariant on purpose and requires a named test to go red;
   `check:vacuous` catches tests that pass while asserting nothing;

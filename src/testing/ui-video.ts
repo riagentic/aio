@@ -33,7 +33,7 @@ import {
 import type { VideoFormat } from "../media/chunks.ts";
 import { codeMask } from "../diagnostics/code-mask.ts";
 import { generateHTML } from "../server/server-html-gen.ts";
-import { appHasStylesheet } from "../server/app-files.ts";
+import { APP_STYLE, appHasStylesheet } from "../server/app-files.ts";
 import { readDenoJsonSync } from "../server/deno-json.ts";
 import { resolveEntryPath } from "../server/paths.ts";
 import { appIdFromConfig, slugify } from "../server/single-instance-lock.ts";
@@ -386,7 +386,7 @@ export function appLook(testFile: string | null): AppLook {
   const notes = [
     `theme ${JSON.stringify(look.theme ?? "tokens")}`,
     `appId ${JSON.stringify(appId)}`,
-    hasCSS ? "style.css" : "no style.css",
+    hasCSS ? APP_STYLE : `no ${APP_STYLE}`,
     ...(look.unread.length
       ? [`not literal, so default: ${look.unread.join(", ")}`]
       : []),
@@ -686,7 +686,7 @@ async function renderVideo(
               },
             });
           } catch {
-            // not a file the app has — the 404 below is the answer
+            // aio-ok: missing path is not an error — the 404 below is the answer
           }
         }
       }

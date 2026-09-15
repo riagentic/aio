@@ -47,7 +47,7 @@ Deno.test("scaffold: the starter test says to rewrite or delete it with the cell
     for (const [path, body] of tests) {
       assertStringIncludes(
         body,
-        "rewrite or delete this when you replace the cell",
+        "Replace the cell → delete or rewrite",
         `${t}/${path}`,
       );
     }
