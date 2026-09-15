@@ -429,8 +429,12 @@ Deno.test({
       ]);
       const out = dec.decode(tested.stdout) + dec.decode(tested.stderr);
       assert(tested.success, `the brief's test snippet fails:\n${out}`);
+      // deno colours the summary (`ok` is green); strip SGR so the contract
+      // is the words, not the paint.
+      // deno-lint-ignore no-control-regex
+      const plain = out.replace(/\u001b\[[0-9;]*m/g, "");
       assert(
-        /ok \| [1-9]\d* passed \| 0 failed/.test(out),
+        /ok \| [1-9]\d* passed \| 0 failed/.test(plain),
         `no tests ran:\n${out}`,
       );
     } finally {
