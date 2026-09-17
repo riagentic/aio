@@ -14,23 +14,38 @@ is frozen — additive only, bugfix-only through beta; 1.0.0 = boring.
 
 ---
 
-## RESUME HERE — round of 2026-09-16 (paused on token limit)
+## RESUME HERE — round of 2026-09-17 (Windows builds, 1.0.3-beta)
 
-**State.** 1.0.2-beta is tagged. Since then, on `main`, unpushed:
-b1ac3df31 (nested display cookie + owner check, `setsid`, first-run Electron
-wait, install.sh hint) · 0c1b6dbcb (window rect fitted to the display) ·
-437462ab1 (`am agent` Markdown, `--min`/`--max`) · 2f34c287d (`am start` waits
-for a booting app, crash tail, restart keeps port, surface/preview/colour).
-`feedback/refused.md` has this round's refusals (uncommitted).
+**State.** 1.0.3-beta is prepared (version triple, CHANGELOG, upgrade guide,
+`update:api`, `update:docs`, `check:release --fast` green). Not pushed.
 
-**Round closed.** All eight fixer areas (A persistence, B harness parity,
-C am process, D Electron, E renderer + video, F aiol + removals, G harness vs
-Chromium, H browser bundle) are committed; the tree was clean at 2fb9ebe57
-with check, lint, lint:aio, check:api, check:docs, check:boundaries,
-check:ratchets, test:fast and the bundle gate green. The full core suite was
-NOT re-run after the fixes — run `deno task test:core` first when resuming.
+**This round: Windows stops being rubbish.** A Windows desktop app opens on the
+first double-click from either artifact on a machine with nothing installed, and
+the one-file exe binds **zero TCP ports**. Verified on a real Windows 11 VM
+(zip + self-contained exe, `ui mounted 7 element(s)`, no listening TCP port).
+
+- Spawn: a `--no-terminal` GUI exe has no console, so inheriting stdout threw
+  `Invalid handle`; retry with the std handles discarded (`electron-spawn.ts`).
+- One Electron version per build (`installedElectronVersion` requires a real
+  `dist/`; one `resolveElectronVersion` decider) and one platform per package
+  (fresh staging + executable-format check) — the zip shipped 44.4.1 beside a
+  43.0.0 exe, and both platforms in one 350 MB zip.
+- Zero ports for the one-file exe: the embedded VFS `dist/` is served over the
+  app socket instead of opening a loopback port (`resolveZeroPort`).
+- The named pipe is drained (`FlushFileBuffers`) before `DisconnectNamedPipe`:
+  real Windows DISCARDS unread buffered bytes on disconnect, so the first page
+  request answered `read EPIPE` and the window failed to load. Wine never
+  reproduced it.
+- Built-in zip reader (`server/zip-extract.ts`); the exe carries Electron's own
+  release zip and unpacks it through the same verified installer a download
+  uses.
+- The build stops embedding dev-only npm closure (esbuild/electron/happy-dom
+  graph walk) and bakes `--client=…` from the target flags.
+
+**The 2026-09-16 round is closed** (areas A–H committed at 2fb9ebe57).
 
 Small follow-ups from the fixers:
+
 - [ ] Android runtime (`src/standalone-air.ts`) lacks the serverUser /
       serverRequest / serverAuth / blocking stubs; stale comment atop
       `src/server/auth-context.ts`.
@@ -38,32 +53,38 @@ Small follow-ups from the fixers:
       (`src/diagnostics/logger-core.ts` hook).
 - [ ] `am check` is green with the `aio` import mapping removed
       (`src/server/graph-validator.ts`).
-- [ ] The production dispatch loop does not log a self-call that runs after
-      its caller threw (testCell does).
+- [ ] The production dispatch loop does not log a self-call that runs after its
+      caller threw (testCell does).
 - [ ] `docs/clients/app-manager.md`: document `am dispatch --args=@file` / `-`.
 
-Hunter reports with repro scripts: scratchpad `h1`–`h8` (session
-26af1791…). They are temporary; the findings are summarised above.
+Hunter reports with repro scripts: scratchpad `h1`–`h8` (session 26af1791…).
+They are temporary; the findings are summarised above.
 
 **Still open after that** (from the full triage of this file):
 
-- [ ] Async read-your-writes overlay is quadratic (section below) — needs
-      its own fixer; start from the fuzzer seed that broke the last attempt.
-- [ ] Ratchets red on committed work: `tests/browser-server-only-stubs.test.ts:118` (vacuous); silent-catch ceiling needs lowering to the new count (330) (`src/state/blocking.ts:175`, `src/sync/browser-storage.ts:81`).
-- [ ] Dev-only chunk — MEASURED 9.3 KB gz of dev-only code on the page, plus
-      the `am trigger` engine (+2.4 KB gz) that production never runs. The
-      ceiling was raised 83 → 86 on 2026-09-16 on that promise; build the
-      chunk and lower it again.
+- [ ] Async read-your-writes overlay is quadratic (section below) — needs its
+      own fixer; start from the fuzzer seed that broke the last attempt.
+- [ ] Ratchet tightening left over: the silent-catch ceiling is at its exact
+      count (330 blocks / 91 handlers); lower it as the remaining swallows in
+      `src/state/blocking.ts:175` and `src/sync/browser-storage.ts:81` are
+      justified or made loud. `tests/browser-server-only-stubs.test.ts:118` is
+      still vacuous.
+- [ ] Dev-only chunk — MEASURED 9.3 KB gz of dev-only code on the page, plus the
+      `am trigger` engine (+2.4 KB gz) that production never runs. The ceiling
+      was raised 83 → 86 on 2026-09-16 on that promise; build the chunk and
+      lower it again.
 - [ ] Sync-method browser-replay differential (known gap, bottom of file).
 - [ ] Flaky-test remainder: `tests/am.test.ts`, `tests/spawn.test.ts` onto
       `stopChild` with stderr + exit code kept.
-- [ ] Clear-out: move the DONE items below to `feedback/resolved.md`, the
-      policy sections (beta gate, alpha70 decisions, standing policy, facts)
-      to `.katana/` / docs, then delete them here; delete `feedback/cc.md`,
+- [ ] Clear-out: move the DONE items below to `feedback/resolved.md`, the policy
+      sections (beta gate, alpha70 decisions, standing policy, facts) to
+      `.katana/` / docs, then delete them here; delete `feedback/cc.md`,
       `that report`, `that report` once each item is in resolved/refused (back
       them up first — `feedback/` is gitignored).
-- [ ] Release 1.0.3-beta: CHANGELOG, upgrade guide, version in three places,
-      `update:api`, `docs:index`, full `check:release`. Push only when asked.
+- [ ] Release 1.0.3-beta: surfaces are prepared (version triple, CHANGELOG,
+      upgrade guide, `update:api`, `update:docs`, `check:release --fast` green).
+      Remaining before a tag: the heavy `check:release` (`test:onboard`,
+      `test:build`, mutation gate) and the push — only when asked.
 
 **Answered, no work queued:** a one-file `deno run` build is feasible (measured:
 2 MB, 560 KB gz) but today fails to boot — the SQLite worker file and the page

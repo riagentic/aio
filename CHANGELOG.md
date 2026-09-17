@@ -1,5 +1,93 @@
 # Changelog
 
+## v1.0.3-beta — Windows that actually works (2026-09-17)
+
+> **Nothing breaks.** The public surface is byte-identical to 1.0.2-beta
+> (`check:api` reports no drift); every change is a fix or a stricter refusal of
+> something that was already wrong. `am pin --latest` is the whole upgrade.
+>
+> The milestone: **Windows builds stopped being rubbish.** A Windows desktop app
+> now opens on the first double-click, from either artifact, on a machine with
+> nothing installed — and the one-file exe binds **zero TCP ports**.
+
+### Windows: the desktop app opens
+
+- **A `--no-terminal` GUI exe double-clicked has no console**, so inheriting
+  `stdout` aborted the spawn with
+  `TypeError: Failed to spawn '…': Invalid
+  handle` — Electron never started
+  and the window never opened. The launcher now retries with the std handles
+  discarded. Measured on a real Windows 11 VM: the zip and the one-file exe both
+  mount the UI (`ui mounted 7 element(s)`).
+- **One Electron version per build.** The zip shipped 44.4.1 while the
+  self-contained exe baked 43.0.0 — a stale `node_modules/electron`
+  (`package.json` with no `dist/`) pinned one version and auto-install fetched
+  another. `installedElectronVersion` now requires the runtime to actually be
+  unpacked, and one `resolveElectronVersion` decider feeds both artifacts.
+- **One platform per package.** Every target staged into one `AppDir` that was
+  only ever `mkdir -p`'d, so the Windows zip carried the Linux Electron and the
+  Linux binary (350 MB instead of ~160). The staging dir is emptied per build
+  and the finished tree is checked by executable format before it ships.
+- **The build stops dragging in dev-only npm packages** — a graph walk over
+  deno's own `.deno` layout (esbuild, electron, happy-dom and their transitive
+  closure), measured rather than listed, so a hello-world binary is not 25 MB
+  heavier for things it can never load.
+- **The baked client is the target's.** A compiled binary booted in the app's
+  deno.json `"client"`, so an Electron app's `browser` target started a silent
+  ~100 MB download on a user's first double-click. The build now bakes
+  `--client=…` from the flags that decided the target.
+
+### Windows: zero TCP ports, even for the one-file exe
+
+- **The self-contained exe serves its embedded `dist/` over the local socket**
+  instead of opening a loopback port. The page is in the binary's Deno VFS,
+  which the foreign Electron process cannot open — but the server reads its own
+  embedded bundle, so it serves the page, modules and assets over the pipe
+  exactly as dev does. `resolveZeroPort` gained the row: prod with dist only in
+  the VFS is still **no TCP port**.
+- **A named pipe is drained before it is disconnected.** On real Windows,
+  `DisconnectNamedPipe` with unread bytes in the pipe buffer DISCARDS them, and
+  the client saw `read EPIPE` after a 200 — the very first page request failed,
+  so the window showed `did-fail-load`. `FlushFileBuffers` (on a pool thread,
+  never the event loop) now runs before the disconnect. Wine never reproduced
+  it; a real Windows VM did, first try.
+
+### Windows: no outside tools on the critical path
+
+- **A built-in zip reader** (`src/server/zip-extract.ts`) unpacks the Electron
+  runtime with nothing but the runtime — a clean Windows has no `unzip`, no
+  `bsdtar`, no `python3`, and under Wine `powershell.exe` exits 0 having
+  unpacked nothing. The one step a first launch depends on was the step most
+  likely to be missing. Stored and deflated entries, Unix modes and symlinks;
+  refused loudly: zip64, encryption, CRC mismatches, zip-slip.
+- **The self-contained exe carries Electron's own release zip** and unpacks it
+  through the same installer a download uses — lock, integrity check against the
+  checksum the build verified, stage, rename, stamp — so a corrupted binary is
+  refused exactly like a tampered download. A dead connection now says so after
+  60 s of no bytes instead of hanging forever behind "downloading…".
+
+### The installer and `run`
+
+- **`am start` waits for a booting app** instead of killing it, and the crash
+  reason reaches the caller; `--restart` keeps the port. `am agent` gained a
+  Markdown brief in three sizes (`--min`, `--max`).
+- **A nested display belongs to the user** — the X authority cookie is written
+  and owner-checked, and the app is detached with `setsid` so it survives the
+  shell that started it.
+
+### Harness, renderer and dev loop
+
+- **A fast typist no longer loses keystrokes**, and `am trigger` / `testUI` fire
+  the events a real Chromium fires.
+- **A dev cell edit no longer kills the app**, and maximized windows come back
+  maximized. A restored window rect is fitted to the display it opens on.
+- **`serverUser` / `serverRequest` / `serverAuth` / `blocking` import cleanly
+  into a cell module** without failing the browser build.
+- **Persistence is honest about damage**: a torn journal line no longer eats
+  acked writes, and silent drift, a deleted database and `SIGXFSZ` are loud.
+- **`aiol` / `am pin`** retired-API rows match only at aio's own sites, and the
+  interface and self-call rules catch the real layouts.
+
 ## v1.0.2-beta — harness honesty, cell DX, window size (2026-09-15)
 
 > **Nothing breaks.** Additive fixes and clearer tooling. `am pin --latest` is

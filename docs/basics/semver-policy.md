@@ -140,7 +140,8 @@ compares `beta10` and `beta2` as ASCII, so JSR, `deno`, and `sort -V` all put
 the tenth beta below the second. The patch number is the counter instead, and it
 means what it means everywhere else:
 
-- a fix round bumps PATCH: `1.0.0-beta` → `1.0.1-beta` → `1.0.2-beta`;
+- a fix round bumps PATCH: `1.0.0-beta` → `1.0.1-beta` → `1.0.2-beta` →
+  `1.0.3-beta`;
 - a feature bumps MINOR: `1.1.0-beta`;
 - an rc is the same triple with `-rc`: `1.1.0-rc`;
 - the first stable is the same triple with the suffix dropped: `1.1.0`.
