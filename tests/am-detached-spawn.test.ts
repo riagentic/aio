@@ -92,8 +92,22 @@ Deno.test({
       const f = s.slice(s.lastIndexOf(")") + 2).split(" ");
       return { pgrp: Number(f[2]), session: Number(f[3]) };
     };
-    const child = stat(pid);
+    // POLL for the session to be established, do not read once. `echo $!`
+    // reports the PID the moment the shell forks the background job, and
+    // `setsid` calls setsid(2) a moment LATER — a single read raced it and
+    // failed under the loaded full suite while passing in isolation. Bounded,
+    // so a real regression still fails.
     const mine = stat(Deno.pid);
+    let child = stat(pid);
+    const deadline = Date.now() + 5_000;
+    while (child.session !== pid && Date.now() < deadline) {
+      await new Promise((r) => setTimeout(r, 10));
+      try {
+        child = stat(pid);
+      } catch {
+        break; // the child went away — the asserts below say so
+      }
+    }
     assertEquals(child.session, pid, "the app leads its own session");
     assertEquals(child.pgrp, pid, "…and its own process group");
     assert(child.session !== mine.session, "not the runner's session");
@@ -120,7 +134,7 @@ Deno.test({
   name: "posix spec EXECUTES: detached child, real PID on stdout, log written",
   ignore: Deno.build.os === "windows",
   async fn() {
-    const dir = await Deno.makeTempDir();
+    const dir = await tempDir("am-detached-");
     const log = join(dir, "out.log");
     // A stand-in "deno" invocation the spec runs verbatim: print + linger
     // briefly so we can prove the PID is the CHILD's and it outlives am.
@@ -157,6 +171,6 @@ Deno.test({
     try {
       Deno.kill(pid, "SIGKILL");
     } catch { /* already exited */ }
-    await Deno.remove(dir, { recursive: true }).catch(() => {});
+    await dropTempDir(dir);
   },
 });

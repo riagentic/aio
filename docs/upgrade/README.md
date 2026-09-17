@@ -20,6 +20,11 @@ app, that is a bug in aio, not a step you missed.
 - **[The aio restructure (alpha27+)](restructure.md)** — every restructure
   breaking change with before → after recipes (methods-only cells, instances,
   SQLite-only persistence, `aio/extras`, wire catalog)
+- [1.0.2-beta → **1.0.3-beta**](from-1.0.2-beta-to-1.0.3-beta.md) — nothing
+  breaks. The Windows round: a desktop app opens on the first double-click from
+  either artifact, the one-file exe binds zero TCP ports, one Electron version
+  and one platform per package, and the build stops shipping dev-only npm
+  packages
 - [1.0.1-beta → **1.0.2-beta**](from-1.0.1-beta-to-1.0.2-beta.md) — nothing
   breaks. Harness matches the window (Enter/`preventDefault`, form handlers,
   render-burst), `CellState` + aiol at the cause, Electron honours a changed
