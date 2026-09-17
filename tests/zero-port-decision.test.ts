@@ -46,11 +46,29 @@ const TABLE: [string, In, Out][] = [
     portRequested: true,
     routeCount: 1,
   }, PORT],
-  ["prod, no dist → port (the window must load over http)", {
+  [
+    "prod, no dist on disk (embedded VFS — a one-file exe) → handler on the socket, no TCP",
+    {
+      prod: true,
+      localElectronUds: true,
+      canServeFromDisk: false,
+      portRequested: false,
+      routeCount: 0,
+    },
+    SOCKET,
+  ],
+  ["prod, no dist on disk, routes → handler AND routes on the socket", {
     prod: true,
     localElectronUds: true,
     canServeFromDisk: false,
     portRequested: false,
+    routeCount: 2,
+  }, SOCKET],
+  ["prod, no dist, --port=N → the named port (the opt-out)", {
+    prod: true,
+    localElectronUds: true,
+    canServeFromDisk: false,
+    portRequested: true,
     routeCount: 0,
   }, PORT],
   ["prod, not electron+uds (browser / --expose / ws / Windows) → port", {

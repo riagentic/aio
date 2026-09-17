@@ -40,7 +40,11 @@ Deno.test("air-forms: the documented parsed() call type-checks", async () => {
         compilerOptions: {
           jsx: "react-jsx",
           jsxImportSource: "aio",
-          lib: ["deno.ns", "dom"],
+          // `deno.unstable` is what a real aio app declares (the scaffold's
+          // deno.json carries it); without it, `import … from "aio"` fails on
+          // the legacy `Deno.Kv` type in `skv-sqlite.ts` and the DOC example
+          // looks broken when the app it was copied into would compile.
+          lib: ["deno.ns", "deno.unstable", "dom"],
         },
         imports: {
           "aio/jsx-runtime": `${repo}src/jsx-runtime.ts`,

@@ -54,7 +54,9 @@ Deno.test("jsx types: the documented className/style/select-multiple forms type-
         compilerOptions: {
           jsx: "react-jsx",
           jsxImportSource: "aio",
-          lib: ["deno.ns", "dom"],
+          // `deno.unstable` is what a real aio app declares; the fixture imports
+          // `aio`, whose graph reaches the legacy `Deno.Kv` type.
+          lib: ["deno.ns", "deno.unstable", "dom"],
         },
         imports: {
           "aio/jsx-runtime": `${repo}src/jsx-runtime.ts`,

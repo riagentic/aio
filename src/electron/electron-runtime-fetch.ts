@@ -30,7 +30,8 @@ import { join } from "@std/path";
 import { log as flog } from "../diagnostics/logger-api.ts";
 import { homedir } from "../server/paths.ts";
 import { isProcessAlive } from "../server/single-instance-lock.ts";
-import { HEY, OK } from "../diagnostics/fmt.ts";
+import { OK } from "../diagnostics/fmt.ts";
+import { extractZip } from "../server/zip-extract.ts";
 
 /** The Electron version a build falls back to when the app declares no exact
  *  one and none is installed. ONE decider — the scaffold's import map says
@@ -189,73 +190,49 @@ export async function bakedElectronVersion(
   }
 }
 
-/** Unpack `zip` into `dir`.
- *
- *  Deno has no zip reader, so this shells out — and the tool it needs is the
- *  one a minimal image most often lacks (the fresh-Ubuntu lab exists because
- *  `deno`'s own installer assumed `unzip`). Three candidates are tried and the
- *  failure names the package to install, rather than arriving as "command not
- *  found" from a program the developer never invoked.
- *
- *  `unzip` and `bsdtar` both preserve the symlinks and exec bits inside
- *  Electron.app; python's zipfile does not preserve exec bits, so it is the
- *  last resort and the bits are restored by hand for the one file that must
- *  have them. */
+/** The runtime zip a self-contained build embeds in `dist/`, beside
+ *  `electron.json` (which records its name and checksum). */
+export const EMBEDDED_RUNTIME_ZIP = "electron-runtime.zip";
+
+/** The runtime this binary CARRIES, from `<distDir>/electron.json`'s
+ *  `embedded` record — or null when the build embedded none. A record whose
+ *  zip is missing is an error, not a null: the build said it is there. */
+export async function bakedEmbeddedRuntime(
+  distDir: string | undefined,
+): Promise<EmbeddedRuntime | null> {
+  if (!distDir) return null;
+  let rec: { embedded?: { name?: unknown; sha256?: unknown } };
+  try {
+    rec = JSON.parse(
+      await Deno.readTextFile(join(distDir, ELECTRON_VERSION_FILE)),
+    );
+  } catch {
+    return null;
+  }
+  const e = rec.embedded;
+  if (typeof e?.name !== "string" || typeof e.sha256 !== "string") return null;
+  const path = join(distDir, EMBEDDED_RUNTIME_ZIP);
+  await Deno.stat(path).catch((cause) => {
+    throw new Error(
+      `this build says it carries ${e.name}, but ${path} is not in the ` +
+        `binary — the build that embedded it is broken; rebuild.`,
+      { cause },
+    );
+  });
+  return { name: e.name, sha256: e.sha256, path };
+}
+
+/** Unpack `zip` into `dir` — with the runtime's own zip reader, never an
+ *  outside tool (see server/zip-extract.ts for why). `slug` names the
+ *  platform the archive is for; the reader keeps each entry's exec bit and
+ *  symlinks, so it needs no per-platform repair. */
 export async function unzipInto(
   zip: string,
   dir: string,
-  warn: (msg: string) => void = console.warn,
-  /** Release slug the archive is FOR — decides which file gets its exec bit
-   *  back. Defaults to this host's; a cross-build passes the target's. */
-  slug: string = electronSlug(),
+  _warn: (msg: string) => void = console.warn,
+  _slug: string = electronSlug(),
 ): Promise<void> {
-  await Deno.mkdir(dir, { recursive: true });
-  const tries: [string, string[]][] = [
-    ["unzip", ["-q", "-o", zip, "-d", dir]],
-    ["bsdtar", ["-xf", zip, "-C", dir]],
-    ["python3", ["-m", "zipfile", "-e", zip, dir]],
-  ];
-  const missing: string[] = [];
-  for (const [cmd, args] of tries) {
-    let out;
-    try {
-      out = await new Deno.Command(cmd, {
-        args,
-        stdout: "null",
-        stderr: "piped",
-      }).output();
-    } catch {
-      missing.push(cmd);
-      continue; // not installed — try the next
-    }
-    if (out.success) {
-      if (cmd === "python3") {
-        warn(
-          `${HEY} unpacked with python's zipfile, which drops ` +
-            "executable bits — install `unzip` for a package that runs " +
-            "without a chmod",
-        );
-        if (Deno.build.os !== "windows") {
-          await Deno.chmod(
-            electronBinIn(dir, electronOsFromSlug(slug)),
-            0o755,
-          ).catch(() => {});
-        }
-      }
-      return;
-    }
-    throw new Error(
-      `${cmd} failed to unpack ${zip}: ${
-        new TextDecoder().decode(out.stderr).trim().split("\n")[0] ?? ""
-      }`,
-    );
-  }
-  throw new Error(
-    `no unzip tool found (tried ${missing.join(", ")}) — install one:\n` +
-      "    Debian/Ubuntu: sudo apt install unzip\n" +
-      "    Fedora:        sudo dnf install unzip\n" +
-      "    macOS:         unzip ships with the system",
-  );
+  await extractZip(await Deno.readFile(zip), dir);
 }
 
 /** Marker written last, inside a completed runtime directory. */
@@ -322,6 +299,207 @@ async function withRuntimeLock<T>(
   }
 }
 
+/** How long a download may go without receiving a byte before it is
+ *  abandoned. A dead connection used to hang the launcher forever behind a
+ *  "downloading runtime (~100 MB)…" line that never changed (real Windows 11,
+ *  2026-09-17). */
+export const DOWNLOAD_STALL_MS = 60_000;
+
+/** Read `res`'s body, logging progress every ~10% and failing loudly when no
+ *  byte arrives for `stallMs`. `abort` cancels the underlying request. */
+async function readWithProgress(
+  res: Response,
+  label: string,
+  log: (msg: string) => void,
+  abort: AbortController,
+  stallMs: number,
+): Promise<Uint8Array<ArrayBuffer>> {
+  const total = Number(res.headers.get("content-length")) || 0;
+  const reader = res.body?.getReader();
+  if (!reader) return new Uint8Array(await res.arrayBuffer());
+  const chunks: Uint8Array[] = [];
+  let got = 0;
+  let nextPct = 10;
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const stalled = () =>
+    new Promise<never>((_, reject) => {
+      timer = setTimeout(() => {
+        abort.abort();
+        reject(
+          new Error(
+            `${label}: no data for ${stallMs / 1000}s after ` +
+              `${(got / 1e6).toFixed(1)} MB — the connection is dead. ` +
+              `Check the network (a VPN or proxy blocking github.com?), then ` +
+              `start the app again; set $ELECTRON_MIRROR to use a mirror.`,
+          ),
+        );
+      }, stallMs);
+    });
+  try {
+    while (true) {
+      const { done, value } = await Promise.race([reader.read(), stalled()]);
+      clearTimeout(timer);
+      if (done) break;
+      chunks.push(value);
+      got += value.length;
+      if (total > 0 && (got * 100) / total >= nextPct) {
+        log(
+          `  ${label}: ${Math.floor((got * 100) / total)}% ` +
+            `(${(got / 1e6).toFixed(0)} / ${(total / 1e6).toFixed(0)} MB)`,
+        );
+        nextPct = Math.floor((got * 100) / total / 10) * 10 + 10;
+      }
+    }
+  } finally {
+    clearTimeout(timer);
+    reader.releaseLock();
+  }
+  const out = new Uint8Array(got);
+  let at = 0;
+  for (const c of chunks) {
+    out.set(c, at);
+    at += c.length;
+  }
+  return out;
+}
+
+/** Electron's published zip for `version`+`slug`, downloaded and checked
+ *  against the release's `SHASUMS256.txt`. Refuses, never warns: these bytes
+ *  become the process the app runs as. */
+export async function fetchVerifiedZip(
+  version: string,
+  slug: string,
+  opts: {
+    log: (msg: string) => void;
+    fetch: typeof fetch;
+    mirror?: string;
+    stallMs?: number;
+    /** What to say first; the default names a download. */
+    announce?: string;
+  },
+): Promise<{ bytes: Uint8Array<ArrayBuffer>; sha256: string; name: string }> {
+  const { log, mirror } = opts;
+  const name = electronZipName(version, slug);
+  const url = electronZipUrlFor(version, slug, mirror);
+  log(
+    opts.announce ??
+      `downloading runtime ${version} for ${slug} (~100 MB, once per machine)…`,
+  );
+  const abort = new AbortController();
+  const res = await opts.fetch(url, { signal: abort.signal });
+  if (!res.ok) {
+    throw new Error(
+      `could not download the Electron runtime for ${slug}: ` +
+        `${res.status} ${res.statusText}\n  ${url}\n` +
+        `  (is ${version} a real Electron release? If a proxy blocks ` +
+        `github.com, set $ELECTRON_MIRROR to a mirror of ` +
+        `electron/electron's releases, or point $ELECTRON_PATH at an ` +
+        `Electron you already have.)`,
+    );
+  }
+  const bytes = await readWithProgress(
+    res,
+    name,
+    log,
+    abort,
+    opts.stallMs ?? DOWNLOAD_STALL_MS,
+  );
+
+  const sumsUrl = electronShasumsUrlFor(version, mirror);
+  const sumsRes = await opts.fetch(sumsUrl, {
+    signal: AbortSignal.timeout(opts.stallMs ?? DOWNLOAD_STALL_MS),
+  });
+  if (!sumsRes.ok) {
+    throw new Error(
+      `downloaded ${name} but could not fetch its checksums ` +
+        `(${sumsRes.status} ${sumsRes.statusText})\n  ${sumsUrl}\n` +
+        `  Refusing to run 100 MB of unverified native code. Retry, or ` +
+        `point $ELECTRON_PATH at an Electron you already trust.`,
+    );
+  }
+  const expected = shasumFor(await sumsRes.text(), name);
+  if (!expected) {
+    throw new Error(
+      `${name} is not listed in ${sumsUrl} — the release does not publish ` +
+        `this asset, so the download cannot be verified. Check that ` +
+        `${version} really ships a ${slug} build, or point ` +
+        `$ELECTRON_PATH at an Electron you already have.`,
+    );
+  }
+  const actual = await sha256Hex(bytes);
+  if (actual !== expected) {
+    throw new Error(
+      `integrity check FAILED for ${name}: SHASUMS256.txt says ` +
+        `${expected}, the download hashes to ${actual}. The file was ` +
+        `corrupted or tampered with in transit — it is NOT being ` +
+        `unpacked. Retry; if it keeps failing, a proxy or mirror is ` +
+        `rewriting the download.`,
+    );
+  }
+  log(`${OK} integrity check passed (${name})`);
+  return { bytes, sha256: actual, name };
+}
+
+/** A runtime zip carried INSIDE a compiled binary, and its baked checksum. */
+export type EmbeddedRuntime = { name: string; sha256: string; path: string };
+
+/** A `fetch` that answers the runtime installer from an embedded zip instead
+ *  of the network: the zip's own URL gets its bytes, the release's
+ *  `SHASUMS256.txt` a one-line manifest built from the checksum the BUILD
+ *  verified. So the self-contained exe goes through exactly the path a
+ *  download does — lock, stage, integrity check, unpack, stamp — and a
+ *  corrupted binary is refused the same way a tampered download is. Anything
+ *  else is a 404: an embedded runtime never reaches the network. */
+export function embeddedRuntimeFetch(rt: EmbeddedRuntime): typeof fetch {
+  return (input) => {
+    const url = String(input instanceof Request ? input.url : input);
+    if (url.endsWith(`/${rt.name}`)) {
+      return Deno.readFile(rt.path).then((b) => new Response(b));
+    }
+    if (url.endsWith("/SHASUMS256.txt")) {
+      return Promise.resolve(new Response(`${rt.sha256} *${rt.name}\n`));
+    }
+    return Promise.resolve(new Response(null, { status: 404 }));
+  };
+}
+
+/** Electron's verified zip for `version`+`slug`, kept beside the unpacked
+ *  runtime in the cache (`<runtime>.zip` + `.sha256`) so a build can embed it
+ *  without downloading it twice. Re-hashed on every use: a cache file is not
+ *  trusted just because it exists. */
+export async function ensureElectronZip(
+  version: string,
+  slug: string,
+  opts: {
+    log?: (msg: string) => void;
+    fetch?: typeof fetch;
+    mirror?: string;
+  } = {},
+): Promise<{ path: string; sha256: string; name: string }> {
+  const log = opts.log ?? ((m: string) => flog.info(m));
+  const zip = `${electronRuntimeDir(version, slug)}.zip`;
+  const name = electronZipName(version, slug);
+  try {
+    const want = (await Deno.readTextFile(`${zip}.sha256`)).trim();
+    const have = await sha256Hex(await Deno.readFile(zip));
+    if (want === have) return { path: zip, sha256: have, name };
+  } catch {
+    // aio-ok(silent-catch): "not in the cache yet" is the miss this probe
+    // exists to detect — the fetch below is the answer, not an error path.
+  }
+  const { bytes, sha256 } = await fetchVerifiedZip(version, slug, {
+    log,
+    fetch: opts.fetch ?? fetch,
+    mirror: opts.mirror ?? Deno.env.get("ELECTRON_MIRROR") ?? undefined,
+  });
+  await Deno.mkdir(join(zip, ".."), { recursive: true });
+  const tmp = `${zip}.incoming.${Deno.pid}`;
+  await Deno.writeFile(tmp, bytes);
+  await Deno.rename(tmp, zip);
+  await Deno.writeTextFile(`${zip}.sha256`, `${sha256}\n`);
+  return { path: zip, sha256, name };
+}
+
 /** The unpacked Electron runtime for `version`+`slug`, downloading it once.
  *
  *  Returns the directory (the same shape `node_modules/electron/dist` has,
@@ -356,10 +534,14 @@ export async function ensureElectronRuntime(
     fetch?: typeof fetch;
     /** `$ELECTRON_MIRROR` override (tests). */
     mirror?: string;
+    /** Install from the zip this binary CARRIES instead of the network. */
+    embedded?: EmbeddedRuntime;
   } = {},
 ): Promise<string> {
   const log = opts.log ?? ((m: string) => flog.info(m));
-  const doFetch = opts.fetch ?? fetch;
+  const doFetch = opts.embedded
+    ? embeddedRuntimeFetch(opts.embedded)
+    : opts.fetch ?? fetch;
   const mirror = opts.mirror ?? Deno.env.get("ELECTRON_MIRROR") ?? undefined;
   const dir = electronRuntimeDir(version, slug);
   if (await runtimeUsable(dir, slug)) {
@@ -390,54 +572,19 @@ export async function ensureElectronRuntime(
     await Deno.remove(stage, { recursive: true }).catch(() => {});
     await Deno.mkdir(stage, { recursive: true });
     try {
-      log(
-        `downloading runtime ${version} for ${slug} (~100 MB, once per machine)…`,
+      const { bytes, sha256: actual } = await fetchVerifiedZip(
+        version,
+        slug,
+        {
+          log,
+          fetch: doFetch,
+          mirror,
+          announce: opts.embedded
+            ? `unpacking the Electron ${version} this app carries ` +
+              `(once per machine)…`
+            : undefined,
+        },
       );
-      const res = await doFetch(url);
-      if (!res.ok) {
-        throw new Error(
-          `could not download the Electron runtime for ${slug}: ` +
-            `${res.status} ${res.statusText}\n  ${url}\n` +
-            `  (is ${version} a real Electron release? If a proxy blocks ` +
-            `github.com, set $ELECTRON_MIRROR to a mirror of ` +
-            `electron/electron's releases, or point $ELECTRON_PATH at an ` +
-            `Electron you already have.)`,
-        );
-      }
-      const bytes = new Uint8Array(await res.arrayBuffer());
-
-      // Integrity. Refuses, never warns: these bytes become the process the
-      // app runs as.
-      const sumsUrl = electronShasumsUrlFor(version, mirror);
-      const sumsRes = await doFetch(sumsUrl);
-      if (!sumsRes.ok) {
-        throw new Error(
-          `downloaded ${name} but could not fetch its checksums ` +
-            `(${sumsRes.status} ${sumsRes.statusText})\n  ${sumsUrl}\n` +
-            `  Refusing to run 100 MB of unverified native code. Retry, or ` +
-            `point $ELECTRON_PATH at an Electron you already trust.`,
-        );
-      }
-      const expected = shasumFor(await sumsRes.text(), name);
-      if (!expected) {
-        throw new Error(
-          `${name} is not listed in ${sumsUrl} — the release does not publish ` +
-            `this asset, so the download cannot be verified. Check that ` +
-            `${version} really ships a ${slug} build, or point ` +
-            `$ELECTRON_PATH at an Electron you already have.`,
-        );
-      }
-      const actual = await sha256Hex(bytes);
-      if (actual !== expected) {
-        throw new Error(
-          `integrity check FAILED for ${name}: SHASUMS256.txt says ` +
-            `${expected}, the download hashes to ${actual}. The file was ` +
-            `corrupted or tampered with in transit — it is NOT being ` +
-            `unpacked. Retry; if it keeps failing, a proxy or mirror is ` +
-            `rewriting the download.`,
-        );
-      }
-      log(`${OK} integrity check passed (${name})`);
 
       const zip = join(stage, "electron.zip");
       await Deno.writeFile(zip, bytes);

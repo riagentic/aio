@@ -338,6 +338,16 @@ async function serveConn(
       writer.releaseLock();
     } catch { /* fine */ }
     src.release();
+    // Give the peer every byte before tearing the connection down. On Windows
+    // a server pipe that closes with unread bytes buffered DISCARDS them, and
+    // the client sees `read EPIPE` after a 200 — measured on the FIRST page
+    // request of a packaged app (real Windows 11, 2026-09-17). Unix sockets
+    // flush on close, so `drain` is absent there. Awaited, but bounded by the
+    // peer actually reading; a peer that never reads is a dead connection.
+    await conn.drain?.().catch(() => {
+      // aio-ok(silent-catch): a peer gone mid-drain is what `drain` tolerates;
+      // the `close` below is the real teardown and cannot fail loudly.
+    });
     conn.close();
     done();
   }

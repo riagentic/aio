@@ -448,8 +448,8 @@ export const LEDGER: readonly Mutation[] = [
     what:
       "a tampered 100 MB Electron zip is unpacked and executed as the user's desktop app \u2014 native code execution on every launch",
     file: "src/electron/electron-runtime-fetch.ts",
-    find: "      const actual = await sha256Hex(bytes);",
-    replace: "      const actual = expected;",
+    find: "  const actual = await sha256Hex(bytes);",
+    replace: "  const actual = expected;",
     test: "tests/electron-runtime-fetch.test.ts",
     filter:
       "ensureElectronRuntime: a tampered zip is REFUSED, and nothing is cached",

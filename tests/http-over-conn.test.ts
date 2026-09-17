@@ -19,6 +19,7 @@ import {
   listenLocal,
   type LocalConn,
 } from "../src/server/local-listen.ts";
+import { dropTempDir, tempDir } from "../src/testing/temp-dir.ts";
 
 const enc = new TextEncoder();
 const dec = new TextDecoder();
@@ -95,14 +96,14 @@ async function withServer(
   handler: Parameters<typeof serveHttpOverLocal>[1],
   f: (path: string) => Promise<void>,
 ): Promise<void> {
-  const dir = await Deno.makeTempDir({ prefix: "aio-hoc-" });
+  const dir = await tempDir("aio-hoc-");
   const path = join(dir, "h.sock");
   const srv = serveHttpOverLocal(listenLocal(path), handler);
   try {
     await f(path);
   } finally {
     await srv.close();
-    await Deno.remove(dir, { recursive: true });
+    await dropTempDir(dir);
   }
 }
 
@@ -449,7 +450,7 @@ Deno.test("concurrent requests are served independently", async () => {
 });
 
 Deno.test("close(): stops accepting and settles", async () => {
-  const dir = await Deno.makeTempDir({ prefix: "aio-hoc-" });
+  const dir = await tempDir("aio-hoc-");
   const path = join(dir, "h.sock");
   const srv = serveHttpOverLocal(listenLocal(path), () => new Response("x"));
   await srv.close();
@@ -461,5 +462,57 @@ Deno.test("close(): stops accepting and settles", async () => {
     refused = true;
   }
   assert(refused);
-  await Deno.remove(dir, { recursive: true });
+  await dropTempDir(dir);
+});
+
+Deno.test("a server pipe is DRAINED before it is closed (real Windows: EPIPE)", async () => {
+  // On real Windows a server named pipe that closes with unread bytes in its
+  // buffer DISCARDS them, and the client sees `read EPIPE` after a 200. It hit
+  // the very FIRST page request of a packaged one-file exe (2026-09-17), so
+  // the window failed `did-fail-load` while the same bytes were fine on unix
+  // (which flushes on close). The server must call `drain()` before `close()`;
+  // this pins the order and that close still happens.
+  const order: string[] = [];
+  const drained = Promise.withResolvers<void>();
+  const closed = Promise.withResolvers<void>();
+  const conn: LocalConn = {
+    readable: new ReadableStream<Uint8Array>({
+      start(c) {
+        c.enqueue(enc.encode("GET / HTTP/1.1\r\n\r\n"));
+        c.close();
+      },
+    }),
+    writable: new WritableStream<Uint8Array>({
+      write() {
+        order.push("write");
+      },
+    }),
+    remoteAddr: { transport: "unix", path: "/fake" },
+    drain() {
+      order.push("drain");
+      drained.resolve();
+      return Promise.resolve();
+    },
+    close() {
+      order.push("close");
+      closed.resolve();
+    },
+  };
+  const listener = {
+    path: "/fake",
+    close() {},
+    async *[Symbol.asyncIterator]() {
+      yield conn;
+    },
+  };
+  void serveHttpOverLocal(listener, () => new Response("hello"));
+  // `serveConn` runs detached; the signals are its own `drain` and `close`,
+  // not timers — nothing here can pass or fail on scheduling luck.
+  await drained.promise;
+  await closed.promise;
+  assertEquals(order.includes("drain"), true, `drain must run: ${order}`);
+  assert(
+    order.indexOf("drain") < order.indexOf("close"),
+    `drain must precede close: ${order}`,
+  );
 });

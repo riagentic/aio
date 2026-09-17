@@ -10,9 +10,11 @@ import { classifyElectronLine } from "./electron-renderer-log.ts";
 import { isCompiled } from "../server/paths.ts";
 import {
   bakedElectronVersion,
+  bakedEmbeddedRuntime,
   DEFAULT_ELECTRON_VERSION,
   electronBinIn,
   electronSlug,
+  electronZipName,
   ensureElectronRuntime,
 } from "./electron-runtime-fetch.ts";
 
@@ -65,6 +67,8 @@ export type FindElectronOpts = {
     slug: string,
     log: Log,
   ) => Promise<string>;
+  /** The embedded-runtime unpack step (tests). */
+  unpackEmbedded?: (log: Log) => Promise<string>;
   /** The dev-only `deno install` step (`autoInstallElectron`). */
   denoInstall?: (log: Log) => Promise<boolean>;
 };
@@ -124,12 +128,51 @@ export async function findElectronBin(
     if (await electronBinReady(electronBin)) return electronBin;
   }
 
-  // 5. The runtime Electron publishes, into the per-user cache. THE path for a
-  //    compiled binary; the last resort for dev (offline npm, a proxy that
-  //    blocks the lifecycle script — the zip may still be reachable).
   const version = (await bakedElectronVersion(opts.distDir)) ??
     DEFAULT_ELECTRON_VERSION;
   const slug = electronSlug();
+
+  // 5. The runtime this binary CARRIES (a self-contained Windows exe): the
+  //    same install as a download — lock, integrity check, unpack into the
+  //    per-user cache — fed from the embedded zip. Never the network: a
+  //    self-contained app that cannot unpack says why instead of quietly
+  //    fetching 100 MB it was built not to need.
+  if (compiled) {
+    try {
+      const rt = await bakedEmbeddedRuntime(opts.distDir);
+      if (rt) {
+        if (rt.name !== electronZipName(version, slug)) {
+          throw new Error(
+            `this binary carries ${rt.name}, but this machine needs ` +
+              `${electronZipName(version, slug)} — it was built for another ` +
+              `platform.`,
+          );
+        }
+        const unpack = opts.unpackEmbedded ??
+          ((l: Log) =>
+            ensureElectronRuntime(version, slug, {
+              log: l.info,
+              warn: l.error,
+              embedded: rt,
+            }));
+        const bin = electronBinIn(await unpack(log));
+        await Deno.stat(bin);
+        return bin;
+      }
+    } catch (e) {
+      log.error(
+        `the Electron runtime inside this app could not be unpacked: ${
+          e instanceof Error ? e.message : e
+        }`,
+      );
+      return null;
+    }
+  }
+
+  // 6. The runtime Electron publishes, into the per-user cache. THE path for a
+  //    compiled binary built without one; the last resort for dev (offline
+  //    npm, a proxy that blocks the lifecycle script — the zip may still be
+  //    reachable).
   try {
     const dir = await fetchRuntime(version, slug, log);
     const bin = electronBinIn(dir);
@@ -540,6 +583,23 @@ export function electronArgsFromEnv(
   return { args, refused };
 }
 
+/** Whether a spawn failure is Windows' "the std handles I was given to inherit
+ *  are not valid" — a `deno compile --no-terminal` GUI exe started by
+ *  double-click has NO console, so inheriting stdout aborts with
+ *  `TypeError: Failed to spawn '…': Invalid handle`. Every desktop app that
+ *  carried a runtime opened nothing (real Windows 11, 2026-09-17). Kept to a
+ *  message match so the retry is the fallback, never the first move: a real
+ *  failure that merely mentions a handle must not be retried into silence.
+ *  `os` is injected so the rule is a unit test off Windows. */
+export function isInvalidHandleError(
+  e: unknown,
+  os: typeof Deno.build.os = Deno.build.os,
+): boolean {
+  return os === "windows" &&
+    e instanceof TypeError &&
+    /invalid handle/i.test(e.message);
+}
+
 /** Writes script to temp file, spawns Electron, cleans up after exit or process unload */
 async function spawnElectron(
   bin: string,
@@ -580,16 +640,30 @@ async function spawnElectron(
         "docs/clients/electron.md",
     );
   }
-  const proc = new Deno.Command(bin, {
-    args: [tmpFile, ...sandboxArgs, ...extraArgs, ...envArgs.args],
-    // The window dies with this process — see tmplParentWatch. Merged into
-    // the inherited environment, so the shim passes it through to Electron.
-    env: { AIO_PARENT_PID: String(Deno.pid) },
-    // stderr is PIPED so the graphics-stack probe noise can be kept out of the
-    // app's own log (see forwardStderr). stdout stays inherited — that is the
-    // app's own console output and must pass through untouched.
-    stderr: "piped",
-  }).spawn();
+  // stdout is inherited so the app's own console output passes through
+  // untouched — EXCEPT when this process has no console to inherit from. A
+  // `--no-terminal` GUI exe opened by double-click gives `inherit` no valid
+  // handle and `spawn()` throws `Invalid handle`; retry with the std handles
+  // discarded. stderr is PIPED either way, so the graphics-stack probe noise is
+  // still kept out of the app's own log (see forwardStderr).
+  const command = (stdio: "inherit" | "null") =>
+    new Deno.Command(bin, {
+      args: [tmpFile, ...sandboxArgs, ...extraArgs, ...envArgs.args],
+      // The window dies with this process — see tmplParentWatch. Merged into
+      // the inherited environment, so the shim passes it through to Electron.
+      env: { AIO_PARENT_PID: String(Deno.pid) },
+      ...(stdio === "inherit"
+        ? { stdout: "inherit" as const }
+        : { stdin: "null" as const, stdout: "null" as const }),
+      stderr: "piped",
+    });
+  let proc: Deno.ChildProcess;
+  try {
+    proc = command("inherit").spawn();
+  } catch (e) {
+    if (!isInvalidHandleError(e)) throw e;
+    proc = command("null").spawn();
+  }
   forwardStderr(proc);
   const cleanup = () => Deno.remove(tmpFile).catch(() => {});
   // Primary cleanup: after Electron exits normally

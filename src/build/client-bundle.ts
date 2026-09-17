@@ -237,7 +237,13 @@ export async function bundleClient(o: ClientBundleOpts): Promise<ClientBundle> {
       // when nothing is written — esbuild refuses otherwise ("Cannot use an
       // external source map without an output path"), so the in-memory path
       // names one it never creates.
-      ...(o.sourcemap ? { sourcemap: "external" as const } : {}),
+      // No `sourcesContent`: the map is read by the SERVER to remap stack
+      // positions (diagnostics/stack-remap.ts) and never served, so the
+      // embedded copy of every source file was dead weight — 3.5 MB of a
+      // 5.2 MB map, inside every compiled binary (2026-09-17).
+      ...(o.sourcemap
+        ? { sourcemap: "external" as const, sourcesContent: false }
+        : {}),
       ...(o.write
         ? { outfile: o.write.outfile, banner: { js: o.write.banner } }
         : {

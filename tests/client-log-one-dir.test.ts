@@ -8,6 +8,7 @@
 // (`~/.<appId>/logs/client.log`).
 import { assert, assertEquals } from "@std/assert";
 import { dirname, fromFileUrl, join } from "@std/path";
+import { setFallbackLogDir } from "../src/diagnostics/logger-api.ts";
 import {
   _pendingWrites,
   disposeClientLog,
@@ -40,6 +41,38 @@ Deno.test("client log: writes land in the directory it was initialised with", as
   } finally {
     disposeClientLog(); // the rate-limit reset timer is the module's, not the app's
     await Deno.remove(dir, { recursive: true }).catch(() => {});
+  }
+});
+
+Deno.test("client log: with no HTTP server booted, writes follow the logger's directory", async () => {
+  // A prod Electron app on a named pipe skips the HTTP server, so
+  // `initClientLog` never runs. The module default was cwd-relative, and an
+  // installed Windows app logged "write failed for .aio/log/client.log" for
+  // every renderer line (real Windows 11, 2026-09-17).
+  const dir = await Deno.makeTempDir({ prefix: "aio-clientlog-" });
+  const cwd = await Deno.makeTempDir({ prefix: "aio-clientlog-cwd-" });
+  const was = Deno.cwd();
+  try {
+    disposeClientLog(); // no initClientLog in this process's history
+    setFallbackLogDir(dir);
+    Deno.chdir(cwd); // a cwd with no .aio/ — where the old default failed
+    writeClientLog(
+      0,
+      {
+        ts: Date.now(),
+        level: "info",
+        msg: "renderer over the pipe",
+      } as Parameters<typeof writeClientLog>[1],
+    );
+    await flushClientLog();
+    const text = await Deno.readTextFile(join(dir, "client.log"));
+    assert(text.includes("renderer over the pipe"), text);
+  } finally {
+    Deno.chdir(was);
+    setFallbackLogDir(null);
+    disposeClientLog();
+    await Deno.remove(dir, { recursive: true }).catch(() => {});
+    await Deno.remove(cwd, { recursive: true }).catch(() => {});
   }
 });
 
