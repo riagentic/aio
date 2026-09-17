@@ -2,11 +2,7 @@
  * @module
  * Build compile — withDevExcluded symlink manager + deno compile step + systemd service file.
  */
-import {
-  APP_STYLE,
-  BUILD_SCRATCH_DIR,
-  BUNDLE_JS,
-} from "../server/app-files.ts";
+import { APP_STYLE, BUNDLE_JS } from "../server/app-files.ts";
 import {
   DENO_JSON_NAMES,
   readDenoJson,
@@ -25,6 +21,8 @@ import {
 import type { BuildConfig } from "./build-config.ts";
 import { HEY, NO, OK } from "../diagnostics/fmt.ts";
 import { compiled } from "./build-say.ts";
+import { electronStagingDir, freshElectronStaging } from "./build-electron.ts";
+import { writeWindowsIcon } from "./build-helpers.ts";
 
 /** npm packages the FRAMEWORK only ever needs at BUILD / DEV / TEST time.
  *  None of them is reachable from a compiled binary:
@@ -143,10 +141,106 @@ export async function readDenoNmGraph(
   return graph;
 }
 
+/** The slice of `deno info --json` this build reads. */
+export type DenoInfoGraph = {
+  modules?: Array<{ kind?: string; npmPackage?: string }>;
+  npmPackages?: Record<string, { dependencies?: string[] }>;
+};
+
+/** The `.deno` entry names (`@scope+pkg@1.2.3`) that NO module of the
+ *  binary's graph can reach — safe to leave out, measured rather than listed.
+ *
+ *  `deno compile` with a `node_modules` dir embeds the whole tree, whatever
+ *  the server imports. A 3D app shipped three.js (27 MB) and its typings
+ *  inside a server that never loads them — the browser bundle already carries
+ *  what the page needs — and every cross-compiled Windows exe gained esbuild's
+ *  Windows binary (10 MB), because deno links it DURING the compile, after a
+ *  list built from the tree on disk was already made (field report,
+ *  2026-09-17). The lockfile knows every package, and the graph knows which
+ *  ones are imported: this is the difference, plus every `@types/*` (type
+ *  information only, never loaded).
+ *
+ *  `graphs` is one `deno info --json` per root (the entry, the DB worker, each
+ *  embedded server module). Returns null when a reachable package has no
+ *  `.deno` entry under the name this derives — a layout this cannot map is a
+ *  reason to exclude nothing, never a guess. Pure. */
+export function unreachableNpmEntries(
+  graphs: readonly DenoInfoGraph[],
+  denoEntries: ReadonlySet<string>,
+): string[] | null {
+  const all = new Map<string, string[]>();
+  for (const g of graphs) {
+    for (const [id, p] of Object.entries(g.npmPackages ?? {})) {
+      all.set(id, p.dependencies ?? []);
+    }
+  }
+  const reached = new Set<string>();
+  const queue = graphs.flatMap((g) =>
+    (g.modules ?? []).flatMap((m) =>
+      m.kind === "npm" && m.npmPackage ? [m.npmPackage] : []
+    )
+  );
+  while (queue.length) {
+    const id = queue.pop()!;
+    if (reached.has(id)) continue;
+    reached.add(id);
+    queue.push(...(all.get(id) ?? []));
+  }
+  const entryOf = (id: string) => id.replaceAll("/", "+");
+  for (const id of reached) {
+    if (!id.startsWith("@types/") && !denoEntries.has(entryOf(id))) return null;
+  }
+  return [...all.keys()]
+    .filter((id) => !reached.has(id) || id.startsWith("@types/"))
+    .map(entryOf)
+    .sort();
+}
+
+/** `deno info --json` for each module root, or null if any cannot be read. */
+async function denoInfoGraphs(
+  cwd: string,
+  roots: readonly string[],
+): Promise<DenoInfoGraph[] | null> {
+  const out: DenoInfoGraph[] = [];
+  for (const r of roots) {
+    try {
+      const p = await new Deno.Command("deno", {
+        args: ["info", "--json", r],
+        cwd,
+        stdout: "piped",
+        stderr: "null",
+      }).output();
+      if (!p.success) return null;
+      out.push(JSON.parse(new TextDecoder().decode(p.stdout)));
+    } catch {
+      return null;
+    }
+  }
+  return out;
+}
+
+/** The module files a compile embeds as ROOTS: the entry and every
+ *  `--include` that is itself a module (the DB worker, `.server.ts` assets).
+ *  Pure. */
+export function compileModuleRoots(
+  entry: string,
+  includeArgs: readonly string[],
+): string[] {
+  const roots = [entry];
+  includeArgs.forEach((a, i) => {
+    const v = includeArgs[i + 1];
+    if (a === "--include" && v && /\.(m?[jt]sx?)$/.test(v)) roots.push(v);
+  });
+  return roots;
+}
+
 /** Temporarily remove dev symlinks, run compile callback, restore symlinks. Returns callback result. */
 export async function withDevExcluded(
   nmDir: string,
   fn: (excludes: string[]) => Promise<boolean>,
+  /** The binary's module roots (see {@link compileModuleRoots}); when given,
+   *  every npm package none of them reaches is left out too. */
+  graph?: { cwd: string; roots: readonly string[] },
 ): Promise<boolean> {
   // ONE build at a time may hold the project's dev symlinks aside.
   //
@@ -185,7 +279,7 @@ export async function withDevExcluded(
     }
   }
   try {
-    return await _withDevExcluded(nmDir, fn);
+    return await _withDevExcluded(nmDir, fn, graph);
   } finally {
     if (held) await Deno.remove(lock).catch(() => {});
   }
@@ -194,6 +288,7 @@ export async function withDevExcluded(
 async function _withDevExcluded(
   nmDir: string,
   fn: (excludes: string[]) => Promise<boolean>,
+  graphRoots?: { cwd: string; roots: readonly string[] },
 ): Promise<boolean> {
   const denoDir = join(nmDir, ".deno");
 
@@ -213,6 +308,18 @@ async function _withDevExcluded(
     (DEV_ONLY_PACKAGES.includes(pkg) ? devRoots : keepRoots).push(entry);
   }
   const excluded = new Set(devOnlyClosure(graph, devRoots, keepRoots));
+  if (graphRoots) {
+    const graphs = await denoInfoGraphs(graphRoots.cwd, graphRoots.roots);
+    const unreached = graphs &&
+      unreachableNpmEntries(graphs, new Set(graph.keys()));
+    if (unreached) { for (const e of unreached) excluded.add(e); }
+    else {
+      console.warn(
+        `${HEY} could not map the binary's npm graph onto node_modules — ` +
+          `embedding every package (the binary is larger, not broken)`,
+      );
+    }
+  }
   const excludes = [...excluded].map((e) => join(denoDir, e));
 
   const saved: SavedLink[] = [];
@@ -771,6 +878,39 @@ export function compileArgs(opts: {
    *  uses its own default (and needs no extra runtime download). */
   target?: string;
 }): string[] {
+  // The public signature is FROZEN (`check:api`) — the two extras the BUILD
+  // adds (the baked runtime args, the Windows GUI pair) live on the private
+  // entry below, so an app that calls this helper sees exactly what it always
+  // did.
+  return _compileArgv(opts);
+}
+
+/** The build's own `deno compile` argv: {@link compileArgs} plus the switches
+ *  only the packaging pipeline sets. NOT exported from `aio/build` — widening
+ *  the public signature is a breaking change by the surface rule, and neither
+ *  extra belongs to a caller compiling its own entry. `@internal`, reachable
+ *  from tests through the module path (the repo's seam convention).
+ *
+ *   - `runtimeArgs` — baked AFTER the entry, so `deno compile` hands them to
+ *     the program ahead of the user's own argv (the CLI parser keeps the last
+ *     value). See {@link bakedClientArgs}.
+ *   - `windowsGui` — a Windows desktop exe: no console window
+ *     (`--no-terminal`), and the app's `.ico` as its file icon. A GUI exe
+ *     double-clicked has no console, so an inherited stdout handle is invalid
+ *     (see `electron-spawn.ts`). */
+export function _compileArgv(opts: {
+  hasDist: boolean;
+  workerInclude: string[];
+  v8Flags?: string[];
+  assets: string[];
+  excludes: string[];
+  stamp?: string;
+  out: string;
+  entry: string;
+  target?: string;
+  runtimeArgs?: string[];
+  windowsGui?: { icon: string };
+}): string[] {
   return [
     "compile",
     // `-q`: deno compile prints an "Embedded Files" TREE of every module it
@@ -781,6 +921,9 @@ export function compileArgs(opts: {
     "-q",
     "-A",
     ...(opts.target ? ["--target", opts.target] : []),
+    ...(opts.windowsGui
+      ? ["--no-terminal", "--icon", opts.windowsGui.icon]
+      : []),
     ...(opts.v8Flags ?? []),
     ...(opts.hasDist ? ["--include", "dist/"] : []),
     ...opts.workerInclude,
@@ -790,18 +933,60 @@ export function compileArgs(opts: {
     "-o",
     opts.out,
     opts.entry,
+    ...(opts.runtimeArgs ?? []),
   ];
 }
 
+/** The client a compiled binary boots in, baked in as `--client=…` so the
+ *  TARGET decides — not the app's deno.json `"client"`, and not
+ *  `aio.run({ client })` (a flag outranks both).
+ *
+ *  Nothing was baked before, except into a systemd unit. A binary asked
+ *  `defaultClientFor`, which reads the app's own `"client"` — so the `browser`
+ *  target of an Electron app booted as ELECTRON, found no runtime beside it,
+ *  and started a silent ~100 MB download on a user's first double-click (real
+ *  Windows 11, 2026-09-17); the `server-app` binary started by hand opened a
+ *  desktop window. The build flags already say what the artifact is:
+ *
+ *   - `--electron` → the desktop package
+ *   - `--headless`, or `--remote` (an exposed server that also serves its
+ *     page) → `server-only`, which still serves the page
+ *   - `--cli` → `cli`; `--cli --remote` compiles the app's OWN client program
+ *     (not `aio.run()`), so nothing is baked into it
+ *   - any other compile → the browser app
+ *
+ *  Pure. */
+export function bakedClientArgs(
+  opts: {
+    doElectron: boolean;
+    doHeadless: boolean;
+    doCli: boolean;
+    doRemote: boolean;
+  },
+): string[] {
+  if (opts.doCli) return opts.doRemote ? [] : ["--client=cli"];
+  const client = opts.doElectron
+    ? "electron"
+    : opts.doHeadless || opts.doRemote
+    ? "server-only"
+    : "browser";
+  return [`--client=${client}`];
+}
+
 /** Run deno compile. Returns true on success. */
-export async function runDenoCompile(cfg: BuildConfig): Promise<boolean> {
+export async function runDenoCompile(
+  cfg: BuildConfig,
+  /** `out`: compile to this path instead of the target's usual place — the
+   *  self-contained Windows exe is a second compile of the same app. */
+  opts: { out?: string } = {},
+): Promise<boolean> {
   const { root, dist, binaryName, configEntry, doElectron } = cfg;
   const nmDir = join(root, "node_modules");
 
   // Cross builds carry the platform in the name (and .exe on Windows) so a
   // dist/ holding every platform is unambiguous; the host keeps the bare name
-  // every existing task and test expects. Electron packages into AppDir and is
-  // host-only (loadBuildConfig refuses --electron with a foreign --platform).
+  // every existing task and test expects. Electron compiles into the staging
+  // dir its package is assembled in (build-electron.ts).
   const outName = doElectron
     ? binaryName
     : artifactName(binaryName, cfg.platform);
@@ -811,20 +996,34 @@ export async function runDenoCompile(cfg: BuildConfig): Promise<boolean> {
   // directory per app; without this, callers staged into dist/ and the next
   // build deleted it (R-4).
   const outDir = cfg.outDir ?? root;
-  const compileTarget = doElectron
-    ? join(root, BUILD_SCRATCH_DIR, "AppDir", binaryName)
-    : join(outDir, outName);
-  if (!doElectron) await Deno.mkdir(outDir, { recursive: true });
+  const compileTarget = opts.out ??
+    (doElectron
+      ? join(electronStagingDir(root), binaryName)
+      : join(outDir, outName));
+  if (!doElectron || opts.out) {
+    await Deno.mkdir(dirname(compileTarget), { recursive: true });
+  }
   if (cfg.targetTriple) {
     console.log(
       `cross-compiling for ${cfg.platform} (${cfg.targetTriple})`,
     );
   }
-  if (doElectron) {
-    await Deno.mkdir(join(root, BUILD_SCRATCH_DIR, "AppDir"), {
-      recursive: true,
-    });
-  }
+  if (doElectron && !opts.out) await freshElectronStaging(root);
+  // A Windows desktop exe is a GUI program: no console window behind the app
+  // (closing it killed the app), and the app's icon instead of Deno's.
+  const windowsGui = doElectron && cfg.os === "windows"
+    ? {
+      icon: await writeWindowsIcon(
+        join(dirname(electronStagingDir(root)), "app.ico"),
+        {
+          root,
+          appDir: cfg.appDir,
+          name: cfg.appTitle ?? binaryName,
+          warn: (m) => console.warn(`${HEY} ${m}`),
+        },
+      ),
+    }
+    : undefined;
 
   let hasDist = false;
   try {
@@ -854,9 +1053,13 @@ export async function runDenoCompile(cfg: BuildConfig): Promise<boolean> {
   // exactly what it found. The E2E gate is the hard half.
   await warnUnservableAssets(root, dist, hasDist, configEntry, assets);
 
+  const graphRoots = {
+    cwd: root,
+    roots: compileModuleRoots(configEntry, [...workerInclude, ...assets]),
+  };
   const ok = await withDevExcluded(nmDir, async (excludes) => {
     const result = await new Deno.Command("deno", {
-      args: compileArgs({
+      args: _compileArgv({
         hasDist,
         workerInclude,
         assets,
@@ -866,6 +1069,8 @@ export async function runDenoCompile(cfg: BuildConfig): Promise<boolean> {
         out: compileTarget,
         entry: configEntry,
         target: cfg.targetTriple,
+        runtimeArgs: bakedClientArgs(cfg),
+        windowsGui,
       }),
       stdout: "inherit",
       stderr: "inherit",
@@ -891,7 +1096,7 @@ export async function runDenoCompile(cfg: BuildConfig): Promise<boolean> {
     }
     compiled(compileTarget, root);
     return true;
-  });
+  }, graphRoots);
 
   return ok;
 }

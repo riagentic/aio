@@ -29,6 +29,13 @@ export function isPipePath(p: string): boolean {
 export interface LocalConn {
   readonly readable: ReadableStream<Uint8Array>;
   readonly writable: WritableStream<Uint8Array>;
+  /** Wait until everything already written has been READ by the peer, before
+   *  the connection is torn down. Windows-only in practice: a server that
+   *  `DisconnectNamedPipe`s with unread bytes in the pipe buffer DISCARDS them
+   *  (real Windows 11, 2026-09-17 — Electron's first page request answered
+   *  `read EPIPE`), where a Unix socket flushes on close. Optional: unix has
+   *  nothing to do, so it is absent there rather than a no-op implementation. */
+  drain?(): Promise<void>;
   /** Idempotent. */
   close(): void;
   /** `{ transport: "unix", path }` on BOTH OSs — server.ts treats it as the

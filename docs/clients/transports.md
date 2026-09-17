@@ -37,15 +37,17 @@ on both.
 | prod | electron, `dist/` readable           | **UDS** only — page from disk (`aio://`), **no HTTP handler at all**                           | **named pipe** only — **no TCP port**                             |
 | prod | electron, `dist/` readable, `routes` | **UDS** (state) + **UDS** `<appId>.http.sock` (routes only) — **no TCP**                       | named pipe (state) + named pipe `-http` — **no TCP**              |
 | prod | electron, `--port=N`                 | UDS (state) + TCP 127.0.0.1:N (page, routes)                                                   | named pipe (state) + TCP 127.0.0.1:N                              |
-| prod | electron, no `dist/` on disk         | UDS (state) + TCP 127.0.0.1 (page) — warns why                                                 | named pipe (state) + TCP 127.0.0.1 (page)                         |
+| prod | electron, no `dist/` on disk         | **UDS** (state) + **UDS** `<appId>.http.sock` (page, routes) — **no TCP**                      | named pipe (state) + named pipe `-http` — **no TCP port**         |
 | prod | browser                              | TCP 127.0.0.1                                                                                  | TCP 127.0.0.1                                                     |
 | prod | server-only / cli                    | TCP 127.0.0.1                                                                                  | TCP 127.0.0.1                                                     |
 | any  | any, `--expose`                      | TCP 0.0.0.0 (or `--host`), HTTPS unless `--no-tls`; transport is WS                            | same                                                              |
 
 "No `dist/` on disk" is the compiled-binary case: the bundle is inside the
-binary's embedded VFS, which Electron cannot open, so the page still needs a
-server. Ship `dist/` next to the binary (the AppImage/AppDir layout) to reach
-zero ports. The boot log says which case you are in:
+binary's embedded VFS, which the foreign Electron process cannot open — but the
+server reads its OWN VFS, so the page comes to the window through the socket
+exactly as dev's does. A one-file Windows exe (the exe with Electron inside,
+nothing beside it) is this row: **no TCP port**. The boot log says which case
+you are in:
 
 ```
 prod+UDS: HTTP server skipped (zero TCP ports)
@@ -72,13 +74,17 @@ function, pinned as a table by `tests/zero-port-decision.test.ts`).
   alone, and boot prints
   `N custom route(s) served over the socket
   (aio://app/<path>) — no TCP port`.
+- **prod, `dist/` only inside the binary** (a one-file exe) — the window cannot
+  read the VFS, so the page is served over the second socket; still **no TCP
+  port**. Ship `dist/` next to the binary (the AppImage/AppDir layout) to skip
+  the handler entirely, which is faster and needs no socket.
 
 **The opt-out is a named port.** Anything that needs a URL keeps one: a browser
-client, `--expose`, the thin client, prod without `dist/` — and an app whose
-port was named: `--port=N`, `AIO_PORT`, or `aio.run({ port })`. A route that
-**another process** must reach over TCP (a webhook receiver, a `curl` probe, a
-browser tab beside the window) is exactly the case for naming the port, and boot
-says so: `port N named explicitly — keeping a TCP listener`.
+client, `--expose`, the thin client — and an app whose port was named:
+`--port=N`, `AIO_PORT`, or `aio.run({ port })`. A route that **another process**
+must reach over TCP (a webhook receiver, a `curl` probe, a browser tab beside
+the window) is exactly the case for naming the port, and boot says so:
+`port N named explicitly — keeping a TCP listener`.
 
 `--zero-port` was the dev opt-in before this became the default. It has been a
 no-op since alpha66 and is REFUSED as of alpha76 (src/state/removals.ts) —

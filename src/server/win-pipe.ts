@@ -207,6 +207,15 @@ const K32_SYMBOLS = {
   },
   CloseHandle: { parameters: ["pointer"], result: "i32" },
   CancelIoEx: { parameters: ["pointer", "pointer"], result: "i32" },
+  // Blocks until every byte written has been READ by the client (or the peer
+  // disconnects). A `nonblocking: true` FFI call runs on a pool thread, so the
+  // event loop keeps serving other connections while this one drains — see
+  // PipeConn#drain for why a server pipe needs it at all.
+  FlushFileBuffers: {
+    parameters: ["pointer"],
+    result: "i32",
+    nonblocking: true,
+  },
   CreateFileW: {
     parameters: ["buffer", "u32", "u32", "pointer", "u32", "u32", "pointer"],
     result: "pointer",
@@ -392,6 +401,28 @@ class PipeConn implements LocalConn {
   #readFailed(code: number): null {
     if (this.#closed || isPeerGoneError(code)) return null;
     throw winError("ReadFile", code, this.path);
+  }
+
+  /** Wait for the peer to have READ everything already written.
+   *
+   *  A server-side named pipe that is disconnected with unread bytes in its
+   *  buffer DISCARDS them: `DisconnectNamedPipe` is documented to terminate
+   *  the connection "after all data ... has been read by the client" only for
+   *  a CLEAN shutdown, and in practice the close path raced ahead of the
+   *  client's read. Measured on real Windows 11 (2026-09-17): Electron's very
+   *  FIRST page request over the pipe answered `read EPIPE` after a 200 whose
+   *  body was buffered and never delivered — the window then failed
+   *  `did-fail-load`, while a Unix socket (which flushes on close) was fine.
+   *  `FlushFileBuffers` on the server handle blocks exactly until the client
+   *  has consumed the bytes, so it is the documented way to close cleanly; the
+   *  FFI call is `nonblocking`, so the wait lives on a pool thread and the
+   *  event loop keeps serving. A peer already gone is not an error here. */
+  async drain(): Promise<void> {
+    if (!this.server || this.#closed) return;
+    await this.#track(k32().FlushFileBuffers(this.#h)).catch(() => {
+      // aio-ok(silent-catch): FlushFileBuffers fails only when the peer is
+      // already gone — the case this drain exists to tolerate, never to report.
+    });
   }
 
   /** One write, complete: WriteFile until every byte is accepted. Serialized

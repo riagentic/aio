@@ -3,7 +3,7 @@
 // Called from server.ts for incoming "log" frames (WS/IPC).
 
 import type { ClientLogEntry } from "../air/dom-inspector-types.ts";
-import { log } from "../diagnostics/logger-api.ts";
+import { getLogDir, log } from "../diagnostics/logger-api.ts";
 import { remapClientText } from "../diagnostics/stack-remap.ts";
 
 const MAX_RATE = 100; // messages per second per client
@@ -19,11 +19,12 @@ const LEVEL_PAD: Record<ClientLogEntry["level"], string> = {
 // Rate tracking: clientIndex → { count within current second, warned flag }
 const _rate = new Map<number, { count: number; warned: boolean }>();
 
-// Overwritten at every server boot (`initClientLog`). The literal survives only
-// for a direct caller that never booted a server — kept cwd-relative rather
-// than guessing a home directory, because a wrong absolute path is harder to
-// notice than a visibly local one.
-let _logDir = ".aio/log";
+// Set by `initClientLog` when the HTTP server boots; otherwise THE logger's
+// directory, asked at write time. It used to default to the cwd-relative
+// `.aio/log`, and a prod Electron app on a named pipe never boots the HTTP
+// server — so every renderer line of an installed Windows app failed with
+// "write failed for .aio/log/client.log" (real Windows 11, 2026-09-17).
+let _logDir: string | null = null;
 let _resetTimer: ReturnType<typeof setTimeout> | null = null;
 let _writeErrors = 0;
 /** Whether this process has already tightened the current `client.log`. One
@@ -138,6 +139,7 @@ export function disposeClientLog(): void {
   }
   _rate.clear();
   _modeFixed = false;
+  _logDir = null; // back to the logger's directory
 }
 
 // ── Internals ─────────────────────────────────────────────────────────
@@ -148,7 +150,7 @@ export function disposeClientLog(): void {
 const _pending = new Set<Promise<unknown>>();
 
 function _append(line: string): void {
-  const path = `${_logDir}/client.log`;
+  const path = `${_logDir ?? getLogDir()}/client.log`;
   // 0600 + the chmod half, exactly as `logger-core.ts` documents it and
   // `action-log.ts` obeys it. This was the one log writer in the repo that
   // did neither, and it is the worst file to miss: `client.log` holds every

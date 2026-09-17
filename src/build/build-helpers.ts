@@ -6,7 +6,13 @@ import { sha256Hex } from "./ship.ts";
 import { dirname, join, resolve } from "@std/path";
 import { toolCacheDir } from "../electron/electron-runtime-fetch.ts";
 export { toolCacheDir };
-import { appIconPng, appIconSvg } from "./app-icon.ts";
+import {
+  appIconIco,
+  appIconPng,
+  appIconSvg,
+  icoFromPngs,
+  pngSize,
+} from "./app-icon.ts";
 import { APP_ICON } from "../server/app-files.ts";
 
 /** The appimagetool release this build pins to.
@@ -402,6 +408,53 @@ export async function writeDefaultIcon(
 ): Promise<void> {
   await Deno.writeTextFile(`${base}.svg`, appIconSvg(appName));
   await Deno.writeFile(`${base}.png`, await appIconPng(appName, 512));
+}
+
+/** The app's own `.ico`, beside its `icon.png`. */
+export const APP_ICON_ICO = "icon.ico";
+
+/** The `.ico` a Windows exe carries as its file icon, written to `out`.
+ *
+ *  An `icon.ico` in the app dir wins; else the app's `icon.png` when Windows
+ *  can hold it as-is (square, at most 256 px); else the monogram every other
+ *  icon-less surface already shows. A larger `icon.png` is WARNED about, not
+ *  silently swapped: the window will wear the PNG and Explorer the monogram,
+ *  and the fix is one file. Returns the path written. */
+export async function writeWindowsIcon(
+  out: string,
+  opts: {
+    root: string;
+    appDir: string;
+    name: string;
+    warn?: (msg: string) => void;
+  },
+): Promise<string> {
+  const warn = opts.warn ?? console.warn;
+  await Deno.mkdir(dirname(out), { recursive: true });
+  const ico = join(opts.appDir, APP_ICON_ICO);
+  try {
+    await Deno.copyFile(ico, out);
+    return out;
+  } catch (e) {
+    if (!(e instanceof Deno.errors.NotFound)) throw e;
+  }
+  const { icon } = await resolveAppIcon(opts.root, opts.appDir);
+  if (icon) {
+    const png = await Deno.readFile(icon);
+    const size = pngSize(png);
+    if (size && size.w === size.h && size.w <= 256) {
+      await Deno.writeFile(out, icoFromPngs([png]));
+      return out;
+    }
+    warn(
+      `${icon} is ${size ? `${size.w}×${size.h}` : "not a PNG"}, which a ` +
+        `Windows exe icon cannot hold (square, at most 256 px) — the exe ` +
+        `shows the generated monogram instead. Add ` +
+        `${join(opts.appDir, APP_ICON_ICO)} to use your own.`,
+    );
+  }
+  await Deno.writeFile(out, await appIconIco(opts.name));
+  return out;
 }
 
 /** Format bytes as MB string with one decimal place */

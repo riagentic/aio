@@ -325,12 +325,17 @@ export function _unusedCertWarning(source: "flag" | "config"): string {
  *      is skipped entirely (`skipHttp`) UNLESS the app declares custom
  *      `routes`, which then run on a socket the window proxies to (an
  *      `<img src="/nft-image/x">` resolves to `aio://app/nft-image/x`).
+ *    • prod WITHOUT a readable dist/ — the page is in the binary's embedded
+ *      VFS, which the foreign Electron process cannot open but THIS one can.
+ *      The handler runs on the socket and Electron proxies `aio://` to it, so
+ *      the one-file exe (`dist/` embedded, nothing beside it) still binds no
+ *      TCP port. It used to fall back to a loopback PORT for this case, which
+ *      is the cost the zero-port rule exists to remove — and the fallback was
+ *      never necessary: the socket serves the same page, modules and assets.
  *    • dev — the page and its modules are transpiled on demand, so the
  *      handler always runs, on the socket.
  *  Everything that needs a URL keeps a port: a browser client, `--expose`,
- *  the thin client, prod without a readable dist/ (on windows the local
- *  socket is a named pipe — the same rows apply), and — the explicit opt-out
- *  — an app whose
+ *  the thin client, and — the explicit opt-out — an app whose
  *  port was NAMED (`--port=N`, `AIO_PORT`, `aio.run({ port })`): a route that
  *  another process must reach over TCP (a webhook receiver, a `curl` probe, a
  *  browser tab beside the window) is exactly the case where naming the port
@@ -338,14 +343,17 @@ export function _unusedCertWarning(source: "flag" | "config"): string {
 export function resolveZeroPort(i: {
   prod: boolean;
   localElectronUds: boolean;
+  /** A real-filesystem dist/ Electron can read from its own process. When
+   *  false, the page is in the embedded VFS and the SOCKET must serve it —
+   *  still zero TCP ports, but `skipHttp` cannot apply. */
   canServeFromDisk: boolean;
   /** A port was named — flag, env or config. The opt-out. */
   portRequested: boolean;
   routeCount: number;
 }): { zeroPort: boolean; skipHttp: boolean; useHttpSocket: boolean } {
-  const zeroPort = i.localElectronUds && !i.portRequested &&
-    (i.prod ? i.canServeFromDisk : true);
-  const skipHttp = zeroPort && i.prod && i.routeCount === 0;
+  const zeroPort = i.localElectronUds && !i.portRequested;
+  const skipHttp = zeroPort && i.prod && i.canServeFromDisk &&
+    i.routeCount === 0;
   return { zeroPort, skipHttp, useHttpSocket: zeroPort && !skipHttp };
 }
 
@@ -506,9 +514,12 @@ export async function setupTransport<S, A>(
   // comes from:
   //   • prod, with a readable dist/ — Electron loads the bundle straight off
   //     disk (aio://), so no request handler is needed at all.
-  //   • dev — the page and its modules must be transpiled on demand, so the
-  //     handler still runs; it just listens on a SOCKET instead of a port
-  //     (`Deno.serve({ path })`), and Electron fetches through it.
+  //   • dev, or prod whose dist/ is only in the embedded VFS — the page and
+  //     its modules must come through the handler, which listens on a SOCKET
+  //     instead of a port (`Deno.serve({ path })`) and Electron fetches
+  //     through. A one-file Windows exe is this case: nothing is on disk for
+  //     the foreign Electron process to open, but THIS process reads its own
+  //     embedded dist/ and serves it over the pipe.
   // Everything that needs a URL — a browser client, --expose, a NAMED port —
   // keeps one. See `resolveZeroPort` for the principle.
   const canServeFromDisk = !!electronDistDir;
@@ -529,7 +540,7 @@ export async function setupTransport<S, A>(
         `reach over TCP (a webhook receiver) needs a named port: --port=N`,
     );
   }
-  if (localElectronUds && deps.portRequested && !prod) {
+  if (localElectronUds && deps.portRequested) {
     log.info(
       `port ${port} named explicitly — keeping a TCP listener for this local ` +
         `electron app (drop --port / AIO_PORT / config.port for zero ports)`,
@@ -540,13 +551,6 @@ export async function setupTransport<S, A>(
   const httpSocketPath = zp.useHttpSocket
     ? resolveSocketPath(appId, "http")
     : undefined;
-  if (prod && localElectronUds && !zeroPort) {
-    log.warn(
-      "prod+electron: no dist/ readable outside the binary (embedded VFS " +
-        "only) — keeping the HTTP server so the window can load. Ship dist/ " +
-        "next to the binary (the AppImage/AppDir layout) for zero TCP ports.",
-    );
-  }
   // Network-borne dispatch: auth-gate → dispatch → resolve with the method's
   // RETURN value. Shared by the WS server and the UDS listener so both give an
   // awaiting caller (browser ack, trojan, CLI) the real value, and both enforce

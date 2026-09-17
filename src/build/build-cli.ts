@@ -5,8 +5,9 @@
 import { artifactName } from "./platforms.ts";
 import { join } from "@std/path";
 import {
+  _compileArgv,
   assetIncludes,
-  compileArgs,
+  bakedClientArgs,
   dbWorkerInclude,
   smokeRunArtifact,
   v8FlagsArg,
@@ -39,7 +40,7 @@ export function cliEntryFor(
 }
 
 /** The `deno compile` argv for a CLI target — THE SAME assembly every other
- *  compiled target uses (`compileArgs`), narrowed to what a CLI has.
+ *  compiled target uses (`_compileArgv`), narrowed to what a CLI has.
  *
  *  It used to be a second, hand-written argv, and the two had drifted in the
  *  way copies do: this one embedded no build stamp and passed no `--v8-flags`.
@@ -59,7 +60,7 @@ export function cliCompileArgs(opts: {
   v8Flags: string[];
   target?: string;
 }): string[] {
-  return compileArgs({
+  return _compileArgv({
     hasDist: false, // a CLI serves no browser bundle
     // A remote CLI client talks to a server and opens no database of its own.
     workerInclude: opts.doRemote ? [] : dbWorkerInclude(),
@@ -70,6 +71,12 @@ export function cliCompileArgs(opts: {
     out: opts.out,
     entry: opts.entry,
     target: opts.target,
+    runtimeArgs: bakedClientArgs({
+      doCli: true,
+      doRemote: opts.doRemote,
+      doElectron: false,
+      doHeadless: false,
+    }),
   });
 }
 

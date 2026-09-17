@@ -24,20 +24,23 @@ import {
 } from "../src/electron/electron-runtime-fetch.ts";
 import {
   findElectronBin,
+  isInvalidHandleError,
   packagedElectronCandidates,
 } from "../src/electron/electron-spawn.ts";
 import {
   electronCacheDir,
+  localElectronDistFor,
   resolveElectronVersion,
 } from "../src/build/electron-runtime.ts";
 import type { Log } from "../src/electron/electron-shared.ts";
+import { dropTempDir, tempDir } from "../src/testing/temp-dir.ts";
 
 const silent: Log = { info: () => {}, error: () => {} };
 
 /** Run `fn` in an empty cwd with a private cache — steps 2/3 of the launcher
  *  stat RELATIVE paths, and this repo has a node_modules/.bin/electron. */
 async function isolated<T>(fn: (tmp: string) => Promise<T>): Promise<T> {
-  const tmp = await Deno.makeTempDir({ prefix: "electron-fetch-" });
+  const tmp = await tempDir("electron-fetch-");
   const cwd = Deno.cwd();
   const xdg = Deno.env.get("XDG_CACHE_HOME");
   const ep = Deno.env.get("ELECTRON_PATH");
@@ -51,7 +54,7 @@ async function isolated<T>(fn: (tmp: string) => Promise<T>): Promise<T> {
     if (xdg === undefined) Deno.env.delete("XDG_CACHE_HOME");
     else Deno.env.set("XDG_CACHE_HOME", xdg);
     if (ep !== undefined) Deno.env.set("ELECTRON_PATH", ep);
-    await Deno.remove(tmp, { recursive: true }).catch(() => {});
+    await dropTempDir(tmp);
   }
 }
 
@@ -90,18 +93,18 @@ Deno.test("electron-runtime-fetch: pure mapping — slug, url, cache dir, binary
 });
 
 Deno.test("bakedElectronVersion: reads dist/electron.json, null for anything else", async () => {
-  const tmp = await Deno.makeTempDir();
+  const tmp = await tempDir("electron-fetch-");
   assertEquals(await bakedElectronVersion(undefined), null);
   assertEquals(await bakedElectronVersion(tmp), null, "no file");
   await Deno.writeTextFile(join(tmp, "electron.json"), '{"version":""}');
   assertEquals(await bakedElectronVersion(tmp), null, "empty is not a version");
   await Deno.writeTextFile(join(tmp, "electron.json"), '{"version":"43.4.1"}');
   assertEquals(await bakedElectronVersion(tmp), "43.4.1");
-  await Deno.remove(tmp, { recursive: true });
+  await dropTempDir(tmp);
 });
 
 Deno.test("resolveElectronVersion: installed > import-map spec > default — never null", async () => {
-  const tmp = await Deno.makeTempDir();
+  const tmp = await tempDir("electron-fetch-");
   assertEquals(await resolveElectronVersion(tmp), DEFAULT_ELECTRON_VERSION);
   await Deno.writeTextFile(
     join(tmp, "deno.json"),
@@ -118,13 +121,48 @@ Deno.test("resolveElectronVersion: installed > import-map spec > default — nev
   );
   assertEquals(await resolveElectronVersion(tmp), "43.4.1");
   // An installed runtime wins over the spec: what dev runs is what ships.
-  await Deno.mkdir(join(tmp, "node_modules", "electron"), { recursive: true });
+  // "Installed" means the runtime is UNPACKED — a package.json whose `dist/`
+  // is missing (deleted, or written by `deno install` before its lifecycle
+  // script ran) pins nothing, and trusting it baked one Electron while the
+  // package shipped another (real Windows 11, 2026-09-17).
+  await Deno.mkdir(join(tmp, "node_modules", "electron", "dist"), {
+    recursive: true,
+  });
   await Deno.writeTextFile(
     join(tmp, "node_modules", "electron", "package.json"),
     '{"version":"42.0.0"}',
   );
   assertEquals(await resolveElectronVersion(tmp), "42.0.0");
-  await Deno.remove(tmp, { recursive: true });
+  await dropTempDir(tmp);
+});
+
+Deno.test("localElectronDistFor: a stale node_modules runtime is NOT used for another version", async () => {
+  // The second half of the same field report: the PACKAGE step copied the host
+  // runtime whenever one existed, so a `node_modules/electron` left over from a
+  // previous install shipped one Electron in the zip while the self-contained
+  // exe carried the version the build baked. The fix is that a local runtime is
+  // reused ONLY for the exact version — an offline build still works, and a
+  // stale one can never slip in beside the baked version.
+  const tmp = await tempDir("electron-fetch-");
+  try {
+    const dist = join(tmp, "node_modules", "electron", "dist");
+    await Deno.mkdir(dist, { recursive: true });
+    await Deno.writeTextFile(
+      join(tmp, "node_modules", "electron", "package.json"),
+      '{"version":"42.0.0"}',
+    );
+    assertEquals(await localElectronDistFor("42.0.0", tmp), dist);
+    assertEquals(
+      await localElectronDistFor("44.4.1", tmp),
+      null,
+      "a runtime of a different version is never handed back",
+    );
+    // No dist/ at all → nothing to reuse, whatever the package.json says.
+    await Deno.remove(dist, { recursive: true });
+    assertEquals(await localElectronDistFor("42.0.0", tmp), null);
+  } finally {
+    await dropTempDir(tmp);
+  }
 });
 
 /** A zip holding one executable at `entryName` — what the release asset looks
@@ -603,4 +641,38 @@ Deno.test("ensureElectronRuntime: an archive missing the TARGET's binary is stil
       `the refusal must name the file it looked for: ${e}`,
     );
   });
+});
+
+// ── the spawn-handle retry (real Windows 11, 2026-09-17) ─────────────────────
+//
+// A `deno compile --no-terminal` GUI exe double-clicked has NO console, so the
+// inherited stdout handle is invalid and `Deno.Command(...).spawn()` throws
+// `TypeError: Failed to spawn 'electron.exe': Invalid handle` — before Electron
+// is ever reached, so the window never opened. The retry (spawn with the std
+// handles discarded) is the fix; these pin the predicate that gates it, so an
+// unrelated failure is never retried into silence.
+
+Deno.test("isInvalidHandleError: only Windows' no-console inherit failure", () => {
+  const thrown = () =>
+    new TypeError(
+      "Failed to spawn 'C:\\app\\electron.exe': Invalid handle",
+    );
+  assertEquals(isInvalidHandleError(thrown(), "windows"), true);
+  // Off Windows the same message is a different problem: never retried.
+  assertEquals(isInvalidHandleError(thrown(), "linux"), false);
+  assertEquals(isInvalidHandleError(thrown(), "darwin"), false);
+  // A non-TypeError, or a TypeError without the phrase, is not this bug.
+  assertEquals(
+    isInvalidHandleError(new Error("Invalid handle"), "windows"),
+    false,
+  );
+  assertEquals(
+    isInvalidHandleError(
+      new TypeError("Failed to spawn: access denied"),
+      "windows",
+    ),
+    false,
+  );
+  assertEquals(isInvalidHandleError("Invalid handle", "windows"), false);
+  assertEquals(isInvalidHandleError(null, "windows"), false);
 });

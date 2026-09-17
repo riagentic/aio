@@ -472,3 +472,60 @@ export async function appIconPngBase64(
   }
   return btoa(s);
 }
+
+/** Width and height from a PNG's IHDR, or null for anything that is not a
+ *  PNG. Pure. */
+export function pngSize(png: Uint8Array): { w: number; h: number } | null {
+  const sig = [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a];
+  if (png.length < 24 || sig.some((b, i) => png[i] !== b)) return null;
+  const v = new DataView(png.buffer, png.byteOffset, png.byteLength);
+  return { w: v.getUint32(16), h: v.getUint32(20) };
+}
+
+/** A Windows `.ico` whose images are PNG-compressed (valid since Vista, and
+ *  what `deno compile --icon` embeds as the exe's icon). Every image must be
+ *  a square PNG of at most 256 px — the directory entry has one byte per side,
+ *  with 0 meaning 256. Pure. */
+export function icoFromPngs(pngs: readonly Uint8Array[]): Uint8Array {
+  const sizes = pngs.map((p, i) => {
+    const s = pngSize(p);
+    if (!s) throw new Error(`icon image ${i} is not a PNG`);
+    if (s.w !== s.h || s.w < 1 || s.w > 256) {
+      throw new Error(
+        `icon image ${i} is ${s.w}×${s.h} — a Windows icon image must be ` +
+          `square and at most 256 px`,
+      );
+    }
+    return s.w;
+  });
+  const head = 6 + 16 * pngs.length;
+  const out = new Uint8Array(head + pngs.reduce((n, p) => n + p.length, 0));
+  const v = new DataView(out.buffer);
+  v.setUint16(2, 1, true); // type: icon
+  v.setUint16(4, pngs.length, true);
+  let at = head;
+  pngs.forEach((p, i) => {
+    const e = 6 + 16 * i;
+    out[e] = sizes[i]! % 256; // 256 is written as 0
+    out[e + 1] = sizes[i]! % 256;
+    v.setUint16(e + 4, 1, true); // colour planes
+    v.setUint16(e + 6, 32, true); // bits per pixel
+    v.setUint32(e + 8, p.length, true);
+    v.setUint32(e + 12, at, true);
+    out.set(p, at);
+    at += p.length;
+  });
+  return out;
+}
+
+/** The sizes Windows asks an exe icon for: taskbar, Explorer's views, the
+ *  title bar. */
+export const ICO_SIZES = [256, 48, 32, 16] as const;
+
+/** The app's default icon as a Windows `.ico` — the same monogram as the PNG,
+ *  rendered at each {@link ICO_SIZES} rather than scaled. */
+export async function appIconIco(name: string): Promise<Uint8Array> {
+  return icoFromPngs(
+    await Promise.all(ICO_SIZES.map((s) => appIconPng(name, s))),
+  );
+}

@@ -47,8 +47,15 @@ Deno.test("cli target: the compile argv embeds the build stamp, like every other
     includes(args).some((p) => p.endsWith("db-worker.ts")),
     `the DB worker is not embedded:\n${args.join(" ")}`,
   );
-  // Shape: `-o <out> <entry>` last, so a stray include cannot displace them.
-  assertEquals(args.slice(-3), ["-o", "/out/tool", "src/app.ts"]);
+  // Shape: `-o <out> <entry>` then the baked client, so a stray include
+  // cannot displace them — and the binary boots as a CLI whatever the app's
+  // deno.json `"client"` says (build-baked-client.test.ts).
+  assertEquals(args.slice(-4), [
+    "-o",
+    "/out/tool",
+    "src/app.ts",
+    "--client=cli",
+  ]);
   assertEquals(args[0], "compile");
 });
 

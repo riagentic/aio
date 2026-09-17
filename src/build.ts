@@ -35,6 +35,7 @@ import { runDenoCompile, writeServiceFile } from "./build/build-compile.ts";
 import { buildElectron } from "./build/build-electron.ts";
 import { resolveElectronVersion } from "./build/electron-runtime.ts";
 import { ELECTRON_VERSION_FILE } from "./electron/electron-runtime-fetch.ts";
+import { buildSelfContainedWindowsExe } from "./build/build-windows-exe.ts";
 import {
   BUILD_STAMP_FILE,
   installArtifactName,
@@ -175,6 +176,9 @@ export async function build(cfg?: BuildConfig): Promise<void> {
 
   // ── Step 3: Package with bundled Electron ────────────────────────────────
   await buildElectron(cfg);
+
+  // ── Step 4: Windows — the one-file exe that carries Electron ────────────
+  if (cfg.os === "windows") await buildSelfContainedWindowsExe(cfg);
 }
 
 /** Compiling the app's entry yourself (a custom script, a monorepo task, CI)?

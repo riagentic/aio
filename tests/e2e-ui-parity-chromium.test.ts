@@ -126,9 +126,8 @@ export default function App() {
 Deno.test({
   name: "e2e: am trigger in real chromium answers what real input answers",
   ignore: BROWSER === null,
-  // The browser and the app are external processes, stopped in `finally`.
-  sanitizeOps: false,
-  sanitizeResources: false,
+  sanitizeOps: false, // aio-ok(sanitizers): external browser+app, reaped in `finally`
+  sanitizeResources: false, // aio-ok(sanitizers): same — children outlive the check
   async fn() {
     const dir = await tempDir("aio-ui-parity-");
     await Deno.mkdir(`${dir}/src`, { recursive: true });

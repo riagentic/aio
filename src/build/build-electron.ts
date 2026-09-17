@@ -20,8 +20,8 @@ import { isHostPlatform } from "./platforms.ts";
 import {
   electronMissingHint,
   ensureElectronDist,
-  ensureHostElectronDist,
-  installedElectronVersion,
+  localElectronDistFor,
+  resolveElectronVersion,
 } from "./electron-runtime.ts";
 import {
   APP_ICON,
@@ -40,6 +40,12 @@ import { HEY, NO, OK } from "../diagnostics/fmt.ts";
  *  fallback (Windows hosts without `zip`), and it is no longer the only way —
  *  that was what made a Windows package a Windows-only act. */
 async function zipDir(dir: string, out: string): Promise<boolean> {
+  // `zip -r` UPDATES an existing archive: entries the tree no longer has stay
+  // in it. A previous build's zip therefore carried its files into this one
+  // however clean the staging dir was. Only absence is fine.
+  await Deno.remove(out).catch((e) => {
+    if (!(e instanceof Deno.errors.NotFound)) throw e;
+  });
   const attempts: [string, string[]][] = [
     ["zip", ["-r", "-y", "-q", out, "."]],
     ["powershell", [
@@ -71,11 +77,85 @@ async function zipDir(dir: string, out: string): Promise<boolean> {
   return false;
 }
 
+/** Where every Electron package is assembled before it is packed. */
+export function electronStagingDir(root: string): string {
+  return join(root, BUILD_SCRATCH_DIR, "AppDir");
+}
+
+/** Empty the staging dir — FRESH per build, never merely ensured. Every
+ *  platform stages into this one directory and `buildElectron` packs it
+ *  wholesale, so a kept tree carried the previous platform into the next
+ *  package: a Windows zip that shipped the Linux Electron and the Linux binary
+ *  beside its own (350 MB instead of ~160). Only absence is fine; a tree that
+ *  cannot be removed is a package that cannot be trusted. */
+export async function freshElectronStaging(root: string): Promise<string> {
+  const dir = electronStagingDir(root);
+  await Deno.remove(dir, { recursive: true }).catch((e) => {
+    if (!(e instanceof Deno.errors.NotFound)) throw e;
+  });
+  await Deno.mkdir(dir, { recursive: true });
+  return dir;
+}
+
+/** An executable's container format, from its first four bytes. */ export type BinaryFormat =
+  | "elf"
+  | "pe"
+  | "macho";
+
+/** The format a platform's executables use, keyed by `Deno.build.os`. */
+const NATIVE_FORMAT: Readonly<Record<string, BinaryFormat>> = {
+  linux: "elf",
+  windows: "pe",
+  darwin: "macho",
+};
+
+/** Which executable format `head` starts with, or null for anything else.
+ *  Mach-O covers thin 32/64-bit (either byte order) and fat/universal. Pure. */
+export function binaryFormat(head: Uint8Array): BinaryFormat | null {
+  const [a = -1, b = -1, c = -1, d = -1] = head;
+  if (a === 0x4d && b === 0x5a) return "pe";
+  if (d < 0) return null;
+  const m = ((a << 24) | (b << 16) | (c << 8) | d) >>> 0;
+  if (m === 0x7f454c46) return "elf";
+  if (
+    m === 0xfeedface || m === 0xfeedfacf || m === 0xcefaedfe ||
+    m === 0xcffaedfe || m === 0xcafebabe || m === 0xbebafeca
+  ) return "macho";
+  return null;
+}
+
+/** Every executable under `dir` whose format is not `os`'s own, as paths
+ *  relative to `dir`. Symlinks are not followed (a macOS framework is full of
+ *  them, and they point inside the tree anyway). */
+export async function foreignBinaries(
+  dir: string,
+  os: string,
+): Promise<{ path: string; format: BinaryFormat }[]> {
+  const native = NATIVE_FORMAT[os];
+  if (!native) throw new Error(`foreignBinaries: unknown os "${os}"`);
+  const out: { path: string; format: BinaryFormat }[] = [];
+  const walk = async (rel: string): Promise<void> => {
+    for await (const e of Deno.readDir(join(dir, rel))) {
+      const p = rel ? `${rel}/${e.name}` : e.name;
+      if (e.isDirectory) await walk(p);
+      else if (e.isFile) {
+        const f = await Deno.open(join(dir, p));
+        const head = new Uint8Array(4);
+        const n = await f.read(head).finally(() => f.close());
+        const format = binaryFormat(head.subarray(0, n ?? 0));
+        if (format && format !== native) out.push({ path: p, format });
+      }
+    }
+  };
+  await walk("");
+  return out.sort((a, b) => a.path.localeCompare(b.path));
+}
+
 /** Package the Electron app for the current platform. Exits process on completion or error. */
 export async function buildElectron(cfg: BuildConfig): Promise<void> {
   const { root, dist, binaryName, appTitle, os, arch, archStr } = cfg;
 
-  const appDir = join(root, BUILD_SCRATCH_DIR, "AppDir");
+  const appDir = electronStagingDir(root);
 
   // Copy dist/ assets into AppDir/dist/ (Electron can't read Deno's embedded VFS)
   const appDirDist = join(appDir, DIST_DIR);
@@ -102,25 +182,29 @@ export async function buildElectron(cfg: BuildConfig): Promise<void> {
   console.log(`${OK} dist/ assets copied to AppDir/dist/`);
 
   // Copy Electron runtime — auto-install on first build so `--electron` works
-  // OUT OF THE BOX; loud manual fallback if it fails. WHERE it lives, and the
-  // install, are `ensureHostElectronDist`: one decider, shared with the
-  // `--client` target (electron-runtime.ts says why).
-  let electronSrc = await ensureHostElectronDist(root);
-
-  // Cross-building: the runtime in node_modules is THIS host's. Electron
-  // publishes every platform's build as a zip, so fetch the one this package
-  // is for — the version comes from the runtime already installed here, so a
-  // cross-built package and a local one are never two different Electrons.
-  if (!isHostPlatform(cfg.platform)) {
-    const version = await installedElectronVersion(root);
-    if (!version) {
-      console.error(
-        `${NO} cannot tell which Electron version to fetch for ` +
-          `${cfg.platform} — install it once here so the version is pinned:\n` +
-          "      deno task install:electron",
-      );
-      Deno.exit(1);
-    }
+  // OUT OF THE BOX; loud manual fallback if it fails.
+  //
+  // ONE version decider for the whole package: `resolveElectronVersion` is the
+  // SAME call `build.ts` uses to bake `dist/electron.json`, and the runtime is
+  // then taken for exactly that version. It used to take the host runtime from
+  // node_modules and, separately, the target runtime from the baked version —
+  // so a stale `node_modules/electron` (a package.json whose `dist/` was
+  // deleted, or a rewrite by `deno install`) made the zip ship one Electron
+  // while the self-contained exe carried another (real Windows 11,
+  // 2026-09-17).
+  const version = await resolveElectronVersion(root);
+  // A local node_modules runtime is used ONLY when it IS that version, so an
+  // offline build still works and a stale one cannot slip in beside the baked
+  // version. Anything else is fetched for the platform (a download, which the
+  // per-user cache makes once).
+  const host = isHostPlatform(cfg.platform)
+    ? await localElectronDistFor(version, root)
+    : null;
+  let electronSrc: string | null;
+  if (host) {
+    console.log(`copying Electron runtime ${version} from node_modules...`);
+    electronSrc = host;
+  } else {
     try {
       electronSrc = await ensureElectronDist(version, cfg.platform);
     } catch (e) {
@@ -133,7 +217,7 @@ export async function buildElectron(cfg: BuildConfig): Promise<void> {
     console.error(`${NO} ${electronMissingHint()}`);
     Deno.exit(1);
   }
-  console.log(`copying Electron runtime...`);
+  console.log(`copying Electron runtime ${version}...`);
   await copyDir(electronSrc, electronDst);
   console.log(`${OK} electron/ copied`);
 
@@ -168,6 +252,22 @@ export async function buildElectron(cfg: BuildConfig): Promise<void> {
     /[\x00-\x1f\x7f\r\n]/g,
     "",
   );
+
+  // A package holds ONE platform's executables. Checked on the finished tree,
+  // not assumed from how it was assembled: a stale staging dir once shipped
+  // the Linux Electron inside the Windows zip, and every Linux-host gate was
+  // green because nothing ever looked inside.
+  const foreign = await foreignBinaries(appDir, os);
+  if (foreign.length > 0) {
+    console.error(
+      `${NO} the ${cfg.platform} package holds executables for another ` +
+        `platform:\n` +
+        foreign.map((f) => `      ${f.path} (${f.format})`).join("\n") +
+        `\n      Refusing to ship it. Remove ${appDir} and rebuild; if they ` +
+        `come back, the step that copies them is the bug.`,
+    );
+    Deno.exit(1);
+  }
 
   if (os === "linux") {
     await _packageLinux(cfg, appDir, displayName, arch, root, binaryName);
@@ -263,10 +363,12 @@ async function _packageWindows(
   binaryName: string,
 ): Promise<void> {
   void cfg;
+  // `start ""` returns at once, so the launcher's own console closes instead
+  // of sitting behind the window (the exe itself is a GUI program).
   const launcher = `@echo off
 SET HERE=%~dp0
 SET ELECTRON_PATH=%HERE%electron\\electron.exe
-"%HERE%${binaryName}.exe" %*
+start "" "%HERE%${binaryName}.exe" %*
 `;
   await Promise.all([
     Deno.writeTextFile(join(appDir, "run.bat"), launcher),

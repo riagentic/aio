@@ -199,13 +199,13 @@ app.
 
 Where a route is served, by mode:
 
-| Mode                          | Page                                  | Custom `routes` / `/__aio/*` | TCP port |
-| ----------------------------- | ------------------------------------- | ---------------------------- | -------- |
-| prod, electron, dist/ on disk | `aio://` off disk                     | `aio://app/<path>` → UDS     | none     |
-| prod, electron, no dist/      | `http://127.0.0.1:<port>`             | same origin, TCP             | one      |
-| dev, electron (default)       | `aio://` → UDS                        | `aio://app/<path>` → UDS     | none     |
-| dev or prod, `--port=N`       | `http://127.0.0.1:N`                  | same origin, TCP             | one      |
-| any, Windows                  | as above — the socket is a named pipe | `aio://app/<path>` → pipe    | none     |
+| Mode                             | Page                                  | Custom `routes` / `/__aio/*` | TCP port |
+| -------------------------------- | ------------------------------------- | ---------------------------- | -------- |
+| prod, electron, dist/ on disk    | `aio://` off disk                     | `aio://app/<path>` → UDS     | none     |
+| prod, electron, dist/ in the VFS | `aio://` → UDS (served from the VFS)  | `aio://app/<path>` → UDS     | none     |
+| dev, electron (default)          | `aio://` → UDS                        | `aio://app/<path>` → UDS     | none     |
+| dev or prod, `--port=N`          | `http://127.0.0.1:N`                  | same origin, TCP             | one      |
+| any, Windows                     | as above — the socket is a named pipe | `aio://app/<path>` → pipe    | none     |
 
 A `serverFn` is not a substitute for a route here: it returns a value over the
 message bridge, while an `<img>` needs a URL the renderer's network stack can

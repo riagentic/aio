@@ -68,6 +68,17 @@ export async function installedElectronVersion(
 ): Promise<string | null> {
   const { electronPkgDirs } = await import("../electron/electron-spawn.ts");
   for (const base of await electronPkgDirs(root)) {
+    // The version only counts when the RUNTIME is actually unpacked. A
+    // `package.json` outlives a deleted `dist/` (and `deno install` rewrites
+    // it before the lifecycle script downloads anything), so reading it alone
+    // reported a version nothing on this machine could run — the build baked
+    // 43.0.0 into the self-contained exe while auto-install put 44.4.1 in the
+    // zip (real Windows 11, 2026-09-17).
+    try {
+      if (!(await Deno.stat(join(base, "dist"))).isDirectory) continue;
+    } catch {
+      continue;
+    }
     try {
       const pkg = JSON.parse(
         await Deno.readTextFile(join(base, "package.json")),
@@ -89,6 +100,28 @@ export async function ensureElectronDist(
   const slug = electronAssetSlug(platform);
   if (!slug) throw new Error(`unknown platform "${platform}"`);
   return await ensureElectronRuntime(version, slug, opts);
+}
+
+/** A local `node_modules` Electron `dist/` directory, but ONLY when its
+ *  `package.json` version is exactly `version`. Lets an offline build reuse an
+ *  installed runtime without ever mixing two Electrons in one package — the
+ *  bug that made a Windows zip ship 44.4.1 while the self-contained exe baked
+ *  43.0.0 (real Windows 11, 2026-09-17). */
+export async function localElectronDistFor(
+  version: string,
+  root = ".",
+): Promise<string | null> {
+  const { electronDistDir } = await import("../electron/electron-spawn.ts");
+  const dir = await electronDistDir(root);
+  if (dir === null) return null;
+  try {
+    const pkg = JSON.parse(
+      await Deno.readTextFile(join(dir, "..", "package.json")),
+    ) as { version?: string };
+    return pkg.version === version ? dir : null;
+  } catch {
+    return null;
+  }
 }
 
 /** The Electron version THIS app is built against — one decider for the
