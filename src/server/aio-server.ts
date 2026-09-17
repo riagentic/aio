@@ -31,6 +31,7 @@ import {
 import { cellAccessAllowed } from "./server-auth.ts";
 import type { Access } from "../state/cell-types.ts";
 import { createAioError } from "../diagnostics/error.ts";
+import { _noteShortCall, shortCallSentence } from "./action-ack.ts";
 import {
   _bindBudgetOwner,
   type BudgetLedger,
@@ -663,6 +664,20 @@ export async function setupTransport<S, A>(
     }
     const callId = (tagged as { payload?: { _callId?: string } }).payload
       ?._callId;
+    // SHORT call: fewer positional arguments than the method declares. Not a
+    // refusal (compat — a working raw client sends `payload:{}` today), but
+    // the ack carries the trojan's `short` sentence, so all three doors say
+    // the same thing about the same frame. See action-ack.ts.
+    const required = cellId
+      ? (deps.cellMethodArity ?? {})[cellId]?.[methodName]
+      : undefined;
+    if (required !== undefined && required > 0) {
+      const argv = (tagged as { payload?: { args?: unknown } }).payload?.args;
+      const supplied = Array.isArray(argv) ? argv.length : 0;
+      if (supplied < required) {
+        _noteShortCall(tagged, shortCallSentence(type, required, supplied));
+      }
+    }
     // Interactive priority: a client action's patches flush IMMEDIATELY
     // (after the sync commit, and again when an async method settles) —
     // the coalescer throttle paces background churn, and made every user

@@ -14,6 +14,61 @@ is frozen — additive only, bugfix-only through beta; 1.0.0 = boring.
 
 ---
 
+## RESUME HERE — round of 2026-09-16 (paused on token limit)
+
+**State.** 1.0.2-beta is tagged. Since then, on `main`, unpushed:
+b1ac3df31 (nested display cookie + owner check, `setsid`, first-run Electron
+wait, install.sh hint) · 0c1b6dbcb (window rect fitted to the display) ·
+437462ab1 (`am agent` Markdown, `--min`/`--max`) · 2f34c287d (`am start` waits
+for a booting app, crash tail, restart keeps port, surface/preview/colour).
+`feedback/refused.md` has this round's refusals (uncommitted).
+
+**Round closed.** All eight fixer areas (A persistence, B harness parity,
+C am process, D Electron, E renderer + video, F aiol + removals, G harness vs
+Chromium, H browser bundle) are committed; the tree was clean at 2fb9ebe57
+with check, lint, lint:aio, check:api, check:docs, check:boundaries,
+check:ratchets, test:fast and the bundle gate green. The full core suite was
+NOT re-run after the fixes — run `deno task test:core` first when resuming.
+
+Small follow-ups from the fixers:
+- [ ] Android runtime (`src/standalone-air.ts`) lacks the serverUser /
+      serverRequest / serverAuth / blocking stubs; stale comment atop
+      `src/server/auth-context.ts`.
+- [ ] Count the shutdown "database file is GONE" ERROR in `errors=`
+      (`src/diagnostics/logger-core.ts` hook).
+- [ ] `am check` is green with the `aio` import mapping removed
+      (`src/server/graph-validator.ts`).
+- [ ] The production dispatch loop does not log a self-call that runs after
+      its caller threw (testCell does).
+- [ ] `docs/clients/app-manager.md`: document `am dispatch --args=@file` / `-`.
+
+Hunter reports with repro scripts: scratchpad `h1`–`h8` (session
+26af1791…). They are temporary; the findings are summarised above.
+
+**Still open after that** (from the full triage of this file):
+
+- [ ] Async read-your-writes overlay is quadratic (section below) — needs
+      its own fixer; start from the fuzzer seed that broke the last attempt.
+- [ ] Ratchets red on committed work: `tests/browser-server-only-stubs.test.ts:118` (vacuous); silent-catch ceiling needs lowering to the new count (330) (`src/state/blocking.ts:175`, `src/sync/browser-storage.ts:81`).
+- [ ] Dev-only chunk — MEASURED 9.3 KB gz of dev-only code on the page, plus
+      the `am trigger` engine (+2.4 KB gz) that production never runs. The
+      ceiling was raised 83 → 86 on 2026-09-16 on that promise; build the
+      chunk and lower it again.
+- [ ] Sync-method browser-replay differential (known gap, bottom of file).
+- [ ] Flaky-test remainder: `tests/am.test.ts`, `tests/spawn.test.ts` onto
+      `stopChild` with stderr + exit code kept.
+- [ ] Clear-out: move the DONE items below to `feedback/resolved.md`, the
+      policy sections (beta gate, alpha70 decisions, standing policy, facts)
+      to `.katana/` / docs, then delete them here; delete `feedback/cc.md`,
+      `that report`, `that report` once each item is in resolved/refused (back
+      them up first — `feedback/` is gitignored).
+- [ ] Release 1.0.3-beta: CHANGELOG, upgrade guide, version in three places,
+      `update:api`, `docs:index`, full `check:release`. Push only when asked.
+
+**Answered, no work queued:** a one-file `deno run` build is feasible (measured:
+2 MB, 560 KB gz) but today fails to boot — the SQLite worker file and the page
+bundle are not inside it. GitHub releases exist: `deno task ship github`.
+
 ## Open work
 
 ### Two browser-bundle gaps left after report 9 (2026-09-13)

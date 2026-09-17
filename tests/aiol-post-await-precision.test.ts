@@ -224,3 +224,109 @@ Deno.test("post-await: the hint names the method-line marker", async () => {
   const hints = await hintsFor(OBSERVER({}));
   assert(hints[0]!.includes("on the method line"), hints[0]);
 });
+
+// h8 F6 — an `await` inside a NESTED async callback suspends the callback, not
+// the method: a read before the method's own first await is pre-suspension.
+Deno.test("post-await: an await inside a nested async callback is not the method's suspension (h8 F6)", async () => {
+  assertEquals(
+    await hintsFor(`import { cell } from "aio";
+export const c = cell("c", {
+  state: { a: 1, b: 2, items: [] as string[] },
+  methods: {
+    async go(s) {
+      const jobs = s.items.map(async (i) => { await fetch(i); });
+      s.b = s.a + jobs.length;
+      await Promise.all(jobs);
+    },
+    async then(s) {
+      const p = fetch("/x").then(async (r) => { await r.text(); });
+      s.b = s.a;
+      await p;
+    },
+    async old(s) {
+      const p = fetch("/x").then(async function (r) { return await r.text(); });
+      s.b = s.a;
+      await p;
+    },
+  },
+});
+`),
+    [],
+  );
+});
+
+Deno.test("post-await: a real read after the method's own await still fires beside a nested one (h8 F6 control)", async () => {
+  const hints = await hintsFor(`import { cell } from "aio";
+export const c = cell("c", {
+  state: { a: 1, b: 2, items: [] as string[] },
+  methods: {
+    async go(s) {
+      const jobs = s.items.map(async (i) => { await fetch(i); });
+      await Promise.all(jobs);
+      s.b = s.a + 1;
+    },
+  },
+});
+`);
+  assertEquals(hints.length, 1, JSON.stringify(hints));
+  assert(hints[0]!.includes(":8 "), hints[0]);
+});
+
+// h8 F7 — the supersede guard is the deliberate re-read the hint recommends.
+Deno.test("post-await: the supersede guard `if (s.x !== captured) return` is not flagged (h8 F7)", async () => {
+  assertEquals(
+    await hintsFor(`import { cell } from "aio";
+export const c = cell("c", {
+  state: { selectedPath: "", detail: null as null | string, loading: false },
+  methods: {
+    async select(s, path: string) {
+      s.selectedPath = path;
+      const detail = await fetch(path).then((r) => r.text());
+      if (s.selectedPath !== path) return;
+      s.detail = detail;
+    },
+    async multi(s, path: string) {
+      s.selectedPath = path;
+      const detail = await fetch(path).then((r) => r.text());
+      if (path !== s.selectedPath) {
+        s.loading = false;
+        return;
+      }
+      s.detail = detail;
+    },
+    async captured(s) {
+      const want = s.selectedPath;
+      const detail = await fetch(want).then((r) => r.text());
+      if (s.selectedPath !== want) return;
+      s.detail = detail;
+    },
+  },
+});
+`),
+    [],
+  );
+});
+
+Deno.test("post-await: a guard against a value NOT captured before the await, or a guard that goes on to read, still fires (h8 F7 control)", async () => {
+  const hints = await hintsFor(`import { cell } from "aio";
+export const c = cell("c", {
+  state: { selectedPath: "", other: "", detail: "" },
+  methods: {
+    async late(s, path: string) {
+      const detail = await fetch(path).then((r) => r.text());
+      const now = s.other;
+      if (s.selectedPath !== now) return;
+      s.detail = detail;
+    },
+    async reads(s, path: string) {
+      const detail = await fetch(path).then((r) => r.text());
+      if (s.selectedPath !== path) return;
+      s.detail = detail + s.other;
+    },
+  },
+});
+`);
+  assertEquals(hints.length, 2, JSON.stringify(hints));
+  assert(hints[0]!.includes(":7 "), hints[0]);
+  assert(hints[1]!.includes(":14 "), hints[1]);
+});

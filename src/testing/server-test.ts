@@ -12,6 +12,8 @@ import {
 } from "./boot-refusals.ts";
 import { dropTempDir, tempDir } from "./temp-dir.ts";
 import { chromiumBin, findChromium, launchChromium } from "./chromium.ts";
+// `-- --video=…` is the harness's flag in any test process that boots an app.
+import "./harness-flags.ts";
 
 export { findChromium };
 import type { AioApp, CellsConfig } from "../server/aio-types.ts";
@@ -256,7 +258,7 @@ export function testBrowser(
   opts: { browserPath?: string; extraArgs?: string[] } = {},
 ): Promise<TestBrowser> {
   // Resolved SYNCHRONOUSLY: a missing browser throws at the call, not later.
-  const bin = chromiumBin("testBrowser", opts.browserPath);
+  const bin = chromiumBin("[testBrowser]", opts.browserPath);
   return launchChromium(bin, [...(opts.extraArgs ?? []), url]).then((
     { proc, close },
   ) => ({ proc, close, [Symbol.asyncDispose]: close }));

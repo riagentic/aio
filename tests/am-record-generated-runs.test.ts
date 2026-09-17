@@ -7,7 +7,7 @@
 // substrings of the output, which a broken file satisfies as well as a working
 // one. This lays the output out beside real cells and runs `deno check` and
 // `deno test` on it.
-import { assertEquals } from "@std/assert";
+import { assert, assertEquals, assertStringIncludes } from "@std/assert";
 import { join } from "@std/path";
 import { generateReplayTest } from "../src/am/record.ts";
 import { dropTempDir, tempDir } from "../src/testing/temp-dir.ts";
@@ -72,4 +72,93 @@ export const stats = cell("stats", {
   } finally {
     await dropTempDir(dir);
   }
+});
+
+// ── The import names the DEFINING file ───────────────────────────────────────
+//
+// `am record` imported each cell by its NAME — `../src/timer.ts` — for a cell
+// that lived in src/cell.ts, so `deno task check` was red until the file was
+// edited (h3 F8). The real `am record`, from a journal, in a project laid out
+// that way, must write an import that type-checks and runs.
+Deno.test("am record: imports the cell from the file that defines it", async () => {
+  const dir = await tempDir("am-record-deffile-");
+  try {
+    await Deno.mkdir(join(dir, "src"));
+    await Deno.mkdir(join(dir, "tests"));
+    await Deno.writeTextFile(
+      join(dir, "src", "cell.ts"),
+      `import { cell } from "aio";
+// cell("timer") in a comment is not the definition
+const timerCell = cell("timer", {
+  state: { remaining: 25 },
+  methods: {
+    setLength(s, m: number) { s.remaining = m; },
+  },
+});
+export { timerCell };
+`,
+    );
+    const journal = join(dir, "journal.jsonl");
+    await Deno.writeTextFile(
+      journal,
+      JSON.stringify({
+        seq: 1,
+        type: "timer:setLength",
+        payload: { args: [5] },
+      }) +
+        "\n",
+    );
+    const am = await new Deno.Command(Deno.execPath(), {
+      args: [
+        "run",
+        "-A",
+        "--config",
+        CONFIG,
+        new URL("../src/am.ts", import.meta.url).pathname,
+        "record",
+        "tests/rec.test.ts",
+        `--from=${journal}`,
+      ],
+      cwd: dir,
+      env: {
+        ...Deno.env.toObject(),
+        NO_COLOR: "1",
+        AIO_APPS_DIR: join(dir, ".aio-home"),
+      },
+      stdout: "piped",
+      stderr: "piped",
+    }).output();
+    const d = new TextDecoder();
+    assertEquals(
+      am.code,
+      0,
+      `am record failed:\n${d.decode(am.stdout)}${d.decode(am.stderr)}`,
+    );
+    const src = await Deno.readTextFile(join(dir, "tests", "rec.test.ts"));
+    assertStringIncludes(
+      src,
+      `import { timerCell as timer } from "../src/cell.ts";`,
+    );
+    assert(!src.includes("GUESS"), `nothing was guessed:\n${src}`);
+    const check = await deno(["check", join(dir, "tests", "rec.test.ts")], dir);
+    assertEquals(check.code, 0, `deno check failed:\n${check.text}\n${src}`);
+    const run = await deno(
+      ["test", "-A", join(dir, "tests", "rec.test.ts")],
+      dir,
+    );
+    assertEquals(run.code, 0, `the generated test failed:\n${run.text}`);
+  } finally {
+    await dropTempDir(dir);
+  }
+});
+
+Deno.test("generateReplayTest: an unresolved cell import is marked a GUESS", () => {
+  const src = generateReplayTest([
+    { type: "ghost:go", payload: { args: [] } },
+  ]);
+  assertStringIncludes(
+    src,
+    `import { ghost } from "../src/ghost.ts"; // a GUESS`,
+  );
+  assertStringIncludes(src, "import paths marked GUESS");
 });

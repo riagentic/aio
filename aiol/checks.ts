@@ -18,14 +18,19 @@ import {
   isServerOnlyFile,
   SERVER_ONLY_AIO_SYMBOLS,
 } from "../src/entries.ts";
-import { removalMessage, removalOf, REMOVALS } from "../src/state/removals.ts";
+import {
+  isCellConfigKeyAt,
+  removalMessage,
+  removalOf,
+  REMOVALS,
+} from "../src/state/removals.ts";
 import { isRefusableCredential } from "../src/state/secret-names.ts";
 import {
   linkSatisfiesPin,
   pinDisagreementHint,
 } from "../src/server/framework-pin.ts";
 import { readFrameworkPinSync } from "../src/server/deno-json.ts";
-import { codeMatches, codeText } from "./scan.ts";
+import { codeMatches, codeText, topLevelKeyOffsets } from "./scan.ts";
 import {
   unknownBuildKeys,
   VALID_BUILD_KEYS,
@@ -880,11 +885,16 @@ export const checkPerformance: Checker = (ctx) => {
     // `isTestPath` rather than a `.test.ts` name check: that spelling missed
     // `.test.tsx`, `_test.ts` and everything under a `test/` directory.
     if (isToolingPath(file.relative) || isTestPath(file.relative)) continue;
+    const codeLines = codeText(file.content).split("\n");
     for (const api of syncApis) {
-      // Code only — the API named in a comment or a string isn't a call.
-      if (codeText(file.content).includes(api)) {
-        // Find line number
-        const lineIdx = file.lines.findIndex((l) => l.includes(api));
+      // Code only — the API named in a comment or a string isn't a call —
+      // and the first site WITHOUT an `// aio-ok: <why>` marker (on the line
+      // or the comment line above): a deliberate sync read (a boot-once
+      // config load) is acknowledged the way every other rule's is.
+      const lineIdx = codeLines.findIndex((l, i) =>
+        l.includes(api) && !isSuppressed(file.lines, i)
+      );
+      if (lineIdx >= 0) {
         report(
           "warn",
           "perf",
@@ -2032,6 +2042,29 @@ function readOnlyInside(
   return offsets.every((o) => spans.some(([a, b]) => o >= a && o <= b));
 }
 
+/** Spans of `if (<param>.a.b <op> <local>) return|{` (either operand order)
+ *  on one line, where `<local>` is in `captured` — the supersede guard. */
+function supersedeGuardSpans(
+  line: string,
+  param: string,
+  captured: ReadonlySet<string>,
+): Array<[number, number]> {
+  const p = param.replace(/\$/g, "\\$");
+  const draft = `${p}(?:\\s*\\??\\.\\s*[\\w$]+)+`;
+  const re = new RegExp(
+    `\\bif\\s*\\(\\s*(?:${draft}\\s*[!=]==?\\s*([A-Za-z_$][\\w$]*)|` +
+      `([A-Za-z_$][\\w$]*)\\s*[!=]==?\\s*${draft})\\s*\\)\\s*(?:return\\b|\\{)`,
+    "g",
+  );
+  const out: Array<[number, number]> = [];
+  for (const m of line.matchAll(re)) {
+    const local = m[1] ?? m[2]!;
+    if (local === param || !captured.has(local)) continue;
+    out.push([m.index!, m.index! + m[0].length]);
+  }
+  return out;
+}
+
 /** True when `param` has been RE-BOUND by a nested function between the method
  *  header and this line — a callback whose own parameter happens to share the
  *  draft's name. Its `s.x` is that callback's `s`, not the draft, and blaming
@@ -2249,6 +2282,46 @@ export const checkPatterns: Checker = (ctx) => {
         // a marker on every line (llama.master, v1.0.0-beta pin).
         if (isSuppressed(file.lines, startIdx)) continue;
         const readLines = readLinesFor(param);
+        // The method's OWN suspension points: an `await` inside a nested
+        // callback (`items.map(async (i) => { await f(i); })`) suspends that
+        // callback, not this method (h8 F6). Found on a twin of the source
+        // with the body's nested function literals blanked, offsets kept.
+        const paren = m.index! + m[0].indexOf("(");
+        const parenClose = closingBracket(codeSrc, paren);
+        const bodyOpen = parenClose < 0
+          ? -1
+          : codeSrc.slice(parenClose).search(/\{/) + parenClose;
+        const bodyClose = bodyOpen < parenClose
+          ? -1
+          : _balancedClose(codeSrc, bodyOpen);
+        const ownLines = bodyClose < 0 ? codeLines : (
+          codeSrc.slice(0, bodyOpen) +
+          _blankNestedFns(codeSrc.slice(bodyOpen, bodyClose + 1)) +
+          codeSrc.slice(bodyClose + 1)
+        ).split("\n");
+        // Locals that hold a value captured BEFORE the first suspension —
+        // the parameters, and what the body declares ahead of its first
+        // own `await` — are what a supersede guard compares against (F7).
+        const firstAwait = bodyClose < 0
+          ? -1
+          : ownLines.join("\n").slice(bodyOpen, bodyClose).search(
+            /\bawait\b/,
+          );
+        const captured = new Set<string>(
+          parenClose < 0 ? [] : [
+            ...codeSrc.slice(paren + 1, parenClose).matchAll(
+              /(?:^|,)\s*([A-Za-z_$][\w$]*)/g,
+            ),
+          ].map((x) => x[1]!),
+        );
+        if (firstAwait > 0) {
+          const pre = codeSrc.slice(bodyOpen, bodyOpen + firstAwait);
+          for (const d of pre.matchAll(/\b(?:const|let|var)\s+/g)) {
+            for (const n of _declaredNames(pre, d.index! + d[0].length)) {
+              captured.add(n);
+            }
+          }
+        }
         let depth = 0;
         let entered = false;
         let sawAwait = false;
@@ -2268,7 +2341,7 @@ export const checkPatterns: Checker = (ctx) => {
           let minOffset = 0;
           let justSuspended = false;
           if (!sawAwait) {
-            const at = code.search(/\bawait\b/);
+            const at = (ownLines[i] ?? code).search(/\bawait\b/);
             if (at < 0) continue;
             sawAwait = true;
             justSuspended = true;
@@ -2284,9 +2357,15 @@ export const checkPatterns: Checker = (ctx) => {
             ? [...pollSpans(code), ...awaitArgSpan(code)]
             : pollSpans(code);
           const nested = nestedShadowLine(codeLines, startIdx, i, param);
+          // THE SUPERSEDE GUARD — `if (s.selectedPath !== path) return;` —
+          // is the deliberate re-read this hint recommends: the draft
+          // compared against a value captured before the await, bailing out
+          // (or opening a block) when another action moved it.
+          const guards = supersedeGuardSpans(code, param, captured);
           if (
             readLines.has(i) && !isSuppressed(file.lines, i) &&
-            !readOnlyInside(code, param, spans, minOffset) && !nested
+            !readOnlyInside(code, param, [...spans, ...guards], minOffset) &&
+            !nested
           ) {
             report(
               "hint",
@@ -2742,6 +2821,13 @@ export const checkImports: Checker = (ctx) => {
 
   // An `aio/x` import with no mapping in deno.json — the app followed the docs
   // and the specifier simply doesn't resolve.
+  //
+  // DECIDED (h8 F8): the app's OWN deno.json is the only map that counts. An
+  // app nested inside the aio package (amui/) resolves an unmapped `aio/x`
+  // through the enclosing package's config, but the identical deno.json
+  // copied anywhere else fails `deno check` — so accepting the inherited
+  // mapping would pass an app that breaks the day it moves (or is compiled
+  // from its own root). Such an app maps the entry itself, one line.
   const map = denoJson?.imports ?? {};
   const base = map["aio"];
   const missing = new Map<string, { file: string; line: number }>();
@@ -3107,16 +3193,8 @@ function cellLiteralSpan(
   code: string,
   declLine: number,
 ): [number, number] | null {
-  const lines = code.split("\n");
-  if (declLine < 1 || declLine > lines.length) return null;
-  const lineStart = lines.slice(0, declLine - 1).reduce(
-    (n, l) => n + l.length + 1,
-    0,
-  );
-  const call = /\bcell\s*\(/.exec(code.slice(lineStart));
-  if (!call) return null;
-  const open = code.indexOf("(", lineStart + call.index);
-  if (open < 0) return null;
+  const open = cellCallAt(code, declLine)?.open;
+  if (open === undefined) return null;
   let depth = 0;
   for (let i = open; i < code.length; i++) {
     const ch = code[i];
@@ -3125,6 +3203,42 @@ function cellLiteralSpan(
       depth--;
       if (depth === 0) return [open, i];
     }
+  }
+  return null;
+}
+
+/** The first `cell(` call at or after the start of line `declLine`: the
+ *  offset of its `cell` token and of its `(`. A generic call
+ *  (`cell<S>(`, `cell<Record<K, () => V>>(`) is one too — its type
+ *  arguments are skipped by depth (an arrow's `>` closes nothing). */
+function cellCallAt(
+  code: string,
+  declLine: number,
+): { token: number; open: number } | null {
+  const lines = code.split("\n");
+  if (declLine < 1 || declLine > lines.length) return null;
+  const lineStart = lines.slice(0, declLine - 1).reduce(
+    (n, l) => n + l.length + 1,
+    0,
+  );
+  const re = /\bcell\b/g;
+  re.lastIndex = lineStart;
+  for (let m; (m = re.exec(code));) {
+    let i = m.index + 4;
+    while (/\s/.test(code[i] ?? "")) i++;
+    if (code[i] === "<") {
+      let depth = 0;
+      for (; i < code.length; i++) {
+        const ch = code[i];
+        if (ch === "<") depth++;
+        else if (ch === ">" && code[i - 1] !== "=" && --depth === 0) break;
+        else if (ch === ";") break;
+      }
+      if (depth !== 0) continue;
+      i++;
+      while (/\s/.test(code[i] ?? "")) i++;
+    }
+    if (code[i] === "(") return { token: m.index, open: i };
   }
   return null;
 }
@@ -3173,17 +3287,20 @@ type MethodSpan = {
   body: [number, number];
 };
 
-/** The cell's methods written in shorthand form (`name(s) {` /
- *  `async name(s) {`), located by their real names inside the cell literal —
- *  so `if (x) {` or `catch (e) {` is never mistaken for a method header. */
+/** The cell's methods — shorthand (`name(s) {` / `async name(s) {`) or a
+ *  block-bodied property (`name: async (s) => {`, `name: function (s) {`) —
+ *  located by their real names inside the cell literal, so `if (x) {` or
+ *  `catch (e) {` is never mistaken for a method header. */
 function methodSpans(
   code: string,
   span: [number, number],
   names: string[],
 ): MethodSpan[] {
   const out: MethodSpan[] = [];
+  const alt = names.join("|");
   const header = new RegExp(
-    `(?<![.\\w$])(async\\s+)?(${names.join("|")})\\s*\\(`,
+    `(?<![.\\w$])(?:(async\\s+)?(${alt})\\s*|(${alt})\\s*:\\s*(async\\b\\s*)?` +
+      `(?:function\\b\\s*)?)\\(`,
     "g",
   );
   header.lastIndex = span[0];
@@ -3193,14 +3310,46 @@ function methodSpans(
     const close = closingBracket(code, open);
     const rest = close < 0
       ? null
-      : /^\s*(?::[^{;=]*)?\{/.exec(code.slice(close + 1));
+      : /^\s*(?::[^{;=]*)?(?:=>\s*)?\{/.exec(code.slice(close + 1));
+    const arrow = !rest && m[3] && close >= 0
+      ? /^\s*(?::[^{;=]*)?=>\s*/.exec(code.slice(close + 1))
+      : null;
+    if (arrow) {
+      // Expression body (`name: (s) => s.input.length`): to the depth-0 `,`
+      // or the enclosing object's `}`. Its "open" is the char before it.
+      const from = close + 1 + arrow[0].length;
+      let depth = 0, to = code.length;
+      for (let i = from; i < code.length; i++) {
+        const ch = code[i]!;
+        if ("([{".includes(ch)) depth++;
+        else if (")]}".includes(ch)) {
+          if (depth-- === 0) {
+            to = i;
+            break;
+          }
+        } else if (ch === "," && depth === 0) {
+          to = i;
+          break;
+        }
+      }
+      out.push({
+        name: m[3]!,
+        isAsync: !!m[4],
+        draft:
+          /^\s*([A-Za-z_$][\w$]*)/.exec(code.slice(open + 1, close))?.[1] ??
+            null,
+        body: [from - 1, to],
+      });
+      header.lastIndex = to;
+      continue;
+    }
     if (!rest) continue;
     const bodyOpen = close + rest[0].length;
     const bodyClose = closingBracket(code, bodyOpen);
     if (bodyClose < 0) continue;
     out.push({
-      name: m[2]!,
-      isAsync: !!m[1],
+      name: (m[2] ?? m[3])!,
+      isAsync: !!(m[1] ?? m[4]),
       draft: /^\s*([A-Za-z_$][\w$]*)/.exec(code.slice(open + 1, close))?.[1] ??
         null,
       body: [bodyOpen, bodyClose],
@@ -3242,8 +3391,75 @@ function inNestedFunction(code: string, from: number, at: number): boolean {
   return frames.some(Boolean) || exprArrows.length > 0;
 }
 
+// The written PATH: `s.form.input = p` writes `form.input` (a bracket segment
+// ends the path — `s.rows[i].x` writes into `rows`).
 const DRAFT_WRITE =
-  "\\s*\\.\\s*([\\w$]+)\\s*(?:=(?!=)|\\+=|-=|\\*=|\\/=|\\?\\?=|\\|\\|=|&&=|\\+\\+|--|\\.\\s*(?:push|pop|shift|unshift|splice|sort|reverse|set|delete|add|clear)\\s*\\()";
+  "\\s*\\.\\s*([\\w$]+(?:\\s*\\.\\s*[\\w$]+)*)(?:\\s*\\[[^\\]]*\\](?:\\s*\\.\\s*[\\w$]+)*)*\\s*(?:=(?!=)|\\+=|-=|\\*=|\\/=|\\?\\?=|\\|\\|=|&&=|\\+\\+|--|\\.\\s*(?:push|pop|shift|unshift|splice|sort|reverse|set|delete|add|clear)\\s*\\()";
+
+/** The first path in `written` the callee body READS through its draft
+ *  `draft` — `s.form.input`, `s.form` (the whole object), a destructure
+ *  (`const { input } = s`), or a bracket read (`s["input"]`, matched on the
+ *  ORIGINAL text since the mask blanks the name). `"*"` matches any read.
+ *  A read of a SIBLING (`s.form.other` after a write to `form.input`) is not
+ *  stale. Returns the path as printed, or null. */
+function calleeReads(
+  code: string,
+  raw: string,
+  [open, close]: [number, number],
+  draft: string,
+  written: string[],
+): string | null {
+  const body = code.slice(open, close);
+  const d = draft.replace(/\$/g, "\\$");
+  const esc = (x: string) => x.replace(/\$/g, "\\$");
+  const notWrite = "(?!\\s*=(?!=))";
+  const destructured = new Set<string>();
+  for (
+    const m of body.matchAll(
+      new RegExp(`\\{([^{}]*)\\}\\s*=\\s*${d}\\b(?!\\s*\\.)`, "g"),
+    )
+  ) {
+    for (const p of m[1]!.split(",")) {
+      const k = /^\s*(?:\.\.\.)?\s*([A-Za-z_$][\w$]*)/.exec(p)?.[1];
+      if (k) destructured.add(k);
+    }
+  }
+  const bracket = new Set<string>();
+  const rawBody = raw.slice(open, close);
+  for (
+    const m of rawBody.matchAll(
+      new RegExp(
+        `(?<![.\\w$])${d}\\s*\\[\\s*(["'\`])([\\w$]+)\\1\\s*\\]${notWrite}`,
+        "g",
+      ),
+    )
+  ) {
+    if (body[m.index!] === rawBody[m.index!]) bracket.add(m[2]!);
+  }
+  for (const path of written) {
+    if (path === "*") {
+      const any = new RegExp(
+        `(?<![.\\w$])${d}\\s*\\.\\s*(?!\\$)([\\w$]+)\\b${notWrite}`,
+      ).exec(body);
+      if (any) return any[1]!;
+      const first = [...destructured, ...bracket][0];
+      if (first) return first;
+      continue;
+    }
+    const parts = path.split(".");
+    if (destructured.has(parts[0]!) || bracket.has(parts[0]!)) return parts[0]!;
+    // A read of any PREFIX used whole, or of the full path (and below).
+    for (let k = 1; k <= parts.length; k++) {
+      const chain = parts.slice(0, k).map(esc).join("\\s*\\.\\s*");
+      const tail = k < parts.length ? "(?!\\s*\\??\\.\\s*[\\w$])" : "";
+      if (
+        new RegExp(`(?<![.\\w$])${d}\\s*\\.\\s*${chain}\\b${tail}${notWrite}`)
+          .test(body)
+      ) return path;
+    }
+  }
+  return null;
+}
 
 export const checkSelfMethodCall: Checker = (ctx) => {
   const { cells, report } = ctx;
@@ -3254,8 +3470,12 @@ export const checkSelfMethodCall: Checker = (ctx) => {
     const code = codeText(c.file.content);
     // The binding the cell was assigned to — that is what a self-call is
     // written through, and a cell nobody named cannot be self-called at all.
-    const bind = /\b(?:const|let|var)\s+(\w+)\s*=\s*cell\s*\(/.exec(
-      code.split("\n")[c.line - 1] ?? "",
+    // Read back from the `cell` token, so a formatter-wrapped
+    // `export const x =\n  cell(…)` is still bound (h8 F5).
+    const at0 = cellCallAt(code, c.line);
+    if (!at0) continue;
+    const bind = /\b(?:const|let|var)\s+([\w$]+)\s*(?::[^=;]*)?=\s*$/.exec(
+      code.slice(Math.max(0, at0.token - 400), at0.token),
     );
     if (!bind) continue;
     const varName = bind[1]!;
@@ -3268,12 +3488,15 @@ export const checkSelfMethodCall: Checker = (ctx) => {
     // STATE FIELD that happens to share the cell's name — reads as a call on
     // the cell binding.
     const call = new RegExp(
-      `(?<![.\\w$])${varName}\\s*\\.\\s*(${c.methodNames.join("|")})\\s*\\(`,
+      `(?<![.\\w$])${varName.replace(/\$/g, "\\$")}\\s*\\.\\s*(${
+        c.methodNames.join("|")
+      })\\s*\\(`,
       "g",
     );
     for (const caller of methods) {
       if (!caller.isAsync || !caller.draft) continue;
       const [open, close] = caller.body;
+      const d = caller.draft.replace(/\$/g, "\\$");
       for (const m of code.slice(open, close).matchAll(call)) {
         const at = open + m.index;
         if (inNestedFunction(code, open, at)) continue;
@@ -3282,25 +3505,56 @@ export const checkSelfMethodCall: Checker = (ctx) => {
         // The writes still pending at the call: those after the last `await`
         // (the one prefixing this very call is not a commit point before it).
         const before = code.slice(open + 1, at).replace(/\bawait\s*$/, "");
+        // The caller's OWN awaits: one inside a nested closure
+        // (`const later = async () => { await x; }`) commits nothing here.
         const lastAwait = Math.max(
           -1,
-          ...[...before.matchAll(/\bawait\b/g)].map((a) => a.index),
+          ...[..._blankNestedFns(before).matchAll(/\bawait\b/g)].map((a) =>
+            a.index
+          ),
         );
         const pending = before.slice(lastAwait + 1);
         const written = new Set(
           [...pending.matchAll(
-            new RegExp(`(?<![.\\w$])${caller.draft}${DRAFT_WRITE}`, "g"),
+            new RegExp(`(?<![.\\w$])${d}${DRAFT_WRITE}`, "g"),
           )]
-            .map((w) => w[1]!),
+            .map((w) => w[1]!.replace(/\s+/g, "")),
         );
+        // `Object.assign(s, { a, b: 1 })` writes its top-level keys;
+        // `Object.assign(s, patch)` writes fields nobody can name statically,
+        // so any field the callee reads counts ("*").
+        for (
+          const a of pending.matchAll(
+            new RegExp(
+              `\\bObject\\s*\\.\\s*assign\\s*\\(\\s*${d}\\s*,\\s*`,
+              "g",
+            ),
+          )
+        ) {
+          const lit = pending.indexOf("{", a.index! + a[0].length - 1);
+          if (lit === a.index! + a[0].length) {
+            const close = _balancedClose(pending, lit);
+            if (close === -1) written.add("*");
+            else {
+              for (const k of _topLevelKeys(pending.slice(lit, close + 1))) {
+                written.add(k);
+              }
+              // Shorthand members (`{ input }`) are keys too.
+              for (
+                const sh of pending.slice(lit + 1, close).matchAll(
+                  /(?:^|,)\s*([A-Za-z_$][\w$]*)\s*(?=,|$)/g,
+                )
+              ) written.add(sh[1]!);
+            }
+          } else written.add("*");
+        }
         if (written.size === 0) continue;
-        const calleeBody = code.slice(callee.body[0], callee.body[1]);
-        const read = [...written].find((f) =>
-          new RegExp(
-            `(?<![.\\w$])${callee.draft}\\s*\\.\\s*${
-              f.replace(/\$/g, "\\$")
-            }\\b(?!\\s*=(?!=))`,
-          ).test(calleeBody)
+        const read = calleeReads(
+          code,
+          c.file.content,
+          callee.body,
+          callee.draft,
+          [...written],
         );
         if (!read) continue;
         const line = code.slice(0, at).split("\n").length;
@@ -3553,8 +3807,11 @@ export const checkAlpha52: Checker = (ctx) => {
     // carrying the inserted `transaction: false,` needs no action either — it
     // now states the default.)
 
-    // listensTo array form
+    // listensTo array form — as a cell's OWN config key only, like its `ui:`
+    // sibling: `state: { listensTo: ["a"] }` is app data (h8 F2). One
+    // decider with `am pin` (`isCellConfigKeyAt`).
     for (const m of codeMatches(file.content, /\blistensTo\s*:\s*\[/g)) {
+      if (!isCellConfigKeyAt(code, m.index!)) continue;
       const line = lineOf(m.index!);
       if (isSuppressed(file.lines, line - 1)) continue;
       found++;
@@ -5918,7 +6175,12 @@ function _blankNestedFns(body: string): string {
   for (const m of body.matchAll(re)) {
     const lit = _fnLiteralBody(body, m.index!);
     const from = m.index! + (m[0] === "=>" ? 2 : 0);
-    const to = m.index! + lit.length;
+    // A brace body is returned from its `{`, not from `=>`/`function` —
+    // measuring it from the keyword left the body's last characters (after a
+    // `function (x) ` header, a whole `await r.text()`) unblanked.
+    const brace = /^(?:=>|function\b[^{]*)\s*\{/.exec(body.slice(m.index!));
+    const to = (brace ? m.index! + brace[0].length - 1 : m.index!) +
+      lit.length;
     out = out.slice(0, from) + out.slice(from, to).replace(/[^\n]/g, " ") +
       out.slice(to);
   }
@@ -6330,43 +6592,109 @@ export const checkStyles: Checker = (ctx) => {
 /** A cell whose `state` is cast to (or annotated with) an `interface` fails
  *  TypeScript far from the call site — inside aio — because an interface is
  *  not assignable to `Record<string, unknown>` / `CellState`. The useful
- *  error is one line at the cause: rename it to a `type` alias. */
+ *  error is one line at the cause: rename it to a `type` alias.
+ *
+ *  EXACT CRITERION (error): the value of a TOP-LEVEL `state:` key of a
+ *  `cell(` config literal has static type `I`, where `I` is an `interface`
+ *  declared in that file or imported (`import [type] { I [as J] } from
+ *  "./…"`) from one that declares it — and the type is read from:
+ *  `expr as I` (outermost), `<I>expr`, a bare identifier declared
+ *  `const id: I`, or a call to a function declared `(…): I`. Each is a shape
+ *  TypeScript refuses identically (TS2322/TS18046); `satisfies I`, `as const`
+ *  and type aliases are fine and never fire. A `state:` anywhere else (a
+ *  fixture object in the same file) is not a cell's state (h8 F3/F4). */
 export const checkCellStateInterface: Checker = (ctx) => {
-  for (const file of ctx.sourceFiles) {
-    if (isTestPath(file.relative) || isToolingPath(file.relative)) continue;
-    if (!file.content.includes("cell(")) continue;
-    // Interfaces declared in this file (and re-exports are out of scope —
-    // the common failure is `export interface St` next to the cell).
-    const interfaces = new Set<string>();
-    for (
-      const m of codeMatches(
-        file.content,
-        /\b(?:export\s+)?interface\s+([A-Za-z_][\w]*)\b/g,
-      )
-    ) {
-      interfaces.add(m[1]!);
+  const byPath = new Map(ctx.sourceFiles.map((f) => [f.path, f]));
+  const decls = new Map<string, { iface: Set<string>; alias: Set<string> }>();
+  const declsOf = (f: { path: string; content: string }) => {
+    let d = decls.get(f.path);
+    if (d) return d;
+    const code = codeText(f.content);
+    d = {
+      iface: new Set(
+        [...code.matchAll(/(?:^|[;\s])interface\s+([A-Za-z_$][\w$]*)/g)]
+          .map((m) => m[1]!),
+      ),
+      alias: new Set(
+        [...code.matchAll(
+          /(?:^|[;\s])(?:type|class|enum)\s+([A-Za-z_$][\w$]*)/g,
+        )]
+          .map((m) => m[1]!),
+      ),
+    };
+    decls.set(f.path, d);
+    return d;
+  };
+  /** Is `name`, as seen from `file`, an interface? One import hop. */
+  const isInterface = (
+    file: { path: string; content: string },
+    name: string,
+  ): boolean => {
+    const own = declsOf(file);
+    if (own.iface.has(name)) return true;
+    if (own.alias.has(name)) return false;
+    const imp =
+      /\bimport\s+(?:type\s+)?\{([^}]*)\}\s*from\s*["'](\.{1,2}\/[^"']+)["']/g;
+    for (const m of codeMatches(file.content, imp)) {
+      for (const part of m[1]!.split(",")) {
+        const el =
+          /^\s*(?:type\s+)?([A-Za-z_$][\w$]*)(?:\s+as\s+([A-Za-z_$][\w$]*))?\s*$/
+            .exec(part);
+        if (!el || (el[2] ?? el[1]) !== name) continue;
+        const target = byPath.get(resolve(file.path, "..", m[2]!));
+        return !!target && declsOf(target).iface.has(el[1]!);
+      }
     }
-    if (interfaces.size === 0) continue;
-    // `state: {…} as Name` (common) or `state: expr as Name`.
-    // Cannot use `[^}]*` — the object literal itself contains `}`.
-    for (
-      const m of codeMatches(
-        file.content,
-        /\bstate\s*:\s*(?:\{(?:[^{}]|\{[^{}]*\})*\}\s*|[A-Za-z_][\w.]*\s+)as\s+([A-Za-z_][\w]*)\b/g,
-      )
-    ) {
-      const name = m[1]!;
-      if (!interfaces.has(name)) continue;
-      const line = file.content.slice(0, m.index).split("\n").length;
-      // Which cell? Best-effort: nearest preceding cell("…").
-      const before = file.content.slice(0, m.index);
-      const cells = [...before.matchAll(/\bcell\s*\(\s*["']([^"']+)["']/g)];
-      const cellName = cells.length ? cells[cells.length - 1]![1]! : "?";
+    return false;
+  };
+  const ID = "[A-Za-z_$][\\w$]*";
+  for (const c of ctx.cells) {
+    const file = c.file;
+    if (isTestPath(file.relative) || isToolingPath(file.relative)) continue;
+    const code = codeText(file.content);
+    const span = _cellConfigSpan(code, c.line);
+    if (!span) continue;
+    for (const at of topLevelKeyOffsets(file.content, span[0], "state")) {
+      const from = code.indexOf(":", at) + 1;
+      // The value runs to the depth-0 `,` or the config's own `}`.
+      let depth = 0, to = span[1];
+      for (let i = from; i < span[1]; i++) {
+        const ch = code[i]!;
+        if ("([{".includes(ch)) depth++;
+        else if (")]}".includes(ch)) depth--;
+        else if (ch === "," && depth === 0) {
+          to = i;
+          break;
+        }
+      }
+      const value = code.slice(from, to).trim();
+      const esc = (n: string) => n.replace(/\$/g, "\\$");
+      let type: string | undefined =
+        new RegExp(`\\bas\\s+(${ID})\\s*(?:<[\\s\\S]*>)?$`).exec(value)?.[1] ??
+          new RegExp(`^<\\s*(${ID})\\s*>`).exec(value)?.[1];
+      if (!type && new RegExp(`^${ID}$`).test(value)) {
+        type = new RegExp(
+          `\\b(?:const|let|var)\\s+${esc(value)}\\s*:\\s*(${ID})\\s*[=;]`,
+        ).exec(code)?.[1];
+      }
+      const call = new RegExp(`^(${ID})\\s*\\(`).exec(value);
+      if (!type && call && value.endsWith(")")) {
+        const fn = esc(call[1]!);
+        type = new RegExp(
+          `\\bfunction\\s+${fn}\\s*(?:<[^>]*>)?\\s*\\([^)]*\\)\\s*:\\s*(${ID})\\s*\\{`,
+        ).exec(code)?.[1] ??
+          new RegExp(
+            `\\b(?:const|let|var)\\s+${fn}\\s*=\\s*(?:async\\s*)?\\([^)]*\\)\\s*:\\s*(${ID})\\s*=>`,
+          ).exec(code)?.[1];
+      }
+      if (!type || !isInterface(file, type)) continue;
+      const line = code.slice(0, at).split("\n").length;
+      if (isSuppressed(file.lines, line - 1)) continue;
       ctx.report(
         "error",
         "cells",
-        `cell "${cellName}": state type \`${name}\` is an interface; ` +
-          `make it \`type ${name} = {…}\` (an interface is not a CellState — ` +
+        `cell "${c.name}": state type \`${type}\` is an interface; ` +
+          `make it \`type ${type} = {…}\` (an interface is not a CellState — ` +
           `TS points inside aio and every \`s.field\` becomes unknown)`,
         { file: file.relative, line },
       );

@@ -48,7 +48,7 @@ function setOwn(
 // hostile payload nested thousands of levels deep would blow the JS stack
 // before the app ever serves, and a stack overflow is unrecoverable and
 // undiagnosable. 32 levels is far past any hand-written state shape.
-const MAX_DEPTH = 32;
+export const MAX_DEPTH = 32;
 
 // Breadth guard. MAX_DEPTH bounds how DEEP the merge goes; nothing bounded how
 // WIDE. That did not matter while cycle detection used a visited-set, because a

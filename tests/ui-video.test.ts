@@ -12,6 +12,7 @@ import {
   readRunLook,
   snapshotDocument,
   uiVideoConfig,
+  videoSlug,
 } from "../src/testing/ui-video.ts";
 import { parseCli } from "../src/server/aio-cli.ts";
 
@@ -29,6 +30,7 @@ Deno.test("uiVideoConfig: a directory, a file, the space form, env, and pace", (
     kind: "dir",
     format: "mp4",
     paceMs: 800,
+    scheme: "light",
   });
   assertEquals(
     uiVideoConfig(["--video", "out/demo.webm", "--video-pace=300"], noEnv),
@@ -37,11 +39,28 @@ Deno.test("uiVideoConfig: a directory, a file, the space form, env, and pace", (
       kind: "file",
       format: "webm",
       paceMs: 300,
+      scheme: "light",
     },
   );
   assertEquals(
     uiVideoConfig([], env({ AIO_VIDEO: "a.mp4", AIO_VIDEO_PACE: "100" })),
-    { path: "a.mp4", kind: "file", format: "mp4", paceMs: 100 },
+    {
+      path: "a.mp4",
+      kind: "file",
+      format: "mp4",
+      paceMs: 100,
+      scheme: "light",
+    },
+  );
+  // The scheme is PINNED — light unless asked — never the recording
+  // machine's desktop setting.
+  assertEquals(
+    uiVideoConfig(["--video=v/", "--video-scheme=dark"], noEnv)?.scheme,
+    "dark",
+  );
+  assertEquals(
+    uiVideoConfig(["--video=v/"], env({ AIO_VIDEO_SCHEME: "dark" }))?.scheme,
+    "dark",
   );
   // The same value in both places is not a disagreement.
   assertEquals(
@@ -61,6 +80,13 @@ Deno.test("uiVideoConfig: every mistake throws instead of quietly recording noth
     [["--video=x/", "--video-pace=10"], {}, "50–60000"],
     [["--video=x/", "--video-pace=1.5e3x"], {}, "50–60000"],
     [["--video=demo.mov"], {}, ".mp4 or .webm"],
+    [["--video=x/", "--video-scheme=sepia"], {}, "light or dark"],
+    [["--video-scheme=dark"], {}, "without --video"],
+    [
+      ["--video=x/", "--video-scheme=dark"],
+      { AIO_VIDEO_SCHEME: "light" },
+      "disagree",
+    ],
   ];
   for (const [args, vars, msg] of cases) {
     assertThrows(
@@ -70,6 +96,17 @@ Deno.test("uiVideoConfig: every mistake throws instead of quietly recording noth
       args.join(" "),
     );
   }
+});
+
+Deno.test("videoSlug: a long test name is capped, and two long names stay apart", () => {
+  assertEquals(videoSlug("adds an item"), "adds-an-item");
+  const a = videoSlug("y".repeat(260));
+  const b = videoSlug("y".repeat(259) + "z");
+  assert(a.length <= 90, `${a.length} chars`);
+  assert(a !== b, "the hash tells two long names apart");
+  assert(/^y+-[0-9a-z]+$/.test(a), a);
+  const exact = videoSlug("x".repeat(80));
+  assertEquals([exact.length, exact.includes("-")], [80, false]); // not cut
 });
 
 Deno.test("--video is the HARNESS's flag: a test process's boot parses it, an app never does", async () => {
@@ -97,6 +134,33 @@ Deno.test("--video is the HARNESS's flag: a test process's boot parses it, an ap
   const out = new TextDecoder().decode(o.stdout);
   assertStringIncludes(out, "REFUSED");
   assertStringIncludes(out, "--video");
+});
+
+Deno.test("--video is accepted by a test that deep-imports only testServer", async () => {
+  // This repo's own tests import `testServer` from src/testing/server-test.ts,
+  // which never loads ui-video.ts — so `-- --video=dir/` was "unknown flag"
+  // at testServer's boot, depending on which harness module a file imported.
+  const o = await new Deno.Command(Deno.execPath(), {
+    args: [
+      "eval",
+      `import ${
+        JSON.stringify(
+          new URL("../src/testing/server-test.ts", import.meta.url).href,
+        )
+      };
+       import { parseCli } from ${
+        JSON.stringify(
+          new URL("../src/server/aio-cli.ts", import.meta.url).href,
+        )
+      };
+       try { parseCli(["--video=videos/", "--video-pace=200", "--video-scheme=dark"]); console.log("ACCEPTED"); }
+       catch (e) { console.log("REFUSED " + e.message); }`,
+    ],
+    stdout: "piped",
+    stderr: "piped",
+  }).output();
+  const out = new TextDecoder().decode(o.stdout);
+  assertStringIncludes(out, "ACCEPTED", new TextDecoder().decode(o.stderr));
 });
 
 Deno.test("snapshotDocument: live values, checked state, marks, and no scripts or handlers", async () => {

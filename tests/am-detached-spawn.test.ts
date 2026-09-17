@@ -6,6 +6,7 @@
 import { assert, assertEquals, assertStringIncludes } from "@std/assert";
 import { join } from "@std/path";
 import { detachedSpawnSpec } from "../src/am/am-cmd-process.ts";
+import { dropTempDir, tempDir } from "../src/testing/temp-dir.ts";
 
 Deno.test("windows spec: PowerShell Start-Process, no sh/nohup, PID out", () => {
   const spec = detachedSpawnSpec(
@@ -39,7 +40,80 @@ Deno.test("posix spec: sh -c nohup … & echo $! (detached, log-merged)", () => 
   // child shell would resolve from ITS PATH, yielding a pid for a process that
   // never execs (see am-process-safety.test.ts).
   assertStringIncludes(cmd, `nohup '${Deno.execPath()}' 'run' '-A' 'app.ts'`);
-  assertStringIncludes(cmd, ">'/tmp/o.log' 2>&1 & echo $!");
+  assertStringIncludes(cmd, ">'/tmp/o.log' 2>&1 &");
+  assert(cmd.trimEnd().endsWith("; echo $!"), "the PID is the last word");
+  // Its OWN session where the box has setsid (cc §7: a runner that kills its
+  // process group when a command ends killed the app with it), and plain
+  // nohup where it does not (macOS ships no setsid binary).
+  assertStringIncludes(
+    cmd,
+    "if command -v setsid >/dev/null 2>&1; then setsid nohup",
+  );
+  assertStringIncludes(cmd, "else nohup");
+});
+
+Deno.test({
+  name:
+    "posix spec EXECUTES: the child is in its OWN session, so killing the caller's process group cannot reach it (cc §7)",
+  ignore: Deno.build.os !== "linux", // reads /proc; setsid is util-linux
+  async fn() {
+    const dir = await tempDir("am-detached-");
+    const log = join(dir, "out.log");
+    const spec = detachedSpawnSpec(
+      Deno.build.os,
+      ["eval", "await new Promise(r=>setTimeout(r,20000))"],
+      log,
+    );
+    // The "runner": a shell that owns a process group of its own, starts the
+    // app the way `am start` does, then lingers — long enough for us to kill
+    // the whole group the way a CI step or an agent harness does.
+    const runner = new Deno.Command("setsid", {
+      args: [
+        "sh",
+        "-c",
+        `${spec.cmd} ${
+          spec.args.map((a) => "'" + a.replace(/'/g, "'\\''") + "'").join(" ")
+        }; sleep 20`,
+      ],
+      stdin: "null",
+      stdout: "piped",
+      stderr: "null",
+    }).spawn();
+    const reader = runner.stdout.getReader();
+    const first = await reader.read();
+    // Not read past the PID: cancel so the pipe is closed when the runner dies.
+    await reader.cancel();
+    const pid = parseInt(new TextDecoder().decode(first.value).trim(), 10);
+    assert(Number.isFinite(pid) && pid > 0, "child PID came back on stdout");
+    const stat = (p: number) => {
+      // /proc/<pid>/stat: `pid (comm) state ppid pgrp session …` — comm may
+      // hold spaces, so split after the last `)`.
+      const s = Deno.readTextFileSync(`/proc/${p}/stat`);
+      const f = s.slice(s.lastIndexOf(")") + 2).split(" ");
+      return { pgrp: Number(f[2]), session: Number(f[3]) };
+    };
+    const child = stat(pid);
+    const mine = stat(Deno.pid);
+    assertEquals(child.session, pid, "the app leads its own session");
+    assertEquals(child.pgrp, pid, "…and its own process group");
+    assert(child.session !== mine.session, "not the runner's session");
+    // Kill the RUNNER's whole group, as a group-killing harness does.
+    await new Deno.Command("kill", { args: ["-TERM", "--", `-${runner.pid}`] })
+      .output();
+    await runner.status;
+    await new Promise((r) => setTimeout(r, 200));
+    let alive = true;
+    try {
+      Deno.kill(pid, "SIGCONT");
+    } catch {
+      alive = false;
+    }
+    assert(alive, "the app outlives the group that started it");
+    try {
+      Deno.kill(pid, "SIGKILL");
+    } catch { /* already gone */ }
+    await dropTempDir(dir);
+  },
 });
 
 Deno.test({

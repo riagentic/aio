@@ -76,6 +76,14 @@ becomes the action type: `increment` → `counter:increment`.
 **What you can do:** mutate any property, nested objects, array methods (`push`,
 `splice`, `sort`), delete properties — anything Immer supports.
 
+**What does not survive a restart:** deleting a key that `state:` declares
+(`delete s.x`, or `s.x = undefined`) — restore fills every declared key back in
+with its default. Set it to `null` instead (declare it `null as T | null`), or
+remove it from `state:`. Adding a key under an object `state:` declares with
+keys (`opts: { a: 1 }`, then `s.opts.b = 2`) is shape drift on the next boot;
+declare an object whose keys are data as `{}`. Both are warned about at the
+write, in dev and production, once per path.
+
 **What you cannot do:** async operations, access other cells' state.
 
 ### Returning a value
@@ -1110,7 +1118,7 @@ value is what the method receives. `setAge("42")` from a form arrives as `42`.
 A failure names the cell, the method and the position, and the call never runs:
 
 ```
-[user:setAge] argument 1 is invalid: must be >= 0
+[user:setAge] argument 1 is invalid (args.setAge[0]): must be >= 0
 ```
 
 An **asynchronous** schema is refused by name. This runs on the dispatch path,
@@ -1129,6 +1137,18 @@ ways to express it, all wrong:
 | `this.bench(...)`     | cannot type-check — the declared method takes the draft, the callable one does not                                                                                                       |
 | `myCell.bench(...)`   | a **second dispatch** with its own draft: your uncommitted writes are invisible to it, and its writes land in a different commit                                                         |
 | a module-level helper | works, and takes the body out of `aiol`'s reach — a post-await read there is no longer analysed, so the absence of a warning starts meaning "not analysed" while still reading as "fine" |
+
+That second dispatch is **queued**: it starts after the current action has
+committed, on every door (a server, `bootCells`, `testUI` and `testCell` alike).
+One consequence follows, and it is consistent everywhere: a queued self-call
+**survives its caller's throw**. If `addTwice()` calls `notes.add("a")` and then
+throws, the caller is rejected and its own writes are rolled back — but the
+queued `add("a")` is its own action and still commits. `testCell` says so on a
+debug line
+(`self-call notes:add runs although its caller notes:addTwice
+threw`). If the
+nested write must share the caller's fate, use `s.$call` (same draft, same
+commit) instead.
 
 `s.$call.bench(kind)` is none of those. The sibling's body runs against **your**
 draft, in **your** commit:

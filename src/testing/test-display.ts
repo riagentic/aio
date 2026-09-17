@@ -29,7 +29,11 @@ import {
   AIO_NESTED_DISPLAY,
   AIO_NESTED_SCREEN,
   displayIsUp,
+  nestedDisplayEnv,
+  nestedDisplayRange,
+  pickNestedDisplay,
   startXephyr,
+  startXephyrDetailed,
   XEPHYR_INSTALL_HINT,
 } from "../server/nested-display.ts";
 
@@ -39,6 +43,9 @@ export { displayIsUp, startXephyr };
  *  when it contains an agent's window. One number means one Xephyr on the box
  *  (see server/nested-display.ts); two would mean two nested desktops and a
  *  person having to guess which one their app went to. */
+// The pick itself starts from the same constant in server/nested-display.ts,
+// so nothing in src/ needs this alias — tests and scripts/xephyr.sh do.
+// aio-ok: the test-facing NAME of the first nested display number
 export const AIO_TEST_DISPLAY: string = AIO_NESTED_DISPLAY;
 
 /** Default geometry — big enough for a real app layout, small enough to leave
@@ -53,9 +60,10 @@ let _warned = false;
  *  Order, and the reason for each step:
  *   1. `$AIO_TEST_DISPLAY` — an explicit choice always wins (CI with Xvfb, a
  *      user who already runs a nested session, a remote X display).
- *   2. an Xephyr already up on {@linkcode AIO_TEST_DISPLAY} — the normal case
- *      once someone has run `scripts/xephyr.sh`.
- *   3. start one, detached, and LEAVE IT RUNNING.
+ *   2. THIS user's Xephyr already up — {@linkcode AIO_TEST_DISPLAY}, or the
+ *      next number when `:77` is another account's — the normal case once
+ *      someone has run `scripts/xephyr.sh`.
+ *   3. start one, detached, with an access cookie, and LEAVE IT RUNNING.
  *   4. no Xephyr on the box → the real `$DISPLAY`, with one loud warning that
  *      says what to install and why the focus jumped.
  *
@@ -70,24 +78,42 @@ export function testDisplay(): string {
   }
   const explicit = Deno.env.get("AIO_TEST_DISPLAY");
   if (explicit) return (_resolved = explicit);
-  if (displayIsUp(AIO_TEST_DISPLAY)) return (_resolved = AIO_TEST_DISPLAY);
+  // THIS user's nested display — `:77` when it is theirs or free, the next
+  // number when `:77` belongs to another account (its socket being up says
+  // nothing about whose desktop it is; see server/nested-display.ts).
+  const pick = pickNestedDisplay();
+  if (pick?.up) return (_resolved = pick.display);
   // No parent display: a headless box or CI. Xephyr is a NESTED server — it
   // needs a session to open its window inside — and there is no focus to steal
   // here anyway. Trying anyway costs a doomed spawn and a 3s wait per run.
   if (!Deno.env.get("DISPLAY")) return (_resolved = "");
+  if (pick === null) {
+    if (!_warned) {
+      _warned = true;
+      console.error(
+        `[aio:test] every nested display from ${nestedDisplayRange()} ` +
+          `belongs to another user — GUI tests will open on your REAL ` +
+          `desktop and take focus. Point $AIO_TEST_DISPLAY at a display ` +
+          `you control.`,
+      );
+    }
+    return (_resolved = Deno.env.get("DISPLAY") ?? "");
+  }
   // Both arguments spelled out, not defaulted: the shared primitive owns the
-  // fallbacks, but what a TEST display is (this number, this geometry) is
-  // this module's decision, and `scripts/xephyr.sh` reads $AIO_TEST_SCREEN
-  // expecting the same value. A default that silently agrees today is the
-  // drift this repo keeps finding.
-  if (startXephyr(AIO_TEST_DISPLAY, AIO_TEST_SCREEN)) {
+  // fallbacks, but what a TEST display is (this geometry) is this module's
+  // decision, and `scripts/xephyr.sh` reads $AIO_TEST_SCREEN expecting the
+  // same value. A default that silently agrees today is the drift this repo
+  // keeps finding.
+  const started = startXephyrDetailed(pick.display, AIO_TEST_SCREEN);
+  if (started.ok) {
     console.error(
-      `[aio:test] started Xephyr on ${AIO_TEST_DISPLAY} for this and every ` +
+      `[aio:test] started Xephyr on ${pick.display} for this and every ` +
         `later run — test windows open THERE, not on your desktop. It stays ` +
         `up on purpose; close it yourself when you are done (or run ` +
-        `scripts/xephyr.sh to manage it).`,
+        `scripts/xephyr.sh to manage it).` +
+        (started.warning ? ` WARNING: ${started.warning}` : ""),
     );
-    return (_resolved = AIO_TEST_DISPLAY);
+    return (_resolved = pick.display);
   }
   if (!_warned) {
     _warned = true;
@@ -114,7 +140,13 @@ export function testDisplayEnv(): Record<string, string> {
   // Stacking one per spawned app is the failure people actually report. The
   // display and "do not open anything" are the same decision — a test's UI
   // belongs to the test — so they ship together and cannot be set apart.
-  return d ? { DISPLAY: d, AIO_NO_OPEN: "1" } : { AIO_NO_OPEN: "1" };
+  //
+  // The display's cookie rides along too (`XAUTHORITY`): the nested server is
+  // started with access control, so a child without the cookie is refused
+  // ("Authorization required") and its window simply never appears.
+  return d
+    ? { ...nestedDisplayEnv(d), AIO_NO_OPEN: "1" }
+    : { AIO_NO_OPEN: "1" };
 }
 
 /** Test seam: forget the cached answer. @internal */

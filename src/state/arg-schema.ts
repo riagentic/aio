@@ -97,11 +97,15 @@ export function validateMethodArgs(
     const spec = specs[i];
     if (!spec) continue;
     const where = `[${cell}:${method}] argument ${i + 1}`;
+    // The 0-based SCHEMA slot, beside the 1-based argument: the config is
+    // written `args.setLength[0]`, and "argument 1" alone sent a reader to
+    // the wrong index. Appended AFTER the existing phrase, which agents grep.
+    const slot = `(args.${method}[${i}])`;
     if (typeof spec === "function") {
       const verdict = spec(out[i]);
       if (verdict !== true) {
         throw new Error(
-          `${where} is invalid: ${
+          `${where} is invalid ${slot}: ${
             typeof verdict === "string" ? verdict : "the check returned false"
           }`,
         );
@@ -113,7 +117,7 @@ export function validateMethodArgs(
       // is `undefined is not a function` from inside aio, for a value the app
       // put in its own config.
       throw new Error(
-        `${where}: the rule in \`args\` is neither a function nor a Standard ` +
+        `${where} ${slot}: the rule in \`args\` is neither a function nor a Standard ` +
           `Schema (got ${
             spec === null ? "null" : typeof spec
           }).\n  fix: pass a schema from Zod / Valibot / ArkType, a predicate ` +
@@ -123,7 +127,7 @@ export function validateMethodArgs(
     const res = spec["~standard"].validate(out[i]);
     if (res instanceof Promise) {
       throw new Error(
-        `${where}: the schema validates ASYNCHRONOUSLY, and aio checks ` +
+        `${where} ${slot}: the schema validates ASYNCHRONOUSLY, and aio checks ` +
           `arguments on the dispatch path, which is synchronous for a sync ` +
           `method.\n` +
           `  fix: use the schema's sync form, or validate inside the method ` +
@@ -135,7 +139,7 @@ export function validateMethodArgs(
     if ("issues" in res && res.issues) {
       const why = res.issues.map((x) => x.message).join("; ") ||
         "it did not match the schema";
-      throw new Error(`${where} is invalid: ${why}`);
+      throw new Error(`${where} is invalid ${slot}: ${why}`);
     }
     // COERCED. A schema returns the parsed value, and that is what the method
     // gets — which is the dozen hand-written coercions the reports counted.

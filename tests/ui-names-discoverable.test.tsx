@@ -7,7 +7,7 @@
 //
 // `uiNames(ui)` in a test, `am surface --names` on a live app: one answer, two
 // places, same shape.
-import { assert, assertEquals } from "@std/assert";
+import { assert, assertEquals, assertStringIncludes } from "@std/assert";
 import { testUI, uiNames } from "../src/testing/ui-test.ts";
 
 function Panel() {
@@ -121,9 +121,10 @@ Deno.test("uiNames(ui): the list AGREES with what a miss reports as available", 
   } catch (e) {
     const m = /available: ([^\n]+)/.exec(String(e));
     if (m) {
-      available = m[1]!.split(",").map((x) => x.trim()).filter((x) =>
-        x && x !== "(none)" && !x.startsWith("…")
-      ).sort();
+      // Each element entry carries its harness spelling (`path → ui.x`); the
+      // PATH half is the one uiNames shares.
+      available = m[1]!.split(",").map((x) => x.split(" → ")[0]!.trim())
+        .filter((x) => x && x !== "(none)" && !x.startsWith("…")).sort();
     }
   }
   // The miss MUST have produced a list — if it did not, this test proves
@@ -187,4 +188,59 @@ Deno.test("uiNames(): a handle with no name list answers empty, not by throwing"
   // itself a failure, which is the shape being removed.
   // deno-lint-ignore no-explicit-any
   assertEquals(uiNames({} as any), []);
+});
+
+// ── A miss states the spelling THIS harness takes ───────────────────────────
+//
+// `<Button t="start">` asked for as `ui.StartButton` listed
+// `App/Button:start` — an am path `ui.<name>` does not take — and then tipped
+// "name elements with the t prop" for an element that already had one. The
+// working spelling, `ui.start`, was never stated (h3 F10).
+function TButton(props: { t: string; children: string }) {
+  return <button type="button" t={props.t}>{props.children}</button>;
+}
+
+function Timer() {
+  return (
+    <div>
+      <TButton t="start">Start</TButton>
+      <TButton t="pause">Pause</TButton>
+      <button type="button">Apply</button>
+      <button type="button">Apply</button>
+      <TButton t="del">A</TButton>
+      <TButton t="del">B</TButton>
+    </div>
+  );
+}
+
+Deno.test("a miss lists each element with its testUI spelling, and no t-tip when it has t", async () => {
+  await using ui = await testUI(Timer);
+  await ui.settle();
+  let text = "";
+  try {
+    // deno-lint-ignore no-explicit-any
+    (ui as any).StartButton.click();
+    await ui.settle();
+  } catch (e) {
+    text = String(e);
+  }
+  assertStringIncludes(text, "available: ");
+  assertStringIncludes(text, "Timer/TButton:start → ui.start");
+  // Same-named siblings are de-duplicated into distinct names.
+  assertStringIncludes(text, "Timer:ApplyButton2 → ui.ApplyButton2");
+  // Not unique on the surface → the path form, which the top level accepts.
+  assertStringIncludes(
+    text,
+    'Timer/TButton#4:del → ui["Timer/TButton#4:del"]',
+  );
+  assert(
+    !text.includes("tip: name elements explicitly with the t prop"),
+    `the closest candidate already has t= — no t-tip:\n${text}`,
+  );
+  // …and every stated spelling WORKS.
+  ui.start.click();
+  ui.ApplyButton2.click();
+  // deno-lint-ignore no-explicit-any
+  (ui as any)["Timer/TButton#4:del"].click();
+  await ui.settle();
 });

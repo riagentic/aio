@@ -110,9 +110,19 @@ const CEILING_GZ = {
   //   · cell-reactive, vdom diff/render, prop-write, contrast audit (~4 KB) —
   //     the per-user view, keyed lists, SSR/hydrate agreement.
   // Not paid down at release time; a size pass is on todo.md.
-  air: 83,
+  //
+  // Raised 83 → 86 on 2026-09-16 (measured 85; app 88), +3.2 KB gz:
+  //   · prop-write (+0.35 KB min) — a cell-bound controlled input LOST
+  //     keystrokes in Chromium when typing outpaced the round trip (19 of 40
+  //     measured); the echo guard is the fix, and it runs in production;
+  //   · ui-trigger (+2.4 KB gz) — `am trigger` now fires the events a real
+  //     browser fires (implicit submit, focus on click, keypress/beforeinput,
+  //     dblclick, pointer hover, Escape on a modal). It runs in the page, so
+  //     production downloads it too — the dev-only chunk (todo.md, 9.3 KB gz
+  //     measured) is where this comes back.
+  air: 86,
   /** The same, plus one cell — measured 2 KB, which is what a cell costs. */
-  app: 86,
+  app: 89,
 };
 
 const RUN = Deno.env.get("AIO_BUNDLE_SIZE") === "1";

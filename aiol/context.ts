@@ -1,9 +1,16 @@
 // aiol — project scanner: reads files, extracts cells, builds LintContext
 
 import { basename, extname, join, relative } from "@std/path";
-import { codeMatches, topLevelKeyOffsets } from "./scan.ts";
-import { removalsInSource } from "../src/state/removals.ts";
-import { appSourceScope } from "../src/am/app-source-scope.ts";
+import { codeMatches, codeText, topLevelKeyOffsets } from "./scan.ts";
+import {
+  _boundConfigSpans,
+  cellConfigKeyOf,
+  removalsInSource,
+} from "../src/state/removals.ts";
+import {
+  appSourceScope,
+  type SourceScope,
+} from "../src/am/app-source-scope.ts";
 import type {
   CellInfo,
   DenoJsonConfig,
@@ -177,22 +184,34 @@ const NOT_SOURCE_DIRS = new Set([
 export type Skip = { path: string; reason: string };
 
 /** Recursively collect source files */
+/** Is an over-limit file one the app excludes (deno.json `exclude` /
+ *  `fmt.exclude`, `.gitignore`)? Then "NOT read" is the app's own decision,
+ *  not a silent skip worth a warning. */
+function overLimitExcluded(scope: SourceScope, rel: string): boolean {
+  return scope.excludedBy(rel, false) !== null;
+}
+
 async function collectFiles(
   dir: string,
   root: string,
   out: SourceFile[],
   skipped: Skip[],
+  scope: SourceScope,
 ): Promise<void> {
   try {
     for await (const entry of Deno.readDir(dir)) {
       const path = join(dir, entry.name);
       if (entry.isDirectory) {
         if (IGNORE_DIRS.has(entry.name)) continue;
-        await collectFiles(path, root, out, skipped);
+        await collectFiles(path, root, out, skipped, scope);
       } else if (entry.isFile && SOURCE_EXTS.has(extname(entry.name))) {
         try {
           const stat = await Deno.stat(path);
           if (stat.size > MAX_FILE_SIZE) {
+            // A file the app itself declares is not its code (a generated
+            // bundle in `fmt.exclude`) is silent on purpose — THE scope
+            // decider, shared with the root scan below and with `am pin`.
+            if (overLimitExcluded(scope, relative(root, path))) continue;
             skipped.push({
               path: relative(root, path),
               reason: `${Math.round(stat.size / 1024)} KB — over aiol's ${
@@ -314,18 +333,25 @@ async function readDenoJson(
 function extractCells(files: SourceFile[]): CellInfo[] {
   const cells: CellInfo[] = [];
   // Match: cell('name', { ... }) or cell("name", { ... })
-  const cellRe = /\bcell\s*\(\s*(['"`])(\w[\w-]*)\1/g;
+  // A generic call (`cell<S>(`, `cell<Record<K, V>>(`) is a cell too.
+  const cellRe =
+    /\bcell\s*(?:<(?:[^<>()]|<(?:[^<>()]|<[^<>()]*>)*>|\([^()]*\))*>\s*)?\(\s*(['"`])(\w[\w-]*)\1/g;
 
   for (const file of files) {
+    const code = codeText(file.content);
     // Only real code declares a cell — a `cell("x")` in a doc comment or in a
     // code-generator's template literal is an example, not this project's cell
     // (it used to produce phantom cells + unfixable duplicate-name errors).
     for (const match of codeMatches(file.content, cellRe)) {
       const name = match[2]!;
       const lineIdx = file.content.slice(0, match.index).split("\n").length;
-      // Scan forward from match to find the config object
-      const afterMatch = file.content.slice(match.index!);
-      const info = parseCellConfig(afterMatch);
+      const info = parseCellConfig(
+        cellConfigBlock(
+          file.content,
+          code,
+          match.index! + match[0].lastIndexOf("("),
+        ),
+      );
 
       cells.push({
         name,
@@ -351,7 +377,60 @@ function extractCells(files: SourceFile[]): CellInfo[] {
   return cells;
 }
 
-/** Parse cell config block to extract state keys, methods, etc. */
+/** The config object of the `cell(` call whose `(` is at `open`, as ORIGINAL
+ *  text starting at its `{` — or "" when there is none. Located on MASKED code (a `{` in a
+ *  string is not a brace) and FOLLOWED like `am pin` follows it
+ *  (`_boundConfigSpans`): `cell("c", config)` reads the literal `config` is
+ *  bound to, and `{ ...base, state }` reads `base`'s keys as this config's
+ *  own. Reading raw text and the first `{` reported a correct cell as having
+ *  no state and no methods, and missed the removed key its bound config
+ *  carried, while `am pin` refused it (h8 F9). */
+function cellConfigBlock(
+  content: string,
+  code: string,
+  open: number,
+): string {
+  const close = closeParen(code, open);
+  const call: [number, number] = [open + 1, close];
+  const bound = _boundConfigSpans(code, [call]).slice(1);
+  const lit = code.indexOf("{", call[0]);
+  const ownBlock = lit >= 0 && lit < call[1]
+    ? content.slice(lit, closeBrace(code, lit) + 1)
+    : "";
+  const extra = bound.map(([s, e]) => content.slice(s + 1, e - 1));
+  if (extra.length === 0) return ownBlock;
+  if (!ownBlock) return `{${extra.join(",")}}`;
+  return `${ownBlock.slice(0, -1)},${extra.join(",")}}`;
+}
+
+/** Index of the `)` closing the `(` at `open` in MASKED code (end of text
+ *  when unbalanced). */
+function closeParen(code: string, open: number): number {
+  let depth = 0;
+  for (let i = open; i < code.length; i++) {
+    const ch = code[i];
+    if (ch === "(" || ch === "[" || ch === "{") depth++;
+    else if ((ch === ")" || ch === "]" || ch === "}") && --depth === 0) {
+      return i;
+    }
+  }
+  return code.length;
+}
+
+/** Index of the `}` closing the `{` at `open` in MASKED code (bounded — see
+ *  parseCellConfig), or the bound when unbalanced. */
+function closeBrace(code: string, open: number): number {
+  let depth = 0;
+  const end = Math.min(code.length, open + 200_000);
+  for (let i = open; i < end; i++) {
+    if (code[i] === "{") depth++;
+    else if (code[i] === "}" && --depth === 0) return i;
+  }
+  return -1;
+}
+
+/** Parse cell config block to extract state keys, methods, etc. `source` is
+ *  the ORIGINAL text of the config object (`cellConfigBlock`). */
 function parseCellConfig(source: string): {
   hasState: boolean;
   hasMethods: boolean;
@@ -373,44 +452,13 @@ function parseCellConfig(source: string): {
   methodNames: string[];
   actionNames: string[];
 } {
-  // Find the config object: first { after cell('name',
-  // The source starts at `cell('name',...` so find the first {
-  const firstBrace = source.indexOf("{");
-  if (firstBrace === -1) {
-    return {
-      hasState: false,
-      hasMethods: false,
-      hasActions: false,
-      hasGenerators: false,
-      hasMachine: false,
-      removedKeys: [],
-      hasSelectors: false,
-      isWorker: false,
-      hasVersion: false,
-      noPersist: false,
-      stateKeys: [],
-      stateIsLiteral: false,
-      methodNames: [],
-      actionNames: [],
-    };
-  }
-  let depth = 1;
-  let end = -1;
   // Scan bound guards against pathological files; 10_000 was too small — a large
   // cell config (e.g. a vault cell with many signing methods) overran it, so the
   // matcher returned end === -1 and the cell was falsely reported as having no
-  // state / no methods. 200_000 covers any realistic cell, still bounded.
-  for (let i = firstBrace + 1; i < Math.min(source.length, 200_000); i++) {
-    if (source[i] === "{") depth++;
-    else if (source[i] === "}") {
-      depth--;
-      if (depth === 0) {
-        end = i + 1;
-        break;
-      }
-    }
-  }
-  if (end === -1) {
+  // state / no methods. 200_000 covers any realistic cell, still bounded
+  // (`closeBrace`, which counts on MASKED code: a `{` inside a string value
+  // no longer swallows the rest of the config).
+  if (!source.startsWith("{") || !source.endsWith("}")) {
     return {
       hasState: false,
       hasMethods: false,
@@ -428,37 +476,48 @@ function parseCellConfig(source: string): {
       actionNames: [],
     };
   }
-
   // Strip comments so a phrase inside a `//` or `/* */` comment (e.g. "lives in
   // state (error…)") can't be mis-parsed as a real state key, method or action
   // and trip a phantom reserved-key error — same naive strip checkPersistence uses.
-  const block = source.slice(firstBrace, end)
-    .replace(/\/\*[\s\S]*?\*\//g, "")
-    .replace(/\/\/.*$/gm, "");
-  const hasState = /\bstate\s*:/.test(block);
+  // Blanked, not removed — offsets stay aligned with `code` (the masked twin
+  // the structural walks below count braces on).
+  const blank = (m: string) => m.replace(/[^\n]/g, " ");
+  const block = source
+    .replace(/\/\*[\s\S]*?\*\//g, blank)
+    .replace(/\/\/.*$/gm, blank);
+  const code = codeText(source);
+  const hasState = /\bstate\s*:/.test(code);
   // `state: initialGameState()` is a call, not a literal — keys are unknowable
   // statically, and warning "empty state {}" about it is a false positive
   // (a field report).
-  const stateIsLiteral = /\bstate\s*:\s*\{/.test(block);
-  const hasMethods = /\bmethods\s*:/.test(block);
-  const hasActions = /\bactions\s*:/.test(block);
-  const hasGenerators = /\bgenerators\s*:/.test(block);
-  const hasMachine = /\bmachine\s*:/.test(block);
+  const stateIsLiteral = /\bstate\s*:\s*\{/.test(code);
+  const hasMethods = /\bmethods\s*:/.test(code);
+  const hasActions = /\bactions\s*:/.test(code);
+  const hasGenerators = /\bgenerators\s*:/.test(code);
+  const hasMachine = /\bmachine\s*:/.test(code);
   // Removed 1.x config keys, sourced from the framework's removal registry so a
   // future removal is caught here the day its row lands — never a second list.
   // A cell-config row counts only as a TOP-LEVEL key of this block:
   // `perfBudget: { reduce: 100 }` is the current budget and
   // `state: { machine: {…} }` is app data — both errored as removed keys
   // (llama-master). `am pin`'s file scan draws the same line.
+  // The same holds for an API row found AS a cell key (`ui:`, `listensTo:`):
+  // `state: { listensTo: ["a"] }` is app data (h8 F2). `aio.run()` keys
+  // (`appVersion:`, `killExisting:`) are never hits inside a cell block — the
+  // registry judges them at their own `aio.run(` site.
   const removedKeys = removalsInSource(block)
-    .filter((h) =>
-      h.removal.kind !== "cell-config" ||
-      topLevelKeyOffsets(block, 0, h.removal.key).length > 0
-    )
+    .filter((h) => {
+      const key = cellConfigKeyOf(h.removal);
+      // A quoted key (`"machine":`) is the same key to the runtime.
+      return key === null ||
+        [key, `"${key}"`, `'${key}'`].some((k) =>
+          topLevelKeyOffsets(block, 0, k).length > 0
+        );
+    })
     .map((h) => h.removal.key);
-  const hasSelectors = /\bselectors\s*:/.test(block);
-  const isWorker = /\bworker\s*:\s*true\b/.test(block);
-  const hasVersion = /\bversion\s*:\s*\d+/.test(block);
+  const hasSelectors = /\bselectors\s*:/.test(code);
+  const isWorker = /\bworker\s*:\s*true\b/.test(code);
+  const hasVersion = /\bversion\s*:\s*\d+/.test(code);
   // TWO SPELLINGS mean the same thing, and a third way to be exempt is not
   // spelled at all. `persist: false` and `persist: "none"` are the same
   // declaration — `"none"` is what `docs/state/cells.md` uses and what `am`
@@ -480,22 +539,23 @@ function parseCellConfig(source: string): {
     /\bpersist\s*:\s*(?:false\b|["\'`]none["\'`])/.test(block) ||
     /\bscope\s*:\s*["\'`]client["\'`]/.test(block);
 
+  // The INSIDE of the object a `key: {` opens, as [original, masked] text —
+  // braces matched on the masked twin, so a `{` in a string is not one.
+  const inner = (re: RegExp): [string, string] | null => {
+    const m = re.exec(code);
+    if (!m) return null;
+    const open = m.index + m[0].length - 1;
+    const close = closeBrace(code, open);
+    const end = close < 0 ? code.length : close;
+    return [block.slice(open + 1, end), code.slice(open + 1, end)];
+  };
+
   // Extract state keys from state: { key1: ..., key2: ... }
   // Use brace matching instead of [^}] to handle nested objects/arrays
   const stateKeys: string[] = [];
-  const stateStart = block.match(/\bstate\s*:\s*\{/);
-  if (stateStart) {
-    const sIdx = block.indexOf(stateStart[0]) + stateStart[0].length;
-    // Find matching close brace for the state object
-    let sd = 1, sEnd = sIdx;
-    for (let i = sIdx; i < block.length && sd > 0; i++) {
-      if (block[i] === "{") sd++;
-      else if (block[i] === "}") {
-        sd--;
-        if (sd === 0) sEnd = i;
-      }
-    }
-    const stateBlock = block.slice(sIdx, sEnd);
+  const stateSpan = inner(/\bstate\s*:\s*\{/);
+  if (stateSpan) {
+    const [stateBlock, stateCode] = stateSpan;
     // Extract top-level keys (skip nested object contents). A QUOTED key is a
     // key: `{ "password": "" }` is the same field to the runtime, which
     // refuses to boot on it — and was invisible to every rule reading this
@@ -505,8 +565,11 @@ function parseCellConfig(source: string): {
         /(?<![$\w"'])(?:(["'])([$\w]+)\1|([$\w]+))\s*:/g,
       )
     ) {
+      // A "key:" INSIDE a string value is not a key: its first character is
+      // blanked in the masked twin (a quoted key's quote is code).
+      if (stateCode[m.index!] !== stateBlock[m.index!]) continue;
       // Count depth up to this match to ensure it's top-level
-      const before = stateBlock.slice(0, m.index);
+      const before = stateCode.slice(0, m.index);
       let kd = 0;
       for (const ch of before) {
         if (ch === "{" || ch === "[") kd++;
@@ -518,18 +581,9 @@ function parseCellConfig(source: string): {
 
   // Extract method names from methods: { name(...) { } }
   const methodNames: string[] = [];
-  const methodsMatch = block.match(/\bmethods\s*:\s*\{/);
-  if (methodsMatch) {
-    const methodsStart = block.indexOf(methodsMatch[0]) +
-      methodsMatch[0].length;
-    let d = 1;
-    let methodsEnd = methodsStart;
-    for (let i = methodsStart; i < block.length && d > 0; i++) {
-      if (block[i] === "{") d++;
-      else if (block[i] === "}") d--;
-      if (d === 0) methodsEnd = i;
-    }
-    const methodsBlock = block.slice(methodsStart, methodsEnd);
+  const methodsSpan = inner(/\bmethods\s*:\s*\{/);
+  if (methodsSpan) {
+    const methodsBlock = methodsSpan[1];
     // Match method declarations: name(, async name(, *name(
     for (
       const m of methodsBlock.matchAll(/(?:async\s+)?(?:\*\s*)?(\w+)\s*\(/g)
@@ -537,22 +591,23 @@ function parseCellConfig(source: string): {
       const n = m[1]!;
       if (n !== "async" && n !== "function") methodNames.push(n);
     }
+    // …and arrow/function PROPERTIES: `name: async (s) => {`, `name: s =>`,
+    // `name: function (s) {` — the same methods to the runtime, and invisible
+    // to every rule reading this list (h8 F5).
+    for (
+      const m of methodsBlock.matchAll(
+        /([$\w]+)\s*:\s*(?:async\b\s*)?(?:function\b\s*\*?\s*)?(?:\(|[$\w]+\s*=>)/g,
+      )
+    ) {
+      if (!methodNames.includes(m[1]!)) methodNames.push(m[1]!);
+    }
   }
 
   // Extract action names from actions: { Name: ... }
   const actionNames: string[] = [];
-  const actionsMatch = block.match(/\bactions\s*:\s*\{/);
-  if (actionsMatch) {
-    const actionsStart = block.indexOf(actionsMatch[0]) +
-      actionsMatch[0].length;
-    let d = 1;
-    let actionsEnd = actionsStart;
-    for (let i = actionsStart; i < block.length && d > 0; i++) {
-      if (block[i] === "{") d++;
-      else if (block[i] === "}") d--;
-      if (d === 0) actionsEnd = i;
-    }
-    const actionsBlock = block.slice(actionsStart, actionsEnd);
+  const actionsSpan = inner(/\bactions\s*:\s*\{/);
+  if (actionsSpan) {
+    const actionsBlock = actionsSpan[1];
     for (const m of actionsBlock.matchAll(/(\w+)\s*:/g)) {
       actionNames.push(m[1]!);
     }
@@ -576,6 +631,9 @@ function parseCellConfig(source: string): {
   };
 }
 
+/** The first line `am testgen` writes into the client it generates. */
+export const TESTGEN_HEADER = "// AUTO-GENERATED by am testgen — do not edit";
+
 /** Build the full lint context for a project directory */
 export async function buildContext(
   projectDir: string,
@@ -592,7 +650,8 @@ export async function buildContext(
 
   // Collect source files from src/ and project root
   const srcDir = join(projectDir, "src");
-  await collectFiles(srcDir, projectDir, sourceFiles, skipped);
+  const scope = await appSourceScope(projectDir);
+  await collectFiles(srcDir, projectDir, sourceFiles, skipped, scope);
   // …and every other directory a project keeps REAL code in. `src/` + root was
   // the whole scan, so a project's build scripts, release gates and dev tools —
   // the code that decides what ships — were the one part the linter never read.
@@ -606,7 +665,7 @@ export async function buildContext(
     } catch {
       continue; // this project has no such directory
     }
-    await collectFiles(path, projectDir, sourceFiles, skipped);
+    await collectFiles(path, projectDir, sourceFiles, skipped, scope);
   }
   // Scan root .ts/.tsx files
   try {
@@ -616,6 +675,7 @@ export async function buildContext(
         const path = join(projectDir, entry.name);
         const stat = await Deno.stat(path);
         if (stat.size > MAX_FILE_SIZE) {
+          if (overLimitExcluded(scope, entry.name)) continue;
           skipped.push({
             path: entry.name,
             reason: `${Math.round(stat.size / 1024)} KB — over aiol's ${
@@ -727,7 +787,7 @@ export async function buildContext(
     try {
       const path = join(projectDir, dir);
       if ((await Deno.stat(path)).isDirectory) {
-        await collectFiles(path, projectDir, testSources, skipped);
+        await collectFiles(path, projectDir, testSources, skipped, scope);
       }
     } catch { /* no such directory */ }
   }
@@ -751,9 +811,11 @@ export async function buildContext(
   // and it could not see these at all — a helper under `tests/` holding a
   // hard-coded password went unreported with no hint that anything had been
   // passed over.
-  const testHelpers = testSources.filter((f) => !isTest(f)).map((f) =>
-    f.relative
-  );
+  // `am testgen`'s output is generated, not hand-written: nothing in it is
+  // for a human to review, so it is not named as an unreviewed helper.
+  const testHelpers = testSources
+    .filter((f) => !isTest(f) && f.lines[0]?.trimEnd() !== TESTGEN_HEADER)
+    .map((f) => f.relative);
   // A cell defined inside a test is a FIXTURE, not app surface — counting it
   // would then report it as untested. (`.test.tsx` was missed here too.)
   const cells = extractCells(sourceFiles.filter((f) => !isTest(f)));

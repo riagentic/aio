@@ -297,3 +297,148 @@ export const job6 = cell("job6", {
   assertEquals(found.length, 1);
   assert(found[0]!.message.includes("job6.prepare()"));
 });
+
+// h8 F5 — the measured trap in the layouts the rule used to skip. Each is an
+// async write → same-cell call before any await → a callee that reads it.
+const SELF_TRAP: Record<string, string> = {
+  "a nested write": `import { cell } from "aio";
+export const job = cell("job", {
+  state: { form: { input: "" }, estimate: 0 },
+  methods: {
+    async setInput(s: { form: { input: string } }, p: string) {
+      s.form.input = p;
+      await job.estimateSize();
+    },
+    estimateSize(s: { form: { input: string }; estimate: number }) { s.estimate = s.form.input.length; },
+  },
+});
+`,
+  "arrow-property methods": `import { cell } from "aio";
+export const job = cell("job", {
+  state: { input: "", estimate: 0 },
+  methods: {
+    setInput: async (s: { input: string }, p: string) => {
+      s.input = p;
+      await job.estimateSize();
+    },
+    estimateSize: (s: { input: string; estimate: number }) => { s.estimate = s.input.length; },
+  },
+});
+`,
+  "an expression-bodied arrow callee": `import { cell } from "aio";
+export const job = cell("job", {
+  state: { input: "", estimate: 0 },
+  methods: {
+    async setInput(s: { input: string }, p: string) {
+      s.input = p;
+      await job.estimateSize();
+    },
+    estimateSize: (s: { input: string; estimate: number }) => void (s.estimate = s.input.length),
+  },
+});
+`,
+  "Object.assign onto the draft": `import { cell } from "aio";
+export const job = cell("job", {
+  state: { input: "", estimate: 0 },
+  methods: {
+    async setInput(s: { input: string }, p: string) {
+      Object.assign(s, { input: p });
+      await job.estimateSize();
+    },
+    estimateSize(s: { input: string; estimate: number }) { s.estimate = s.input.length; },
+  },
+});
+`,
+  "a formatter-wrapped declaration": `import { cell } from "aio";
+type JobState = { input: string; estimate: number };
+export const jobWithAVeryLongNameThatWraps =
+  cell("job-with-a-very-long-name-that-wraps-the-declaration", {
+    state: { input: "", estimate: 0 } as JobState,
+    methods: {
+      async setInput(s: JobState, p: string) {
+        s.input = p;
+        await jobWithAVeryLongNameThatWraps.estimateSize();
+      },
+      estimateSize(s: JobState) { s.estimate = s.input.length; },
+    },
+  });
+`,
+  "a generic cell<S>(": `import { cell } from "aio";
+type St = { input: string; estimate: number };
+export const job = cell<St>("job", {
+  state: { input: "", estimate: 0 },
+  methods: {
+    async setInput(s, p: string) {
+      s.input = p;
+      await job.estimateSize();
+    },
+    estimateSize(s) { s.estimate = s.input.length; },
+  },
+});
+`,
+  "an await only inside a nested closure before the call":
+    `import { cell } from "aio";
+export const job = cell("job", {
+  state: { input: "", estimate: 0 },
+  methods: {
+    async setInput(s: { input: string }, p: string) {
+      s.input = p;
+      const later = async () => { await Promise.resolve(); };
+      await job.estimateSize();
+      await later();
+    },
+    estimateSize(s: { input: string; estimate: number }) { s.estimate = s.input.length; },
+  },
+});
+`,
+  "a destructuring read": `import { cell } from "aio";
+export const job = cell("job", {
+  state: { input: "", estimate: 0 },
+  methods: {
+    async setInput(s: { input: string }, p: string) {
+      s.input = p;
+      await job.estimateSize();
+    },
+    estimateSize(s: { input: string; estimate: number }) { const { input } = s; s.estimate = input.length; },
+  },
+});
+`,
+  "a bracket read": `import { cell } from "aio";
+export const job = cell("job", {
+  state: { input: "", estimate: 0 },
+  methods: {
+    async setInput(s: { input: string }, p: string) {
+      s.input = p;
+      await job.estimateSize();
+    },
+    estimateSize(s: Record<string, string | number>) { s.estimate = String(s["input"]).length; },
+  },
+});
+`,
+};
+
+for (const [name, src] of Object.entries(SELF_TRAP)) {
+  Deno.test(`aiol: self-call trap is flagged — ${name} (h8 F5)`, async () => {
+    const found = await issues({ "src/job.ts": src });
+    assertEquals(found.length, 1, JSON.stringify(found));
+    assertEquals(found[0]!.severity, "warn");
+  });
+}
+
+Deno.test("aiol: a nested write whose callee reads only a SIBLING field is clean (h8 F5)", async () => {
+  const found = await issues({
+    "src/job.ts": `import { cell } from "aio";
+export const job = cell("job", {
+  state: { form: { input: "", mode: "a" }, estimate: 0 },
+  methods: {
+    async setInput(s: { form: { input: string } }, p: string) {
+      s.form.input = p;
+      await job.estimateSize();
+    },
+    estimateSize(s: { form: { mode: string }; estimate: number }) { s.estimate = s.form.mode.length; },
+  },
+});
+`,
+  });
+  assertEquals(found, []);
+});

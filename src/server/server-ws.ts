@@ -127,7 +127,7 @@ function retryAfter(windowStart: number | undefined): number {
  *  server-side callers. */
 export { _isFrameworkInternalActionType } from "../protocol/action-gate.ts";
 import { _isFrameworkInternalActionType } from "../protocol/action-gate.ts";
-import { _dispatchRefusal } from "./action-ack.ts";
+import { _dispatchRefusal, _dispatchShort } from "./action-ack.ts";
 import { guardHookResult } from "./aio-dispatch.ts";
 
 /** Strip client-set trusted provenance off a network action, loudly, and
@@ -1971,9 +1971,19 @@ export function createWsManager(deps: WsDeps): WsManager {
     // a second copy of the dropped one, gated on `!prod`, so production was
     // silent about a return value it had thrown away.
     const { value: safe } = serializeReturn(value, actionType);
+    // `short`: the call ran with arguments missing — the trojan's sentence,
+    // stamped by dispatchNetwork, so the three doors agree (action-ack.ts).
+    const short = _dispatchShort(action);
     try {
       if (socket.readyState === WebSocket.OPEN) {
-        socket.send(enc("ack", { cid, ok: true, value: safe }));
+        socket.send(
+          enc("ack", {
+            cid,
+            ok: true,
+            value: safe,
+            ...(short !== undefined ? { short } : {}),
+          }),
+        );
       }
     } catch { /* client gone */ }
   }

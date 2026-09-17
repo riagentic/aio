@@ -18,8 +18,10 @@ Output auto-detects: terminal -> pretty text, piped -> JSON. Override with
 ## If you are an AI agent (`am agent`)
 
 ```sh
-am agent                # the whole brief
-am agent --list         # the sections
+am agent                # the page (Markdown)
+am agent --min          # compact: rules, model, the loop, a cell, a component, a test
+am agent --max          # everything, deep sections included
+am agent --list         # the sections, with the size each appears at
 am agent --task=rules   # one of them
 ```
 
@@ -341,6 +343,7 @@ deno task am kill --stale         # reap ORPHANS — processes still serving wit
                                   # numbers while `am status` says stopped.
                                   # --port=N for an orphan on an unrecorded port
 deno task am restart              # stop + start — exit 1 + NOT SAVED if the final write was refused (the app still restarts)
+                                  # keeps the port it had when that port is still free
 deno task am status               # stopped|starting|started|stopping
 deno task am open                 # open THIS app in a browser (--print writes the URL)
 ```
@@ -361,6 +364,24 @@ The cross-cutting ones
 --home --json --quiet --wait --timeout --client-index --entry --force`)
 and the launch flags (`--no-wait --transport`) are accepted everywhere. `--`
 ends am's options: what follows is an argument, never a flag.
+
+**A booting app is never killed.** A second `am start` while the first boot is
+still running (`status: starting`, process alive, nothing listening yet) prints
+`note: still starting (pid N) — waiting` and waits for THAT process — same pid,
+no second child. When a wait runs out on a live process that has bound nothing,
+`am start` exits 1 with
+`still starting after 10s (pid N alive, …) — am status
+follows it (exit 2 = transitional); a cold start may need --wait=60`;
+"not responding" is kept for a process that IS listening and does not answer. A
+`starting` instance is reclaimed only when it listens and never answers past the
+10 s grace, or when neither its lock nor its log has moved for 50 s. A boot that
+crashes is reported by its `error:` line and the `→ fix:` lines under it, with
+stack frames left out.
+
+**`restart` keeps the port.** An app that declares no port gets the port it had
+before the restart, if that port is still free. If something else has taken it,
+a `note:` says so and the app picks a free one. `--port=N` or a declared port
+still wins, and the port restart reuses is never written into the launch record.
 
 `start` WAITS by default (`--no-wait` opts out); `stop` returns immediately
 unless you pass `--wait[=N]`. `restart` always waits for stop internally, then
@@ -431,8 +452,9 @@ Controlled by `singleton` in `aio.run()`:
 | `false`          | Allow multiple instances              |
 
 Lock files at `/tmp/aio/` (or `$XDG_RUNTIME_DIR/aio/`) as `{appId}.lock`. Stale
-locks (dead PID) are auto-cleaned. Zombies (alive but not responding) are killed
-automatically on `start`.
+locks (dead PID) are auto-cleaned. Zombies (alive and listening, but not
+answering) are killed automatically on `start`; an instance that is still
+booting is waited for, never killed (see Process management).
 
 **Identity is appId AND data home.** An app booted again from a different
 `appDir` (an isolated smoke-test or screenshot boot beside the user's own) is a
@@ -900,7 +922,12 @@ component under its directory) the render shows the UI as it was. When a UI
 source file is newer than the import, the answer says so: a
 `note: this server-side render is STALE — <file> changed …` line on stderr, and
 a `stale: { file, changedAt, importedAt, note }` field on each top-level node of
-the `--json` answer. Open a client for the current UI.
+the `--json` answer. Open a client for the current UI. Every `--json` answer
+says which renderer answered: `"render": "server" | "client"` on each top-level
+node, and at the top level of `--names --json` (`{names, render}`) and
+`--rects --json` (`{roots, measured, render}`). If no client is connected,
+`am trigger` refuses and names a launch that keeps off your screen:
+`am start --client=electron` (on the nested display) or `--client=browser`.
 
 `type` APPENDS to the field's current value (a user typing into a field that
 already has one); `setValue` clears first, then types — use it to drive a form,
@@ -1321,7 +1348,8 @@ same renderer `am surface` uses and prints the same `Component:Element` paths
 - The file is found the way your shell means it: relative to the current
   directory first, then the project root, then the app directory (so
   `src/Card.tsx` and `Card.tsx` both work from the project root).
-- `--export=Name` picks a named export; without it, the default export.
+- `--export=Name` picks a named export; without it, the default export (also
+  spelled `--export=default` — a miss on a default-exported module says so).
 - `--props=` is a JSON **object**. A number or an array is refused rather than
   spread into nothing, because a component rendering with every prop `undefined`
   looks exactly like the bug you are hunting.

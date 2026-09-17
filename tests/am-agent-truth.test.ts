@@ -72,7 +72,8 @@ function amSegments(
       const start = m.index! + m[0].length;
       const next = hits[i + 1]?.index ?? line.length;
       let seg = line.slice(start, next);
-      const stop = seg.search(/ · | {2,}|\(| — |;|→/);
+      // `|` ends a segment too: a Markdown table cell.
+      const stop = seg.search(/ · | {2,}|\(| — |;|→|\|/);
       if (stop !== -1) seg = seg.slice(0, stop);
       const flags = [...seg.matchAll(FLAG_RE)].map((f) => f[1]!);
       out.push({ verb: m[1]!, flags, at: line.trim() });
@@ -163,7 +164,7 @@ Deno.test("am agent: `deno task` names and their flags are real", () => {
   const bad: string[] = [];
   let seen = 0;
   for (const line of ALL.split("\n")) {
-    for (const m of line.matchAll(/deno task ([a-z][a-z:-]*)([^·(;→]*)/g)) {
+    for (const m of line.matchAll(/deno task ([a-z][a-z:-]*)([^·(;→|]*)/g)) {
       seen++;
       const [name, rest] = [m[1]!, m[2]!.split(/ {2,}/)[0]!];
       if (!tasks.has(name)) bad.push(`deno task ${name}   ← ${line.trim()}`);
@@ -239,9 +240,10 @@ Deno.test("am agent: the layout it describes is what am create writes", () => {
   const files = Object.keys(scaffold("demo", "counter", true));
   const page = body("new");
   const scaffoldLine = page.slice(
-    page.indexOf("2 layout"),
-    page.indexOf("3 tasks"),
+    page.indexOf("2. **layout**"),
+    page.indexOf("3. **tasks**"),
   );
+  assert(scaffoldLine.length > 100, "the layout step moved");
   const described = [
     ...new Set(
       [...scaffoldLine.matchAll(
@@ -511,11 +513,20 @@ Deno.test("am agent: every call-like name and JSX component in the prose is real
   ]);
   const placeholders = new Set(["Kid", "U"]);
 
-  const prose = BRIEF_SECTIONS.map((s) => s.body).join("\n")
-    // the snippets are compiled for real above; scan only what is not code
-    .split("\n").filter((l) =>
-      !/^ {2}(?:\/\/ |import |export |[ \w].*[;{}]$)/.test(l) || l.includes("·")
-    )
+  // The snippets are compiled for real above; scan only what is not code:
+  // everything outside a fenced block, minus the two-space-indented code
+  // lines the older layout used.
+  let fenced = false;
+  const prose = BRIEF_SECTIONS.flatMap((s) => [s.body, s.min ?? ""]).join("\n")
+    .split("\n").filter((l) => {
+      if (l.startsWith("```")) {
+        fenced = !fenced;
+        return false;
+      }
+      if (fenced) return false;
+      return !/^ {2}(?:\/\/ |import |export |[ \w].*[;{}]$)/.test(l) ||
+        l.includes("·");
+    })
     .join("\n");
   const calls = [
     ...new Set(

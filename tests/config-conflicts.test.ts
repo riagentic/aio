@@ -383,6 +383,42 @@ Deno.test("a conflict is reported ONCE per process, not once per validateConfig 
   assertEquals(hits.length, 1);
 });
 
+Deno.test("an error-level conflict REFUSES every boot in a process — only its log line is deduped", () => {
+  // The dedupe used to `continue` before `exit(1)`: the first
+  // `testServer({ transport: "uds", client: "server-only" })` was refused, and
+  // the second and third in the same process BOOTED on a socket their client
+  // cannot reach.
+  _resetConfigConflicts();
+  const exits: number[] = [];
+  const exit = ((c: number) => {
+    exits.push(c);
+    throw new Error("exit");
+  }) as (c: number) => never;
+  const errors: string[] = [];
+  const origError = console.error;
+  console.error = (...a: unknown[]) => void errors.push(a.join(" "));
+  try {
+    for (let i = 0; i < 3; i++) {
+      try {
+        validateConfig(
+          { transport: "uds", client: "server-only" },
+          VALID_AIO_CONFIG_KEYS,
+          "AioConfig",
+          exit,
+        );
+      } catch { /* the exit stub */ }
+    }
+  } finally {
+    console.error = origError;
+  }
+  assertEquals(exits, [1, 1, 1]);
+  assertEquals(
+    errors.filter((e) => e.includes('transport: "uds"')).length,
+    1,
+    errors.join("\n"),
+  );
+});
+
 // ── ENUM_VALUES covers every enum-valued option ──────────────────────
 
 Deno.test("client, transport, persistMode and perfCheck are value-checked", () => {

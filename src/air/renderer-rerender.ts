@@ -43,6 +43,7 @@ import {
 } from "./renderer-state.ts";
 import { _flushPending } from "./renderer-flush.ts";
 import { _inEventHandler } from "./vdom-events.ts";
+import { _inLifecycleCallback } from "./untracked-read.ts";
 import { _componentName } from "./hook-error.ts";
 import { count } from "../diagnostics/fmt.ts";
 
@@ -85,8 +86,23 @@ export function _scheduleComponentRender(inst: ComponentInstance): void {
   // counted, so a fast typist got "move the write into an event handler" for
   // a write that was already there. Non-handler writes (render body,
   // afterRender, promise, socket) still count.
-  if (isDevMode() && !_inEventHandler()) {
+  //
+  // A handler is input only when it is the OUTERMOST frame. One fired from
+  // inside a lifecycle callback — `afterRender(() => btn.click())`, or a
+  // `dispatchEvent(new Event("input"))` from onMount — is the render writing
+  // what it read with an event in between, and it made the tripwire blind
+  // (121 renders, 0 warnings) while the plain `afterRender` write tripped.
+  if (isDevMode() && (!_inEventHandler() || _inLifecycleCallback())) {
     inst._devLoopCandidate = true;
+  }
+  // …and WHERE it came from, so the tripwire's advice fits: a write made in a
+  // render or a lifecycle callback is the loop it describes; one from nowhere
+  // on the stack is a server push, a timer, a promise or a socket.
+  if (isDevMode()) {
+    _devOrigin.set(
+      inst,
+      _instanceStack.length > 0 || _inLifecycleCallback() ? "render" : "push",
+    );
   }
   root.pendingComponents.add(inst);
   if (!root.flushScheduled) {
@@ -108,6 +124,9 @@ function _scheduleLentRender(inst: ComponentInstance): void {
 // ── Per-component re-render ───────────────────────────────────────────
 
 const DEV_RENDER_LIMIT = 50;
+
+/** What scheduled an instance's latest counted render (dev only). */
+const _devOrigin = new WeakMap<ComponentInstance, "render" | "push">();
 
 /** Dev tripwire: the state hooks (`useRef`/`useSignal`/`useId`) are matched
  *  across renders BY CALL ORDER — index 0 is index 0 forever.
@@ -161,12 +180,21 @@ export function _rerenderComponent(inst: ComponentInstance): void {
         ? (inst.vnode.tag.name || "Anonymous")
         : "Component";
       console.warn(
-        `[aio-dev] ${name} re-rendered ${DEV_RENDER_LIMIT} times in under a ` +
-          `second — a render is WRITING state that the same render READS, so ` +
-          `every render schedules the next one. Two fixes: move the write into ` +
-          `an event handler or onMount (a render must only read), or wrap the ` +
-          `read in untrack(() => …) if the value is genuinely a one-shot ` +
-          `initialisation that must not subscribe.`,
+        _devOrigin.get(inst) === "push"
+          ? `[aio-dev] ${name} re-rendered ${DEV_RENDER_LIMIT} times in under ` +
+            `a second from writes made outside any render or event handler — ` +
+            `server pushes, timers, promises, sockets. For a text input bound ` +
+            `to a cell (one push per keystroke re-renders every reader), keep ` +
+            `the draft in useLocal and commit it on blur/submit; for a timer ` +
+            `or a stream, throttle or batch the writes. (A render that WRITES ` +
+            `state it READS loops the same way — move that write into an ` +
+            `event handler or onMount.)`
+          : `[aio-dev] ${name} re-rendered ${DEV_RENDER_LIMIT} times in under ` +
+            `a second — a render is WRITING state that the same render READS, ` +
+            `so every render schedules the next one. Two fixes: move the ` +
+            `write into an event handler or onMount (a render must only ` +
+            `read), or wrap the read in untrack(() => …) if the value is ` +
+            `genuinely a one-shot initialisation that must not subscribe.`,
       );
     }
   }

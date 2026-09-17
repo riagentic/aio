@@ -2,7 +2,8 @@
  * @module
  * `am agent` — the whole of aio for a model, in one command: the page (concept,
  * API, every verb, the new-app flow, testing, debugging, shipping) by default,
- * one deeper section with `--task=<slug>`, everything with `--task=all`.
+ * a compact rendition with `--min`, everything with `--max`, one section with
+ * `--task=<slug>`.
  *
  * The text lives in am-agent-text.ts (a leaf, so a gate and the scaffolder can
  * both read it). This file is the door: argument handling, and the one output
@@ -21,6 +22,13 @@
  * That is a formatting choice keyed on what this command's payload IS, not a
  * behaviour fork: both forms carry the same bytes of brief, and asking for
  * `--json` gets JSON on a terminal and off it alike.
+ *
+ * **Why three sizes.** Context windows differ by an order of magnitude between
+ * the models that read this. A small window wants the rules, the model, the
+ * loop and the three shapes (a cell, a component, a test) and nothing else; a
+ * large one wants every deep section at once rather than eight `--task` calls.
+ * `--min` / (default) / `--max` are those three; the sections and their order
+ * are the same, only the rendition changes.
  */
 import type { GlobalFlags } from "./am-types.ts";
 import { detectMode, out, outError } from "./am-output.ts";
@@ -28,26 +36,46 @@ import {
   agentBrief,
   BRIEF_SECTIONS,
   BRIEF_TASKS,
+  type BriefLevel,
+  levelSections,
   pickSections,
 } from "./am-agent-text.ts";
 import { VERSION } from "../server/aio.ts";
 
-/** `am agent [--task=<slug>] [--list] [--json]` */
+/** `am agent [--min|--medium|--max] [--task=<slug>] [--list] [--json]` */
 export function cmdAgent(args: string[], flags: GlobalFlags): void {
   const mode = detectMode(flags);
   const task = readTask(args);
+  const level = readLevel(args);
+
+  if (level === null) {
+    outError(
+      "pick ONE size: --min, --medium (the default), or --max",
+      mode,
+      "am agent --min prints the compact brief; am agent --max everything",
+    );
+    Deno.exit(1);
+  }
 
   if (args.includes("--list")) {
     const rows = BRIEF_SECTIONS.map((s) => ({
       task: s.slug,
       covers: s.title,
       page: s.page,
+      min: s.min !== undefined,
     }));
     const width = Math.max(...rows.map((r) => r.task.length));
     out(
       flags.json ? rows : [
-        "  am agent prints every page section; --task=<slug> one; --task=all everything",
-        ...rows.map((r) => `  ${r.task.padEnd(width)}  ${r.covers}`),
+        "  am agent prints every page section (Markdown); --min the compact " +
+        "brief; --max everything; --task=<slug> one",
+        "  size column: min = on the --min page too · page = default · deep = " +
+        "--max / --task only",
+        ...rows.map((r) =>
+          `  ${r.task.padEnd(width)}  ${
+            (r.min ? "min" : r.page ? "page" : "deep").padEnd(4)
+          }  ${r.covers}`
+        ),
       ].join("\n"),
       flags.json ? "json" : "pretty",
     );
@@ -79,21 +107,30 @@ export function cmdAgent(args: string[], flags: GlobalFlags): void {
   }
 
   if (flags.json) {
-    const picked = pickSections(task);
+    const picked = task !== undefined
+      ? pickSections(task).map((section) => ({
+        section,
+        text: level === "min" && section.min !== undefined
+          ? section.min
+          : section.body,
+      }))
+      : levelSections(level);
     out({
       version: VERSION,
-      sections: picked.map((s) => ({
-        task: s.slug,
-        title: s.title,
-        body: s.body,
-        page: s.page,
+      level: task === "all" ? "max" : level,
+      sections: picked.map(({ section, text }) => ({
+        task: section.slug,
+        title: section.title,
+        body: text,
+        page: section.page,
+        min: section.min !== undefined,
       })),
     }, "json");
     return;
   }
 
   // The brief, as text, whoever is reading. See the module note above.
-  console.log(agentBrief({ version: VERSION, task }));
+  console.log(agentBrief({ version: VERSION, task, level }));
 }
 
 /** `--task=<slug>`, or undefined. A bare `am agent <slug>` is accepted too —
@@ -104,4 +141,15 @@ export function readTask(args: string[]): string | undefined {
   if (flag) return flag.slice("--task=".length);
   const bare = args.find((a) => !a.startsWith("-"));
   return bare;
+}
+
+/** The size asked for: `--min` / `--medium` / `--max`, `medium` when none;
+ *  `null` when two are given at once (a contradiction to refuse, not to
+ *  resolve by position). @internal */
+export function readLevel(args: string[]): BriefLevel | null {
+  const asked = (["min", "medium", "max"] as const).filter((l) =>
+    args.includes(`--${l}`)
+  );
+  if (asked.length > 1) return null;
+  return asked[0] ?? "medium";
 }

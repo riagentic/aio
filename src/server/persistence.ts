@@ -127,6 +127,11 @@ export interface PersistenceConfig {
    *  CONSUMED (migrated and deleted) has its row removed on the first flush
    *  instead of resurfacing as an orphan on every boot. */
   storedKeys?: string[];
+  /** The database FILE the store writes, resolved at open — absent for an
+   *  in-memory database. Checked once per persist window: an unlinked file
+   *  still accepts commits through the open fd, so "the write succeeded" is
+   *  not a fact about the disk without it. */
+  dbFile?: string;
 }
 
 /** Persistence manager API — debounced state persistence to KV and/or SQLite. */
@@ -1100,8 +1105,46 @@ export function createPersistenceManager(
   // logged, and this repeats every window. The verdict is never deduped.
   let _heldLogged = "";
 
+  // The database-gone verdict is said once per loss, reported every window.
+  let _goneLogged = false;
+  /** True when the database file was deleted under the running app. One
+   *  `stat` per window. Anything but NotFound (EACCES on the directory, an
+   *  I/O error) is not evidence of deletion — the write itself answers. */
+  async function _dbFileGone(): Promise<boolean> {
+    if (!cfg.dbFile) return false;
+    return await Deno.stat(cfg.dbFile).then(
+      () => false,
+      (e) => e instanceof Deno.errors.NotFound,
+    );
+  }
+
   async function _persistOnce(): Promise<void> {
     _cycleError = null;
+    // BEFORE anything is planned or committed. Delete the database out from
+    // under a running app (a cleared tmp dir, a volume that was not really
+    // persistent, `am remove --data --force`) and SQLite commits happily into
+    // the unlinked inode: every window reported success, `am persist` said
+    // ok, health said healthy, and only the shutdown noticed. Not written:
+    // a "successful" commit would advance the journal watermark and compact
+    // away the lines that are now the only record of those writes.
+    if (await _dbFileGone()) {
+      const msg = `persist: the database file is GONE (${cfg.dbFile}) — it ` +
+        `was deleted while the app was running. Nothing written since reaches ` +
+        `the disk (SQLite would commit into the unlinked file), so this ` +
+        `window is NOT written and state lives in memory only${
+          _journaled ? " (the journal keeps every action since)" : ""
+        }. fix: \`am snapshot save state.json\` saves the live state now; ` +
+        `restart the app (it creates a fresh database), then ` +
+        `\`am snapshot load state.json\`.`;
+      if (!_goneLogged) {
+        _goneLogged = true;
+        log.error(msg);
+      }
+      _reportPersistError(new Error(msg), { report: false });
+      _forceFullTablePass();
+      return;
+    }
+    _goneLogged = false;
     // Before anything is planned: the version stamp rides in the SAME
     // transaction as the snapshot, and building it needs the stored map.
     await _loadStoredVersions();

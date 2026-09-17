@@ -132,7 +132,7 @@ const COMPOSITE_ITEM_ROLES = new Set([
   "menuitemcheckbox",
   "menuitemradio",
 ]);
-/** Owners of those items: they carry the keyboard when focusable. */
+/** Owners of those items: the keyboard lives ON them (WAI-ARIA). */
 const COMPOSITE_OWNER_ROLES = new Set([
   "listbox",
   "grid",
@@ -174,9 +174,11 @@ function _devA11yCheck(tag: string, props: Record<string, unknown>): void {
   // "add onKeyDown here" is advice that cannot be followed (wallet report §10). A
   // composite item (`option`, `row`, `tab`, …) is never itself focused in the
   // `aria-activedescendant` pattern: the arrows and Enter belong to its owner.
-  // The owner (`listbox`, `grid`, …) counts only when FOCUSABLE — a keyboard
-  // handler on it needs a focus to arrive at; an unfocusable listbox with a
-  // click is still the mouse-only case this check exists for. A `dialog` /
+  // The owner (`listbox`, `grid`, …) is where that keyboard LIVES, so it is
+  // exempt only when it visibly carries it: a key handler (checked below) or
+  // `aria-activedescendant`. A focusable listbox with a click and neither is
+  // keyboard-dead — Tab reaches it, the arrows and Enter do nothing — and is
+  // exactly the one owner that CAN follow "add onKeyDown". A `dialog` /
   // `alert` / `status` click is a convenience by construction (Escape, the
   // auto-expiry), and `role="presentation"` would erase the semantics that
   // make them accessible.
@@ -184,7 +186,7 @@ function _devA11yCheck(tag: string, props: Record<string, unknown>): void {
   const keyboardElsewhere = COMPOSITE_ITEM_ROLES.has(role) ||
     DISMISSIBLE_ROLES.has(role) ||
     (COMPOSITE_OWNER_ROLES.has(role) &&
-      (props.tabIndex !== undefined || props.tabindex !== undefined));
+      props["aria-activedescendant"] !== undefined);
   const nativelyActivatable = tag === "button" || tag === "a" ||
     tag === "input" || tag === "select" || tag === "textarea" ||
     tag === "summary" || tag === "label" || tag === "option";

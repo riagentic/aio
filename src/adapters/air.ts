@@ -129,6 +129,7 @@ export function useLocal<T>(
         "useLocal",
         c._component,
         (c.refIndex ?? 1) - 1,
+        c.refs,
       );
     }
   }

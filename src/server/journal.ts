@@ -386,27 +386,64 @@ export function parseJournal(
   /** Internal: a second read of text a first read already reported on. */
   opts: { quiet?: boolean } = {},
 ): JournalEntry[] {
-  let corrupt = 0;
-  const out: JournalEntry[] = [];
+  const { entries, torn } = parseJournalLines(text);
+  if (torn.lines > 0 && !opts.quiet) log.warn("journal", tornSummary(torn));
+  return entries;
+}
+
+/** What a read could not parse: how many LINES, how many ENTRIES they held
+ *  (a fused line holds two or more — see {@linkcode createJournal}'s seal),
+ *  and every seq scraped out of them, so a torn entry's seq is never handed
+ *  to a new one. */
+type TornLines = {
+  lines: number;
+  entries: number;
+  seqs: number[];
+  fused: number;
+};
+
+/** The parse itself, plus what it skipped. `parseJournal` is the reporting
+ *  face; the journal instance reads through here so it can say the tear ONCE
+ *  per boot (open, `readSince` and compaction all parse the same file). */
+function parseJournalLines(
+  text: string,
+): { entries: JournalEntry[]; torn: TornLines } {
+  const torn: TornLines = { lines: 0, entries: 0, seqs: [], fused: 0 };
+  const entries: JournalEntry[] = [];
   for (const line of text.split("\n")) {
     if (!line.trim()) continue;
     try {
       const e = JSON.parse(line) as JournalEntry;
-      if (typeof e.seq === "number" && typeof e.type === "string") out.push(e);
+      if (typeof e.seq === "number" && typeof e.type === "string") {
+        entries.push(e);
+      }
     } catch {
-      corrupt++;
+      torn.lines++;
+      // Every `"seq":N` on the line: one for a plain tear, two or more when
+      // an earlier build appended onto an unterminated line. Each is an
+      // entry that is gone, and each is a seq that must not be re-issued.
+      const seqs = [...line.matchAll(/"seq":(\d+)/g)].map((m) => Number(m[1]));
+      if (seqs.length >= 2) torn.fused++;
+      torn.entries += Math.max(1, seqs.length);
+      torn.seqs.push(...seqs);
     }
   }
-  if (corrupt > 0 && !opts.quiet) {
-    log.warn(
-      "journal",
-      `journal: ${corrupt} torn line${corrupt === 1 ? "" : "s"} skipped (a ` +
-        `crash mid-write) — ${out.length} intact entr${
-          out.length === 1 ? "y" : "ies"
-        } replay; the torn one${corrupt === 1 ? " is" : "s are"} lost`,
-    );
-  }
-  return out;
+  return { entries, torn };
+}
+
+function tornSummary(t: TornLines): string {
+  const n = (k: number, one: string, many: string) =>
+    `${k} ${k === 1 ? one : many}`;
+  const why = t.fused > 0
+    ? `(${
+      n(t.fused, "line holds", "lines hold")
+    } entries fused together — an earlier boot appended to an unterminated ` +
+      `line, which this build seals at open)`
+    : "(a crash mid-write)";
+  const seqs = t.seqs.length > 0 ? ` (seq ${t.seqs.join(", ")})` : "";
+  return `journal: ${n(t.lines, "torn line", "torn lines")} skipped ${why} ` +
+    `— ${n(t.entries, "entry", "entries")} lost${seqs}; the intact ` +
+    `entries replay`;
 }
 
 /** An `undefined` JSON drops that nevertheless comes back as the SAME value
@@ -527,7 +564,14 @@ export function createJournal(
   if (wmText !== null) wm = Math.max(wm, parseInt(wmText, 10) || 0);
   const journalText = readOr(path, "journal");
   if (journalText !== null) {
-    for (const e of parseJournal(journalText)) if (e.seq > seq) seq = e.seq;
+    const { entries, torn } = parseJournalLines(journalText);
+    for (const e of entries) if (e.seq > seq) seq = e.seq;
+    // A torn entry's seq is still ITS seq: re-issuing it to the next append
+    // made the acked entry read as the lost one on the following boot.
+    for (const s of torn.seqs) if (s > seq) seq = s;
+    // Said here, ONCE. `readSince` and the compaction parse the same bytes
+    // and used to say it again each time — three times per boot.
+    if (torn.lines > 0) log.warn("journal", tornSummary(torn));
   }
   if (wm > seq) seq = wm;
 
@@ -616,6 +660,33 @@ export function createJournal(
     }
   }
 
+  // SEAL an unterminated tail before anything is appended after it. A kill
+  // between a line and its "\n" (or mid-line) leaves the file without one;
+  // `append` writes `json + "\n"` after whatever the file ends with, so the
+  // next entry FUSED onto the old line — one unparseable line holding an
+  // entry this boot had just recovered AND the one it was acking, both
+  // skipped as "torn" by the boot after. One "\n" is the whole repair; the
+  // torn line itself stays (skipped and said above) until compaction drops
+  // it. The file format is unchanged.
+  if (
+    journalText !== null && journalText.length > 0 &&
+    !journalText.endsWith("\n")
+  ) {
+    try {
+      writeLine("\n");
+    } catch (e) {
+      // Not swallowed: the first append meets the same refusal and reports
+      // PERSIST_ERROR, but by then it has fused with the tail — say why.
+      log.error(
+        "journal",
+        `journal: could not seal the unterminated last line of ${path} — ${e}` +
+          `. The next append lands on that line and BOTH entries are skipped ` +
+          `on the following boot. fix: make the journal writable (check disk ` +
+          `space and permissions).`,
+      );
+    }
+  }
+
   const api: Journal = {
     append(action, ts) {
       const s = ++seq;
@@ -670,9 +741,9 @@ export function createJournal(
     },
     readSince(after) {
       try {
-        return parseJournal(Deno.readTextFileSync(path)).filter((e) =>
-          e.seq > after
-        );
+        // Quiet: a tear was said at open, once per boot.
+        return parseJournal(Deno.readTextFileSync(path), { quiet: true })
+          .filter((e) => e.seq > after);
       } catch (e) {
         // A journal that cannot be READ is not an empty journal: replaying
         // nothing over a store that has entries is the silent data loss this
@@ -729,7 +800,10 @@ export function createJournal(
           if (e instanceof Deno.errors.NotFound) return;
           throw e;
         }
-        const keep = parseJournal(text).filter((e) => e.seq > s);
+        // Quiet (said at open): the compaction is what DROPS the torn line,
+        // and it used to blame "a crash mid-write" on the way out.
+        const parsed = parseJournal(text, { quiet: true });
+        const keep = parsed.filter((e) => e.seq > s);
         // A tracked (sync) cell's entries go by ITS watermark: the KV snapshot
         // that advanced `s` does not hold them, and dropping them here lost
         // exactly the writes the fold had not reached yet.

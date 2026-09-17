@@ -15,6 +15,8 @@ import {
   agentsMdScaffold,
   BRIEF_SECTIONS,
   BRIEF_TASKS,
+  levelSections,
+  minSections,
   pickSections,
 } from "../src/am/am-agent-text.ts";
 
@@ -28,6 +30,7 @@ async function registeredCommands(): Promise<string[]> {
 
 const PAGE = agentBrief({ version: "test" });
 const ALL = agentBrief({ version: "test", task: "all" });
+const MIN = agentBrief({ version: "test", level: "min" });
 const SCAFFOLD = agentsMdScaffold("demo");
 
 /** Every `am <verb>` spelled in a text, deduped. */
@@ -185,15 +188,21 @@ Deno.test("am agent: the page stands on its own — it starts a new app with am 
 Deno.test("am agent: the brief stays inside its context budget", () => {
   const page = PAGE.split("\n").length;
   const all = ALL.split("\n").length;
+  const min = MIN.split("\n").length;
   // The page is ~10k tokens: the whole of aio, once, instead of a docs crawl.
-  // Past ~520 lines it stops being one page; under ~300 it cannot carry the
-  // API. Raise either bound deliberately, or cut; do not let it drift.
-  assert(page < 520, `the page has grown to ${page} lines — cut, or decide`);
+  // Markdown structure (headings, fences, a table) costs lines, so the page
+  // runs ~620; past ~700 it stops being one page; under ~300 it cannot carry
+  // the API. `--min` is for a small context window: ~250 lines, never past
+  // 320, never so thin it drops the three shapes. Raise a bound deliberately,
+  // or cut; do not let it drift.
+  assert(page < 700, `the page has grown to ${page} lines — cut, or decide`);
   assert(
     page > 300,
     `the page is ${page} lines — too thin to replace the docs`,
   );
-  assert(all < 800, `--task=all has grown to ${all} lines`);
+  assert(all < 950, `--max has grown to ${all} lines`);
+  assert(min < 320, `--min has grown to ${min} lines — it is the SMALL one`);
+  assert(min > 150, `--min is ${min} lines — too thin to build with`);
   const wide = ALL.split("\n").filter((l) => [...l].length > 110);
   assertEquals(
     wide,
@@ -220,6 +229,83 @@ Deno.test("am agent: the rules that protect the user come FIRST", () => {
   ) {
     assert(rules.includes(must), `the rules section never mentions ${must}`);
   }
-  assert(rules.split("\n").length <= 14, "the rules stopped being compressed");
-  assert(PAGE.indexOf(rules) < 400, "the rules are not at the top of the page");
+  assert(rules.split("\n").length <= 20, "the rules stopped being compressed");
+  assert(PAGE.indexOf(rules) < 600, "the rules are not at the top of the page");
+  assert(MIN.indexOf(rules) < 600, "…and of the minimal page");
+});
+
+Deno.test("am agent --min: the compact renditions, in page order, and nothing deep except the loop", () => {
+  const mins = minSections();
+  assert(mins.length >= 8, `too few minimal sections: ${mins.length}`);
+  // The rules and the model are the same text at every size — a small window
+  // still gets the habits that protect the machine, uncompressed.
+  assertEquals(mins[0]?.slug, "rules");
+  assertEquals(mins[0]?.min, mins[0]?.body);
+  assertEquals(mins[1]?.slug, "model");
+  // Every min rendition is printed; no full body of a section that HAS a
+  // compact form leaks in; a deep section is on the minimal page only when it
+  // stands in for a page section (the loop for the verb table).
+  for (const s of mins) assert(MIN.includes(s.min!), `--min lacks ${s.slug}`);
+  assert(BRIEF_SECTIONS.length >= 12, "no sections to check");
+  for (const s of BRIEF_SECTIONS) {
+    if (s.min !== undefined && s.min !== s.body) {
+      assert(!MIN.includes(s.body), `--min printed the FULL ${s.slug}`);
+    }
+    if (s.min === undefined) {
+      assert(!MIN.includes(s.body), `--min leaks ${s.slug}`);
+    }
+  }
+  assert(
+    mins.some((s) => s.slug === "loop"),
+    "the loop stands in for am's verb table",
+  );
+  // The three shapes a small window must hold: a cell, a component, a test.
+  for (
+    const must of [
+      "cell(",
+      "export default function App",
+      "testCell(",
+      "testUI(",
+    ]
+  ) {
+    assert(MIN.includes(must), `--min never shows ${must}`);
+  }
+  // Page order is preserved on the minimal page.
+  const order = mins.map((s) => MIN.indexOf(s.min!));
+  assertEquals(
+    order,
+    [...order].sort((a, b) => a - b),
+    "min sections out of page order",
+  );
+  assertEquals(levelSections("medium").map((x) => x.section), pickSections());
+  assertEquals(levelSections("max").map((x) => x.section), pickSections("all"));
+});
+
+Deno.test("am agent: Markdown that renders — one H2 per section, fenced code, balanced fences", () => {
+  assert(BRIEF_SECTIONS.length >= 12, "no sections to check");
+  for (const s of BRIEF_SECTIONS) {
+    assert(s.body.startsWith("## "), `${s.slug} does not start with an H2`);
+    if (s.min !== undefined) {
+      assert(
+        s.min.startsWith("## "),
+        `${s.slug}.min does not start with an H2`,
+      );
+    }
+    for (const text of [s.body, s.min ?? ""]) {
+      const fences = text.split("\n").filter((l) => l.startsWith("```")).length;
+      assertEquals(fences % 2, 0, `${s.slug}: unbalanced code fence`);
+    }
+  }
+  // Every snippet is a fenced block headed by its path.
+  for (
+    const path of [
+      "src/app.ts",
+      "src/cell.ts",
+      "src/App.tsx",
+      "tests/notes.test.tsx",
+    ]
+  ) {
+    assert(ALL.includes(`// ${path}`), `no fenced snippet for ${path}`);
+  }
+  assert(ALL.startsWith("# aio test — AGENT BRIEF"), "the brief has no H1");
 });

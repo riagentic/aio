@@ -226,3 +226,33 @@ Deno.test("a rule that is neither predicate nor schema is refused clearly", () =
     `it must say what a good rule looks like: ${msg}`,
   );
 });
+
+Deno.test("the position is said both ways: 1-based argument AND the 0-based schema index", () => {
+  // "argument 1 is invalid" (1-based, how a caller counts) beside a schema
+  // declared as `args.setLength[0]` (0-based, how the config is written) sent
+  // a reader to the wrong slot. Both are stated now; the existing phrase is
+  // kept whole — agents grep for it.
+  const e = assertThrows(() =>
+    validateMethodArgs(
+      "timer",
+      "setLength",
+      [(v: unknown) => typeof v === "number" || "must be a number"],
+      ["5"],
+    )
+  );
+  const msg = String(e);
+  assert(msg.includes("argument 1 is invalid"), msg);
+  assert(
+    msg.includes(
+      "[timer:setLength] argument 1 is invalid (args.setLength[0]): must be a number",
+    ),
+    msg,
+  );
+  const e2 = assertThrows(() =>
+    validateMethodArgs("user", "setAge", [null, num({ min: 0 })], ["ok", -3])
+  );
+  assert(
+    String(e2).includes("argument 2 is invalid (args.setAge[1]):"),
+    String(e2),
+  );
+});

@@ -40,6 +40,9 @@ import { runWithUser } from "../server/auth-context.ts";
 import type { AioUser } from "../server/aio-types.ts";
 import type { Catalog, CellDef, Creators, Msg } from "../state/cell-types.ts";
 import { composeCells } from "../state/cell-compose.ts";
+import { frameworkEffectInWrongRuntime } from "../state/cell-compose-execute.ts";
+import { AioError, createAioError } from "../diagnostics/error.ts";
+import { log } from "../diagnostics/logger-api.ts";
 
 // Dev-strict arming lives in its own module so every harness can call it
 // without an import cycle (see test-strict.ts). Re-exported here because this
@@ -496,14 +499,46 @@ export function testCell(
       for (const e of lastEffects) observedEffects.add(e);
       return lastEffects;
     };
-    /** Hand the first un-run framework effect to the executor, whose refusal
-     *  is the ONE place that message lives. No-op when there is none. */
+    /** Which METHOD (action type) emitted each framework effect — so the
+     *  refusal below can say `timer:pause` emitted schedule.cancel(…), not
+     *  "a schedule effect". Per effect object, like `observedEffects`. */
+    const emittedBy = new WeakMap<object, string>();
+    /** Raise the executor's refusal for the first un-run, un-read framework
+     *  effect — the ONE sentence that message has (cell-compose-execute.ts),
+     *  here with the effect and its emitting method named. No-op when there
+     *  is none. */
     const raiseUnrunFrameworkEffect = (): void => {
       const eff = emittedFramework.find((e) =>
         !executed.has(e) && !observedEffects.has(e)
       );
       if (!eff) return;
       executed.add(eff);
+      executeEffect(eff);
+    };
+    /** Hand one effect to the root executor — EXCEPT a framework effect,
+     *  which that executor refuses: thrown here instead with the emitting
+     *  method named, the sentence itself still living in one place. Every
+     *  door that runs effects (settle, runEffects, the end-of-test check)
+     *  goes through this, so no path says "a schedule effect" anonymously. */
+    const executeEffect = (eff: unknown): void => {
+      let kind: "schedule" | "own" | null = null;
+      routeEffect(eff as Msg, {
+        schedule: () => {
+          kind = "schedule";
+        },
+        own: () => {
+          kind = "own";
+        },
+        notify: () => {},
+        app: () => {},
+      });
+      if (kind !== null) {
+        throw frameworkEffectInWrongRuntime(
+          kind,
+          eff as { kind?: unknown; id?: unknown },
+          emittedBy.get(eff as object),
+        );
+      }
       composed.execute(app, eff as { type: string; payload: unknown });
     };
 
@@ -554,23 +589,45 @@ export function testCell(
     // nested one — `addTwice` added nothing here and both items on a server.
     let reducing = 0;
     let sending = 0;
-    const queuedCalls: (() => void)[] = [];
+    const queuedCalls: { run: () => void; method: string }[] = [];
     const drainQueuedCalls = (): void => {
-      while (reducing === 0 && queuedCalls.length > 0) queuedCalls.shift()!();
+      while (reducing === 0 && queuedCalls.length > 0) {
+        queuedCalls.shift()!.run();
+      }
     };
 
     function dispatch(action: Msg): unknown {
       reducing++;
+      const queuedBefore = queuedCalls.length;
       let result: ReturnType<typeof composed.reduce>;
       try {
         result = composed.reduce(state, action);
+      } catch (e) {
+        // A self-call queued by the method that just threw still runs (the
+        // production loop does the same: the caller's write is rolled back,
+        // the queued action is its own commit — docs/state/methods.md). Not
+        // changed here; SAID, once, at debug level, so a test that sees the
+        // nested write land after the caller failed is not left guessing.
+        if (queuedCalls.length > queuedBefore) {
+          log.debug(
+            "test",
+            `self-call ${
+              queuedCalls.slice(queuedBefore).map((q) => q.method).join(", ")
+            } runs although its caller ${action.type} threw — the caller's ` +
+              `own write is rolled back, the queued self-call commits`,
+          );
+        }
+        throw e;
       } finally {
         reducing--;
       }
       state = { ...result.state };
       lastEffects = result.effects;
       for (const e of result.effects) {
-        if (isFrameworkEffect(e)) emittedFramework.push(e);
+        if (isFrameworkEffect(e)) {
+          emittedFramework.push(e);
+          emittedBy.set(e, action.type);
+        }
       }
       // A send drains after it has read its own trigger effects (below);
       // any other dispatch (an async method's batched write) drains here.
@@ -615,7 +672,10 @@ export function testCell(
       const direct = (args: unknown[]): Promise<unknown> => {
         if (reducing > 0) {
           return new Promise((resolve, reject) =>
-            queuedCalls.push(() => void direct(args).then(resolve, reject))
+            queuedCalls.push({
+              run: () => void direct(args).then(resolve, reject),
+              method: `${f.__aio.id}:${key}`,
+            })
           );
         }
         sending++;
@@ -645,10 +705,23 @@ export function testCell(
           // rejection that names no test and cancels every later test in the
           // file — while `testUI`/`bootCells` ledger the same call and fail
           // that one test, by name.
+          //
+          // And the rejection carries the CODE production carries. `dispatch`
+          // rejects a reducer throw with `createAioError("REDUCE_ERROR", …)`
+          // (dispatch.ts), so `errorCode(err) === "REDUCE_ERROR"` is what an
+          // app keys on — and it was green under bootCells/testUI and red
+          // here, for identical app code, because this rejected the raw
+          // Error. Same message text, `.code` added; an AioError (a refusal
+          // that already has its code) passes through unchanged.
           try {
             return Promise.resolve(dispatch(msg));
           } catch (e) {
-            return Promise.reject(e);
+            return Promise.reject(
+              e instanceof AioError ? e : createAioError("REDUCE_ERROR", e, {
+                cellName: f.__aio.id,
+                actionType: msg.type,
+              }),
+            );
           }
         }
         // Async method: tag the dispatch with a callId so completion is
@@ -952,7 +1025,7 @@ export function testCell(
         for (const eff of lastEffects) {
           if (executed.has(eff)) continue;
           executed.add(eff);
-          composed.execute(app, eff as { type: string; payload: unknown });
+          executeEffect(eff);
         }
       },
       settle: async (ms?: number): Promise<void> => {
@@ -966,7 +1039,7 @@ export function testCell(
             runExec(eff as Msg); // pushes into inFlight
           } else {
             executed.add(eff);
-            composed.execute(app, eff as { type: string; payload: unknown });
+            executeEffect(eff);
           }
         }
         // Drain EVERY call started so far, not just this batch: a send that was

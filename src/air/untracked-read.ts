@@ -33,15 +33,33 @@ const _said = new Set<string>();
  *  which left a field report bisecting to find which one (wallet report §8). */
 const _hookSignalNames = new WeakMap<object, string>();
 
-/** @internal Name a hook-created signal after its component and slot. */
+/** Per instance (keyed by its ref-slot array, which lives as long as the
+ *  instance does), how many signals each hook kind has named so far. */
+const _hookOrdinals = new WeakMap<object, Map<string, number>>();
+
+/** @internal Name a hook-created signal after its component and its ORDINAL
+ *  among that component's hooks of the same kind — the 2nd `useLocal` is
+ *  `useLocal #2` whatever `useRef`/`useSignal` calls sit between. The shared
+ *  ref slot (`slot`) numbered it `#4`, which is no count a reader can make.
+ *  `owner` is the instance's ref array; without one the slot is used. A
+ *  signal is named once, on the render that creates it, so the count only
+ *  ever grows in call order. */
 export function _nameHookSignal(
   sig: object,
   hook: string,
   component: string | undefined,
   slot: number,
+  owner?: object,
 ): void {
   if (!isDevMode() || _hookSignalNames.has(sig)) return;
-  _hookSignalNames.set(sig, `<${component ?? "?"}> ${hook} #${slot + 1}`);
+  let n = slot + 1;
+  if (owner) {
+    let counts = _hookOrdinals.get(owner);
+    if (!counts) _hookOrdinals.set(owner, counts = new Map());
+    n = (counts.get(hook) ?? 0) + 1;
+    counts.set(hook, n);
+  }
+  _hookSignalNames.set(sig, `<${component ?? "?"}> ${hook} #${n}`);
 }
 
 /** While `fn` runs, give every NESTED `dispatchEvent` its own untracked frame.
@@ -107,6 +125,34 @@ export function runTrackedLifecycle(
   fn: () => unknown,
   /** An element of the tree being rendered — names the DOM realm whose
    *  `dispatchEvent` a nested listener arrives through. */
+  el?: unknown,
+): unknown {
+  _lifecycleDepth++;
+  try {
+    return runTracked(hook, component, renderDeps, fn, el);
+  } finally {
+    _lifecycleDepth--;
+  }
+}
+
+/** How many lifecycle callbacks (`onMount`/`afterRender`) are on the stack.
+ *  Read by the dev render-burst tripwire: a write made by an event handler is
+ *  INPUT and exempt — unless the handler was fired from INSIDE one of these,
+ *  where `afterRender(() => btn.click())` is the render writing what it read,
+ *  one step removed. The exemption belongs to a handler that is the
+ *  OUTERMOST frame, never to one a render started. */
+let _lifecycleDepth = 0;
+
+/** @internal Is an `onMount`/`afterRender` callback on the stack? */
+export function _inLifecycleCallback(): boolean {
+  return _lifecycleDepth > 0;
+}
+
+function runTracked(
+  hook: "afterRender" | "onMount",
+  component: string | undefined,
+  renderDeps: Set<unknown> | null | undefined,
+  fn: () => unknown,
   el?: unknown,
 ): unknown {
   if (!isDevMode()) return fn();

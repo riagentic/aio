@@ -106,6 +106,13 @@ scripts/xephyr.sh            # starts Xephyr on :77, ONCE; leave it running
 DISPLAY=:77 am start --cdp   # everything the app opens lives inside it
 ```
 
+The display is yours alone: it starts with an access cookie (never `-ac`), kept
+in `$XDG_RUNTIME_DIR/aio/xephyr-77.auth`, and `am start` hands the cookie to the
+app. When `:77` belongs to another account on the box, aio skips to the next
+free number (`:78`…) rather than put your window on their screen. To look in
+from a shell, name the cookie:
+`DISPLAY=:77 XAUTHORITY=$XDG_RUNTIME_DIR/aio/xephyr-77.auth xdpyinfo`.
+
 `testDisplayEnv()` (`src/testing/test-display.ts`) is how the tests do the same.
 A capture of what a launch _generated_ — the main script Electron was handed —
 is cheaper than a window: `ELECTRON_PATH=<a script that copies $1>` replaces the

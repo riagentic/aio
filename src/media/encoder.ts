@@ -93,6 +93,15 @@ export function codecCandidates(
   height: number,
 ): string[] {
   if (format === "webm") return ["vp8"];
+  if (width < 16 || height < 16) {
+    // Chromium's H.264 encoder refuses a frame this small — the SIZE is the
+    // cause, and "cannot be encoded here" sent people looking at their
+    // machine.
+    throw new Error(
+      `[aio:video] ${width}×${height} is too small for H.264 (.mp4 needs at ` +
+        `least 16×16) — record a larger viewport, or write .webm`,
+    );
+  }
   const mbs = Math.ceil(width / 16) * Math.ceil(height / 16);
   const level =
     ([[3600, "1f"], [8192, "28"], [22080, "32"], [36864, "33"]] as const)
@@ -106,9 +115,36 @@ export function codecCandidates(
   return [`avc1.6400${level}`, `avc1.4d00${level}`, `avc1.4200${level}`];
 }
 
+/** Pure: where a `sw`×`sh` picture is drawn in a `dw`×`dh` video frame.
+ *
+ *  The video is the picture's size rounded down to even (both codecs
+ *  subsample colour by two), so an odd-sized window is ONE pixel larger than
+ *  its video: that pixel is cropped — drawn 1:1 at the origin — rather than
+ *  the whole frame being resampled by 0.999, which blurred every frame. A
+ *  real size change (a window resized mid-recording) is fitted, never
+ *  stretched, and centred.
+ *
+ *  Runs in the page too (its source is inlined into the encoder script), so
+ *  it must stay self-contained. */
+export function fitFrame(
+  sw: number,
+  sh: number,
+  dw: number,
+  dh: number,
+): { x: number; y: number; w: number; h: number } {
+  const over = (s: number, d: number) => s - d === 0 || s - d === 1;
+  if (over(sw, dw) && over(sh, dh)) return { x: 0, y: 0, w: sw, h: sh };
+  const k = Math.min(dw / sw, dh / sh);
+  const w = Math.round(sw * k);
+  const h = Math.round(sh * k);
+  return { x: (dw - w) >> 1, y: (dh - h) >> 1, w, h };
+}
+
 /** The script installed into the isolated world. Plain JS on purpose — it is
- *  evaluated in the page, not transpiled. */
+ *  evaluated in the page, not transpiled (`fitFrame` is inlined as the JS
+ *  Deno already compiled it to). */
 const PAGE_ENCODER = `(() => {
+  const fitFrame = ${fitFrame.toString()};
   const b64 = (u8) => {
     let s = "";
     for (let i = 0; i < u8.length; i += 0x8000) {
@@ -159,15 +195,13 @@ const PAGE_ENCODER = `(() => {
         if (f.image) {
           const bin = Uint8Array.from(atob(f.image), (c) => c.charCodeAt(0));
           const bmp = await createImageBitmap(new Blob([bin], { type: f.mime }));
-          // Fit, never stretch: a window resized mid-recording keeps its
-          // proportions, letterboxed in the size the video started at.
-          const k = Math.min(S.width / bmp.width, S.height / bmp.height);
-          const dw = Math.round(bmp.width * k), dh = Math.round(bmp.height * k);
-          if (dw !== S.width || dh !== S.height) {
+          // Fit, never stretch — and crop the odd pixel (see fitFrame).
+          const r = fitFrame(bmp.width, bmp.height, S.width, S.height);
+          if (r.w < S.width || r.h < S.height) {
             S.ctx.fillStyle = "#000";
             S.ctx.fillRect(0, 0, S.width, S.height);
           }
-          S.ctx.drawImage(bmp, (S.width - dw) >> 1, (S.height - dh) >> 1, dw, dh);
+          S.ctx.drawImage(bmp, r.x, r.y, r.w, r.h);
           bmp.close();
         }
         const vf = new VideoFrame(S.canvas, { timestamp: f.us });

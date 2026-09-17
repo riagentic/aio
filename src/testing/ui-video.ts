@@ -24,12 +24,14 @@
 import { basename, dirname, join, resolve } from "@std/path";
 import { chromiumBin, chromiumPage, launchChromium } from "./chromium.ts";
 import {
+  codecCandidates,
   evaluateIn,
   isolatedWorld,
   openPageEncoder,
   planFrames,
   videoFormatOf,
 } from "../media/encoder.ts";
+import { aioTestRoot } from "./test-strict.ts";
 import type { VideoFormat } from "../media/chunks.ts";
 import { codeMask } from "../diagnostics/code-mask.ts";
 import { generateHTML } from "../server/server-html-gen.ts";
@@ -37,7 +39,7 @@ import { APP_STYLE, appHasStylesheet } from "../server/app-files.ts";
 import { readDenoJsonSync } from "../server/deno-json.ts";
 import { resolveEntryPath } from "../server/paths.ts";
 import { appIdFromConfig, slugify } from "../server/single-instance-lock.ts";
-import { declareHarnessFlags } from "../server/aio-cli.ts";
+import { VIDEO_FLAGS } from "./harness-flags.ts";
 
 // deno-lint-ignore no-explicit-any
 type AnyNode = any;
@@ -50,18 +52,23 @@ export type UiVideoConfig = {
   format: VideoFormat;
   /** How long each step stays on screen, ms. */
   paceMs: number;
+  /** The `prefers-color-scheme` the page is drawn in — pinned, so a video
+   *  does not depend on the recording machine's desktop. Default light. */
+  scheme?: "light" | "dark";
 };
 
 const DEFAULT_PACE_MS = 800;
-const FLAGS = ["--video", "--video-pace"];
-// The test process's arguments are also parsed by every boot inside it; these
-// are the harness's, not the app's. `--video <path>` (space form) passes too:
-// a bare word is not a flag to the app parser.
-declareHarnessFlags(FLAGS.flatMap((f) => [f, `${f}=`]));
+// Declared to the CLI parser by harness-flags.ts (imported above, and by
+// every other harness entry): the test process's arguments are also parsed by
+// every boot inside it. `--video <path>` (space form) passes too: a bare word
+// is not a flag to the app parser.
+const FLAGS = VIDEO_FLAGS;
 
-/** Pure: read `--video[=| ]<path>` / `--video-pace[=| ]<ms>` from the test's
- *  arguments (what follows `--` on `deno test`) and `AIO_VIDEO` /
- *  `AIO_VIDEO_PACE` from the environment. `null` when no video was asked for.
+/** Pure: read `--video[=| ]<path>` / `--video-pace[=| ]<ms>` /
+ *  `--video-scheme[=| ]light|dark` from the test's arguments (what follows
+ *  `--` on `deno test`) and `AIO_VIDEO` / `AIO_VIDEO_PACE` /
+ *  `AIO_VIDEO_SCHEME` from the environment. `null` when no video was asked
+ *  for.
  *
  *  Every mistake throws, because each one would otherwise be a test run that
  *  quietly produced no video: an unknown `--video-*` flag, a flag with no
@@ -80,7 +87,8 @@ export function uiVideoConfig(
     if (!FLAGS.includes(flag)) {
       throw new Error(
         `[aio:video] unknown flag ${flag} — the video flags are ` +
-          `--video=<dir/ or file.mp4|.webm> and --video-pace=<ms>`,
+          `--video=<dir/ or file.mp4|.webm>, --video-pace=<ms> and ` +
+          `--video-scheme=light|dark`,
       );
     }
     let value = eq === -1 ? args[i + 1] : a.slice(eq + 1);
@@ -91,7 +99,11 @@ export function uiVideoConfig(
     if (!value) {
       throw new Error(
         `[aio:video] ${flag} needs a value (${flag}=${
-          flag === "--video" ? "videos/" : "800"
+          flag === "--video"
+            ? "videos/"
+            : flag === "--video-pace"
+            ? "800"
+            : "light"
         })`,
       );
     }
@@ -109,14 +121,25 @@ export function uiVideoConfig(
   };
   const path = pick("--video", "AIO_VIDEO");
   const pace = pick("--video-pace", "AIO_VIDEO_PACE");
+  const scheme = pick("--video-scheme", "AIO_VIDEO_SCHEME");
   if (path === undefined) {
-    if (pace !== undefined) {
+    const stray = pace !== undefined
+      ? "--video-pace"
+      : scheme !== undefined
+      ? "--video-scheme"
+      : null;
+    if (stray) {
       throw new Error(
-        "[aio:video] --video-pace without --video records nothing — add " +
+        `[aio:video] ${stray} without --video records nothing — add ` +
           "--video=videos/",
       );
     }
     return null;
+  }
+  if (scheme !== undefined && scheme !== "light" && scheme !== "dark") {
+    throw new Error(
+      `[aio:video] --video-scheme=${scheme}: light or dark`,
+    );
   }
   const paceMs = pace === undefined ? DEFAULT_PACE_MS : Number(pace);
   if (!Number.isInteger(paceMs) || paceMs < 50 || paceMs > 60_000) {
@@ -125,9 +148,43 @@ export function uiVideoConfig(
     );
   }
   const hasExt = /\.[a-z0-9]+$/i.test(basename(path)) && !path.endsWith("/");
+  const pinned = scheme ?? "light";
   return hasExt
-    ? { path, kind: "file", format: videoFormatOf(path), paceMs }
-    : { path, kind: "dir", format: "mp4", paceMs };
+    ? {
+      path,
+      kind: "file",
+      format: videoFormatOf(path),
+      paceMs,
+      scheme: pinned,
+    }
+    : { path, kind: "dir", format: "mp4", paceMs, scheme: pinned };
+}
+
+/** Longest file-name stem a test's name becomes. A file name has a limit
+ *  (255 bytes on most filesystems) and a 260-character test name hit it —
+ *  "File name too long", after the whole test had been drawn. */
+const SLUG_MAX = 80;
+
+/** Pure: 32-bit FNV-1a of `s`, base 36. */
+function shortHash(s: string, seed = 0x811c9dc5): string {
+  let h = seed;
+  for (let i = 0; i < s.length; i++) {
+    h ^= s.charCodeAt(i);
+    h = Math.imul(h, 0x01000193) >>> 0;
+  }
+  return h.toString(36);
+}
+
+/** Pure: the file-name stem for a test called `label` — its slug, capped at
+ *  {@linkcode SLUG_MAX} characters, with a short hash of the whole name when
+ *  cut, so two long names that share a prefix stay two files. */
+export function videoSlug(label: string): string {
+  const slug = slugify(label, "testui");
+  if (slug.length <= SLUG_MAX) return slug;
+  const hash = shortHash(label);
+  return `${
+    slug.slice(0, SLUG_MAX - hash.length - 1).replace(/-+$/, "")
+  }-${hash}`;
 }
 
 // ── the page, frozen ─────────────────────────────────────────────────────
@@ -426,13 +483,141 @@ function shellHead(o: {
 
 // ── the recorder ─────────────────────────────────────────────────────────
 
-/** Files claimed by this process — a second test writing the same file is
- *  refused instead of silently overwriting the first one's video. */
-const claimed = new Map<string, string>();
+// ── claims: one video file, one test, per run ───────────────────────────
+//
+// A second test writing the same file is refused (one-file mode) or numbered
+// (directory mode) instead of silently overwriting the first one's video.
+// "Per run" is per PROCESS: `deno test` gives every test FILE its own module
+// graph (and its own `globalThis`) in one process, and fires `unload` as each
+// file ends — so an in-module Map saw only its own file, and two files'
+// same-named tests wrote one video. A claim is therefore a file, under the
+// test root, named after the process that made it (pid + its kernel start
+// time, so a recycled pid is not the same run). A re-run is a different
+// process: it never sees an old claim and overwrites the old video, as it
+// should. Claims of processes that are gone are pruned.
+
+const CLAIM_PREFIX = "aio-video-claim-";
+
+/** When process `pid` started, from the kernel, or "" where that is not
+ *  readable (then the pid alone identifies the run). */
+function processStart(pid: number | "self"): string {
+  if (Deno.build.os !== "linux") return "";
+  try {
+    const stat = Deno.readTextFileSync(`/proc/${pid}/stat`);
+    // Field 22; the command name (field 2) may hold spaces, so count from
+    // after its closing parenthesis.
+    return stat.slice(stat.lastIndexOf(")") + 2).split(" ")[19] ?? "";
+  } catch {
+    return "gone";
+  }
+}
+
+const RUN = `${Deno.pid}-${processStart("self") || "0"}`;
+let pruned = false;
+
+/** Remove claims left by runs that have ended. Best effort: a claim that
+ *  cannot be removed only costs a file, never a wrong answer — its name
+ *  names a process that is not this one. */
+function pruneClaims(dir: string): void {
+  if (pruned) return;
+  pruned = true;
+  let entries: Deno.DirEntry[];
+  try {
+    entries = [...Deno.readDirSync(dir)];
+  } catch {
+    return; // aio-ok: no claim directory yet is nothing to prune
+  }
+  const dayAgo = Date.now() - 24 * 3600_000;
+  for (const e of entries) {
+    if (!e.isFile || !e.name.startsWith(CLAIM_PREFIX)) continue;
+    const [pid, start] = e.name.slice(CLAIM_PREFIX.length).split("-");
+    if (`${pid}-${start}` === RUN) continue;
+    const path = join(dir, e.name);
+    let gone: boolean;
+    if (Deno.build.os === "linux") {
+      gone = (processStart(Number(pid)) || "0") !== start;
+    } else {
+      try {
+        gone = (Deno.statSync(path).mtime?.getTime() ?? 0) < dayAgo;
+      } catch {
+        continue; // aio-ok: removed by another pruner meanwhile
+      }
+    }
+    if (!gone) continue;
+    try {
+      Deno.removeSync(path);
+    } catch {
+      // aio-ok: another run pruned it first, or it is not ours to remove —
+      // either way the claim names a process that is not this one.
+    }
+  }
+}
+
+/** A held claim on a video file for this run. */
+type Claim = { out: string; release(): void };
+
+/** Claim `out` for `label` in this run, or say who holds it (`label` of the
+ *  holder). */
+function claim(out: string, label: string): Claim | { heldBy: string } {
+  const dir = aioTestRoot();
+  pruneClaims(dir);
+  const path = join(
+    dir,
+    `${CLAIM_PREFIX}${RUN}-${shortHash(out)}${shortHash(out, 0x1234567)}`,
+  );
+  try {
+    Deno.writeTextFileSync(path, JSON.stringify({ out, label }), {
+      createNew: true,
+    });
+  } catch (e) {
+    if (!(e instanceof Deno.errors.AlreadyExists)) {
+      throw new Error(
+        `[aio:video] cannot record which test writes ${out}: ${e}`,
+      );
+    }
+    let held: { out?: string; label?: string } = {};
+    try {
+      held = JSON.parse(Deno.readTextFileSync(path));
+    } catch {
+      // aio-ok: a claim being written right now reads as empty — it is
+      // still held, which is the answer.
+    }
+    return { heldBy: held.label ?? "another test" };
+  }
+  let released = false;
+  return {
+    out,
+    release() {
+      if (released) return;
+      released = true;
+      try {
+        Deno.removeSync(path);
+      } catch (e) {
+        if (!(e instanceof Deno.errors.NotFound)) {
+          console.error(
+            `[aio:video] could not release the claim on ${out}: ${e}`,
+          );
+        }
+      }
+    },
+  };
+}
+
 let lookPrinted = false;
 
-/** The test file that called `testUI`, from the stack. */
-function callerTestFile(): string | null {
+/** Errors that are a video failing to be made — told apart from the test's
+ *  own, so a failed test can report both. @internal */
+const videoFailures = new WeakSet<object>();
+
+/** @internal Was `e` thrown by a recorder's `finish()`? */
+export function isVideoFailure(e: unknown): boolean {
+  return typeof e === "object" && e !== null && videoFailures.has(e);
+}
+
+/** The test file that called `testUI`, from the stack. Call it where the
+ *  test file IS on the stack — at `testUI()` itself: the wrapper form's body
+ *  runs from the test runner, with no frame of the file. @internal */
+export function callerTestFile(): string | null {
   const stack = new Error().stack ?? "";
   for (const m of stack.matchAll(/(file:\/\/[^\s)]+?):\d+:\d+/g)) {
     const url = m[1]!;
@@ -459,6 +644,10 @@ export type UiVideoRecorder = {
   observe(): void;
   /** Draw, encode and write the video. */
   finish(): Promise<void>;
+  /** Record nothing after all (a synchronous `unmount()`): give the file's
+   *  name back, so the next test is not numbered past a video that does not
+   *  exist. */
+  cancel(): void;
 };
 
 /** Start recording a mount, or `null` when no video was asked for. Throws
@@ -471,37 +660,58 @@ export function openUiVideo(o: {
   viewport: { width: number; height: number };
   args?: readonly string[];
   env?: (name: string) => string | undefined;
+  /** The test file, captured where it is on the stack (see
+   *  {@linkcode callerTestFile}); walked from here when absent. */
+  testFile?: string | null;
 }): UiVideoRecorder | null {
   const cfg = uiVideoConfig(
     o.args ?? Deno.args,
     o.env ?? ((n) => Deno.env.get(n)),
   );
   if (!cfg) return null;
-  const bin = chromiumBin("testUI --video");
-  const testFile = callerTestFile();
+  // Everything that can be known before the test runs is checked HERE, so a
+  // wrong setting fails the mount — not the dispose, after the whole test.
+  const bin = chromiumBin("[aio:video] testUI --video:");
+  const w = o.viewport.width & ~1;
+  const h = o.viewport.height & ~1;
+  codecCandidates(cfg.format, Math.max(2, w), Math.max(2, h));
+  const scheme = cfg.scheme ?? "light";
+  const testFile = o.testFile !== undefined ? o.testFile : callerTestFile();
   const label = o.name ??
     `${
       basename(testFile ?? "testui").replace(/\.(test|spec)?\.?[jt]sx?$/, "")
     }`;
-  let out: string;
+  let held: Claim;
   if (cfg.kind === "file") {
-    out = resolve(cfg.path);
-    const prior = claimed.get(out);
-    if (prior !== undefined) {
+    const c = claim(resolve(cfg.path), label);
+    if ("heldBy" in c) {
       throw new Error(
-        `[aio:video] ${cfg.path} names ONE file, and "${prior}" is already ` +
-          `recording into it — "${label}" would overwrite it. Pass a ` +
-          `directory (--video=videos/) or run one test (--filter).`,
+        `[aio:video] ${cfg.path} names ONE file, and "${c.heldBy}" is ` +
+          `already recording into it — "${label}" would overwrite it. Pass ` +
+          `a directory (--video=videos/) or run one test (--filter).`,
       );
     }
+    held = c;
   } else {
-    const base = slugify(label, "testui");
-    out = resolve(cfg.path, `${base}.${cfg.format}`);
-    for (let n = 2; claimed.has(out); n++) {
-      out = resolve(cfg.path, `${base}-${n}.${cfg.format}`);
+    const base = videoSlug(label);
+    for (let n = 1;; n++) {
+      const c = claim(
+        resolve(cfg.path, `${base}${n === 1 ? "" : `-${n}`}.${cfg.format}`),
+        label,
+      );
+      if (!("heldBy" in c)) {
+        held = c;
+        break;
+      }
     }
   }
-  claimed.set(out, label);
+  const out = held.out;
+  try {
+    probeWritable(dirname(out));
+  } catch (e) {
+    held.release();
+    throw e;
+  }
 
   const frames: Frame[] = [];
   let failure: unknown = null;
@@ -538,21 +748,31 @@ export function openUiVideo(o: {
       const s = take();
       if (s && !sameAsLast(s)) frames.push({ snap: s, ms: pace });
     },
+    cancel() {
+      held.release();
+    },
     async finish() {
-      if (failure) throw failure;
       const t0 = performance.now();
       const look = appLook(testFile);
-      const seconds = await renderVideo(
-        frames,
-        out,
-        cfg.format,
-        o.viewport,
-        look,
-        bin,
-      );
+      let seconds: number;
+      try {
+        if (failure) throw failure;
+        seconds = await renderVideo(
+          frames,
+          out,
+          cfg.format,
+          o.viewport,
+          look,
+          bin,
+          scheme,
+        );
+      } catch (e) {
+        if (typeof e === "object" && e !== null) videoFailures.add(e);
+        throw e;
+      }
       if (!lookPrinted) {
         lookPrinted = true;
-        console.log(`[aio:video] ${look.summary}`);
+        console.log(`[aio:video] ${look.summary}, scheme ${scheme}`);
       }
       console.log(
         `[aio:video] ${label} → ${out} (${frames.length} frames, ` +
@@ -562,6 +782,23 @@ export function openUiVideo(o: {
       );
     },
   };
+}
+
+/** Make `dir` and prove a file can be created in it — before the test runs,
+ *  so a bad `--video=` path fails the mount by name instead of failing the
+ *  dispose with a raw OS error after the whole test was drawn. */
+function probeWritable(dir: string): void {
+  try {
+    Deno.mkdirSync(dir, { recursive: true });
+    const probe = Deno.makeTempFileSync({ dir, prefix: ".aio-video-probe-" });
+    Deno.removeSync(probe);
+  } catch (e) {
+    throw new Error(
+      `[aio:video] cannot write a video into ${dir}: ${
+        e instanceof Error ? e.message : e
+      }`,
+    );
+  }
 }
 
 /** Plain JS run in the drawing page: put a snapshot on screen and wait until
@@ -653,6 +890,7 @@ async function renderVideo(
   viewport: { width: number; height: number },
   look: AppLook,
   bin: string,
+  scheme: "light" | "dark",
 ): Promise<number> {
   if (frames.length === 0) {
     throw new Error(
@@ -713,6 +951,12 @@ async function renderVideo(
         mobile: false,
       });
       await cdp.call("Emulation.setFocusEmulationEnabled", { enabled: true });
+      // Pinned: headless Chromium otherwise follows the RECORDING machine's
+      // desktop, so one test drew dark on a dark-themed dev box and light in
+      // CI.
+      await cdp.call("Emulation.setEmulatedMedia", {
+        features: [{ name: "prefers-color-scheme", value: scheme }],
+      });
       let off = () => {};
       const loaded = new Promise<void>((r) => {
         off = cdp.on("Page.loadEventFired", () => r());

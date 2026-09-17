@@ -3,7 +3,8 @@
  * Faithful UI-event trigger — the single implementation both `testUI`
  * (in-process) and the live-client `__ui` protocol (`am ui`) use to simulate
  * a user. Dispatches real DOM event sequences (pointer → mouse → click,
- * per-character typing with input events, Enter-submits-the-form) so handlers,
+ * per-character typing with input events, HTML implicit submission, focus
+ * moving on click) so handlers,
  * delegation, `useLocal`, and controlled inputs behave exactly as with a
  * human — never calls handlers directly.
  */
@@ -55,6 +56,56 @@ function mouseEv(
     ...extra,
   };
   return w.MouseEvent ? new w.MouseEvent(name, init) : ev(el, name, init);
+}
+
+/** A pointer event where the DOM has the class (Chromium, happy-dom), a mouse
+ *  event otherwise. A browser sends `pointer*` before every `mouse*` — a
+ *  tooltip on `onPointerEnter` never showed under the harness (measured). */
+function ptrEv(
+  el: AnyEl,
+  name: string,
+  mods?: KeyModifiers,
+  extra?: Record<string, unknown>,
+) {
+  const w = view(el);
+  if (!w.PointerEvent) return mouseEv(el, name, mods, extra);
+  return new w.PointerEvent(name, {
+    bubbles: true,
+    cancelable: true,
+    button: 0,
+    pointerId: 1,
+    pointerType: "mouse",
+    isPrimary: true,
+    ...mods,
+    ...extra,
+  });
+}
+
+/** `beforeinput` / `input` as the browser builds them: an `InputEvent` with
+ *  `inputType` and `data`. A bare `Event` left `e.inputType` / `e.data`
+ *  undefined, so a handler reading them failed only under the harness.
+ *  `input` is not cancelable in a browser; `beforeinput` is. */
+function inputEv(
+  el: AnyEl,
+  name: "beforeinput" | "input",
+  inputType: string,
+  data: string | null,
+) {
+  const w = view(el);
+  const init = {
+    bubbles: true,
+    cancelable: name === "beforeinput",
+    composed: true,
+    inputType,
+    data,
+  };
+  const e = w.InputEvent ? new w.InputEvent(name, init) : ev(el, name, init);
+  // happy-dom turns a null `data` into "" — a browser keeps null for a line
+  // break or a deletion, and `e.data ?? …` must read the same in both.
+  if (data === null && e.data !== null) {
+    Object.defineProperty(e, "data", { value: null, configurable: true });
+  }
+  return e;
 }
 
 /** Why `el` is invisible to a user, or null when it is on screen.
@@ -181,10 +232,131 @@ export interface KeyModifiers {
   shiftKey?: boolean;
 }
 
-function keyEv(el: AnyEl, name: string, key: string, mods?: KeyModifiers) {
+// US-layout `code` / legacy `keyCode` for a `key` — what Chromium reports.
+// Without them `e.code === "Enter"` and `e.keyCode === 13` were dead under the
+// harness while working in every browser (measured).
+const _ROW = "`1234567890-=[]\\;',./";
+const _SHIFT_ROW = '~!@#$%^&*()_+{}|:"<>?';
+const _ROW_CODES = ("Backquote 1 2 3 4 5 6 7 8 9 0 Minus Equal BracketLeft " +
+  "BracketRight Backslash Semicolon Quote Comma Period Slash").split(" ");
+const _ROW_KC = [192, 49, 50, 51, 52, 53, 54, 55, 56, 57, 48, 189, 187, 219];
+_ROW_KC.push(221, 220, 186, 222, 188, 190, 191);
+const _NAMED_KEYS: Record<string, [string, number]> = {
+  Enter: ["Enter", 13],
+  Escape: ["Escape", 27],
+  Tab: ["Tab", 9],
+  Backspace: ["Backspace", 8],
+  Delete: ["Delete", 46],
+  " ": ["Space", 32],
+  ArrowLeft: ["ArrowLeft", 37],
+  ArrowUp: ["ArrowUp", 38],
+  ArrowRight: ["ArrowRight", 39],
+  ArrowDown: ["ArrowDown", 40],
+  Home: ["Home", 36],
+  End: ["End", 35],
+  PageUp: ["PageUp", 33],
+  PageDown: ["PageDown", 34],
+  Shift: ["ShiftLeft", 16],
+  Control: ["ControlLeft", 17],
+  Alt: ["AltLeft", 18],
+  Meta: ["MetaLeft", 91],
+};
+
+/** `{ code, keyCode }` for a `key` value (unknown keys: `""` / 0). */
+function keyCodes(key: string): { code: string; keyCode: number } {
+  const named = _NAMED_KEYS[key];
+  if (named) return { code: named[0], keyCode: named[1] };
+  if (/^F([1-9]|1[0-2])$/.test(key)) {
+    return { code: key, keyCode: 111 + Number(key.slice(1)) };
+  }
+  if (/^[a-z]$/i.test(key)) {
+    const u = key.toUpperCase();
+    return { code: "Key" + u, keyCode: u.charCodeAt(0) };
+  }
+  let i = key.length === 1 ? _ROW.indexOf(key) : -1;
+  if (i < 0 && key.length === 1) i = _SHIFT_ROW.indexOf(key);
+  const c = _ROW_CODES[i];
+  return c
+    ? { code: /\d/.test(c) ? "Digit" + c : c, keyCode: _ROW_KC[i]! }
+    : { code: "", keyCode: 0 };
+}
+
+/** A keyboard event with `code` / `keyCode` / `which` (and, for `keypress`,
+ *  `charCode`) filled in. The legacy numbers are pinned on the instance when
+ *  the DOM's constructor ignores them (happy-dom drops `which`/`charCode`). */
+function keyEv(
+  el: AnyEl,
+  name: string,
+  key: string,
+  mods?: KeyModifiers,
+  charCode = 0,
+) {
   const w = view(el);
-  const init = { bubbles: true, cancelable: true, key, ...mods };
-  return w.KeyboardEvent ? new w.KeyboardEvent(name, init) : ev(el, name, init);
+  const { code, keyCode } = keyCodes(key);
+  const kc = name === "keypress" ? charCode : keyCode;
+  const legacy: Record<string, number> = {
+    keyCode: kc,
+    which: kc,
+    charCode: name === "keypress" ? charCode : 0,
+  };
+  const init = {
+    bubbles: true,
+    cancelable: true,
+    key,
+    code,
+    ...legacy,
+    ...mods,
+  };
+  const e = w.KeyboardEvent
+    ? new w.KeyboardEvent(name, init)
+    : ev(el, name, init);
+  for (const k in legacy) {
+    if (e[k] !== legacy[k]) {
+      try {
+        Object.defineProperty(e, k, { value: legacy[k], configurable: true });
+      } catch {
+        // aio-ok: a DOM whose event pins these fields keeps its own values —
+        // the init above already asked for the same numbers.
+      }
+    }
+  }
+  return e;
+}
+
+/** The char code a `keypress` carries, or 0 when the key sends none (a browser
+ *  fires `keypress` only for keys that produce a character — and for Enter). */
+function pressCode(key: string, mods?: KeyModifiers): number {
+  if (mods?.ctrlKey || mods?.metaKey || mods?.altKey) return 0;
+  if (key === "Enter") return 13;
+  return key.length === 1 ? key.charCodeAt(0) : 0;
+}
+
+/** Controls a mouse press can focus — a click on anything else blurs. */
+const _FOCUSABLE = "a[href],area[href],button,input,select,textarea," +
+  'summary,iframe,[tabindex],[contenteditable]:not([contenteditable="false"])';
+
+/** The focused element, looking through open shadow roots. */
+function activeOf(doc: AnyEl): AnyEl {
+  let a = doc?.activeElement ?? null;
+  while (a?.shadowRoot?.activeElement) a = a.shadowRoot.activeElement;
+  return a;
+}
+
+/** What a browser does between `mousedown` and `mouseup`: focus moves to the
+ *  pressed control (or away, onto nothing), and the field being edited commits
+ *  its `change` first. The harness used to leave focus where it was, so a
+ *  click on "Save" after typing ran no `onChange`/`onBlur` and left
+ *  `activeElement` on the input (measured against Chromium). */
+function moveFocus(el: AnyEl): void {
+  const doc = el.ownerDocument;
+  if (!doc || typeof el.closest !== "function") return;
+  const prev = activeOf(doc);
+  const target = el.closest(_FOCUSABLE);
+  if (target === prev) return;
+  const leaving = prev && prev !== doc.body && prev !== doc.documentElement;
+  if (leaving) fireChangeIfEdited(prev);
+  if (target) target.focus?.();
+  else if (leaving) prev.blur?.();
 }
 
 /** Full user-faithful click sequence, optionally with held modifiers
@@ -208,15 +380,27 @@ function keyEv(el: AnyEl, name: string, key: string, mods?: KeyModifiers) {
  *  left both the DOM and the app state exactly as they were — while a radio
  *  moved in the DOM and fired no input/change at all, because activation saw
  *  nothing left to change. Both measured. */
-export function triggerClick(el: AnyEl, mods?: KeyModifiers): void {
+export function triggerClick(
+  el: AnyEl,
+  mods?: KeyModifiers,
+  detail = 1,
+): void {
   assertOperable(el, "click");
-  el.dispatchEvent(mouseEv(el, "pointerdown", mods));
-  el.dispatchEvent(mouseEv(el, "mousedown", mods));
-  el.dispatchEvent(mouseEv(el, "pointerup", mods));
-  el.dispatchEvent(mouseEv(el, "mouseup", mods));
+  trackModals(view(el));
+  const d = { detail };
+  el.dispatchEvent(ptrEv(el, "pointerdown", mods, d));
+  const down = mouseEv(el, "mousedown", mods, d);
+  el.dispatchEvent(down);
+  // A browser moves focus as the DEFAULT action of mousedown — a handler that
+  // prevents it (a toolbar button keeping the editor focused) keeps it put.
+  if (!down.defaultPrevented) moveFocus(el);
+  el.dispatchEvent(ptrEv(el, "pointerup", mods, d));
+  el.dispatchEvent(mouseEv(el, "mouseup", mods, d));
   const held = mods &&
     (mods.ctrlKey || mods.metaKey || mods.altKey || mods.shiftKey);
-  if (!held && typeof el.click === "function") {
+  // `el.click()` carries no `detail`: the second click of a double-click is
+  // dispatched, like a modified one.
+  if (!held && detail === 1 && typeof el.click === "function") {
     el.click();
     return;
   }
@@ -234,7 +418,7 @@ export function triggerClick(el: AnyEl, mods?: KeyModifiers): void {
     el.addEventListener?.("input", note);
     el.addEventListener?.("change", note);
   }
-  const click = mouseEv(el, "click", mods);
+  const click = mouseEv(el, "click", mods, d);
   try {
     el.dispatchEvent(click);
   } finally {
@@ -273,15 +457,100 @@ function fireChangeIfEdited(el: AnyEl): void {
   }
 }
 
-/** Type one character like a user: keydown → value += ch → input → keyup.
- *  Callers loop characters (re-resolving controlled inputs between them).
+/** What the harness itself last wrote into a control, and what the control
+ *  showed right after. A browser keeps the typed text in its own editing
+ *  buffer, which is NOT `el.value`: a number field holding "1e" reports `""`,
+ *  so re-reading `.value` before each keystroke typed "1e5" as "5" (Chromium
+ *  sanitizes) — while happy-dom does not sanitize at all and typed "1a2".
+ *  Three tiers, three values (measured). The buffer is used only while the
+ *  control still shows what the harness left there; anything else (the app
+ *  rewrote the value, the user cleared it) wins. */
+const _typed = new WeakMap<object, { buf: string; seen: string }>();
+
+function baseValue(el: AnyEl): string {
+  const cur = String(el.value ?? "");
+  const t = _typed.get(el);
+  return t && t.seen === cur ? t.buf : cur;
+}
+
+function writeTyped(el: AnyEl, next: string): void {
+  el.value = next;
+  _typed.set(el, { buf: next, seen: String(el.value ?? "") });
+}
+
+function inputTypeOf(el: AnyEl): string {
+  return String(el?.tagName ?? "").toLowerCase() === "input"
+    ? String(el.type ?? "text").toLowerCase()
+    : "";
+}
+
+/** `<input>` types whose value is not a character stream: a browser gives
+ *  them segments, pickers, sliders or a click — never "append this char".
+ *  Typing "2024-01-05" into a date field produced `""` in both harness tiers
+ *  and a garbled year in Chromium (measured). */
+const _EXAMPLE: Record<string, string> = {
+  date: "2024-01-05",
+  time: "13:45",
+  month: "2024-01",
+  week: "2024-W01",
+  "datetime-local": "2024-01-05T13:45",
+  color: "#ff8800",
+  range: "50",
+};
+const _WHOLE_VALUE = new Set(Object.keys(_EXAMPLE));
+const _BUTTON_TYPES = "submit button reset image";
+const _NO_KEYSTROKES = new Set([
+  ..._WHOLE_VALUE,
+  ...`file checkbox radio ${_BUTTON_TYPES}`.split(" "),
+]);
+
+/** Can `type()` put characters into `el`? False for the whole-value and the
+ *  click-only `<input>` types. */
+export function takesCharacters(el: AnyEl): boolean {
+  return !_NO_KEYSTROKES.has(inputTypeOf(el));
+}
+
+/** Characters a browser lets into an `<input type="number">`. */
+const _NUMBER_CHAR = /^[0-9+\-.eE]$/;
+
+/** `beforeinput` → value → `input`, the way an edit reaches a control. A
+ *  cancelled `beforeinput` edits nothing. */
+function insertText(
+  el: AnyEl,
+  next: string,
+  inputType: string,
+  data: string | null,
+): void {
+  if (!el.dispatchEvent(inputEv(el, "beforeinput", inputType, data))) return;
+  writeTyped(el, next);
+  markEdited(el);
+  el.dispatchEvent(inputEv(el, "input", inputType, data));
+}
+
+/** Type one character like a user: keydown → keypress → beforeinput → value
+ *  += ch → input → keyup. Callers loop characters (re-resolving controlled
+ *  inputs between them).
  *
  *  `maxLength` is honoured: a browser DROPS the keystroke at the limit, so a
  *  harness that appended past it proved a value no user can enter (and the
- *  server-side validation it was meant to exercise never sees that string). */
+ *  server-side validation it was meant to exercise never sees that string).
+ *  A `number` field drops what is not part of a number, as a browser does. */
 export function triggerChar(el: AnyEl, ch: string): void {
   assertOperable(el, "type into", { write: true, text: true });
-  const current = String(el.value ?? "");
+  const type = inputTypeOf(el);
+  if (_NO_KEYSTROKES.has(type)) {
+    throw new Error(
+      `cannot type into <input type="${type}"> — a browser has no character ` +
+        `stream there\n  ` +
+        (_WHOLE_VALUE.has(type)
+          ? `set the whole value at once: .setValue(${
+            JSON.stringify(_EXAMPLE[type])
+          }) (am trigger … setValue)`
+          : `use .click() / .check() / .uncheck()`),
+    );
+  }
+  trackModals(view(el));
+  const current = baseValue(el);
   const max = typeof el.maxLength === "number" ? el.maxLength : -1;
   if (max >= 0 && current.length >= max) {
     throw new Error(
@@ -294,40 +563,206 @@ export function triggerChar(el: AnyEl, ch: string): void {
         `raise maxLength`,
     );
   }
-  el.dispatchEvent(keyEv(el, "keydown", ch));
-  el.value = current + ch;
-  markEdited(el);
-  el.dispatchEvent(ev(el, "input"));
+  const down = keyEv(el, "keydown", ch);
+  if (el.dispatchEvent(down)) {
+    const code = pressCode(ch);
+    const pressed = code === 0 ||
+      el.dispatchEvent(keyEv(el, "keypress", ch, undefined, code));
+    if (pressed && (type !== "number" || _NUMBER_CHAR.test(ch))) {
+      insertText(el, current + ch, "insertText", ch);
+    }
+  }
   el.dispatchEvent(keyEv(el, "keyup", ch));
 }
 
-/** Press a key, optionally with modifiers (Ctrl/Cmd/Alt/Shift). A bare Enter
- *  inside a form submits it (browser implicit submission); a modified Enter
- *  (e.g. Ctrl+Enter) does not — it's a shortcut the handler owns, matching
- *  real browsers. */
+/** Set a whole-value control (`date`, `time`, `color`, `range`, …) the way
+ *  its picker does: one assignment, `input`, then `change`. A value the
+ *  control refuses is an error, not a silent `""`. */
+export function triggerAssign(el: AnyEl, text: string): void {
+  assertOperable(el, "set the value of", { write: true, text: true });
+  const type = inputTypeOf(el);
+  if (!_WHOLE_VALUE.has(type)) {
+    throw new Error(
+      `cannot set the value of <input type="${type || "text"}"> in one step ` +
+        `— only a picker-style input takes a whole value; type() it instead`,
+    );
+  }
+  el.focus?.();
+  el.value = text;
+  if (String(el.value ?? "") !== text) {
+    throw new Error(
+      `cannot set <input type="${type}"> to ${JSON.stringify(text)} — the ` +
+        `control refuses it (value is ${JSON.stringify(String(el.value))})\n` +
+        `  use the stored format, e.g. ${JSON.stringify(_EXAMPLE[type])}`,
+    );
+  }
+  _typed.delete(el);
+  markEdited(el);
+  el.dispatchEvent(inputEv(el, "input", "insertReplacementText", null));
+  fireChangeIfEdited(el); // a picker commits at once
+}
+
+const _TEXTISH = new Set(" text search url tel email password".split(" "));
+
+/** `<input>` types that block implicit submission when a form has more than
+ *  one of them and no submit button (HTML § implicit submission). */
+const _BLOCKING = new Set([
+  ..._TEXTISH,
+  ..."number date month week time datetime-local".split(" "),
+]);
+
+function tagOf(el: AnyEl): string {
+  return String(el?.tagName ?? "").toLowerCase();
+}
+
+/** Controls a key activates (a click): Enter clicks buttons, links and
+ *  `<summary>`; Space (on keyup) clicks buttons, `<summary>` and checkables. */
+function keyClicks(el: AnyEl, space: boolean): boolean {
+  const tag = tagOf(el);
+  if (tag === "button" || tag === "summary") return true;
+  if (tag === "a") return !space && el.hasAttribute?.("href") === true;
+  return tag === "input" &&
+    (space ? _SPACE_CLICKS : _ENTER_CLICKS).includes(inputTypeOf(el));
+}
+const _ENTER_CLICKS = _BUTTON_TYPES.split(" ");
+const _SPACE_CLICKS = [..._ENTER_CLICKS, "checkbox", "radio"];
+
+function isSubmitButton(el: AnyEl): boolean {
+  const tag = tagOf(el);
+  if (tag === "button") return String(el.type ?? "submit") === "submit";
+  return tag === "input" &&
+    (inputTypeOf(el) === "submit" || inputTypeOf(el) === "image");
+}
+
+/** HTML implicit submission. The DEFAULT button (the form's first submit
+ *  button) is CLICKED — its `onClick` runs and the submit event names it as
+ *  `submitter`; a disabled one means nothing happens; with no button the form
+ *  submits only when at most one field blocks it. The harness used to fire a
+ *  bare `submit` in every case (six divergences from Chromium, measured). */
+function implicitSubmit(form: AnyEl): void {
+  if (!form) return;
+  const els: AnyEl[] = [
+    ...(form.elements ?? form.querySelectorAll("button,input")),
+  ];
+  const btn = els.find(isSubmitButton);
+  if (btn) {
+    if (btn.disabled !== true) btn.click();
+    return;
+  }
+  const blocking =
+    els.filter((e) => tagOf(e) === "input" && _BLOCKING.has(inputTypeOf(e)))
+      .length;
+  if (blocking > 1) return;
+  if (!form.noValidate && form.checkValidity?.() === false) return;
+  const w = view(form);
+  form.dispatchEvent(
+    w.SubmitEvent
+      ? new w.SubmitEvent("submit", {
+        bubbles: true,
+        cancelable: true,
+        submitter: null,
+      })
+      : ev(form, "submit"),
+  );
+}
+
+/** Enter's default action on `el`. */
+function enterDefault(el: AnyEl): void {
+  const tag = tagOf(el);
+  if (tag === "textarea") {
+    insertText(el, baseValue(el) + "\n", "insertLineBreak", null);
+    return;
+  }
+  if (keyClicks(el, false)) {
+    el.click?.();
+    return;
+  }
+  if (tag !== "input" && tag !== "select") return;
+  if (tag === "input" && _TEXTISH.has(inputTypeOf(el))) {
+    el.dispatchEvent(inputEv(el, "beforeinput", "insertLineBreak", null));
+  }
+  fireChangeIfEdited(el); // Enter commits the edit before the form sees it
+  implicitSubmit(el.form ?? el.closest?.("form"));
+}
+
+// ── Modal dialogs ─────────────────────────────────────────────────────
+// Escape closes the topmost MODAL dialog. Chromium answers `dialog:modal`;
+// a DOM without modality (happy-dom's `showModal` is `show`) cannot, so its
+// `showModal`/`close` are wrapped — from the first trigger on — to remember
+// which dialogs were opened modally.
+const _modals = new WeakSet<object>();
+const _TRACKED = Symbol.for("aio.trigger.modalTracked");
+
+function trackModals(w: AnyEl): void {
+  const P = w?.HTMLDialogElement?.prototype;
+  if (!P || P[_TRACKED] || typeof P.showModal !== "function") return;
+  P[_TRACKED] = true;
+  if (String(P.showModal).includes("[native code]")) return;
+  const show = P.showModal;
+  const close = P.close;
+  P.showModal = function (this: object, ...a: unknown[]) {
+    const r = show.apply(this, a);
+    _modals.add(this);
+    return r;
+  };
+  P.close = function (this: object, ...a: unknown[]) {
+    _modals.delete(this);
+    return close.apply(this, a);
+  };
+}
+
+function topModal(doc: AnyEl): AnyEl {
+  const open: AnyEl[] = [...(doc?.querySelectorAll?.("dialog[open]") ?? [])];
+  let modal: AnyEl[] = [];
+  try {
+    modal = [...doc.querySelectorAll("dialog:modal")];
+  } catch {
+    // aio-ok: a selector engine without `:modal` — the tracked set answers.
+  }
+  const all = open.filter((d) => _modals.has(d) || modal.includes(d));
+  return all.at(-1) ?? null;
+}
+
+/** Escape's default action: `cancel` (cancelable) on the top modal, then
+ *  `close`. */
+function escapeDefault(el: AnyEl): void {
+  const dlg = topModal(el.ownerDocument ?? el);
+  if (!dlg) return;
+  const w = view(dlg);
+  if (!dlg.dispatchEvent(new w.Event("cancel", { cancelable: true }))) return;
+  dlg.close();
+}
+
+/** Press a key, optionally with modifiers (Ctrl/Cmd/Alt/Shift), with the
+ *  browser's default actions: Enter in a text field commits it and runs
+ *  implicit submission (see {@link implicitSubmit}); Enter in a `<textarea>`
+ *  inserts a line break; Enter on a button/link/summary clicks it, Space on a
+ *  button/checkbox clicks it on keyup; Escape closes the top modal dialog. A
+ *  modified Enter (e.g. Ctrl+Enter) is a shortcut the handler owns, and a
+ *  `preventDefault()` on keydown or keypress cancels every default action. */
 export function triggerPress(
   el: AnyEl,
   key: string,
   mods?: KeyModifiers,
 ): void {
   assertOperable(el, "press a key on");
+  trackModals(view(el));
   // Keep the keydown Event — a browser skips implicit form submit when the
   // keydown was preventDefault'd (combobox: Enter picks an option). The
   // harness used to dispatch submit unconditionally after keyup, so testUI
   // submitted while the real window did not (wallet report §2).
-  const down = keyEv(el, "keydown", key, mods);
-  el.dispatchEvent(down);
-  el.dispatchEvent(keyEv(el, "keyup", key, mods));
+  let go = el.dispatchEvent(keyEv(el, "keydown", key, mods));
+  const code = pressCode(key, mods);
+  if (go && code) go = el.dispatchEvent(keyEv(el, "keypress", key, mods, code));
   const modified = mods
     ? (mods.ctrlKey || mods.metaKey || mods.altKey || mods.shiftKey)
     : false;
-  if (
-    key === "Enter" && !modified && !down.defaultPrevented &&
-    typeof el.closest === "function"
-  ) {
-    const form = el.closest("form");
-    if (form) form.dispatchEvent(ev(el, "submit"));
+  if (go && !modified) {
+    if (key === "Enter") enterDefault(el);
+    else if (key === "Escape") escapeDefault(el);
   }
+  el.dispatchEvent(keyEv(el, "keyup", key, mods));
+  if (go && !modified && key === " " && keyClicks(el, true)) el.click?.();
 }
 
 /** Hold a key DOWN (no keyup) — games, drag interactions, held modifiers,
@@ -430,9 +865,14 @@ export function triggerSetChecked(
 export function triggerClear(el: AnyEl): void {
   assertOperable(el, "clear", { write: true, text: true });
   el.focus?.();
-  el.value = "";
+  if (
+    !el.dispatchEvent(inputEv(el, "beforeinput", "deleteContentBackward", null))
+  ) {
+    return;
+  }
+  writeTyped(el, "");
   markEdited(el);
-  el.dispatchEvent(ev(el, "input"));
+  el.dispatchEvent(inputEv(el, "input", "deleteContentBackward", null));
 }
 
 /** Scroll an element like a user: set scrollTop/scrollLeft, fire `scroll`
@@ -512,8 +952,10 @@ export function triggerAction(
       triggerClick(el, mods);
       break;
     case "dblclick":
-      triggerClick(el, mods);
-      el.dispatchEvent(mouseEv(el, "dblclick", mods));
+      // A browser delivers TWO clicks before the dblclick (detail 1, 2).
+      triggerClick(el, mods, 1);
+      triggerClick(el, mods, 2);
+      el.dispatchEvent(mouseEv(el, "dblclick", mods, { detail: 2 }));
       break;
     case "press":
       triggerPress(el, key ?? "Enter", mods);
@@ -524,16 +966,29 @@ export function triggerAction(
     case "keyUp":
       triggerKeyUp(el, key ?? "Enter", mods);
       break;
-    case "hover":
+    case "hover": {
+      // Chromium's order: pointerover, pointerenter, mouseover, mouseenter,
+      // pointermove, mousemove. `*enter` does NOT bubble in a browser —
+      // dispatching it with bubbles:true ran every ancestor's onMouseEnter as
+      // well, so a hover on one row fired the whole list's handlers.
+      const hover = { button: -1 };
+      el.dispatchEvent(ptrEv(el, "pointerover", mods, hover));
+      el.dispatchEvent(
+        ptrEv(el, "pointerenter", mods, { ...hover, bubbles: false }),
+      );
       el.dispatchEvent(mouseEv(el, "mouseover", mods));
-      // `mouseenter` does NOT bubble in a browser — dispatching it with
-      // bubbles:true ran every ancestor's onMouseEnter as well, so a hover on
-      // one row fired the whole list's handlers and a test could not tell.
       el.dispatchEvent(mouseEv(el, "mouseenter", mods, { bubbles: false }));
+      el.dispatchEvent(ptrEv(el, "pointermove", mods, hover));
+      el.dispatchEvent(mouseEv(el, "mousemove", mods));
       break;
-    case "focus":
+    }
+    case "focus": {
+      // Focus leaving an edited field commits it, as a click would.
+      const prev = activeOf(el.ownerDocument);
+      if (prev && prev !== el) fireChangeIfEdited(prev);
       el.focus?.();
       break;
+    }
     case "blur": {
       // A browser commits a changed value at blur — `change` first, then
       // `blur`. Without this the onChange path was unreachable from either

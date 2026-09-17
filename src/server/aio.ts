@@ -1946,6 +1946,7 @@ async function _runPhases<S, A, E>(
     getReportOpts: () => _reportOpts,
     journal: config.journal,
     redactActions: config.redactActions,
+    cellPersist: config._cellPersist,
     log,
   });
   state = boot.state as S;
@@ -2746,8 +2747,23 @@ async function _runPhases<S, A, E>(
   // One per app, shared by the dispatch loop and the worker pool's effect
   // router below — see `notifyCrossUserGate`.
   const _notifyCrossUser = notifyCrossUserGate((m) => log.warn("aio", m));
+  // Observe-only: a committed write the next boot will undo (a deleted
+  // declared key, a key added under a closed declared object) is said at the
+  // write, dev and prod — see declared-shape-guard.ts.
+  const _writeGuard = boot.writeGuard;
   const _dispatchCore = setupDispatch<S, A, E>({
-    reduce,
+    reduce: _writeGuard
+      ? (s, a) => {
+        const r = reduce(s, a);
+        if (r.state !== s) {
+          _writeGuard(
+            String((a as { type?: unknown }).type ?? ""),
+            (r as { patches?: unknown }).patches,
+          );
+        }
+        return r;
+      }
+      : reduce,
     // Effects run inside the effect scope, so everything they dispatch — now,
     // or later from a timer, a promise or an async body they started — is
     // recorded as `cause: "effect"` (see `_effectScope`).

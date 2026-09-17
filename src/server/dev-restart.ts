@@ -155,6 +155,17 @@ export async function relaunchArgs(): Promise<string[]> {
 
 let _restarting = false;
 
+/** True from the moment a cell-change restart begins in THIS process until it
+ *  exits (supervised child) or has become the supervisor — it never goes back
+ *  to false. Everything the restart's own teardown ends is EXPECTED while this
+ *  is true: the Electron window `shutdown()` kills is the case. Its exit used
+ *  to be read by the launch-time status handler as "the user closed the
+ *  window" and answered with `stopProcess(0)` — in the process that had just
+ *  become the supervisor, so the relaunched child followed its dead parent
+ *  two seconds later and a cell edit under `--client=electron` ended the dev
+ *  session (field report cc §5). */
+export const isRestarting = (): boolean => _restarting;
+
 /** What the restarted app must inherit from the one being torn down. */
 export interface RestartCarry {
   /** The TCP port the app is bound to — read at restart time, after the

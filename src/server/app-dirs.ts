@@ -285,8 +285,17 @@ export function resolveAppDirs(opts: {
   baseDir?: string;
 }): AppDirs {
   const { appId, appDir, libraryMode, baseDir } = opts;
-  const configured = appDir ??
-    (libraryMode ? join(resolve(baseDir ?? Deno.cwd()), ".aio") : undefined);
+  // libraryMode with NO directory named by the author: `AIO_APPS_DIR`, when
+  // set, places it like any app (`<root>/<appId>`). The cwd default ignored
+  // the appId, so two such apps in one cwd shared one state.db and journal —
+  // and `AIO_APPS_DIR` exists precisely for apps whose ids a suite does not
+  // control. An explicit `baseDir` keeps its `<baseDir>/.aio` meaning.
+  const libraryHome = libraryMode
+    ? baseDir === undefined && appsDirEnv() !== undefined
+      ? undefined
+      : join(resolve(baseDir ?? Deno.cwd()), ".aio")
+    : undefined;
+  const configured = appDir ?? libraryHome;
   const dirs = appDirs(appId, configured);
   // Only a DERIVED home is checked: an `appDir` is a path somebody wrote down
   // on purpose, while `~/.<appId>` is a path the app's NAME picked for it.

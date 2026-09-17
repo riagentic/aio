@@ -127,8 +127,14 @@ export function tmplBounds(async = false): string {
   // new declaration wins; if it is unchanged, the user's resize is kept.
   // Without that, a leftover window-state.json silently ate every declared
   // size after the first launch (field report: window sizing).
-  const payload =
-    `Object.assign({}, win.getBounds(), { declaredWidth: __aioDw, declaredHeight: __aioDh })`;
+  //
+  // A MAXIMIZED window saves its NORMAL rect plus `maximized: true`, and comes
+  // back maximized over that rect. Saving `getBounds()` stored the maximized
+  // size as if the user had dragged the window to it: the next launch opened a
+  // plain window filling the screen, and un-maximize had nowhere to return to
+  // (measured on a nested display with a window manager). The key is written
+  // only when true, so a non-maximized state file is byte-for-byte as before.
+  const payload = `__aioBoundsPayload(win)`;
   const save = async
     ? `  try { require('fs/promises').writeFile(stateFile, JSON.stringify(${payload})).catch(() => {}); } catch {}`
     : `  // AIO-272: window state persistence failures should be visible
@@ -137,18 +143,70 @@ export function tmplBounds(async = false): string {
   return `
 const stateFile = path.join(app.getPath('userData'), 'window-state.json');
 let __aioDw = 800, __aioDh = 600;
+// Set by loadBounds from the saved state; tmplBoundsTracking re-maximizes.
+let __aioRestoreMax = false;
+
+function __aioBoundsPayload(win) {
+  const max = win.isMaximized();
+  const r = max ? win.getNormalBounds() : win.getBounds();
+  const out = { x: r.x, y: r.y, width: r.width, height: r.height, declaredWidth: __aioDw, declaredHeight: __aioDh };
+  if (max) out.maximized = true;
+  return out;
+}
+
+// A saved rect can come from a DIFFERENT display than the one this run is on:
+// the same app launched on a 4000x2560 desktop saves y=392 (below a top
+// panel), then a nested Xephyr display that is only 1280x900 tall restores
+// the window hanging off the bottom. Electron restores x/y verbatim and does
+// not clamp, so aio must: anything not fully inside a display's work area is
+// repositioned into the one it overlaps most. An oversized window is pinned
+// to the work-area origin — centred would clip both edges, and the title bar
+// (the part that must stay reachable) is at the top-left.
+function __aioFitBounds(b) {
+  if (typeof b.x !== 'number' || typeof b.y !== 'number') return b;
+  try {
+    const { screen } = require('electron');
+    const ds = screen.getAllDisplays();
+    if (!ds.length) return b;
+    for (const d of ds) {
+      const a = d.workArea;
+      if (b.x >= a.x && b.y >= a.y &&
+          b.x + b.width <= a.x + a.width &&
+          b.y + b.height <= a.y + a.height) return b;
+    }
+    let best = ds[0], bestArea = -1;
+    for (const d of ds) {
+      const a = d.workArea;
+      const ix = Math.max(0, Math.min(b.x + b.width, a.x + a.width) - Math.max(b.x, a.x));
+      const iy = Math.max(0, Math.min(b.y + b.height, a.y + a.height) - Math.max(b.y, a.y));
+      if (ix * iy > bestArea) { bestArea = ix * iy; best = d; }
+    }
+    const a = best.workArea;
+    const x = b.width >= a.width
+      ? a.x
+      : Math.max(a.x, Math.min(b.x, a.x + a.width - b.width));
+    const y = b.height >= a.height
+      ? a.y
+      : Math.max(a.y, Math.min(b.y, a.y + a.height - b.height));
+    return { width: b.width, height: b.height, x: x, y: y };
+  } catch { return b; }
+}
 
 function loadBounds(dw, dh) {
   __aioDw = dw; __aioDh = dh;
+  __aioRestoreMax = false;
   try {
     const d = JSON.parse(fs.readFileSync(stateFile, 'utf8'));
     if (d.width > 0 && d.height > 0) {
-      if (d.declaredWidth === dw && d.declaredHeight === dh) return d;
+      // The rect is the NORMAL one (see __aioBoundsPayload) — fitted like any
+      // other; the maximize is re-applied after the window exists.
+      __aioRestoreMax = d.maximized === true;
+      const same = d.declaredWidth === dw && d.declaredHeight === dh;
       // Declared size changed — keep position, take the new size.
-      const out = { width: dw, height: dh };
+      const out = same ? { width: d.width, height: d.height } : { width: dw, height: dh };
       if (typeof d.x === 'number') out.x = d.x;
       if (typeof d.y === 'number') out.y = d.y;
-      return out;
+      return __aioFitBounds(out);
     }
   } catch {}
   return { width: dw, height: dh };
@@ -195,9 +253,15 @@ export function tmplWindowShape(
   b.frame = ${JSON.stringify((meta?.chrome ?? "standard") === "standard")};`;
 }
 
-/** Debounced bounds tracking (resize/move/close) — returns CJS lines to insert inside ready */
+/** Debounced bounds tracking (resize/move/close) — returns CJS lines to insert
+ *  inside ready, right after the window is created. Re-applies a saved
+ *  maximize first (loadBounds sets `__aioRestoreMax`). */
 export function tmplBoundsTracking(): string {
-  return `  let t;
+  return `  if (__aioRestoreMax) {
+    try { win.maximize(); }
+    catch (e) { console.warn('[aio:electron] could not restore the maximized window:', e); }
+  }
+  let t;
   const save = () => { clearTimeout(t); t = setTimeout(() => saveBounds(win), 500); };
   win.on('resize', save);
   win.on('move', save);

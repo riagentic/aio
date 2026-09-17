@@ -34,26 +34,12 @@ import * as browser from "../src/browser-air.ts";
  *  carry now ship — tests/browser-bundle-self-export.test.ts bundles each. */
 const ABSENT_ON_BROWSER: Record<string, string> = {
   // ── not bundle-safe: the module graph reaches server-only code ──
-  serverUser: "server: ambient caller of a server call — auth-context.ts " +
-    "imports node:async_hooks (AsyncLocalStorage); not bundle-safe. NOTE " +
-    "docs/auth/auth.md:357 imports it into a cell module, which still " +
-    "refuses the bundle — closing that needs a browser stub, not a re-export",
-  serverRequest: "server: ambient request context — same module as " +
-    "serverUser (node:async_hooks); not bundle-safe",
-  serverAuth: "server: ambient auth context — same module as serverUser " +
-    "(node:async_hooks); not bundle-safe",
   generateTotpSecret: "server: TOTP enrollment secret — auth-totp.ts " +
     "reaches @std/path/@std/jsonc via server-auth.ts; not bundle-safe",
   totpUri: "server: TOTP enrollment URI — same module as generateTotpSecret",
   verifyTotp: "server: TOTP verification — same module as generateTotpSecret",
   VERSION: "server: framework version stamp — lives on src/server/aio.ts, " +
     "whose graph is the whole server (node:sqlite, node:crypto, @std/path)",
-  // ── bundle-safe, but its price lands on every page ──
-  blocking: "server: Deno worker pool for CPU-bound method work. Bundles, " +
-    "but blocking.ts computes its pool size in a module-scope IIFE esbuild " +
-    "cannot tree-shake — measured +0.8 KB gzip on EVERY page, used or not. " +
-    "docs/debugging/performance.md imports it beside cell; ship it only " +
-    "once that initializer is lazy",
   // ── aio.run() configuration, written in the server entry ──
   definePlugin: "server: packages cells/routes/hooks for aio.run({ plugins })",
   route: "server: HTTP route handler for aio.run({ routes })",
@@ -90,6 +76,18 @@ const SHIPPED_FOR_CELL_MODULES = [
   "serverImport",
 ] as const;
 
+/** Server-only names the browser entry carries as FACADES that throw (or
+ *  reject) when called — a cell module imports them, a browser never runs
+ *  them. Deliberately not mod.ts's objects: the real modules cannot bundle
+ *  (auth-context.ts) or would pin a worker pool on every page (blocking.ts).
+ *  tests/browser-server-only-stubs.test.ts pins the refusal text. */
+const BROWSER_FACADES = [
+  "serverUser",
+  "serverRequest",
+  "serverAuth",
+  "blocking",
+] as const;
+
 const values = (m: Record<string, unknown>) =>
   Object.keys(m).filter((k) => !k.startsWith("_"));
 
@@ -119,6 +117,16 @@ Deno.test("browser aio: the absent ledger has no dead entries", () => {
     "listed as absent but now shipped on the browser entry (or gone from " +
       "mod.ts) — the ledger has to shrink when the gap does",
   );
+});
+
+Deno.test("browser aio: a server-only facade is a stub, never mod.ts's object", () => {
+  const b = browser as Record<string, unknown>;
+  const m = mod as Record<string, unknown>;
+  const wrong = BROWSER_FACADES.filter((n) =>
+    typeof b[n] !== "function" || !(n in m) || b[n] === m[n] ||
+    (SHIPPED_FOR_CELL_MODULES as readonly string[]).includes(n)
+  );
+  assertEquals(wrong, [], "a facade went missing, or became the real module");
 });
 
 Deno.test("browser aio: every name shipped for cell modules is mod.ts's own implementation", () => {

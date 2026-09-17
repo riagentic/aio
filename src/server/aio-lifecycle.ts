@@ -30,12 +30,49 @@ import { appIconPngBase64 } from "../build/app-icon.ts";
 import { artifactPath, relaunch } from "./updates-apply.ts";
 import { isCompiled } from "./paths.ts";
 import {
+  isRestarting,
   isSupervisedChild,
   relaunchArgs,
   RESTART_EXIT_CODE,
   restartBlockedReason,
 } from "./dev-restart.ts";
 import { count } from "../diagnostics/fmt.ts";
+
+/** What the Electron window's exit means for the process that launched it —
+ *  pure, so the decision is a unit test rather than a window on a display.
+ *
+ *  Says HOW it ended, always: the window going away is the only thing that
+ *  shuts a desktop app down, so "closed by the user" and "killed by a signal"
+ *  are the two answers a crash report turns on — and the no-keepServer path
+ *  used to log neither, leaving a graceful shutdown as the only trace of a
+ *  crash.
+ *
+ *  `restarting` is the one exit aio caused itself: a cell-change restart
+ *  tears the app down — window included — and then relaunches it (as a fresh
+ *  child, from this very process). Reading that exit as "the user closed the
+ *  window" stopped the process that had just become the supervisor, and the
+ *  relaunched child followed its dead parent two seconds later. So: log it as
+ *  what it is, and stop nothing — the relaunch opens the next window. */
+export function electronClosedPlan(
+  s: Pick<Deno.CommandStatus, "code" | "signal">,
+  ctx: { keepServer: boolean; restarting: boolean; url: string },
+): { line: string; stop: boolean } {
+  const how = s.signal ? `signal ${s.signal}` : `code ${s.code ?? 0}`;
+  if (ctx.restarting) {
+    return {
+      line: `electron closed (${how}) — restarting, the relaunched app ` +
+        `opens the next window`,
+      stop: false,
+    };
+  }
+  if (ctx.keepServer) {
+    return {
+      line: `electron closed (${how}) — server still running at ${ctx.url}`,
+      stop: false,
+    };
+  }
+  return { line: `electron closed (${how}) — shutting down`, stop: true };
+}
 
 /** One parent watch per process — see `AIO_PARENT_PID` in startLifecycle. */
 let _parentWatched = false;
@@ -831,22 +868,15 @@ export function startLifecycle<S, A>(deps: LifecycleDeps<S, A>): void {
         proc.status
           .then((s) => {
             setElectronProc(null);
-            // Say HOW it ended, always. The window going away is the only
-            // thing that shuts a desktop app down, so "closed by the user"
-            // and "killed by a signal" are the two answers a crash report
-            // turns on — and the no-keepServer path used to log neither,
-            // leaving a graceful shutdown as the only trace of a crash.
-            const how = s.signal ? `signal ${s.signal}` : `code ${s.code ?? 0}`;
-            if (keepServer) {
-              log.info(
-                `electron closed (${how}) — server still running at ${url}`,
-              );
-            } else {
-              log.info(`electron closed (${how}) — shutting down`);
-              // This exits the PROCESS, so every app in it stops here —
-              // including one still writing its final snapshot.
-              stopProcess(0);
-            }
+            const plan = electronClosedPlan(s, {
+              keepServer: !!keepServer,
+              restarting: isRestarting(),
+              url,
+            });
+            log.info(plan.line);
+            // This exits the PROCESS, so every app in it stops here —
+            // including one still writing its final snapshot.
+            if (plan.stop) stopProcess(0);
           })
           .catch((e) => log.error(`electron status: ${e}`));
       })

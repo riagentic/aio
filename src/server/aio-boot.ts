@@ -22,7 +22,11 @@ import {
   pkColumn,
   type TableDef,
 } from "./sql.ts";
-import { deepMerge } from "../state/deep-merge.ts";
+import {
+  deepMerge,
+  MAX_DEPTH as DEEP_MERGE_MAX_DEPTH,
+} from "../state/deep-merge.ts";
+import { createDeclaredShapeGuard } from "./declared-shape-guard.ts";
 import { isCompiled, resolveKvPath } from "./paths.ts";
 import { prodRequested } from "./aio-cli.ts";
 import { SYNC_VERSION_UNKNOWN } from "../sync/compact.ts";
@@ -870,6 +874,12 @@ export interface BootConfig<S> {
    *  the debounce-window tail. bootStorage creates it, the persistence manager
    *  advances its watermark, _run appends + replays. Undefined/false ⇒ off. */
   journal?: boolean;
+  /** Cell id → its `persist` filter (dot paths included) — the declared-shape
+   *  write guard skips fields that are never restored. */
+  cellPersist?: Record<
+    string,
+    import("../state/cell-types.ts").CellFieldFilter
+  >;
   log: Log;
 }
 
@@ -888,6 +898,10 @@ export interface BootResult<S> {
   /** Mutable ref — caller wires broadcast after server creation */
   syncBroadcastRef: { fn: (msg: string, exclude?: WebSocket) => void };
   syncDispatchRef: { fn: (a: { type: string; payload?: unknown }) => void };
+  /** Observe-only: call with each committed reduce's action type and patches
+   *  — warns (dev and prod) about writes the next boot will undo. Absent when
+   *  nothing persists. See declared-shape-guard.ts. */
+  writeGuard?: (actionType: string, patches: unknown) => void;
 }
 
 /** Runs the full storage boot sequence — SQLite, CRDT sync, KV restore,
@@ -1659,9 +1673,36 @@ export async function bootStorage<S>(
     )
     : null;
 
+  // Said once per `cell.path`, whichever of the two write-time checks gets
+  // there first (the guard names the method; the watcher sees every write).
+  const _shapeSaid = new Set<string>();
+  const writeGuard = shouldPersist
+    ? createDeclaredShapeGuard({
+      template: initialState as Record<string, unknown>,
+      persist: cfg.cellPersist,
+      skip: new Set([
+        ...syncCellIds,
+        ...(migrations?.report ?? []).map((r) => r.cell),
+      ]),
+      unknownKeys: (declared, written) =>
+        detectShapeDrift({ c: declared }, { c: written })
+          .filter((d) =>
+            d.issue === "unknown-field" && d.storedType !== "undefined"
+          )
+          .map((d) => d.path),
+      said: _shapeSaid,
+      warn: (msg) => log.warn(msg),
+    })
+    : undefined;
+
   const persistence = createPersistenceManager({
     kvDb,
     asyncDb,
+    // `:memory:` is SQLite's sentinel for "no file", never a path.
+    ...(openedDbPath !== undefined && !openedDbPath.startsWith(":memory:") &&
+        !openedDbPath.startsWith("file::memory:")
+      ? { dbFile: resolve(openedDbPath) }
+      : {}),
     // The BOUND schema (see `syncSchema`) — the same decider that feeds
     // `getTableState` below, so the planner never meets a table the view
     // omits.
@@ -1695,6 +1736,7 @@ export async function bootStorage<S>(
           initialState as Record<string, unknown>,
           new Set((migrations?.report ?? []).map((r) => r.cell)),
           (msg) => log.warn(msg),
+          _shapeSaid,
         ),
         (msg) => log.warn(msg),
       )
@@ -1748,6 +1790,7 @@ export async function bootStorage<S>(
     syncHandler,
     syncBroadcastRef,
     syncDispatchRef,
+    ...(writeGuard ? { writeGuard } : {}),
   };
 }
 
@@ -1865,7 +1908,13 @@ export type ShapeDriftEntry = {
 };
 
 const MAX_DRIFT = 100;
-const DRIFT_MAX_DEPTH = 8;
+// ONE cap with the restore: `deepMerge` prunes undeclared keys down to its
+// stack guard and keeps everything below it verbatim (and says so). A drift
+// walk that stopped earlier (it was 8) let the merge DROP a field 9+ levels
+// down with no drift line — dev booted, prod did not warn. The merge starts
+// at the whole state (depth 0 = the cells), this walk at one cell's slice, so
+// the same cut is one level less here.
+const DRIFT_MAX_DEPTH = DEEP_MERGE_MAX_DEPTH - 1;
 
 const kindOf = (v: unknown): string =>
   v === null ? "null" : Array.isArray(v) ? "array" : typeof v;
@@ -2110,10 +2159,17 @@ export function newFieldsSummary(added: ShapeAdditionEntry[]): string {
   const more = added.length > show.length
     ? ` …and ${added.length - show.length} more`
     : "";
-  return `state shape: ${added.length} new field(s), no migration needed — ` +
-    `${show.join(", ")}${more}. A field the stored data does not have is ` +
-    `filled from \`state:\`, so adding one is safe on its own. (Renaming or ` +
-    `removing one is not — that is the "shape drift" line.)`;
+  // NOT "new field(s)": the stored data cannot say WHY a declared key is
+  // missing. A field this build added is one reason; a method that ran
+  // `delete s.key` is the other — and calling that resurrection "new … safe"
+  // hid that the delete never survived the restart.
+  return `state shape: ${added.length} declared field(s) not in the stored ` +
+    `data, filled from \`state:\` — no migration needed — ` +
+    `${show.join(", ")}${more}. Either the field is new in this build ` +
+    `(adding one is safe on its own), or a method deleted it — a deleted ` +
+    `declared key always comes back with its default (write null to clear ` +
+    `one). (Renaming or removing a field from \`state:\` is not safe — that ` +
+    `is the "shape drift" line.)`;
 }
 
 /** A persisted-document getter that also shows each document to `watch`. The
@@ -2154,9 +2210,12 @@ export function restoreDropWatcher(
   initial: Record<string, unknown>,
   skip: ReadonlySet<string>,
   warn: (msg: string) => void,
+  /** `cell.path` strings already said — shared with the write-time guard
+   *  (declared-shape-guard.ts), which names the method, so one fact is one
+   *  line. */
+  said: Set<string> = new Set<string>(),
 ): (doc: unknown) => void {
   const lastSlice = new Map<string, unknown>();
-  const said = new Set<string>();
   return (doc) => {
     if (!_isObj(doc)) return;
     const changed: Record<string, unknown> = {};
@@ -2378,7 +2437,13 @@ function driftStoreLines(store: DriftStore): string {
       : `\`rm ${q(store.dbPath)} ${q(store.dbPath + "-wal")} ${
         q(store.dbPath + "-shm")
       }\``) +
-    `\n`
+    `\n` +
+    // The escape that keeps this data untouched. Not under AIO_APPS_DIR:
+    // there `--instance` is ignored (said loudly), so offering it misleads.
+    (store.appsDir
+      ? ""
+      : `or run this build against a PRIVATE, empty data home and leave ` +
+        `this one untouched: \`am start --instance=<name>\`\n`)
   );
 }
 

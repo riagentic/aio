@@ -950,16 +950,19 @@ export function validateConfig(
   // two keys.
   if (label in NESTED_CONFIGS) return;
   for (const c of configConflicts(obj)) {
-    // Deduped by text: `aio.run()` validates the CellsConfig on the way in and
-    // the composed AioConfig on the way through, so every conflict is seen
-    // twice in one boot and a diagnostic printed twice reads as a loop.
-    if (_reportedConflicts.has(c.what)) continue;
+    // The LINE is deduped by text: `aio.run()` validates the CellsConfig on
+    // the way in and the composed AioConfig on the way through, so every
+    // conflict is seen twice in one boot and a diagnostic printed twice reads
+    // as a loop. The VERDICT is not: the dedupe used to skip the `exit(1)`
+    // too, so only the first boot in a process was refused and every later
+    // boot with the same misconfig came up.
+    const first = !_reportedConflicts.has(c.what);
     _reportedConflicts.add(c.what);
     const msg = teachMessage(c.what, c.fix, c.doc);
     if (c.level === "error") {
-      log.error(msg);
+      if (first) log.error(msg);
       exit(1);
-    } else {
+    } else if (first) {
       log.warn(msg);
     }
   }

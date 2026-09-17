@@ -384,6 +384,16 @@ aio does not widen the map itself. Its index type is published surface, and the
 compatibility promise has no exceptions — not even for a widening that provably
 breaks nobody, because the value of the promise is that it has none.
 
+## Child windows (`openWindow`)
+
+With `aio.run({ childWindows: true })` the page can call
+`__aioIPC.openWindow(url, { preload })` to open an http(s) page in a child
+window. `preload` is required and must be a file inside the app directory; a
+relative path is resolved against the app directory, never the process's working
+directory, so dev and a packaged app agree. Every refusal is logged with its
+reason (`[aio:electron] openWindow refused — …`). See [webview](webview.md) for
+the inline alternative.
+
 ## Headless and VM hosts (`AIO_ELECTRON_ARGS`)
 
 Electron on a real desktop needs nothing. On a VM, a container or a box with no
@@ -541,8 +551,10 @@ Across runs, Electron saves bounds to `window-state.json` under the app's
 `userData` directory (slugified title, e.g. "My Dashboard" → `my-dashboard`). A
 _user resize_ is kept while the declared size is unchanged. If you change
 `ui.width` / `ui.height` (or pass a new `--width`), the new declaration wins for
-size; position is kept. Delete `window-state.json` only if you want a clean
-slate for both.
+size; position is kept. A window closed while **maximized** reopens maximized,
+and un-maximizing it returns to the size and position it had before
+(`window-state.json` stores that normal rect plus `"maximized": true`). Delete
+`window-state.json` only if you want a clean slate for both.
 
 ## Thin client (`--server-url=X` / `--connect`)
 

@@ -25,6 +25,7 @@ import {
   type InstanceInfo,
   instances,
   isLockOwnerAlive,
+  isPortInUse,
   isProcessAlive,
   isSocketAlive,
   killProcess,
@@ -34,6 +35,7 @@ import {
   readLaunchInfo,
   resolveAppId,
   STARTUP_GRACE_MS,
+  STUCK_STARTING_MS,
   writeLaunchInfo,
   writeLock,
 } from "../server/single-instance-lock.ts";
@@ -188,10 +190,14 @@ const STOP_CHECK_TIMEOUT_MS = 500;
  *  "is it actually gone". */
 export { killProcess };
 
-/** Ensure no other instance of this app is running. Kills zombies, waits for stopping. */
+/** Ensure no other instance of this app is running. Kills zombies, waits for
+ *  stopping — and ATTACHES to one that is still booting: with `attach` (the
+ *  caller's flags) a live, progressing `starting` instance is waited for the
+ *  way `am start` waits for its own child, and this call never returns. */
 export async function ensureSingleton(
   appId: string,
   mode: import("./am-types.ts").OutputMode,
+  attach?: GlobalFlags,
 ): Promise<void> {
   // Wherever the instance's home is: an app `am instances` lists must never
   // be started a second time because its lock sits under `<id>@<hash>`.
@@ -227,46 +233,96 @@ export async function ensureSingleton(
   }
 
   if (pf.status === "starting") {
-    // A booting app is not a stuck one. Two facts decide that, and both used
-    // to be ignored: the runtime's own grace (`STARTUP_GRACE_MS` — the same
-    // number `AppLock.acquire` honours) and whether there is a port to probe
-    // at all. `am start` writes the placeholder lock with `port: 0` when the
-    // app declared none, so the probe below went to 127.0.0.1:0, failed by
-    // definition, and a second `am start` during boot SIGTERMed the first.
+    // A booting app is not a stuck one. Three facts decide that, and all
+    // three used to be ignored: the runtime's own grace (`STARTUP_GRACE_MS`
+    // — the same number `AppLock.acquire` honours), whether there is a door
+    // to probe at all (`am start` writes the placeholder lock with `port: 0`
+    // when the app declared none, so a probe went to 127.0.0.1:0, failed by
+    // definition, and a second `am start` during boot SIGTERMed the first),
+    // and — the one that cost the most — whether anything is LISTENING yet.
+    // A cell module that takes 15 s to import has bound nothing at 10 s; the
+    // next `am start` called that "stuck", killed it, and spawned another
+    // that it would kill in turn. An agent re-running on exit 1 killed the
+    // app every 10 s forever (h7 F2, measured).
+    //
+    // The rule now: alive and nothing bound is BOOTING until neither the lock
+    // nor the app's own log has moved for `STUCK_STARTING_MS`; alive and
+    // bound but not answering past the grace is a zombie listener; and a
+    // booting instance is attached to, never killed.
     const probePort = pf.trojanPort ?? pf.port;
-    const withinGrace = Date.now() - pf.startedAt < STARTUP_GRACE_MS;
-    if (withinGrace || !(probePort > 0)) {
+    const pastGrace = Date.now() - pf.startedAt >= STARTUP_GRACE_MS;
+    const listening = probePort > 0
+      ? await isPortInUse(probePort)
+      : pf.socketPath
+      ? await isSocketAlive(pf.socketPath)
+      : false;
+    if (listening && pastGrace) {
+      let responds = !(probePort > 0); // a live socket IS the answer
+      if (probePort > 0) {
+        try {
+          const r = await fetch(`http://127.0.0.1:${probePort}/`, {
+            signal: AbortSignal.timeout(HEALTH_TIMEOUT_MS),
+          });
+          await r.body?.cancel();
+          responds = r.ok;
+        } catch { /* listening, not answering */ }
+      }
+      if (responds) {
+        // It's actually started — refuse
+        outError(alreadyRunningLine(pf), mode);
+        Deno.exit(1);
+      }
+      // Bound but not answering, past the grace — a zombie listener.
+      out(
+        mode === "pretty"
+          ? `killing stuck instance (pid ${pf.pid}, status: starting, ` +
+            `listening but not answering)…`
+          : { killing: pf.pid, reason: "stuck-starting" },
+        mode,
+      );
+      await killProcess(pf.pid, undefined, pf);
+      removePid(appId, pf);
+      return;
+    }
+    if (
+      !listening &&
+      bootStalled(pf.startedAt, logMtime(stdoutLogPath(appId)))
+    ) {
+      // Alive, nothing bound, and neither the lock nor the log has moved for
+      // STUCK_STARTING_MS — hung before it could listen. Reclaim.
+      out(
+        mode === "pretty"
+          ? `killing stuck instance (pid ${pf.pid}, status: starting, ` +
+            `nothing listening and no log progress for ${
+              STUCK_STARTING_MS / 1000
+            }s)…`
+          : { killing: pf.pid, reason: "stuck-starting" },
+        mode,
+      );
+      await killProcess(pf.pid, undefined, pf);
+      removePid(appId, pf);
+      return;
+    }
+    // Booting. Wait for it the way `am start` waits for its own child; a
+    // caller that opted out of waiting is told, and told the truth.
+    if (!attach || attach.noWait) {
       outError(
-        `already starting: ${appId} (pid ${pf.pid}) — wait for it, or ` +
-          `\`am stop\` it first`,
+        `already starting: ${appId} (pid ${pf.pid}) — am status follows ` +
+          `it, or \`am start\` (without --no-wait) waits for it`,
         mode,
       );
       Deno.exit(1);
     }
-    // Past the grace with a real port: is it actually responding?
-    let responds = false;
-    try {
-      const r = await fetch(`http://127.0.0.1:${pf.trojanPort ?? pf.port}/`, {
-        signal: AbortSignal.timeout(HEALTH_TIMEOUT_MS),
-      });
-      await r.body?.cancel();
-      responds = r.ok;
-    } catch { /* not yet */ }
-    if (responds) {
-      // It's actually started — refuse
-      outError(alreadyRunningLine(pf), mode);
-      Deno.exit(1);
-    }
-    // Not responding — stuck process, kill it and clean up
-    out(
-      mode === "pretty"
-        ? `killing stuck instance (pid ${pf.pid}, status: starting)…`
-        : { killing: pf.pid, reason: "stuck-starting" },
+    console.error(`am: note: still starting (pid ${pf.pid}) — waiting`);
+    await awaitStarted({
+      appId,
+      pid: pf.pid,
+      declared: pf.port > 0 ? pf.port : undefined,
+      port: pf.port,
+      flags: attach,
       mode,
-    );
-    await killProcess(pf.pid, undefined, pf);
-    removePid(appId, pf);
-    return;
+    });
+    Deno.exit(0);
   }
 
   // status='started' — verify it's actually responding
@@ -333,13 +389,23 @@ export function detachedSpawnSpec(
     };
   }
   const esc = (v: string) => "'" + v.replace(/'/g, "'\\''") + "'";
+  const run = `nohup ${esc(denoBin)} ${denoArgs.map(esc).join(" ")} >${
+    esc(logFile)
+  } 2>&1`;
   return {
     cmd: "sh",
     args: [
       "-c",
-      `nohup ${esc(denoBin)} ${denoArgs.map(esc).join(" ")} >${
-        esc(logFile)
-      } 2>&1 & echo $!`,
+      // Its OWN SESSION, not just nohup. nohup only ignores SIGHUP; the child
+      // still sat in the caller's process group, so any runner that ends a
+      // command by killing its group — CI steps, agent harnesses, a `timeout`
+      // wrapper — took the app with it the moment `am start` returned (field
+      // report cc §7: 4.5 minutes lost to an app that "kept dying").
+      // `setsid` (util-linux, BusyBox) calls setsid(2) and execs IN PLACE when
+      // the caller is not a group leader — a `sh -c` background job never is —
+      // so `$!` is still the deno PID am records. Where there is no setsid
+      // binary (macOS), nohup alone is what there was.
+      `if command -v setsid >/dev/null 2>&1; then setsid ${run} & else ${run} & fi; echo $!`,
     ],
   };
 }
@@ -437,6 +503,11 @@ export async function cmdUi(
 export async function cmdStart(
   args: string[],
   flags: GlobalFlags,
+  /** `reusePort`: the port this app bound LAST time (a restart) — used when
+   *  nothing declares one and it is still free, so a restart does not move
+   *  the app and kill every open tab. Never recorded: a later restart asks
+   *  the same question again, and a taken port falls back to a free one. */
+  opts?: { reusePort?: number },
 ): Promise<void> {
   const mode = detectMode(flags);
 
@@ -500,10 +571,22 @@ export async function cmdStart(
   // disagree about the same app, and made `am start` refuse over a port the app
   // was never going to bind.
   const declared = declaredPort(flags.port);
-  const port = declared ?? 0; // 0 = "not decided yet", for the placeholder lock
+  let reused: number | undefined;
+  if (declared === undefined && opts?.reusePort) {
+    if (await isPortInUse(opts.reusePort)) {
+      console.error(
+        `am: note: port ${opts.reusePort} (the one this app bound before) ` +
+          `is taken now — the app picks a free one`,
+      );
+    } else reused = opts.reusePort;
+  }
+  // 0 = "not decided yet", for the placeholder lock
+  const port = declared ?? reused ?? 0;
 
-  // Clean up stuck/zombie instances before acquiring lock
-  await ensureSingleton(appId, mode);
+  // Clean up stuck/zombie instances before acquiring lock — or ATTACH to one
+  // that is still booting (this returns only when there is nothing to attach
+  // to; see ensureSingleton).
+  await ensureSingleton(appId, mode, flags);
 
   // `--home=<dir>` TARGETS an instance that is already running from that data
   // home (docs/clients/app-manager.md: "Target the instance of the app running
@@ -620,10 +703,13 @@ export async function cmdStart(
   // fail FAST with the fix instead (a field report). The
   // effective client is the --client override, else the app's declared target.
   let gui = false;
+  /** The client this launch runs, when known: `--client=` first, else the
+   *  app's declared one. `undefined` = the framework default (a browser). */
+  let effective: string | undefined;
   {
     const clientArg = passthrough.find((a) => a.startsWith("--client="))
       ?.slice(9);
-    let effective = clientArg;
+    effective = clientArg;
     if (!effective) {
       try {
         const dj = ((await readDenoJson(projectRoot()))?.config ?? {}) as {
@@ -653,16 +739,18 @@ export async function cmdStart(
   ) {
     passthrough.push(`--transport=${flags.transport}`);
   }
-  // Deno-runtime flags before the entry script; app flags after it (see
-  // buildDenoArgs) — a misplaced --env-file is silently ignored by Deno.
-  const denoArgs = buildDenoArgs(entry, passthrough);
-
   // Record the launch so `am restart` can replay it — the running app can't
   // recover deno-runtime flags (esp. --env-file) from its own Deno.args.
   // The PROJECT root, not the cwd: `am start` from a subdirectory launches
   // the app the way `deno task dev` at the root would, and records that.
+  // Recorded BEFORE a reused port joins: that port is this restart's answer,
+  // not the app's declaration.
   const cwd = projectRoot();
-  writeLaunchInfo(appId, { flags: passthrough, entry, cwd });
+  writeLaunchInfo(appId, { flags: [...passthrough], entry, cwd });
+  if (reused !== undefined) passthrough.push(`--port=${reused}`);
+  // Deno-runtime flags before the entry script; app flags after it (see
+  // buildDenoArgs) — a misplaced --env-file is silently ignored by Deno.
+  const denoArgs = buildDenoArgs(entry, passthrough);
 
   // Detached background spawn — the child must survive am's exit, its output
   // must land in the log file, and its real PID must come back on stdout. The
@@ -681,6 +769,12 @@ export async function cmdStart(
     ),
     gui,
     interactive: amIsInteractive(),
+    inheritedDisplay: Deno.env.get("DISPLAY"),
+    inheritedXauthority: Deno.env.get("XAUTHORITY"),
+    // A client that never opens a tab gets no "tabs suppressed" note — the
+    // note is about what WOULD have happened, and for server-only nothing
+    // would (a hunter read it as "my server-only app tried to open a tab").
+    tabs: clientOpensTabs(effective),
   });
   if (plan.note) {
     // The level is part of the message, not decoration: "note:" is what
@@ -756,7 +850,7 @@ export async function cmdStart(
       `${appId} did not start — the child (pid ${pid}) exited immediately.\n` +
         (tail
           ? `  it said:\n${
-            tail.split("\n").slice(-8).map((l) => `      ${l}`).join("\n")
+            crashTail(tail).map((l) => `      ${l}`).join("\n")
           }\n`
           : `  it wrote nothing to ${logFile}\n`) +
         (missingLink
@@ -800,6 +894,27 @@ export async function cmdStart(
   };
   if (!childLock || childLock.pid !== pid) writeLock(lockData);
 
+  await awaitStarted({ appId, pid, declared, port, flags, mode });
+}
+
+/** Wait for `pid` — a child `am start` just spawned, or a booting instance it
+ *  attached to — to answer, then print the verdict: `started` (returns), a
+ *  crash (exit 1, with what the log said), or the truth about a wait that ran
+ *  out (exit 1): alive but nothing listening yet is STILL STARTING, not "not
+ *  responding" — the fault-shaped wording sent readers hunting a fault in an
+ *  app that was 10 s into a 15 s boot while `am status` said `starting`. */
+async function awaitStarted(o: {
+  appId: string;
+  pid: number;
+  /** The port declared (or reused by a restart) — probed from the first
+   *  tick; `undefined` = read it from the child's own lock. */
+  declared: number | undefined;
+  /** The placeholder lock's port (0 = none), the report's last fallback. */
+  port: number;
+  flags: GlobalFlags;
+  mode: import("./am-types.ts").OutputMode;
+}): Promise<void> {
+  const { appId, pid, declared, port, flags, mode } = o;
   // ── `am start` WAITS by default ──
   //
   // It used to return the instant the child was spawned, with
@@ -831,15 +946,36 @@ export async function cmdStart(
   }
 
   // Probe health until started or timeout (`--wait=<seconds>` overrides).
-  const timeout = (flags.wait || 10) * 1000;
+  let timeout = (flags.wait || 10) * 1000;
   let healthy = false;
-  const deadline = Date.now() + timeout;
+  const startedAt = Date.now();
+  let deadline = startedAt + timeout;
+  let slowStart: string | null = null;
   // The port to probe is whatever the CHILD bound, which it records in its own
   // lock — the only honest source when nothing was declared.
   let livePort = declared;
   while (Date.now() < deadline) {
     await new Promise((r) => setTimeout(r, POLL_INTERVAL_MS));
     if (!isProcessAlive(pid)) break; // died early
+    // A FIRST run downloads the Electron runtime (~100 MB, once per machine)
+    // before the app can answer at all — 15 s on a fast line, minutes on a
+    // slow one. `am start` gave up at 10 s with exit 1 and "not responding";
+    // the window appeared seconds later, and an agent, reading exit 1 as
+    // failure, started it AGAIN (cc §6). The child's own log says when that
+    // is what it is doing; wait for it — bounded, announced, and only when
+    // no explicit `--wait` was given (an explicit number is the caller's).
+    if (slowStart === null && !flags.wait) {
+      slowStart = slowStartReason(readLogTail(stdoutLogPath(appId)));
+      if (slowStart) {
+        timeout = SLOW_START_WAIT_MS;
+        deadline = startedAt + timeout;
+        console.error(
+          `am: note: ${slowStart} — waiting up to ${
+            SLOW_START_WAIT_MS / 1000
+          }s for it (--wait=N to change)`,
+        );
+      }
+    }
     if (livePort === undefined) {
       const written = readPid(appId); // our own child's lock — see above
       // A SOCKET-ONLY app never binds a port, and `port: 0` is falsy — so
@@ -889,39 +1025,168 @@ export async function cmdStart(
     );
   } else if (!isProcessAlive(pid)) {
     removePid(appId); // our own child's placeholder, under our own home
-    let reason = "";
-    try {
-      const log = Deno.readTextFileSync(stdoutLogPath(appId));
-      const lines = log.split("\n");
-      const errLine = lines.findLast((l) =>
-        l.includes("Error:") || l.includes("[ERROR]")
-      );
-      if (errLine) {
-        reason = errLine
-          // deno-lint-ignore no-control-regex
-          .replace(/\x1b\[[0-9;]*m/g, "") // strip ANSI
-          .replace(/^error:\s*(Uncaught\s*(\(in promise\)\s*)?)?/i, "") // strip Deno wrapper
-          .trim();
-      }
-    } catch { /* no log */ }
+    // What it said — the `error:` line and the `→ fix:` lines under it, not
+    // the last lines of the log (the stack frames, so the one line that says
+    // what to do was the first to be cut).
+    const said = crashTail(readLogTail(stdoutLogPath(appId)));
     outError(
-      reason || `process crashed — check ${stdoutLogPath(appId)}`,
+      said.length
+        ? `${appId} did not start — the child (pid ${pid}) exited.\n` +
+          `  it said:\n${said.map((l) => `      ${l}`).join("\n")}\n` +
+          `  full log: ${stdoutLogPath(appId)}`
+        : `process crashed — check ${stdoutLogPath(appId)}`,
       mode,
     );
     Deno.exit(1);
   } else {
-    // Timed out but process alive — leave lock at 'starting'.
-    // Name the door we actually knocked on. `port` is am's own placeholder and
-    // reads 0 for the socket-only desktop shape, so the old wording — "not
-    // responding on port 0" — sent a reader looking for a port that never
-    // existed, and said nothing about the socket that did.
+    // Timed out but process alive — leave lock at 'starting'. Two different
+    // truths, told apart by whether anything is LISTENING:
+    //  · nothing bound yet → it is still starting. Not a fault: `am status`
+    //    says `starting` (exit 2) and a cold start may need a longer wait.
+    //  · bound but not answering → "not responding", naming the door we
+    //    knocked on (`port` is am's placeholder and reads 0 for the
+    //    socket-only desktop shape — "not responding on port 0" sent a
+    //    reader after a port that never existed).
+    const lock = readPid(appId);
+    const socketOnly = !!lock?.socketPath && !lock.port;
+    const doorPort = lock?.port || livePort;
+    const bound = socketOnly
+      ? await isSocketAlive(lock!.socketPath!)
+      : doorPort
+      ? await isPortInUse(doorPort)
+      : false;
+    const secs = timeout / 1000;
     outError(
-      `not responding ${waitedAt(readPid(appId), livePort)} after ${
-        timeout / 1000
-      }s — check am status`,
+      bound
+        ? `not responding ${waitedAt(lock, livePort)} after ${secs}s — ` +
+          `pid ${pid} is listening but did not answer — check am status ` +
+          `and ${stdoutLogPath(appId)}`
+        : stillStartingMessage(
+          secs,
+          pid,
+          socketOnly ? "socket" : doorPort ? doorPort : null,
+        ),
       mode,
     );
     Deno.exit(1);
+  }
+}
+
+/** The timeout message for a child that is alive but not listening yet.
+ *  `door`: "socket" (a socket-only app), the declared port, or null (none
+ *  chosen yet). Pure — the wording is pinned by a test. */
+export function stillStartingMessage(
+  secs: number,
+  pid: number,
+  door: "socket" | number | null,
+): string {
+  const what = door === "socket"
+    ? "its socket is not up yet"
+    : door
+    ? `port ${door} not bound yet`
+    : "no port yet";
+  return `still starting after ${secs}s (pid ${pid} alive, ${what}) — ` +
+    `am status follows it (exit 2 = transitional); a cold start may need ` +
+    `--wait=60`;
+}
+
+/** What a crashed child SAID, for `am start`'s report: ANSI stripped, stack
+ *  frames (`    at …`) and caret lines dropped, and — when the log has an
+ *  `error:` line — starting FROM it, so the `→ fix:` lines a teachable error
+ *  carries are the ones shown. The last eight raw lines used to be taken, and
+ *  a ten-frame stack is longer than eight lines: the line that said what to
+ *  do was exactly the one cut off. Pure. */
+export function crashTail(log: string, n = 8): string[] {
+  const lines = log
+    // deno-lint-ignore no-control-regex
+    .replace(/\x1b\[[0-9;]*m/g, "") // the child's colours are not ours
+    .split("\n")
+    .map((l) => l.trimEnd())
+    .filter((l) => !/^\s*at\s/.test(l) && !/^\s*[\^~]+\s*$/.test(l));
+  while (lines.length && lines.at(-1) === "") lines.pop();
+  const errAt = lines.findLastIndex((l) =>
+    /^\s*error\b/i.test(l) || l.includes("[ERROR]")
+  );
+  return errAt >= 0 ? lines.slice(errAt, errAt + n) : lines.slice(-n);
+}
+
+/** Is a `starting` lock whose owner is alive but has bound nothing STUCK, or
+ *  merely slow? Stuck = the lock is older than `STUCK_STARTING_MS` AND the
+ *  app's own stdout log (its progress) has not moved for as long — a boot
+ *  that is still printing is a boot. `logMtime` null = no log at all. Pure. */
+export function bootStalled(
+  lockStartedAt: number,
+  logMtime: number | null,
+  now: number = Date.now(),
+  stuckMs: number = STUCK_STARTING_MS,
+): boolean {
+  if (now - lockStartedAt < stuckMs) return false;
+  return logMtime === null || now - logMtime >= stuckMs;
+}
+
+/** A file's mtime in epoch ms, or null when it cannot be read. */
+function logMtime(path: string): number | null {
+  try {
+    return Deno.statSync(path).mtime?.getTime() ?? null;
+  } catch {
+    // aio-ok: no log is a fact `bootStalled` handles ("no progress"), not an
+    // error — the lock's own age still decides.
+    return null;
+  }
+}
+
+/** Whether a client can hand a URL to the desktop's browser at all. Only
+ *  `server-only` and `cli` cannot; everything else (browser, electron's
+ *  external links, the framework default) can. Pure, pinned by a test. */
+export function clientOpensTabs(client: string | undefined): boolean {
+  return client !== "server-only" && client !== "cli";
+}
+
+/** How long `am start` waits when the child's log shows a first-run download
+ *  in progress. Generous on purpose: a 100 MB fetch on a slow line is minutes,
+ *  and the alternative is exit 1 for an app that is about to be fine. */
+export const SLOW_START_WAIT_MS = 180_000;
+
+/** Why a boot may legitimately take longer than the default wait, read from
+ *  the child's log — or null when nothing in it says so. Pure, so the rule is
+ *  testable without a spawn. Today one reason exists: the Electron runtime
+ *  download (`downloading runtime <v> for <slug> (~100 MB, once per machine)…`,
+ *  src/electron/electron-runtime-fetch.ts) that has not yet reported
+ *  `runtime … — cached` or failed. @internal */
+export function slowStartReason(log: string): string | null {
+  const at = log.lastIndexOf("downloading runtime ");
+  if (at < 0) return null;
+  const after = log.slice(at);
+  // Finished (cached) or failed since — the download is no longer the reason.
+  if (/— cached|could not download|Error:|\[ERROR\]/.test(after)) return null;
+  return "first run: the app is downloading the Electron runtime (~100 MB, " +
+    "once per machine)";
+}
+
+/** The last 64 KB of a log, or "" when it cannot be read — a probe, not a
+ *  requirement: no log means no reason to wait longer. */
+function readLogTail(path: string): string {
+  try {
+    const st = Deno.statSync(path);
+    const f = Deno.openSync(path);
+    try {
+      const from = Math.max(0, st.size - 65536);
+      f.seekSync(from, Deno.SeekMode.Start);
+      const buf = new Uint8Array(st.size - from);
+      let got = 0;
+      while (got < buf.length) {
+        const n = f.readSync(buf.subarray(got));
+        if (n === null) break;
+        got += n;
+      }
+      return new TextDecoder().decode(buf.subarray(0, got));
+    } finally {
+      f.close();
+    }
+  } catch {
+    // aio-ok: no log yet, or none readable — "nothing says the boot is slow"
+    // is the answer, and the default wait applies.
+    return "";
   }
 }
 
@@ -1705,6 +1970,14 @@ async function restartApp(
   }
 
   let unsaved: string | undefined;
+  // The port the app bound LAST time — reused when nothing declares one and
+  // it is still free, so a restart keeps the address a human's tab (and an
+  // agent's script) is pointed at. `deno task dev` keeps its port across a
+  // restart; `am restart` moved the app to a new free one (55095 → 51159,
+  // measured) and every open tab died with it.
+  const lastPort = pf && running && t.kind === "target" && pf.port > 0
+    ? pf.port
+    : undefined;
   if (pf && running && t.kind === "target") {
     const port = pf.port;
     // Stop must complete before start — force --wait internally. `stopOne`
@@ -1747,7 +2020,11 @@ async function restartApp(
       } // connection refused = port free
     }
   }
-  await cmdStart(launchArgs, flags);
+  await cmdStart(
+    launchArgs,
+    flags,
+    lastPort !== undefined ? { reusePort: lastPort } : undefined,
+  );
   return unsaved === undefined ? { appId } : { appId, unsaved };
 }
 

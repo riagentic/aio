@@ -5,7 +5,12 @@
 // and the convention every other CLI follows did nothing here. The rule:
 // colour is decoration — turning it off changes no character of the message.
 import { assert, assertEquals, assertStringIncludes } from "@std/assert";
-import { ansi, colorEnabled, paint } from "../src/diagnostics/color.ts";
+import {
+  ansi,
+  colorEnabled,
+  forceColorOn,
+  paint,
+} from "../src/diagnostics/color.ts";
 import { formatText } from "../src/diagnostics/logger-format.ts";
 
 const ESC = "\x1b[";
@@ -131,4 +136,24 @@ Deno.test("no-color: the helpers agree with the flag", () => {
       msg: "boom",
     }).includes(ESC),
   );
+});
+
+Deno.test("no-color: FORCE_COLOR=false is off, not on", async () => {
+  // The same hosts spell it `false` as often as `0`; a check that only knew
+  // `"0"` read `FORCE_COLOR=false` as "force colour ON" — the opposite of
+  // what the word says, on every piped `am help | grep`.
+  const piped = await run({ FORCE_COLOR: "false", NO_COLOR: "" }, PRINT_LINE);
+  assert(
+    !piped.includes(ESC),
+    `FORCE_COLOR=false must be plain on a pipe, got: ${piped}`,
+  );
+});
+
+Deno.test("no-color: the FORCE_COLOR reading is one rule", () => {
+  for (const off of ["0", "false", "False", "FALSE", "", "  "]) {
+    assertEquals(forceColorOn(off), false, `FORCE_COLOR=${off} is off`);
+  }
+  for (const on of ["1", "true", "2", "yes", "3"]) {
+    assertEquals(forceColorOn(on), true, `FORCE_COLOR=${on} forces on`);
+  }
 });

@@ -249,3 +249,42 @@ testCell(
     t.destroy();
   },
 );
+
+// ── The refusal names WHAT and WHO, and the in-testCell fix ─────────────────
+//
+// The message said "a schedule effect (schedule.after / every / at / cron)
+// reached the root cell executor" — no kind, no id, no method, `cancel` not
+// even in the list, and the only fix offered was `bootCells`. The fix that
+// keeps the test in `testCell` — READ the effect, which is asserting on it —
+// was not mentioned, and cost a field report two red runs (h3 F6).
+Deno.test("the refusal names the method, the effect kind + id, and BOTH fixes", async () => {
+  const { ok, text } = await runChildTest(
+    `import { cell } from "__ROOT__src/state/cell.ts";\n` +
+      `import { testCell } from "__ROOT__src/testing/cell-test.ts";\n` +
+      `import { schedule } from "__ROOT__src/state/schedule.ts";\n` +
+      `import { self } from "__ROOT__src/state/self.ts";\n` +
+      `const timer = cell("timer", {\n` +
+      `  state: { n: 0 },\n` +
+      `  methods: {\n` +
+      `    start(s) { s.$do(schedule.every("timer:tick", 1000, self("tick"))); },\n` +
+      `    pause(s) { s.$do(schedule.cancel("timer:tick")); },\n` +
+      `    tick(s) { s.n++; },\n` +
+      `  },\n` +
+      `});\n` +
+      `testCell(timer, "pause emits a cancel nobody reads", async (t) => {\n` +
+      `  t.send.start();\n` +
+      `  t.expect.effects(["__schedule"]);\n` +
+      `  t.send.pause();\n` +
+      `  await t.settle();\n` +
+      `});\n`,
+  );
+  assert(!ok, `the child test PASSED with an unread cancel:\n${text}`);
+  assertStringIncludes(
+    text,
+    `\`timer:pause\` emitted schedule.cancel("timer:tick") that no assertion observed`,
+  );
+  assertStringIncludes(text, `t.expect.effects(["__schedule"])`);
+  assertStringIncludes(text, "t.getEffects()");
+  assertStringIncludes(text, "bootCells");
+  assertStringIncludes(text, "h.advance(ms)");
+});

@@ -134,6 +134,21 @@ async function bindImportedCells(file: string): Promise<void> {
   }
 }
 
+/** The refusal for a `--export=Name` that is not there — plus the way in when
+ *  the module's component IS its default export. The raw list said
+ *  `components exported here: default`, and `--export=default` is a spelling
+ *  nobody guesses: `--export=App` on an `export default function App` was
+ *  refused with a list that named the very thing they wanted, under a name
+ *  they could not see how to type. Pure; the renderer's text is untouched. */
+export function previewExportRefusal(error: string): string {
+  const m = /components exported here: (.+)$/m.exec(error);
+  if (!m) return error;
+  const names = m[1]!.split(",").map((n) => n.trim());
+  if (!names.includes("default")) return error;
+  return `${error}\n  → fix: the default export needs no flag ` +
+    `(am preview <file>), or name it: --export=default`;
+}
+
 /** `am preview <file> [--export=Name] [--props=JSON]` */
 export async function cmdPreview(
   args: string[],
@@ -183,7 +198,7 @@ export async function cmdPreview(
     props: props.props,
   });
   if (!rendered.ok) {
-    outError(`am preview: ${rendered.error}`, mode);
+    outError(`am preview: ${previewExportRefusal(rendered.error)}`, mode);
     Deno.exit(1);
   }
   const roots = (rendered.roots ?? []) as UISurfaceNode[];

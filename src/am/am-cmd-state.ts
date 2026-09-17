@@ -436,6 +436,7 @@ export function envelopeJsonPayload(type: string, value: unknown): unknown {
 export const DISPATCH_USAGE = `usage: am dispatch <cell:method> [args…]
   am dispatch conn:setHost 192.168.1.9            positional args (no '=') → setHost("192.168.1.9")
   am dispatch conn:setHost --args='["192.168.1.9"]'   the same, JSON-exact (use when a value contains '=' or must keep its type)
+  am dispatch conn:import --args=@rows.json     the argument list from a FILE (--args=- reads stdin; --body takes both too) — for a payload too big for the command line
   am dispatch conn:configure host=h port=8000     named pairs → configure({host:"h", port:8000})
   am dispatch Increment by=1                      a plain (non-cell) action → payload {by:1}
   am dispatch Increment --body='{"by":1}'         --body after a type is that action's PAYLOAD
@@ -477,6 +478,49 @@ export function argsFlagAsPositional(
     `  did you mean: am dispatch ${type} --args=${inner}\n` +
     `  or, to pass that object as a real argument: ` +
     `am dispatch ${type} --args='[${rest[at]}]'`;
+}
+
+/** Where a `--args` / `--body` value really lives.
+ *
+ *  `--args='<300 KB>'` cannot be spawned at all — the kernel refuses an argv
+ *  entry that long — so a big payload had no spelling. `@path` reads it from a
+ *  file and `-` from stdin. Additive: neither is valid JSON for an argument
+ *  list or an envelope, so no working command changes meaning. `readStdin` is
+ *  injectable for tests. */
+export async function readFlagPayload(
+  value: string | undefined,
+  flag: "--args" | "--body",
+  readStdin: () => Promise<string> = () =>
+    new Response(Deno.stdin.readable).text(),
+): Promise<
+  { ok: true; value: string | undefined } | { ok: false; error: string }
+> {
+  if (value === "-") {
+    try {
+      return { ok: true, value: await readStdin() };
+    } catch (e) {
+      return {
+        ok: false,
+        error: `${flag}=- could not read stdin: ${
+          e instanceof Error ? e.message : String(e)
+        }`,
+      };
+    }
+  }
+  if (value !== undefined && value.startsWith("@")) {
+    const path = value.slice(1);
+    try {
+      return { ok: true, value: await Deno.readTextFile(path) };
+    } catch (e) {
+      return {
+        ok: false,
+        error: `${flag}=@${path}: cannot read that file (${
+          e instanceof Error ? e.message : String(e)
+        }) — @<path> reads the JSON from a file, - from stdin`,
+      };
+    }
+  }
+  return { ok: true, value };
 }
 
 /** Parse `--args` — a JSON ARRAY of positional arguments for a cell method.
@@ -548,6 +592,19 @@ export async function cmdDispatch(
     explicit: flags.app !== undefined,
   });
 
+  // `@path` / `-` → the value itself, before anything reads it. A copy of the
+  // flags, so the hint below (`argsShapeHint`) sees the JSON actually sent.
+  for (
+    const [k, flag] of [["jsonArgs", "--args"], ["jsonBody", "--body"]] as const
+  ) {
+    const r = await readFlagPayload(flags[k], flag);
+    if (!r.ok) {
+      outError(r.error, mode);
+      Deno.exit(1);
+      return;
+    }
+    if (r.value !== flags[k]) flags = { ...flags, [k]: r.value };
+  }
   let action: unknown;
   if (flags.jsonArgs !== undefined) {
     // `--args` IS the whole argument list, so anything else that also carries
@@ -928,7 +985,27 @@ export async function cmdMigrations(
   _args: string[],
   flags: GlobalFlags,
 ): Promise<void> {
-  const ctx = amCtx(flags);
+  // A RUNNING app answers this. The app most likely to be asked about is the
+  // one a dev boot just REFUSED over shape drift — which is not running, so
+  // the bare "does not know which app to target" read as a wrong app name.
+  const offline = (why: string, mode: ReturnType<typeof detectMode>) => {
+    outError(
+      `${why} — \`am migrations\` needs a running app. A dev boot that ` +
+        `refused over shape drift ("persist: REFUSING to boot") already ` +
+        `printed the same picture: the drifted fields per cell and the way out.`,
+      mode,
+    );
+    Deno.exit(1);
+  };
+  let ctx: ReturnType<typeof amCtx>;
+  try {
+    ctx = amCtx(flags);
+  } catch (e) {
+    return offline(
+      e instanceof Error ? e.message : String(e),
+      detectMode(flags),
+    );
+  }
   const r = await trojanGet(ctx.port, "migrations", ctx.appId);
   if (!r.ok) {
     outError(r.error, ctx.mode);

@@ -47,7 +47,10 @@ export interface Removal {
   /** How the removed spelling is found in an app's SOURCE (code only — see
    *  `removalsInSource`). A cell-config key needs none (`key:` is the
    *  pattern); an API shape names its own. Absent = not textually findable
-   *  (the type-checker or the CLI refuses it instead). */
+   *  (the type-checker or the CLI refuses it instead). A pattern that can
+   *  also spell an app's OWN name (`appVersion:`, `type Action`) needs a
+   *  SITE as well — `API_SITES` in removals.ts — or `am pin` refuses a
+   *  correct app. */
   readonly pattern?: RegExp;
   /** The spelling that replaced it — set when the removal is a RENAME, so a
    *  surface can say "spelled `x` now" in five words. */

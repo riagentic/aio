@@ -18,7 +18,9 @@ import {
   type UISurfaceNode,
 } from "./ui-surface.ts";
 import {
+  takesCharacters,
   triggerAction,
+  triggerAssign,
   triggerChar,
   triggerClear,
   triggerDragTo,
@@ -155,6 +157,13 @@ const settle = () => new Promise((r) => setTimeout(r, 60));
  *  window is not a gesture a user can make, and silently accepting one would
  *  report ok for an interaction that did nothing. */
 const WINDOW_PATH = "window";
+
+/** The path the previous request CLEARED. `am trigger … setValue` is sent as
+ *  `clear` then `type`; for a whole-value control (date, color, range) a
+ *  character stream does not exist, so that pair is applied as ONE
+ *  assignment — exactly what testUI's `setValue()` does. A bare `type` on such
+ *  a control still refuses, as it does in testUI. */
+let _clearedPath: string | null = null;
 const KEY_ACTIONS = new Set(["press", "keyDown", "keyUp"]);
 
 /** The document to dispatch a window-level event on. Dispatching on the
@@ -179,6 +188,8 @@ export async function runUITrigger(
   req: UITriggerRequest,
 ): Promise<UITriggerResult> {
   const base = { path: req.path, action: req.action };
+  const cleared = _clearedPath;
+  _clearedPath = null;
   try {
     if (req.path === WINDOW_PATH) {
       if (!KEY_ACTIONS.has(req.action)) {
@@ -216,7 +227,12 @@ export async function runUITrigger(
         available: [WINDOW_PATH, ...allPaths()],
       };
     }
-    if (req.action === "type") {
+    if (
+      req.action === "type" && cleared === req.path &&
+      !takesCharacters(info._el)
+    ) {
+      triggerAssign(info._el, req.text ?? "");
+    } else if (req.action === "type") {
       (info._el as HTMLElement).focus?.();
       let typed = 0;
       for (const ch of req.text ?? "") {
@@ -242,6 +258,7 @@ export async function runUITrigger(
       triggerSelect(info._el, req.text ?? "");
     } else if (req.action === "clear") {
       triggerClear(info._el);
+      _clearedPath = req.path;
     } else if (req.action === "check" || req.action === "uncheck") {
       // ONE guard, shared with testUI: `el.checked` is `undefined` on a
       // <button>, so the old `el.checked !== want` comparison clicked anything

@@ -61,11 +61,13 @@ export const CREATE_FLAGS: readonly string[] = [
 ];
 
 export const HELP_TEXT = `If you are an AI agent, start here:
-  agent                   THE BRIEF — how aio works, the verbs, and the four
-                          rules that protect the user (never kill apps by
-                          process match, never open windows on their desktop,
-                          never script around am, learn before editing). One
-                          command, no docs to open.
+  agent                   THE BRIEF (Markdown) — how aio works, the verbs, and
+                          the seven rules that protect the user (never kill
+                          apps by process match, never open windows on their
+                          desktop, never script around am, learn before
+                          editing, check → run → test, type not interface, the
+                          repair verbs). One command, no docs to open.
+                          --min (small context) · default page · --max (all);
                           --task=<slug> for one section, --list for the index.
 
 Onboard:

@@ -189,6 +189,7 @@ a value of the wrong type into your state.
 | **renamed** it                     | remove + add — the old value is **lost** unless you migrate it |
 | nested object                      | same rules, field by field, at every depth                     |
 | `state: { byId: {} }`              | an empty object means "dictionary" — every stored key is kept  |
+| a method `delete`d a declared key  | it comes back with its **default** — write `null` to clear one |
 
 Nothing is guessed: a rename is indistinguishable from a delete-plus-add, so aio
 does not try to match them up. Carry the value across yourself with `version` +
@@ -266,19 +267,31 @@ gate — so this is hard to half-do.
 The same shape works for an array (`state.items.forEach(…)`) and for a nested
 collection (walk down, then across).
 
-`am migrations` shows each cell's declared vs stored version, what the last
-boot's migration pass did, and any **shape drift** — a field still in storage
-that the current `state` no longer declares. Boot warns about drift too, so a
-rename you forgot to migrate is visible before a user reports it.
+`am migrations` shows a running app's declared vs stored version per cell, what
+the last boot's migration pass did, and any **shape drift** — a field still in
+storage that the current `state` no longer declares. It needs a running app: a
+dev boot REFUSES over unmigrated drift, and that refusal prints the same picture
+— the drifted fields per cell, where the data is, and the ways out (including
+`am start --instance=<name>`, which runs the new build against a private, empty
+data home and leaves the refused data untouched). Production boots and warns
+instead, so a rename you forgot to migrate is visible before a user reports it.
 
 Boot also says the **safe** case out loud:
 
 ```
-state shape: 1 new field(s), no migration needed — cfg.retries (number).
-A field the stored data does not have is filled from `state:`, so adding one
-is safe on its own. (Renaming or removing one is not — that is the
+state shape: 1 declared field(s) not in the stored data, filled from `state:`
+— no migration needed — cfg.retries (number). Either the field is new in this
+build (adding one is safe on its own), or a method deleted it — a deleted
+declared key always comes back with its default (write null to clear one).
+(Renaming or removing a field from `state:` is not safe — that is the
 "shape drift" line.)
 ```
+
+The two writes that the next boot would undo are said **when they happen**, in
+dev and production, once per path, naming the method: a `delete` of a declared
+key (`state write: … deleting a declared key does not survive a restart`), and a
+key added under an object `state:` declares with keys
+(`state write: … does not declare "y" under that (closed) object`).
 
 Adding a field really is safe — stored data without it deep-merges and the
 declared value fills the gap — but you should not have to work that out from

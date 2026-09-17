@@ -13,7 +13,11 @@ import { parseNumArg } from "./am-utils.ts";
 import type { CdpSession } from "../media/cdp.ts";
 import type { VideoFormat } from "../media/chunks.ts";
 import { videoFormatOf } from "../media/encoder.ts";
-import { encodeRecording, recordScreencast } from "../media/screencast.ts";
+import {
+  encodeRecording,
+  type RecordedFrame,
+  recordScreencast,
+} from "../media/screencast.ts";
 
 /** What `--video` asked for. */
 export type ShotVideo = {
@@ -103,6 +107,25 @@ export function shotVideoOptions(
   return { ok: true, value: { path, format, durationMs } };
 }
 
+/** `Page.startScreencast` sends one frame as it starts (measured ~33 ms in),
+ *  whether or not anything painted: the picture the start screenshot already
+ *  shows. A frame this early is that one, not a paint. */
+const INITIAL_FRAME_US = 200_000;
+
+/** Pure: did the window send no picture after the first — one still for the
+ *  whole recording? `frames[0]` is the start screenshot; the screencast's own
+ *  initial frame is not counted. Counting it made the documented warning
+ *  impossible: a never-changing window always had two frames. */
+export function isStillRecording(
+  frames: readonly RecordedFrame[],
+  endUs: number,
+): boolean {
+  if (endUs < 1_500_000) return false;
+  const paints = frames.slice(1);
+  if (paints[0] && paints[0].us < INITIAL_FRAME_US) paints.shift();
+  return paints.length === 0;
+}
+
 /** Resolves on Ctrl-C / SIGTERM / the duration; `dispose` removes the
  *  listeners and the timer so the CLI can exit. */
 function stopSignal(durationMs: number | null) {
@@ -166,13 +189,13 @@ export async function recordShotVideo(
       Deno.exit(1);
     }
     const seconds = rec.endUs / 1e6;
-    const still = rec.frames.length === 1 && seconds >= 1.5;
+    const still = isStillRecording(rec.frames, rec.endUs);
     say(`encoding ${rec.frames.length} frame(s), ${seconds.toFixed(1)}s…`);
     const started = Date.now();
     const done = await encodeRecording(cdp, rec, opts.format);
     await Deno.writeFile(opts.path, done.bytes);
     const warning = still
-      ? `the window sent no frame after the first — nothing changed on ` +
+      ? `the window painted nothing after the first frame — nothing changed on ` +
         `screen, or it is hidden, minimised or occluded (a window that is not ` +
         `composited paints nothing). The video is one still picture.`
       : undefined;
