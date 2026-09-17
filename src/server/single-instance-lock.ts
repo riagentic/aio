@@ -19,6 +19,14 @@ import { inheritedWorkerAppId } from "./cell-worker-protocol.ts";
  *  killed every app that was still booting. */
 export const STARTUP_GRACE_MS = 10_000;
 
+/** How long a `status:"starting"` lock whose owner is ALIVE but has bound
+ *  nothing may go without any progress before `am start` may reclaim it. Past
+ *  `STARTUP_GRACE_MS` a booting app is not a stuck one — a 15 s boot was
+ *  killed at 10.4 s by the next `am start`, and every retry killed the next
+ *  one (an agent re-running on exit 1 killed the app forever). "Progress" is
+ *  the app's own stdout log still moving; see `bootStalled` in am. */
+export const STUCK_STARTING_MS = 5 * STARTUP_GRACE_MS;
+
 // ── Types ────────────────────────────────────────────────────
 
 /** Unified lock file — replaces both .aio.lock and .aio.pid */
@@ -839,6 +847,23 @@ export class AppLock {
       AppLock._sigtermHandler = onTerm;
       Deno.addSignalListener("SIGTERM", onTerm);
     } catch { /* unsupported on windows */ }
+    // SIGXFSZ: a write past RLIMIT_FSIZE (`ulimit -f`, a container limit).
+    // Its default action is terminate + core dump, so the first persist that
+    // grew state.db or the journal past the limit killed the app outright —
+    // no PERSIST_ERROR, no shutdown phases, no final persist, the lock left
+    // behind. Listening (a no-op) turns it into EFBIG ("File too large") on
+    // the write itself, which the persist path already reports, and the app
+    // stays up. POSIX only — Windows has no such signal.
+    if (Deno.build.os !== "windows") {
+      try {
+        AppLock._sigxfszHandler = () => {};
+        Deno.addSignalListener("SIGXFSZ", AppLock._sigxfszHandler);
+      } catch {
+        // aio-ok: a runtime that refuses the listener keeps the kernel
+        // default — the behaviour before this existed, nothing worse.
+        AppLock._sigxfszHandler = undefined;
+      }
+    }
   }
 
   /** Unregister signal handlers to prevent listener leaks (e.g. in tests). */
@@ -856,8 +881,16 @@ export class AppLock {
       AppLock._sigtermHandler &&
         Deno.removeSignalListener("SIGTERM", AppLock._sigtermHandler);
     } catch { /* already removed or unsupported */ }
+    try {
+      AppLock._sigxfszHandler &&
+        Deno.removeSignalListener("SIGXFSZ", AppLock._sigxfszHandler);
+    } catch {
+      // aio-ok: the listener is already gone or was never installable —
+      // either way nothing is left registered, which is all this wants.
+    }
     AppLock._sigintHandler = undefined;
     AppLock._sigtermHandler = undefined;
+    AppLock._sigxfszHandler = undefined;
     AppLock._cleanupRegistered = false;
   }
 
@@ -869,6 +902,7 @@ export class AppLock {
   private static _cleanupRegistered = false;
   private static _sigintHandler?: () => void;
   private static _sigtermHandler?: () => void;
+  private static _sigxfszHandler?: () => void;
 
   /** Acquire the lock for this app.
    *  - Cleans stale locks (dead PID)

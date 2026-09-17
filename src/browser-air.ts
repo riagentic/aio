@@ -4,6 +4,13 @@
 
 // ── Transport (side-effectful — must import to wire up WS/IPC) ──────
 import "./browser/browser-air-transport.ts";
+import type {
+  serverAuth as ServerAuth,
+  serverRequest as ServerRequest,
+  serverUser as ServerUser,
+} from "./server/auth-context.ts";
+import type { blocking as ServerBlocking } from "./state/blocking.ts";
+import { blockingServerOnly } from "./state/blocking-reason.ts";
 export {
   // Documented in docs/persistence/offline.md and docs/clients/browser.md as
   // the way to drive a "reconnecting / slow connection" indicator — but it was
@@ -213,9 +220,46 @@ export {
 // UI imports. The method body never runs in the browser (a browser cell is a
 // protocol stub), but the import has to resolve or the bundle is refused.
 // `serverImport` is documented "in the cell" (docs/testing/ui-testing.md) and
-// has no imports. (`blocking` is NOT here: its module-scope pool-size IIFE is
-// not tree-shaken, measured +0.8 KB gzip on every page — see the ledger.)
+// has no imports.
 export { serverImport } from "./state/server-import.ts";
+
+// ── Server-only names, as browser facades that refuse when CALLED ─────
+// docs/auth/auth.md and docs/debugging/performance.md import these into a
+// cell module, so the name has to resolve here or the bundle is refused.
+// None can be a re-export: auth-context.ts needs node:async_hooks, and
+// blocking.ts's facade assignments (`blocking.cancel = …`) are statements
+// esbuild keeps, which would pin the whole worker pool on every page. Each
+// facade is a pure-annotated const — 0 bytes unless a page uses it — and a
+// call throws (a sync method replayed here under sync/localFirst fails loud
+// instead of reading `undefined` as "anonymous").
+// tests/browser-server-only-stubs.test.ts bundles the docs' examples.
+const serverOnly = (name: string) => (): never => {
+  throw new Error(
+    `[aio] ${name}() is server-only — it ran in the browser; call it from ` +
+      `an async method, a *.server.ts module or a route`,
+  );
+};
+export const serverUser: typeof ServerUser = /* @__PURE__ */ serverOnly(
+  "serverUser",
+);
+export const serverRequest: typeof ServerRequest = /* @__PURE__ */ serverOnly(
+  "serverRequest",
+);
+export const serverAuth: typeof ServerAuth = /* @__PURE__ */ serverOnly(
+  "serverAuth",
+);
+/** `blocking` in a browser: the same refusal blocking.ts gives any runtime
+ *  without Deno (blocking-reason.ts), with an inert cancel/dispose — there is
+ *  never a pool here to cancel. */
+export const blocking: typeof ServerBlocking = /* @__PURE__ */ Object.assign(
+  (id: string): Promise<never> =>
+    Promise.reject(new Error(blockingServerOnly(id))),
+  {
+    cancel: (_id: string): boolean => false,
+    disposeIdle: (): boolean => true,
+    dispose: (): Promise<void> => Promise.resolve(),
+  },
+);
 /** Ask for desktop-notification permission from a click handler — the one
  *  place a browser grants it. See `notify()`. */
 export { requestNotificationPermission } from "./browser/desktop-notify.ts";

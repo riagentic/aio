@@ -38,14 +38,49 @@ export function findChromium(): string | null {
   return null;
 }
 
+/** Pure-ish probe: does `bin` name an existing file — a path as given, or a
+ *  bare command name found on `$PATH` (how `Deno.Command` resolves it)? */
+function binExists(bin: string): boolean {
+  const isFile = (p: string) => {
+    try {
+      return Deno.statSync(p).isFile;
+    } catch {
+      // aio-ok: a probe — "no file here" is the answer, and the caller turns
+      // a final `false` into a throw that names the path.
+      return false;
+    }
+  };
+  if (/[\\/]/.test(bin)) return isFile(bin);
+  const sep = Deno.build.os === "windows" ? ";" : ":";
+  const exts = Deno.build.os === "windows" ? ["", ".exe"] : [""];
+  return (Deno.env.get("PATH") ?? "").split(sep).some((d) =>
+    d !== "" && exts.some((x) => isFile(`${d}/${bin}${x}`))
+  );
+}
+
 /** The binary to launch — `browserPath`, else {@linkcode findChromium} — or a
- *  throw that says what to install. `who` names the feature that needed it. */
+ *  throw that says what to install. `who` is the tag that opens the line (`[testBrowser]`).
+ *
+ *  An EXPLICIT choice (`browserPath`, `$CHROMIUM_BIN`, `$CHROME_BIN`) is
+ *  checked here, synchronously: returned unchecked, a typo surfaced later as
+ *  a raw "Failed to spawn" — after a whole recorded test had run, for
+ *  `testUI --video` — naming neither the setting nor the fix. */
 export function chromiumBin(who: string, browserPath?: string): string {
   const bin = browserPath ?? findChromium();
+  const fix = "install one, set $CHROMIUM_BIN, or pass { browserPath }.";
   if (!bin) {
+    throw new Error(`${who} no headless Chromium/Chrome found — ${fix}`);
+  }
+  if (!binExists(bin)) {
+    const source = browserPath !== undefined
+      ? `{ browserPath: ${JSON.stringify(bin)} }`
+      : Deno.env.get("CHROMIUM_BIN")
+      ? `$CHROMIUM_BIN=${bin}`
+      : `$CHROME_BIN=${bin}`;
+    const where = /[\\/]/.test(bin) ? "does not exist" : "is not found on PATH";
     throw new Error(
-      `${who}: no headless Chromium/Chrome found — install one, set ` +
-        "$CHROMIUM_BIN, or pass { browserPath }.",
+      `${who} no headless Chromium/Chrome at ${bin}: ${source} ${where} — ` +
+        fix,
     );
   }
   return bin;
@@ -90,11 +125,11 @@ export async function launchChromium(
   }).spawn();
 
   let killed = false;
-  const kill = () => {
-    if (killed) return;
+  const kill = (signal: Deno.Signal = "SIGTERM") => {
+    if (killed && signal === "SIGTERM") return;
     killed = true;
     try {
-      proc.kill();
+      proc.kill(signal);
     } catch (e) {
       // A browser that already exited is the ordinary case — `close()` runs
       // after the tab may well have gone by itself, and Deno answers that
@@ -118,6 +153,17 @@ export async function launchChromium(
     closing ??= (async () => {
       removeEventListener("unload", onUnload);
       kill();
+      // Bounded: a browser that ignores SIGTERM (a loaded box, a renderer
+      // stuck mid-paint) must not leave the exit wait pending — that was a
+      // "leaks detected: a child process" failure under the full suite. The
+      // wait is ALWAYS awaited, after SIGKILL if it comes to that.
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      const exited = await Promise.race([
+        proc.status.then(() => true),
+        new Promise<false>((r) => timer = setTimeout(() => r(false), 5_000)),
+      ]);
+      clearTimeout(timer);
+      if (!exited) kill("SIGKILL");
       await proc.status;
       await dropTempDir(profile);
     })();

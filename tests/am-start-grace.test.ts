@@ -13,6 +13,7 @@ import {
   isProcessAlive,
   type LockData,
   STARTUP_GRACE_MS,
+  STUCK_STARTING_MS,
 } from "../src/server/single-instance-lock.ts";
 
 class ExitSignal extends Error {
@@ -107,13 +108,15 @@ Deno.test("am start: past the grace with NO port to probe is still refused, neve
   }
 });
 
-Deno.test("am start: past the grace, a real port that does not answer IS a stuck instance", async () => {
+Deno.test("am start: past the grace, a declared port NOT YET BOUND is a slow boot — refused, never killed", async () => {
+  // h7 F2, measured: a 15 s boot was killed at 10.4 s by the next `am start`
+  // ("stuck-starting"), and every retry killed the next child. Alive and
+  // nothing listening is BOOTING, not stuck.
   const appId = `am-grace-${Deno.pid}-c`;
   const child = bootingChild();
-  // A port nothing listens on: reserve-and-release.
   const l = Deno.listen({ port: 0, hostname: "127.0.0.1" });
   const port = (l.addr as Deno.NetAddr).port;
-  l.close();
+  l.close(); // nothing listens on it: the app has not bound it yet
   writePid(
     pf(appId, {
       pid: child.pid,
@@ -123,7 +126,63 @@ Deno.test("am start: past the grace, a real port that does not answer IS a stuck
   );
   try {
     const code = await exitCode(() => ensureSingleton(appId, "json"));
-    assertEquals(code, null, "a stuck instance is cleaned up, start proceeds");
+    assertEquals(code, 1, "no attach requested → refused, with the truth");
+    await new Promise((r) => setTimeout(r, 200));
+    assert(isProcessAlive(child.pid), "a booting app was killed");
+    assert(readPid(appId) !== null, "its lock must survive");
+  } finally {
+    child.kill("SIGKILL");
+    await child.status;
+    removePid(appId);
+  }
+});
+
+Deno.test("am start: nothing bound and no progress for STUCK_STARTING_MS IS stuck — reclaimed", async () => {
+  const appId = `am-grace-${Deno.pid}-d`;
+  const child = bootingChild();
+  writePid(
+    pf(appId, {
+      pid: child.pid,
+      startedAt: Date.now() - STUCK_STARTING_MS - 1_000,
+    }),
+  );
+  try {
+    const code = await exitCode(() => ensureSingleton(appId, "json"));
+    assertEquals(code, null, "a hung boot is cleaned up, start proceeds");
+    assert(!isProcessAlive(child.pid), "the hung instance is killed");
+    assertEquals(readPid(appId), null, "and its lock removed");
+  } finally {
+    try {
+      child.kill("SIGKILL");
+    } catch { /* already dead */ }
+    await child.status;
+    removePid(appId);
+  }
+});
+
+Deno.test("am start: past the grace, a port that is BOUND but never answers ok IS a stuck instance", async () => {
+  const appId = `am-grace-${Deno.pid}-e`;
+  const child = bootingChild();
+  const ac = new AbortController();
+  const srv = Deno.serve(
+    {
+      port: 0,
+      hostname: "127.0.0.1",
+      signal: ac.signal,
+      onListen: () => {},
+    },
+    () => new Response("wedged", { status: 503 }),
+  );
+  writePid(
+    pf(appId, {
+      pid: child.pid,
+      port: srv.addr.port,
+      startedAt: Date.now() - STARTUP_GRACE_MS * 2,
+    }),
+  );
+  try {
+    const code = await exitCode(() => ensureSingleton(appId, "json"));
+    assertEquals(code, null, "a zombie listener is cleaned up");
     assert(!isProcessAlive(child.pid), "the stuck instance is killed");
     assertEquals(readPid(appId), null, "and its lock removed");
   } finally {
@@ -132,5 +191,7 @@ Deno.test("am start: past the grace, a real port that does not answer IS a stuck
     } catch { /* already dead */ }
     await child.status;
     removePid(appId);
+    ac.abort();
+    await srv.finished;
   }
 });

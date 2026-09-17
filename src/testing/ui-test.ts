@@ -29,7 +29,12 @@ import {
   type HarnessBootOptions,
 } from "./boot-refusals.ts";
 import { formatCellState } from "./test-format.ts";
-import { openUiVideo, type UiVideoRecorder } from "./ui-video.ts";
+import {
+  callerTestFile,
+  isVideoFailure,
+  openUiVideo,
+  type UiVideoRecorder,
+} from "./ui-video.ts";
 import { frozenWriteMessage, isFrozenWriteError } from "../state/immutable.ts";
 import { _resetRootSignals } from "../state/signal.ts";
 import { _resetAioRuntime } from "../state/runtime-reset.ts";
@@ -71,7 +76,9 @@ import { createAioError } from "../diagnostics/error.ts";
 import {
   assertOperable,
   hiddenReason as _hiddenReason,
+  takesCharacters,
   triggerAction,
+  triggerAssign,
   triggerChar,
   triggerClear,
   triggerDragTo,
@@ -177,6 +184,17 @@ export interface TestUIOptions {
    *  zeros. testUI says so out loud the first time you ask (see the layout
    *  warning) rather than letting a zero read as a measurement. */
   viewport?: { width: number; height: number };
+  /** Simulated round trip, in ms. Each cell-method call is dispatched this
+   *  much later (in call order), and `type()` / `setValue()` yield a
+   *  macrotask between characters — so a UI that is only right when the
+   *  answer is instant (a controlled input bound to a cell, typed faster
+   *  than the server answers) fails here as it does over a real socket.
+   *  Default 0: the local loop answers inside the handler. */
+  latency?: number;
+  /** Names this mount's video under `--video=<dir>/` (`"checkout flow"` →
+   *  `checkout-flow.mp4`). The wrapper form uses the test's name; without
+   *  this the handle form is named after the test FILE. */
+  name?: string;
 }
 
 /** Which kind of thing a presence question is about — see
@@ -552,18 +570,69 @@ function traceSafe(fn: () => unknown): unknown {
 /** The live trace inputs, installed per mount. `null` between mounts. */
 let _traceSource: (() => Record<string, unknown>) | null = null;
 
+/** The live root a miss spells its candidates against. `null` between
+ *  mounts. Installed and cleared beside `_traceSource`. */
+let _missSurface: (() => UISurfaceNode) | null = null;
+
+/** How THIS harness reaches an element path: `ui.start` when the name is
+ *  unique on the surface (the top-level hoist), else the path itself —
+ *  `ui["App/Button#2:start"]`, which the top level also accepts. The am path
+ *  alone (`App/Button:start`) is a grammar `ui.<name>` does not take, so a
+ *  miss that printed only that left the working spelling unstated (h3 F10). */
+function harnessSpelling(
+  path: string,
+  root: UISurfaceNode | null,
+): { spelled: string; tNamed: boolean } {
+  const name = lastSegment(path);
+  const hits = root ? findElementsDeep(root, name) : [];
+  const me = hits.find((e) => e.path === path);
+  const t = (me?._vnode as { props?: Record<string, unknown> } | undefined)
+    ?.props?.t;
+  const unique = hits.length === 1;
+  const spelled = unique
+    ? (/^[A-Za-z_$][A-Za-z0-9_$]*$/.test(name)
+      ? `ui.${name}`
+      : `ui[${JSON.stringify(name)}]`)
+    : `ui[${JSON.stringify(path)}]`;
+  return { spelled, tNamed: typeof t === "string" && t === name };
+}
+
 function fail(msg: string, available: string[], target?: string): never {
   const all = Deno.env.get("AIO_TEST_NAMES") === "all";
   const ranked = rankNames(target, available);
   const shown = all ? ranked : ranked.slice(0, NAME_LIMIT);
   const hidden = ranked.length - shown.length;
+  // Each ELEMENT path (the `Component:name` entries — the same list
+  // `uiNames` / `am surface` print) gets the harness spelling beside it.
+  // Components are listed as they are already addressed (`Row`, `Row2`).
+  let root: UISurfaceNode | null = null;
+  try {
+    root = _missSurface?.() ?? null;
+  } catch {
+    // aio-ok: nothing mounted — the miss is already being raised, and the
+    // spelling falls back to the path form, which needs no surface.
+  }
+  let closestHasT = false;
+  let firstElement = true;
+  const listed = shown.map((p) => {
+    if (!p.includes(":") || p.includes(" ")) return p;
+    const { spelled, tNamed } = harnessSpelling(p, root);
+    if (firstElement) closestHasT = tNamed;
+    firstElement = false;
+    return `${p} → ${spelled}`;
+  });
   throw new Error(
-    `${msg}\n  available: ${shown.length ? shown.join(", ") : "(none)"}` +
+    `${msg}\n  available: ${listed.length ? listed.join(", ") : "(none)"}` +
       (hidden > 0
         ? `\n  (closest ${shown.length} of ${ranked.length} shown — ` +
           `AIO_TEST_NAMES=all lists every one)`
         : "") +
-      `\n  tip: name elements explicitly with the t prop, e.g. <button t="save">` +
+      // The closest candidate already HAS a `t` name — telling the reader to
+      // add one sends them to fix what is not broken; the spelling beside it
+      // is the answer.
+      (closestHasT
+        ? ""
+        : `\n  tip: name elements explicitly with the t prop, e.g. <button t="save">`) +
       (_traceSource ? writeTrace(_traceSource()) : ""),
   );
 }
@@ -794,13 +863,21 @@ export function testUI(
   // write into the developer's real `~/.<appId>`. `test-strict.ts` exists
   // precisely so every harness gets both.
   _armTestStrict();
+  // The test file is on the stack HERE — not in the wrapper's body, which the
+  // runner calls — and the video takes the app's look from its project.
+  const testFile = callerTestFile();
   // Wrapper form: testUI(App, "name", fn) — a Deno.test with auto-teardown.
   if (typeof optsOrName === "string") {
     if (typeof fn !== "function") {
       throw new Error('testUI(App, "name", fn): missing test function');
     }
     Deno.test(optsOrName, async () => {
-      const ui = await _mountTestUI(App as ComponentFn, namedOpts, optsOrName);
+      const ui = await _mountTestUI(
+        App as ComponentFn,
+        namedOpts,
+        optsOrName,
+        testFile,
+      );
       let bodyErr: { e: unknown } | null = null;
       try {
         await fn(ui);
@@ -824,12 +901,31 @@ export function testUI(
       } catch (e) {
         teardownErr = { e };
       }
-      if (bodyErr) throw bodyErr.e;
+      if (bodyErr) {
+        // The body's error is the one thrown; a teardown failure behind it
+        // is still SAID — dropped, a video that could not be made left
+        // nothing at all (no file, no line).
+        if (teardownErr) {
+          const t = teardownErr.e;
+          console.error(
+            isVideoFailure(t)
+              ? `[aio:video] no video for this failed test: ${t}`
+              : `[aio:testUI] teardown failed too, behind the test's own ` +
+                `error: ${t}`,
+          );
+        }
+        throw bodyErr.e;
+      }
       if (teardownErr) throw teardownErr.e;
     });
     return;
   }
-  return _mountTestUI(App as ComponentFn, optsOrName ?? {});
+  return _mountTestUI(
+    App as ComponentFn,
+    optsOrName ?? {},
+    undefined,
+    testFile,
+  );
 }
 
 /** Make the mount report a real viewport size.
@@ -1077,12 +1173,13 @@ async function _mountTestUI(
   App: ComponentFn,
   opts: TestUIOptions,
   name?: string,
+  testFile?: string | null,
 ): Promise<TestUI> {
   // A throw anywhere in setup must leave the process exactly as it found it —
   // see PartialMount.
   const partial: PartialMount = { owned: [], restore: [], window: null };
   try {
-    return await _buildTestUI(App, opts, partial, name);
+    return await _buildTestUI(App, opts, partial, name, testFile);
   } catch (e) {
     await _teardownPartialMount(partial);
     throw e;
@@ -1094,6 +1191,7 @@ async function _buildTestUI(
   opts: TestUIOptions,
   partial: PartialMount,
   name?: string,
+  testFile?: string | null,
 ): Promise<TestUI> {
   let doc: AnyDoc = opts.document ?? (globalThis as AnyDoc).document;
   // The contrast walk stands down, SAYING so, on a DOM whose style cascade is
@@ -1383,6 +1481,8 @@ async function _buildTestUI(
     | ((p: Record<string, Record<string, unknown>>) => void)
     | undefined;
   let ledger: CallFailureLedger | undefined;
+  const latency = Math.max(0, opts.latency ?? 0);
+  const latent = new Set<Promise<unknown>>(); // calls not yet dispatched
   const cells = opts.cells ?? [...getRegisteredCells().values()];
   // The state that does NOT live in a cell. A module-level `signal()` survives
   // a mount exactly as a cell singleton does, and used to be the half nothing
@@ -1498,6 +1598,9 @@ async function _buildTestUI(
       calls.restore();
       _traceSource = null;
     });
+    if (latency > 0) {
+      partial.restore.unshift(_delayCalls(cells, latency, latent));
+    }
     _traceSource = () => ({
       when: new Date().toISOString(),
       // How it got here — the half a failing assertion can never print.
@@ -1578,7 +1681,8 @@ async function _buildTestUI(
   // it only ever READS the DOM, synchronously, so the run it records is the
   // run it would have been (see ui-video.ts).
   let video: UiVideoRecorder | null = openUiVideo({
-    name,
+    name: name ?? opts.name,
+    testFile,
     doc,
     root,
     viewport: {
@@ -1586,8 +1690,19 @@ async function _buildTestUI(
       height: opts.viewport?.height ?? 768,
     },
   });
+  // A mount that fails from here on records nothing: give the name back.
+  partial.unmount = () => video?.cancel();
   const handle: MountHandle = mount(root, App);
-  partial.unmount = () => _unmount(handle);
+  partial.unmount = () => {
+    video?.cancel();
+    _unmount(handle);
+  };
+  // What a miss spells its candidates against (see `fail`) — every mount,
+  // cells or not; cleared with the rest of the harness.
+  _missSurface = () => currentSurface();
+  partial.restore.push(() => {
+    _missSurface = null;
+  });
   const state: RootState | undefined = _rootStateMap.get(handle);
 
   /** Why the last `settle()` stopped, when it stopped for the wrong reason.
@@ -1625,7 +1740,7 @@ async function _buildTestUI(
       // report). Await what is actually pending — bounded by the iteration
       // budget, so a deliberately long-running call (a stream driving
       // progressive UI) is REPORTED rather than silently called settled.
-      const pending = _pendingCallPromises();
+      const pending = [..._pendingCallPromises(), ...latent];
       if (pending.length > 0) {
         // Same wake-timer rule as `settle()` in cell-test.ts: cleared when the
         // calls win, or it outlives this wait and a sanitized test reports it.
@@ -1891,6 +2006,7 @@ async function _buildTestUI(
           for (const ch of text) {
             triggerChar(el(), ch); // re-resolve — controlled inputs re-render
             handle._flush();
+            if (latency > 0) await new Promise((r) => setTimeout(r, 0));
           }
           await settle();
         });
@@ -1975,12 +2091,18 @@ async function _buildTestUI(
       setValue(text: string) {
         return step(`set ${JSON.stringify(text)}`, async () => {
           assertEnabled("set value on", true);
+          if (!takesCharacters(el())) {
+            triggerAssign(el(), text); // a date/color/range: one assignment
+            await settle();
+            return;
+          }
           triggerClear(el()); // replace, don't append
           handle._flush();
           el().focus?.();
           for (const ch of text) {
             triggerChar(el(), ch); // re-resolve — controlled inputs re-render
             handle._flush();
+            if (latency > 0) await new Promise((r) => setTimeout(r, 0));
           }
           await settle();
         });
@@ -2605,7 +2727,9 @@ async function _buildTestUI(
     unmount() {
       if (video) {
         // Synchronous teardown cannot wait for a video to be drawn — say so
-        // rather than let a requested recording silently not exist.
+        // rather than let a requested recording silently not exist — and
+        // give the file's name back for the next mount.
+        video.cancel();
         video = null;
         console.warn(
           "[aio:video] ui.unmount() cannot wait for the video to be written, " +
@@ -2871,4 +2995,39 @@ export function uiRects(
   };
   for (const r of Array.isArray(roots) ? roots : [roots]) walk(r);
   return out;
+}
+
+/** `testUI({ latency })`: dispatch every bound cell method `ms` later, in
+ *  call order, tracking the not-yet-dispatched calls in `latent` so
+ *  `settle()` waits for them. A Proxy keeps the method's own properties
+ *  (`.action()`, `.type`). Returns the undo. */
+function _delayCalls(
+  // deno-lint-ignore no-explicit-any
+  cells: any[],
+  ms: number,
+  latent: Set<Promise<unknown>>,
+): () => void {
+  const undo: (() => void)[] = [];
+  for (const def of cells) {
+    const holder = def as Record<string, unknown>;
+    for (const key of def.__aio?.actionKeys ?? []) {
+      const original = holder[key];
+      if (typeof original !== "function") continue;
+      holder[key] = new Proxy(original, {
+        apply(target, self, args) {
+          const call = new Promise((resolve) =>
+            setTimeout(() => resolve(Reflect.apply(target, self, args)), ms)
+          );
+          const gate = call.then(() => {}, () => {});
+          latent.add(gate);
+          void gate.then(() => latent.delete(gate));
+          return call;
+        },
+      });
+      undo.push(() => {
+        holder[key] = original;
+      });
+    }
+  }
+  return () => undo.splice(0).reverse().forEach((u) => u());
 }

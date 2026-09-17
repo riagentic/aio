@@ -60,10 +60,27 @@ testUI(App, "add a todo end-to-end", async (ui) => {
 - Acting on UI a previous action creates just works:
   `ui.OpenButton.click(); ui.Modal.ConfirmButton.click()` — the modal is
   resolved when its turn comes, not at access time.
-- Actions: `click`, `dblclick`, `type`, `press` (Enter submits forms), `hover`,
-  `focus`, `blur`, `select(value)`, `check()`, `uncheck()`, `clear()`,
+- Actions: `click`, `dblclick`, `type`, `press`, `hover`, `focus`, `blur`,
+  `select(value)`, `check()`, `uncheck()`, `clear()`, `setValue(text)`,
   `scroll({top, left})`, `dragTo(other)` (full HTML5 DnD sequence with a shared
   DataTransfer).
+- They do what Chromium does with real input (pinned by
+  `tests/ui-harness-browser-parity.test.tsx` and its Chromium twin):
+  - `press("Enter")` in a text field fires `change`, then runs HTML **implicit
+    submission**: the form's first submit button is CLICKED (its `onClick` runs,
+    `e.submitter` names it); a disabled one means no submit; with no submit
+    button the form submits only if it has at most one text-like field. In a
+    `<textarea>` Enter inserts `"\n"`; on a button, link or `<summary>` it
+    clicks. `press(" ")` on a button or checkbox clicks it. `press("Escape")`
+    closes the top modal `<dialog>` (`cancel`, then `close`).
+  - `click()` moves focus to the clicked control (a non-focusable target blurs)
+    and commits the field being edited (`change`) first.
+  - `type()` fires `keydown` · `keypress` · `beforeinput` · `input` · `keyup`,
+    with `code`/`keyCode` set and `InputEvent`s carrying `inputType`/`data`. A
+    `type="number"` field drops non-numeric characters. `type()` refuses
+    date/time/color/range inputs — use `setValue("2024-01-05")`.
+  - `dblclick()` is two clicks and a `dblclick`; `hover()` sends `pointerover`,
+    `pointerenter`, `mouseover`, `mouseenter`, `pointermove`, `mousemove`.
 - **What a user cannot do, a test cannot do** — the harness is never more
   permissive than the browser. Each of these **fails loud**, naming the element
   and what exists:
@@ -561,7 +578,7 @@ Every miss and every `waitFor` timeout names a file:
 
 ```
 testUI: no "SaveButton" on <App>
-  available: SubmitButton, TitleInput, …
+  available: App:SubmitButton → ui.SubmitButton, App:TitleInput → ui.TitleInput, …
   trace: /repo/.aio/traces/ui-1789112956688-k2p9x.json
 ```
 
@@ -591,23 +608,33 @@ deno test -A tests/todo.test.tsx --filter "adds" -- --video=demo.webm
 AIO_VIDEO=videos/ AIO_VIDEO_PACE=400 deno test -A tests/
 ```
 
-| Flag / env                             | Meaning                                                    |
-| -------------------------------------- | ---------------------------------------------------------- |
-| `--video=<dir/>` · `AIO_VIDEO`         | one file per test, named after it (`adds-an-item.mp4`)     |
-| `--video=<file.mp4\|.webm>`            | one file — the extension picks H.264 MP4 or VP8 WebM       |
-| `--video-pace=<ms>` · `AIO_VIDEO_PACE` | how long each step stays on screen (default 800, 50–60000) |
+| Flag / env                                        | Meaning                                                    |
+| ------------------------------------------------- | ---------------------------------------------------------- |
+| `--video=<dir/>` · `AIO_VIDEO`                    | one file per test, named after it (`adds-an-item.mp4`)     |
+| `--video=<file.mp4\|.webm>`                       | one file — the extension picks H.264 MP4 or VP8 WebM       |
+| `--video-pace=<ms>` · `AIO_VIDEO_PACE`            | how long each step stays on screen (default 800, 50–60000) |
+| `--video-scheme=light\|dark` · `AIO_VIDEO_SCHEME` | the `prefers-color-scheme` it is drawn in (default light)  |
 
 The flags go after `--`: they are the test run's arguments. Each video shows
 every action (`click`, `type`, `check`, …) as a frame **before** it — the
 element outlined, a caption such as `AddButton · click` — and a frame after it,
 plus a frame at each `settle`/`waitFor`/`expectCell` where the page changed. A
 test that fails its assertion still gets its video; that is where it is most
-useful. One line per video is printed:
+useful — and if the video itself cannot be made behind a failing test, the
+test's error stands and `[aio:video] no video for this failed test: …` says why.
+One line per video is printed:
 
 ```
-[aio:video] look from /app/src/app.ts: theme "auto", appId "ex-todo", no style.css
+[aio:video] look from /app/src/app.ts: theme "auto", appId "ex-todo", no style.css, scheme light
 [aio:video] adds an item → videos/adds-an-item.mp4 (7 frames, 4.8s video, 1918ms to make)
 ```
+
+The look comes from the project of the TEST FILE (its nearest `deno.json`),
+whatever directory the run starts in. The colour scheme is pinned — light unless
+`--video-scheme=dark` — so a video does not depend on the recording machine's
+desktop. A handle-form mount is named after its test file unless given one:
+`await testUI(App, { name: "checkout flow" })` → `checkout-flow.mp4`. A long
+test name is cut to 80 characters plus a short hash.
 
 **How.** `testUI` runs in happy-dom, which has a DOM and no pixels. After each
 step the recorder copies the page as HTML — synchronously, so the app cannot
@@ -619,14 +646,18 @@ same `<head>` the app's own page gets, from its
 built-in encoder. No ffmpeg.
 
 **Needs** a headless Chromium or Chrome (`$CHROMIUM_BIN` to point at one). With
-`--video` and none installed, the test fails at mount and says so. Without
-`--video`, nothing is looked for.
+`--video` and none installed — or `$CHROMIUM_BIN` naming a file that is not
+there, or an output directory that cannot be written — the test fails at mount
+and says so, before its body runs. Without `--video`, nothing is looked for.
 
 **Not in the picture:** hover styles, the text caret, `<canvas>` content, and
 theme or layout options that are not literals in `aio.run` (the look line names
 them). Mistakes are refused, never skipped: an unknown `--video-*` flag, a
-missing value, a pace with no video, `--video` and `AIO_VIDEO` naming different
-places, and two tests writing one file.
+missing value, a pace or scheme with no video, `--video` and `AIO_VIDEO` naming
+different places, and two tests writing one file. Two tests with one name — in
+one file or in two, `--parallel` or not — get `name.mp4` and `name-2.mp4`; a
+later run overwrites them. `ui.unmount()` cannot wait for a video, so it records
+none and gives the name back.
 
 ## Geometry: `uiRects`
 
@@ -683,7 +714,16 @@ Works against any connected client — browser tab, Electron window, **Android
 WebView** — over aio's own protocol; no driver install. Dev-mode only. Both
 tiers share one trigger implementation and the **full action set** (including
 `select`, `check`, `clear`, `scroll "top=200"`, `dragTo "<target path>"`), so a
-test and an `am` session behave identically.
+test and an `am` session send the same events.
+
+**Except for time.** `testUI` runs cell methods in process, inside the handler:
+a keystroke's answer is rendered before the next key. Over a real socket the
+answer arrives a round trip later, and a UI can be right only when the answer is
+instant. Reproduce the transport in the test with `testUI(App, { latency: 5 })`
+— each method call is dispatched 5 ms later and `type()` yields between
+characters. (A controlled input bound to a cell keeps every keystroke either
+way: a render that carries an older keystroke's value is not written into the
+focused field.)
 
 The whole stack is proven against a real browser:
 `tests/e2e-ui-chromium.test.ts` boots an app, opens it in headless chromium, and
@@ -904,8 +944,12 @@ const PORT = freePort(); // verified free at call time; one per server
 ## What can I address? (`uiNames`)
 
 The list of addressable names was reachable only by **provoking a failure** — a
-miss prints `available: …`. That is a fine recovery path and a poor discovery
-one, and it is exactly the list you want _before_ writing the first line.
+miss prints `available: …` (each element path followed by the spelling this
+harness takes — `App/Button:start → ui.start`, or the path form
+`ui["App/Button#2:del"]` when the name is not unique; the `t`-prop tip is left
+out when the closest match already has one). That is a fine recovery path and a
+poor discovery one, and it is exactly the list you want _before_ writing the
+first line.
 
 ```ts
 import { testUI, uiNames } from "aio/testing";

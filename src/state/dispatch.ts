@@ -302,7 +302,15 @@ type DispatchFn<A> = ((action: A) => Promise<unknown>) & {
   getEffectBacklog: () => number;
 };
 
-/** Creates a re-entrant-safe dispatch loop that drains queued actions in order */
+/** Creates a re-entrant-safe dispatch loop that drains queued actions in order.
+ *
+ *  A dispatch made WHILE a reduce runs (a method calling its own cell's method,
+ *  `notes.add("a")` inside `addTwice`) is queued and runs after the current
+ *  action commits — as its own action. So a queued self-call SURVIVES its
+ *  caller's throw: the caller is rejected and its write rolled back, the queued
+ *  action still commits. Consistent on every door (WS, UDS, trojan, bootCells,
+ *  testCell); documented in docs/state/methods.md ("One method calling
+ *  another"); `s.$call` is the spelling that shares the caller's commit. */
 /** How many budget violations each cell has produced, and whether it has
  *  crossed into "this is what this cell always does".
  *

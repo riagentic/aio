@@ -21,7 +21,11 @@
 // shell user means it (cwd first — tests/am-file-arg-resolution.test.ts), so
 // the brief teaches the path tab completion writes.
 import { assert, assertEquals, assertStringIncludes } from "@std/assert";
-import { agentBrief, BRIEF_TASKS } from "../src/am/am-agent-text.ts";
+import {
+  agentBrief,
+  BRIEF_SECTIONS,
+  BRIEF_TASKS,
+} from "../src/am/am-agent-text.ts";
 
 const BRIEF = agentBrief({ version: "test", task: "all" });
 
@@ -65,9 +69,23 @@ Deno.test("am agent --task with no section is refused", async () => {
   assertEquals(one.code, 0);
   assertStringIncludes(
     one.text,
-    agentBrief({ version: "x", task: BRIEF_TASKS[0] }).split("\n").slice(3)
-      .join("\n").trim(),
+    BRIEF_SECTIONS.find((s) => s.slug === BRIEF_TASKS[0])!.body,
   );
+  // The three sizes, and their contradiction.
+  const min = await run("--min");
+  assertEquals(min.code, 0);
+  assertStringIncludes(min.text, "MINIMAL brief");
+  assert(min.text.split("\n").length < 320, "--min is not small");
+  const max = await run("--max");
+  assertEquals(max.code, 0);
+  assertStringIncludes(max.text, "PITFALLS — the long list");
+  const both = await run("--min", "--max");
+  assertEquals(both.code, 1, "two sizes at once must be refused");
+  assertStringIncludes(both.text, "pick ONE size");
+  const index = await run("--list");
+  assertEquals(index.code, 0);
+  assertStringIncludes(index.text, "min ");
+  assertStringIncludes(index.text, "deep");
   const page = await run();
   assertEquals(page.code, 0);
   assertStringIncludes(page.text, "BUILD A NEW APP");

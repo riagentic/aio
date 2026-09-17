@@ -265,3 +265,68 @@ Deno.test("am dispatch: ordinary positional args are untouched", () => {
     null,
   );
 });
+
+// ── A payload too big for argv: `--args=@file` / `--args=-` ──────────────────
+//
+// `am dispatch --args='<300 KB>'` cannot even be spawned — the kernel refuses
+// an argument that long (E2BIG), so the payload never reaches am (h4). The
+// same value from a FILE (`@path`) or from STDIN (`-`) is additive: neither
+// spelling is valid JSON for an argument list or an envelope, so no command
+// that works today changes meaning.
+import { readFlagPayload } from "../src/am/am-cmd-state.ts";
+import { dropTempDir, tempDir } from "../src/testing/temp-dir.ts";
+
+Deno.test({
+  name: "am dispatch --args=@path: a 300 KB argument list arrives whole",
+  async fn() {
+    const dir = await tempDir("am-dispatch-atfile-");
+    try {
+      const big = "x".repeat(300_000);
+      const file = `${dir}/args.json`;
+      await Deno.writeTextFile(file, JSON.stringify([big]));
+      await withApp(async (dispatch, received) => {
+        await dispatch([`${CELL}:setHost`], { jsonArgs: `@${file}` });
+        const got = received();
+        assertEquals(got.kind, "string");
+        assertEquals(got.json.length, big.length + 2, "every byte arrived");
+      });
+      // …and --body=@path, the envelope form.
+      const env = `${dir}/body.json`;
+      await Deno.writeTextFile(
+        env,
+        JSON.stringify({
+          type: `${CELL}:setHost`,
+          payload: { args: ["from-body-file"] },
+        }),
+      );
+      await withApp(async (dispatch, received) => {
+        await dispatch([], { jsonBody: `@${env}` });
+        assertEquals(received(), {
+          kind: "string",
+          json: '"from-body-file"',
+        });
+      });
+    } finally {
+      await dropTempDir(dir);
+    }
+  },
+});
+
+Deno.test("readFlagPayload: `-` reads stdin, `@path` a file, anything else is the value", async () => {
+  const stdin = () => Promise.resolve('["from-stdin"]');
+  assertEquals(await readFlagPayload("-", "--args", stdin), {
+    ok: true,
+    value: '["from-stdin"]',
+  });
+  assertEquals(await readFlagPayload('["x"]', "--args", stdin), {
+    ok: true,
+    value: '["x"]',
+  });
+  assertEquals(await readFlagPayload(undefined, "--args", stdin), {
+    ok: true,
+    value: undefined,
+  });
+  const missing = await readFlagPayload("@/no/such/file.json", "--args", stdin);
+  assert(!missing.ok);
+  assertStringIncludes(missing.error, "--args=@/no/such/file.json");
+});

@@ -108,6 +108,14 @@ const EXTRA_ON_BROWSER: Record<string, string> = {
   serverImport:
     "the `aio` specifier maps here — stubbable *.server.ts import a cell " +
     "method makes (the cell module is in the client graph)",
+  serverUser: "the `aio` specifier maps here — server-only; a facade that " +
+    "throws when called (a cell module imports it; docs/auth/auth.md)",
+  serverRequest: "the `aio` specifier maps here — server-only facade, " +
+    "throws when called",
+  serverAuth: "the `aio` specifier maps here — server-only facade, throws " +
+    "when called",
+  blocking: "the `aio` specifier maps here — server-only facade, rejects " +
+    "when called (docs/debugging/performance.md)",
   serverFn: "the `aio` specifier maps here — serverFn client proxy",
   serverFns: "the `aio` specifier maps here — serverFn definition passthrough",
   log: "the `aio` specifier maps here — no-op logger shim for shared modules",

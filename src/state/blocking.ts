@@ -1,4 +1,5 @@
 import { log } from "../diagnostics/logger-api.ts";
+import { blockingServerOnly } from "./blocking-reason.ts";
 
 // blocking.ts — schedule.blocking(): a named, cancellable, backpressured worker
 // pool for FFI/CPU/sync work. A wedged USB ioctl or a
@@ -45,12 +46,15 @@ export type BlockingPool = {
   readonly size: number;
 };
 
-const DEFAULT_SIZE = (() => {
+/** The default pool size — read on first use, not at import: a module-scope
+ *  initializer is a statement no bundler can drop, so it rode along into every
+ *  bundle that merely re-exported this module. */
+const defaultSize = (): number => {
   const hw =
     (globalThis.navigator as { hardwareConcurrency?: number } | undefined)
       ?.hardwareConcurrency;
   return Math.max(1, (hw ?? 4) - 1); // leave a core for the main isolate
-})();
+};
 
 /**
  * Where the worker module lives — resolved on FIRST USE, not at import.
@@ -106,7 +110,7 @@ export function blockingWorkerMissingHint(message: string): string | null {
 }
 
 export function createBlockingPool(opts?: { size?: number }): BlockingPool {
-  const size = Math.max(1, opts?.size ?? DEFAULT_SIZE);
+  const size = Math.max(1, opts?.size ?? defaultSize());
   const _warnedDupId = new Set<string>();
   const idle: Worker[] = [];
   const all = new Set<Worker>();
@@ -180,7 +184,7 @@ export function createBlockingPool(opts?: { size?: number }): BlockingPool {
       // used to unwind out of `pump()` and out of the caller's promise
       // executor — so the caller was rejected (fine) and the worker was left
       // in `active` FOREVER: never released, never retired, capacity
-      // permanently one lower. On a 2-core box (`DEFAULT_SIZE` = hw-1 = 1)
+      // permanently one lower. On a 2-core box (`defaultSize()` = hw-1 = 1)
       // that means every later `blocking()` call returns a promise that never
       // settles, and `disposeIdle()` returns false at shutdown so the process
       // cannot exit — a silent hang, from one bad argument.
@@ -320,14 +324,12 @@ function pool(): BlockingPool {
  *  worker pool; a browser bundle or the android/standalone WebView runtime
  *  has none. Named so the refusal reads as a platform fact with a fix, not as
  *  `Worker is not defined` three frames down. */
-export function blockingUnavailableReason(id: string): string | null {
-  if (typeof Deno !== "undefined" && typeof Deno.execPath === "function") {
-    return null;
-  }
-  return `[aio] blocking('${id}') is server-only — it runs a Deno worker ` +
-    `pool, which does not exist in a browser/WebView (standalone) runtime. ` +
-    `Call it from a server-side method and let the client read the result ` +
-    `from state.`;
+export function blockingUnavailableReason(
+  id: string,
+  deno: { execPath?: unknown } | null = globalThis.Deno ?? null,
+): string | null {
+  if (typeof deno?.execPath === "function") return null;
+  return blockingServerOnly(id);
 }
 
 /** Run a self-contained fn off the main thread. See BlockingPool.run. */

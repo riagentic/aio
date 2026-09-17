@@ -41,7 +41,7 @@ import {
   _isFrameworkInternalActionType,
   sanitizeClientAction,
 } from "./server-ws.ts";
-import { _dispatchRefusal } from "./action-ack.ts";
+import { _dispatchRefusal, _dispatchShort } from "./action-ack.ts";
 import { invokeServerFn } from "./server-fns.ts";
 import {
   type ActionPayload,
@@ -1171,8 +1171,18 @@ function _handleUDSConn(
                     // `serializeReturn` warns for both a dropped and a lossy
                     // return, once, for every transport.
                     const { value: safe } = serializeReturn(value, actionType);
+                    // `short` — parity with the WS ack (action-ack.ts).
+                    const short = _dispatchShort(action);
                     try {
-                      sendTo(conn, enc("ack", { cid, ok: true, value: safe }));
+                      sendTo(
+                        conn,
+                        enc("ack", {
+                          cid,
+                          ok: true,
+                          value: safe,
+                          ...(short !== undefined ? { short } : {}),
+                        }),
+                      );
                     } catch { /* client gone */ }
                   },
                   (err) => {

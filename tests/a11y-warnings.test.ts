@@ -356,13 +356,34 @@ Deno.test({
 
 // wallet report §10 — the keyboard already lives elsewhere by WAI-ARIA design, so
 // "add onKeyDown" cannot be followed; `role="presentation"` would erase the
-// semantics. The unfocusable owner and a role with no pattern still warn.
+// semantics. A composite OWNER is the one place the advice CAN be followed:
+// WAI-ARIA puts the arrows and Enter on the focusable owner, so a focusable
+// listbox with a click and no key handler is keyboard-dead (Tab reaches it,
+// nothing else works) and warns. Only an owner that already carries its
+// keyboard — a key handler, or `aria-activedescendant` — is exempt.
 for (
   const [label, props, warns] of [
     ["option row", { role: "option" }, false],
     ["gridcell", { role: "gridcell" }, false],
     ["menuitemradio", { role: "menuitemradio" }, false],
-    ["focusable listbox", { role: "listbox", tabIndex: 0 }, false],
+    ["FOCUSABLE listbox with no key handler", {
+      role: "listbox",
+      tabIndex: 0,
+    }, true],
+    ["focusable listbox with a key handler", {
+      role: "listbox",
+      tabIndex: 0,
+      onKeyDown: () => {},
+    }, false],
+    ["aria-activedescendant listbox", {
+      role: "listbox",
+      tabIndex: 0,
+      "aria-activedescendant": "opt-1",
+    }, false],
+    ["aria-activedescendant grid", {
+      role: "grid",
+      "aria-activedescendant": "",
+    }, false],
     ["alert toast", { role: "alert" }, false],
     ["dialog viewer", { role: "dialog" }, false],
     ["UNFOCUSABLE listbox", { role: "listbox" }, true],

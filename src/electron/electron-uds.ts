@@ -675,7 +675,13 @@ ${tmplRendererDiagnostics(true)}
       }
       const root = fs.realpathSync(BASE_DIR || process.cwd());
       const pfx = root.endsWith(path.sep) ? root: root + path.sep;
-      const p = path.resolve(String(preload || ''));
+      if (typeof preload !== 'string' || !preload) {
+        return refuseWindow('no preload given — pass { preload: <a file inside the app directory ' + root + '> }');
+      }
+      // Relative to the APP directory, never the process cwd: a packaged app's
+      // cwd is whatever launched it, so a cwd-relative answer differs between
+      // dev and prod. An absolute path is unaffected.
+      const p = path.resolve(root, preload);
       if (!p.startsWith(pfx)) {
         return refuseWindow('preload ' + p + ' is outside the app directory ' + root);
       }

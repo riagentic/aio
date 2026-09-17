@@ -328,4 +328,60 @@ export function installDefaultStateGetters(def: CellDef): void {
       configurable: true,
     });
   }
+  installReflexGuards(def);
+}
+
+/** `timer.state.x` / `timer.selectors.x()` — the React/Redux reflex.
+ *
+ *  A cell handle IS its state (`timer.x`) and its selectors (`timer.x()`), so
+ *  both spellings read a silent `undefined` and the TypeError arrived one
+ *  property later, naming nothing (field report cc §4, h3 Y4). In dev — and
+ *  under every harness, which runs dev-strict — the read THROWS, naming the
+ *  spelling that works. In prod it answers `undefined`, exactly as before:
+ *  category (b), dev stricter, never the reverse. Decided at READ time,
+ *  because cells are defined at module load, before `__aioDev` is armed.
+ *
+ *  Only where the cell owns no such name: `state` is reserved (RESERVED_KEYS),
+ *  `selectors` is a legal method/selector/field name, and the binder ASSIGNS
+ *  those — so the setter hands the slot over as plain data. */
+function installReflexGuards(def: CellDef): void {
+  const a = def.__aio;
+  for (const key of ["state", "selectors"] as const) {
+    if (
+      key in def ||
+      Object.hasOwn(a.state as Record<string, unknown>, key) ||
+      Object.hasOwn(a.selectors ?? {}, key)
+    ) continue;
+    Object.defineProperty(def, key, {
+      get() {
+        if ((globalThis as Record<string, unknown>).__aioDev !== true) {
+          return undefined;
+        }
+        const id = a.id;
+        const field = Object.keys(a.state as Record<string, unknown>)[0] ??
+          "field";
+        const sel = Object.keys(a.selectors ?? {})[0] ?? "selector";
+        throw new Error(
+          key === "state"
+            ? `[cell:${id}] ${id}.state does not exist — the cell IS its ` +
+              `state: read ${id}.${field}, not ${id}.state.${field} (a ` +
+              `React/Redux reflex). A component re-renders on that read.`
+            : `[cell:${id}] ${id}.selectors does not exist — a selector is ` +
+              `called on the cell itself: ${id}.${sel}(), not ` +
+              `${id}.selectors.${sel}(). The cell IS its state and its ` +
+              `selectors.`,
+        );
+      },
+      set(v: unknown) {
+        Object.defineProperty(def, key, {
+          value: v,
+          writable: true,
+          enumerable: true,
+          configurable: true,
+        });
+      },
+      enumerable: false,
+      configurable: true,
+    });
+  }
 }

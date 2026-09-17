@@ -4,6 +4,7 @@
 > — the four rules that protect the user's machine, the model, building a new
 > app from `am create` to a shipped binary, the full API, every `am` verb,
 > testing, debugging — straight into your context, with nothing to open.
+> `am agent --min` for a small context window, `am agent --max` for everything,
 > `am agent --task=<slug>` for one section (deeper ones too: `loop`, `run`,
 > `auth`, `sync`, `api`, `pitfalls`…), `--list` for the index. This page is the
 > long form of its driving loop.

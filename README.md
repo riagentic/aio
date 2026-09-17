@@ -124,8 +124,8 @@ screen, `am trigger` acts on it.
 | 🚚 **Ship**    | browser · Electron · Android · iOS client · CLI · service · signed updates |
 | 🛠️ **Operate** | `am` — status, health, logs, state, dispatch, pins, installs               |
 
-A whole client — renderer, protocol, offline queue, CRDT merge — is **81 KB
-gzipped**, 70 KB brotli. `deno task bench:bundle` prints it, and
+A whole client — renderer, protocol, offline queue, CRDT merge — is **85 KB
+gzipped**, 74 KB brotli. `deno task bench:bundle` prints it, and
 `tests/bundle-size.test.ts` keeps this sentence true — both numbers.
 
 ## 🏃 Run any aio app, from its repo

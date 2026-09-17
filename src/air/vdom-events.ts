@@ -136,6 +136,17 @@ export function _ensureDelegation(root: Element, evt: string): void {
             configurable: true,
             get: () => node,
           });
+          // …and `target` RETARGETED to the handler's tree, as a browser
+          // does across an open shadow root: a host's handler sees the host,
+          // never the button inside it. happy-dom does not retarget, so
+          // `e.target` differed between testUI and Chromium (measured).
+          // A no-op where the DOM already retargets.
+          const home = (node as Node).getRootNode?.();
+          Object.defineProperty(e, "target", {
+            configurable: true,
+            get: () =>
+              path.find((p) => (p as Node).getRootNode?.() === home) ?? node,
+          });
           // AIO-281: catch handler errors to prevent parent handlers from being skipped
           try {
             handler(e);
@@ -150,6 +161,8 @@ export function _ensureDelegation(root: Element, evt: string): void {
       // Remove the shadow so the event object behaves natively afterwards.
       // deno-lint-ignore no-explicit-any
       delete (e as any).currentTarget;
+      // deno-lint-ignore no-explicit-any
+      delete (e as any).target;
     }
   };
   registered.set(evt, listener);
@@ -317,6 +330,7 @@ const _KNOWN_EVENTS = new Set([
   "keydown",
   "keyup",
   "keypress",
+  "beforeinput",
   "input",
   "change",
   "submit",

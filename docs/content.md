@@ -58,7 +58,7 @@
 
 ## UI — AIR renderer — components, signals, routing, forms
 
-- [Rendering & UI](ui/README.md) — AIO uses AIR — a built-in signal-based renderer (81 KB gzipped with the
+- [Rendering & UI](ui/README.md) — AIO uses AIR — a built-in signal-based renderer (85 KB gzipped with the
 - [AIR Advanced Patterns](ui/air-advanced.md) — SSR, portals, islands, code splitting, virtual scrolling, dimensions, deferred
 - [AIR Animation](ui/air-animation.md) — CSS-first declarative transitions for enter/exit animations, imperative spring
 - [AIR vs React vs Best-in-Class — Full Comparison](ui/air-comparison.md) — Reference frameworks: React 19, Solid.js 1.9 (signal pioneer), Svelte

@@ -41,11 +41,14 @@
  * refusal to start the app would be a far worse outcome than a stolen focus.
  */
 import {
-  AIO_NESTED_DISPLAY,
-  displayIsUp,
   hasParentDisplay,
-  startXephyr,
+  nestedDisplayCookie,
+  type NestedDisplayPick,
+  nestedDisplayRange,
+  pickNestedDisplay,
+  startXephyrDetailed,
   XEPHYR_INSTALL_HINT,
+  type XephyrStart,
 } from "../server/nested-display.ts";
 
 /** `--display=` / `AIO_AM_DISPLAY=`.
@@ -61,14 +64,24 @@ export type DisplayChoice = string;
  *  without an X server on the box — the policy is the part that has bugs, and
  *  a test that needs a desktop is a test that does not run in CI. */
 export type DisplayProbe = {
-  isUp: (d: string) => boolean;
-  start: () => boolean;
+  /** Which nested display THIS USER should use: the first candidate that is
+   *  theirs (up — reuse it) or free (start one there). Never another
+   *  account's, whose socket being up says nothing about whose desktop it is
+   *  (cc §10). Null when every candidate belongs to somebody else. */
+  pick: () => NestedDisplayPick | null;
+  /** Start Xephyr on `display`, with a cookie; `warning` when it came up
+   *  without one. */
+  start: (display: string) => XephyrStart;
+  /** The cookie file on record for `display`, or null — what the child's
+   *  `XAUTHORITY` must name to be let in. */
+  cookie: (display: string) => string | null;
   hasParent: () => boolean;
 };
 
 const REAL: DisplayProbe = {
-  isUp: displayIsUp,
-  start: () => startXephyr(),
+  pick: pickNestedDisplay,
+  start: (display) => startXephyrDetailed(display),
+  cookie: nestedDisplayCookie,
   hasParent: hasParentDisplay,
 };
 
@@ -125,25 +138,54 @@ export function planDisplay(opts: {
   gui: boolean;
   interactive: boolean;
   probe?: DisplayProbe;
+  /** The caller's own `$DISPLAY` / `$XAUTHORITY`, for the one thing an
+   *  uncontained launch still needs: a human who typed `DISPLAY=:77 am start`
+   *  to watch their agent's display gets its cookie handed to the child, or
+   *  the window they asked for never appears ("Authorization required"). */
+  inheritedDisplay?: string;
+  inheritedXauthority?: string;
+  /** Whether the app could open a browser tab at all. `--client=server-only`
+   *  (and `cli`) never hand a URL to anything, so "browser tabs suppressed"
+   *  is not a fact about that launch — the env is still set (it costs
+   *  nothing and one rule is better than two), the NOTE is not printed.
+   *  Default true: every caller that does not say is the old behaviour. */
+  tabs?: boolean;
 }): DisplayPlan {
   const { choice, gui, interactive } = opts;
   const probe = opts.probe ?? REAL;
+  /** DISPLAY plus the cookie for it when one is on record. */
+  const onto = (display: string): Record<string, string> => {
+    const cookie = probe.cookie(display);
+    return cookie
+      ? { DISPLAY: display, XAUTHORITY: cookie }
+      : { DISPLAY: display };
+  };
+  /** An uncontained launch: `{}` — unless the inherited DISPLAY is one of
+   *  OUR nested displays and no XAUTHORITY came with it, in which case the
+   *  cookie is the only addition. Everything else is byte-for-byte inherited. */
+  const untouched = (): DisplayPlan => {
+    const d = opts.inheritedDisplay;
+    if (!d || opts.inheritedXauthority) return { env: {} };
+    const cookie = probe.cookie(d);
+    return cookie ? { env: { XAUTHORITY: cookie } } : { env: {} };
+  };
 
   // The opt-out, and the only branch that is byte-for-byte the old behaviour.
-  if (choice === "current") return { env: {} };
+  if (choice === "current") return untouched();
 
   // A display the caller named is theirs to manage — we do not probe it, do
-  // not start anything, and do not second-guess it.
+  // not start anything, and do not second-guess it. The cookie rides along
+  // only when it is one of ours (`--display=:77` to reach the agent's screen).
   if (choice.startsWith(":")) {
     return {
-      env: { DISPLAY: choice, AIO_NO_OPEN: "1" },
+      env: { ...onto(choice), AIO_NO_OPEN: "1" },
       level: "note",
       note: `window → ${choice} (you named it); browser tabs suppressed`,
     };
   }
 
   const wantContained = choice === "isolated" || !interactive;
-  if (!wantContained) return { env: {} };
+  if (!wantContained) return untouched();
 
   // From here the launch IS contained. `AIO_NO_OPEN` travels with that
   // decision ALWAYS, including when there is no display to nest in and
@@ -155,6 +197,7 @@ export function planDisplay(opts: {
   const env: Record<string, string> = { AIO_NO_OPEN: "1" };
 
   if (!gui) {
+    if (opts.tabs === false) return { env };
     return {
       env,
       level: "note",
@@ -173,23 +216,43 @@ export function planDisplay(opts: {
     };
   }
 
-  if (probe.isUp(AIO_NESTED_DISPLAY)) {
+  // Whose nested display: this user's, or a free number — never another
+  // account's. `am start` used to reuse `:77` because its socket was up, and
+  // sent one user's app onto another user's screen (cc §10).
+  const pick = probe.pick();
+  if (pick === null) {
     return {
-      env: { ...env, DISPLAY: AIO_NESTED_DISPLAY },
-      level: "note",
-      note: `window → ${AIO_NESTED_DISPLAY} (the nested display already up) ` +
-        `— not your desktop. --display=current to use your desktop instead`,
+      env,
+      level: "warn",
+      note: `every nested display from ${nestedDisplayRange()} belongs to ` +
+        `another user — this app's window will open on the REAL desktop ` +
+        `and may take focus. Pass --display=:N for a display you manage`,
     };
   }
 
-  if (probe.start()) {
+  if (pick.up) {
     return {
-      env: { ...env, DISPLAY: AIO_NESTED_DISPLAY },
+      env: { ...env, ...onto(pick.display) },
       level: "note",
-      note: `started a nested X server on ${AIO_NESTED_DISPLAY} — this app's ` +
+      note: `window → ${pick.display} (your nested display, already up) ` +
+        `— not your desktop. --display=current to use your desktop instead` +
+        (pick.secured ? "" : `. NOTE: no access cookie is on file for ` +
+          `${pick.display} — it was started by hand or by an older aio and ` +
+          `may be open to every local account; close it and let am start ` +
+          `one with access control`),
+    };
+  }
+
+  const started = probe.start(pick.display);
+  if (started.ok) {
+    return {
+      env: { ...env, ...onto(pick.display) },
+      level: started.warning ? "warn" : "note",
+      note: `started a nested X server on ${pick.display} — this app's ` +
         `window opens THERE, not on your desktop. It stays up on purpose ` +
         `(closing it per run is the flicker it exists to remove); close it ` +
-        `yourself when you are done. --display=current to opt out`,
+        `yourself when you are done. --display=current to opt out` +
+        (started.warning ? `. ${started.warning}` : ""),
     };
   }
 

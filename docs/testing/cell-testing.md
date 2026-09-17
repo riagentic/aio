@@ -111,7 +111,10 @@ testCell(loader, "loads data", async (t) => {
 This is the same shape as production (`await loader.load()`), and it is
 deterministic: the promise resolves on real method completion, no matter how
 long the method takes (dynamic imports, file IO, slow fetches). If the method
-throws, the awaited promise rejects — assert with `assertRejects`.
+throws, the awaited promise rejects — assert with `assertRejects`. A sync
+method's throw rejects with the same `AioError` production uses — the app's
+message, code `REDUCE_ERROR` — so `errorCode(err) === "REDUCE_ERROR"` holds
+under `testCell` exactly as under `bootCells`, `testUI` and a real socket.
 
 Not awaiting is fire-and-forget, exactly like production `loader.load()`: **the
 call starts immediately either way.** Awaiting only decides whether the test
@@ -197,9 +200,17 @@ green. Now they **throw**, naming the harness that does run them:
 ```ts
 testCell(poller, "arms the poll", async (t) => {
   t.send.start();
-  await t.settle(); // Error: a schedule effect reached the root cell executor…
+  await t.settle();
+  // Error: `poller:start` emitted schedule.every("poll") that no assertion
+  // observed — it reached the root cell executor, which has no clock. …
 });
 ```
+
+The refusal names the method, the effect kind and its id, and both fixes. A
+framework effect's `type` is `__schedule` / `__own` / `__notify` — not the
+method's `cell:method` — so read it as `t.expect.effects(["__schedule"])`, or
+inspect `t.getEffects()` (`kind`, `id`, `ms`, `action.type`).
+`schedule.cancel(id)` is a schedule effect too.
 
 The refusal does not depend on `settle()`. A test that asserts on state and
 never settles ran nothing, so nothing could throw — and that is the shape most

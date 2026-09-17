@@ -291,8 +291,10 @@ A test that boots a real app process inherits the same default, so pin it:
 ```
 
 `libraryMode: true` (what `bootCells()` and `testCell()` use) already defaults
-its data dir under `baseDir`, so in-process tests are hermetic without any
-flags.
+its data dir under `baseDir` (`<baseDir>/.aio`), so in-process tests are
+hermetic without any flags. A libraryMode app given no `baseDir` (and no
+`appDir`) goes under `AIO_APPS_DIR/<appId>` when that is set — one home per app
+— and under `<cwd>/.aio` only when it is not.
 
 ### The harness sandboxes app directories for you
 

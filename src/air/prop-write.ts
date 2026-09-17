@@ -217,6 +217,7 @@ export function _writeProp(
       _selectValues(el as unknown as HTMLSelectElement, v);
       return;
     }
+    if (_isEchoable(el, k) && _staleEcho(el as EchoEl, k, v)) return;
     // deno-lint-ignore no-explicit-any
     (el as any)[k] = v;
     return;
@@ -360,7 +361,10 @@ export function _controlDrifted(
   if (k === "checked") return Boolean(cur) !== Boolean(rv ?? "");
   const have = String(cur ?? "");
   const want = String(rv ?? "");
-  if (have === want) return false;
+  if (have === want) {
+    _echoArrived(el as EchoEl, want);
+    return false;
+  }
   // A NUMERIC input is compared as a number, not as a string.
   //
   // The element holds what the user TYPED and the state holds what the
@@ -384,4 +388,88 @@ export function _controlDrifted(
     return !(Number.isFinite(a) && a === Number(want));
   }
   return true;
+}
+
+// ── Keystroke echoes ──────────────────────────────────────────────────
+
+/** A controlled input bound to state that lives across a round trip (a server
+ *  cell) is re-rendered once per keystroke — AFTER the round trip. Type faster
+ *  than that and a render carrying an OLDER keystroke lands mid-word: writing
+ *  it regressed the field, the next keystroke appended to the regressed value,
+ *  and the loss was permanent on screen and on the server. Measured in
+ *  Chromium: 40 keys at 30 ms against a 40 ms reducer kept 21.
+ *
+ *  So each element remembers what it EMITTED (its last 256 `input` values —
+ *  a slow server trails fast typing by dozens of keys, measured).
+ *  While it is focused, a write of a value it emitted that is not its newest
+ *  one is an echo of a keystroke the user has already typed past — skipped.
+ *  The newest echo still lands (DOM and state converge), a value it never
+ *  emitted still wins (a server-side transform, a reset), and a write in the
+ *  SAME task as the keystroke is the handler's own synchronous answer (a local
+ *  signal that refused the input) — also written. One path, dev and prod. */
+const _ECHO = Symbol.for("aio.air.inputEcho");
+const _ECHO_RING = 256;
+type Echo = { vals: string[]; live: boolean };
+type EchoEl = HTMLElement & { [_ECHO]?: Echo };
+
+function _isEchoable(el: HTMLElement, k: string): boolean {
+  return (k === "value" || k === "checked") &&
+    (el.tagName === "INPUT" || el.tagName === "TEXTAREA");
+}
+
+/** A short fingerprint of a value (length + FNV-1a), so the ring stays a
+ *  few KB even for a long textarea. A collision can only skip a write while
+ *  the field is focused, and the newest echo still lands. */
+function _echoKey(k: string, v: unknown): string {
+  const s = k === "checked" ? String(Boolean(v)) : String(v ?? "");
+  let h = 0x811c9dc5;
+  for (let i = 0; i < s.length; i++) {
+    h = Math.imul(h ^ s.charCodeAt(i), 0x01000193);
+  }
+  return `${s.length}:${h >>> 0}`;
+}
+
+function _echoRing(el: EchoEl, k: string): Echo {
+  const had = el[_ECHO];
+  if (had) return had;
+  const r: Echo = { vals: [], live: false };
+  el[_ECHO] = r;
+  el.addEventListener("input", () => {
+    r.vals.push(_echoKey(k, (el as unknown as Record<string, unknown>)[k]));
+    if (r.vals.length > _ECHO_RING) r.vals.shift();
+    r.live = true;
+    // Past the render flush this keystroke's handler queued (a microtask),
+    // the task is over: whatever renders next came from somewhere else.
+    queueMicrotask(() =>
+      queueMicrotask(() =>
+        queueMicrotask(() => {
+          r.live = false;
+        })
+      )
+    );
+  }, true);
+  return r;
+}
+
+/** True when writing `v` would replay a keystroke the user typed past. */
+function _staleEcho(el: EchoEl, k: string, v: unknown): boolean {
+  const r = _echoRing(el, k);
+  const i = r.vals.indexOf(_echoKey(k, v));
+  const root = el.getRootNode?.() as { activeElement?: unknown } | undefined;
+  const focused = (root?.activeElement ?? el.ownerDocument?.activeElement) ===
+    el;
+  if (r.live || !focused || i < 0 || i === r.vals.length - 1) {
+    r.vals.length = 0;
+    return false;
+  }
+  r.vals.splice(0, i + 1); // acknowledged up to i; newer keys still in flight
+  return true;
+}
+
+/** The element already shows `want`: every keystroke up to it is answered. */
+function _echoArrived(el: EchoEl, want: string): void {
+  const r = el[_ECHO];
+  if (!r) return;
+  const i = r.vals.indexOf(_echoKey("value", want));
+  if (i >= 0) r.vals.splice(0, i + 1);
 }

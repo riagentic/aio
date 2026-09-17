@@ -21,14 +21,14 @@ import v8 from "node:v8";
 import { measureCellState } from "../diagnostics/memory-monitor.ts";
 import { CELL_METHOD_SEP } from "../state/cell-helpers.ts";
 import { serializeReturn } from "../protocol/return-value.ts";
-import { _dispatchRefusal } from "./action-ack.ts";
+import { _dispatchRefusal, shortCallSentence } from "./action-ack.ts";
 import {
   CONTROL_MAX_BODY,
   declaresOverLimit,
   readBounded,
   SNAPSHOT_MAX_BODY,
 } from "./read-body.ts";
-import { enc } from "../protocol/envelope.ts";
+import { enc, errorCode } from "../protocol/envelope.ts";
 import { snapshotShapeError } from "./server-static.ts";
 import { findUnserializable, PersistSerializeError } from "./persist-guard.ts";
 import { UNSERIALIZABLE_BYTES } from "../diagnostics/fmt.ts";
@@ -276,11 +276,16 @@ export function handleTrojan(
   const route = pathname.slice(TROJAN_PREFIX.length);
   const method = req?.method ?? "GET";
 
-  const err = (msg: string, status = 400) =>
-    new Response(JSON.stringify({ error: msg }), {
-      status,
-      headers: { "Content-Type": "application/json" },
-    });
+  // `code` rides beside the message exactly as on the WS/UDS acks
+  // (`errorFields`), so a caller branches on it instead of the prose.
+  const err = (msg: string, status = 400, code?: string) =>
+    new Response(
+      JSON.stringify(code ? { error: msg, code } : { error: msg }),
+      {
+        status,
+        headers: { "Content-Type": "application/json" },
+      },
+    );
   /** Every trojan reply's body.
    *
    *  `JSON.stringify` THROWS on a BigInt or a cycle anywhere in state, and the
@@ -710,7 +715,7 @@ async function handlePost(
   req: Request,
   deps: TrojanDeps,
   json: (d: unknown) => Response,
-  err: (m: string, s?: number) => Response,
+  err: (m: string, s?: number, code?: string) => Response,
   sendToClient: (idx: number, msg: string) => Promise<Response>,
 ): Promise<Response> {
   if (!req.headers.get("x-aio")) {
@@ -804,6 +809,25 @@ async function handlePost(
             }). Dispatch does nothing.`,
             404,
           );
+        }
+        // A `payload.args` that is present but NOT an array is its own fault,
+        // and the reducer's sentence for it is the right one. Checked before
+        // the arity gate, which read it as "passes none" — true of nothing
+        // the caller wrote.
+        {
+          const raw = (action.payload as { args?: unknown } | undefined)?.args;
+          if (raw !== undefined && raw !== null && !Array.isArray(raw)) {
+            return err(
+              `[${cell}:${method}] action payload.args must be an ARRAY of ` +
+                `positional arguments (got ${
+                  typeof raw === "object" ? "an object" : `a ${typeof raw}`
+                }: ${JSON.stringify(raw)?.slice(0, 60) ?? String(raw)}). ` +
+                `Pass them as JSON (\`am dispatch ${cell}:${method} ` +
+                `--args='[…]'\`) or dispatch { type: "${cell}:${method}", ` +
+                `payload: { args: [a, b] } }. Dispatch does nothing.`,
+              400,
+            );
+          }
         }
         // ARITY. The route refuses an unknown cell and an unknown method by
         // name; the number of arguments a KNOWN method needs was never
@@ -933,6 +957,8 @@ async function handlePost(
           `dispatch of "${action.type}" failed: ${
             e instanceof Error ? e.message : String(e)
           }`,
+          400,
+          errorCode(e),
         );
       }
       // …UNLESS THE REDUCE REFUSED IT. `dispatch` resolves whether or not
@@ -947,7 +973,7 @@ async function handlePost(
       // file's own rule, stated in its time-travel arm, that "ok:true must
       // mean EXECUTED".
       const refused = _dispatchRefusal(action);
-      if (refused) return err(refused.message, 409);
+      if (refused) return err(refused.message, 409, errorCode(refused));
       // The method's return value rides back exactly as it does over the WS
       // ack (`serializeReturn`: JSON round-trip, lossy conversions warned).
       // `{ok:true}` alone told a caller the method RAN and nothing about what
@@ -975,18 +1001,15 @@ async function handlePost(
         // while this route answered a clean `ok` to the operator who made the
         // call. A field report's exact shape: `am dispatch todo:add` wrote a
         // row whose declared field was simply gone, under `{"ok":true}`.
+        // ONE sentence for every door (action-ack.ts) — the WS and UDS acks
+        // carry the same `short` for the same frame.
         ...(_shortBy > 0
           ? {
-            short:
-              `${action.type} declares ${_shortRequired} argument${
-                _shortRequired === 1 ? "" : "s"
-              } and this call passed ${
-                _shortRequired - _shortBy
-              } — the missing one${_shortBy === 1 ? " is" : "s are"} ` +
-              `\`undefined\` inside the method. If it fills its own in, give ` +
-              `the parameter a default in the SIGNATURE (\`(s, x = 0)\`), ` +
-              `which is what makes its optionality visible — a TypeScript \`?\` ` +
-              `alone does not (it is erased; only a default is).`,
+            short: shortCallSentence(
+              action.type,
+              _shortRequired,
+              _shortRequired - _shortBy,
+            ),
           }
           : {}),
         ...(persistErr === undefined ? {} : {

@@ -9,6 +9,7 @@
 import { assert, assertEquals, assertThrows } from "@std/assert";
 import {
   codecCandidates,
+  fitFrame,
   FRAME_RATE,
   planFrames,
   videoFormatOf,
@@ -45,6 +46,30 @@ Deno.test("codecCandidates: H.264 level follows the frame size; VP8 has none", (
   assertEquals(codecCandidates("mp4", 1920, 1080)[0], "avc1.640028");
   assertEquals(codecCandidates("mp4", 3840, 2160)[0], "avc1.640033");
   assertThrows(() => codecCandidates("mp4", 8000, 8000), Error, ".webm");
+});
+
+Deno.test("codecCandidates: a frame below 16×16 is refused as too SMALL, not as this machine's fault", () => {
+  for (const [w, h] of [[2, 2], [14, 480], [640, 8]]) {
+    assertThrows(
+      () => codecCandidates("mp4", w!, h!),
+      Error,
+      "at least 16×16",
+      `${w}×${h}`,
+    );
+  }
+  assertEquals(codecCandidates("mp4", 16, 16)[0], "avc1.64001f");
+  assertEquals(codecCandidates("webm", 2, 2), ["vp8"]);
+});
+
+Deno.test("fitFrame: the odd pixel an even-sized video drops is CROPPED, a real size change is letterboxed", () => {
+  // 1023×767 into 1022×766: drawn 1:1 at the origin (the last column and row
+  // fall off), never resampled by 0.999 — which blurred every frame.
+  assertEquals(fitFrame(1023, 767, 1022, 766), { x: 0, y: 0, w: 1023, h: 767 });
+  assertEquals(fitFrame(1023, 766, 1022, 766), { x: 0, y: 0, w: 1023, h: 766 });
+  assertEquals(fitFrame(640, 480, 640, 480), { x: 0, y: 0, w: 640, h: 480 });
+  // A window resized mid-recording keeps its proportions, centred.
+  assertEquals(fitFrame(1280, 480, 640, 480), { x: 0, y: 120, w: 640, h: 240 });
+  assertEquals(fitFrame(1024, 768, 1022, 766).w, 1021); // 2 px over: scaled
 });
 
 Deno.test("planFrames: every frame on the 60 fps grid, strictly increasing, first is a keyframe", () => {

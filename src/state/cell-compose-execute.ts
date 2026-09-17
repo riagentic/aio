@@ -25,24 +25,46 @@ import { resolveCall } from "./cell-impl.ts";
  *  green.
  *
  *  Silence is the defect, so this throws and names the harness that does run
- *  them. */
-function frameworkEffectInWrongRuntime(kind: "schedule" | "own"): Error {
-  const what = kind === "schedule"
-    ? "a schedule effect (schedule.after / every / at / cron)"
+ *  them. It names the EFFECT (`schedule.cancel("timer:tick")`, not "a schedule
+ *  effect") and, when the caller knows it, the METHOD that emitted it — the
+ *  first version said neither, listed four kinds where there are five, and
+ *  offered only `bootCells` as the fix, while the fix that keeps the test in
+ *  `testCell` (READ the effect — reading is asserting on it) went unsaid and
+ *  cost a field report two red runs (h3 F6). Exported so `testCell` can throw
+ *  the same sentence with the method's name; the message lives HERE only. */
+export function frameworkEffectInWrongRuntime(
+  kind: "schedule" | "own",
+  effect?: { kind?: unknown; id?: unknown },
+  emittedBy?: string,
+): Error {
+  const named = effect && typeof effect.kind === "string"
+    ? kind === "schedule"
+      ? `schedule.${effect.kind}(${JSON.stringify(String(effect.id ?? ""))})`
+      : `an own() effect (${effect.kind} ${
+        JSON.stringify(String(effect.id ?? ""))
+      })`
+    : kind === "schedule"
+    ? "a schedule effect (schedule.after / every / at / cron / cancel)"
     : "an own() effect (acquire / dispose of a resource)";
+  const who = emittedBy
+    ? `\`${emittedBy}\` emitted ${named} that no assertion observed — it`
+    : named;
   const runs = kind === "schedule"
     ? "a clock to fire it on"
     : "a resource table to hold it in";
+  const reads = kind === "schedule" ? "__schedule" : "__own";
   return new Error(
-    `[aio] ${what} reached the root cell executor, which has ${
+    `[aio] ${who} reached the root cell executor, which has ${
       kind === "schedule" ? "no clock" : "no resource table"
     }.\n` +
       `  cause: this effect only runs in a runtime that owns ${runs} — the ` +
       `server loop, the standalone/Android loop, or the worker host. ` +
       `\`testCell\` runs the composed executor directly and owns neither, so ` +
       `the effect would be silently dropped.\n` +
-      `  fix: test this cell with \`bootCells([cell])\` (or \`testUI\`), which ` +
-      `boots the standalone runtime — \`await h.advance(ms)\` fires due ` +
+      `  fix: in testCell, READ it — \`t.expect.effects(["${reads}"])\` or ` +
+      `\`t.getEffects()\` right after the send that emits it (reading is ` +
+      `asserting on it) — or run the cell under \`bootCells([cell])\` (or ` +
+      `\`testUI\`) for a real clock: \`await h.advance(ms)\` fires due ` +
       `schedules and \`h.dispose()\` disposes owned resources. Keep ` +
       `\`testCell\` for the reduce/method logic that emits the effect.`,
   );
@@ -86,7 +108,10 @@ export function buildRootExecutor(
       app: () => {},
     });
     if (frameworkKind !== null) {
-      throw frameworkEffectInWrongRuntime(frameworkKind);
+      throw frameworkEffectInWrongRuntime(
+        frameworkKind,
+        effect as unknown as { kind?: unknown; id?: unknown },
+      );
     }
 
     const colonIdx = (effect.type as string).indexOf(":");

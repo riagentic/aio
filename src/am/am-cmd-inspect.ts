@@ -5,6 +5,7 @@
 
 import { join } from "@std/path";
 import { appDirs } from "../server/app-dirs.ts";
+import { collectElementPaths, type UISurfaceNode } from "../air/ui-surface.ts";
 import type { GlobalFlags, OutputMode } from "./am-types.ts";
 import {
   detectMode,
@@ -1180,6 +1181,23 @@ export function surfaceReplyError(data: unknown): string | null {
  *  What you see here is exactly what `am trigger` (and tests) can drive. */
 
 /** Exported for tests — the scoping rules are the interesting part. @internal */
+/** What `am trigger` says when no UI client is connected. It names a launch
+ *  that stays OFF the human's screen: `am open` (the old hint) hands a URL to
+ *  the desktop's browser, which is the one thing an agent driving an app must
+ *  never do (docs/clients/app-manager.md, "never take the screen"). */
+export const NO_UI_CLIENT_HINT: string =
+  `no UI client is connected, so there is nothing to drive. Start a ` +
+  `client: am start --client=electron (contained on the nested display) ` +
+  `or --client=browser — \`am surface\` can still show you a server-side ` +
+  `render of the UI in the meantime.`;
+
+/** `am surface --names`: every addressable path, in surface order — THE
+ *  walker (`collectElementPaths`, src/air/ui-surface.ts), the same one
+ *  `ui.names()` and the test harness use. A hand-kept copy here had already
+ *  drifted once (1.0.2 said there was one walker; this was the second). */
+export const _surfaceNames = (scoped: readonly unknown[]): string[] =>
+  scoped.flatMap((r) => collectElementPaths(r as UISurfaceNode));
+
 export const _scope = (
   data: unknown,
   opts: { component?: string; path?: string; depth?: number },
@@ -1419,19 +1437,17 @@ export async function cmdSurface(
   // something that is not there (report 6 §5a). A fine recovery path and a poor
   // discovery one, and the same list is what an agent needs BEFORE it writes
   // the first `am trigger`. `ui.names()` is the same answer in a test.
+  // Which renderer answered — the plain form says it in a `note:` line on
+  // stderr, and `--json` used to drop it: a script could not tell a live
+  // client's surface from the headless render it fell back to. Stamped on
+  // every root (like `stale`), and at the top level of the object forms, so
+  // nothing that reads the roots today changes shape.
+  const render: "server" | "client" = headlessRender ? "server" : "client";
+  for (const n of scoped) (n as { render?: string }).render ??= render;
   if (args.includes("--names")) {
-    const names: string[] = [];
-    const walk = (n: unknown) => {
-      const node = n as {
-        elements?: { path?: string }[];
-        children?: unknown[];
-      };
-      for (const e of node.elements ?? []) if (e.path) names.push(e.path);
-      for (const c of node.children ?? []) walk(c);
-    };
-    for (const r of Array.isArray(scoped) ? scoped : [scoped]) walk(r);
+    const names = _surfaceNames(scoped);
     if (mode === "json") {
-      out({ names }, mode);
+      out({ names, render }, mode);
       return;
     }
     out(
@@ -1448,7 +1464,7 @@ export async function cmdSurface(
     // A script asking for geometry gets the counts in the same document. The
     // roots stay the top level for every other invocation, so nothing that
     // parses `am surface --json` today has to change.
-    out(wantRects ? { roots: scoped, measured } : scoped, mode);
+    out(wantRects ? { roots: scoped, measured, render } : scoped, mode);
     if (wantRects) reportRects(measured);
     return;
   }
@@ -1624,12 +1640,7 @@ export async function cmdTrigger(
   // being sent an action nothing will ever answer.
   const idx = await resolveUiClient(port, appId, wantIdx, mode);
   if (idx === null) {
-    outError(
-      `no UI client is connected, so there is nothing to drive. Open the app ` +
-        `(am open) and try again — \`am surface\` can still show you a ` +
-        `server-side render of the UI in the meantime.`,
-      mode,
-    );
+    outError(NO_UI_CLIENT_HINT, mode);
     Deno.exit(1);
   }
   const post = async (body: Record<string, unknown>): Promise<unknown> => {

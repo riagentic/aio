@@ -94,6 +94,22 @@ method:
 <Checkbox checked={settings.notify} label="Email me" onChange={settings.setNotify} />
 ```
 
+Binding a text field straight to a cell sends one call and gets one push per
+keystroke, and every component that reads that cell re-renders on each push. No
+keystroke is lost (a push carrying an older keystroke is not written into the
+focused field), but for free typing it is cheaper to keep the draft in
+`useLocal` and commit it when the field does — beside `onInput`, `onChange` is
+the native commit (blur or Enter):
+
+```tsx
+const draft = useLocal(form.email);
+<Input
+  value={draft.local}
+  onInput={(v) => draft.set(v)}
+  onChange={(v) => form.setEmail(v)}
+/>;
+```
+
 ### Field — label + control + error
 
 Wraps any control with a label, optional hint, and error message:

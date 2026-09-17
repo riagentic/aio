@@ -6640,7 +6640,7 @@
         },
         "TestUIOptions": {
           "kind": "interface",
-          "sig": "1164e2920034ab2e",
+          "sig": "dd3c2815eab3456c",
           "members": {
             "document": "opt:42a1ada9bcefe9fc",
             "cells": "opt:8748a872b06260ec",
@@ -6656,10 +6656,12 @@
             "authFeatures": "opt:5635828a0d20f0b2",
             "viewport": "opt:object",
             "viewport.width": "req:f6522636230fa080",
-            "viewport.height": "req:f6522636230fa080"
+            "viewport.height": "req:f6522636230fa080",
+            "latency": "opt:f6522636230fa080",
+            "name": "opt:2fb40568533c1a6d"
           },
           "sigs": [
-            "1164e2920034ab2e"
+            "dd3c2815eab3456c"
           ]
         },
         "TestWorkerMode": {

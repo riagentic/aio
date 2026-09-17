@@ -312,7 +312,13 @@ export function useSignal<T>(initial: T): Signal<T> {
   const idx = collector.refIndex++;
   if (idx >= collector.refs.length) {
     const sig = signal(initial);
-    _nameHookSignal(sig, "useSignal", collector._component, idx);
+    _nameHookSignal(
+      sig,
+      "useSignal",
+      collector._component,
+      idx,
+      collector.refs,
+    );
     collector.refs.push(sig as unknown as { current: unknown });
     return sig;
   }

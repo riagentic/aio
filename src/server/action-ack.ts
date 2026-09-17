@@ -43,3 +43,49 @@ export function _dispatchRefusal(action: unknown): AioError | null {
     actionType: type,
   });
 }
+
+// ── Short calls ──────────────────────────────────────────────────────────────
+//
+// A call that supplies fewer arguments than the method DECLARES runs with
+// `undefined` in the gaps — a warning, not a refusal (`fn.length` stops at the
+// first defaulted parameter, so refusing on the count would break a method
+// that fills its own in). The trojan door already told its caller so, in a
+// `short` field beside `ok: true`; the WS and UDS doors said nothing, so the
+// same frame was "fine" on two doors and "short" on the third (h4 doors.ts).
+//
+// Computed ONCE, in `dispatchNetwork` (the one place every door passes), and
+// keyed to the action object exactly like a refusal, so a concurrent call can
+// never read another call's note. Compat: nothing is refused that ran before.
+
+const _shortNotes = new WeakMap<object, string>();
+
+/** The one sentence every door says about a short call. `supplied` is the
+ *  positional count the call carried (0 for no `args` array at all). */
+export function shortCallSentence(
+  type: string,
+  required: number,
+  supplied: number,
+): string {
+  const missing = Math.max(0, required - supplied);
+  return `${type} declares ${required} argument${
+    required === 1 ? "" : "s"
+  } and this call passed ${supplied} — the missing one${
+    missing === 1 ? " is" : "s are"
+  } \`undefined\` inside the method. If it fills its own in, give ` +
+    `the parameter a default in the SIGNATURE (\`(s, x = 0)\`), ` +
+    `which is what makes its optionality visible — a TypeScript \`?\` ` +
+    `alone does not (it is erased; only a default is).`;
+}
+
+/** Record that `action` is a short call. @internal */
+export function _noteShortCall(action: unknown, sentence: string): void {
+  if (action && typeof action === "object") _shortNotes.set(action, sentence);
+}
+
+/** The short-call note for `action`, if `dispatchNetwork` recorded one —
+ *  read on the ack path so `{cid, ok:true, value, short}` reaches the caller. */
+export function _dispatchShort(action: unknown): string | undefined {
+  return action && typeof action === "object"
+    ? _shortNotes.get(action)
+    : undefined;
+}

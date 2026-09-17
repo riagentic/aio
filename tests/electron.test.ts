@@ -1,5 +1,6 @@
 // Unit tests for src/electron.ts — pure function coverage (no Electron/display needed)
 import { assertEquals, assertStringIncludes } from "@std/assert";
+import { tmplBounds } from "../src/electron/electron-shared.ts";
 import {
   electronClientScript,
   electronMainScript,
@@ -404,4 +405,202 @@ Deno.test("electron bounds: declared size change beats a leftover window-state.j
   assertStringIncludes(s, "declaredHeight");
   assertStringIncludes(s, "d.declaredWidth === dw");
   assertStringIncludes(s, "loadBounds(420, 620)");
+});
+
+Deno.test("electron bounds: a restored position off the current display is fitted", () => {
+  // A rect saved on a taller/offset desktop (e.g. y=392 under a top panel)
+  // must not be restored verbatim onto a smaller nested display — it would
+  // open with its bottom off-screen. Both shells must carry the fitter.
+  for (
+    const s of [
+      electronMainScript("http://127.0.0.1:1/", { title: "x" }),
+      electronMainScriptUDS("http://127.0.0.1:1/", "/tmp/x.sock", {
+        title: "x",
+      }),
+    ]
+  ) {
+    assertStringIncludes(s, "__aioFitBounds");
+    assertStringIncludes(s, "screen.getAllDisplays");
+    assertStringIncludes(s, "workArea");
+    assertStringIncludes(s, "return __aioFitBounds(out)");
+  }
+});
+
+// ── maximized windows (measured on a nested display with a window manager) ──
+//
+// A maximized window saved `getBounds()` — the MAXIMIZED rect — as if the user
+// had dragged it there: the next launch was a plain window filling the screen,
+// and un-maximize had nowhere to go. Now it saves the normal rect plus
+// `maximized: true`, and comes back maximized over that rect.
+
+/** Run the generated bounds block for real, against an in-memory state file. */
+function boundsHarness(
+  async: boolean,
+  display = { x: 0, y: 0, width: 1280, height: 900 },
+) {
+  const files = new Map<string, string>();
+  const fsStub = {
+    readFileSync: (p: string) => {
+      const v = files.get(p);
+      if (v === undefined) throw new Error("ENOENT");
+      return v;
+    },
+    writeFileSync: (p: string, d: string) => void files.set(p, d),
+  };
+  const req = (id: string) => {
+    if (id === "electron") {
+      return { screen: { getAllDisplays: () => [{ workArea: display }] } };
+    }
+    if (id === "fs/promises") {
+      return {
+        writeFile: (
+          p: string,
+          d: string,
+        ) => (files.set(p, d), Promise.resolve()),
+      };
+    }
+    throw new Error(id);
+  };
+  const body = tmplBounds(async) + `
+return { loadBounds, saveBounds, restoreMax: () => __aioRestoreMax };`;
+  const api = new Function("app", "path", "fs", "require", body)(
+    { getPath: () => "/ud" },
+    { join: (...p: string[]) => p.join("/") },
+    fsStub,
+    req,
+  ) as {
+    loadBounds: (w: number, h: number) => Record<string, unknown>;
+    saveBounds: (win: unknown) => void;
+    restoreMax: () => boolean;
+  };
+  const state = "/ud/window-state.json";
+  return { api, files, state };
+}
+
+const fakeWin = (max: boolean) => ({
+  isMaximized: () => max,
+  getBounds: () =>
+    max
+      ? { x: 0, y: 37, width: 1280, height: 863 }
+      : { x: 300, y: 120, width: 800, height: 600 },
+  getNormalBounds: () => ({ x: 300, y: 120, width: 800, height: 600 }),
+});
+
+Deno.test("electron bounds: a maximized window saves its NORMAL rect and comes back maximized", async () => {
+  for (const async of [false, true]) {
+    const { api, files, state } = boundsHarness(async);
+    api.loadBounds(800, 600);
+    api.saveBounds(fakeWin(true));
+    await Promise.resolve();
+    assertEquals(JSON.parse(files.get(state)!), {
+      x: 300,
+      y: 120,
+      width: 800,
+      height: 600,
+      declaredWidth: 800,
+      declaredHeight: 600,
+      maximized: true,
+    });
+    assertEquals(api.loadBounds(800, 600), {
+      x: 300,
+      y: 120,
+      width: 800,
+      height: 600,
+    });
+    assertEquals(api.restoreMax(), true, `async=${async}`);
+    // Un-maximized again: the key is gone, the file is exactly the old shape.
+    api.saveBounds(fakeWin(false));
+    await Promise.resolve();
+    assertEquals(JSON.parse(files.get(state)!), {
+      x: 300,
+      y: 120,
+      width: 800,
+      height: 600,
+      declaredWidth: 800,
+      declaredHeight: 600,
+    });
+    api.loadBounds(800, 600);
+    assertEquals(api.restoreMax(), false);
+  }
+});
+
+Deno.test("electron bounds: the maximized flag survives a fitted rect and a changed declaration; old files load unchanged", () => {
+  const { api, files, state } = boundsHarness(false);
+  files.set(
+    state,
+    JSON.stringify({
+      x: 100,
+      y: 2000,
+      width: 800,
+      height: 600,
+      declaredWidth: 800,
+      declaredHeight: 600,
+      maximized: true,
+    }),
+  );
+  assertEquals(api.loadBounds(800, 600), {
+    x: 100,
+    y: 300,
+    width: 800,
+    height: 600,
+  });
+  assertEquals(api.restoreMax(), true);
+  assertEquals(api.loadBounds(640, 480), {
+    x: 100,
+    y: 420,
+    width: 640,
+    height: 480,
+  });
+  assertEquals(api.restoreMax(), true);
+  // A pre-maximize-key file: exactly what it loaded to before.
+  files.set(
+    state,
+    JSON.stringify({
+      x: 0,
+      y: 37,
+      width: 1280,
+      height: 863,
+      declaredWidth: 800,
+      declaredHeight: 600,
+    }),
+  );
+  assertEquals(api.loadBounds(800, 600), {
+    x: 0,
+    y: 37,
+    width: 1280,
+    height: 863,
+  });
+  assertEquals(api.restoreMax(), false);
+  // No position saved: no position keys invented.
+  files.set(
+    state,
+    JSON.stringify({
+      width: 900,
+      height: 700,
+      declaredWidth: 800,
+      declaredHeight: 600,
+    }),
+  );
+  assertEquals(api.loadBounds(800, 600), { width: 900, height: 700 });
+});
+
+Deno.test("electron bounds: both shells re-maximize right after creating the window", () => {
+  for (
+    const s of [
+      electronMainScript("http://127.0.0.1:1/", { title: "x" }),
+      electronMainScriptUDS("http://127.0.0.1:1/", "/tmp/x.sock", {
+        title: "x",
+      }),
+    ]
+  ) {
+    assertStringIncludes(s, "win.getNormalBounds()");
+    assertStringIncludes(s, "out.maximized = true");
+    const created = s.indexOf("const win = new BrowserWindow(b);");
+    const remax = s.indexOf(
+      "if (__aioRestoreMax) {\n    try { win.maximize(); }",
+    );
+    const tracked = s.indexOf("win.on('resize', save);");
+    assertEquals(created > 0 && remax > created && tracked > remax, true);
+    new Function(s); // still parses
+  }
 });

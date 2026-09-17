@@ -175,10 +175,12 @@ Deno.test("dev boot: a method writing an undeclared key is named at the WRITE, n
         await app.close();
       }
     });
+    // Said by the write-time guard (declared-shape-guard.ts), which names the
+    // method — and ONCE: the persist-time watcher shares its dedupe.
+    const said = lines.filter((l) => l.includes("rds.opts.b"));
     assert(
-      lines.some((l) =>
-        l.includes("persist (dev): rds.opts.b (number) is being written")
-      ),
+      said.length === 1 &&
+        said[0]!.includes('state write: rds:addKey added "rds.opts.b"'),
       lines.join("\n"),
     );
   } finally {

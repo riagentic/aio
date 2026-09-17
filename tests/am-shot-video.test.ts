@@ -6,7 +6,10 @@
 // Skipped when the box has no Chromium; ffprobe is the independent decoder
 // when present.
 import { assert, assertEquals, assertStringIncludes } from "@std/assert";
-import { shotVideoOptions } from "../src/am/am-cmd-shot-video.ts";
+import {
+  isStillRecording,
+  shotVideoOptions,
+} from "../src/am/am-cmd-shot-video.ts";
 import { unknownFlags } from "../src/am/am-flags.ts";
 import {
   chromiumPage,
@@ -59,6 +62,19 @@ Deno.test("shotVideoOptions: what a video cannot honour is refused by name", () 
   }
 });
 
+Deno.test("isStillRecording: the screencast's own first frame is not a paint", () => {
+  const f = (...us: number[]) => us.map((u) => ({ us: u, path: "" }));
+  // What a never-changing window measured: the start screenshot, then the
+  // frame Page.startScreencast always sends ~33 ms in. One picture.
+  assertEquals(isStillRecording(f(0, 33_000), 2_500_000), true);
+  assertEquals(isStillRecording(f(0), 2_000_000), true);
+  // A later paint is a change.
+  assertEquals(isStillRecording(f(0, 33_000, 600_000), 2_500_000), false);
+  assertEquals(isStillRecording(f(0, 900_000), 2_500_000), false);
+  // Too short to call it still.
+  assertEquals(isStillRecording(f(0, 33_000), 1_000_000), false);
+});
+
 Deno.test("am shot's flag gate lets --video and --duration through", () => {
   assertEquals(unknownFlags("shot", ["--video=a.mp4", "--duration=3"]), []);
   assertEquals(unknownFlags("shot", ["--videos"]), ["--videos"]);
@@ -66,14 +82,15 @@ Deno.test("am shot's flag gate lets --video and --duration through", () => {
 
 /** A page that repaints every 40 ms, served over http://127.0.0.1 — a secure
  *  context, which WebCodecs requires (a data: URL is not one). */
-function servePage() {
+function servePage(html: string | null = null) {
   const ac = new AbortController();
   const port = freePort();
   const server = Deno.serve(
     { port, hostname: "127.0.0.1", signal: ac.signal, onListen() {} },
     () =>
       new Response(
-        `<!doctype html><body style="margin:0;font:48px sans-serif">
+        html ??
+          `<!doctype html><body style="margin:0;font:48px sans-serif">
 <div id=n>0</div><script>let i=0;setInterval(()=>{n.textContent=++i;document.body.style.background=i%2?"#fde":"#def"},40)</script>`,
         { headers: { "content-type": "text/html" } },
       ),
@@ -116,58 +133,101 @@ async function ffprobe(path: string): Promise<Record<string, string> | null> {
   );
 }
 
+/** A headless Chromium on `page`, with its CDP page — everything it made is
+ *  closed in `finally`, in order, whatever threw and wherever: the browser is
+ *  killed AND its exit awaited even when a wait inside timed out (the full
+ *  suite's load reported a leaked child process here). */
+async function withBrowser(
+  size: string,
+  html: string | null,
+  fn: (
+    cdp: Awaited<ReturnType<typeof chromiumPage>>,
+    browser: Awaited<ReturnType<typeof launchChromium>>,
+    dir: string,
+  ) => Promise<void>,
+): Promise<void> {
+  const page = servePage(html);
+  let browser: Awaited<ReturnType<typeof launchChromium>> | null = null;
+  let cdp: Awaited<ReturnType<typeof chromiumPage>> | null = null;
+  let dir: string | null = null;
+  try {
+    dir = await tempDir("am-shot-video-");
+    browser = await launchChromium(CHROME!, [
+      "--remote-debugging-port=0",
+      `--window-size=${size}`,
+      page.url,
+    ]);
+    cdp = await chromiumPage(browser);
+    await cdp.call("Page.enable");
+    await fn(cdp, browser, dir);
+  } finally {
+    await cdp?.close();
+    await browser?.close();
+    await page.close();
+    if (dir) await dropTempDir(dir);
+  }
+}
+
 Deno.test({
   name:
     "recordScreencast + encodeRecording: a repainting page becomes a decodable MP4 and WebM",
   ignore: !CHROME,
   async fn() {
-    const page = servePage();
-    const browser = await launchChromium(CHROME!, [
-      "--remote-debugging-port=0",
-      "--window-size=640,480",
-      page.url,
-    ]);
-    const dir = await tempDir("am-shot-video-");
-    try {
-      const cdp = await chromiumPage(browser);
-      try {
-        await cdp.call("Page.enable");
+    await withBrowser("640,480", null, async (cdp, _browser, dir) => {
+      const rec = await recordScreencast(
+        cdp,
+        dir,
+        new Promise((r) => setTimeout(r, 1200)),
+      );
+      assertEquals(rec.lost, false);
+      assert(
+        rec.frames.length >= 5,
+        `only ${rec.frames.length} frames from a page repainting every 40 ms`,
+      );
+      assertEquals(rec.frames[0]!.us, 0);
+      assert(rec.endUs >= 1_150_000, `${rec.endUs}`);
+      assertEquals(isStillRecording(rec.frames, rec.endUs), false);
+      for (const format of ["mp4", "webm"] as const) {
+        const done = await encodeRecording(cdp, rec, format);
+        const file = `${dir}/out.${format}`;
+        await Deno.writeFile(file, done.bytes);
+        const p = await ffprobe(file);
+        if (!p) continue;
+        assertEquals(p.codec_name, format === "mp4" ? "h264" : "vp8");
+        assertEquals([Number(p.width), Number(p.height)], [
+          done.width,
+          done.height,
+        ]);
+        assert(
+          Number(p.nb_read_frames) >= 5,
+          `${format}: ${p.nb_read_frames} frames`,
+        );
+      }
+    });
+  },
+});
+
+Deno.test({
+  name:
+    "recordScreencast: a window that never changes is a STILL recording (the documented warning fires)",
+  ignore: !CHROME,
+  async fn() {
+    await withBrowser(
+      "320,240",
+      `<!doctype html><body style="margin:0">static</body>`,
+      async (cdp, _browser, dir) => {
+        await new Promise((r) => setTimeout(r, 300)); // first paint done
         const rec = await recordScreencast(
           cdp,
           dir,
-          new Promise((r) => setTimeout(r, 1200)),
+          new Promise((r) => setTimeout(r, 1700)),
         );
-        assertEquals(rec.lost, false);
         assert(
-          rec.frames.length >= 5,
-          `only ${rec.frames.length} frames from a page repainting every 40 ms`,
+          isStillRecording(rec.frames, rec.endUs),
+          `frames at ${rec.frames.map((f) => f.us).join(", ")} µs`,
         );
-        assertEquals(rec.frames[0]!.us, 0);
-        assert(rec.endUs >= 1_150_000, `${rec.endUs}`);
-        for (const format of ["mp4", "webm"] as const) {
-          const done = await encodeRecording(cdp, rec, format);
-          const file = `${dir}/out.${format}`;
-          await Deno.writeFile(file, done.bytes);
-          const p = await ffprobe(file);
-          if (!p) continue;
-          assertEquals(p.codec_name, format === "mp4" ? "h264" : "vp8");
-          assertEquals([Number(p.width), Number(p.height)], [
-            done.width,
-            done.height,
-          ]);
-          assert(
-            Number(p.nb_read_frames) >= 5,
-            `${format}: ${p.nb_read_frames} frames`,
-          );
-        }
-      } finally {
-        await cdp.close();
-      }
-    } finally {
-      await browser.close();
-      await page.close();
-      await dropTempDir(dir);
-    }
+      },
+    );
   },
 });
 
@@ -176,34 +236,17 @@ Deno.test({
     "recordScreencast: the window going away ends the recording as LOST, with the frames kept",
   ignore: !CHROME,
   async fn() {
-    const page = servePage();
-    const browser = await launchChromium(CHROME!, [
-      "--remote-debugging-port=0",
-      "--window-size=320,240",
-      page.url,
-    ]);
-    const dir = await tempDir("am-shot-video-");
-    try {
-      const cdp = await chromiumPage(browser);
-      try {
-        await cdp.call("Page.enable");
-        const never = new Promise<void>(() => {});
-        const recording = recordScreencast(cdp, dir, never);
-        await new Promise((r) => setTimeout(r, 400));
-        await browser.close();
-        const rec = await recording;
-        assertEquals(rec.lost, true);
-        assert(rec.frames.length >= 1);
-        for (const f of rec.frames) {
-          assert((await Deno.stat(f.path)).size > 0, f.path);
-        }
-      } finally {
-        await cdp.close();
-      }
-    } finally {
+    await withBrowser("320,240", null, async (cdp, browser, dir) => {
+      const never = new Promise<void>(() => {});
+      const recording = recordScreencast(cdp, dir, never);
+      await new Promise((r) => setTimeout(r, 400));
       await browser.close();
-      await page.close();
-      await dropTempDir(dir);
-    }
+      const rec = await recording;
+      assertEquals(rec.lost, true);
+      assert(rec.frames.length >= 1);
+      for (const f of rec.frames) {
+        assert((await Deno.stat(f.path)).size > 0, f.path);
+      }
+    });
   },
 });

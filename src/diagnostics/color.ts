@@ -26,15 +26,27 @@ export const colorEnabled: boolean = (() => {
     // and every `am help | …` under that env (commands "missing" from help
     // because ANSI sat between the indent and the verb).
     const force = D.env.get("FORCE_COLOR");
-    // FORCE_COLOR=0 means off (CI/agent hosts); any other non-empty value forces on.
-    if (force === "0") return false;
-    if (force !== undefined && force !== "") return true;
+    // FORCE_COLOR=0 / FORCE_COLOR=false mean off (CI/agent hosts export both
+    // spellings); any other non-empty value forces on. "" is off too — Node
+    // reads an empty FORCE_COLOR as "on"; aio does not, deliberately: an
+    // empty variable is what `FORCE_COLOR= cmd` and an unset-by-template CI
+    // line produce, and neither is a request to paint a pipe.
+    if (force !== undefined && !forceColorOn(force)) return false;
+    if (force !== undefined) return true;
     if (D.env.get("NO_COLOR")) return false;
     return D.stdout?.isTerminal?.() ?? false;
   } catch {
     return false;
   }
 })();
+
+/** How a `FORCE_COLOR` value reads: `"0"`, `"false"` (any case) and `""` are
+ *  OFF; everything else forces colour on. Exported so the rule is a unit test,
+ *  not a child process per spelling. */
+export function forceColorOn(value: string): boolean {
+  const v = value.trim().toLowerCase();
+  return v !== "" && v !== "0" && v !== "false";
+}
 
 /** An escape code, or "" when colour is off — for palette constants that are
  *  interpolated directly (`${C.red}…${C.r}`). */

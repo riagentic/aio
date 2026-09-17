@@ -116,7 +116,7 @@ else
   if ! _clone_err=$(git clone -q "$AIO_REPO" "$AIO_HOME" 2>&1); then
     _hint=""
     case "$_clone_err" in
-      *"Permission denied"*.git/objects/*)
+      *"Permission denied"*.git/objects/*|*.git/objects/*"Permission denied"*)
         _unreadable=$(find "$AIO_REPO/.git/objects" -type f ! -perm -o+r 2>/dev/null | wc -l)
         [ "${_unreadable:-0}" -gt 0 ] && _hint="
 

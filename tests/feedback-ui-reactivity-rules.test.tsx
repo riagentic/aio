@@ -416,7 +416,8 @@ testUI(
       ui.BigApp["orientation-pickr"].value
     ) as Error;
     const listed = /available: (.*)/.exec(err.message)?.[1] ?? "";
-    const names = listed.split(", ");
+    // Each entry is `<path> → <testUI spelling>`; the path is what is ranked.
+    const names = listed.split(", ").map((n) => n.split(" → ")[0]!);
     assert(names.length <= 8, `capped, got ${names.length}: ${listed}`);
     assert(
       names[0] === "orientation-picker" ||

@@ -37,3 +37,21 @@ Deno.test("openWindow: preload bridge exposes openWindow → IPC", () => {
     "preload forwards to the main handler",
   );
 });
+
+Deno.test("openWindow: no preload is refused with THAT reason; a relative preload is the app dir's", () => {
+  // Measured before: `{}` was refused as "preload <appdir> is outside the app
+  // directory <appdir>", and `preload: "ok.cjs"` opened or was refused
+  // depending on the process cwd (a packaged app's cwd is whoever launched it).
+  const s = gen(true);
+  assertStringIncludes(s, "refuseWindow('no preload given");
+  assertStringIncludes(s, "path.resolve(root, preload)");
+  assert(
+    !s.includes("path.resolve(String(preload"),
+    "cwd-relative resolve is back",
+  );
+  assert(
+    s.indexOf("no preload given") < s.indexOf("path.resolve(root, preload)"),
+    "the missing-preload refusal must come before resolving it",
+  );
+  new Function(s);
+});

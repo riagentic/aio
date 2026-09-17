@@ -558,9 +558,8 @@ export const LEDGER: readonly Mutation[] = [
     what:
       "journal compaction eats the newest un-snapshotted action, so the one write a crash was supposed to replay is the one that cannot be",
     file: "src/server/journal.ts",
-    find: "        const keep = parseJournal(text).filter((e) => e.seq > s);",
-    replace:
-      "        const keep = parseJournal(text).filter((e) => e.seq > s + 1);",
+    find: "        const keep = parsed.filter((e) => e.seq > s);",
+    replace: "        const keep = parsed.filter((e) => e.seq > s + 1);",
     test: "tests/journal-compaction-perms.test.ts",
     filter: "journal: compaction still keeps the unpersisted tail",
   },

@@ -50,9 +50,10 @@ case "${1:-}" in
       echo "$DISPLAY_NUM is already up — nothing to do."
       exit 0
     fi
-    echo "Xephyr on $DISPLAY_NUM ($SCREEN). Test windows open in here, not on"
-    echo "your desktop. Leave it running; Ctrl-C or closing the window stops it."
-    exec Xephyr -screen "$SCREEN" -resizeable -ac "$DISPLAY_NUM"
+    # The framework's own start: with an access cookie in your private runtime
+    # dir (never `-ac` — an open nested display is every local account's).
+    exec deno run --allow-read --allow-write --allow-env --allow-run \
+      --allow-sys "$(dirname "$0")/xephyr.ts" "$DISPLAY_NUM" "$SCREEN"
     ;;
   *)
     echo "unknown flag: $1 (try --status, --stop, --help)" >&2

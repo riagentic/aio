@@ -183,7 +183,7 @@ export const VERB_FLAGS: Readonly<Record<string, readonly string[]>> = {
   // `--task=<slug>` one section, `--list` the section index. Gated (not
   // passthrough) so a mistyped slug is refused with the real list rather
   // than silently printing the whole brief.
-  agent: ["--task", "--list"],
+  agent: ["--task", "--list", "--min", "--medium", "--max"],
 };
 
 /** The flag name in `--name=value` / `--name`. Non-flags return null, and so
