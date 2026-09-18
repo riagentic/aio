@@ -26,8 +26,8 @@ not browse._ So here are the words.
 | **reproduce** it              | `am replay N..M`                         | re-running by hand                 |
 
 Two more once you have a window: `am shot` (a PNG of the real Electron window)
-and `am eval '<js>'` (geometry, computed styles, a fetch from the page's own
-origin — everything `am surface` cannot see). Both need the app started with
+and `am eval '<expression>'` (geometry, computed styles, a fetch from the page's
+own origin — everything `am surface` cannot see). Both need the app started with
 `--cdp`; `am instances` reports the port as `cdpPort`.
 
 ## The loop that works

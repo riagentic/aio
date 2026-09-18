@@ -27,16 +27,17 @@ name, so the table cannot fall behind the code.
 
 ## Building
 
-| Variable                  | Read by       | Effect                                                                                                                                                                             |
-| ------------------------- | ------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `AIO_BUILD_VERSION`       | build         | **The supported way a parent build hands a version to a child.** See below                                                                                                         |
-| `AIO_BUILD_COMMIT`        | update check  | The commit a build came from, when git is not available where the binary runs                                                                                                      |
-| `AIO_ELECTRON_PROTOCOL=1` | dev           | Load the dev window over `aio://` — the packaged path — instead of `http://`. Test what you ship                                                                                   |
-| `AIO_ELECTRON_SANDBOX=1`  | Electron      | Force the strict sandbox behaviour rather than the platform default                                                                                                                |
-| `AIO_ELECTRON_ARGS=…`     | Electron      | Extra Chromium switches, space separated (`--disable-gpu --disable-dev-shm-usage`). A token that is not a `--switch` is refused and named in the log. See docs/clients/electron.md |
-| `ELECTRON_PATH`           | Electron      | Use this Electron runtime instead of the downloaded one                                                                                                                            |
-| `ELECTRON_MIRROR`         | Electron      | Mirror to download Electron from                                                                                                                                                   |
-| `AIO_AVD`                 | `dev-android` | Which Android emulator image to boot. Default: the first one                                                                                                                       |
+| Variable                  | Read by       | Effect                                                                                                                                                                                                                                         |
+| ------------------------- | ------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `AIO_BUILD_VERSION`       | build         | **The supported way a parent build hands a version to a child.** See below                                                                                                                                                                     |
+| `AIO_BUILD_COMMIT`        | update check  | The commit a build came from, when git is not available where the binary runs                                                                                                                                                                  |
+| `AIO_ELECTRON_PROTOCOL=1` | dev           | Load the dev window over `aio://` — the packaged path — instead of `http://`. Test what you ship                                                                                                                                               |
+| `AIO_ELECTRON_SANDBOX=1`  | Electron      | Force the strict sandbox behaviour rather than the platform default                                                                                                                                                                            |
+| `AIO_ELECTRON_ARGS=…`     | Electron      | Extra Chromium switches, space separated (`--disable-gpu --disable-dev-shm-usage`). A token that is not a `--switch` is refused and named in the log. See docs/clients/electron.md                                                             |
+| `AIO_MACOS_SSH`           | macOS build   | `[user@]mac-host` reachable over SSH with `hdiutil`, so a Linux/Windows host can produce a macOS `.dmg`: the `.app` is shipped there, imaged, and fetched back. Equivalent to `"build": { "macos": { "host": … } }`. See docs/build/targets.md |
+| `ELECTRON_PATH`           | Electron      | Use this Electron runtime instead of the downloaded one                                                                                                                                                                                        |
+| `ELECTRON_MIRROR`         | Electron      | Mirror to download Electron from                                                                                                                                                                                                               |
+| `AIO_AVD`                 | `dev-android` | Which Android emulator image to boot. Default: the first one                                                                                                                                                                                   |
 
 ### `AIO_BUILD_VERSION` — one build, one version
 

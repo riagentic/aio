@@ -251,7 +251,8 @@ Inspect:
                           then encode it in the window — no ffmpeg; the
                           extension picks H.264 MP4 or VP8 WebM
                           Deterministic state: am snapshot load, then am dispatch
-  eval '<js>'             Evaluate JS in the live renderer, get JSON back —
+  eval '<expression>'     Evaluate ONE JS expression in the live renderer, get
+                          JSON back (statements: '(() => { …; return x })()') —
                           geometry, computed styles, a fetch from the page's own
                           origin: everything \`surface\` cannot see. Promises are
                           awaited. Needs --cdp, same as shot. --window=N picks

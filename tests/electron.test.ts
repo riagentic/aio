@@ -1,5 +1,5 @@
 // Unit tests for src/electron.ts — pure function coverage (no Electron/display needed)
-import { assertEquals, assertStringIncludes } from "@std/assert";
+import { assert, assertEquals, assertStringIncludes } from "@std/assert";
 import { tmplBounds } from "../src/electron/electron-shared.ts";
 import {
   electronClientScript,
@@ -310,6 +310,7 @@ Deno.test("electron: UDS script — reports a backend outage once, with the true
 
 // ── electron auto-install ────────────────────────────────
 import { autoInstallElectron } from "../src/electron/electron-spawn.ts";
+import { DEFAULT_ELECTRON_VERSION } from "../src/electron/electron-runtime-fetch.ts";
 
 // The contract is "is Electron INSTALLED now", not "did the installer exit
 // zero" — because `deno install --allow-scripts` exits zero having skipped the
@@ -358,6 +359,12 @@ Deno.test("autoInstallElectron: answers 'is it installed', not 'did the command 
   // Loud: every attempt announces what it's doing (no silent installs).
   assertEquals(infos.length >= 4, true);
   assertEquals(infos[0]!.includes("--allow-scripts=npm:electron"), true);
+  // …and announces the PINNED version, not a bare `npm:electron` (latest at
+  // install time), so a dev tree cannot drift from the build's floor.
+  assert(
+    infos[0]!.includes(`npm:electron@${DEFAULT_ELECTRON_VERSION}`),
+    `the auto-install must name the framework's version: ${infos[0]}`,
+  );
 });
 
 // ── Main-process crash guard (no native error dialog on close) ──────

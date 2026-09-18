@@ -26,7 +26,7 @@
  * boundary matrix lets build → electron, never the reverse. The build-side
  * wrappers in `build/electron-runtime.ts` delegate here.
  */
-import { join } from "@std/path";
+import { basename, dirname, join } from "@std/path";
 import { log as flog } from "../diagnostics/logger-api.ts";
 import { homedir } from "../server/paths.ts";
 import { isProcessAlive } from "../server/single-instance-lock.ts";
@@ -34,10 +34,28 @@ import { OK } from "../diagnostics/fmt.ts";
 import { extractZip } from "../server/zip-extract.ts";
 
 /** The Electron version a build falls back to when the app declares no exact
- *  one and none is installed. ONE decider — the scaffold's import map says
- *  `npm:electron` (latest at install time), so a version has to come from
- *  somewhere when nothing has been installed yet. */
-export const DEFAULT_ELECTRON_VERSION = "43.4.1";
+ *  one and none is installed.
+ *
+ *  ONE decider for the whole framework — the launcher, the build, the
+ *  scaffold's pin and every doc read this number. It was `43.4.1` while the
+ *  repo's own `package.json` ran `44.4.1` and the scaffold wrote a BARE
+ *  `npm:electron` (latest at install time), so the same app could ship three
+ *  different Electrons depending on which rung of the resolver answered.
+ *
+ *  It is what `frameworkSpecs` pins the scaffold's import map to — so a new
+ *  app, an app upgrading its pin, and a build with nothing installed all
+ *  agree, on every platform. (`resolveElectronVersion` still prefers an
+ *  INSTALLED runtime and then an app's declared spec; this is the floor.)
+ *
+ *  Kept as the NEWEST INSTALLABLE release, not blindly Electron's `latest`.
+ *  Deno's default `minimumDependencyAge` is 24 hours (a supply-chain guard),
+ *  so a version published minutes ago cannot be installed — which fails every
+ *  example boot with "a newer matching version was found, but it was newer
+ *  than the specified minimum dependency date". Measured: Electron 44.4.2,
+ *  1.7 h old, blocked the whole example suite while 44.4.1 installed cleanly.
+ *  When `latest` outruns this floor, the freshness test REPORTS it (see
+ *  tests/electron-version-consistency.test.ts) rather than failing a build. */
+export const DEFAULT_ELECTRON_VERSION = "44.4.1";
 
 /** `dist/electron.json` — written by the build, read by the launcher of a
  *  compiled binary. The file name is the contract between the two. */
@@ -296,6 +314,55 @@ async function withRuntimeLock<T>(
     return await fn(held);
   } finally {
     if (held) await Deno.remove(lock).catch(() => {});
+  }
+}
+
+/** Remove `<dir>.incoming.<pid>` stages whose process is gone. Called while
+ *  holding the runtime lock, so no live unpack is ever touched; a stage whose
+ *  pid is still alive is left alone either way. */
+async function removeDeadStages(dir: string): Promise<void> {
+  const prefix = `${basename(dir)}.incoming.`;
+  let entries: Deno.DirEntry[];
+  try {
+    entries = await Array.fromAsync(Deno.readDir(dirname(dir)));
+  } catch {
+    return; // aio-ok: no parent yet — nothing was ever staged
+  }
+  for (const e of entries) {
+    if (!e.isDirectory || !e.name.startsWith(prefix)) continue;
+    const pid = Number(e.name.slice(prefix.length));
+    if (!Number.isInteger(pid) || pid === Deno.pid || isProcessAlive(pid)) {
+      continue;
+    }
+    await Deno.remove(join(dirname(dir), e.name), { recursive: true }).catch(
+      () => {
+        // aio-ok(silent-catch): disk space, not correctness — a stage that will
+        // not delete now is retried on the next unpack.
+      },
+    );
+  }
+}
+
+/** `rename`, retried briefly on the errors Windows returns while antivirus
+ *  scans a freshly written `electron.exe` (ERROR_ACCESS_DENIED / sharing
+ *  violation). A first launch that loses that race would otherwise delete the
+ *  whole verified stage and open nothing. Any other error throws at once. */
+export async function renameWithRetry(
+  from: string,
+  to: string,
+  opts: { tries?: number; delayMs?: number; rename?: typeof Deno.rename } = {},
+): Promise<void> {
+  const tries = opts.tries ?? 20;
+  const rename = opts.rename ?? Deno.rename;
+  for (let i = 1;; i++) {
+    try {
+      return await rename(from, to);
+    } catch (e) {
+      const transient = e instanceof Deno.errors.PermissionDenied ||
+        e instanceof Deno.errors.Busy;
+      if (!transient || i >= tries) throw e;
+      await new Promise((r) => setTimeout(r, opts.delayMs ?? 250));
+    }
   }
 }
 
@@ -569,6 +636,10 @@ export async function ensureElectronRuntime(
     // Stage beside the target, never into it: an interrupted download must not
     // be able to destroy a runtime that already works.
     const stage = `${dir}.incoming.${Deno.pid}`;
+    // A launch killed mid-unpack (likely: a GUI exe shows nothing while it
+    // unpacks, so people kill it) left its ~250 MB stage behind, named by a
+    // pid nobody will ever have again. We hold the lock, so clear them.
+    await removeDeadStages(dir);
     await Deno.remove(stage, { recursive: true }).catch(() => {});
     await Deno.mkdir(stage, { recursive: true });
     try {
@@ -610,8 +681,17 @@ export async function ensureElectronRuntime(
         `${url}\nsha256:${actual}\n`,
       );
 
+      // Re-check before replacing: a second launch that took over a lock it
+      // believed stale may have finished first, and deleting a runtime whose
+      // Electron is already starting breaks that window — on Windows only
+      // HALF-deletes it (the running exe is locked), leaving a tree whose
+      // stamp still says "good".
+      if (await runtimeUsable(dir, slug)) {
+        log(`${OK} runtime ${version} (${slug}) — cached`);
+        return dir;
+      }
       await Deno.remove(dir, { recursive: true }).catch(() => {});
-      await Deno.rename(stage, dir);
+      await renameWithRetry(stage, dir);
       log(`${OK} runtime ${version} (${slug}) ready`);
       return dir;
     } finally {

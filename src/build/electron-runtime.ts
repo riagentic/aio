@@ -33,6 +33,11 @@ import { PLATFORMS } from "./platforms.ts";
 import { HEY } from "../diagnostics/fmt.ts";
 
 export { unzipInto } from "../electron/electron-runtime-fetch.ts";
+// THE version, re-exported through the build's runtime module so `am create`
+// can pin the scaffold's import map to it. `am` may import `build` (matrix) but
+// not `electron`, and a second literal in the scaffold is exactly how the
+// framework default and a new app's pin drifted apart before.
+export { DEFAULT_ELECTRON_VERSION } from "../electron/electron-runtime-fetch.ts";
 
 /** Electron's own name for a platform, as it appears in its release assets:
  *  `electron-v28.3.3-win32-x64.zip`. Ours is the aio platform name. */

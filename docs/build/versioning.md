@@ -57,20 +57,21 @@ The fleet build (`deno task build`) places every artifact under
 `-dirty.<hash8>` / `-nogit.<hash8>` included, so a dirty artifact is visibly
 dirty:
 
-| Target                       | File in `dist/`                                                                            |
-| ---------------------------- | ------------------------------------------------------------------------------------------ |
-| browser / server / cli       | `notes-1.2.345` (bare binary)                                                              |
-| server (+ systemd unit)      | `notes-1.2.345.service`                                                                    |
-| electron (Linux)             | `notes-1.2.345-x86_64.AppImage`                                                            |
-| electron (Windows / macOS)   | `notes-1.2.345-win-x64.zip`, `…-mac-arm64.zip`                                             |
-| android                      | `notes-1.2.345.apk` (`…-unsigned.apk` unsigned)                                            |
-| android-client               | `notes-1.2.345-client.apk`                                                                 |
-| cli-client                   | `notes-1.2.345-client`                                                                     |
-| cross builds (`--platforms`) | `notes-1.2.345-windows-x64.exe`, `notes-1.2.345-macos-arm64`, `notes-1.2.345-client-linux` |
-| ios-client                   | `notes-1.2.345-ios-client/` (Xcode project)                                                |
-| electron-client              | `aio-client-1.2.345-x86_64.AppImage`                                                       |
-| a suffixed duplicate target  | `notes-1.2.345-cli` (see "Target names")                                                   |
-| dirty                        | `notes-1.2.345-dirty.9f3ac2b1-client.apk`                                                  |
+| Target                       | File in `dist/`                                                                              |
+| ---------------------------- | -------------------------------------------------------------------------------------------- |
+| browser / server / cli       | `notes-1.2.345` (bare binary)                                                                |
+| server (+ systemd unit)      | `notes-1.2.345.service`                                                                      |
+| electron (Linux)             | `notes-1.2.345-x86_64.AppImage`                                                              |
+| electron (Windows)           | `notes-1.2.345-win-x64.zip`                                                                  |
+| electron (macOS)             | `notes-1.2.345-mac-x64.dmg`, `…-mac-arm64.dmg` (a `.app` is inside; no `.dmg` without a Mac) |
+| android                      | `notes-1.2.345.apk` (`…-unsigned.apk` unsigned)                                              |
+| android-client               | `notes-1.2.345-client.apk`                                                                   |
+| cli-client                   | `notes-1.2.345-client`                                                                       |
+| cross builds (`--platforms`) | `notes-1.2.345-windows-x64.exe`, `notes-1.2.345-macos-arm64`, `notes-1.2.345-client-linux`   |
+| ios-client                   | `notes-1.2.345-ios-client/` (Xcode project)                                                  |
+| electron-client              | `aio-client-1.2.345-x86_64.AppImage`                                                         |
+| a suffixed duplicate target  | `notes-1.2.345-cli` (see "Target names")                                                     |
+| dirty                        | `notes-1.2.345-dirty.9f3ac2b1-client.apk`                                                    |
 
 Grammar: `<name>-<version>` first, then whatever the target adds. The direct
 single-target builder (`build.ts --compile`) still writes the bare name into the

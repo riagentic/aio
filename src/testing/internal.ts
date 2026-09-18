@@ -17,6 +17,7 @@
 // `aio ship` internals (src/build/ship.ts).
 export {
   gitWorkTreeOf, // aio-ok: test-only seam — the ship tests pin the git worktree rule
+  inferTarget, // aio-ok: test-only seam — the ship tests pin artifact→install-strategy
   notRunnableExit, // aio-ok: test-only seam — the ship tests pin the not-runnable exit rule
   publishInstructions, // aio-ok: test-only seam — the ship tests pin the publish text
 } from "../build/ship.ts";

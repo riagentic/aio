@@ -1163,7 +1163,7 @@ ui       am surface [idx|server] [--component=X] [--path=App/Main] [--depth=N] [
          am trigger [idx] "App:AddButton" click|dblclick|type|setValue|press|keyDown|keyUp|hover|
            focus|blur|select|check|uncheck|clear|scroll|dragTo [text]   reply includes fresh surface
          am preview src/ui/Card.tsx --export=Card --props='{"title":"x"}'   path as your shell completes it
-         am clients · am client <idx> (component tree) · am eval '<js>' [--window=N]
+         am clients · am client <idx> (component tree) · am eval '<expression>' [--window=N]
          am shot [--out=F] [--full] [--selector=css] [--update=B] [--check=B]   (shot/eval/video: an
            app started with am start --client=electron --cdp)
          am shot --video[=F.mp4|.webm] [--duration=S]   record the window until Ctrl-C

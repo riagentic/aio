@@ -1,5 +1,163 @@
 # Changelog
 
+## v1.0.4-beta — macOS that actually works (2026-09-18)
+
+> **Nothing breaks.** The public surface is byte-identical to 1.0.3-beta
+> (`check:api` reports no drift); every change is a fix or a stricter refusal of
+> something that was already wrong. `am pin --latest` is the whole upgrade.
+>
+> The milestone: **macOS builds stopped being rubbish.** The `electron` target
+> now produces a real, signed `.app` in a `.dmg` — the Dock entry is the app's
+> name and icon, the window mounts the UI over `aio://`, and the same bundle is
+> assembled on Linux, Windows or a Mac. Verified end to end by running the
+> Counter app on a real macOS 14 guest, from the mounted `.dmg`.
+
+### macOS: a real `.app`, in a `.dmg`
+
+- **What shipped before was a zip holding a bare Mach-O next to an untouched
+  `Electron.app`** still named "Electron" and still signed `com.github.Electron`
+  — no `.app`, no Dock identity, no icon, Gatekeeper-blocking, and an unsigned
+  nested Electron that macOS kills with exit status 1 and no message. The
+  `electron` target now assembles the bundle a macOS app actually is:
+
+  ```
+  Counter.app/Contents/
+    Info.plist               identity (CFBundleExecutable/Identifier/Icon)
+    PkgInfo
+    MacOS/counter            the Deno server binary IS the bundle executable
+    MacOS/electron/Electron.app/   the runtime, at the path the launcher reads
+    Resources/AppIcon.icns
+  ```
+
+- **Three load-bearing details, each measured on the real guest:**
+  - The Deno binary is `CFBundleExecutable` — aio is a two-process app, so its
+    identity is the app's and there is one Dock entry and one lifetime.
+  - `Contents/MacOS/` holds only the executable (Apple's rule); a `dist/` there
+    makes `codesign` fail with "code object is not signed at all". None is
+    needed — the compiled binary already serves its embedded `dist/` over the
+    app's socket, so the app runs with no bundle data on disk.
+  - The nested Electron carries the **same** `CFBundleIdentifier` and icon,
+    which is what makes macOS show "Counter" instead of "Electron".
+- **The bundle is signed inside-out (ad-hoc)** after the identity edit — without
+  it macOS refuses the nested runtime. The plists are rewritten by a pure-TS
+  plist editor and the icon is encoded to `.icns` in TypeScript, so a Linux or
+  Windows host produces the same bundle a Mac would; only `hdiutil` is left.
+- **The `.dmg` is produced by `hdiutil`, on a Mac.** On a Mac it just runs. From
+  anywhere else, set `AIO_MACOS_SSH=[user@]mac-host` (or
+  `"build": { "macos": { "host": … } }`) and the build ships the `.app` there,
+  makes the `.dmg`, and fetches it back — the documented, scriptable way to
+  build a real DMG from Linux CI. With no Mac, the `.app` is zipped and the
+  build says so; it never writes a file that merely claims to be a `.dmg`.
+- **The artifact is always ONE file.** Returning the `.app` directory alone made
+  `--targets=electron --platforms=macos` fail with "produced no recognized
+  artifact" on every host without a Mac — the build worked and reported failure.
+  The zip fallback closes that, and the loose bundle stays in build scratch.
+- **`CFBundleIdentifier` is `app.aio.<binaryName>`**, overridable with
+  `"build": { "macos": { "bundleId": "com.acme.Counter" } }`; an invalid one is
+  refused, never silently rewritten — it is the app's permanent macOS identity.
+
+### Every platform: smaller packages, one Electron, nothing missing
+
+- **Chromium's translations are trimmed on every OS.** Electron ships its UI
+  strings in ~55 locales — ~46 MB on Linux/Windows (`locales/*.pak`) and ~66 MB
+  on macOS (`*.lproj`) — and none of it is the app's text, which lives in the
+  Deno bundle. Only English survives; a missing locale falls back to it.
+  Measured: the Windows zip lost 49 MB of never-read data and the AppImage 46
+  MB.
+- **One Electron version for the whole framework.** The default was `43.4.1`
+  while the repo's own `package.json` ran `44.4.1` and `am create` wrote a BARE
+  `npm:electron` (latest at install time). All four surfaces — the launcher's
+  fallback, the build, the scaffold pin, the examples — now name the same
+  version **exactly** (no `^` range, the same rule `esbuild` follows), and
+  `tests/electron-version-consistency.test.ts` makes drift a red gate. The pin
+  is the newest _installable_ release, **44.4.1**: Deno's 24-hour
+  `minimumDependencyAge` guard refuses a version published minutes ago, so the
+  test REPORTS a newer upstream release rather than failing a build on
+  Electron's release cadence.
+- **The scaffold pins the framework's version**, not "latest at install": two
+  apps scaffolded a month apart ran different Chromiums, and neither matched the
+  version a build falls back to. The dev auto-install (`autoInstallElectron`)
+  pins the same version, so a checkout cannot drift from the build either.
+- **The macOS bundle carries Electron's licence files.** Chromium and Electron
+  are redistributed inside the app, so `LICENSE` and `LICENSES.chromium.html`
+  ship in `Contents/Resources/` as they already did on Linux and Windows —
+  copying only `Electron.app` (the files sit BESIDE it in the published runtime)
+  had dropped them.
+- **`aio ship` recognises a `.dmg`** — a UDIF image's magic is at the END, so
+  the first-bytes format gate called a valid DMG "not an artifact". It also
+  refuses a `.dmg` by name rather than mislabelling it `binary`, because no
+  update target can install one — a release that cannot be installed fails at
+  the publisher, not on every user's machine.
+
+### Review round: five fixes to 1.0.3's Windows path, one to macOS
+
+Found by reviewing the shipped 1.0.3 code, each proven on the real OS where the
+OS was the point:
+
+- **An update or `aio.restart()` closed a double-clicked Windows app for good.**
+  The relaunch spawned its successor with inherited stdio. A `--no-terminal` GUI
+  exe has no console, so the spawn threw `Invalid handle` — the same failure
+  1.0.3 fixed for the Electron window only. The app exited and never came back.
+  Both spawns now share one rule (`src/server/no-console.ts`). Measured on
+  Windows 11: from a double-clicked exe the old spawn fails and the new one
+  runs.
+- **The one-file exe's first unpack is sturdier.** It re-checks for a finished
+  runtime before replacing one: a second launch that took over a lock it
+  believed stale could otherwise delete a runtime whose Electron was starting,
+  and on Windows only half-delete it. A launch killed mid-unpack no longer
+  leaves ~250 MB behind forever: dead `*.incoming.<pid>` stages are removed
+  (verified on Windows 11). And the final rename rides out the few seconds
+  antivirus holds a fresh `electron.exe`, instead of throwing the whole verified
+  unpack away.
+- **The "rebuild the client" refusal reaches a mismatched client on Windows.**
+  The socket closed right after writing it, and a Windows named pipe discards
+  unread bytes on disconnect, so the client saw a bare EPIPE. It now drains
+  first, as the page server already did.
+- **A `.dmg` built on a Mac matches one built over SSH.** The native path imaged
+  the bare `.app`, so it had no drag-to-Applications link. Both paths now share
+  one tail: sign, link, image. It ran on macOS 14 with a space and an apostrophe
+  in the path.
+- **Docs: what a user sees on the first open of a downloaded `.dmg`.**
+  Gatekeeper holds an app that is not notarized. `docs/build/targets.md` gives
+  the way through for each macOS version.
+- **README: one install line per OS.** Shell and PowerShell are split. Windows
+  needs Git first (measured on a clean Windows 11, where the installer says so
+  and stops). The create/run step is three lines, because Windows PowerShell 5.1
+  rejects `&&`.
+
+### Field reports: six dev-time signals that were wrong or unclear
+
+From two app reports (a markdown viewer, a desktop wallet). Each has a test that
+fails without the fix:
+
+- **A cell method called from `onMount` was blamed for its own reads.** Under
+  `testUI` the method body runs in-process, inside the component's `onMount`, so
+  its reads of another cell landed in the component's tracking frame, and the
+  dev detector warned "was read inside onMount … but NOT during its render". The
+  docs already say "a cell method — not tracked". The dispatch drain now runs
+  untracked, so both runtimes agree: in the browser the call is an RPC and reads
+  nothing locally. On a server there is no tracking frame, so nothing changes
+  there.
+- **`<label><input type="checkbox"/> text</label>` was reported as unlabelled.**
+  Nesting is valid HTML and the recommended form for a checkbox. The check ran
+  before the input had a parent. It now looks once the tree is built, and the
+  message also names the nesting fix.
+- **A named signal set to the same PRIMITIVE value no longer warns.**
+  `count.set(0)` on a reset is an ordinary idiom and already a no-op, and the
+  warning taught apps to guard every set. An object set to itself (the
+  mutate-then-set bug) still warns, and the message now says to set a copy.
+- **`am eval` says it takes ONE expression.** The help, the agent contract and
+  `docs/AGENTS.md` say `'<expression>'`. A SyntaxError, which here almost always
+  means a statement form, now ends with the fix: `'(() => { …; return x })()'`.
+- **The contrast warning names an element the way HTML spells it:**
+  `<button class="btn btn-lg">`, not `class="btn.btn-lg"`, which pasted into
+  neither devtools nor CSS.
+- Also answered, with no code change: `testCell` accepts a scheduled effect once
+  the test reads it (`t.expect.effects(["__schedule"])` or `t.getEffects()`), as
+  the refusal message says. The "Module evaluation is still pending" boot
+  deadlock was fixed in 1.0.0-alpha56 (no dynamic import on the boot path, with
+  a guard test).
+
 ## v1.0.3-beta — Windows that actually works (2026-09-17)
 
 > **Nothing breaks.** The public surface is byte-identical to 1.0.2-beta

@@ -41,7 +41,7 @@ import { justified as okMarker } from "../src/diagnostics/ok-marker.ts";
 // (`sync/server-handler.ts`) became one `sendTo` that names the frame it could
 // not deliver, and the five harness swallows in `src/testing/` were either
 // made loud or justified in place.
-const CEILING = 330;
+const CEILING = 329;
 
 /** The budget for the PROMISE spelling, counted separately.
  *

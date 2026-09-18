@@ -280,24 +280,113 @@ artifact its `platform`, `triple`, and whether it is the `host` one.
 
 **What cross-compiles**
 
-|                                        | from any host                                                                                        |
-| -------------------------------------- | ---------------------------------------------------------------------------------------------------- |
-| `server` `browser` `cli` `cli-client`  | ✅ — `deno compile` emits the target's binary                                                        |
-| `electron` → **Windows, macOS**        | ✅ — the runtime is a published zip we fetch and cache; the package is a directory + launcher + zip  |
-| `electron*` → **Linux**                | ❌ needs a Linux host **of that arch** — an AppImage is assembled by `appimagetool`, a native binary |
-| `electron-client` → **Windows, macOS** | ❌ by design — the connect-page client is an AppImage, Linux only; build `electron` or `cli-client`  |
-| `android*`                             | ❌ by design — the APK is platform-independent, so it is built **once**, on any host                 |
-| `ios-client`                           | ❌ by design — the Xcode project is the same on every host; `xcodebuild` (macOS) makes the `.app`    |
+|                                        | from any host                                                                                                                         |
+| -------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------- |
+| `server` `browser` `cli` `cli-client`  | ✅ — `deno compile` emits the target's binary                                                                                         |
+| `electron` → **Windows, macOS**        | ✅ — the runtime is a published zip we fetch and cache; Windows is a directory + launcher + zip, macOS a real `.app` (assembled here) |
+| `electron*` → **Linux**                | ❌ needs a Linux host **of that arch** — an AppImage is assembled by `appimagetool`, a native binary                                  |
+| `electron-client` → **Windows, macOS** | ❌ by design — the connect-page client is an AppImage, Linux only; build `electron` or `cli-client`                                   |
+| `android*`                             | ❌ by design — the APK is platform-independent, so it is built **once**, on any host                                                  |
+| `ios-client`                           | ❌ by design — the Xcode project is the same on every host; `xcodebuild` (macOS) makes the `.app`                                     |
 
 So on a Linux x86_64 box, `--targets=electron --all-platforms` gives you the
-Linux `.AppImage`, the Windows `.zip` and both macOS `.zip`s, and skips
+Linux `.AppImage`, the Windows `.zip` and both macOS `.dmg`s, and skips
 `linux-arm64` with its reason.
 
-What still needs the target OS is **signing**, not packaging: Apple notarization
-(and a `.dmg`), and a Windows Authenticode certificate. The zips we emit are
-unsigned on every host, so nothing is lost by building them here — but a
-_downloaded_ unsigned app meets Gatekeeper/SmartScreen, which is a distribution
-decision, not a build one.
+What still needs the target OS is **notarization**, not packaging: Apple
+notarization, and a Windows Authenticode certificate. The artifacts we emit are
+ad-hoc signed (macOS) or unsigned (Windows) on every host — a _downloaded_
+unsigned app meets Gatekeeper/SmartScreen, which is a distribution decision, not
+a build one.
+
+### macOS: the `.app` and the `.dmg`
+
+A macOS GUI app is not a binary or a zip — it is a **bundle**: a directory with
+a `Contents/Info.plist`, an icon, and a bundle identifier, which is what the OS
+reads to draw the Dock entry, the menu bar and the window. So the `electron`
+target produces:
+
+| Platform      | Artifact                                               |
+| ------------- | ------------------------------------------------------ |
+| macOS (x64)   | `<name>-<version>-mac-x64.dmg` (a `<name>.app` inside) |
+| macOS (arm64) | `<name>-<version>-mac-arm64.dmg`                       |
+
+The `.app` is assembled **on any host** (a bundle is a directory tree and
+Electron's runtime is a download), with the shape a real macOS app has:
+
+```
+Counter.app/Contents/
+  Info.plist            identity: CFBundleExecutable, Identifier, Icon
+  PkgInfo
+  MacOS/
+    counter             the Deno server binary IS the bundle executable
+    electron/Electron.app/   the runtime (where the launcher looks)
+  Resources/AppIcon.icns
+```
+
+Three details are load-bearing and were measured on a real macOS 14 guest:
+
+- **The Deno binary is `CFBundleExecutable`.** aio is a two-process app — the
+  binary owns the server and spawns Electron as its window. Its identity is the
+  app's, so there is one Dock entry and one lifetime.
+- **`Contents/MacOS/` holds only the executable.** `codesign` treats that
+  directory as code-only; a `dist/` there fails the seal with "code object is
+  not signed at all / In subcomponent: …/dist/icon.png". None is needed — the
+  compiled binary embeds `dist/` in its Deno VFS and serves it to Electron over
+  the app's own socket.
+- **The nested Electron carries the same `CFBundleIdentifier` and icon.** macOS
+  merges processes by identifier; matching them is what shows **Counter** in the
+  menu bar and Dock instead of **Electron**.
+
+Unused Chromium translations are trimmed (~218 `.lproj` bundles, ≈46 MB), the
+app's `icon.png` becomes `AppIcon.icns`, Electron's `LICENSE` and
+`LICENSES.chromium.html` ride in `Contents/Resources/` (redistribution requires
+them, and they are the same files the Linux/Windows packages carry), and the
+whole bundle is signed inside-out (ad-hoc) so macOS will actually launch the
+nested runtime — an unsealed one is killed with exit status 1 and no message.
+
+**The `.dmg` needs `hdiutil`, which exists only on macOS.** It is a disk image,
+not an archive, so there is no Linux equivalent. `aio` handles this without
+falling back to a zip in disguise:
+
+- **On a Mac** — it just runs `hdiutil`.
+- **Anywhere else** — set `AIO_MACOS_SSH=[user@]mac-host` (or
+  `"build": { "macos": { "host": "…" } }` in `deno.json`) and the build ships
+  the `.app` to that Mac, runs `hdiutil` there, and fetches the `.dmg` back. An
+  `~/.ssh/config` alias works; the only requirements are OpenSSH and an
+  authorised key.
+- **Neither** — the `.app` is zipped to `<name>-<version>-mac-<arch>.zip` and a
+  warning says so. It never produces a file that merely claims to be a `.dmg`.
+
+Either way the artifact is **one file**, because the `.app` is a directory and
+the build's output is a file. The DMG is preferred: it is what a macOS user
+expects, and signing happens on the Mac (see below). The zip is the honest
+fallback — it still runs on Intel, but **an unsigned arm64 `.app` is refused by
+Apple Silicon**, and editing the nested `Info.plist` necessarily invalidates
+Electron's shipped signature (arm64 binaries carry one; the kernel requires it).
+So on a host with no Mac, treat the arm64 zip as a build artifact to be signed
+on a Mac before it can ship.
+
+**What your users see on first open.** The bundle is signed ad-hoc, not with an
+Apple Developer ID, and it is not notarized. So a `.dmg` downloaded through a
+browser carries macOS's quarantine mark, and Gatekeeper holds the first launch
+with a warning that Apple cannot check the app. Measured on macOS 14: the
+process is held before any app code runs, and nothing opens until the user
+approves it. The way through:
+
+- **macOS 14 and earlier** — Control-click the app → **Open** → **Open**.
+- **macOS 15 and later** — try to open it once, then **System Settings → Privacy
+  & Security → Open Anyway**.
+- **From a terminal** —
+  `xattr -dr com.apple.quarantine "/Applications/<name>.app"`.
+
+Only a Developer ID signature plus notarization removes the warning. That needs
+an Apple Developer account, which is a distribution decision, not a build step.
+A copy that never carried the mark (built locally, or copied with `scp`) opens
+directly.
+
+`"build": { "macos": { "bundleId": "com.acme.Counter" } }` overrides
+`CFBundleIdentifier`; the default is `app.aio.<binaryName>`.
 
 Anything refused is **refused with the reason**, never quietly satisfied with a
 host binary under a foreign name.
@@ -631,19 +720,21 @@ deno run -A dep/aio/src/build.ts --compile --electron
 
 Does everything `compile` does, plus packages the binary with Electron:
 
-| Platform | Output                                                | Launcher                               |
-| -------- | ----------------------------------------------------- | -------------------------------------- |
-| Linux    | `<name>-x86_64.AppImage` or `<name>-aarch64.AppImage` | self-contained, double-click           |
-| macOS    | `<name>-mac-x64.zip` or `<name>-mac-arm64.zip`        | extract, run `./run.sh`                |
-| Windows  | `<name>-win-x64.zip`                                  | extract, run `run.bat` or `<name>.exe` |
+| Platform | Output                                                     | How it opens                           |
+| -------- | ---------------------------------------------------------- | -------------------------------------- |
+| Linux    | `<name>-x86_64.AppImage` or `<name>-aarch64.AppImage`      | self-contained, double-click           |
+| macOS    | `<name>-mac-x64.dmg` / `…-mac-arm64.dmg` (a `.app` inside) | drag to Applications, double-click     |
+| Windows  | `<name>-win-x64.zip`                                       | extract, run `run.bat` or `<name>.exe` |
 
 Build steps: bundle dist/app.js -> compile deno binary (which embeds it) -> copy
-Electron -> generate launcher + icon -> package (AppImage on Linux, zip
-elsewhere). The intermediate `dist/app.js` does not survive into the finished
-`dist/`.
+Electron -> generate launcher + icon -> package (AppImage on Linux, a signed
+`.app` + `.dmg` on macOS — see below, a zip on Windows). The intermediate
+`dist/app.js` does not survive into the finished `dist/`.
 
-All launchers set `$ELECTRON_PATH` before starting the Deno binary. State is
-persisted to the OS user data directory.
+On Linux and Windows the launcher sets `$ELECTRON_PATH` before starting the Deno
+binary; on macOS the `.app` bundles the runtime where the binary looks for it
+directly, so there is no launcher to run by hand. State is persisted to the OS
+user data directory.
 
 **Cross-platform builds via CI:**
 

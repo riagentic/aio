@@ -9,7 +9,7 @@
 </p>
 
 <p align="center">
-  <code>v1.0.3-beta</code> · <a href="LICENSE">MIT</a> ·
+  <code>v1.0.4-beta</code> · <a href="LICENSE">MIT</a> ·
   <a href="docs/content.md">Docs</a> ·
   <a href="docs/basics/quickstart.md">Quickstart</a> ·
   <a href="CHANGELOG.md">Changelog</a>
@@ -19,9 +19,27 @@
 
 ## ⚡ Start
 
+**1. Install `am`** (installs Deno too, if missing)
+
+Shell (Mac, Linux):
+
 ```sh
 curl -fsSL https://raw.githubusercontent.com/riagentic/aio/main/install.sh | sh
-am create my-app && cd my-app && deno task dev
+```
+
+PowerShell (Windows — needs [Git](https://git-scm.com/download/win) first:
+`winget install Git.Git`):
+
+```powershell
+irm https://raw.githubusercontent.com/riagentic/aio/main/install.ps1 | iex
+```
+
+**2. Create an app and run it** (any shell, PowerShell included)
+
+```sh
+am create my-app
+cd my-app
+deno task dev
 ```
 
 > 🤖 **Working on this with an AI agent?** Have it run **`am agent`** first. One
@@ -38,13 +56,13 @@ rest:
   APK); iPhone, `--targets=ios-client` (an Xcode project that connects to your
   server — Deno does not run on iOS)
 - 📦 **One binary** — `deno task compile`
-- 🪟 **Windows** — install with `irm …/install.ps1 | iex`
 
 Proven where: every release is gate-built and booted on Linux — server, browser,
 Electron AppImage, and the one-line install on a fresh Ubuntu container — and
-its Windows scripts run under Wine. A real Windows or macOS machine, an Android
-device and iOS are not yet release gates; `deno task check:proof` prints what
-has actually been measured.
+its Windows scripts run under Wine. The desktop packages were run by hand on a
+real Windows 11 and a real macOS 14 (Intel) machine for this release; those, an
+Android device and iOS are not yet automated release gates.
+`deno task check:proof` prints what has actually been measured.
 
 ## 🧠 The idea
 
@@ -130,8 +148,16 @@ gzipped**, 74 KB brotli. `deno task bench:bundle` prints it, and
 
 ## 🏃 Run any aio app, from its repo
 
+Shell (Mac, Linux):
+
 ```sh
 curl -fsSL https://raw.githubusercontent.com/riagentic/aio/main/run.sh | sh -s owner/repo
+```
+
+PowerShell (Windows):
+
+```powershell
+& ([scriptblock]::Create((irm https://raw.githubusercontent.com/riagentic/aio/main/run.ps1))) -Git owner/repo
 ```
 
 Installs what is missing, builds, starts it. Nothing to read first.

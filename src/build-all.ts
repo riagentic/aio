@@ -122,7 +122,7 @@ export const TARGETS: Record<string, TargetSpec> = {
   electron: {
     flags: ["--compile", "--electron"],
     role: "app",
-    desc: "Electron desktop app (AppImage / zip)",
+    desc: "Electron desktop app (AppImage / .app + .dmg)",
   },
   android: {
     flags: ["--android"],
@@ -350,6 +350,7 @@ const ARTIFACT_EXTS = new Set([
   ".AppImage",
   ".apk",
   ".zip",
+  ".dmg",
   ".service",
   ".exe",
 ]);
@@ -1281,7 +1282,7 @@ export async function buildAll(): Promise<number> {
           console.error(
             `${C.red}✗ ${label} — ${why}${C.r}\n  ${C.dim}looked for: ` +
               `${targetBin}, ${targetBin}-client, ${targetBin}-<platform>, ` +
-              `${targetBin}*.{AppImage,apk,zip,exe,service}, aio-client-*, ` +
+              `${targetBin}*.{AppImage,apk,zip,dmg,exe,service}, aio-client-*, ` +
               `the ${iosArtifactName(targetBin)}/ directory — new since the ` +
               `build began.\n  fix: the single-target build wrote elsewhere ` +
               `or under another name. A per-target "name" in build.targets ` +

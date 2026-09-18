@@ -149,6 +149,10 @@ export function _render(
 }
 
 /** Create real DOM nodes from a VNode tree — handles elements, text, fragments, and components. */
+/** How many `<label>` elements are being built around the current node — a
+ *  control created inside one is labelled by it (the dev a11y check). */
+let _labelDepth = 0;
+
 export function createDom(
   vnode: VNode | string | number,
   ctx: RenderCtx,
@@ -400,14 +404,27 @@ export function createDom(
 
   applyProps(el as HTMLElement, vnode.props, {});
   bindSignalProps(el as HTMLElement, vnode.props);
-  if (_devA11yCheckFn) _devA11yCheckFn(tag, vnode.props);
+  if (_devA11yCheckFn) {
+    // Inside a <label>? Known NOW, without waiting for the tree to attach:
+    // either we are building that label's children (`_labelDepth`), or the
+    // new node is being patched into a label that already exists.
+    const inLabel = _labelDepth > 0 ||
+      !!(parentDom as Element | undefined)?.closest?.("label");
+    _devA11yCheckFn(tag, vnode.props, inLabel);
+  }
 
   // Raw html owns the content (see _hasRawHtml) — `applyProps` wrote it, and
   // children are not appended after it (SSR never emitted them either).
   if (!_hasRawHtml(vnode.props)) {
-    for (let i = 0; i < vnode.children.length; i++) {
-      const childDom = createDom(vnode.children[i]!, ctx, childSvg, el);
-      if (childDom) el.appendChild(childDom);
+    const isLabel = tag === "label";
+    if (isLabel) _labelDepth++;
+    try {
+      for (let i = 0; i < vnode.children.length; i++) {
+        const childDom = createDom(vnode.children[i]!, ctx, childSvg, el);
+        if (childDom) el.appendChild(childDom);
+      }
+    } finally {
+      if (isLabel) _labelDepth--;
     }
   }
 

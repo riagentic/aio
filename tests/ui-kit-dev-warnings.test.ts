@@ -153,6 +153,26 @@ Deno.test("aio/ui: no kit component trips a framework dev warning", async () => 
   );
 });
 
+Deno.test("a control NESTED in a <label> is labelled — no warning", async () => {
+  // Valid HTML and the recommended form for a checkbox; the check used to run
+  // before the input had a parent and flag every one (a field report).
+  const warns = await devWarnings(() =>
+    h("label", {}, h("input", { type: "checkbox" }), " Remember me")
+  );
+  assertEquals(warns, []);
+  // …deeper nesting too: the label need not be the direct parent.
+  const deep = await devWarnings(() =>
+    h("label", {}, h("span", {}, h("input", { type: "text" })), " Name")
+  );
+  assertEquals(deep, []);
+  // …and an input a COMPONENT renders inside the label.
+  const Field = () => h("input", { type: "email" });
+  const viaComponent = await devWarnings(() =>
+    h("label", {}, "Email ", h(Field, {}))
+  );
+  assertEquals(viaComponent, []);
+});
+
 Deno.test("the a11y check still speaks when the APP left a control unnamed", async () => {
   // The control: silence above must come from the kit being correct, not from
   // the check having been defanged.

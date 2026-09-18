@@ -16,6 +16,10 @@ import {
 } from "./build-version.ts";
 import { appIdFromConfig } from "../server/single-instance-lock.ts";
 import { bakedServerUrl, resolveEntryPath } from "../server/paths.ts";
+import { resolveMacHost } from "./dmg.ts";
+import { isValidBundleId } from "./build-ios.ts";
+// The bundle-id shape rule is Apple's, and iOS already owns its one copy.
+export { isValidBundleId };
 import {
   BUILD_BOOL_FLAGS,
   BUILD_VALUE_FLAGS,
@@ -64,6 +68,39 @@ export function resolveAppDir(root: string, configEntry: string): string {
   return resolve(root, dirname(configEntry));
 }
 
+/** THE macOS bundle-identifier decider — one place, because the outer bundle
+ *  and the nested Electron runtime MUST agree on it (matching identifiers are
+ *  what make macOS show one app instead of "Electron").
+ *
+ *  Default `app.aio.<binaryName>`; deno.json `build.macos.bundleId` overrides.
+ *  A declared value that is not a valid identifier is refused BY NAME — the id
+ *  is permanent, and silently slugifying `com.acme.My App` into
+ *  `com.acme.my-app` would change an app's identity behind its author's back.
+ *
+ *  Validation delegates to {@link isValidBundleId} in `build-ios.ts` — Apple's
+ *  rule for a bundle id is the SAME rule on iOS and macOS, and a second copy
+ *  here would be free to drift from the one the iOS target enforces. */
+export function resolveMacBundleId(
+  mainConfig: Record<string, unknown>,
+  binaryName: string,
+): string {
+  const declared = ((mainConfig.build as { macos?: { bundleId?: unknown } })
+    ?.macos)?.bundleId;
+  if (declared === undefined || declared === null) {
+    return `app.aio.${binaryName}`;
+  }
+  if (typeof declared !== "string" || !isValidBundleId(declared)) {
+    throw new Error(
+      `[aio] build.macos.bundleId must be a valid bundle identifier ` +
+        `(dot-separated segments of letters, digits and hyphens, at least one ` +
+        `dot — e.g. "com.acme.counter"), got ${JSON.stringify(declared)}.\n` +
+        `       It is used VERBATIM: this id is the app's permanent macOS ` +
+        `identity, so it is refused rather than silently rewritten.`,
+    );
+  }
+  return declared;
+}
+
 export interface BuildConfig {
   // Paths
   root: string;
@@ -103,6 +140,20 @@ export interface BuildConfig {
   // App identity
   binaryName: string;
   appTitle: string | undefined;
+  /** A macOS host reachable over SSH (`build.macos.host`, else
+   *  `$AIO_MACOS_SSH`) that has `hdiutil`, so a Linux/Windows build can still
+   *  produce a real `.dmg`. Null means "this host cannot, and none is
+   *  configured" — the build then ships the `.app` and says so. */
+  macosHost: string | null;
+  /** The macOS bundle identifier (`CFBundleIdentifier`) — the app's permanent
+   *  OS-level identity, shown as the Dock entry's reverse-DNS name and used by
+   *  macOS to merge the Deno server and its Electron child into ONE app.
+   *
+   *  Default `app.aio.<binaryName>`; deno.json `build.macos.bundleId` overrides
+   *  it verbatim (a distributor with their own namespace sets it once). It must
+   *  be a valid identifier — alphanumerics, `.`, `-` — so a declared value is
+   *  refused rather than silently mangled. */
+  macBundleId: string;
   /** THE app version this build carries — `major.minor.<commit count>`,
    *  resolved once (by the fleet when it runs this build, else here) and
    *  stamped into every artifact. See build-version.ts. */
@@ -259,6 +310,18 @@ export async function loadBuildConfig(): Promise<BuildConfig> {
   const defaultName = appIdFromConfig(mainConfig) ?? slugify(basename(root));
   const rawName = Deno.args.find((a) => a.startsWith("--name="))?.slice(7);
   const binaryName = rawName ? slugify(rawName) : defaultName;
+  // A Mac that can run `hdiutil`, so a non-macOS host can still produce a
+  // .dmg. deno.json `build.macos.host` outranks $AIO_MACOS_SSH.
+  const macosHost = resolveMacHost(
+    ((mainConfig.build as { macos?: { host?: string } } | undefined)?.macos)
+      ?.host,
+  )?.target ?? null;
+  // The macOS bundle identifier. A DECLARED one is used verbatim and REFUSED if
+  // it is not a valid identifier, rather than silently slugified: it is the
+  // app's permanent OS-level identity (Gatekeeper, the Dock, `defaults`, the
+  // saved window frame all key off it), so "fixed up" is strictly worse than
+  // "refused" — the same rule `android.applicationId` follows.
+  const macBundleId = resolveMacBundleId(mainConfig, binaryName);
   // THE app version. The fleet resolves it once and hands it down
   // (AIO_BUILD_VERSION); a direct single-target build resolves it here and
   // prints the notes itself — exactly once per build either way.
@@ -418,6 +481,8 @@ export async function loadBuildConfig(): Promise<BuildConfig> {
     ),
     binaryName,
     appTitle,
+    macosHost,
+    macBundleId,
     version,
     configEntry,
     appDir,

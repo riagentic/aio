@@ -208,6 +208,7 @@ export { deepFreeze } from "./immutable.ts";
 import { deepFreeze } from "./immutable.ts";
 import { cloneExecEffect, isExecEffect } from "./exec-effect.ts";
 import { count } from "../diagnostics/fmt.ts";
+import { _outsideTracking } from "./signal.ts";
 
 /** Queue depth limit — prevents unbounded memory growth from burst dispatches.
  *  THE number: whatever the queue is allowed to hold, the drain must be
@@ -544,7 +545,22 @@ export function createDispatch<S, A, E>(
    *  otherwise fill the log while the developer reads the panel. */
   const pausedWarnedTypes = new Set<string>();
 
+  /** THE door. A cell method's body is not a render read
+   *  (docs/ui/reactivity-tracking.md: "A cell method — not tracked"), so the
+   *  whole drain runs OUTSIDE any tracking scope — set aside, not covered by
+   *  an `untrack` frame, because "is a render tracking?" must answer no inside
+   *  a method (the in-process worker-cell refusals ask exactly that). Where there is no tracking frame (a server)
+   *  this changes nothing. Where there is one — an in-process runtime, where a
+   *  component's `onMount(() => cell.method())` runs the method body right
+   *  there — the method's own reads of other cells used to land in the
+   *  CALLER's frame, and the dev detector blamed the component for reads it
+   *  never made (a field report). In the browser the same call is an RPC and
+   *  reads nothing locally; now both agree. */
   function dispatch(action: A): Promise<unknown> {
+    return _outsideTracking(() => dispatchNow(action));
+  }
+
+  function dispatchNow(action: A): Promise<unknown> {
     // TIME TRAVEL PAUSED — refuse, don't pretend.
     //
     // This drop used to happen inside `reduce`, which returned the state

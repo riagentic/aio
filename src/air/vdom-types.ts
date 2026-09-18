@@ -297,11 +297,13 @@ export function setDevMode(enabled: boolean | "auto"): void {
 }
 
 export let _devA11yCheckFn:
-  | ((tag: string, props: Record<string, unknown>) => void)
+  | ((tag: string, props: Record<string, unknown>, inLabel?: boolean) => void)
   | null = null;
 
 export function _setDevA11yCheck(
-  fn: ((tag: string, props: Record<string, unknown>) => void) | null,
+  fn:
+    | ((tag: string, props: Record<string, unknown>, inLabel?: boolean) => void)
+    | null,
 ): void {
   _devA11yCheckFn = fn;
 }

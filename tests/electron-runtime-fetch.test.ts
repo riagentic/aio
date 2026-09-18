@@ -19,6 +19,7 @@ import {
   electronZipName,
   electronZipUrlFor,
   ensureElectronRuntime,
+  renameWithRetry,
   shasumFor,
   toolCacheDir,
 } from "../src/electron/electron-runtime-fetch.ts";
@@ -324,6 +325,75 @@ Deno.test("ensureElectronRuntime: downloads once into the cache, stamps completi
     assertEquals(fetches(), 3);
     assert((await Deno.stat(bin)).isFile, "the runtime was repaired");
   });
+});
+
+Deno.test("ensureElectronRuntime: a killed unpack's stage is removed; a LIVE one is not", async () => {
+  await isolated(async (tmp) => {
+    const bytes = await tinyElectronZip(tmp);
+    const rel = await fakeRelease(bytes, "9.9.8", "linux-x64");
+    const dir = electronRuntimeDir("9.9.8", "linux-x64");
+    // A pid no process has (the max pid on Linux is < 2^22) and pid 1 (alive).
+    const dead = `${dir}.incoming.4194303`;
+    const live = `${dir}.incoming.1`;
+    for (const d of [dead, live]) {
+      await Deno.mkdir(d, { recursive: true });
+      await Deno.writeTextFile(join(d, "partial"), "x");
+    }
+    await ensureElectronRuntime("9.9.8", "linux-x64", {
+      fetch: rel.fetch,
+      log: () => {},
+    });
+    assertEquals(
+      await Deno.stat(dead).then(() => "kept", () => "removed"),
+      "removed",
+      "a dead launch's ~250 MB stage must not live forever",
+    );
+    assertEquals(
+      await Deno.stat(live).then(() => "kept", () => "removed"),
+      "kept",
+      "a stage whose process is alive is never touched",
+    );
+  });
+});
+
+Deno.test("renameWithRetry: rides out a transient lock, throws anything else at once", async () => {
+  let calls = 0;
+  const flaky = (failures: number, err: () => Error) =>
+    (() => {
+      calls++;
+      if (calls <= failures) return Promise.reject(err());
+      return Promise.resolve();
+    }) as typeof Deno.rename;
+  // Antivirus holding the fresh electron.exe for a moment: retried, succeeds.
+  calls = 0;
+  await renameWithRetry("a", "b", {
+    delayMs: 1,
+    rename: flaky(3, () => new Deno.errors.PermissionDenied("in use")),
+  });
+  assertEquals(calls, 4);
+  // A lock that never lets go: bounded, and the real error surfaces.
+  calls = 0;
+  await assertRejects(
+    () =>
+      renameWithRetry("a", "b", {
+        delayMs: 1,
+        tries: 5,
+        rename: flaky(99, () => new Deno.errors.PermissionDenied("in use")),
+      }),
+    Deno.errors.PermissionDenied,
+  );
+  assertEquals(calls, 5);
+  // Not a transient error: no retry.
+  calls = 0;
+  await assertRejects(
+    () =>
+      renameWithRetry("a", "b", {
+        delayMs: 1,
+        rename: flaky(99, () => new Deno.errors.NotFound("gone")),
+      }),
+    Deno.errors.NotFound,
+  );
+  assertEquals(calls, 1);
 });
 
 Deno.test("ensureElectronRuntime: a tampered zip is REFUSED, and nothing is cached", async () => {

@@ -233,7 +233,7 @@ function effectiveBackground(
  *  selector — the reader needs to recognise the element, not query it. */
 function placeOf(el: Element): string {
   const cls = (el.getAttribute?.("class") ?? "").trim().split(/\s+/)
-    .filter(Boolean).slice(0, 3).join(".");
+    .filter(Boolean).slice(0, 3).join(" ");
   return cls
     ? `<${el.tagName.toLowerCase()} class="${cls}">`
     : `<${el.tagName.toLowerCase()}>`;

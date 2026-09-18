@@ -29,6 +29,23 @@ const _stateSerialization = degraded("uds:broadcast-state");
  *  missed frame, because the coalescer already discarded the patches. */
 const _broadcastRound = degraded("uds:broadcast-round");
 
+/** Close a connection only once the peer has READ what was written to it.
+ *  A Windows server pipe that closes with unread bytes buffered DISCARDS them
+ *  (`DisconnectNamedPipe`), so the "rebuild the client" refusal written just
+ *  before this close reached a mismatched client as a bare EPIPE — the same
+ *  loss `http-over-conn.ts` drains for. Unix sockets flush on close and have
+ *  no `drain`. */
+function closeAfterDrain(conn: LocalConn): void {
+  void Promise.resolve(conn.drain?.()).catch(() => {
+    // aio-ok(silent-catch): a peer gone mid-drain is what `drain` tolerates;
+    // the close below is the real teardown.
+  }).finally(() => {
+    try {
+      conn.close();
+    } catch { /* already closed */ }
+  });
+}
+
 /** A UDS peer that has stopped draining its socket. Module scope, like the
  *  broadcast trackers: one tracker for the transport, whatever listener the
  *  connection belongs to. */
@@ -825,11 +842,7 @@ function _handleUDSConn(
               conn,
               "__proto-err:this server speaks wire protocol v2+ — rebuild/update the client",
             );
-            sendTo(conn, "", () => {
-              try {
-                conn.close();
-              } catch { /* already closed */ }
-            });
+            sendTo(conn, "", () => closeAfterDrain(conn));
             continue;
           }
 
@@ -883,11 +896,7 @@ function _handleUDSConn(
                 sendTo(conn, enc("proto-err", { reason: result.reason }));
                 sendTo(conn, "__proto-err:" + result.reason);
                 // Close after the error message flushes through the write queue.
-                sendTo(conn, "", () => {
-                  try {
-                    conn.close();
-                  } catch { /* already closed */ }
-                });
+                sendTo(conn, "", () => closeAfterDrain(conn));
               }
               continue;
             }

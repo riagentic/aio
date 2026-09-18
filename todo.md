@@ -14,15 +14,86 @@ is frozen — additive only, bugfix-only through beta; 1.0.0 = boring.
 
 ---
 
-## RESUME HERE — round of 2026-09-17 (Windows builds, 1.0.3-beta)
+## RESUME HERE — round of 2026-09-18 (macOS builds, 1.0.4-beta)
 
-**State.** 1.0.3-beta is prepared (version triple, CHANGELOG, upgrade guide,
-`update:api`, `update:docs`, `check:release --fast` green). Not pushed.
+**State.** 1.0.4-beta is prepared (version triple, CHANGELOG, upgrade guide,
+`update:api`, `update:docs`) and **the full `check:release` is green** —
+including the heavy tier (`test`, `test:onboard`, `test:build`, mutations and
+the fresh Ubuntu lab). Not pushed. The lab first failed on the known `umask 077`
+git permissions (`chmod -R a+rX .git` is the documented fix; applied this
+session).
 
-**This round: Windows stops being rubbish.** A Windows desktop app opens on the
-first double-click from either artifact on a machine with nothing installed, and
-the one-file exe binds **zero TCP ports**. Verified on a real Windows 11 VM
-(zip + self-contained exe, `ui mounted 7 element(s)`, no listening TCP port).
+**This round: macOS stops being rubbish, and every package gets smaller.**
+`electron --platforms=macos[-arm64]` now assembles a real signed `.app` in a
+`.dmg`. Verified end to end on a real macOS 14 (x86_64) QEMU guest over SSH:
+Counter mounts inside the DMG, the Dock/menu say "Counter" (`app.aio.counter`),
+the window renders over `aio://app/` (`ui mounted 10 element(s)`), and
+`codesign -v --deep --strict` passes. arm64 is packaged + arch/format-verified.
+
+- New: `src/build/macos-app.ts` (bundle assembly, pure-TS ICNS, plist editor),
+  `src/build/dmg.ts` (native / SSH-remote `hdiutil` / loud refusal),
+  `src/build/electron-locales.ts` (locale trim on every OS).
+- The Deno binary is `CFBundleExecutable`; the nested Electron carries the same
+  `CFBundleIdentifier` + icon (that is what names the Dock entry); the whole
+  bundle is signed inside-out (ad-hoc). `Contents/MacOS/` holds only the
+  executable — a `dist/` there breaks the code seal, and none is needed (the
+  binary serves its embedded VFS `dist/` over the app socket).
+- The artifact is always ONE file: `.dmg` with a Mac, else a `.zip` of the
+  `.app`. Returning the bare `.app` directory made `--platforms=macos` fail with
+  "produced no recognized artifact" on every host without a Mac.
+- Deleted `default_app.asar` broke Electron silently (exit 1, no output) —
+  measured; it stays. Licence files (`LICENSE`, `LICENSES.chromium.html`) now
+  ship in `Contents/Resources/` as they already did on Linux/Windows.
+- One Electron version framework-wide, pinned EXACTLY at **44.4.1** (newest
+  installable — Deno's 24 h `minimumDependencyAge` refuses 44.4.2, published 1.7
+  h ago, and that blocked the whole example suite). `am create` pins it, the
+  examples pin it, and `tests/electron-version-consistency.test.ts` gates it
+  (freshness against upstream's `latest` is REPORTED, never fatal).
+- `aio ship` recognises a `.dmg` (UDIF magic is at the END) and refuses one by
+  name rather than mislabelling it `binary`.
+
+**Follow-up for a future round:** an unsigned arm64 `.app` (the no-Mac `.zip`
+path) cannot RUN on Apple Silicon, because editing the nested `Info.plist`
+invalidates Electron's shipped signature. Producing a shippable arm64 zip with
+no Mac would need either a Developer ID signature or a way to avoid editing the
+nested plist. The `.dmg` path (a Mac, local or `$AIO_MACOS_SSH`) signs
+correctly.
+
+**Review pass on the same day (Claude).** It re-ran the release on the real
+OSes: an `am create` electron app built for 4 platforms from Linux, with every
+package's contents listed. The Windows zip and the one-file exe were
+double-clicked on Windows 11 from a cold cache, on a Czech-locale system, so the
+locale trim was tested too. The `.dmg` was installed and run on macOS 14, and so
+was the no-Mac zip. All rendered the UI with zero TCP ports. The five fixes are
+in the CHANGELOG ("Review round"). Open items it found and left:
+
+- [ ] A compiled binary still prefers `./node_modules/.bin/electron` (rung 3 in
+      `findElectronBin`) over the runtime it carries. That only matters when it
+      is started from inside a dev tree. Gate it on `!compiled` once a test
+      proves nothing relies on it.
+- [ ] Old Electron runtimes in `~/.cache/aio/tools/electron/` are never pruned.
+      44.3.0 sat beside 44.4.1 on the Windows VM, at ~250 MB each.
+- [ ] The log says "launching Electron (fetched runtime…)" even when the runtime
+      was unpacked from the exe itself.
+- [ ] Every packaged app logs Electron's "Insecure Content-Security-Policy"
+      warning. A CSP on the `aio://` page would fix the cause.
+- [ ] macOS `.app` self-update has no install strategy yet. A `.dmg` is refused
+      at the publisher. An old-layout macOS zip install refuses the new layout
+      before anything changes.
+- [ ] A downloaded `.dmg` meets Gatekeeper (not notarized). This is documented,
+      but only a Developer ID signature fixes it.
+- VM note: a Windows VM whose display has gone to sleep paints Electron windows
+  WHITE in screenshots, while the DOM is fine.
+  `powercfg /change
+  monitor-timeout-ac 0` is now set on `w11pro`. Check the
+  DOM (`--cdp`) before believing a blank screenshot.
+
+**The 2026-09-17 round is closed** (Windows builds, 1.0.3-beta).
+
+**Windows, for the record.** A Windows desktop app opens on the first
+double-click from either artifact on a machine with nothing installed, and the
+one-file exe binds **zero TCP ports**. Verified on a real Windows 11 VM (zip +
+self-contained exe, `ui mounted 7 element(s)`, no listening TCP port).
 
 - Spawn: a `--no-terminal` GUI exe has no console, so inheriting stdout threw
   `Invalid handle`; retry with the std handles discarded (`electron-spawn.ts`).

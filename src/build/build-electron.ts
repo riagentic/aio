@@ -1,9 +1,11 @@
 /**
  * @module
- * Build Electron — packages the compiled Deno binary + Electron runtime into
- * a platform-native distributable (AppImage on Linux, zip on Windows/macOS).
+ * Build Electron — packages the compiled Deno binary + Electron runtime into a
+ * platform-native distributable: an AppImage on Linux, a zip on Windows, and a
+ * real `.app` (in a `.dmg`, or a zip of the bundle when no Mac is available) on
+ * macOS. See `macos-app.ts` for the bundle and `dmg.ts` for the disk image.
  */
-import { join } from "@std/path";
+import { dirname, join } from "@std/path";
 import {
   appimageEnv,
   chmodIfSupported,
@@ -17,6 +19,15 @@ import {
 } from "./build-helpers.ts";
 import type { BuildConfig } from "./build-config.ts";
 import { isHostPlatform } from "./platforms.ts";
+import { assembleMacApp, icnsFromName, icnsFromPng } from "./macos-app.ts";
+import { trimLocalePaks } from "./electron-locales.ts";
+import {
+  canFinalizeDmg,
+  dmgDone,
+  finalizeMacDmg,
+  MACOS_HOST_ENV,
+  noDmgWarning,
+} from "./dmg.ts";
 import {
   electronMissingHint,
   ensureElectronDist,
@@ -221,6 +232,23 @@ export async function buildElectron(cfg: BuildConfig): Promise<void> {
   await copyDir(electronSrc, electronDst);
   console.log(`${OK} electron/ copied`);
 
+  // Trim Chromium's translations — ~46 MB on Linux/Windows, ~66 MB on macOS,
+  // and the largest safe saving in every desktop package. The app's own text is
+  // in the Deno bundle; a missing locale falls back to English, so the worst
+  // case is Chromium's menus in English.
+  //
+  // macOS keeps its locales inside the Electron.app as `.lproj` directories, so
+  // the trim for that platform happens in `assembleMacApp` (against the bundle
+  // it is building); here we handle the flat `locales/*.pak` layout that Linux
+  // and Windows use. One of the two always applies, and a runtime with neither
+  // simply trims zero.
+  const trimmed = cfg.os === "darwin"
+    ? 0 // done in assembleMacApp, once the bundle exists
+    : trimLocalePaks(join(electronDst, "locales"));
+  if (trimmed > 0) {
+    console.log(`${OK} trimmed ${trimmed} unused locale(s) from the runtime`);
+  }
+
   // Icon \u2014 from THE app-dir decider (cfg.appDir), same place dev reads it
   const { icon: userIcon, misplaced } = await resolveAppIcon(
     cfg.root,
@@ -396,6 +424,30 @@ start "" "%HERE%${binaryName}.exe" %*
   );
 }
 
+/** macOS: assemble a real `.app`, then deliver it as a `.dmg` (a Mac was
+ *  reachable) or a `.zip` of the bundle (none was).
+ *
+ *  What this REPLACED: a zip holding the Deno binary next to a pristine
+ *  `Electron.app` still named "Electron" and still signed as
+ *  `com.github.Electron` — no `.app`, no Dock identity, no icon, a
+ *  Gatekeeper-blocking archive.
+ *
+ *  **Both outcomes are a single collectable FILE**, which is not a detail: the
+ *  `.app` is a directory, and the fleet collects files. A version of this that
+ *  returned after assembling only the directory made `--targets=electron
+ *  --platforms=macos` fail with "produced no recognized artifact" on every
+ *  host without a Mac — the build worked and reported failure.
+ *
+ *  | A Mac | Artifact | Why |
+ *  | ----- | -------- | --- |
+ *  | reachable (native or `AIO_MACOS_SSH`) | `<bin>-mac-<arch>.dmg` | signed, drag-to-Applications |
+ *  | none | `<bin>-mac-<arch>.zip` | the unsigned `.app`, zipped |
+ *
+ *  The DMG is preferred because it is what a macOS user expects and it is the
+ *  only path that SIGNS the bundle. Apple Silicon refuses to execute an
+ *  unsigned arm64 binary, and editing the nested `Info.plist` invalidates
+ *  Electron's shipped signature, so an unsigned arm64 `.app` is a real
+ *  limitation — which is why the zip path WARNS rather than pretending. */
 async function _packageMacos(
   cfg: BuildConfig,
   appDir: string,
@@ -403,27 +455,143 @@ async function _packageMacos(
   root: string,
   binaryName: string,
 ): Promise<void> {
-  void cfg;
-  const launcher = `#!/bin/bash
-HERE="$(cd "$(dirname "$0")" && pwd)"
-export ELECTRON_PATH="$HERE/electron/Electron.app/Contents/MacOS/Electron"
-exec "$HERE/${binaryName}" "$@"
-`;
-  const launcherPath = join(appDir, "run.sh");
-  await Deno.writeTextFile(launcherPath, launcher);
-  await chmodIfSupported(launcherPath, 0o755);
-  console.log(`${OK} run.sh launcher`);
+  const outDir = cfg.outDir ?? root;
+  await Deno.mkdir(outDir, { recursive: true });
 
-  await Deno.mkdir(cfg.outDir ?? root, { recursive: true });
-  const zipOut = join(cfg.outDir ?? root, `${binaryName}-mac-${archStr}.zip`);
-  console.log(`zipping macOS package...`);
-  if (!await zipDir(appDir, zipOut)) {
-    console.error(`${NO} could not zip the macOS package`);
-    Deno.exit(1);
+  const displayName = (cfg.appTitle ?? binaryName).replace(
+    // deno-lint-ignore no-control-regex
+    /[\x00-\x1f\x7f\r\n]/g,
+    "",
+  );
+  // A version Electron/macOS will accept: `0.1.0-nogit.2bfe7cce` is a legal
+  // bundle version once the build metadata is dropped.
+  const bundleVersion = cfg.version.version.split("+")[0]!
+    .replace(/[^0-9A-Za-z.].*$/, "") || "0.0.0";
+
+  // The icon: the app's own `icon.png` when it is a square PNG, else its
+  // generated monogram — the SAME identity every other target shows.
+  const { icon: userIcon } = await resolveAppIcon(cfg.root, cfg.appDir);
+  let icns: Uint8Array | null = null;
+  if (userIcon) {
+    icns = icnsFromPng(await Deno.readFile(userIcon));
+    if (icns === null) {
+      console.warn(
+        `${HEY} ${userIcon} is not a square PNG, so the app's generated ` +
+          `monogram is used for the macOS icon instead. Provide a square ` +
+          `icon.png (512x512 is the convention).`,
+      );
+    }
+  }
+  if (icns === null) icns = await icnsFromName(displayName);
+
+  // Assembled into the build SCRATCH, never the output dir: a `.app` is a
+  // 300 MB directory, and the artifact this target ships is the ONE file that
+  // wraps it. Leaving the loose bundle in `dist/` would also put a directory
+  // where the fleet expects a release file.
+  const scratch = join(root, BUILD_SCRATCH_DIR);
+  await Deno.mkdir(scratch, { recursive: true });
+  console.log(`assembling ${displayName}.app...`);
+  const app = await assembleMacApp({
+    stagedDir: appDir,
+    outDir: scratch,
+    name: displayName,
+    binaryName,
+    identifier: cfg.macBundleId,
+    version: bundleVersion,
+    iconIcns: icns,
+  });
+  const appSize = await dirSize(app);
+  console.log(`${OK} ${displayName}.app (${formatMb(appSize)} MB)`);
+
+  if (canFinalizeDmg(cfg.macosHost)) {
+    const dmgOut = join(outDir, `${binaryName}-mac-${archStr}.dmg`);
+    console.log(`building the .dmg...`);
+    try {
+      await finalizeMacDmg({
+        appPath: app,
+        outPath: dmgOut,
+        volumeName: displayName,
+        binaryName,
+        declaredHost: cfg.macosHost,
+      });
+    } catch (e) {
+      // A configured Mac that fails is a real failure, not a reason to pretend:
+      // the message names the host and the ssh command to check.
+      console.error(`${NO} ${e instanceof Error ? e.message : e}`);
+      Deno.exit(1);
+    }
+    const stat = await Deno.stat(dmgOut);
+    console.log(
+      dmgDone(`${binaryName}-mac-${archStr}.dmg`, formatMb(stat.size)),
+    );
+    return;
   }
 
-  const zipStat = await Deno.stat(zipOut);
+  // No Mac: a `.zip` of the `.app` (symlinks preserved) is the collectable,
+  // mount-free deliverable. It is UNSIGNED — say so, because on Apple Silicon
+  // that is the difference between an app that opens and one that does not.
+  const zipOut = join(outDir, `${binaryName}-mac-${archStr}.zip`);
+  console.log(`no Mac available — zipping the .app instead of a .dmg...`);
+  if (!await zipAppBundle(app, zipOut)) {
+    console.error(`${NO} could not zip the macOS .app bundle`);
+    Deno.exit(1);
+  }
+  console.warn(`${HEY} ${noDmgWarning()}`);
+  const zstat = await Deno.stat(zipOut);
   console.log(
-    `${OK} ${binaryName}-mac-${archStr}.zip (${formatMb(zipStat.size)} MB)`,
+    `${OK} ${binaryName}-mac-${archStr}.zip (${formatMb(zstat.size)} MB, ` +
+      `UNSIGNED — Apple Silicon will refuse it until it is ad-hoc signed)`,
   );
+}
+
+/** Zip a `.app` bundle so the BUNDLE ITSELF is the archive's top entry.
+ *
+ *  Distinct from {@link zipDir}, which zips a directory's CONTENTS: a macOS
+ *  `.app` only works when it is unzipped AS a bundle, so the archive must carry
+ *  `Counter.app/…`, not `Contents/…`. `-y` keeps Electron's framework symlinks
+ *  as links — resolving them into copies is both enormous and subtly broken. */
+async function zipAppBundle(appPath: string, out: string): Promise<boolean> {
+  await Deno.remove(out).catch((e) => {
+    if (!(e instanceof Deno.errors.NotFound)) throw e;
+  });
+  try {
+    const r = await new Deno.Command("zip", {
+      args: [
+        "-r",
+        "-y",
+        "-q",
+        out,
+        appPath.slice(appPath.lastIndexOf("/") + 1),
+      ],
+      cwd: dirname(appPath),
+      stdout: "null",
+      stderr: "piped",
+    }).output();
+    if (r.success) return true;
+    console.error(
+      `${HEY} zip: ${
+        new TextDecoder().decode(r.stderr).trim().split("\n")[0] ?? ""
+      }`,
+    );
+  } catch {
+    // aio-ok: `zip` not installed — the message below names the package to
+    // install and the alternative (configure a Mac), which is the whole point.
+  }
+  console.error(
+    `${NO} \`zip\` is needed to package the macOS .app on a host without a ` +
+      `Mac (Debian/Ubuntu: sudo apt install zip) — or configure a Mac with ` +
+      `${MACOS_HOST_ENV} to produce a .dmg instead.`,
+  );
+  return false;
+}
+
+/** Recursive byte size of a directory. */
+async function dirSize(dir: string): Promise<number> {
+  let total = 0;
+  for await (const e of Deno.readDir(dir)) {
+    const p = join(dir, e.name);
+    if (e.isDirectory) total += await dirSize(p);
+    else if (e.isFile) total += (await Deno.stat(p)).size;
+  }
+  return total;
 }
