@@ -458,21 +458,12 @@ export class AioLogger {
    *  credential. Best-effort: Windows and mode-less filesystems have nothing
    *  to set, and losing the app's voice over a chmod would be worse. */
   private _tighten(path: string): void {
-    if (this._modeFixed.has(path)) return;
-    this._modeFixed.add(path);
-    if (Deno.build.os === "windows") return;
-    // TRACKED, not fired and forgotten: the chmod joins `_pending`, the set
-    // `flush()` awaits, so a flush that returns has really finished with the
-    // file. Un-awaited it was an async op still open when a test ended — the
-    // one non-deterministic red in the 1.0.0-beta suite, resource-leak shaped like
-    // every other in that class. Best-effort by design (above): the catch
-    // stays, the promise no longer escapes.
-    // aio-ok: a mode-less filesystem must not cost the app its voice
-    const c: Promise<void> = Deno.chmod(path, 0o600).catch(() => {}).finally(
-      () => {
-        this._pending.delete(c);
-      },
-    );
+    // The published shape (a snapshot-frozen member): fire-and-TRACK. The
+    // write paths below use `tightenOnce` directly and return it from the
+    // write promise itself.
+    const c: Promise<void> = tightenOnce(this._modeFixed, path).finally(() => {
+      this._pending.delete(c);
+    });
     this._pending.add(c);
   }
 
@@ -490,8 +481,8 @@ export class AioLogger {
         mode: 0o600,
       }).then(
         () => {
-          this._tighten(path);
           this._noteWriteSuccess();
+          return tightenOnce(this._modeFixed, path);
         },
         async (e) => {
           // The log directory vanished under a running app: someone cleaned up
@@ -508,9 +499,8 @@ export class AioLogger {
                 mode: 0o600,
               });
               this._modeFixed.delete(path); // recreated file — tighten it again
-              this._tighten(path);
               this._noteWriteSuccess();
-              return;
+              return await tightenOnce(this._modeFixed, path);
             } catch { /* still unwritable — fall through and report */ }
           }
           this._noteWriteFailure(path, lines.length, e);
@@ -726,4 +716,20 @@ export class AioLogger {
       );
     }
   }
+}
+
+/** Lock a log file to its owner, once per file per process (`fixed` is the
+ *  logger's own record). RETURNED, and the write paths return it from the
+ *  write's own `.then`: the chmod is part of the write promise `flush()`
+ *  awaits. Adding it to `_pending` from inside that `.then` was too late —
+ *  `flush()` had already taken its snapshot of `_pending`, so a flush
+ *  returned with the chmod still open, and a test ending there leaked an
+ *  async op (seen only under load: the suite's parallel shards). Best-effort
+ *  (see `_tighten`): Windows and mode-less filesystems have nothing to set. */
+function tightenOnce(fixed: Set<string>, path: string): Promise<void> {
+  if (fixed.has(path)) return Promise.resolve();
+  fixed.add(path);
+  if (Deno.build.os === "windows") return Promise.resolve();
+  // aio-ok: a mode-less filesystem must not cost the app its voice
+  return Deno.chmod(path, 0o600).catch(() => {});
 }

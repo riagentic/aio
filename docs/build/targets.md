@@ -221,9 +221,9 @@ already knew. `build.server` is now baked into what the build produces:
 - **Electron client** — connects straight to it. `--server-url=` and an imported
   `.aioapp` profile still win (both are someone choosing THIS run), and
   `--connect` always reaches the picker for when the server has moved.
-- **Android client** — the field is prefilled and the first launch connects
-  without a form. Only on a fresh install: once the user has chosen a server,
-  including changing it, their choice wins.
+- **Android / iOS client** — every launch connects without a form: to the user's
+  own choice once they have made one (including a change), else to the baked
+  address. Back to the connect page stays on the form, to change it.
 - **CLI client** — takes the address as its first argument, which a launching
   script already controls; nothing is baked.
 

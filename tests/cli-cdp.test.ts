@@ -88,7 +88,16 @@ Deno.test({
         );
         assert(p, "spawned");
         await p.status;
-        return (await Deno.readTextFile(argv)).split("\n").filter(Boolean);
+        const args = (await Deno.readTextFile(argv)).split("\n").filter(
+          Boolean,
+        );
+        // argv[0] is the generated main script: gone the moment the exit is
+        // seen — a sync remove, so nothing is left in flight either.
+        assertEquals(
+          await Deno.stat(args[0]!).then(() => "kept", () => "removed"),
+          "removed",
+        );
+        return args;
       };
       const without = await run(undefined);
       assert(

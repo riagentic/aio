@@ -57,16 +57,16 @@ export function frameworkEffectInWrongRuntime(
     `[aio] ${who} reached the root cell executor, which has ${
       kind === "schedule" ? "no clock" : "no resource table"
     }.\n` +
-      `  cause: this effect only runs in a runtime that owns ${runs} — the ` +
-      `server loop, the standalone/Android loop, or the worker host. ` +
-      `\`testCell\` runs the composed executor directly and owns neither, so ` +
-      `the effect would be silently dropped.\n` +
       `  fix: in testCell, READ it — \`t.expect.effects(["${reads}"])\` or ` +
       `\`t.getEffects()\` right after the send that emits it (reading is ` +
       `asserting on it) — or run the cell under \`bootCells([cell])\` (or ` +
       `\`testUI\`) for a real clock: \`await h.advance(ms)\` fires due ` +
       `schedules and \`h.dispose()\` disposes owned resources. Keep ` +
-      `\`testCell\` for the reduce/method logic that emits the effect.`,
+      `\`testCell\` for the reduce/method logic that emits the effect.\n` +
+      `  cause: this effect only runs in a runtime that owns ${runs} — the ` +
+      `server loop, the standalone/Android loop, or the worker host. ` +
+      `\`testCell\` runs the composed executor directly and owns neither, so ` +
+      `the effect would be silently dropped.`,
   );
 }
 

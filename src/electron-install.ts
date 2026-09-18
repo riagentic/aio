@@ -21,7 +21,9 @@
 import {
   autoInstallElectron,
   electronDistDir,
+  installedRuntimeVersion,
 } from "./electron/electron-spawn.ts";
+import { DEFAULT_ELECTRON_VERSION } from "./electron/electron-runtime-fetch.ts";
 import { log } from "./diagnostics/logger-api.ts";
 
 // `--check`: answer "is the runtime there?" and nothing else — exit 0 when
@@ -33,10 +35,38 @@ if (Deno.args.includes("--check")) {
   Deno.exit((await electronDistDir()) === null ? 1 : 0);
 }
 
-const ok = await autoInstallElectron({
-  info: (m: string) => log.info("electron", m),
-  error: (m: string) => log.error("electron", m),
-});
+// `--version`: print the installed runtime's version (nothing when none) and
+// exit 0. `am fix` / `am pin` ask here rather than re-reading node_modules
+// themselves — one reader of "which Electron is installed".
+if (Deno.args.includes("--version")) {
+  const v = await installedRuntimeVersion();
+  if (v) console.log(v);
+  Deno.exit(0);
+}
+
+// `--install=<x.y.z>`: install exactly that version — the one the app's
+// PINNED aio is tested with, which `am` reads from that aio's source. Without
+// it: this aio's own tested version.
+const asked = Deno.args.find((a) => a.startsWith("--install="))?.slice(10);
+if (asked !== undefined && !/^\d+\.\d+\.\d+$/.test(asked)) {
+  log.error(
+    "electron",
+    `--install wants an exact x.y.z version, got "${asked}"`,
+  );
+  Deno.exit(2);
+}
+const want = asked ?? DEFAULT_ELECTRON_VERSION;
+
+const ok = await autoInstallElectron(
+  {
+    info: (m: string) => log.info("electron", m),
+    error: (m: string) => log.error("electron", m),
+  },
+  undefined,
+  // Present AND the version asked for: a stale runtime is not "installed".
+  async () => (await installedRuntimeVersion()) === want,
+  want,
+);
 if (!ok) {
   log.error(
     "electron",

@@ -135,10 +135,53 @@ function resolveWorkerMode(config: TestServerConfig): string | undefined {
  *  server the harness doesn't boot for you — a hand-picked or pid-derived port
  *  eventually collides with another test file and flakes the suite. */
 export function freePort(): number {
+  const slice = portSlice(Deno.env.get(PORT_SLICE_ENV));
+  if (slice) return fromSlice(slice);
   const l = Deno.listen({ port: 0 });
   const port = (l.addr as Deno.NetAddr).port;
   l.close();
   return port;
+}
+
+/** Set by the parallel suite runner (scripts/test-shards.ts): this process's
+ *  own port range, `"<first>-<last>"`, below the OS ephemeral range.
+ *
+ *  `port: 0` then close hands back a number that is free NOW — and with 16
+ *  test processes each doing the same, another process's `port: 0` can be
+ *  handed that number before the first one binds it (measured: "port 39827
+ *  already in use" in the parallel suite). A slice nobody else draws from —
+ *  not the other shards, not the OS's own ephemeral picks — cannot collide. */
+const PORT_SLICE_ENV = "AIO_TEST_PORT_SLICE";
+
+/** `"20000-20799"` → [20000, 20799], or null. Pure. */
+function portSlice(v: string | undefined): [number, number] | null {
+  const m = v ? /^(\d+)-(\d+)$/.exec(v) : null;
+  if (!m) return null;
+  const a = Number(m[1]), b = Number(m[2]);
+  return a >= 1024 && b <= 65535 && a <= b ? [a, b] : null;
+}
+
+let _sliceNext = -1;
+
+/** The next port of `slice` that is free right now (bind-checked — another
+ *  program may own one), round-robin so a just-closed port is not reused at
+ *  once. Throws when the whole slice is taken. */
+function fromSlice([first, last]: [number, number]): number {
+  const n = last - first + 1;
+  if (_sliceNext < first || _sliceNext > last) _sliceNext = first;
+  for (let i = 0; i < n; i++) {
+    const port = _sliceNext;
+    _sliceNext = port >= last ? first : port + 1;
+    try {
+      Deno.listen({ port, hostname: "127.0.0.1" }).close();
+      return port;
+    } catch {
+      // aio-ok: taken by something else — the next port in the slice
+    }
+  }
+  throw new Error(
+    `freePort: every port in ${PORT_SLICE_ENV}=${first}-${last} is in use`,
+  );
 }
 
 /** Boot an aio app for a test — libraryMode (never exits the process), a free

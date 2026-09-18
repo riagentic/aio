@@ -445,7 +445,13 @@ async function withHarness(
     childWindows: opts.childWindows,
   });
   try {
-    await main.waitFor(() => srv.conns() > 0);
+    // Startup DONE before any test reads `main.events`: the socket connects
+    // before main has registered its scheme and loaded the page, and under
+    // load (the parallel suite) a test that read the events at once found
+    // them missing. `loadURL` is main's last startup step.
+    await main.waitFor(() =>
+      srv.conns() > 0 && main.events.some((e) => e.ev === "loadURL")
+    );
     await fn(srv, main, dir);
   } finally {
     await main.close();
@@ -577,10 +583,11 @@ Deno.test("electron main: frames during a reload are not silently dropped", asyn
 // left rendererReady false on a document that had already signalled it.
 Deno.test("electron aio://: a reload of the app's own root is NOT vetoed; foreign URLs are", async () => {
   await withHarness(async (_srv, main) => {
-    assert(
-      main.events.some((e) => e.ev === "loadURL" && e.url === "aio://app/"),
-      "zero-port shell: the page is aio://app/",
-    );
+    // WAITED for, not asserted at once: the socket connects before main calls
+    // loadURL, and under load (the parallel suite) the event lands after it.
+    await main.waitFor(() =>
+      main.events.some((e) => e.ev === "loadURL" && e.url === "aio://app/")
+    ); // times out — with the event list — if the page is anything else
     await main.rendererReady();
     assertEquals(
       await main.navigate("aio://app/"),

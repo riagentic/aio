@@ -396,6 +396,18 @@ class SignalImpl<T> implements Omit<Signal<T>, never> {
     return this._value;
   }
 
+  /** `.value` is read-only. Without this setter the write failed with the
+   *  engine's "Cannot set property value … which has only a getter" — true,
+   *  and silent about the fix (a field report: "Signal.value is read-only"
+   *  cost a cycle). Same throw, in dev and prod; it just names the door. */
+  set value(_next: T) {
+    throw new TypeError(
+      `[aio] signal${
+        this._name ? ` "${this._name}"` : ""
+      }.value is read-only — use .set(v) or .update((v) => next)`,
+    );
+  }
+
   /** Tracked read — the method spelling of `.value` (see the interface). */
   get(): T {
     return this.value;
@@ -590,6 +602,14 @@ class ComputedImpl<T> {
     this._unsubs = [];
     this._deps.clear();
     this._subscribers.clear();
+  }
+
+  /** A computed is derived: it has no value of its own to set. */
+  set value(_next: T) {
+    throw new TypeError(
+      "[aio] computed(…).value is read-only — it is derived; change the " +
+        "signals or cell state it reads",
+    );
   }
 
   get value(): T {

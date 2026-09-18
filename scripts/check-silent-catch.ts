@@ -48,7 +48,7 @@ const CEILING = 329;
  *  Separately because the two are one rule but not one number: folding 102
  *  pre-existing swallows into `CEILING` would move it upward, and this file's
  *  own contract is that it only ever moves down. Two ratchets, both falling. */
-const HANDLER_CEILING = 91;
+const HANDLER_CEILING = 90;
 
 const ROOT = new URL("../src/", import.meta.url).pathname;
 

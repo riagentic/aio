@@ -14,7 +14,7 @@
  */
 import { readDenoJson } from "./server/deno-json.ts";
 import { staged } from "./build/build-say.ts";
-import { NO } from "./diagnostics/fmt.ts";
+import { HEY, NO } from "./diagnostics/fmt.ts";
 import { fromFileUrl, join } from "@std/path";
 import {
   type BuildConfig,
@@ -33,7 +33,10 @@ import { buildAndroid } from "./build/build-android.ts";
 import { buildIos } from "./build/build-ios.ts";
 import { runDenoCompile, writeServiceFile } from "./build/build-compile.ts";
 import { buildElectron } from "./build/build-electron.ts";
-import { resolveElectronVersion } from "./build/electron-runtime.ts";
+import {
+  reportElectronDrift,
+  resolveElectronVersion,
+} from "./build/electron-runtime.ts";
 import { ELECTRON_VERSION_FILE } from "./electron/electron-runtime-fetch.ts";
 import { buildSelfContainedWindowsExe } from "./build/build-windows-exe.ts";
 import {
@@ -111,6 +114,7 @@ export async function build(cfg?: BuildConfig): Promise<void> {
   // business asking its user to `deno task install:electron`.
   if (doCompile && !doCli && !doClient && !doAndroid && !doIos) {
     const version = await resolveElectronVersion(root);
+    await reportElectronDrift(root, (m) => console.warn(`${HEY} ${m}`));
     await Deno.mkdir(dist, { recursive: true });
     await Deno.writeTextFile(
       join(dist, ELECTRON_VERSION_FILE),

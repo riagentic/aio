@@ -6,6 +6,7 @@
 // Skipped when the box has no Chromium; ffprobe is the independent decoder
 // when present.
 import { assert, assertEquals, assertStringIncludes } from "@std/assert";
+import { join } from "@std/path";
 import {
   isStillRecording,
   shotVideoOptions,
@@ -216,7 +217,21 @@ Deno.test({
       "320,240",
       `<!doctype html><body style="margin:0">static</body>`,
       async (cdp, _browser, dir) => {
-        await new Promise((r) => setTimeout(r, 300)); // first paint done
+        // First paint DONE, asked of the page — not a 300 ms guess, which
+        // the parallel suite's load outran (a late paint = a second frame).
+        // Asked again while the tab is still navigating off about:blank (that
+        // destroys the context mid-question).
+        for (let tries = 0;; tries++) {
+          const r = await cdp.call("Runtime.evaluate", {
+            expression:
+              `location.protocol === "about:" ? false : new Promise((r) => { const go = () => requestAnimationFrame(() => requestAnimationFrame(() => r(true))); document.readyState === "complete" ? go() : addEventListener("load", go); })`,
+            awaitPromise: true,
+            returnByValue: true,
+          }).catch(() => null) as { result?: { value?: unknown } } | null;
+          if (r?.result?.value === true) break;
+          assert(tries < 100, "the page never painted");
+          await new Promise((r) => setTimeout(r, 50));
+        }
         const rec = await recordScreencast(
           cdp,
           dir,
@@ -239,7 +254,18 @@ Deno.test({
     await withBrowser("320,240", null, async (cdp, browser, dir) => {
       const never = new Promise<void>(() => {});
       const recording = recordScreencast(cdp, dir, never);
-      await new Promise((r) => setTimeout(r, 400));
+      // Recording STARTED (its first frame is on disk) — not a 400 ms guess,
+      // which the parallel suite's load outran: the window closed before the
+      // first picture and the recording rightly had nothing to keep.
+      for (let i = 0;; i++) {
+        const ok = await Deno.stat(join(dir, "000000.jpg")).then(
+          (s) => s.size > 0,
+          () => false,
+        );
+        if (ok) break;
+        assert(i < 200, "the recording never took its first frame");
+        await new Promise((r) => setTimeout(r, 50));
+      }
       await browser.close();
       const rec = await recording;
       assertEquals(rec.lost, true);

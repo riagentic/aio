@@ -1,5 +1,12 @@
 [
   {
+    "target": "android",
+    "env": "emulator",
+    "commit": "c14db4e15",
+    "date": "2026-09-18",
+    "detail": "API 35: standalone (dispatch, persistence, rotation) + client (connect, server dispatch, Back, unreachable)"
+  },
+  {
     "target": "soak",
     "env": "72h",
     "commit": "1eecfca48",

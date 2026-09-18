@@ -1,5 +1,6 @@
 // cell-methods-internals.ts — machine, reducer, and executor builders for methods-based cells
 
+import { eventArgWarning } from "./event-arg.ts";
 import { isScheduleEffect, type ScheduleEffect } from "./schedule.ts";
 import { trackCall, trackPending } from "./method-cancel.ts";
 import { _isTTPausedRefusal, markInflight } from "./dispatch.ts";
@@ -379,6 +380,24 @@ function _warnShortCall(
   );
 }
 
+const _eventArgWarned = new Set<string>();
+
+/** A DOM Event in a declared parameter — the hint, once per method
+ *  (src/state/event-arg.ts). Observe-only: the call proceeds unchanged. */
+function _warnEventArg(
+  cell: string,
+  key: string,
+  fn: unknown,
+  args: readonly unknown[],
+): void {
+  const id = `${cell}:${key}`;
+  if (_eventArgWarned.has(id)) return;
+  const msg = eventArgWarning(cell, key, fn, args);
+  if (!msg) return;
+  _eventArgWarned.add(id);
+  log.warn("cell", msg);
+}
+
 /** Build the CellReduceFn for a methods-based cell. */
 export function buildMethodsReducer(
   actionTypeToKey: Map<string, string>,
@@ -505,6 +524,7 @@ export function buildMethodsReducer(
     if (raw === undefined || raw === null) return [];
     if (Array.isArray(raw)) {
       _warnShortCall(cell, key, methods[key], raw.length);
+      _warnEventArg(cell, key, methods[key], raw);
       // Validated and COERCED before the method sees them. A schema returns
       // the parsed value and that value is what runs — which is the dozen
       // hand-written coercions the reports counted (report 9 §9.6, report 3 §12.7).

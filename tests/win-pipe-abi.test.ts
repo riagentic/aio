@@ -152,3 +152,21 @@ Deno.test("win-pipe: only WAIT_OBJECT_0 means the wait completed", () => {
     assertEquals(waitFailed(rc), true, `rc=0x${rc.toString(16)}`);
   }
 });
+
+// Measured on real Windows 11 (2026-09-18): `DisconnectNamedPipe` on the
+// server end DISCARDS what the client has not read yet, even after the
+// FlushFileBuffers drain — Chromium lost the last ~64 KB of a 9 MB app.js and
+// the window stayed empty (1.0.4-beta: 3/3 empty, 1.0.5-beta: 4/4 rendered).
+// Only a real Windows run can show it, so the source is held to the rule: the
+// server end is closed, never disconnected. The binding must not even exist.
+Deno.test("win-pipe: a server end is closed, never DisconnectNamedPipe'd", async () => {
+  const src = await Deno.readTextFile(
+    new URL("../src/server/win-pipe.ts", import.meta.url),
+  );
+  const code = src.replace(/\/\/[^\n]*|\/\*[\s\S]*?\*\//g, "");
+  assertEquals(
+    code.includes("DisconnectNamedPipe"),
+    false,
+    "DisconnectNamedPipe drops unread bytes — the empty-window bug",
+  );
+});

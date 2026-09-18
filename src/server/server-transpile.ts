@@ -74,15 +74,61 @@ export function _explainTranspileFailure(e: unknown): unknown {
   );
 }
 
-/** Stop esbuild subprocess — call on server shutdown to avoid resource leaks */
-export async function stopEsbuild() {
-  if (esbuildStop) {
-    await esbuildStop();
-    // Allow child process to fully terminate before returning
-    await new Promise((r) => setTimeout(r, 10));
-    esbuildStop = null;
-    transformFn = null;
+/** The esbuild service processes this process started (Linux: `/proc`).
+ *  Empty elsewhere, or when nothing can tell. */
+function esbuildChildPids(): number[] {
+  if (Deno.build.os !== "linux") return [];
+  try {
+    const kids: number[] = [];
+    for (const t of Deno.readDirSync("/proc/self/task")) {
+      const raw = Deno.readTextFileSync(`/proc/self/task/${t.name}/children`);
+      for (const p of raw.trim().split(/\s+/)) if (p) kids.push(Number(p));
+    }
+    return kids.filter((pid) => {
+      try {
+        return Deno.readTextFileSync(`/proc/${pid}/cmdline`).includes(
+          "esbuild",
+        );
+      } catch {
+        return false; // already gone
+      }
+    });
+  } catch {
+    return []; // no /proc — the fallback wait below
   }
+}
+
+/** Is `pid` still in the process table (a zombie counts — it is not reaped)? */
+function inProcTable(pid: number): boolean {
+  try {
+    Deno.statSync(`/proc/${pid}`);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/** Stop the esbuild subprocess and return only once it has EXITED.
+ *
+ *  esbuild's `stop()` only sends the kill; it offers no way to await the exit.
+ *  This used to follow it with a fixed 10 ms "allow it to terminate" — true on
+ *  an idle machine, false under load (the parallel suite): the child outlived
+ *  the server that owned it, and its exit landed inside the NEXT test as a
+ *  leaked subprocess. So on Linux the service's pids are taken first and
+ *  polled until reaped (bounded — a stuck child must not hang shutdown); the
+ *  fixed wait stays only where no process table can be read. */
+export async function stopEsbuild(): Promise<void> {
+  if (!esbuildStop) return;
+  const pids = esbuildChildPids();
+  await esbuildStop();
+  esbuildStop = null;
+  transformFn = null;
+  const deadline = Date.now() + 2000;
+  while (pids.some(inProcTable) && Date.now() < deadline) {
+    await new Promise((r) => setTimeout(r, 5));
+  }
+  // one more turn so the runtime settles the exit it just observed
+  await new Promise((r) => setTimeout(r, 10));
 }
 
 // Transpile cache — keyed by filepath, invalidated when source changes, capped at 200 entries

@@ -36,6 +36,8 @@ import {
   buildMethodsMachine,
   buildMethodsReducer,
 } from "./cell-methods-internals.ts";
+import { declaredArgCount } from "./arg-arity.ts";
+import { log } from "../diagnostics/logger-api.ts";
 import { resolveSelfAction } from "./self.ts";
 import { refuseRetired, removalOf } from "./removals-core.ts";
 
@@ -424,6 +426,21 @@ export function createCellFromMethods<
             `rules — [schema, (v) => true | "why", null] — got ${
               specs === null ? "null" : typeof specs
             }.`,
+        );
+      } // More rules than the method has arguments: the extra rule guards a
+      // position nothing ever passes, and the rest are usually shifted by one
+      // — `[null, null, v]` written as if `s` took slot 0 (a field report).
+      // WARNED, not thrown: an app that runs today keeps running.
+      const declared = declaredArgCount(
+        methods[mk] as (...a: never[]) => unknown,
+      );
+      if (declared !== null && specs.length > declared) {
+        log.warn(
+          "cell",
+          `${name}: args.${mk} lists ${specs.length} rules, but ${mk} takes ` +
+            `${declared} argument${declared === 1 ? "" : "s"} after \`s\` — ` +
+            `slot 0 is the FIRST argument, not \`s\`. As written, rule ` +
+            `${declared + 1}+ never runs and the others may be shifted by one.`,
         );
       }
     }

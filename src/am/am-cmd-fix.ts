@@ -34,6 +34,12 @@ import { meetsMinDeno, MIN_DENO } from "../server/deno-version.ts";
 import { parseDeclaredVersion } from "../server/app-version.ts";
 import { removalMessage, removalsInSource } from "../state/removals.ts";
 import { count } from "../diagnostics/fmt.ts";
+import {
+  electronSpec,
+  installedElectronIn,
+  installElectronIn,
+  testedElectronFor,
+} from "./am-electron.ts";
 import { GIT_NO_PROMPT_ENV } from "../server/git-noninteractive.ts";
 
 // fixed/would-fix/ok = safe auto-repairs; advise = a suggestion we DON'T apply
@@ -752,6 +758,30 @@ export async function cmdFix(
   // install:electron", and every later `am fix` said "ok" because the empty
   // package was there. A repair that reports success on the wrong question is
   // worse than no repair; this one asks "is the BINARY there?" on both sides.
+  // The version is aio's, not the app's: the one the app's PINNED aio is
+  // tested with and ships (src/am/am-electron.ts). The import line is a copy
+  // aio keeps in line — every app declares it (the scaffold writes it for
+  // browser apps too), so it is aligned whether or not the app ships Electron;
+  // a string edit, never a download.
+  const testedElectron = await testedElectronFor(dir);
+  if (typeof imports["electron"] === "string") {
+    const want = electronSpec(testedElectron);
+    await repair(
+      "electron version = aio's tested version",
+      imports["electron"] !== want,
+      async () => {
+        const text = await Deno.readTextFile(jsonPath);
+        const re = /("electron"\s*:\s*)"[^"]*"/;
+        if (!re.test(text)) throw new Error('no "electron" line to rewrite');
+        await Deno.writeTextFile(
+          jsonPath,
+          text.replace(re, `$1${JSON.stringify(want)}`),
+        );
+        imports["electron"] = want;
+      },
+      `"${imports["electron"]}" → "${want}"`,
+    );
+  }
   if (usesElectron && noDownload) {
     add(
       "electron runtime installed",
@@ -768,7 +798,11 @@ export async function cmdFix(
       "electron runtime installed",
       !have,
       async () => {
-        const r = await run("deno", ["run", "-A", installer], dir);
+        const r = await run(
+          "deno",
+          ["run", "-A", installer, `--install=${testedElectron}`],
+          dir,
+        );
         if (!r.ok) throw new Error(r.err || "electron install failed");
         const now = await run("deno", ["run", "-A", installer, "--check"], dir);
         if (!now.ok) {
@@ -777,7 +811,16 @@ export async function cmdFix(
           );
         }
       },
-      "downloaded the Electron runtime (npm:electron)",
+      `downloaded the Electron runtime (npm:electron@${testedElectron})`,
+    );
+    // Present — but which one? A runtime installed by an older aio stays that
+    // aio's Electron until something moves it.
+    const installed = await installedElectronIn(dir);
+    await repair(
+      "electron runtime = aio's tested version",
+      installed !== null && installed !== testedElectron,
+      () => installElectronIn(dir, testedElectron),
+      `node_modules has ${installed}; aio is tested with ${testedElectron}`,
     );
   }
 

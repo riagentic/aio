@@ -68,6 +68,32 @@ async function cost(url: string, q = "") {
   return JSON.parse(body);
 }
 
+/** The report, taken when the sockets are QUIET and still quiet after it came
+ *  back — so report and socket count the same frames. A fixed "sleep 200 ms"
+ *  lost under load: the server's throttled `tt-state` frame went out just
+ *  after the report was taken and arrived before the assertion (measured:
+ *  17 frames received, 16 reported, the extra one a 3.7 KB tt-state). */
+async function settledCost(
+  url: string,
+  clients: { frames: number }[],
+  q = "?window=60",
+) {
+  const seen = () => clients.reduce((n, c) => n + c.frames, 0);
+  for (let attempt = 0; attempt < 20; attempt++) {
+    let last = seen();
+    for (let quiet = 0; quiet < 3;) { // 3 × 100 ms with no new frame
+      await sleep(100);
+      const now = seen();
+      quiet = now === last ? quiet + 1 : 0;
+      last = now;
+    }
+    const report = await cost(url, q);
+    await sleep(50); // a frame racing the report has landed by now
+    if (seen() === last) return report;
+  }
+  throw new Error("the sockets never went quiet around a cost report");
+}
+
 Deno.test("cost: reported wire bytes EQUAL what a real socket received", async () => {
   await using srv = await testServer({ cells: [hw] });
   const client = await countingClient(srv.url);
@@ -78,9 +104,7 @@ Deno.test("cost: reported wire bytes EQUAL what a real socket received", async (
       await hw.tick(i);
       await sleep(20);
     }
-    await sleep(200); // let the last broadcast drain
-
-    const report = await cost(srv.url, "?window=60");
+    const report = await settledCost(srv.url, [client]);
     assertEquals(
       report.wire.totalBytes,
       client.bytes,
@@ -108,9 +132,7 @@ Deno.test("cost: two surfaces cost twice, and per-client shows the unit price", 
       await hw.tick(i);
       await sleep(20);
     }
-    await sleep(200);
-
-    const report = await cost(srv.url, "?window=60");
+    const report = await settledCost(srv.url, [a, b]);
     assertEquals(
       report.wire.totalBytes,
       a.bytes + b.bytes,
@@ -235,9 +257,7 @@ Deno.test("cost: acks are NOT counted as full resends", async () => {
       await hw.tick(i); // each dispatch acks, and may or may not patch
       await sleep(15);
     }
-    await sleep(200);
-
-    const report = await cost(srv.url, "?window=60");
+    const report = await settledCost(srv.url, [client]);
     const k = report.wire.byKind;
     assert(k, "the frame split must be inspectable, not implied");
     assertEquals(

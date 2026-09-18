@@ -59,6 +59,13 @@ export const job = cell("job", {
 kdialog on Linux, `osascript` on macOS, the Windows common dialogs (STA
 PowerShell). They are on `aio/server`: they spawn a desktop binary.
 
+On Windows a double-clicked app has no console, and Windows would give every
+console program it starts — the dialog's PowerShell, `openExternal`'s `cmd`, an
+update step, your own `spawn()` — a new Terminal window, flashing up before the
+dialog. So at boot such an app attaches to one hidden console, and every child
+shares it: no window, output intact (measured on Windows 11). An app started
+from a terminal keeps its own console and is untouched.
+
 The contract is about the endings, because that is what a hand-rolled wrapper
 gets wrong:
 

@@ -288,3 +288,14 @@ Deno.test("the refusal names the method, the effect kind + id, and BOTH fixes", 
   assertStringIncludes(text, "bootCells");
   assertStringIncludes(text, "h.advance(ms)");
 });
+
+Deno.test("the refusal's SECOND line is the fix — before the why", async () => {
+  const { frameworkEffectInWrongRuntime } = await import(
+    "../src/state/cell-compose-execute.ts"
+  );
+  for (const kind of ["schedule", "own"] as const) {
+    const lines = frameworkEffectInWrongRuntime(kind).message.split("\n");
+    assertStringIncludes(lines[1]!, "fix: in testCell, READ it");
+    assertStringIncludes(lines[2]!, "cause:");
+  }
+});

@@ -33,6 +33,8 @@ const ROOT = fromFileUrl(new URL("../", import.meta.url));
 const NEEDS_HARDWARE: Record<string, string> = {
   AIO_VM_LAB:
     "a real Windows or macOS host — tracked as `windows (real)` / `macos (real)` in the physical proof matrix",
+  AIO_ANDROID_E2E:
+    "the Android SDK and an emulator (booted headless if none runs); run by hand as `deno task test:android` — tracked as `android (emulator)` in the physical proof matrix",
   AIO_WINE_E2E:
     "builds a ~5 GB Wine image; run by hand as `deno task test:wine` — tracked as `windows (wine)` in the physical proof matrix, which records the run that proved it",
 };

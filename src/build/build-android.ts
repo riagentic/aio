@@ -169,7 +169,9 @@ export async function buildAndroid(cfg: BuildConfig): Promise<void> {
     "build.gradle.kts",
     "settings.gradle.kts",
     "app/src/main/AndroidManifest.xml",
+    MAIN_ACTIVITY,
   ];
+  const serverOpts = { devUrl: cfg.androidDevUrl, remote: doRemote };
   // `_fillTemplate` — every substitution is a function, never a string; see
   // its own comment for what a `$` in a title used to do here.
   for (const f of templateFiles) {
@@ -183,10 +185,9 @@ export async function buildAndroid(cfg: BuildConfig): Promise<void> {
         "{{VERSION_NAME}}": appVersion.name,
         "{{APP_NAME}}": xmlFiles.has(f) ? appNameXml : appNameKotlin,
         "{{ICON_ATTR}}": 'android:icon="@mipmap/ic_launcher"',
-        "{{CLEARTEXT_ATTR}}": _cleartextAttr({
-          devUrl: cfg.androidDevUrl,
-          remote: doRemote,
-        }),
+        "{{CLEARTEXT_ATTR}}": _cleartextAttr(serverOpts),
+        "{{TALKS_TO_SERVER}}": String(talksToServer(serverOpts)),
+        "{{IS_CLIENT}}": String(doRemote && !cfg.androidDevUrl),
       }),
     );
   }
@@ -199,7 +200,11 @@ export async function buildAndroid(cfg: BuildConfig): Promise<void> {
 
   if (cfg.androidDevUrl) {
     // dev:android — point the WebView at the LIVE dev server, no bundled assets.
-    await _applyDevUrl(androidDir, cfg.androidDevUrl);
+    await _applyDevUrl(
+      androidDir,
+      cfg.androidDevUrl,
+      overlaid.includes(MAIN_ACTIVITY),
+    );
     console.log(`${OK} dev build → ${cfg.androidDevUrl}`);
   } else {
     // Copy assets into android project
@@ -263,9 +268,17 @@ export async function buildAndroid(cfg: BuildConfig): Promise<void> {
 export function _cleartextAttr(
   opts: { devUrl?: string | null; remote?: boolean },
 ): string {
-  return opts.devUrl || opts.remote
-    ? 'android:usesCleartextTraffic="true"'
-    : "";
+  return talksToServer(opts) ? 'android:usesCleartextTraffic="true"' : "";
+}
+
+/** THE decider for "this APK's app lives on a server" — a dev build or a
+ *  client. It drives BOTH the manifest's cleartext attribute and the WebView's
+ *  navigation rule (`TALKS_TO_SERVER` in MainActivity.kt). The navigation rule
+ *  used to be switched off by the dev rewrite alone, so the client APK kept
+ *  the standalone rule and could never leave its connect page — the same
+ *  second-decider shape the cleartext comment above records, once more. */
+function talksToServer(opts: { devUrl?: string | null; remote?: boolean }) {
+  return Boolean(opts.devUrl || opts.remote);
 }
 
 /**
@@ -362,10 +375,14 @@ ${htmlOpen()}
     var baked=${JSON.stringify(bakedServer ?? "")};
     var s=localStorage.getItem('aio_server')||baked;
     if(s)document.getElementById('addr').value=s;
-    // Straight in on a fresh install: the build knew the address, so the first
-    // launch should not be a form. Only when the user has never chosen one —
-    // a stored choice, including a deliberate change, always wins.
-    if(baked&&!localStorage.getItem('aio_server')){localStorage.setItem('aio_server',baked);location.href=baked;}
+    // Straight in on EVERY launch that has an address — the baked one on a
+    // fresh install, else the user's stored choice (a deliberate change always
+    // wins). It used to go straight in on the first launch only, so every
+    // later launch of an installed client stopped on this form. \`#change\`
+    // (what Back from the server opens) stays on the form, to change it.
+    if(baked&&!localStorage.getItem('aio_server'))localStorage.setItem('aio_server',baked);
+    if(location.hash==='#unreachable')document.getElementById('err').textContent='Could not reach '+s+' — is the server running? Change the address, or Connect to retry.';
+    else if(s&&location.hash!=='#change')location.href=s;
     document.getElementById('f').onsubmit=function(e){
       e.preventDefault();
       var v=document.getElementById('addr').value.trim();
@@ -522,6 +539,8 @@ export function _fillTemplate(
   return out;
 }
 
+const MAIN_ACTIVITY = "app/src/main/java/aio/app/MainActivity.kt";
+
 export function apkLabel(
   cfg: { binaryName: string; doRemote: boolean; androidDevUrl?: string },
 ): string {
@@ -584,23 +603,42 @@ export function safeDevUrl(devUrl: string): string {
   return parsed.href;
 }
 
-async function _applyDevUrl(androidDir: string, devUrl: string): Promise<void> {
-  const actPath = join(
-    androidDir,
-    "app/src/main/java/aio/app/MainActivity.kt",
-  );
+async function _applyDevUrl(
+  androidDir: string,
+  devUrl: string,
+  /** The app's `android/` overlay supplied its own MainActivity.kt. */
+  ownActivity: boolean,
+): Promise<void> {
+  const actPath = join(androidDir, MAIN_ACTIVITY);
   const safeUrl = safeDevUrl(devUrl);
-  let act = await Deno.readTextFile(actPath);
-  act = act.replace(
-    'loadUrl("https://appassets.androidplatform.net/assets/index.html")',
-    `loadUrl("${safeUrl}")`,
+  const act = await Deno.readTextFile(actPath);
+  const anchor =
+    'loadUrl("https://appassets.androidplatform.net/assets/index.html")';
+  // A rewrite whose anchor is missing ships an APK that loads the packaged
+  // page instead of the dev server, and says nothing. Our own template
+  // missing it is aio's bug: refuse. An app's own MainActivity.kt (an
+  // `android/` overlay) is the app's to shape: say what did not happen.
+  if (!act.includes(anchor)) {
+    const what = `MainActivity.kt has no ${anchor} to point at ${safeUrl}`;
+    if (!ownActivity) {
+      throw new Error(
+        `[aio] --android-dev-url: ${what} — the template changed and this ` +
+          `rewrite did not.`,
+      );
+    }
+    console.warn(
+      `⚠ [aio] --android-dev-url: your android/${what}, so this dev APK loads ` +
+        `whatever it loads — not the dev server. Load the dev URL yourself, ` +
+        `or keep that line in your MainActivity.kt.`,
+    );
+    return;
+  }
+  // Navigation needs no rewrite: TALKS_TO_SERVER (filled above) keeps the
+  // dev server's pages in the WebView.
+  await Deno.writeTextFile(
+    actPath,
+    act.replace(anchor, () => `loadUrl("${safeUrl}")`),
   );
-  // Keep every navigation inside the WebView (no external redirect handling).
-  act = act.replace(
-    'return !url.startsWith("https://appassets.androidplatform.net/")',
-    "return false",
-  );
-  await Deno.writeTextFile(actPath, act);
   // Cleartext is NOT patched in here — see `_cleartextAttr`, which decides it
   // for the dev build and the remote client alike, at placeholder time.
 }

@@ -9,7 +9,7 @@
 </p>
 
 <p align="center">
-  <code>v1.0.4-beta</code> · <a href="LICENSE">MIT</a> ·
+  <code>v1.0.5-beta</code> · <a href="LICENSE">MIT</a> ·
   <a href="docs/content.md">Docs</a> ·
   <a href="docs/basics/quickstart.md">Quickstart</a> ·
   <a href="CHANGELOG.md">Changelog</a>
@@ -166,6 +166,14 @@ Installs what is missing, builds, starts it. Nothing to read first.
 [Concepts](docs/basics/concepts.md) · [Pitfalls](docs/basics/pitfalls.md) ·
 [API](docs/basics/api-reference.md) · [`am`](docs/clients/app-manager.md)
 
+## 🏗️ Built with aio
+
+The examples here are small on purpose; the apps built with aio so far are not.
+There are over thirty — public ones like
+[Claude Control](https://github.com/riagentic/cc), mdview and llama-master, and
+private ones such as a trading platform, a 3D CAD editor and an e-shop. Their
+bug reports shaped much of the framework.
+
 ## 🎯 Honestly
 
 - 🧊 **Beta means the surface is frozen, not that the work is done.** An app
@@ -179,8 +187,8 @@ Installs what is missing, builds, starts it. Nothing to read first.
   machine, a physical Android device and iOS are **not** release gates yet —
   `deno task check:proof` prints exactly what has been run. The suite is large;
   it is still one machine's opinion.
-- 🧑‍🔬 **A small number of real apps run on it.** Their field reports drove most
-  of what changed since alpha52, and they still find bugs — the first beta was
+- 🧑‍🔬 **Real apps run on it** (listed above). Their field reports drove most of
+  what changed since alpha52, and they still find bugs — the first beta was
   re-cut the same evening for one. Expect rough edges; please report them.
 - ✅ **Built for** apps where state is the product — dashboards, ops tools,
   control panels, internal tools, local-first desktop and mobile.
