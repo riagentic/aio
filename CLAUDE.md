@@ -26,7 +26,9 @@ colour everywhere it appears.
 ## Commands
 
 ```sh
-deno task test              # full suite (no flags needed)
+deno task test              # full suite, parallel processes (~2.5 min); real-window tests serialized
+deno task test:changed      # only tests importing what you changed vs HEAD (edit loop, not a gate)
+deno task test:serial       # the old one-process run (~27 min) — for bisecting a load-only failure
 deno task test:core         # skip env-dependent tests (build, server, tls, electron, chromium)
 deno task test:e2e          # real-browser + subscription e2e
 deno task test:onboard      # install→create→dev→compile→android E2E (release gate)

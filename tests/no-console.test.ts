@@ -3,7 +3,10 @@
 // throws `Invalid handle`. Both production spawns that inherit — the Electron
 // window and the update/restart relaunch — retry with the handles discarded.
 import { assertEquals, assertThrows } from "@std/assert";
-import { spawnInheritingOrNull } from "../src/server/no-console.ts";
+import {
+  adoptHiddenConsole,
+  spawnInheritingOrNull,
+} from "../src/server/no-console.ts";
 
 /** A fake command whose `inherit` spawn fails the way Windows fails it. */
 function fakeMake(failInherit: Error | null) {
@@ -48,4 +51,13 @@ Deno.test("no-console: any other failure is thrown, not retried into silence", (
     assertThrows(() => spawnInheritingOrNull(make, os));
     assertEquals(tried, ["inherit"]);
   }
+});
+
+Deno.test("adoptHiddenConsole: off Windows it does nothing, and it never throws", () => {
+  assertEquals(adoptHiddenConsole("linux"), "not-windows");
+  assertEquals(adoptHiddenConsole("darwin"), "not-windows");
+  // Asked to act as Windows on a machine without kernel32: a reason string,
+  // never a throw — boot must go on exactly as before.
+  const r = adoptHiddenConsole("windows");
+  assertEquals(typeof r, "string");
 });

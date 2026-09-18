@@ -29,8 +29,7 @@ looks for (in order):
    electron/<version>-<platform>/` — THE path for a
    **compiled binary** (which has no `node_modules` and no `deno`), and the last
    resort for dev. The version is the one the build baked into
-   `dist/electron.json` (installed runtime > the exact `npm:electron@x.y.z` in
-   the import map > framework default).
+   `dist/electron.json` — always the Electron this aio is tested with.
 
 aio ships **one** Electron version across the whole framework — the launcher's
 fallback, `am create`'s scaffold pin, the examples and the framework's own
@@ -40,6 +39,25 @@ any drift a red gate. Before that, the framework default was `43.4.1` while a
 freshly scaffolded app pinned nothing (`npm:electron` = whatever was latest at
 install time) — so the same app could run one Chromium in dev and ship another,
 and two apps scaffolded a month apart did not match each other.
+
+### aio decides the Electron, not the app
+
+aio is tested with one Electron, and a **build always ships that one**. The
+app's `"electron": "npm:electron@x.y.z"` line and its `node_modules` runtime are
+copies aio keeps in line — an app never picks a different Electron by editing
+them:
+
+| When                        | What happens                                                                                                                  |
+| --------------------------- | ----------------------------------------------------------------------------------------------------------------------------- |
+| `am pin <version>`          | the app's `electron` line moves to that aio's tested version, and an installed runtime is replaced (`--no-download` skips it) |
+| `am fix`                    | same alignment, for the aio the app is pinned to (`dep/aio`) — the fix for any drift                                          |
+| dev start (`am start`, dev) | a stale `node_modules` runtime is replaced once, loudly; offline, the old one runs and says so                                |
+| build                       | ships the tested version; if the app's copies disagree, one line says so and names `am fix`                                   |
+
+Before 1.0.5-beta the app's copies decided (installed runtime > import-map line
+
+> default), so an app scaffolded by an older aio kept that aio's Electron under
+> every later framework — a pairing no release had run.
 
 The floor is the newest INSTALLABLE release, not blindly Electron's `latest`:
 Deno's default 24-hour `minimumDependencyAge` (a supply-chain guard) refuses a

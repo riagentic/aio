@@ -160,6 +160,22 @@ export type ClientBundle = {
   ms: number;
 };
 
+/** A classic-script (iife) bundle has no `import.meta`: esbuild turns it into
+ *  `{}`, so `import.meta.url` is undefined — and `isRunningFromSource()`
+ *  called `.startsWith` on it on EVERY dispatch in a standalone APK. Every
+ *  button of every standalone Android app threw a REDUCE_ERROR from
+ *  1.0.0-beta to 1.0.4-beta; the e2e suites all run the ESM bundle, where it
+ *  is a real URL. Give the two fields the framework reads their real values:
+ *  the script's own URL, and "not the main module". Anything else under
+ *  `import.meta` stays esbuild's `{}`, and esbuild's warning names it. */
+const IIFE_META_BANNER = "var __aioScriptUrl=(function(){" +
+  "try{var s=document.currentScript.src;if(typeof s==='string'&&s)return s}catch(e){}" +
+  "try{return String(location.href)}catch(e){return ''}})();";
+const IIFE_META_DEFINE = {
+  "import.meta.url": "__aioScriptUrl",
+  "import.meta.main": "false",
+};
+
 /** Build the browser bundle. One esbuild invocation, one option set. */
 export async function bundleClient(o: ClientBundleOpts): Promise<ClientBundle> {
   const t0 = performance.now();
@@ -179,6 +195,9 @@ export async function bundleClient(o: ClientBundleOpts): Promise<ClientBundle> {
     if (!v.startsWith("npm:") && !v.startsWith("jsr:")) alias[k] = v;
   }
   const format = o.doAndroid ? "iife" : "esm";
+  // The stamps (when written) and, for a classic script, the import.meta shim.
+  const banner = [o.write?.banner, format === "iife" ? IIFE_META_BANNER : ""]
+    .filter(Boolean).join("\n");
   _resetServerOnlyStatic();
   const plugins = [
     aioBrowserPlugin(),
@@ -244,13 +263,13 @@ export async function bundleClient(o: ClientBundleOpts): Promise<ClientBundle> {
       ...(o.sourcemap
         ? { sourcemap: "external" as const, sourcesContent: false }
         : {}),
-      ...(o.write
-        ? { outfile: o.write.outfile, banner: { js: o.write.banner } }
-        : {
-          write: false,
-          ...(o.sourcemap ? { outfile: BUNDLE_JS } : {}),
-        }),
+      ...(o.write ? { outfile: o.write.outfile } : {
+        write: false,
+        ...(o.sourcemap ? { outfile: BUNDLE_JS } : {}),
+      }),
+      ...(banner ? { banner: { js: banner } } : {}),
       ...ESBUILD_JSX,
+      ...(format === "iife" ? { define: IIFE_META_DEFINE } : {}),
       alias,
       plugins,
       nodePaths: [join(o.root, "node_modules")],

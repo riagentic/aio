@@ -163,10 +163,10 @@
 
 ## Upgrade guides — version-to-version migration notes
 
-- [Upgrade Guides](upgrade/README.md) — every one, newest first (79 pages)
+- [Upgrade Guides](upgrade/README.md) — every one, newest first (80 pages)
+- [Upgrading from 1.0.4-beta to 1.0.5-beta](upgrade/from-1.0.4-beta-to-1.0.5-beta.md) — needed.
 - [Upgrading from 1.0.3-beta to 1.0.4-beta](upgrade/from-1.0.3-beta-to-1.0.4-beta.md) — is no migration step to perform.
 - [Upgrading from 1.0.2-beta to 1.0.3-beta](upgrade/from-1.0.2-beta-to-1.0.3-beta.md) — is no migration step to perform.
-- [Upgrading from 1.0.1-beta to 1.0.2-beta](upgrade/from-1.0.1-beta-to-1.0.2-beta.md) — step to perform.
 - [The aio restructure — alpha27/alpha28 breaking changes](upgrade/restructure.md) — This guide tracks every breaking change of the restructure
 
 ## Design specs — decision records — background, not manuals

@@ -65,33 +65,15 @@ export function electronCacheDir(version: string, platform: string): string {
   return electronRuntimeDir(version, slug);
 }
 
-/** The Electron version this app builds against — read from the runtime it
- *  already has, so the cross-built package and the local one are never two
- *  different Electrons. */
+/** The Electron runtime installed under `root` (unpacked), or null — THE
+ *  reader lives with the launcher (`installedRuntimeVersion`). */
 export async function installedElectronVersion(
   root = ".",
 ): Promise<string | null> {
-  const { electronPkgDirs } = await import("../electron/electron-spawn.ts");
-  for (const base of await electronPkgDirs(root)) {
-    // The version only counts when the RUNTIME is actually unpacked. A
-    // `package.json` outlives a deleted `dist/` (and `deno install` rewrites
-    // it before the lifecycle script downloads anything), so reading it alone
-    // reported a version nothing on this machine could run — the build baked
-    // 43.0.0 into the self-contained exe while auto-install put 44.4.1 in the
-    // zip (real Windows 11, 2026-09-17).
-    try {
-      if (!(await Deno.stat(join(base, "dist"))).isDirectory) continue;
-    } catch {
-      continue;
-    }
-    try {
-      const pkg = JSON.parse(
-        await Deno.readTextFile(join(base, "package.json")),
-      ) as { version?: string };
-      if (pkg.version) return pkg.version;
-    } catch { /* not this layout — try the next */ }
-  }
-  return null;
+  const { installedRuntimeVersion } = await import(
+    "../electron/electron-spawn.ts"
+  );
+  return await installedRuntimeVersion(root);
 }
 
 /** The Electron runtime directory for `platform`, downloading it once.
@@ -129,24 +111,61 @@ export async function localElectronDistFor(
   }
 }
 
-/** The Electron version THIS app is built against — one decider for the
- *  build and (via `dist/electron.json`) the compiled binary's launcher:
- *   1. the runtime already installed in node_modules (what dev runs);
- *   2. an exact-enough spec in the import map (`npm:electron@^43.4.1`);
- *   3. the framework default.
- *  Never null: a compiled desktop app has to know which Electron to fetch. */
-export async function resolveElectronVersion(root = "."): Promise<string> {
-  const installed = await installedElectronVersion(root);
-  if (installed) return installed;
+/** The Electron version THIS app is built against: the one this aio is
+ *  tested with (`DEFAULT_ELECTRON_VERSION`) — always. One decider for the
+ *  build and (via `dist/electron.json`) the compiled binary's launcher.
+ *
+ *  It used to be the APP's choice (installed runtime > import-map spec >
+ *  default), so an app scaffolded by an older aio shipped that aio's Electron
+ *  forever: `am pin` moved the framework and left the Chromium under it on a
+ *  version this aio never ran. The app's spec and runtime are now copies aio
+ *  keeps in line (`am pin`, `am fix`, the dev launcher); a stale copy is
+ *  REPORTED (`electronDrift`), never shipped. `root` is kept for callers. */
+export function resolveElectronVersion(_root = "."): Promise<string> {
+  return Promise.resolve(DEFAULT_ELECTRON_VERSION);
+}
+
+/** What an app's Electron copies say, against the tested version. */
+export type ElectronDrift = {
+  tested: string;
+  /** `imports.electron` in the app's deno.json, as written (null: none). */
+  declared: string | null;
+  /** The unpacked runtime in node_modules (null: none). */
+  installed: string | null;
+};
+
+/** Read the app's two copies of its Electron version. */
+export async function electronDrift(root = "."): Promise<ElectronDrift> {
+  let declared: string | null = null;
   try {
     const cfg = ((await readDenoJson(root))?.config ?? {}) as {
       imports?: Record<string, string>;
     };
-    const spec = cfg.imports?.["electron"];
-    const m = spec && /^npm:electron@[\^~]?(\d+\.\d+\.\d+)$/.exec(spec);
-    if (m) return m[1]!;
-  } catch { /* no deno.json here — the default below */ }
-  return DEFAULT_ELECTRON_VERSION;
+    declared = cfg.imports?.["electron"] ?? null;
+  } catch { /* no deno.json — nothing declared */ }
+  return {
+    tested: DEFAULT_ELECTRON_VERSION,
+    declared,
+    installed: await installedElectronVersion(root),
+  };
+}
+
+/** The one line a build prints when the app's copies disagree with the
+ *  version it ships, or null when they agree. Pure. */
+export function electronDriftNote(d: ElectronDrift): string | null {
+  const want = `npm:electron@${d.tested}`;
+  const off = [
+    d.declared !== null && d.declared !== want
+      ? `deno.json says "${d.declared}"`
+      : null,
+    d.installed !== null && d.installed !== d.tested
+      ? `node_modules has ${d.installed}`
+      : null,
+  ].filter((x): x is string => x !== null);
+  return off.length === 0 ? null : `Electron ${d.tested} ships (the version ` +
+    `this aio is tested with), but ${
+      off.join(" and ")
+    } — \`am fix\` aligns them`;
 }
 
 /** THE Electron runtime this HOST has, installing it once if it has none.
@@ -210,4 +229,18 @@ export function electronMissingHint(): string {
     "      deno task install:electron\n" +
     "  (looked in node_modules/electron/dist and " +
     "node_modules/.deno/electron@*/node_modules/electron/dist)";
+}
+
+const _driftSaid = new Set<string>();
+
+/** Say `electronDriftNote` once per app root per process — the compile step
+ *  and the package step both resolve the version, and one build is one line. */
+export async function reportElectronDrift(
+  root: string,
+  warn: (msg: string) => void,
+): Promise<void> {
+  if (_driftSaid.has(root)) return;
+  _driftSaid.add(root);
+  const note = electronDriftNote(await electronDrift(root));
+  if (note) warn(note);
 }

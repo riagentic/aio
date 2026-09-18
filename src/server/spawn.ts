@@ -237,11 +237,11 @@ export async function spawn(
     );
   }
 
-  const pgidPromise = _readStreams(child, opts.onLine);
+  const { pgid: pgidPromise, drained } = _readStreams(child, opts.onLine);
   // The marker races the child's own death: a launcher that fails (a missing
   // command, a cwd that does not exist) exits before printing anything, and a
   // spawn() that waited for a marker that will never come would hang forever.
-  const status = child.status.then(_toStatus);
+  const status = _statusAfterDrain(child, drained);
   const pgid = await Promise.race([
     pgidPromise,
     status.then(() => null),
@@ -395,8 +395,8 @@ function _spawnWindows(
     stdout: "piped",
     stderr: "piped",
   }).spawn();
-  void _readStreams(child, opts.onLine);
-  const status = child.status.then(_toStatus);
+  const { drained } = _readStreams(child, opts.onLine);
+  const status = _statusAfterDrain(child, drained);
   const stdin = opts.stdin ? _stdin(child.stdin, status, cmd) : undefined;
   const pid = child.pid;
   const unsupported = (op: string) => () => {
@@ -454,7 +454,7 @@ const _toStatus = (s: Deno.CommandStatus): SpawnStatus => ({
 function _readStreams(
   child: Deno.ChildProcess,
   onLine?: (line: string, stream: "stdout" | "stderr") => void,
-): Promise<number> {
+): { pgid: Promise<number>; drained: Promise<unknown> } {
   let resolvePgid: (n: number) => void;
   const pgid = new Promise<number>((r) => {
     resolvePgid = r;
@@ -486,9 +486,33 @@ function _readStreams(
 
   // Both pumps must run to completion even when nobody reads the handle's
   // streams, or a chatty child blocks forever on a full pipe.
-  void Promise.all([
+  const drained = Promise.all([
     pump(child.stdout, "stdout").catch(() => {}),
     pump(child.stderr, "stderr").catch(() => {}),
   ]);
-  return pgid;
+  return { pgid, drained };
 }
+
+/** The child's status, settled only once its output has been READ: `onLine`
+ *  has seen the last line, and no pipe read is still open. Resolving on exit
+ *  alone let a caller that awaited `status` (or `kill()`) miss the tail of
+ *  the output, and — under load — end a test with both pipe reads still in
+ *  flight (a leaked op). Bounded: a grandchild that inherited the pipe and
+ *  outlives the child must not hold the status hostage. */
+function _statusAfterDrain(
+  child: Deno.ChildProcess,
+  drained: Promise<unknown>,
+): Promise<SpawnStatus> {
+  return child.status.then(async (st) => {
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    await Promise.race([
+      drained,
+      new Promise((r) => timer = setTimeout(r, DRAIN_BOUND_MS)),
+    ]);
+    clearTimeout(timer);
+    return _toStatus(st);
+  });
+}
+
+/** How long a finished child's pipes may take to reach EOF. */
+const DRAIN_BOUND_MS = 2000;

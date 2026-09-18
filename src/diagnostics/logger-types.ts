@@ -187,5 +187,8 @@ export function filterInternal(
  *  names. This one decides whether the logger MIRRORS to the console by
  *  default: a binary in a service unit should not, a source checkout should. */
 export function isRunningFromSource(): boolean {
-  return import.meta.url.startsWith("file:///");
+  // On the dispatch path (wire-fidelity), so it must never throw: a classic
+  // script bundle has no import.meta and `url` was undefined there.
+  const url: unknown = import.meta.url;
+  return typeof url === "string" && url.startsWith("file:///");
 }

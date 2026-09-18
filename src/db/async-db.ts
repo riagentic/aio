@@ -313,7 +313,8 @@ export type DBOpts = {
    *  that never settles is a method call that never returns, which looks
    *  exactly like a slow app. A request that cannot finish now fails, loudly
    *  and by name, instead of hanging. Raise it for an app whose legitimate
-   *  statements (a VACUUM over many GB) run longer. */
+   *  statements (a VACUUM over many GB) run longer. It bounds statements
+   *  only: the worker's boot (`open`) keeps at least the 120s default. */
   requestTimeoutMs?: number;
   /** Spawn N additional readonly Workers on the same WAL-mode file.
    *  query() round-robins across readers; execute()/transaction() always go to the writer.
@@ -448,7 +449,14 @@ export function createDB(path: string, opts: DBOpts = {}): DB {
         reject: settle(reject),
       });
       workerPending.get(w)?.add(id);
-      if (timeoutMs > 0 && msg.type !== "close") {
+      // `open` is the worker BOOTING (module load, the SQLite library, the
+      // file), not a statement: an app's short statement ceiling applied to it
+      // failed the boot on a loaded machine before any query ran. Boot keeps
+      // the generous default, so a worker that dies while booting still fails.
+      const ceiling = msg.type === "open" && timeoutMs > 0
+        ? Math.max(timeoutMs, DB_REQUEST_TIMEOUT_MS)
+        : timeoutMs;
+      if (ceiling > 0 && msg.type !== "close") {
         timer = setTimeout(() => {
           const p = pending.get(id);
           if (!p) return;
@@ -462,7 +470,7 @@ export function createDB(path: string, opts: DBOpts = {}): DB {
           reject(
             new Error(
               `db: the SQLite worker did not answer a "${msg.type}" within ` +
-                `${timeoutMs}ms${sql}. Either the statement is genuinely ` +
+                `${ceiling}ms${sql}. Either the statement is genuinely ` +
                 `slower than that, or the worker died without reporting it ` +
                 `(an OOM-killed isolate fires no error event) — in which ` +
                 `case this request would otherwise never settle, and a ` +
@@ -471,7 +479,7 @@ export function createDB(path: string, opts: DBOpts = {}): DB {
                 `look for what killed the worker.`,
             ),
           );
-        }, timeoutMs);
+        }, ceiling);
         // Never hold the process open for a timer that only guards a hang.
         Deno.unrefTimer?.(timer as unknown as number);
       }

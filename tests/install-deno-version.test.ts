@@ -49,6 +49,28 @@ esac
     );
     await Deno.chmod(join(bin, "deno"), 0o755);
   }
+  // No network, as the header promises. When the fake deno refuses to
+  // upgrade, install.sh falls back to the official installer
+  // (`curl -fsSL https://deno.land/install.sh | sh`) — which used to be REAL:
+  // ~10 s per test on a good day, 17 min on a bad one, and a red run when
+  // offline. This `curl` serves that one URL as a script that installs the
+  // deno running this test (a real, current one); anything else is refused
+  // by name, so a new download in install.sh fails here instead of hiding.
+  await Deno.writeTextFile(
+    join(bin, "curl"),
+    `#!/bin/sh
+for a in "$@"; do
+  case "$a" in
+    https://deno.land/install.sh)
+      printf '%s\n' 'set -e' 'mkdir -p "$DENO_INSTALL/bin"' 'cp "${Deno.execPath()}" "$DENO_INSTALL/bin/deno"' 'chmod +x "$DENO_INSTALL/bin/deno"'
+      exit 0 ;;
+    http*) echo "test curl: no network in this sandbox (asked for $a)" >&2; exit 7 ;;
+  esac
+done
+echo "test curl: no URL in: $*" >&2; exit 2
+`,
+  );
+  await Deno.chmod(join(bin, "curl"), 0o755);
   return {
     dir,
     bin,

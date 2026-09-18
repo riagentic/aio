@@ -6,7 +6,12 @@
 // tree, run `deno task install:electron` by hand, and start the binary from
 // there. These tests pin the resolution order and the fetch, without a
 // display and without a 100 MB download.
-import { assert, assertEquals, assertRejects } from "@std/assert";
+import {
+  assert,
+  assertEquals,
+  assertRejects,
+  assertStringIncludes,
+} from "@std/assert";
 import { join } from "@std/path";
 import {
   bakedElectronVersion,
@@ -30,6 +35,8 @@ import {
 } from "../src/electron/electron-spawn.ts";
 import {
   electronCacheDir,
+  electronDrift,
+  electronDriftNote,
   localElectronDistFor,
   resolveElectronVersion,
 } from "../src/build/electron-runtime.ts";
@@ -104,37 +111,64 @@ Deno.test("bakedElectronVersion: reads dist/electron.json, null for anything els
   await dropTempDir(tmp);
 });
 
-Deno.test("resolveElectronVersion: installed > import-map spec > default — never null", async () => {
+Deno.test("resolveElectronVersion: aio's tested version, whatever the app's copies say", async () => {
+  // aio decides the Electron (it is tested with ONE, and a build ships that
+  // one). This used to be installed > import-map spec > default, so an app
+  // scaffolded by an older aio shipped that aio's Electron under every later
+  // framework. The app's copies are now REPORTED when they disagree.
   const tmp = await tempDir("electron-fetch-");
-  assertEquals(await resolveElectronVersion(tmp), DEFAULT_ELECTRON_VERSION);
-  await Deno.writeTextFile(
-    join(tmp, "deno.json"),
-    '{"imports":{"electron":"npm:electron"}}',
+  try {
+    assertEquals(await resolveElectronVersion(tmp), DEFAULT_ELECTRON_VERSION);
+    assertEquals(
+      electronDriftNote(await electronDrift(tmp)),
+      null,
+      "no copies",
+    );
+    await Deno.writeTextFile(
+      join(tmp, "deno.json"),
+      '{"imports":{"electron":"npm:electron@^43.4.1"}}',
+    );
+    await Deno.mkdir(join(tmp, "node_modules", "electron", "dist"), {
+      recursive: true,
+    });
+    await Deno.writeTextFile(
+      join(tmp, "node_modules", "electron", "package.json"),
+      '{"version":"42.0.0"}',
+    );
+    assertEquals(await resolveElectronVersion(tmp), DEFAULT_ELECTRON_VERSION);
+    const d = await electronDrift(tmp);
+    assertEquals(d, {
+      tested: DEFAULT_ELECTRON_VERSION,
+      declared: "npm:electron@^43.4.1",
+      installed: "42.0.0",
+    });
+    const note = electronDriftNote(d)!;
+    assertStringIncludes(note, `Electron ${DEFAULT_ELECTRON_VERSION} ships`);
+    assertStringIncludes(note, '"npm:electron@^43.4.1"');
+    assertStringIncludes(note, "node_modules has 42.0.0");
+    assertStringIncludes(note, "am fix");
+    // Installed means UNPACKED: a package.json without dist/ is no runtime.
+    await Deno.remove(join(tmp, "node_modules", "electron", "dist"));
+    assertEquals((await electronDrift(tmp)).installed, null);
+  } finally {
+    await dropTempDir(tmp);
+  }
+});
+
+Deno.test("electronDriftNote: copies that agree say nothing", () => {
+  const tested = DEFAULT_ELECTRON_VERSION;
+  assertEquals(
+    electronDriftNote({
+      tested,
+      declared: `npm:electron@${tested}`,
+      installed: tested,
+    }),
+    null,
   );
   assertEquals(
-    await resolveElectronVersion(tmp),
-    DEFAULT_ELECTRON_VERSION,
-    "a bare npm:electron pins nothing",
+    electronDriftNote({ tested, declared: null, installed: null }),
+    null,
   );
-  await Deno.writeTextFile(
-    join(tmp, "deno.json"),
-    '{"imports":{"electron":"npm:electron@^43.4.1"}}',
-  );
-  assertEquals(await resolveElectronVersion(tmp), "43.4.1");
-  // An installed runtime wins over the spec: what dev runs is what ships.
-  // "Installed" means the runtime is UNPACKED — a package.json whose `dist/`
-  // is missing (deleted, or written by `deno install` before its lifecycle
-  // script ran) pins nothing, and trusting it baked one Electron while the
-  // package shipped another (real Windows 11, 2026-09-17).
-  await Deno.mkdir(join(tmp, "node_modules", "electron", "dist"), {
-    recursive: true,
-  });
-  await Deno.writeTextFile(
-    join(tmp, "node_modules", "electron", "package.json"),
-    '{"version":"42.0.0"}',
-  );
-  assertEquals(await resolveElectronVersion(tmp), "42.0.0");
-  await dropTempDir(tmp);
 });
 
 Deno.test("localElectronDistFor: a stale node_modules runtime is NOT used for another version", async () => {

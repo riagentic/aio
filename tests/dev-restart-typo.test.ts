@@ -125,13 +125,19 @@ Deno.test({
         20_000,
       );
       assertEquals(gone, "down", "the broken cell must stop the old child");
-      await new Promise((r) => setTimeout(r, 1500));
+      // Wait for the SAYING, not a fixed sleep: the relaunch that fails on the
+      // typo took ~2.3s on a loaded suite, and a 1.5s sleep looked before it.
+      const said = await waitFor(
+        () => Promise.resolve(/stays up/.test(text) ? "said" : null),
+        30_000,
+      );
       assert(
         alive(child.pid),
         `the supervisor exited on a syntax error — the dev session is gone:\n${text}`,
       );
-      assert(
-        /stays up/.test(text),
+      assertEquals(
+        said,
+        "said",
         `the supervisor must SAY it is waiting for a fix:\n${text}`,
       );
       // Fix it: the app must come back by itself.

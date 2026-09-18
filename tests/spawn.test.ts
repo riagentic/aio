@@ -377,3 +377,37 @@ Deno.test({
     );
   },
 });
+
+Deno.test({
+  name:
+    "spawn: when status settles, onLine has seen EVERY line — the output is drained",
+  fn: async () => {
+    // The CONTRACT: `status` settles after the output is read. It used to
+    // settle on exit with both pipe reads still in flight; on an idle machine
+    // the data is usually in anyway (this test passes on the old code), but
+    // under load `kill()` returned with the reads open and the test that
+    // called it leaked them. Measured with 24 copies + 24 busy CPUs: old code
+    // 3/24 red, this code 24/24 green.
+    for (let round = 0; round < 20; round++) {
+      const lines: string[] = [];
+      const h = await spawn(posix ? "sh" : "cmd", {
+        args: posix
+          ? [
+            "-c",
+            "i=0; while [ $i -lt 200 ]; do echo line$i; i=$((i+1)); done; echo last >&2",
+          ]
+          : ["/c", "echo line & echo last 1>&2"],
+        onLine: (l) => lines.push(l),
+      });
+      await h.status;
+      assertEquals(
+        lines.includes("last"),
+        true,
+        `round ${round}: ${lines.length} lines`,
+      );
+      if (posix) {
+        assertEquals(lines.filter((l) => l.startsWith("line")).length, 200);
+      }
+    }
+  },
+});

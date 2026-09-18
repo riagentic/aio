@@ -182,7 +182,6 @@ const K32_SYMBOLS = {
     result: "pointer",
   },
   ConnectNamedPipe: { parameters: ["pointer", "buffer"], result: "i32" },
-  DisconnectNamedPipe: { parameters: ["pointer"], result: "i32" },
   ReadFile: {
     parameters: ["pointer", "buffer", "u32", "buffer", "buffer"],
     result: "i32",
@@ -416,7 +415,9 @@ class PipeConn implements LocalConn {
    *  `FlushFileBuffers` on the server handle blocks exactly until the client
    *  has consumed the bytes, so it is the documented way to close cleanly; the
    *  FFI call is `nonblocking`, so the wait lives on a pool thread and the
-   *  event loop keeps serving. A peer already gone is not an error here. */
+   *  event loop keeps serving. A peer already gone is not an error here.
+   *  Not sufficient alone: it can return while the client still has a
+   *  buffer's worth to read, which is why `close` never disconnects. */
   async drain(): Promise<void> {
     if (!this.server || this.#closed) return;
     await this.#track(k32().FlushFileBuffers(this.#h)).catch(() => {
@@ -464,8 +465,16 @@ class PipeConn implements LocalConn {
     // event is signalled on cancellation) and read back OPERATION_ABORTED,
     // which is end-of-stream. The events are closed only after every wait
     // has returned — a handle closed under a waiter is undefined behaviour.
+    //
+    // A server end is CLOSED, never `DisconnectNamedPipe`d. Disconnect
+    // discards what the client has not read yet and fails its next read with
+    // ERROR_PIPE_NOT_CONNECTED — `read EPIPE` in Node, `net::ERR_FAILED` in
+    // Electron — even after `drain`: measured on real Windows 11 (2026-09-18),
+    // a 9 MB `app.js` read at Chromium's pace lost its last ~64 KB and the
+    // window stayed blank. Closing the handle leaves the buffered bytes to the
+    // client, whose next read after them is ERROR_BROKEN_PIPE: a clean EOF.
+    // Each connection is its own pipe instance, so there is nothing to reuse.
     k32().CancelIoEx(h, null);
-    if (this.server) k32().DisconnectNamedPipe(h);
     closeHandle(h);
     const rev = this.#rev, wev = this.#wev;
     Promise.allSettled([...this.#inFlight]).then(() => {

@@ -115,6 +115,12 @@ methods: {
 
 Fires `action` every `ms` milliseconds until cancelled.
 
+Every tick re-sends the **same** action, payload included, exactly as it was
+when the schedule was made:
+`schedule.every("tick", 1000, self.tick.action(Date.now()))` sends the first
+timestamp forever. Read anything that changes (the time, live state) inside the
+method, not from its arguments.
+
 ```ts
 // Poll every 30 seconds
 s.$do(schedule.every("sync", 30_000, data.sync.action()));

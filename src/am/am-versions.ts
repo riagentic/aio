@@ -32,6 +32,7 @@
  * exact string is the whole mechanism.
  */
 
+import { electronSpec, testedElectronOf } from "./am-electron.ts";
 import {
   LOCAL_PIN_FILE,
   readDenoJson,
@@ -608,6 +609,24 @@ export async function syncFrameworkDeps(
     if (!re.test(out)) continue;
     out = out.replace(re, `$1${JSON.stringify(target)}`);
     changes.push({ key, from: have[key] ?? null, to: target });
+  }
+  // Electron: not in the framework's own import map (aio never imports it),
+  // so the version comes from the pinned aio's source — the one Electron
+  // that release is tested with and that its build ships. Same rule as above:
+  // only an app that already declares it.
+  const tested = await testedElectronOf(versionPathOfPin);
+  if (
+    tested && "electron" in have && have["electron"] !== electronSpec(tested)
+  ) {
+    const re = /("electron"\s*:\s*)"[^"]*"/;
+    if (re.test(out)) {
+      out = out.replace(re, `$1${JSON.stringify(electronSpec(tested))}`);
+      changes.push({
+        key: "electron",
+        from: have["electron"] ?? null,
+        to: electronSpec(tested),
+      });
+    }
   }
   if (changes.length > 0) await Deno.writeTextFile(appPath, out);
   return changes;

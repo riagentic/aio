@@ -56,6 +56,18 @@ async function withPage(
     assert(page, "chromium never exposed a page target");
     const cdp = await cdpConnect(page.webSocketDebuggerUrl, 8000);
     try {
+      // A page TARGET exists before its document does: on a loaded suite the
+      // probe ran first and `getElementById('r')` answered null.
+      let state = "";
+      for (let i = 0; i < 80 && state !== "complete"; i++) {
+        const r = await cdp.call("Runtime.evaluate", {
+          expression: "document.readyState",
+          returnByValue: true,
+        }) as { result?: { value?: string } };
+        state = r.result?.value ?? "";
+        if (state !== "complete") await new Promise((r) => setTimeout(r, 125));
+      }
+      assertEquals(state, "complete", "the test page never finished loading");
       await fn(async (expr) =>
         evalOutcome(
           await cdp.call("Runtime.evaluate", {

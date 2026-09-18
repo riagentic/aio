@@ -1,5 +1,148 @@
 # Changelog
 
+## v1.0.5-beta — aio decides the Electron, and a suite ten times faster (2026-09-18)
+
+> **The public surface is byte-identical to 1.0.4-beta** (`check:api` reports no
+> drift). One behaviour changes on purpose: **an app's Electron is now the one
+> this aio is tested with** — an app on an older Electron moves to it at its
+> next build, `am pin` or `am fix` (see the upgrade guide). Everything else is a
+> fix, a clearer message, or a dev hint.
+
+### Electron: aio decides, not the app
+
+aio is tested with one Electron and a build ships exactly that one. The app's
+`"electron": "npm:electron@x.y.z"` line and its `node_modules` runtime used to
+DECIDE (installed runtime > import-map line > default), so an app scaffolded by
+an older aio kept that aio's Chromium under every later framework — a pairing no
+release had run. They are now copies aio keeps in line:
+
+- **build** — always ships the tested version; if the app's copies disagree, one
+  line says so and names `am fix`.
+- **`am pin`** — moves the app's `electron` line to the pinned aio's tested
+  version and replaces an installed runtime (`--no-download` skips; a failed
+  download is said, the pin stands).
+- **`am fix`** — two new checks: the `electron` line, and the installed
+  runtime's version, both against the aio in `dep/aio`. Verified for real: an
+  app on 44.2.0 → `am fix` → `deno.json` and `node_modules` both 44.4.1.
+- **dev start** — a stale `node_modules` runtime is replaced once, loudly;
+  offline, the old one still runs and says so.
+- **a compiled app never takes `./node_modules`' Electron** — started from
+  inside a dev tree it used to run that tree's runtime instead of the one it was
+  built with.
+- `electron-install.ts` gained `--version` (the one reader of "which Electron is
+  installed") and `--install=<x.y.z>`.
+- The launch log says "runtime carried by this app" for a one-file exe's own
+  runtime, not "fetched runtime".
+
+### Windows: a large app no longer opens to an empty window
+
+A desktop app whose page is large (a 9 MB `app.js`) opened to an empty window on
+Windows: the local pipe that serves the page was DISCONNECTED on close, which
+discards whatever the window had not read yet — the last ~64 KB of the script
+never arrived, so nothing ran. The server end is now closed instead, which
+leaves those bytes to the reader. Verified on Windows 11 with the same app:
+1.0.4-beta 3/3 launches empty, 1.0.5-beta 4/4 rendered.
+
+### Windows: no console window before a native dialog
+
+A double-clicked Windows app has no console, so Windows gave every console
+program it started a new Terminal window: `pickFile` / `pickDirectory` showed a
+"Windows PowerShell" window before — and under — the dialog, and `openExternal`,
+update steps, `taskkill` and an app's own `spawn()` flashed one too. Neither
+`detached` nor `-WindowStyle Hidden` prevents it (measured). At boot such an app
+now attaches to one windowless console (a helper started with
+`CREATE_NO_WINDOW`, then ended), and every child shares it. A terminal-started
+app is untouched; any failure is logged and the app runs as before. Verified on
+Windows 11 with a compiled app calling `pickFile`: before, a Terminal window at
+6.5 s under the dialog; after, none — the dialog in front.
+
+### Android: the APKs, run for the first time — and fixed
+
+Every Android test so far read the generated project or faked `adb`; none had
+run an APK. The first run, on an emulator, found:
+
+- **The standalone APK threw on every tap** — since 1.0.0-beta. Its bundle is a
+  classic script, where `import.meta.url` is undefined, and a dev check on the
+  dispatch path called `.startsWith` on it: every method was a `REDUCE_ERROR`,
+  the screen never changed. The bundle now gets the script's real URL (and
+  `import.meta.main` = false), and the check cannot throw.
+- **The client APK could never reach its server.** The WebView refused every
+  navigation away from the packaged page, so it sat on "Connect" forever — the
+  rule was switched off for the dev build alone. One decider now ("this APK
+  talks to a server") drives both that rule and the cleartext permission.
+- **The client stopped on the connect form at every launch after the first.** It
+  now goes straight to the remembered server; Back from the server's first page
+  opens the form (to change it), and a server that cannot be reached opens the
+  form saying so, instead of Chromium's error page. The iOS client shares the
+  page.
+- **A rotation reloaded the app**, losing whatever was on screen and unsaved.
+- A link to another site did nothing; it now opens the phone's browser.
+- The dev-build rewrite of `MainActivity.kt` failed silently when its anchor
+  moved; it now refuses (our template) or warns (an app's own overlay).
+
+`deno task test:android` (new, opt-in: the SDK + an AVD, booted headless) runs
+both APKs on an emulator through the WebView's DevTools: render, taps, state
+across a kill, rotation, a client tap reaching the server's own state, Back, and
+a dead server. Each of the three main defects, put back, turns it red. It
+records `android (emulator)` in the proof matrix. A real phone and iOS are still
+unproven.
+
+### Field-report traps, named at the point of use
+
+- **A DOM Event in a method parameter** (`<input onInput={form.setTitle}>` hands
+  `setTitle(s, v)` the Event, not the text) is named first, once per method,
+  with the fix. It used to surface as four warnings about symbol keys and frozen
+  accessors, then a TypeError blaming "a write to cell state". A hint only —
+  `onClick={counter.inc}` (no parameter) and a client cell that takes the Event
+  on purpose keep working and stay silent.
+- **`signal.value = x`** throws naming `.set(v)` / `.update(fn)` (it always
+  threw — with the engine's getter-only message); a computed says it is derived.
+- **An `args` list longer than the method's arguments** is warned at `cell()`:
+  slot 0 is the first argument, not `s`. Counted from the method's source, so
+  defaults and destructuring count; warned, never thrown.
+- **`testCell`'s refusal of an unread schedule effect** prints the `fix:` line
+  first, before the explanation.
+- **`schedule.every`** — JSDoc and docs say every tick re-sends the ORIGINAL
+  payload; read changing values inside the method.
+- **`am create`** ends with the next commands (`deno task am start`, then
+  `am surface` / `am state`), in the human output and as `next` in the JSON.
+
+### Docs
+
+- The README mentions what has been built with aio so far.
+
+### Tests: the full suite in ~2.5 minutes (was ~27)
+
+`deno task test` runs the same files, flags and sanitizers over parallel
+`deno test` processes (half the cores, at most 16), each with its own data home.
+Tests that put a window on a display run one at a time; headless work runs in
+parallel; balance comes from measured per-file times. `test:changed` runs only
+the tests that import what changed; `test:serial` keeps the old run.
+
+Load exposed real defects, fixed at the source:
+
+- `spawn()` settled `status` / `kill()` on exit with both pipe reads still open
+  (and `onLine` could miss the tail) — it now settles after the output is read,
+  bounded at 2 s. Under 24 busy CPUs: old code 3/24 red, new 24/24.
+- `stopEsbuild()` trusted a fixed 10 ms for the esbuild child to exit — it now
+  waits for the process to be reaped (Linux; bounded).
+- the logger's log-file `chmod` was not part of the flush it belongs to.
+- `am shot --video`: a window closed while the screencast was starting or
+  stopping threw instead of ending as LOST with its frames.
+- `createDB({ requestTimeoutMs })` also timed the worker's BOOT: a short
+  statement ceiling failed `open` on a loaded machine before any query ran. It
+  now bounds statements only; boot keeps the 120 s default.
+- The Electron launcher removed its generated main script with an async delete,
+  including from an `unload` handler that cannot wait for it — the file outlived
+  the process. It is removed synchronously now.
+- Test ports: `freePort()` hands each parallel process its own port range, so
+  two processes can no longer be given the same free port.
+
+And sleep-based waits in tests became waits for the event (Electron relay
+startup, screencast first paint, the cost report's quiet socket, a dev restart's
+"stays up" line, a CDP page's load); the installer tests no longer download Deno
+(offline, 43 s → 11 s).
+
 ## v1.0.4-beta — macOS that actually works (2026-09-18)
 
 > **Nothing breaks.** The public surface is byte-identical to 1.0.3-beta

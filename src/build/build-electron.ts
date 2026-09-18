@@ -32,6 +32,7 @@ import {
   electronMissingHint,
   ensureElectronDist,
   localElectronDistFor,
+  reportElectronDrift,
   resolveElectronVersion,
 } from "./electron-runtime.ts";
 import {
@@ -204,6 +205,7 @@ export async function buildElectron(cfg: BuildConfig): Promise<void> {
   // while the self-contained exe carried another (real Windows 11,
   // 2026-09-17).
   const version = await resolveElectronVersion(root);
+  await reportElectronDrift(root, (m) => console.warn(`${HEY} ${m}`));
   // A local node_modules runtime is used ONLY when it IS that version, so an
   // offline build still works and a stale one cannot slip in beside the baked
   // version. Anything else is fetched for the platform (a download, which the

@@ -67,14 +67,17 @@ locale trim was tested too. The `.dmg` was installed and run on macOS 14, and so
 was the no-Mac zip. All rendered the UI with zero TCP ports. The five fixes are
 in the CHANGELOG ("Review round"). Open items it found and left:
 
-- [ ] A compiled binary still prefers `./node_modules/.bin/electron` (rung 3 in
-      `findElectronBin`) over the runtime it carries. That only matters when it
-      is started from inside a dev tree. Gate it on `!compiled` once a test
-      proves nothing relies on it.
+- [x] A compiled binary still prefers `./node_modules/.bin/electron` (rung 3 in
+      `findElectronBin`) over the runtime it carries — gated on `!compiled`
+      (1.0.5-beta, tests/electron-aio-decides.test.ts).
 - [ ] Old Electron runtimes in `~/.cache/aio/tools/electron/` are never pruned.
-      44.3.0 sat beside 44.4.1 on the Windows VM, at ~250 MB each.
-- [ ] The log says "launching Electron (fetched runtime…)" even when the runtime
-      was unpacked from the exe itself.
+      44.3.0 sat beside 44.4.1 on the Windows VM, at ~250 MB each. More likely
+      since 1.0.5 moves apps to aio's Electron on pin/fix. NOT a blind prune:
+      the cache is shared by every aio app on the machine, and deleting another
+      app's runtime makes its next offline start fail.
+- [x] The log says "launching Electron (fetched runtime…)" even when the runtime
+      was unpacked from the exe itself — now "runtime carried by this app"
+      (1.0.5-beta).
 - [ ] Every packaged app logs Electron's "Insecure Content-Security-Policy"
       warning. A CSP on the `aio://` page would fix the cause.
 - [ ] macOS `.app` self-update has no install strategy yet. A `.dmg` is refused
@@ -162,6 +165,27 @@ They are temporary; the findings are summarised above.
 bundle are not inside it. GitHub releases exist: `deno task ship github`.
 
 ## Open work
+
+### Android / iOS — after the first real run (2026-09-18, 1.0.5-beta)
+
+`deno task test:android` now runs both APKs on an emulator (three shipped
+defects fixed, see CHANGELOG). Still open, from the same audit:
+
+- [ ] **A kill within ~1 s of a change loses it** (standalone APK). Measured:
+      the WebView commits localStorage to disk lazily — kill at 0.8 s lost the
+      change, at 2 s it survived. A crash or an instant kill only; the fix is a
+      native store (a `@JavascriptInterface` writing a file) — not a rush job.
+- [ ] Release APK is debug-signed + debuggable; no AAB; targetSdk 34 (Play wants
+      35+); AGP 8.7.3. Needs a signing story before any store upload.
+- [ ] `CAMERA` is declared for every APK, used or not.
+- [ ] Windows host: the build's `gradlew` / `gradle.bat` path is unverified.
+- [ ] **iOS: never built.** Needs Xcode on the macOS VM (`ssh aio-macos`, 16 GB
+      now) — the user downloads the `.xip` (Apple ID). Read-only findings to
+      verify there: ATS `NSAllowsLocalNetworking` makes `NSAllowsArbitraryLoads`
+      ignored (http to a LAN hostname blocked?); `derivedData` inside the
+      artifact dir ships in dist; simulator-only `.app`; icon alpha;
+      `MARKETING_VERSION` with a suffix; no shared scheme; no UIScene.
+- [ ] A real phone (proof row `android (device)`), once one is attached.
 
 ### Two browser-bundle gaps left after report 9 (2026-09-13)
 

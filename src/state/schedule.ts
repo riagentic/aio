@@ -689,6 +689,12 @@ export const schedule = {
   },
   /** Repeat `action` every `ms`.
    *
+   *  Every tick re-sends the SAME `action`, payload included, exactly as it
+   *  was when the schedule was made — `schedule.every("tick", 1000,
+   *  self.tick.action(Date.now()))` sends the first timestamp forever. Read
+   *  anything that changes (the time, live state) INSIDE the method, not from
+   *  its arguments.
+   *
    *  `{ skipIfRunning: true }` drops a tick while the previous one is still in
    *  flight — the guard every polling cell otherwise opens with
    *  (`if (s.refreshing) return`). Hand-rolled, that guard needs a state field,

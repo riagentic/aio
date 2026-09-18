@@ -68,6 +68,7 @@ import {
   removalsInFile,
 } from "../state/removals.ts";
 import { appSourceFiles } from "./app-source-scope.ts";
+import { alignElectronRuntime, electronLine } from "./am-electron.ts";
 
 export type PinInfo = {
   /** What deno.json asks for (null = unpinned, i.e. "whatever is installed"). */
@@ -528,6 +529,11 @@ export async function cmdPin(
     Deno.exit(1);
   }
   const minDeno = await pinnedMinDeno(res.path);
+  const electron = await alignElectronRuntime(
+    appDir,
+    res.path,
+    args.includes("--no-download"),
+  );
 
   out(
     mode === "pretty"
@@ -546,6 +552,7 @@ export async function cmdPin(
         deps.map((d) =>
           `  dep synced: ${d.key} ${d.from ?? "(none)"} → ${d.to}\n`
         ).join("") +
+        (electron ? `  ${electronLine(electron)}\n` : "") +
         (minDeno ? `  requires Deno ≥ ${minDeno}\n` : "") +
         (ref === MAIN
           ? `  NOTE: pinned to that exact commit. Re-run \`am pin main\` to advance.\n`
@@ -560,6 +567,7 @@ export async function cmdPin(
         path: res.path,
         provisioned: res.created,
         depsSynced: deps,
+        electron,
         minDeno,
       },
     mode,

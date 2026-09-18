@@ -4,13 +4,36 @@ Coverage counts what ran. Hunters showed that is not the same as what can break.
 aio therefore splits testing into **lanes** so the default loop stays short
 while seam and hunter coverage stay obligatory.
 
-| Lane                   | Task                                                                     | Wall-clock          | What it is for                                                                                              |
-| ---------------------- | ------------------------------------------------------------------------ | ------------------- | ----------------------------------------------------------------------------------------------------------- |
-| **A — fast**           | `deno task test:fast`                                                    | seconds–~2 min      | Ratchets + lie detectors + small pins. Run on every edit.                                                   |
-| **B — seam**           | `deno task test:seam`                                                    | minutes             | Harness ≠ wire, prod-parity, transport, hunter-seed catalogue. Run before push / when touching those areas. |
-| **Hunters**            | `deno task test:hunters`                                                 | seconds–low minutes | Seed catalogue + named audit/wire pins. Not a full `check:audit` sweep.                                     |
-| **Full**               | `deno task test`                                                         | long                | Release gate. Unchanged.                                                                                    |
-| **Nightly / hardware** | `test:onboard`, `test:build`, `test:e2e`, `test:electron`, `lab`, `soak` | long                | Lane C. Do not pull into `test:fast`.                                                                       |
+| Lane                   | Task                                                                                     | Wall-clock          | What it is for                                                                                              |
+| ---------------------- | ---------------------------------------------------------------------------------------- | ------------------- | ----------------------------------------------------------------------------------------------------------- |
+| **A — fast**           | `deno task test:fast`                                                                    | seconds–~2 min      | Ratchets + lie detectors + small pins. Run on every edit.                                                   |
+| **B — seam**           | `deno task test:seam`                                                                    | minutes             | Harness ≠ wire, prod-parity, transport, hunter-seed catalogue. Run before push / when touching those areas. |
+| **Hunters**            | `deno task test:hunters`                                                                 | seconds–low minutes | Seed catalogue + named audit/wire pins. Not a full `check:audit` sweep.                                     |
+| **Changed**            | `deno task test:changed`                                                                 | seconds–~1 min      | Only the test files that import (transitively) what you changed vs HEAD. Edit loop, not a gate.             |
+| **Full**               | `deno task test`                                                                         | ~2.5 min (16 cores) | Release gate: every file, parallel processes; real-window tests one at a time. `test:serial` = old ~27 min. |
+| **Nightly / hardware** | `test:onboard`, `test:build`, `test:e2e`, `test:electron`, `test:android`, `lab`, `soak` | long                | Lane C. Do not pull into `test:fast`.                                                                       |
+
+## How the full run is parallel
+
+`scripts/test-shards.ts` splits the files over N separate `deno test` processes
+(default: half the cores, at most 16; `--shards=N` or `AIO_TEST_SHARDS`).
+Processes, not `deno test --parallel`: that shares `Deno.cwd()` and `Deno.env`
+between files, and dozens of tests change both. Each process gets its own
+`AIO_APPS_DIR` (`.aio-test-shards/<n>/.aio-test-home`).
+
+- **Real-window tests run one at a time**, all in shard 0, beside the others. A
+  test is one when its own source names `testDisplayEnv`, `Xephyr`,
+  `ELECTRON_E2E`, `ffmpeg` or `DISPLAY` (`REAL_WINDOW`): two windows on one
+  display overlap and spoil each other's screenshots. Headless Chromium runs in
+  parallel.
+- **Balance** comes from measured time: every run writes each file's time to
+  `.aio/test-timings.json`, and the next run hands out the slowest files first.
+- **Logs**: `.aio/test-shards/<n>.log`; a failure prints the shard's closing
+  `FAILURES` list.
+- **A test that fails only here is a real race**, not a runner quirk: load is
+  what exposed a chmod the logger never awaited, an esbuild child that outlived
+  `server.shutdown()`, and three sleep-based waits. Fix the wait, never
+  serialize the file.
 
 ## Catalogue
 

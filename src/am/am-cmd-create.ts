@@ -1176,6 +1176,9 @@ export async function cmdCreate(
       git,
       /** The home an earlier app with this appId left, or null. */
       existingData,
+      /** What to run next, in order — the first run is the step an agent
+       *  most often postpones (a field report: 13.7 min to the first start). */
+      next: nextSteps(opts.name, "src/App.tsx" in files),
     }, mode);
     return;
   }
@@ -1204,6 +1207,9 @@ export async function cmdCreate(
       `  ${dim("run it")}`,
       `    cd ${opts.name}`,
       `    ${cyan("deno task dev")}            ${dim(devHint)}`,
+      `    ${
+        cyan(nextSteps(opts.name, "src/App.tsx" in files).slice(1).join(" && "))
+      }  ${dim("→ in the background, then see it")}`,
       ...(opts.target === "browser"
         ? [
           "",
@@ -1225,6 +1231,17 @@ export async function cmdCreate(
     ].join("\n"),
     mode,
   );
+}
+
+/** The commands that take a fresh app to "running, and seen": start it in
+ *  the background (it waits until the app answers), then look at it — the UI
+ *  surface when there is a UI, the state when there is not. Pure. */
+export function nextSteps(name: string, hasUI: boolean): string[] {
+  return [
+    `cd ${name}`,
+    "deno task am start",
+    hasUI ? "deno task am surface" : "deno task am state",
+  ];
 }
 
 /** What an EARLIER app with the same appId left in its home. */

@@ -111,10 +111,36 @@ export async function findElectronBin(
   const electronBin = Deno.build.os === "windows"
     ? "node_modules\\.bin\\electron.cmd"
     : "node_modules/.bin/electron";
-  if (await electronBinReady(electronBin)) return electronBin;
-
   const compiled = opts.compiled ?? isCompiled();
   const denoInstall = opts.denoInstall ?? ((l: Log) => autoInstallElectron(l));
+  // A compiled binary never takes it: started from inside a dev tree it used
+  // to run THAT tree's Electron instead of the one it was built with (review
+  // pass, 2026-09-18). node_modules is a dev-time thing.
+  if (!compiled && await electronBinReady(electronBin)) {
+    // aio decides the Electron, not whatever node_modules happens to hold: the
+    // build ships DEFAULT_ELECTRON_VERSION (the one this aio is tested with),
+    // so dev running another one is a dev/prod split. An app scaffolded by an
+    // older aio keeps its old runtime across `am pin` unless something moves
+    // it — this is the dev half of that (`am pin` / `am fix` the other).
+    // Moved once, loudly; offline, the old runtime still runs (said so).
+    const have = await installedRuntimeVersion();
+    if (have === null || have === DEFAULT_ELECTRON_VERSION) return electronBin;
+    log.error(
+      `electron: node_modules has Electron ${have}; this aio is tested with ` +
+        `${DEFAULT_ELECTRON_VERSION} (the one a build ships) — installing it`,
+    );
+    if (
+      await denoInstall(log) &&
+      await installedRuntimeVersion() === DEFAULT_ELECTRON_VERSION
+    ) return electronBin;
+    log.error(
+      `electron: could not install ${DEFAULT_ELECTRON_VERSION} — running ` +
+        `${have} for now. \`am fix\` retries; a build ships ` +
+        `${DEFAULT_ELECTRON_VERSION} regardless.`,
+    );
+    return electronBin;
+  }
+
   const fetchRuntime = opts.fetchRuntime ??
     ((v: string, slug: string, l: Log) =>
       ensureElectronRuntime(v, slug, { log: l.info, warn: l.error }));
@@ -283,6 +309,34 @@ export async function electronDistDir(root = "."): Promise<string | null> {
   return null;
 }
 
+/** The version of the Electron runtime installed under `root`, or null.
+ *
+ *  Counts only when the runtime is UNPACKED: a `package.json` outlives a
+ *  deleted `dist/` (and `deno install` rewrites it before the lifecycle script
+ *  downloads anything), so reading it alone reported a version nothing on
+ *  this machine could run — the build baked 43.0.0 into the self-contained
+ *  exe while auto-install put 44.4.1 in the zip (real Windows 11,
+ *  2026-09-17). THE reader: the build, the dev launcher and `am fix` (via
+ *  `electron-install.ts --version`) all ask it. */
+export async function installedRuntimeVersion(
+  root = ".",
+): Promise<string | null> {
+  for (const base of await electronPkgDirs(root)) {
+    try {
+      if (!(await Deno.stat(join(base, "dist"))).isDirectory) continue;
+    } catch {
+      continue;
+    }
+    try {
+      const pkg = JSON.parse(
+        await Deno.readTextFile(join(base, "package.json")),
+      ) as { version?: string };
+      if (pkg.version) return pkg.version;
+    } catch { /* not this layout — try the next */ }
+  }
+  return null;
+}
+
 /** Every place the electron PACKAGE itself may live (both node_modules
  *  layouts). `electronDistDir` and the installer recovery below read the same
  *  list, so "where is electron" has one answer. */
@@ -308,7 +362,7 @@ export async function autoInstallElectron(
       args: [
         "install",
         "--allow-scripts=npm:electron",
-        `npm:electron@${DEFAULT_ELECTRON_VERSION}`,
+        `npm:electron@${version}`,
       ],
       stdout: "inherit",
       stderr: "inherit",
@@ -321,10 +375,13 @@ export async function autoInstallElectron(
   // without a 100MB download.
   isInstalled: () => Promise<boolean> = () =>
     electronDistDir().then((d) => d !== null),
+  /** The exact version to install — aio's tested one unless `am fix` asks
+   *  for the one the app's PINNED aio is tested with. */
+  version: string = DEFAULT_ELECTRON_VERSION,
 ): Promise<boolean> {
   (log.info ?? console.log)(
     `electron: not installed — auto-installing (deno install ` +
-      `--allow-scripts=npm:electron npm:electron@${DEFAULT_ELECTRON_VERSION})… ` +
+      `--allow-scripts=npm:electron npm:electron@${version})… ` +
       `first run downloads the Electron binary (~100MB), this can take a minute.`,
   );
   try {
@@ -658,7 +715,15 @@ async function spawnElectron(
     });
   const proc = spawnInheritingOrNull(command);
   forwardStderr(proc);
-  const cleanup = () => Deno.remove(tmpFile).catch(() => {});
+  // SYNC on purpose: an `unload` listener cannot await, so an async remove
+  // there never finished — the file outlived the process it belonged to.
+  const cleanup = () => {
+    try {
+      Deno.removeSync(tmpFile);
+    } catch {
+      // aio-ok: the other path (exit / unload) already removed it
+    }
+  };
   // Primary cleanup: after Electron exits normally
   proc.status.then(cleanup);
   // Backup cleanup: covers SIGKILL / host process crash where proc.status never resolves
@@ -716,10 +781,15 @@ export async function launchElectron(
 ): Promise<Deno.ChildProcess | null> {
   const bin = await findElectronBin(log, { distDir });
   if (!bin) return null;
+  // The cache holds both a downloaded runtime and one unpacked from the exe
+  // itself — the same path, so the path cannot tell them apart; whether this
+  // binary CARRIES one can.
   const mode = bin.includes("node_modules")
     ? "dev"
     : bin.includes(join("aio", "tools", "electron"))
-    ? "fetched runtime"
+    ? (await bakedEmbeddedRuntime(distDir).catch(() => null)
+      ? "runtime carried by this app"
+      : "fetched runtime")
     : bin.includes("dist")
     ? "packaged"
     : "$ELECTRON_PATH";

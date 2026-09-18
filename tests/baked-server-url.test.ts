@@ -4,7 +4,7 @@
 // a client-only build without it — and then the APK or AppImage that came out
 // opened a box asking the user to type the server the build already knew. One
 // field deployment worked around it by rewriting a build-time constant.
-import { assert, assertEquals } from "@std/assert";
+import { assert, assertEquals, assertStringIncludes } from "@std/assert";
 import { bakedServerUrl } from "../src/server/paths.ts";
 import { electronClientScript } from "../src/electron/electron.ts";
 import { _writeConnectPage } from "../src/build/build-android.ts";
@@ -60,25 +60,60 @@ Deno.test("electron client: no baked address leaves today's behaviour exactly", 
   assertEquals(script, electronClientScript(null), "null and absent agree");
 });
 
-Deno.test("android client: prefilled and auto-connected on a FRESH install only", async () => {
+/** Run the connect page's script against stub storage and a stub location:
+ *  where does a launch GO? (null = it stays on the form.) */
+function launch(
+  html: string,
+  local: Map<string, string>,
+  hash = "",
+  err = { textContent: "" },
+): { went: string | null; field: string } {
+  const script = html.match(/<script>([\s\S]*?)<\/script>/)![1]!;
+  const field = { value: "" };
+  const start =
+    `https://appassets.androidplatform.net/assets/index.html${hash}`;
+  const location = { href: start, hash };
+  new Function("localStorage", "location", "document", script)(
+    {
+      getItem: (k: string) => local.get(k) ?? null,
+      setItem: (k: string, v: string) => void local.set(k, v),
+    },
+    location,
+    {
+      getElementById: (id: string) => id === "addr" ? field : err,
+    },
+  );
+  return {
+    went: location.href === start ? null : location.href,
+    field: field.value,
+  };
+}
+
+Deno.test("client connect page: every launch goes straight in; #change (Back) stays on the form", async () => {
   const dir = await Deno.makeTempDir({ prefix: "aio-connect-" });
   try {
     await _writeConnectPage(dir, "Wallet", "http://10.0.0.5:8000");
     const html = await Deno.readTextFile(join(dir, "index.html"));
-    assert(
-      html.includes('var baked="http://10.0.0.5:8000"'),
-      "address embedded",
+    const local = new Map<string, string>();
+    // Fresh install: the baked address, no form.
+    assertEquals(launch(html, local).went, "http://10.0.0.5:8000");
+    // Back from the server opens `#change`: the form, prefilled, to change it.
+    const back = launch(html, local, "#change");
+    assertEquals(back.went, null);
+    assertEquals(back.field, "http://10.0.0.5:8000");
+    // The client could not reach it: the form, SAYING so — not a loop.
+    const err = { textContent: "" };
+    assertEquals(launch(html, local, "#unreachable", err).went, null);
+    assertStringIncludes(
+      err.textContent,
+      "Could not reach http://10.0.0.5:8000",
     );
-    // The first launch of an installed client should not be a form.
-    assert(
-      html.includes("!localStorage.getItem('aio_server')"),
-      "auto-connect only when the user has never chosen a server",
-    );
-    // A stored choice — including one the user deliberately changed — wins.
-    assert(
-      html.includes("localStorage.getItem('aio_server')||baked"),
-      "a stored server outranks the baked one",
-    );
+    // A later launch: straight in again — it used to stop on the form on
+    // every launch after the first.
+    assertEquals(launch(html, local).went, "http://10.0.0.5:8000");
+    // The user's own choice outranks the baked one, at every launch.
+    local.set("aio_server", "http://192.168.1.9:8000");
+    assertEquals(launch(html, local).went, "http://192.168.1.9:8000");
   } finally {
     await Deno.remove(dir, { recursive: true });
   }
@@ -91,6 +126,7 @@ Deno.test("android client: no baked address still gives the plain form", async (
     const html = await Deno.readTextFile(join(dir, "index.html"));
     assert(html.includes('var baked=""'), "empty, never undefined in JS");
     assert(html.includes('id="addr"'), "the form is still the fallback");
+    assertEquals(launch(html, new Map()).went, null, "and it stays on it");
   } finally {
     await Deno.remove(dir, { recursive: true });
   }

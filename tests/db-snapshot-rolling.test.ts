@@ -147,22 +147,19 @@ Deno.test("db worker: a request that can never answer fails instead of hanging",
   // No ceiling at all meant a worker that dies WITHOUT firing onerror left
   // every db.query() pending forever — on the dispatch path, that is a method
   // call that never returns.
-  // The ceiling has to clear WORKER BOOT, not just the query. At 50ms the
-  // setup statement below raced the worker's own startup: alone it won, under
-  // a fully loaded suite it lost, and the test failed in 58ms on the CREATE
-  // TABLE — never reaching the runaway query it exists to time out. Any value
-  // is "instant" next to a query that never finishes, so pick one that cannot
-  // lose that race.
-  const db = createDB(":memory:", { requestTimeoutMs: 2000 });
+  // The ceiling is for STATEMENTS, not the worker booting: at 50ms, then
+  // 2000ms, the boot itself lost the race under a loaded suite and the test
+  // failed on "open" — never reaching the runaway query it exists to time out.
+  // A 1ms ceiling pins that boot is exempt: only the query may time out.
+  const db = createDB(":memory:", { requestTimeoutMs: 1 });
   try {
-    await db.execute("CREATE TABLE t (id INTEGER PRIMARY KEY)");
     // A statement that cannot finish inside the ceiling.
     const msg = await db.query(
       "WITH RECURSIVE c(x) AS (SELECT 1 UNION ALL SELECT x+1 FROM c) " +
         "SELECT COUNT(*) FROM c",
     ).then(() => null, (e: Error) => e.message);
     assert(msg, "the request must not hang");
-    assertStringIncludes(msg!, "did not answer");
+    assertStringIncludes(msg!, 'did not answer a "query"');
     assertStringIncludes(msg!, "requestTimeoutMs");
   } finally {
     // The worker is wedged on the runaway query; terminate rather than drain.

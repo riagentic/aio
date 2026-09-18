@@ -80,6 +80,7 @@ import {
   writeAppMeta,
 } from "./app-dirs.ts";
 import { openBlobStore } from "./blobs.ts";
+import { adoptHiddenConsole } from "./no-console.ts";
 import { resolveDataDirLegacy } from "./paths.ts";
 import { describeMigration, migrateLegacyLayout } from "./app-dirs-migrate.ts";
 import { DEV_FRAME_BUDGET_MS } from "../state/dispatch.ts";
@@ -1397,6 +1398,17 @@ async function _runPhases<S, A, E>(
   }
   // `--version` is answered in `run()`, before anything resolves a directory
   // or installs a logger — see the hoist there. Nothing to do here.
+
+  // A Windows GUI exe (double-clicked, no console): one hidden console, so no
+  // console program this app starts — a native dialog's PowerShell,
+  // openExternal's cmd, an update step, the app's own spawn() — flashes a
+  // window (src/server/no-console.ts). A terminal-started app is untouched.
+  if (Deno.build.os === "windows") {
+    const hidden = adoptHiddenConsole();
+    if (hidden !== "adopted" && hidden !== "has-console") {
+      log.warn("boot", `console children may flash a window: ${hidden}`);
+    }
+  }
 
   if (cli.dataContract) {
     // What this build promises about data already on disk. Derived from the

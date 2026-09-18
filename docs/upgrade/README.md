@@ -20,6 +20,8 @@ app, that is a bug in aio, not a step you missed.
 - **[The aio restructure (alpha27+)](restructure.md)** — every restructure
   breaking change with before → after recipes (methods-only cells, instances,
   SQLite-only persistence, `aio/extras`, wire catalog)
+- [1.0.4-beta → **1.0.5-beta**](from-1.0.4-beta-to-1.0.5-beta.md) — aio decides
+  the Electron (`am pin`/`am fix` move it); no code change
 - [1.0.3-beta → **1.0.4-beta**](from-1.0.3-beta-to-1.0.4-beta.md) — nothing
   breaks. The macOS round: a real signed `.app` in a `.dmg`, Chromium's
   translations trimmed on every platform, and one Electron version across the

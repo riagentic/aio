@@ -61,6 +61,12 @@ export const CLAIMS: {
   { target: "soak", env: "72h", how: "deno task soak:72h", auto: true },
   {
     target: "android",
+    env: "emulator",
+    how: "deno task test:android (the SDK + an AVD; boots it headless)",
+    auto: true,
+  },
+  {
+    target: "android",
     env: "device",
     how:
       "NO GATE — am lab android proves the CLI against a fake adb, not a phone",

@@ -15,7 +15,11 @@
     <activity
       android:name="aio.app.MainActivity"
       android:exported="true"
+      android:configChanges="orientation|screenSize|screenLayout|smallestScreenSize|keyboard|keyboardHidden"
     >
+      <!-- configChanges: a rotation (or a keyboard) must not recreate the
+           activity — that destroyed the WebView and RELOADED the app, losing
+           everything on screen not yet saved. The WebView resizes itself. -->
       <intent-filter>
         <action android:name="android.intent.action.MAIN" />
         <category android:name="android.intent.category.LAUNCHER" />

@@ -104,10 +104,24 @@ export async function recordScreencast(
     // screenshot is a frame the screenshot already shows.
     if (us > frames.at(-1)!.us) save(us, f.data);
   });
+  // A window closed WHILE starting or stopping the screencast is the same
+  // event as one closed mid-recording: LOST, frames kept — not a throw. The
+  // call's rejection can land a tick before `gone` flips `lost`, so a
+  // rejected call waits (briefly) for the socket's own verdict first.
+  const unlessLost = async (p: Promise<unknown>) => {
+    try {
+      await p;
+    } catch (e) {
+      await Promise.race([gone, new Promise((r) => setTimeout(r, 200))]);
+      if (!lost) throw e;
+    }
+  };
   try {
-    await cdp.call("Page.startScreencast", { format: "jpeg", quality: 90 });
-    await Promise.race([stop, gone]);
-    if (!lost) await cdp.call("Page.stopScreencast");
+    await unlessLost(
+      cdp.call("Page.startScreencast", { format: "jpeg", quality: 90 }),
+    );
+    if (!lost) await Promise.race([stop, gone]);
+    if (!lost) await unlessLost(cdp.call("Page.stopScreencast"));
   } finally {
     off();
   }
