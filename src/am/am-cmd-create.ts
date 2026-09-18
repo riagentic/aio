@@ -38,6 +38,26 @@ import {
 } from "./am-versions.ts";
 import { type Template, TEMPLATES } from "./am-help-text.ts";
 import { agentsMdScaffold, CLAUDE_MD_SCAFFOLD } from "./am-agent-text.ts";
+import { DEFAULT_ELECTRON_VERSION } from "../build/electron-runtime.ts";
+
+/** The scaffold's `electron` import spec — the framework's ONE Electron
+ *  version, pinned EXACTLY.
+ *
+ *  It used to be the bare `npm:electron`, which resolves to whatever is latest
+ *  at INSTALL time. That is not a pin: two apps scaffolded a month apart ran
+ *  different Chromiums, and neither matched `DEFAULT_ELECTRON_VERSION` — the
+ *  floor a build uses when nothing is installed — so the same source could ship
+ *  one Electron in dev and another in the artifact.
+ *
+ *  Exact, not a `^`-range, for the same reason `esbuild` is pinned exactly and
+ *  is checked by `tests/esbuild-version-pin.test.ts`: the framework tests ONE
+ *  Electron, and a scaffolded app must run that one. A range re-opens the drift
+ *  — an app installing 44.4.2 while the framework's floor is 44.4.1 — and the
+ *  whole point of this round was that there is one version. To move it, `aio`
+ *  moves `DEFAULT_ELECTRON_VERSION` and every app follows in one change. */
+function electronImportSpec(): string {
+  return `npm:electron@${DEFAULT_ELECTRON_VERSION}`;
+}
 
 const PKG = "@riagentic/aio";
 /** THE scaffold templates — declared once in `am-help-text.ts`, which is also
@@ -513,7 +533,7 @@ export function denoJson(
     // framework default (electron-runtime.ts `resolveElectronVersion`).
     imports: {
       ...(target === "electron"
-        ? { ...fw.imports, electron: "npm:electron" }
+        ? { ...fw.imports, electron: electronImportSpec() }
         : fw.imports),
       // Tailwind v4's CLI resolves `tailwindcss` as a node package from the
       // project, so the import must be here AND `nodeModulesDir` on (it is,

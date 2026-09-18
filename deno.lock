@@ -20,7 +20,7 @@
     "jsr:@std/testing@1.0.17": "1.0.17",
     "jsr:@std/yaml@1": "1.1.2",
     "jsr:@std/yaml@1.0.9": "1.0.9",
-    "npm:electron@^44.4.1": "44.4.1",
+    "npm:electron@44.4.1": "44.4.1",
     "npm:esbuild@0.24.2": "0.24.2",
     "npm:happy-dom@17.6.3": "17.6.3",
     "npm:immer@10.2.0": "10.2.0"
@@ -495,7 +495,7 @@
     ],
     "packageJson": {
       "dependencies": [
-        "npm:electron@^44.4.1"
+        "npm:electron@44.4.1"
       ]
     }
   }

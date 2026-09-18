@@ -8,6 +8,7 @@ import { electronMainScriptUDS } from "./electron-uds.ts";
 import { log } from "../diagnostics/logger-api.ts";
 import { classifyElectronLine } from "./electron-renderer-log.ts";
 import { isCompiled } from "../server/paths.ts";
+import { spawnInheritingOrNull } from "../server/no-console.ts";
 import {
   bakedElectronVersion,
   bakedEmbeddedRuntime,
@@ -298,7 +299,17 @@ export async function autoInstallElectron(
   log: { info?: (m: string) => void; error: (m: string) => void },
   run: () => Promise<{ success: boolean }> = () =>
     new Deno.Command(Deno.execPath(), {
-      args: ["install", "--allow-scripts=npm:electron", "npm:electron"],
+      // PINNED to the framework's one version, not bare `npm:electron`.
+      // Bare resolves to whatever is latest at INSTALL time, so a dev tree
+      // could run one Electron while the build's floor is another — the exact
+      // drift `tests/electron-version-consistency.test.ts` now gates. The pin
+      // lives in this folder (`electron-runtime-fetch.ts`), so no boundary is
+      // crossed to read it.
+      args: [
+        "install",
+        "--allow-scripts=npm:electron",
+        `npm:electron@${DEFAULT_ELECTRON_VERSION}`,
+      ],
       stdout: "inherit",
       stderr: "inherit",
     }).output(),
@@ -312,8 +323,9 @@ export async function autoInstallElectron(
     electronDistDir().then((d) => d !== null),
 ): Promise<boolean> {
   (log.info ?? console.log)(
-    "electron: not installed — auto-installing (deno install --allow-scripts=npm:electron npm:electron)… " +
-      "first run downloads the Electron binary (~100MB), this can take a minute.",
+    `electron: not installed — auto-installing (deno install ` +
+      `--allow-scripts=npm:electron npm:electron@${DEFAULT_ELECTRON_VERSION})… ` +
+      `first run downloads the Electron binary (~100MB), this can take a minute.`,
   );
   try {
     await run();
@@ -583,22 +595,9 @@ export function electronArgsFromEnv(
   return { args, refused };
 }
 
-/** Whether a spawn failure is Windows' "the std handles I was given to inherit
- *  are not valid" — a `deno compile --no-terminal` GUI exe started by
- *  double-click has NO console, so inheriting stdout aborts with
- *  `TypeError: Failed to spawn '…': Invalid handle`. Every desktop app that
- *  carried a runtime opened nothing (real Windows 11, 2026-09-17). Kept to a
- *  message match so the retry is the fallback, never the first move: a real
- *  failure that merely mentions a handle must not be retried into silence.
- *  `os` is injected so the rule is a unit test off Windows. */
-export function isInvalidHandleError(
-  e: unknown,
-  os: typeof Deno.build.os = Deno.build.os,
-): boolean {
-  return os === "windows" &&
-    e instanceof TypeError &&
-    /invalid handle/i.test(e.message);
-}
+// THE no-console rule lives in the server runtime (the update relaunch needs
+// it too); re-exported so existing importers keep one name.
+export { isInvalidHandleError } from "../server/no-console.ts";
 
 /** Writes script to temp file, spawns Electron, cleans up after exit or process unload */
 async function spawnElectron(
@@ -657,13 +656,7 @@ async function spawnElectron(
         : { stdin: "null" as const, stdout: "null" as const }),
       stderr: "piped",
     });
-  let proc: Deno.ChildProcess;
-  try {
-    proc = command("inherit").spawn();
-  } catch (e) {
-    if (!isInvalidHandleError(e)) throw e;
-    proc = command("null").spawn();
-  }
+  const proc = spawnInheritingOrNull(command);
   forwardStderr(proc);
   const cleanup = () => Deno.remove(tmpFile).catch(() => {});
   // Primary cleanup: after Electron exits normally

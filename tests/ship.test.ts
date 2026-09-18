@@ -26,7 +26,7 @@ import {
   verifyManifestClaims,
   verifyShipManifest,
 } from "../src/build/ship.ts";
-import { notRunnableExit } from "../src/testing/internal.ts";
+import { inferTarget, notRunnableExit } from "../src/testing/internal.ts";
 import { dropTempDir, tempDir } from "../src/testing/temp-dir.ts";
 import type { DataContract, ShipManifest } from "../src/build/ship.ts";
 import { manifestUrl } from "../src/server/updates-core.ts";
@@ -1600,6 +1600,17 @@ Deno.test("ship: artifactFormat recognises every shape aio publishes, and nothin
   assertEquals(f(0x4d, 0x5a), "PE"); // windows .exe
   assertEquals(f(0x50, 0x4b, 0x03, 0x04), "ZIP"); // electron-zip + .apk
   assertEquals(f(0x23, 0x21), "script"); // shebang launcher
+  // A `.dmg` is a UDIF image: `koly` begins its 512-byte TRAILER, so the check
+  // is at the end. The leading bytes are a compressed blob of any kind.
+  const dmg = new Uint8Array(2048);
+  dmg.set([0x78, 0x01, 0x73], 0); // zlib header — not a binary magic
+  dmg.set(new TextEncoder().encode("koly"), 2048 - 512);
+  assertEquals(artifactFormat(dmg), "DMG");
+  // …and the magic must be at the RIGHT offset, not merely present: a payload
+  // that happens to contain "koly" elsewhere is not a disk image.
+  const fake = new Uint8Array(2048);
+  fake.set(new TextEncoder().encode("koly"), 100);
+  assertEquals(artifactFormat(fake), null);
   for (
     const m of [
       [0xfe, 0xed, 0xfa, 0xce],
@@ -1616,6 +1627,27 @@ Deno.test("ship: artifactFormat recognises every shape aio publishes, and nothin
   );
   assertEquals(artifactFormat(new TextEncoder().encode('{"a":1}')), null);
   assertEquals(artifactFormat(new Uint8Array(0)), null);
+});
+
+Deno.test("ship: a .dmg is refused by NAME, never silently labelled binary", () => {
+  // The failure this prevents: `inferTarget` falls back to `binary`, so a
+  // `.dmg` would sign a manifest every client accepts and then swap the image
+  // FILE over the running `.app` — replacing an app bundle with a disk image.
+  // A release that cannot be installed must fail at the PUBLISHER.
+  let err: Error | null = null;
+  try {
+    inferTarget("counter-1.2.3-mac-arm64.dmg", { targets: ["electron"] });
+  } catch (e) {
+    err = e as Error;
+  }
+  assert(err, "a .dmg must be refused");
+  assertStringIncludes(err.message, ".dmg");
+  assertStringIncludes(err.message, "update target");
+  // A DMG's magic is at the END, so the format gate must accept it — otherwise
+  // the refusal is "not an artifact", which names the wrong problem.
+  const dmg = new Uint8Array(2048);
+  dmg.set(new TextEncoder().encode("koly"), 2048 - 512);
+  assertEquals(artifactFormat(dmg), "DMG");
 });
 
 Deno.test("ship: --no-data cannot publish a file that is not an artifact", async () => {

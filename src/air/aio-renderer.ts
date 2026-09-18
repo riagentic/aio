@@ -146,7 +146,11 @@ const COMPOSITE_OWNER_ROLES = new Set([
 const DISMISSIBLE_ROLES = new Set(["dialog", "alertdialog", "alert", "status"]);
 
 /** @internal Dev-mode a11y checks on element creation. */
-function _devA11yCheck(tag: string, props: Record<string, unknown>): void {
+function _devA11yCheck(
+  tag: string,
+  props: Record<string, unknown>,
+  inLabel = false,
+): void {
   // The check is installed once at module load rather than by `setDevMode()`,
   // so it asks the flag here. Wired only from `setDevMode()`, the whole a11y
   // layer was dark for every app that never called it — which was every app.
@@ -209,9 +213,15 @@ function _devA11yCheck(tag: string, props: Record<string, unknown>): void {
     !props["aria-labelledby"] &&
     !props.id
   ) {
-    _warnA11yOnce(
-      `[aio-dev] <${tag}> has no label association. Add id (for <label htmlFor>), aria-label, or aria-labelledby.`,
-    );
+    // A control NESTED in a <label> is labelled by it — valid HTML and the
+    // recommended form for a checkbox. The element has no parent yet when
+    // this runs, so the renderer says whether it is building one (a field
+    // report: three label-wrapped checkboxes, all flagged).
+    if (!inLabel) {
+      _warnA11yOnce(
+        `[aio-dev] <${tag}> has no label association. Wrap it in a <label>, or add id (for <label htmlFor>), aria-label, or aria-labelledby.`,
+      );
+    }
   }
   // ── The five below are the rest of what a linter would catch ──
   //

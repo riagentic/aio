@@ -668,8 +668,10 @@ export function declaredTargetKinds(
 /** Infer the install strategy from the artifact itself. The extension decides
  *  the mechanism (rename an AppImage, unpack a zip); deno.json's build target
  *  only distinguishes an Electron AppImage from a plain one, and they differ in
- *  what gets relaunched. */
-function inferTarget(
+ *  what gets relaunched.
+ *
+ *  @internal alpha70 — test seam via src/testing/internal.ts */
+export function inferTarget(
   fileName: string,
   buildCfg: Record<string, unknown>,
 ): UpdateTarget {
@@ -679,6 +681,22 @@ function inferTarget(
   }
   if (/\.zip$/i.test(fileName)) return "electron-zip";
   if (/\.apk$/i.test(fileName)) return "android";
+  if (/\.dmg$/i.test(fileName)) {
+    // REFUSED, not labelled `binary`. A `.dmg` is a disk image whose install
+    // step is mount-and-copy — no existing strategy performs that, and
+    // inferring `binary` (the fallback) would sign a manifest every macOS
+    // client accepts and then swaps the image FILE over the running `.app`,
+    // replacing an app bundle with a disk image. A release that cannot be
+    // installed must fail at the publisher, not on every user's machine.
+    throw new Error(
+      `${NO} ${fileName} is a macOS disk image, and no aio update target ` +
+        `installs one yet.\n` +
+        `       Publish the built binary or .AppImage for an app that ` +
+        `self-updates; a .dmg is for a user to drag to /Applications by ` +
+        `hand. (The .app INSIDE the dmg is the real artifact — see ` +
+        `docs/build/targets.md.)`,
+    );
+  }
   return "binary";
 }
 
@@ -789,8 +807,14 @@ export function notRunnableExit(code: number, stderr: string): boolean {
  *
  *  Every shape aio can publish is one of these ({@link UPDATE_TARGETS} is a
  *  closed set): `binary` and `appimage` are ELF/PE/Mach-O, an `electron-zip`
- *  and an `android` APK are ZIP containers, and a launcher script carries a
- *  shebang. There is no sixth thing.
+ *  and an `android` APK are ZIP containers, a launcher script carries a
+ *  shebang, and a macOS `.dmg` is a UDIF image.
+ *
+ *  The DMG is the one shape whose magic is at the END: a UDIF file is a
+ *  compressed blob followed by a 512-byte trailer beginning `koly`. Testing
+ *  only the first bytes therefore reported a perfectly good DMG as "not an
+ *  artifact" — and `--no-data` (the documented hatch for a cross-compiled
+ *  artifact this machine cannot run) would have refused every macOS release.
  *
  *  Which is why `null` can be a refusal rather than a warning: it means the
  *  file is not an executable or an archive for ANY platform. That distinction
@@ -809,6 +833,16 @@ export function artifactFormat(bytes: Uint8Array): string | null {
   if (magic(0x4d, 0x5a)) return "PE"; // Windows .exe
   if (magic(0x50, 0x4b, 0x03, 0x04)) return "ZIP"; // .zip / .apk
   if (magic(0x23, 0x21)) return "script"; // #! launcher
+  // A UDIF disk image (`.dmg`): `koly` starts the trailer, 512 bytes from the
+  // end. Checked by its TRUE position rather than by searching, so an image
+  // whose data happens to contain those bytes is not a false positive.
+  if (bytes.length >= 512) {
+    const t = bytes.length - 512;
+    if (
+      at(t) === 0x6b && at(t + 1) === 0x6f && at(t + 2) === 0x6c &&
+      at(t + 3) === 0x79
+    ) return "DMG";
+  }
   // Mach-O, all four spellings: 32/64-bit, both endiannesses — plus the
   // universal ("fat") header a macOS artifact for two arches carries.
   for (
@@ -1380,7 +1414,7 @@ jobs:
           # The artifact is found by TIME, never by name: the framework owns
           # its naming rules and a second copy of them here would go stale.
           artifact=$(find . -maxdepth 3 -type f -newer deno.json \\
-            \\( -perm -u+x -o -name '*.AppImage' -o -name '*.zip' \\) \\
+            \\( -perm -u+x -o -name '*.AppImage' -o -name '*.zip' -o -name '*.dmg' \\) \\
             ! -path '*/node_modules/*' ! -name '*.ts' ! -name '*.json' \\
             | head -n1)
           test -n "$artifact" || { echo "no artifact produced"; exit 1; }

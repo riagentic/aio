@@ -76,6 +76,17 @@ export function evalOutcome(
   return { ok: true, value: r.value, type: r.type ?? "undefined" };
 }
 
+/** The usage rule a SyntaxError almost always means here. The input is ONE
+ *  expression (see {@link wrapExpression}), so `a(); 1` fails to PARSE — and the
+ *  bare "Unexpected token ';'" read like a bug in the probe, not a rule (a
+ *  field report). Empty for every other error. Pure. */
+export function evalErrorHint(error: string): string {
+  return /\bSyntaxError\b/.test(error)
+    ? `\n  hint: am eval takes ONE expression — wrap statements in a ` +
+      `function: '(() => { …; return x })()'`
+    : "";
+}
+
 /** The expression, wrapped so what comes back is what was asked for.
  *
  *  Every clause here is a wrong answer a real Chromium gave first — the whole
@@ -205,7 +216,10 @@ export async function cmdEval(
     }) as EvalReply;
     const outcome = evalOutcome(reply);
     if (!outcome.ok) {
-      outError(`${expr} threw: ${outcome.error}`, mode);
+      outError(
+        `${expr} threw: ${outcome.error}${evalErrorHint(outcome.error)}`,
+        mode,
+      );
       Deno.exit(1);
     }
     out(

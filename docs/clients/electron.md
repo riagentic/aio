@@ -11,13 +11,16 @@ For build targets (AppImage, zip, systemd), see
 Electron is on by default, and **nothing has to be installed by hand**. AIO
 looks for (in order):
 
-1. `$ELECTRON_PATH` env var — set by packaged launchers (`AppRun` / `run.sh` /
-   `run.bat`)
-2. `./electron/` **beside the executable** — the runtime the shipped Windows and
-   macOS zips already carry. Resolved against the executable, never the cwd, so
+1. `$ELECTRON_PATH` env var — set by the packaged Linux `AppRun` / Windows
+   `run.bat`.
+2. `./electron/` **beside the executable** — the runtime every packaged target
+   already carries. Resolved against the executable, never the cwd, so
    double-clicking `myapp.exe` (which skips `run.bat` and therefore
-   `$ELECTRON_PATH`) finds the Electron that is sitting in the same folder
-   instead of downloading a second one.
+   `$ELECTRON_PATH`) finds the Electron sitting in the same folder instead of
+   downloading a second one. On macOS this is inside the bundle:
+   `Counter.app/Contents/MacOS/electron/Electron.app`, which is exactly what
+   `dirname(execPath)/electron/` resolves to once the binary is the
+   `CFBundleExecutable`.
 3. `node_modules/.bin/electron` — dev binary
 4. in dev: auto-install via `deno install` (the npm package, with a fallback to
    its own `install.js` when the lifecycle script is skipped)
@@ -26,8 +29,24 @@ looks for (in order):
    electron/<version>-<platform>/` — THE path for a
    **compiled binary** (which has no `node_modules` and no `deno`), and the last
    resort for dev. The version is the one the build baked into
-   `dist/electron.json` (installed runtime > `npm:electron@^x.y.z` in the import
-   map > framework default).
+   `dist/electron.json` (installed runtime > the exact `npm:electron@x.y.z` in
+   the import map > framework default).
+
+aio ships **one** Electron version across the whole framework — the launcher's
+fallback, `am create`'s scaffold pin, the examples and the framework's own
+`package.json` all name the same release **exactly** (no `^` range, the same
+rule `esbuild` follows), and `tests/electron-version-consistency.test.ts` makes
+any drift a red gate. Before that, the framework default was `43.4.1` while a
+freshly scaffolded app pinned nothing (`npm:electron` = whatever was latest at
+install time) — so the same app could run one Chromium in dev and ship another,
+and two apps scaffolded a month apart did not match each other.
+
+The floor is the newest INSTALLABLE release, not blindly Electron's `latest`:
+Deno's default 24-hour `minimumDependencyAge` (a supply-chain guard) refuses a
+version published minutes ago, which fails every install. The consistency test
+therefore REPORTS a newer upstream release (visible in the release log, and
+enforceable with `AIO_REQUIRE_LATEST_ELECTRON=1`) instead of failing the build —
+bumping is a deliberate act, done in one place.
 
 The fetched runtime is **verified before it is unpacked**: its SHA-256 is
 checked against the release's own `SHASUMS256.txt` and a mismatch refuses rather

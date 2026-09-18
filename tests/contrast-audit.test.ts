@@ -293,6 +293,19 @@ Deno.test("contrast: a background it CANNOT READ is not a white background", asy
   assert(viaHsl.findings > 0, "hsl() is read, so a violation in it is found");
 });
 
+Deno.test("contrast audit: the element is named the way HTML spells it", async () => {
+  // `<button class="btn.btn-lg">` matched neither HTML nor a CSS selector, so
+  // it pasted into nothing (a field report). Spaces, like the markup.
+  const r = await inHappyDom(
+    ".root{background:#ffffff}.a{color:#eeeeee;font-size:14px}",
+    `<div class="root"><span class="a b c">low contrast</span></div>`,
+  );
+  assert(
+    r.warns.some((w) => w.includes('<span class="a b c">')),
+    r.warns.join(" | "),
+  );
+});
+
 // ── The instrument, against a REAL engine ────────────────────────────────
 //
 // Every test above drives a hand-built DOM, and a stub that agrees with the

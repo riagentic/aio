@@ -31,9 +31,14 @@ Deno.test("ui.advance fires the scheduled auto-dismiss", async () => {
   await T.push("hello");
   await ui.settle();
   assertEquals(T.msg, "hello");
-  await ui.advance(2999);
+  // Not yet due. The margin is a second, not a millisecond: the virtual clock
+  // is real time PLUS what was advanced (standalone-air.ts — time flows
+  // between advances, by design), so under a loaded suite more than 1 ms of
+  // real time passes between push and advance, and `advance(2999)` crossed
+  // 3000 on its own.
+  await ui.advance(2000);
   assertEquals(T.msg, "hello");
-  await ui.advance(1);
+  await ui.advance(1000);
   assertEquals(T.msg, "");
   await ui.dispose();
 });

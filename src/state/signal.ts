@@ -132,6 +132,31 @@ export function untrack<T>(fn: () => T): T {
   return result;
 }
 
+/** @internal Run `fn` as if no render or effect were tracking: the open
+ *  scopes are set ASIDE (the stack is empty while `fn` runs), not covered by
+ *  a throwaway frame the way {@link untrack} does. A cell method's dispatch
+ *  uses this — a method body is not UI code, and code that asks "is a render
+ *  tracking right now?" (the in-process worker-cell refusals) must hear "no"
+ *  inside it, which a pushed frame would answer wrongly. Renders the commit
+ *  triggers push and pop their own scopes on the empty stack. */
+export function _outsideTracking<T>(fn: () => T): T {
+  if (_trackStack.length === 0) return fn();
+  const saved = _trackStack.splice(0);
+  let result: T;
+  try {
+    result = fn();
+  } catch (err) {
+    _trackStack.splice(0, _trackStack.length, ...saved);
+    throw err;
+  }
+  const leftOver = _trackStack.length;
+  _trackStack.splice(0, _trackStack.length, ...saved);
+  if (leftOver !== 0) {
+    throw new Error("Signal tracking stack corrupted in _outsideTracking()");
+  }
+  return result;
+}
+
 /** @internal How many tracking scopes are open. A render that finishes — or
  *  that THROWS and unwinds — must leave this at the depth it started, or the
  *  next component's signal reads are collected into a dead component's
@@ -379,11 +404,21 @@ class SignalImpl<T> implements Omit<Signal<T>, never> {
   set(next: T, opts?: { force?: boolean }): void {
     const resolved = next;
     if (!opts?.force && Object.is(this._value, resolved)) {
-      if (this._name && isDevMode()) {
+      // Only an OBJECT set to itself is worth a word: that is the
+      // mutate-then-set bug, where the change never reaches a reader. A
+      // primitive set to its current value (`count.set(0)` on reset) is an
+      // ordinary idiom and already a no-op — warning taught apps to wrap every
+      // set in `if (s.peek() !== v)` for nothing (a field report).
+      if (
+        this._name && isDevMode() &&
+        typeof resolved === "object" && resolved !== null
+      ) {
         // The logger prints the category it infers from the call site, so a
         // hand-written `[aio]` is a second prefix beside the real one.
         log.warn(
-          `signal "${this._name}" update skipped (identical reference)`,
+          `signal "${this._name}" update skipped (identical reference — ` +
+            `mutating an object and setting the same one notifies nobody; ` +
+            `set a copy)`,
         );
       }
       return;

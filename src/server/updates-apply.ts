@@ -20,6 +20,7 @@ import { pruneVersions, reconcileInstalledVersion } from "./install-record.ts";
 import { isProcessAlive } from "./single-instance-lock.ts";
 import type { UpdateTarget } from "../build/ship.ts";
 import { log } from "../diagnostics/logger-api.ts";
+import { spawnInheritingOrNull } from "./no-console.ts";
 
 /** The path this process was LAUNCHED through, which is the one an update has
  *  to replace — not the file it resolves to.
@@ -918,14 +919,20 @@ export function relaunch(opts: {
   args: string[];
 }): void {
   const args = opts.args.filter((a) => !a.startsWith(RELAUNCH_FLAG));
-  const cmd = new Deno.Command(opts.artifact, {
-    args: [...args, `${RELAUNCH_FLAG}=${Deno.pid}`],
-    stdin: "null",
-    stdout: "inherit",
-    stderr: "inherit",
-  });
+  // Inherit stdio so a terminal-run app keeps its output — but a `--no-terminal`
+  // GUI exe opened by double-click has no console, and `inherit` throws
+  // `Invalid handle` there: the update or `aio.restart()` then exited the app
+  // and never started the successor.
+  const child = spawnInheritingOrNull((stdio) =>
+    new Deno.Command(opts.artifact, {
+      args: [...args, `${RELAUNCH_FLAG}=${Deno.pid}`],
+      stdin: "null",
+      stdout: stdio,
+      stderr: stdio,
+    })
+  );
   // Detached: the successor must outlive this process, which is about to exit.
-  cmd.spawn().unref();
+  child.unref();
 }
 
 /** Block until the predecessor named by `--__aio-relaunch-after=<pid>` is gone,
