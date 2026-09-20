@@ -307,13 +307,37 @@ Deno.test("updates: an artifact on ANOTHER host is refused, naming it", async ()
     assert(got.kind === "error");
     assertMatch(got.error, /different host/);
     assertMatch(got.error, /cdn\.evil\.example/);
-    assertMatch(got.error, /allowCrossOrigin/, "the opt-in is named");
+    // A fix the reader can act on — and ONLY one that exists.
+    assertMatch(got.error, /beside the manifest/);
+    await refusesNoUnknownConfigKey(got.error);
   } finally {
     await h.stop();
   }
 });
 
-Deno.test("updates: a cross-origin artifact is allowed when the app opts in", async () => {
+/** A refusal must not send its reader to a config key the boot refuses.
+ *
+ *  This message used to end "…or opt in with
+ *  `updates: { allowCrossOrigin: true }`". `allowCrossOrigin` is an internal
+ *  `opts` field of `fetchManifest`/`downloadArtifact`: no caller plumbs it
+ *  from app config, it is not on `UpdatesConfig`, and it is not in
+ *  `VALID_UPDATES_KEYS`. Writing it was inert for as long as the sentence
+ *  existed — and since the nested key gate (aeb472172) it EXITS 1 at boot.
+ *  The one place that explains a refusal was handing out a config line that
+ *  stops the app from starting. */
+async function refusesNoUnknownConfigKey(message: string): Promise<void> {
+  const { VALID_UPDATES_KEYS } = await import("../src/server/config.ts");
+  for (const m of message.matchAll(/updates:\s*\{\s*([A-Za-z_$][\w$]*)/g)) {
+    assert(
+      VALID_UPDATES_KEYS.has(m[1]!),
+      `the message tells the reader to write \`updates: { ${
+        m[1]
+      } }\`, which aio's own boot refuses as an unknown key:\n${message}`,
+    );
+  }
+}
+
+Deno.test("updates: a cross-origin artifact is allowed through the internal seam", async () => {
   const h = host(() =>
     Response.json(goodManifest({ url: "https://cdn.example/app" }))
   );

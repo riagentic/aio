@@ -445,9 +445,14 @@ export function triggerClick(
  *  a change on the wrong element. */
 const _edited = new WeakSet<object>();
 
-/** Note that a trigger changed `el`'s value — a `change` is now owed. */
+/** Note that a trigger changed `el`'s value — a `change` is now owed, and the
+ *  value is now one the USER edited (which `minlength`/`maxlength` depend on,
+ *  see {@link _userEdited}). */
 function markEdited(el: AnyEl): void {
-  if (el && typeof el === "object") _edited.add(el as object);
+  if (el && typeof el === "object") {
+    _edited.add(el as object);
+    _userEdited.add(el as object);
+  }
 }
 
 /** Fire the owed `change` (once) — at blur, exactly like a browser. */
@@ -634,33 +639,298 @@ function isSubmitButton(el: AnyEl): boolean {
     (inputTypeOf(el) === "submit" || inputTypeOf(el) === "image");
 }
 
+/** How a field names itself in a refusal — `name`, else `id`, else the
+ *  accessible label, else just the tag. */
+function fieldLabel(el: AnyEl): string {
+  const tag = tagOf(el);
+  const type = tag === "input" ? ` type="${inputTypeOf(el)}"` : "";
+  for (const a of ["name", "id", "aria-label"]) {
+    const v = el.getAttribute?.(a);
+    if (v) return `<${tag}${type} ${a}="${v}">`;
+  }
+  return `<${tag}${type}>`;
+}
+
+/** A number the wording can show: 1.5000000000000002 helps nobody. */
+function tidy(n: number): string {
+  return String(Number(n.toPrecision(12)));
+}
+
+/** The two nearest values a stepped control would accept. */
+function stepText(el: AnyEl): string {
+  const type = inputTypeOf(el);
+  if (type !== "number" && type !== "range") {
+    return "Please enter a valid value.";
+  }
+  const step = Number(el.step) > 0 ? Number(el.step) : 1;
+  const base = stepBase(el);
+  const val = Number(el.value);
+  if (!Number.isFinite(val) || !Number.isFinite(base)) {
+    return "Please enter a valid value.";
+  }
+  const lo = base + Math.floor((val - base) / step) * step;
+  return `Please enter a valid value. The two nearest valid values are ` +
+    `${tidy(lo)} and ${tidy(lo + step)}.`;
+}
+
+/** A control's constraint-validation message, in the browser's own words.
+ *
+ *  The DOM the harness mounts implements `validity` but leaves
+ *  `validationMessage` empty (happy-dom), so a refusal could name the field and
+ *  then say nothing about WHY — the one sentence the reader needs. A real DOM's
+ *  message always wins (a browser, `am trigger` on a live app); these
+ *  stand-ins mirror Chromium's wording for the cases it does not fill in. */
+function validationText(el: AnyEl, flags: readonly string[]): string {
+  const native = typeof el.validationMessage === "string"
+    ? el.validationMessage
+    : "";
+  if (native) return native;
+  // Only a flag a BROWSER would raise ({@link browserFlags}) may name the
+  // reason — the harness DOM's own `validity` holds ones Chromium does not set.
+  const v: Record<string, boolean> = {};
+  for (const f of flags) v[f] = true;
+  const type = inputTypeOf(el);
+  if (v.valueMissing) return "Please fill out this field.";
+  if (v.typeMismatch) {
+    return type === "email"
+      ? "Please include an '@' in the email address."
+      : type === "url"
+      ? "Please enter a URL."
+      : "Please enter a valid value.";
+  }
+  if (v.patternMismatch) return "Please match the requested format.";
+  if (v.tooLong) {
+    return `Please shorten this text to ${el.maxLength} characters or less.`;
+  }
+  if (v.tooShort) {
+    return `Please lengthen this text to ${el.minLength} characters or more.`;
+  }
+  if (v.rangeUnderflow) {
+    return `Value must be greater than or equal to ${el.min}.`;
+  }
+  if (v.rangeOverflow) return `Value must be less than or equal to ${el.max}.`;
+  if (v.stepMismatch) return stepText(el);
+  if (v.badInput) return "Please enter a number.";
+  return "The value is invalid.";
+}
+
+/** Is `el` BARRED from constraint validation? A barred control is always
+ *  valid, whatever its `required`/`pattern` says.
+ *
+ *  `willValidate` answers this in a browser, and the DOM the harness mounts
+ *  (happy-dom) answers it for `disabled`/`readonly`/`type=hidden` — but NOT for
+ *  the one that is inherited rather than written on the control: a descendant
+ *  of a `<fieldset disabled>` (outside that fieldset's first `<legend>`) is
+ *  disabled too, and is therefore barred. Without this the harness refuses a
+ *  form Chromium submits, which is the same defect as submitting one it
+ *  refuses — pointed the other way, at every suite that already drives that
+ *  form. */
+function barredFromValidation(el: AnyEl): boolean {
+  if (el?.willValidate === false) return true;
+  if (el?.disabled === true || el?.readOnly === true) return true;
+  if (tagOf(el) === "input" && inputTypeOf(el) === "hidden") return true;
+  let fs = el?.parentElement?.closest?.("fieldset[disabled]");
+  while (fs) {
+    // The first <legend> of a disabled fieldset is NOT disabled.
+    const legend = fs.querySelector?.("legend");
+    if (!legend || !legend.contains?.(el)) return true;
+    fs = fs.parentElement?.closest?.("fieldset[disabled]");
+  }
+  return false;
+}
+
+/** Every `validity` flag a browser can raise, in the order a message picks
+ *  them. `valid` is not one of them, and `customError` is never second-guessed
+ *  — `setCustomValidity` is the app's own word. */
+const _VALIDITY_FLAGS = [
+  "customError",
+  "valueMissing",
+  "typeMismatch",
+  "patternMismatch",
+  "tooLong",
+  "tooShort",
+  "rangeUnderflow",
+  "rangeOverflow",
+  "stepMismatch",
+  "badInput",
+] as const;
+
+/** Is `el`'s value ON its step ladder, by the browser's own arithmetic?
+ *
+ *  The step BASE is `min` when there is one (else the `value` attribute, else
+ *  0) — `min="0.5"` with the default `step` of 1 accepts 0.5, 1.5, 2.5…, which
+ *  the harness DOM gets wrong by always measuring from 0. Scaled to integers by
+ *  the decimal places in play, so 4.5 − 0.5 = 4.000000000000001 does not decide
+ *  a test. Returns null when the question does not apply (no value, `step` is
+ *  "any", a non-numeric control) and the DOM's own answer stands. */
+function onStepLadder(el: AnyEl): boolean | null {
+  const type = inputTypeOf(el);
+  if (type !== "number" && type !== "range") return null;
+  if (String(el.step ?? "").toLowerCase() === "any") return true;
+  const val = Number(el.value);
+  if (String(el.value ?? "") === "" || !Number.isFinite(val)) return null;
+  const step = Number(el.step) > 0 ? Number(el.step) : 1;
+  const base = Number(stepBase(el));
+  if (!Number.isFinite(step) || !Number.isFinite(base)) return null;
+  const scale = 10 ** Math.max(decimals(val), decimals(step), decimals(base));
+  const off = Math.round(val * scale) - Math.round(base * scale);
+  return off % Math.round(step * scale) === 0;
+}
+
+/** The step base: `min`, else the `value` ATTRIBUTE, else 0 (HTML § step). */
+function stepBase(el: AnyEl): number {
+  for (const a of ["min", "value"]) {
+    const raw = el.getAttribute?.(a);
+    if (raw != null && raw !== "" && Number.isFinite(Number(raw))) {
+      return Number(raw);
+    }
+  }
+  return 0;
+}
+
+function decimals(n: number): number {
+  const s = String(n);
+  const dot = s.indexOf(".");
+  return dot < 0 || s.includes("e") ? 0 : s.length - dot - 1;
+}
+
+/** Controls a trigger has edited AS A USER — never cleared, unlike the
+ *  change-owed set. `minlength`/`maxlength` ("too short"/"too long") apply only
+ *  to a value the USER edited: a browser lets a form submit a programmatic
+ *  (controlled, server-pushed, `value=` in the markup) value that is shorter
+ *  than `minlength`, and the harness DOM does not model that flag at all. */
+const _userEdited = new WeakSet<object>();
+
+/** The `validity` flags a BROWSER would raise for `el` — the DOM's own answer,
+ *  minus the two the harness DOM computes by a rule Chromium does not use. */
+function browserFlags(el: AnyEl): string[] {
+  const v = el.validity ?? {};
+  const dirty = typeof el === "object" && el !== null &&
+    _userEdited.has(el as object);
+  const step = onStepLadder(el);
+  return _VALIDITY_FLAGS.filter((f) => {
+    if (v[f] !== true) return false;
+    if ((f === "tooShort" || f === "tooLong") && !dirty) return false;
+    if (f === "stepMismatch" && step === true) return false;
+    return true;
+  });
+}
+
+/** The first control of `form` the browser's constraint validation rejects, or
+ *  null when the form submits (including a `novalidate` form, which never
+ *  validates). */
+function firstInvalid(form: AnyEl): AnyEl | null {
+  if (form.noValidate === true || form.hasAttribute?.("novalidate")) {
+    return null;
+  }
+  const els: AnyEl[] = [
+    ...(form.elements ?? form.querySelectorAll("button,input,select,textarea")),
+  ];
+  for (const el of els) {
+    if (barredFromValidation(el)) continue;
+    if (typeof el?.checkValidity !== "function") continue;
+    if (el.checkValidity() === false && browserFlags(el).length > 0) return el;
+  }
+  return null;
+}
+
+/** Constraint validation, out loud (a field report).
+ *
+ *  A browser refuses to submit a form holding an invalid control and shows a
+ *  bubble over the field. The harness cannot show a bubble, and the refusal it
+ *  DID make was a bare `return` — the submit simply never happened and the
+ *  reader was left to bisect a passing-looking sequence to find out why. Worse,
+ *  the DOM's own refusal on a submit BUTTON is equally silent. So the one place
+ *  the harness decides — implicit submission — says exactly what a browser
+ *  would have shown: the field, its value, and its `validationMessage`.
+ *
+ *  Refusing is not optional: a harness that submits "1.5" into a
+ *  `<input type="number">` (step defaults to 1) where the browser refuses is
+ *  MORE PERMISSIVE than production, which is how a green test ships a dead
+ *  form. */
+function refuseInvalid(form: AnyEl, how: string): void {
+  const bad = firstInvalid(form);
+  if (!bad) return;
+  throw new Error(
+    `${how} did not submit the form — the browser's constraint validation ` +
+      `refuses it:\n  ${fieldLabel(bad)} value ${
+        JSON.stringify(String(bad.value ?? ""))
+      } is invalid: ${validationText(bad, browserFlags(bad))}\n` +
+      `  A browser shows that message over the field and submits nothing, so ` +
+      `the form's onSubmit never runs.\n` +
+      `  Give the field a value the constraint accepts, relax the constraint ` +
+      `(step="any", min/max, pattern, required), or set novalidate on the ` +
+      `<form> if the app validates by itself.`,
+  );
+}
+
 /** HTML implicit submission. The DEFAULT button (the form's first submit
  *  button) is CLICKED — its `onClick` runs and the submit event names it as
  *  `submitter`; a disabled one means nothing happens; with no button the form
  *  submits only when at most one field blocks it. The harness used to fire a
- *  bare `submit` in every case (six divergences from Chromium, measured). */
-function implicitSubmit(form: AnyEl): void {
+ *  bare `submit` in every case (six divergences from Chromium, measured).
+ *
+ *  Constraint validation runs either way, and refuses LOUDLY — see
+ *  {@link refuseInvalid}. The default button is clicked FIRST: a browser runs
+ *  the button's activation behaviour (its `onClick`) and only then blocks the
+ *  submission, and a handler that calls `preventDefault()` cancels the
+ *  submission itself, which is not a validation refusal to report. */
+function implicitSubmit(form: AnyEl, how: string): void {
   if (!form) return;
   const els: AnyEl[] = [
     ...(form.elements ?? form.querySelectorAll("button,input")),
   ];
   const btn = els.find(isSubmitButton);
   if (btn) {
-    if (btn.disabled !== true) btn.click();
+    if (btn.disabled === true) return;
+    // The click event OBJECT, read after the dispatch has finished — not
+    // `defaultPrevented` as this listener sees it. AIR DELEGATES `click` to the
+    // mount root, so the app's own handler runs after every listener on the
+    // button: a `preventDefault()` there was invisible from here, and the
+    // cancelled submission was reported as a validation refusal.
+    let click: AnyEl | null = null;
+    let submitted = false;
+    const note = (e: AnyEl) => {
+      click = e;
+    };
+    const sawSubmit = () => {
+      submitted = true;
+    };
+    btn.addEventListener?.("click", note);
+    form.addEventListener?.("submit", sawSubmit);
+    try {
+      btn.click();
+    } finally {
+      btn.removeEventListener?.("click", note);
+      form.removeEventListener?.("submit", sawSubmit);
+    }
+    if ((click as AnyEl | null)?.defaultPrevented === true) return;
+    if (btn.formNoValidate !== true) refuseInvalid(form, how);
+    // The DOM's own activation behaviour usually fires the submit. When it
+    // declined although the browser would not have — the harness DOM bars
+    // fewer controls from constraint validation than Chromium does, so a
+    // `<fieldset disabled>` swallowed the submission — the harness supplies
+    // the event the browser would have sent, naming the button as submitter.
+    if (!submitted) dispatchSubmit(form, btn);
     return;
   }
   const blocking =
     els.filter((e) => tagOf(e) === "input" && _BLOCKING.has(inputTypeOf(e)))
       .length;
   if (blocking > 1) return;
-  if (!form.noValidate && form.checkValidity?.() === false) return;
+  refuseInvalid(form, how);
+  dispatchSubmit(form, null);
+}
+
+/** The `submit` event a browser sends, naming its `submitter`. */
+function dispatchSubmit(form: AnyEl, submitter: AnyEl | null): void {
   const w = view(form);
   form.dispatchEvent(
     w.SubmitEvent
       ? new w.SubmitEvent("submit", {
         bubbles: true,
         cancelable: true,
-        submitter: null,
+        submitter,
       })
       : ev(form, "submit"),
   );
@@ -682,7 +952,7 @@ function enterDefault(el: AnyEl): void {
     el.dispatchEvent(inputEv(el, "beforeinput", "insertLineBreak", null));
   }
   fireChangeIfEdited(el); // Enter commits the edit before the form sees it
-  implicitSubmit(el.form ?? el.closest?.("form"));
+  implicitSubmit(el.form ?? el.closest?.("form"), `press("Enter")`);
 }
 
 // ── Modal dialogs ─────────────────────────────────────────────────────

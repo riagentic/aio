@@ -18,10 +18,26 @@
 //   • no desktop session   → THROWS, before spawning anything
 //   • dialog failed        → THROWS, with the tool's own stderr
 //
-// Server-only, like `openExternal`: it spawns a desktop binary and reads the
-// environment. Available from a cell method or a serverFn via `aio/server`.
+// Server-only, like `openExternal`. Available from a cell method or a serverFn
+// via `aio/server`.
+//
+// WHO opens the dialog: when the call came from this app's Electron window,
+// that window does — `dialog.showOpenDialog(win, …)` in its main process,
+// owned by the window, modal, in front, with no child process on any OS
+// (dialog-host.ts decides; a field report #10 had the spawned Windows dialog
+// open BEHIND the app). Every other caller — a browser tab, a script, a
+// server-side schedule with no single window to ask — gets the spawned desktop
+// tool below. Both paths share the request (`dialogRequest`) and the result
+// rules (null on cancel, a non-empty array for `multiple`), and
+// tests/pick-path-electron.test.ts pins that they agree.
 
 import { pauseCallDeadlines } from "../state/cell-impl.ts";
+import {
+  type DialogHost,
+  dialogHostForCall,
+  type DialogReply,
+  type DialogRequest,
+} from "./dialog-host.ts";
 
 /** A named extension group for the dialog's filter dropdown.
  *  `{ name: "Video", extensions: ["mp4", "mkv"] }` — extensions carry no dot. */
@@ -90,17 +106,98 @@ async function _pick(
   opts: PickOptions,
 ): Promise<string | string[] | null> {
   const os = Deno.build.os;
-  _assertDesktopSession(os);
+  const host = dialogHostForCall();
+  // The window has a desktop by construction; only a spawned tool needs one
+  // checked before it can be told apart from a cancel.
+  if (!host) _assertDesktopSession(os);
   // Deadlines pause for the dialog and RESUME when it closes (fresh, full
   // window) — see the note above pauseCallDeadlines. The resume rides a
   // finally so a throwing provider cannot leave every in-flight call
   // unbounded forever.
   const resume = pauseCallDeadlines();
   try {
-    return await _pickDialog(os, kind, opts);
+    return host
+      ? await _pickInWindow(host, kind, opts, os)
+      : await _pickDialog(os, kind, opts);
   } finally {
     resume();
   }
+}
+
+/** The Electron path: the window's main process opens the dialog. */
+async function _pickInWindow(
+  host: DialogHost,
+  kind: PickKind,
+  opts: PickOptions,
+  os: typeof Deno.build.os,
+): Promise<string | string[] | null> {
+  let reply: DialogReply;
+  try {
+    reply = await host.open(dialogRequest(kind, opts, os));
+  } catch (e) {
+    throw new Error(
+      `pickFile/pickDirectory: ${host.label} did not answer — ${
+        e instanceof Error ? e.message : String(e)
+      }`,
+    );
+  }
+  return interpretDialogReply(kind, reply, host.label);
+}
+
+/** What the window is asked to open — resolved exactly as {@linkcode pickSpec}
+ *  resolves it for a spawned tool: the same default title, `startIn` turned
+ *  into a directory the same way, extensions without their dot, and no
+ *  filters on a folder pick. Pure. @internal */
+export function dialogRequest(
+  kind: PickKind,
+  opts: PickOptions,
+  os: typeof Deno.build.os,
+): DialogRequest {
+  const req: DialogRequest = {
+    kind,
+    title: opts.title ??
+      (kind === "directory" ? "Choose a folder" : "Choose a file"),
+  };
+  if (opts.startIn) req.defaultPath = _asDirectory(opts.startIn, os);
+  if (kind !== "directory" && opts.filters?.length) {
+    req.filters = opts.filters.map((f) => ({
+      name: f.name,
+      extensions: f.extensions.map(_bareExt),
+    }));
+  }
+  return req;
+}
+
+/** The window's answer, turned into the SAME contract the spawned tools
+ *  honour (`_interpret`): cancelled → `null`; nothing chosen → `null`, never
+ *  `[]`; `multiple` → a non-empty array; otherwise the one path. A failure the
+ *  window reports THROWS — it is not a cancel. Pure. @internal */
+export function interpretDialogReply(
+  kind: PickKind,
+  reply: DialogReply,
+  label = "the app window",
+): string | string[] | null {
+  if (
+    reply === null || typeof reply !== "object" ||
+    ("error" in reply && typeof reply.error === "string")
+  ) {
+    const why = reply && typeof reply === "object" && "error" in reply
+      ? reply.error
+      : `a malformed answer (${JSON.stringify(reply)})`;
+    throw new Error(`pickFile/pickDirectory: ${label}'s dialog failed: ${why}`);
+  }
+  if (!("canceled" in reply) || !Array.isArray(reply.paths)) {
+    throw new Error(
+      `pickFile/pickDirectory: ${label}'s dialog failed: a malformed answer ` +
+        `(${JSON.stringify(reply)})`,
+    );
+  }
+  if (reply.canceled) return null;
+  const paths = reply.paths.filter((p): p is string =>
+    typeof p === "string" && p.length > 0
+  );
+  if (paths.length === 0) return null;
+  return kind === "files" ? paths : paths[0]!;
 }
 
 async function _pickDialog(
@@ -166,8 +263,9 @@ function _assertDesktopSession(os: typeof Deno.build.os): void {
  *
  *  stderr is deliberately NOT used to detect failure — GTK prints module
  *  warnings on healthy systems, and a wrapper that treated stderr as failure
- *  would refuse to work on half the desktops it runs on. */
-function _interpret(
+ *  would refuse to work on half the desktops it runs on. Exported for the
+ *  parity test against {@linkcode interpretDialogReply}. @internal */
+export function _interpret(
   kind: PickKind,
   cmd: string,
   out: Deno.CommandOutput,
@@ -182,7 +280,15 @@ function _interpret(
       }`,
     );
   }
-  const paths = stdout.split(/\r?\n|\|/).map((p) => p.trim()).filter((p) =>
+  // ONE line per path. A `|` is NOT a separator here and never was: every
+  // provider is spawned to emit newlines (`zenity --separator=\n`, `kdialog
+  // --separate-output`, osascript's `linefeed`, powershell's one `Write-Output`
+  // per name — see `pickSpec`), while `|` is a legal character in a POSIX file
+  // or folder name. Splitting on it cut `/home/u/a|b.txt` down to `/home/u/a`
+  // and handed that back as the user's choice: a path that does not exist,
+  // silently, on every provider and every kind. The window path
+  // (`interpretDialogReply`) never split, so the two disagreed as well.
+  const paths = stdout.split(/\r?\n/).map((p) => p.trim()).filter((p) =>
     p.length > 0
   );
   if (paths.length === 0) return null;
@@ -291,13 +397,24 @@ export function pickSpec(
   if (provider === "powershell") {
     // -STA is REQUIRED: the Windows common dialogs are single-threaded
     // apartment COM objects and silently fail to open without it.
+    //
+    // The OWNER is required too. `ShowDialog()` with none gives the dialog to
+    // a background powershell.exe that has no relation to any window on
+    // screen, and the foreground lock is then free to leave it BEHIND the app
+    // the user just clicked in — sometimes fully hidden (a field report, #10).
+    // A TopMost owner form (never shown, no taskbar button) puts the dialog in
+    // the topmost band. An aio Electron window never takes this path — it
+    // opens the dialog itself (dialog-host.ts); this is for every other
+    // client.
+    const owner =
+      `$o = New-Object System.Windows.Forms.Form -Property @{TopMost=$true;ShowInTaskbar=$false};`;
     const ps = kind === "directory"
-      ? `Add-Type -AssemblyName System.Windows.Forms;` +
+      ? `Add-Type -AssemblyName System.Windows.Forms;` + owner +
         `$d = New-Object System.Windows.Forms.FolderBrowserDialog;` +
         `$d.Description = ${_psEscape(title)};` +
         (dir ? `$d.SelectedPath = ${_psEscape(dir)};` : "") +
-        `if ($d.ShowDialog() -eq 'OK') { Write-Output $d.SelectedPath }`
-      : `Add-Type -AssemblyName System.Windows.Forms;` +
+        `if ($d.ShowDialog($o) -eq 'OK') { Write-Output $d.SelectedPath }`
+      : `Add-Type -AssemblyName System.Windows.Forms;` + owner +
         `$d = New-Object System.Windows.Forms.OpenFileDialog;` +
         `$d.Title = ${_psEscape(title)};` +
         `$d.Multiselect = $${kind === "files"};` +
@@ -313,7 +430,7 @@ export function pickSpec(
             )
           };`
           : "") +
-        `if ($d.ShowDialog() -eq 'OK') { $d.FileNames | ForEach-Object { Write-Output $_ } }`;
+        `if ($d.ShowDialog($o) -eq 'OK') { $d.FileNames | ForEach-Object { Write-Output $_ } }`;
     return {
       cmd: "powershell",
       args: ["-NoProfile", "-NonInteractive", "-STA", "-Command", ps],

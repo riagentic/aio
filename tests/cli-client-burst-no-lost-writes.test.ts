@@ -272,6 +272,12 @@ Deno.test({
           if (!stopped) doneOnA++;
           return v;
         }));
+      // Observed NOW, not after the restart: a call that was on the wire when
+      // server A went away rejects ("connection lost") during stopChild, and
+      // with no handler attached yet that was an unhandled rejection — an
+      // "Uncaught error" that only a loaded machine (one call caught mid-flight)
+      // ever produced.
+      const allSettled = Promise.allSettled(calls);
       await sleep(1_200);
       await stopChild(proc, { label: "clirequeue server A" });
       stopped = true;
@@ -282,7 +288,7 @@ Deno.test({
       // reports it as a leaked timer.
       let guard: ReturnType<typeof setTimeout> | undefined;
       const settled = await Promise.race([
-        Promise.allSettled(calls),
+        allSettled,
         new Promise<null>((r) => {
           guard = setTimeout(() => r(null), 40_000);
         }),

@@ -18,7 +18,11 @@ import {
 import { _ackSink } from "./ack-sink.ts";
 import { trackPath } from "./state-subs.ts";
 import { nameIsTaken } from "./cell-helpers.ts";
-import { applyCellFieldFilter, uiKeyVisibility } from "./state-filter.ts";
+import {
+  applyCellFieldFilter,
+  deepExcludePaths,
+  uiKeyVisibility,
+} from "./state-filter.ts";
 import { log } from "../diagnostics/logger-api.ts";
 import { unregisterCancelOn } from "./method-cancel.ts";
 
@@ -159,51 +163,54 @@ export function reportHiddenRead(
   );
 }
 
-/** Deep-exclude for CLIENT reads — same shape as state-filter's pure
- *  `deepExclude`, plus a tripwire: the dropped field is re-installed as a
+/** Deep-exclude for CLIENT reads — state-filter's `deepExcludePaths`, THE
+ *  one rule, plus a tripwire: the dropped field is re-installed as a
  *  non-enumerable reporting getter, so `account.encSecKey` throws exactly
- *  like a top-level excluded field. Installed
- *  UNCONDITIONALLY at the leaf: on the wire path the field never even arrives
- *  (the broadcast filter strips it), and that absent field reading as a clean
- *  `undefined` was the same "undefined as data" trap, one level down.
+ *  like a top-level excluded field. On the wire path the field never even
+ *  arrives (the broadcast filter strips it), and that absent field reading as
+ *  a clean `undefined` is the same "undefined as data" trap, one level down.
  *  Non-enumerable, so spreads / Object.keys / JSON.stringify of the parent
- *  never trip it — only an actual read of the hidden name does. */
-function deepExcludeLoud(
-  value: unknown,
-  segs: string[],
-  onRead: () => void,
-): unknown {
-  if (segs.length === 0 || value === null || typeof value !== "object") {
-    return value;
-  }
-  if (Array.isArray(value)) {
-    let changed = false;
-    const out = value.map((el) => {
-      const next = deepExcludeLoud(el, segs, onRead);
-      if (next !== el) changed = true;
-      return next;
-    });
-    return changed ? out : value;
-  }
-  const obj = value as Record<string, unknown>;
-  const head = segs[0]!;
-  if (segs.length === 1) {
-    const kept: Record<string, unknown> = { ...obj };
-    delete kept[head];
-    Object.defineProperty(kept, head, {
-      get() {
-        onRead();
-        return undefined;
+ *  never trip it — only an actual read of the hidden name does.
+ *
+ *  ALL of the key's paths in one call, never one excluder per path composed
+ *  over the previous one's output: the second pass rebuilds with a spread,
+ *  which copies own ENUMERABLE properties only, so it dropped the first
+ *  pass's tripwire and `["a.b", "a.c"]` left `a.b` silently `undefined`.
+ *
+ *  MEMOIZED per source value, which is what makes it affordable. A read of
+ *  `cell.accounts` is a property read — the docs call it cheap and UIs are
+ *  written that way — and it walked and re-copied the whole array EVERY time:
+ *  O(n) per read, and a fresh array of fresh rows, so no `WeakMap`-on-the-row
+ *  memo downstream could ever hit. A field report measured 25.5 s of a 27 s
+ *  renderer profile in here at 10 000 rows, with one keypress freezing the app
+ *  for 38 s.
+ *
+ *  A `WeakMap` per depth is EXACT rather than a cache with a staleness
+ *  window: committed state is frozen (Immer `autoFreeze`, never disabled) and
+ *  a delta applies as `applyPatches`, so a value that changed is a different
+ *  object and a value that did not is the same one. Same source ⇒ same view,
+ *  which also keeps the excluded row identities stable between reads. */
+function makeDeepExcluder(
+  paths: string[][],
+  onRead: (path: readonly string[]) => void,
+): (value: unknown) => unknown {
+  // Shared across calls, and keyed by the cursor set the walk is in — same
+  // source value ⇒ same view object, for the life of the binding.
+  const memos = new Map<string, WeakMap<object, unknown>>();
+  return (value: unknown) =>
+    deepExcludePaths(value, paths, {
+      memos,
+      tripwire: (obj, head, path) => {
+        Object.defineProperty(obj, head, {
+          get() {
+            onRead(path);
+            return undefined;
+          },
+          enumerable: false,
+          configurable: true,
+        });
       },
-      enumerable: false,
-      configurable: true,
     });
-    return kept;
-  }
-  if (!(head in obj)) return value;
-  const child = deepExcludeLoud(obj[head], segs.slice(1), onRead);
-  if (child === obj[head]) return value;
-  return { ...obj, [head]: child };
 }
 
 /** The ui filter that applies to CLIENT reads of a cell. Client-scoped cells
@@ -448,6 +455,17 @@ export function bindCellReactive(
     // hidden field THROWS (dev and prod), a dot-path exclude strips the
     // nested value, exactly like the broadcast filter.
     const vis = uiKeyVisibility(uiFilter, key);
+    // Built ONCE per (key, exclude path), not per read: each excluder owns the
+    // memo that makes a read of a 10k-row array cost a `WeakMap` lookup
+    // instead of a full copy — see `makeDeepExcluder`.
+    const exclude = vis.deepSegs && vis.deepSegs.length > 0
+      ? makeDeepExcluder(vis.deepSegs, (path) =>
+        reportHiddenRead(
+          cellName,
+          `${key}.${path.join(".")}`,
+          "the field is under a visible.exclude path",
+        ))
+      : undefined;
     Object.defineProperty(def, key, {
       get() {
         if (vis.hidden) reportHiddenRead(cellName, key, vis.reason!);
@@ -467,19 +485,7 @@ export function bindCellReactive(
         const v = s == null
           ? initialState[key]
           : (s as Record<string, unknown>)[key];
-        if (vis.deepSegs) {
-          return vis.deepSegs.reduce(
-            (acc, segs) =>
-              deepExcludeLoud(acc, segs, () =>
-                reportHiddenRead(
-                  cellName,
-                  `${key}.${segs.join(".")}`,
-                  "the field is under a visible.exclude path",
-                )),
-            v,
-          );
-        }
-        return v;
+        return exclude ? exclude(v) : v;
       },
       enumerable: false,
       configurable: true,

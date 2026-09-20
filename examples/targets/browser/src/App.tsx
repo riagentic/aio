@@ -11,7 +11,7 @@ export default function App() {
       }}
     >
       <h1>ex-browser</h1>
-      <div style={{ fontSize: "4rem", margin: "1rem 0", color: "#00a6cc" }}>
+      <div style={{ fontSize: "4rem", margin: "1rem 0", color: "#00809f" }}>
         {counter.count}
       </div>
       <div style={{ display: "flex", gap: "0.5rem", justifyContent: "center" }}>

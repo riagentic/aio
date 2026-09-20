@@ -35,6 +35,32 @@ export function recordRejection(action: unknown, r: DispatchRejection): void {
   else _byAction.set(action as object, [r]);
 }
 
+/** Move every rejection recorded against `from` onto `to`.
+ *
+ *  For the ONE case where the object that was reduced is provably a stand-in
+ *  for the object the caller holds: an in-isolate `worker: true` cell, whose
+ *  action is structured-cloned first so the harness crosses the same boundary
+ *  a real worker does (`_workerBoundaryDispatch`, aio.ts). The clone is what
+ *  the reducer refuses, and the ack path asks about the original — so without
+ *  this the refusal was recorded against an object nobody asks about and the
+ *  caller was acked `ok: true` for a method the cell does not have.
+ *
+ *  Not a general re-key: it is called by the code that MADE the stand-in, in
+ *  the same turn, which is the only place the two objects are known to be one
+ *  dispatch. @internal */
+export function _moveRejections(from: unknown, to: unknown): void {
+  if (!from || typeof from !== "object" || !to || typeof to !== "object") {
+    return;
+  }
+  if (from === to) return;
+  const list = _byAction.get(from as object);
+  if (!list || list.length === 0) return;
+  _byAction.delete(from as object);
+  const existing = _byAction.get(to as object);
+  if (existing) existing.push(...list);
+  else _byAction.set(to as object, list);
+}
+
 /** Read-and-clear the rejection `cell` recorded for THIS action, if any.
  *  Callers pass the very object they handed to `dispatch()`; matching the cell
  *  here (rather than at every call site) keeps "is this rejection mine?" a

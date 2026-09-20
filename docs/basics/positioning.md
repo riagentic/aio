@@ -38,8 +38,10 @@ The full posture, the known limitations, and the nginx/Caddy recipes are in
   `android-client`. Native APIs (push, biometrics) are out of a WebView's reach;
   the camera is not.
 - **Other runtimes** — aio is Deno-native (compile, workers). No Node/Bun.
-- **Renderer pluralism** — AIR is the renderer. React compat exists as shims
-  (`aio/air/compat`) for migration, not as a parallel first-class path.
+- **Renderer pluralism** — AIR is the renderer. It is React-shaped: React's
+  hooks (`useState`, `useEffect`, `useMemo`, `useCallback`) are first-class on
+  `aio/air` and behave as React 19's (see [React on aio](../ui/react.md)); to
+  mount real React _components_, use [islands](../ui/react-islands.md).
 
 ## Non-goals
 

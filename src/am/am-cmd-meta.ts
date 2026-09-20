@@ -488,7 +488,9 @@ export function helpSummary(text: string, st: Style = style): string {
   // describing the --json contract, and the global flags vanished from the
   // compact help entirely (discoverable only via `am help --all`).
   // {@linkcode helpTail} prints them, verbatim, under the list.
-  for (const line of helpCommandText(text).split("\n")) {
+  const body = helpCommandText(text);
+  const col = descColumn(body);
+  for (const line of body.split("\n")) {
     if (!line.trim()) {
       afterBlank = true;
       continue;
@@ -504,7 +506,18 @@ export function helpSummary(text: string, st: Style = style): string {
       continue;
     }
     afterBlank = false;
-    const m = /^ {2}(\S(?:.*?\S)?)(?: {2,}(.*))?$/.exec(line);
+    // A signature that exactly FILLS the description field is separated from
+    // its description by a single space, not two — `record [out] [--from=J]`
+    // is 23 columns wide in a 24-column field. The 2-space rule read the whole
+    // sentence as the signature and then promoted the entry's second line to
+    // its description ("the RUNNING app's timeline, so a bug you reproduced…"),
+    // so the column the text lays itself out on decides first, and the 2-space
+    // rule handles the signatures that run PAST that column.
+    const atCol = line.length > col && line[col - 1] === " " &&
+      line[col] !== " " && line.slice(2, col - 1).trim() !== "";
+    const m: (string | undefined)[] | null = atCol
+      ? [undefined, line.slice(2, col).trimEnd(), line.slice(col)]
+      : /^ {2}(\S(?:.*?\S)?)(?: {2,}(.*))?$/.exec(line);
     if (m) {
       entries.push({ head, sig: m[1]!, desc: (m[2] ?? "").trim() });
     } else if (entries.length > 0) {
@@ -554,10 +567,45 @@ export function helpSummary(text: string, st: Style = style): string {
   return out.join("\n");
 }
 
-/** Where the help text stops being a list of commands: the first column-0 line
- *  that starts with `--`. Pure. */
+/** The column an entry's description starts at: the indent the text's own
+ *  continuation lines use, taken by majority so one odd block cannot move it.
+ *  Derived rather than spelled, because the layout is the only thing that
+ *  says where a signature ends. Pure. */
+function descColumn(text: string): number {
+  const tally = new Map<number, number>();
+  for (const line of text.split("\n")) {
+    if (!/^ {4,}\S/.test(line)) continue;
+    const n = /^ */.exec(line)![0].length;
+    tally.set(n, (tally.get(n) ?? 0) + 1);
+  }
+  let col = 0, best = 0;
+  for (const [n, count] of tally) if (count > best) [col, best] = [n, count];
+  return col;
+}
+
+/** Where the help text stops being a list of commands: the first blank-line
+ *  block that holds no entry at all — a PARAGRAPH, not a group.
+ *
+ *  This was once "the first column-0 line starting with `--`", which named one
+ *  paragraph (`--json:` … `Flags:`) instead of describing what a paragraph is.
+ *  The next prose block added above it — the agent-verbs note — was read as a
+ *  group heading again, and its indented continuation was glued onto the last
+ *  row of the list: `help  This message expect, DRIVE with dispatch, READ the…`.
+ *  A block with no `  entry` line is prose; prose ends the list. Pure. */
 function tailIndex(text: string): number {
-  return text.split("\n").findIndex((l) => /^--/.test(l));
+  const lines = text.split("\n");
+  let start = -1, entries = 0;
+  for (let i = 0; i < lines.length; i++) {
+    if (!lines[i]!.trim()) {
+      if (start >= 0 && entries === 0) return start;
+      start = -1;
+      entries = 0;
+      continue;
+    }
+    if (start < 0) start = i;
+    if (/^ {2}\S/.test(lines[i]!)) entries++;
+  }
+  return start >= 0 && entries === 0 ? start : -1;
 }
 
 /** The command half of the help text (everything above the flags tail). */

@@ -313,6 +313,38 @@ Deno.test("own key: template keys, id-free functions, and a factory that ignores
   assertEquals(issues, []);
 });
 
+Deno.test("own key: an explicit { replace: true } is the author saying one-at-a-time — silent", async () => {
+  // A field report (#9): the runtime now hears `own.set(id, f, { replace:
+  // true })`; the linter must hear the same words, or the app needs BOTH the
+  // option and an `// aiol-ok` comment to say one thing.
+  const { issues } = await run(checkOwnKeyIdentity, {
+    "src/app.ts": APP,
+    "src/c.ts": cellWith(
+      [
+        '    a(s, path: string) { return own.set("watcher", () => Deno.watchFs(path), { replace: true }); },',
+        '    b(s, path: string) {\n      return own.set("w2", () => Deno.watchFs(path), {\n        replace: true,\n      });\n    },',
+      ].join("\n"),
+      'import { own } from "aio";',
+    ),
+  });
+  assertEquals(issues, []);
+});
+
+Deno.test("own key: { replace: false }, or `replace: true` INSIDE the factory, still fires — and the fix names the option", async () => {
+  const { issues } = await run(checkOwnKeyIdentity, {
+    "src/app.ts": APP,
+    "src/c.ts": cellWith(
+      [
+        '    a(s, path: string) { return own.set("w1", () => Deno.watchFs(path), { replace: false }); },',
+        '    b(s, path: string) { return own.set("w2", () => ({ replace: true, close: () => Deno.watchFs(path).close() })); },',
+      ].join("\n"),
+      'import { own } from "aio";',
+    ),
+  });
+  assertEquals(issues.length, 2, JSON.stringify(issues));
+  assertStringIncludes(issues[0]!.message, "{ replace: true }");
+});
+
 // ── 28b. alpha70 word renames + the air Action alias + schedule.blocking ──
 
 Deno.test("alpha70 renames: CellAccess/ServerFnAccess/ExtractState/connectDevTools are rewritten in code only, duplicates collapsed", async () => {

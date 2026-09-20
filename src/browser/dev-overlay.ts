@@ -125,6 +125,14 @@ function _render(): void {
   if (!doc) return;
   const total = _entries.reduce((n, e) => n + e.count, 0);
   if (total === 0) {
+    // EMPTIED, not merely hidden. This returned before touching the badge, so
+    // after "clear" a hidden overlay still read "aio: 1 problem" — and anything
+    // that reads the page's text rather than its pixels (a scripted demo
+    // recorder watching the overlay, a CDP scrape, an accessibility tree) saw a
+    // phantom error on every tick, with nothing on screen to explain it (a
+    // field report). Stale text behind `display: none` is still a claim.
+    _badge.textContent = "";
+    _list.textContent = "";
     _style(root, { display: "none" });
     return;
   }

@@ -467,6 +467,11 @@ export function buildLegacyConfig(
     _cellPersist: Object.fromEntries(
       composed.cells.map((c) => [c.__aio.id, c.__aio.persist ?? "all"]),
     ),
+    // Cells whose `onPersist` SHAPES the stored slice — a shape names no fields,
+    // so journal replay round-trips these through the store instead.
+    _cellPersistShaped: composed.cells
+      .filter((c) => c.__aio.persistTransform && c.__aio.persist !== "none")
+      .map((c) => c.__aio.id),
     _cellFields: Object.fromEntries(
       composed.cells.map((c) => [
         c.__aio.id,
@@ -492,6 +497,9 @@ export function buildLegacyConfig(
     // The defs of cells flagged `worker: true` — _run spawns one Deno worker
     // each and routes their actions off the main dispatch queue.
     _workerCells: workerCells,
+    // …and the flag those workers need to answer a refusal the way the main
+    // isolate does. Same value the composed reduce was given.
+    _refusalsReject: fc.refusalsReject === true,
     _reduceBreakdown: composed.lastBreakdown,
     _healthGetter: (state: unknown) => {
       const health = composed.registry.health(
@@ -705,6 +713,8 @@ export async function wrapAppWithCells(
     },
     machineWarnFraction: fc.memory?.machineWarnFraction ?? 0.5,
     growthReportRatio: fc.memory?.growthReportRatio ?? 0.15,
+    // Allowlisted and documented, and never passed on — it was always 10.
+    trendWindow: fc.memory?.trendWindow,
     getMemoryUsage: () => Deno.memoryUsage(),
     getHeapLimit: () => _heapLimit,
     // The machine, not just the ceiling: 75%-of-a-47 GB-ceiling is 35 GB, and a

@@ -23,6 +23,8 @@ import {
   type SfnPayload,
 } from "../protocol/envelope.ts";
 import { filterStateBySubs, parseSubs } from "../protocol/broadcast-utils.ts";
+import { overUtf8, utf8Size } from "../protocol/utf8-size.ts";
+import { isFrameTooLarge } from "../protocol/transport-shared.ts";
 import { serializeReturn } from "../protocol/return-value.ts";
 import { writeClientLog } from "./client-log.ts";
 import { CLIENT_REPLY_TIMEOUT_MS, clientReplyTimeoutError } from "./uds.ts";
@@ -39,7 +41,7 @@ import {
   PROTOCOL_MISMATCH_CLOSE_CODE,
   protoHello,
 } from "../protocol/protocol-version.ts";
-import { count } from "../diagnostics/fmt.ts";
+import { bytes, count } from "../diagnostics/fmt.ts";
 import { flushAllUrgent } from "./broadcast-coalescer.ts";
 import { WS_BUFFER_HIGH_WATER, wsWriteBacklog } from "./write-backlog.ts";
 import { userMemoKey } from "./aio-run-helpers.ts";
@@ -75,6 +77,59 @@ export function isPeerGone(message: string): boolean {
   return /unexpected eof|connection reset|broken pipe|reset by peer|connection closed before message completed|os error 104|os error 32/i
     .test(message);
 }
+
+/** The largest message Deno's WebSocket server accepts, in bytes. Over it the
+ *  RUNTIME fails the socket ("Frame too large") before aio ever sees the
+ *  frame — so no aio limit above it can be enforced, answered or advertised
+ *  honestly. Measured: a 63 MiB frame is taken, a 65 MiB one kills the
+ *  connection. `Deno.upgradeWebSocket` has no option to raise it. */
+export const WS_RUNTIME_MAX_MESSAGE = 64 * 1024 * 1024;
+
+/** The frame limit this server can actually keep, and what to say when the
+ *  configured one is not it. Pure — the boot warning and the handshake value
+ *  both come from here.
+ *
+ *  A `wsLimits.maxMessageBytes` above the runtime's ceiling was accepted,
+ *  advertised to every client in the hello, and named in each refusal's way
+ *  out ("raise it with maxMessageBytes") — and every frame between the two
+ *  was not refused at all: the runtime closed the socket, the caller was told
+ *  "connection lost", and the server logged `Frame too large` with no limit
+ *  and no way out. */
+export function effectiveMaxMessage(
+  configured: number,
+): { limit: number; warning?: string } {
+  if (configured <= WS_RUNTIME_MAX_MESSAGE) return { limit: configured };
+  return {
+    limit: WS_RUNTIME_MAX_MESSAGE,
+    warning: `wsLimits: maxMessageBytes (${configured}) is above the ` +
+      `${WS_RUNTIME_MAX_MESSAGE}-byte (64 MiB) message ceiling of Deno's ` +
+      `WebSocket server — a larger frame closes the connection before aio ` +
+      `can refuse it, so ${WS_RUNTIME_MAX_MESSAGE} is the limit in force ` +
+      `(and the one advertised to clients). Send bulk data as a file upload ` +
+      `or in chunks.`,
+  };
+}
+
+/** What this PEER's runtime can receive, when that is knowable from its
+ *  handshake — `undefined` means "no reason to believe it is limited".
+ *
+ *  A Deno peer (`connectCli`, `am`, a service-to-service link, another aio
+ *  server) fails its connection on a message over
+ *  {@linkcode WS_RUNTIME_MAX_MESSAGE}, exactly as this server does inbound —
+ *  and it announces itself in the User-Agent (`Deno/2.9.7`), which is the only
+ *  thing known about a peer before the first frame goes out. Browsers accept
+ *  far larger frames and are deliberately NOT limited here: refusing a frame a
+ *  peer would have taken is a regression, not a guardrail. Pure, so the rule
+ *  is unit-tested rather than reasoned about. */
+export function peerFrameCeiling(userAgent: string): number | undefined {
+  return /^Deno\//i.test(userAgent.trim()) ? WS_RUNTIME_MAX_MESSAGE : undefined;
+}
+
+/** Is this socket error the runtime refusing an oversized message? Defined in
+ *  `protocol/transport-shared.ts` — the CLI client reads the same fact about
+ *  its own socket, and must not import this server to do it — and re-exported
+ *  here, where it has always lived for callers. */
+export { isFrameTooLarge };
 
 /** Safety limits — prevent resource exhaustion */
 const WS_MAX_MESSAGE = 1_000_000; // 1MB — reject oversized WS messages
@@ -259,6 +314,10 @@ export type ClientMeta = {
   bpLastSentAt: number;
   // H3/H4 fix: track consecutive drops for abuse detection (backpressure deadlock prevention)
   consecutiveDrops: number;
+  /** Said once: a frame this connection sent was over `maxMessageBytes` in
+   *  UTF-8 bytes and under it in code units, so it was accepted (see the
+   *  inbound size check — the decision is deliberately unchanged). */
+  overByteLimitSaid?: boolean;
   subscriptions: Set<string> | null;
   disconnected: boolean;
   /** Stable client key (usually remote IP) used for cross-connection abuse tracking. */
@@ -380,7 +439,11 @@ const PENDING_STATE_MAX = 50;
 export function createWsManager(deps: WsDeps): WsManager {
   // W6.6: per-client limits are configurable; defaults stay the hardened
   // constants so existing deployments are unchanged.
-  const wsMaxMessage = deps.wsLimits?.maxMessageBytes ?? WS_MAX_MESSAGE;
+  const _maxMsg = effectiveMaxMessage(
+    deps.wsLimits?.maxMessageBytes ?? WS_MAX_MESSAGE,
+  );
+  if (_maxMsg.warning) log.warn("ws", _maxMsg.warning);
+  const wsMaxMessage = _maxMsg.limit;
   const wsRateLimit = deps.wsLimits?.messagesPerSec ?? WS_RATE_LIMIT;
   const wsBytesPerSec = deps.wsLimits?.bytesPerSec ?? WS_BYTES_PER_SEC;
   // Said at startup, not discovered per frame: a frame between the two limits
@@ -1169,6 +1232,71 @@ export function createWsManager(deps: WsDeps): WsManager {
       resolverToken,
     };
 
+    // ── Never write a frame this peer's runtime cannot take ───────────────
+    //
+    // Deno's WebSocket fails the connection on a message over 64 MiB — the
+    // same ceiling this server documents inbound (`WS_RUNTIME_MAX_MESSAGE`).
+    // Outbound there was no rule at all, so an app whose state grew past it
+    // pushed a full state to a `connectCli` peer, the runtime killed the
+    // socket with "Frame too large", the client reconnected and got the same
+    // frame again: a loop moving 65 MB a second, with `onerror` swallowing the
+    // only clue. The persist guard's 16 MiB hard limit never stopped it — it
+    // refuses nothing by design and speaks about disk, not the wire.
+    //
+    // So the frame is refused HERE, the one place every frame passes, and the
+    // peer is told why (a `diag`, the same channel every other refusal uses)
+    // instead of being disconnected into a retry that cannot work. Only for a
+    // peer whose ceiling is KNOWN (`peerFrameCeiling`): refusing a frame a
+    // browser would have taken would be a regression, not a guardrail. The
+    // check costs a length comparison for every frame under a third of the
+    // ceiling — i.e. all of them (`overUtf8`).
+    const peerCeiling = peerFrameCeiling(userAgent);
+    if (peerCeiling !== undefined) {
+      const rawSend = socket.send.bind(socket);
+      let refused = 0;
+      socket.send = (
+        data: string | ArrayBufferLike | Blob | ArrayBufferView,
+      ) => {
+        if (typeof data === "string" && overUtf8(data, peerCeiling)) {
+          const size = utf8Size(data);
+          const kind = /^\{"v":\d+,"t":"([^"]+)"/.exec(data)?.[1] ?? "frame";
+          const msg =
+            `ws: a ${kind} frame of ${bytes(size)} is over the ${
+              bytes(peerCeiling)
+            } message ceiling of client ` +
+            `${meta.index}'s runtime (a Deno peer — connectCli, am, another ` +
+            `aio server) — NOT sent: writing it kills the connection, and the ` +
+            `reconnect gets the same frame. This client has no state until ` +
+            `the app's is smaller: move bulk rows to db: tables or files ` +
+            `(docs/persistence/big-data.md).`;
+          // Once per socket for the log — the round repeats every change —
+          // and once for the peer, which only needs telling that it is stuck.
+          if (refused++ === 0) {
+            log.error("ws", msg);
+            writeClientLog(meta.index, {
+              level: "error",
+              msg,
+              ts: Date.now(),
+              source: "server-ws",
+            });
+            try {
+              (rawSend as (d: unknown) => void)(enc("diag", {
+                type: "ws-frame-ceiling",
+                severity: "error",
+                source: "server-ws",
+                message: msg,
+                hint: `the whole state does not fit one WebSocket message on ` +
+                  `this runtime (${bytes(peerCeiling)})`,
+                ts: Date.now(),
+              }));
+            } catch { /* aio-ok: the socket is gone — the log is the record */ }
+          }
+          return;
+        }
+        (rawSend as (d: unknown) => void)(data);
+      };
+    }
+
     socket.onerror = (e) => {
       const detail = e instanceof ErrorEvent ? e.message : String(e);
       // A peer that vanishes without a close frame is a DISCONNECT, not a
@@ -1184,6 +1312,19 @@ export function createWsManager(deps: WsDeps): WsManager {
           "ws",
           `client ${clientId.slice(0, 8)} went away without a close frame ` +
             `(${detail})`,
+        );
+      } else if (isFrameTooLarge(detail)) {
+        // The runtime refused a message over its own ceiling and closed the
+        // socket — the one oversize aio cannot answer in-band (see
+        // `effectiveMaxMessage`). Its caller is told only "connection lost",
+        // so the server has to be the one that names the limit and the way out.
+        log.error(
+          "ws",
+          `client ${clientId.slice(0, 8)} sent a message over the ` +
+            `${WS_RUNTIME_MAX_MESSAGE}-byte (64 MiB) ceiling of Deno's ` +
+            `WebSocket server, which closed the connection (${detail}). No ` +
+            `wsLimits setting can raise it: send bulk data as a file upload ` +
+            `or in chunks.`,
         );
       } else {
         log.warn("ws", `error ${clientId.slice(0, 8)} — ${detail}`);
@@ -1598,6 +1739,33 @@ export function createWsManager(deps: WsDeps): WsManager {
         source: "server-ws",
       });
       return;
+    }
+    // COMPAT: the refusal below is decided on `length` — UTF-16 code units —
+    // and stays that way, because tightening it to bytes would start refusing
+    // frames this server accepts today (a CJK payload is ~3× its length). But
+    // the limit is DECLARED in bytes, so a frame that is over it in bytes and
+    // under it in code units is accepted while breaking the promise the
+    // handshake advertised: it is said, once per connection, rather than
+    // quietly passed.
+    if (
+      e.data.length <= wsMaxMessage && !meta.overByteLimitSaid &&
+      overUtf8(e.data, wsMaxMessage)
+    ) {
+      meta.overByteLimitSaid = true;
+      const msg =
+        `ws: a frame from ${meta.id.slice(0, 8)} is ${
+          bytes(utf8Size(e.data))
+        } — over the ${wsMaxMessage}-byte maxMessageBytes it was accepted ` +
+        `under (${e.data.length} characters; non-ASCII text is up to 3 bytes ` +
+        `each). The frame is ACCEPTED, as it has always been; raise ` +
+        `wsLimits.maxMessageBytes to the byte size you really mean.`;
+      log.warn("ws", msg);
+      writeClientLog(meta.index, {
+        level: "warn",
+        msg,
+        ts: Date.now(),
+        source: "server-ws",
+      });
     }
     if (e.data.length > wsMaxMessage) {
       const msg = `ws: message too large (${e.data.length} bytes), dropped`;

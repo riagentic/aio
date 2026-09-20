@@ -35,7 +35,9 @@ export interface SessionStore {
   issue(user: AioUser, opts?: { ttlMs?: number }): string;
   /** Resolve a token → user, or null (unknown / expired / revoked). */
   get(token: string): SessionInfo | null;
-  /** Extend a live session's expiry. False when the token isn't live. */
+  /** Extend a live session's expiry. False when the token isn't live; THROWS
+   *  for a `ttlMs` that cannot become an expiry — the same guard `issue`
+   *  answers to, because it writes the same column. */
   refresh(token: string, ttlMs?: number): boolean;
   /** Revoke one session (logout). */
   revoke(token: string): boolean;
@@ -86,14 +88,84 @@ export interface SessionStoreOptions {
 }
 
 /** Open (or create) a session store at `path` (":memory:" for tests). */
-/** The largest expiry SQLite can hand back as a JavaScript number. */
-const MAX_EXPIRY = Number.MAX_SAFE_INTEGER;
+/** The longest session lifetime this store will write — a century,
+ *  generously, which is also what `config.ts` refuses a `sessions.ttlMs` /
+ *  `auth.ttlMs` past. ONE bound, so the two doors to the same fact agree and
+ *  the refusal below ("milliseconds under a century") is TRUE.
+ *
+ *  It used to be `Number.MAX_SAFE_INTEGER` — the largest expiry SQLite can
+ *  hand back as a JavaScript number — so the store happily issued the year
+ *  285 000, an expiry `new Date()` renders as `NaN`, while the config gate
+ *  refused anything past a century. Two predicates over one fact, disagreeing
+ *  in both directions. */
+export const MAX_SESSION_TTL_MS = 100 * 365 * 24 * 60 * 60_000;
+
+/** THE expiry, for BOTH writers of `expires_at` — the guard and the value it
+ *  produces in one place, so one writer cannot round what the other does not.
+ *
+ *  `issue` refused these; `refresh` writes the same column through the same
+ *  `now + ttlMs` and refused nothing, so every failure `issue`'s guard names
+ *  was reachable one call later. Measured against a real store:
+ *
+ *   - `Number.MAX_SAFE_INTEGER` → the row is written and every later `get`
+ *     throws `RangeError: Value is too large to be represented as a
+ *     JavaScript number`: a live token that 500s each request presenting it
+ *     and cannot even be resolved in order to revoke it;
+ *   - `Infinity` (and `1e20`) → an IMMORTAL session. `DELETE … WHERE
+ *     expires_at <= ?` never matches it, so no TTL, no sweep, nothing but an
+ *     explicit revoke ends it;
+ *   - `-1` → `true` for a session it had just killed;
+ *   - `NaN` → a raw `NOT NULL constraint failed` from SQLite instead of a
+ *     named policy error.
+ *
+ *  …and then `ttl > 0` let the same failures back in from BELOW. `now + ttl`
+ *  is a double, and at `now ≈ 1.79e12` the gap between representable numbers
+ *  is 2⁻¹², so any ttlMs under about 0.0002 adds nothing at all: `issue(1e-9)`
+ *  handed back a real-looking token whose expiry equalled `now`, so the very
+ *  next `get` was null — a session born dead, reported as issued — and
+ *  `refresh(t, 1e-9)` answered `true` for the session it had just killed,
+ *  which is the `-1` case verbatim. The floor is ONE millisecond.
+ *
+ *  A session's lifetime is a security control; "a number the caller computed"
+ *  is exactly where an app's config arithmetic (`days * 86_400_000` with an
+ *  unset `days`) lands. One sentence, both doors. */
+function expiryFor(ttl: unknown, at: string, now: number): number {
+  if (
+    typeof ttl === "number" && Number.isFinite(ttl) &&
+    ttl >= 1 && ttl <= MAX_SESSION_TTL_MS
+  ) {
+    // THE COLUMN IS `INTEGER NOT NULL`, so the value written must be one.
+    // SQLite keeps a REAL that cannot convert losslessly AS a real, so
+    // `ttlMs: 60_000.5` stored `…267.5` and `SessionInfo.expiresAt` came back
+    // a non-integer — the "a live expiry is always a safe integer" this
+    // module's own test asserts and nothing enforced. Floored rather than
+    // refused: a caller whose arithmetic produced a fraction meant the
+    // millisecond, and half of one is not worth an exception.
+    return Math.floor(now + ttl);
+  }
+  throw new Error(
+    `sessions.${at}: ttlMs ${typeof ttl === "number"
+        ? String(ttl)
+        : JSON.stringify(ttl)
+      // `[60000]` stringifies to `60000`: a refusal that names a value the
+      // caller can see nothing wrong with is worse than no message at all.
+    } cannot become an expiry — a session ` +
+      `expires at \`now + ttlMs\`, and this value does not survive the ` +
+      `round trip through SQLite. Use a whole number of ` +
+      `milliseconds, at least 1 and under a century.`,
+  );
+}
 
 export function openSessionStore(
   path: string,
   defaultTtlMs = DEFAULT_TTL_MS,
   opts?: SessionStoreOptions,
 ): SessionStore {
+  // A DEFAULT THAT CANNOT BECOME AN EXPIRY FAILS AT THE DOOR. Otherwise a
+  // store opened with one (an app's `days * 86_400_000` with an unset `days`)
+  // opened perfectly and then threw on EVERY `issue` and `refresh` for the
+  // life of the process — a config validated only when it fires.
+  expiryFor(defaultTtlMs, "open", Date.now());
   const db = new DatabaseSync(path);
   db.exec("PRAGMA journal_mode=WAL");
   db.exec(`CREATE TABLE IF NOT EXISTS sessions (
@@ -145,16 +217,13 @@ export function openSessionStore(
       // NOT NULL constraint; a negative one handed back a token already dead.
       // The config gate refuses these at boot; this is the door a caller
       // holding the store directly comes through.
-      const ttl = opts?.ttlMs ?? defaultTtlMs;
-      if (!Number.isFinite(ttl) || ttl <= 0 || now + ttl > MAX_EXPIRY) {
-        throw new Error(
-          `sessions.issue: ttlMs ${ttl} cannot become an expiry — a session ` +
-            `expires at \`now + ttlMs\`, and this value does not survive the ` +
-            `round trip through SQLite. Use a positive number of ` +
-            `milliseconds under a century.`,
-        );
-      }
-      ins.run(hash(token), user.id, user.role, now, now + ttl);
+      ins.run(
+        hash(token),
+        user.id,
+        user.role,
+        now,
+        expiryFor(opts?.ttlMs ?? defaultTtlMs, "issue", now),
+      );
       return token;
     },
     get(token) {
@@ -179,7 +248,9 @@ export function openSessionStore(
     },
     refresh(token, ttlMs) {
       const now = Date.now();
-      const r = upd.run(now + (ttlMs ?? defaultTtlMs), hash(token), now);
+      // The same guard, and the same expiry, `issue` answers to.
+      const exp = expiryFor(ttlMs ?? defaultTtlMs, "refresh", now);
+      const r = upd.run(exp, hash(token), now);
       return r.changes > 0;
     },
     revoke(token) {

@@ -10,6 +10,9 @@
 //     while nothing has opened it (this runs before storage boot)
 //   • rename when possible; across filesystems copy → verify size → unlink, so
 //     an interruption leaves the ORIGINAL intact rather than a truncated copy
+//   • record a database move (`<to>.moving`) before its first rename, and
+//     finish a WAL it stranded only under that record — never a WAL of
+//     another database
 //   • refuse entirely while another instance is running — it holds the database
 //     open and would write to a file we just moved
 //   • say what moved, per file, once
@@ -49,19 +52,53 @@ const exists = (p: string): boolean => {
 function moveFile(from: string, to: string): Move {
   if (!exists(from)) return { from, to, outcome: "skipped-exists" };
   if (exists(to)) return { from, to, outcome: "skipped-exists" };
+  // An earlier death's torn copy (see the copy below): never valid.
+  const partial = `${to}.partial`;
+  if (exists(partial)) {
+    try {
+      Deno.removeSync(partial);
+    } catch (e) {
+      return {
+        from,
+        to,
+        outcome: "failed",
+        error: `could not clear an interrupted copy at ${partial} (${
+          e instanceof Error ? e.message : String(e)
+        }) — original left in place`,
+      };
+    }
+  }
   try {
     Deno.renameSync(from, to);
     return { from, to, outcome: "moved" };
   } catch {
     // Cross-device (EXDEV) or a platform that refuses the rename.
+    // The copy is written under a temporary name and takes `to` with ONE
+    // rename, once whole and durable. Copied straight onto `to`, a death
+    // mid-copy left a torn target beside the intact original — and the next
+    // boot, finding `to` there, KEPT the original and opened the torn copy.
     try {
-      const size = Deno.statSync(from).size;
-      Deno.copyFileSync(from, to);
-      if (Deno.statSync(to).size !== size) {
-        // Copy is short — remove the partial target, keep the original.
+      const src = Deno.statSync(from);
+      const size = src.size;
+      Deno.copyFileSync(from, partial);
+      // The copy keeps the source's times, as a rename would. With a NEW
+      // mtime, a `-wal` stranded by a death after this copy was always read
+      // as belonging to a database "written since" (`finishDatabaseMove`) —
+      // refused, with a reason that was not true.
+      if (src.mtime) {
         try {
-          Deno.removeSync(to);
-        } catch { /* leave it; the original is what matters */ }
+          Deno.utimeSync(partial, src.atime ?? src.mtime, src.mtime);
+        } catch {
+          // aio-ok: the copy itself is whole (checked below); only a WAL
+          // stranded after it loses its proof of age, and that is refused
+          // and reported as FAILED by `finishDatabaseMove`, never applied.
+        }
+      }
+      if (Deno.statSync(partial).size !== size) {
+        // Copy is short — remove it, keep the original.
+        try {
+          Deno.removeSync(partial);
+        } catch { /* aio-ok: never installed; the next move clears it */ }
         return {
           from,
           to,
@@ -69,6 +106,13 @@ function moveFile(from: string, to: string): Move {
           error: "copy size mismatch — original left in place",
         };
       }
+      const f = Deno.openSync(partial, { read: true, write: true });
+      try {
+        f.syncDataSync(); // durable before the name makes it the database
+      } finally {
+        f.close();
+      }
+      Deno.renameSync(partial, to);
       Deno.removeSync(from);
       return { from, to, outcome: "moved" };
     } catch (e) {
@@ -82,14 +126,149 @@ function moveFile(from: string, to: string): Move {
   }
 }
 
+/** The record of a database move in progress: which file `to` is being moved
+ *  FROM. It is the only proof that a WAL left behind at `<from>-wal` belongs
+ *  to `to` — see {@linkcode finishDatabaseMove}. */
+export const movingRecordFor = (to: string): string => `${to}.moving`;
+
+/** The `from` a move record names, or null (absent, or torn — a torn record
+ *  proves nothing, which is the safe direction). */
+function readMovingRecord(to: string): string | null {
+  try {
+    const from = (JSON.parse(Deno.readTextFileSync(movingRecordFor(to))) as {
+      from?: unknown;
+    }).from;
+    return typeof from === "string" ? from : null;
+  } catch {
+    // aio-ok: absent or torn — no proof; a stranded WAL is then refused, said.
+    return null;
+  }
+}
+
+/** Remove the move record; a record that cannot be removed is reported as a
+ *  failed move of its own (it would keep vouching for a WAL at `from`). */
+function dropMovingRecord(to: string): Move[] {
+  const record = movingRecordFor(to);
+  try {
+    Deno.removeSync(record);
+    return [];
+  } catch (e) {
+    if (e instanceof Deno.errors.NotFound) return [];
+    return [{
+      from: record,
+      to: record,
+      outcome: "failed",
+      error: `could not remove the finished move's record (${
+        e instanceof Error ? e.message : String(e)
+      }) — delete it by hand`,
+    }];
+  }
+}
+
 /** A SQLite file plus the WAL sidecars it cannot be separated from. */
 function moveDatabase(from: string, to: string): Move[] {
+  if (!exists(from) || exists(to)) return [moveFile(from, to)];
+  // Recorded BEFORE the first rename, and durable: a death between the
+  // database and its WAL is finished by the next boot only under it.
+  try {
+    const f = Deno.openSync(movingRecordFor(to), {
+      write: true,
+      create: true,
+      truncate: true,
+      mode: 0o600,
+    });
+    try {
+      f.writeSync(new TextEncoder().encode(JSON.stringify({ from })));
+      f.syncDataSync();
+    } finally {
+      f.close();
+    }
+  } catch (e) {
+    return [{
+      from,
+      to,
+      outcome: "failed",
+      error: `could not record the move at ${movingRecordFor(to)} (${
+        e instanceof Error ? e.message : String(e)
+      }) — nothing was moved`,
+    }];
+  }
   const out: Move[] = [moveFile(from, to)];
-  if (out[0]!.outcome !== "moved") return out; // don't strand sidecars
+  if (out[0]!.outcome !== "moved") {
+    return [...out, ...dropMovingRecord(to)]; // don't strand sidecars
+  }
   for (const suffix of ["-wal", "-shm"]) {
     if (exists(from + suffix)) out.push(moveFile(from + suffix, to + suffix));
   }
-  return out;
+  // A sidecar that did not move keeps the record: the next boot retries it.
+  return out.every((m) => m.outcome === "moved")
+    ? [...out, ...dropMovingRecord(to)]
+    : out;
+}
+
+/** Modification time, or NaN where the platform has none — every comparison
+ *  with NaN is false, so "provably older" can never be concluded from it. */
+const mtimeOf = (p: string): number => Deno.statSync(p).mtime?.getTime() ?? NaN;
+
+/** Finish a `moveDatabase` that died between the database and its WAL.
+ *
+ *  The database is renamed first, its `-wal` second. A death between the two
+ *  left the WAL — the committed frames of a crash-left database — in the old
+ *  directory, and nothing ever looked again: the legacy database was gone, so
+ *  there was "nothing legacy left", and the moved database opened WITHOUT its
+ *  WAL. Every write since its last checkpoint was lost, silently.
+ *
+ *  The WAL is carried over only while the moved database is provably the one
+ *  it belongs to: the move's own record ({@linkcode movingRecordFor}) says
+ *  `to` was moved from `from`, it has no WAL of its own, and it was not
+ *  modified after the stranded WAL was last written (a database opened and
+ *  checkpointed since is newer, and a foreign WAL replayed over it would
+ *  corrupt it). Without the record, a `<from>-wal` with no `from` beside it
+ *  proves nothing — a legacy database KEPT because the new layout was
+ *  already live, then deleted by hand, leaves exactly that, and it belongs to
+ *  another database. Anything else is reported as FAILED, loudly, and left
+ *  exactly where it is. */
+function finishDatabaseMove(from: string, to: string): Move[] {
+  if (exists(from) || !exists(to)) return [];
+  const recorded = readMovingRecord(to) === from;
+  if (!exists(from + "-wal")) {
+    // The move finished and died before dropping its record: drop it now (a
+    // leftover -shm is an index SQLite rebuilds — it goes with the move).
+    if (!recorded) return [];
+    const out = exists(from + "-shm") && !exists(to + "-shm")
+      ? [moveFile(from + "-shm", to + "-shm")]
+      : [];
+    return [...out, ...dropMovingRecord(to)];
+  }
+  const wal = { from: from + "-wal", to: to + "-wal" };
+  if (!recorded) {
+    return [{
+      ...wal,
+      outcome: "failed",
+      error: `a WAL is left at ${wal.from} with no database beside it, and ` +
+        `nothing records that ${to} was moved from ${from} — it may belong ` +
+        `to another database (a kept ${basename(from)} deleted by hand), so ` +
+        `it was NOT applied to ${to}. Keep it for a recovery tool, or delete ` +
+        `it if that database is gone for good`,
+    }];
+  }
+  if (exists(wal.to) || !(mtimeOf(to) <= mtimeOf(wal.from))) {
+    return [{
+      ...wal,
+      outcome: "failed",
+      error: `a WAL was left behind by an interrupted move, but ${to} has ` +
+        `been written since — it was NOT applied (it could corrupt the ` +
+        `database). It may hold writes missing from ${to}; keep it for a ` +
+        `recovery tool`,
+    }];
+  }
+  const out = [moveFile(wal.from, wal.to)];
+  if (out[0]!.outcome === "moved" && exists(from + "-shm")) {
+    out.push(moveFile(from + "-shm", to + "-shm"));
+  }
+  return out.every((m) => m.outcome === "moved")
+    ? [...out, ...dropMovingRecord(to)]
+    : out;
 }
 
 /** The journal plus its `.wm` watermark side file (written by builds from
@@ -158,8 +337,18 @@ export function migrateLegacyLayout(opts: {
   const legacyTls = join(cwd, ".aio-tls");
   const legacyLogs = join(cwd, ".aio", "log");
 
-  const anything = [legacyDb, legacyJournal, legacyAuth, legacyTls, legacyLogs]
-    .some(exists);
+  const anything = [
+    legacyDb,
+    legacyDb + "-wal", // stranded by an interrupted move (finishDatabaseMove)
+    legacyJournal,
+    legacyAuth,
+    legacyAuth + "-wal",
+    legacyTls,
+    legacyLogs,
+    // A move that died after its last rename leaves only its record.
+    movingRecordFor(dirs.stateDb),
+    movingRecordFor(dirs.authDb),
+  ].some(exists);
   if (!anything) return { moves: [] };
 
   // A live instance holds these databases open — moving them under a running
@@ -176,6 +365,8 @@ export function migrateLegacyLayout(opts: {
 
   ensureAppDirs(dirs);
   const moves: Move[] = [
+    ...finishDatabaseMove(legacyDb, dirs.stateDb),
+    ...finishDatabaseMove(legacyAuth, dirs.authDb),
     ...moveDatabase(legacyDb, dirs.stateDb),
     ...moveJournal(legacyJournal, dirs.journal),
     ...moveDatabase(legacyAuth, dirs.authDb),

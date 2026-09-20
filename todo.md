@@ -14,6 +14,53 @@ is frozen — additive only, bugfix-only through beta; 1.0.0 = boring.
 
 ---
 
+## RESUME HERE — round of 2026-09-20 (the 1.0.6-beta release)
+
+**State.** 1.0.6-beta is cut: `check:release` green including the heavy tier,
+the tree stamped, benchmark run (68 s, 1 check try, 0 `src/` reads, 4/4).
+
+**Accepted, not built — from the release benchmark (2026-09-20).** The agent's
+friction list, kept because the kata says each item is fixed or written down:
+
+- **No headless UI client.** With "no window may open" as a constraint,
+  `am trigger` answers _"no UI client is connected, so there is nothing to
+  drive"_ and there is no third option: `--client=electron` opens a window,
+  `--client=browser` needs one, and `am surface` only observes. `testUI` in a
+  test file is the only way to drive a click. A `--client=headless` (happy-dom
+  in-process, the harness's own window) would close it. THE item of this round.
+- **Handle names are PascalCase when derived and verbatim when given**, so one
+  test reads `ui.add.click()` beside `ui.DeleteCoffeeButton.click()`. Documented
+  in `am agent --task=ui`, still a wart.
+- **A submit button's surface entry lists no events** (the form carries
+  `submit`), so choosing a trigger target from the surface alone suggests the
+  button is inert.
+- **`am instances` prints raw JSON with or without `--json`** — no
+  human-readable form.
+- **`am create --help` lists the templates bare**, while `am agent` knows `todo`
+  is "a list + a client-scoped view cell + an input form". The help could say
+  what each template IS.
+
+**Also accepted, not built — from the hunt rounds of 2026-09-19/20:**
+
+- Concurrent `renderToStream`s share one SSR id/head scope: two streams corrupt
+  each other's `useId` sequence and `collectHead()` (measured). Needs per-render
+  state, not a guard.
+- SSR writers do not validate attribute NAMES — a crafted name injects raw HTML
+  where the client path throws. Own round, security-relevant.
+- Windows, carried from the pipe round: `drain()`'s timeout can act on a REUSED
+  handle value (wants `DuplicateHandle`), and `socketFetch` has no timeout, so
+  six never-read responses can block the rest.
+- `libraryMode` takes no `AppLock`, so it gets no SIGXFSZ listener — an embedded
+  app still dies on a write past `ulimit -f`.
+- The always-on timeline estimator still reads ~4.3× low for one huge value
+  among small rows (fixing it costs an O(n) scan in production).
+- A per-account session ceiling (60 logins in 3 s are all accepted today), and
+  whether `updates.allowCrossOrigin` should become a real config key.
+- An Electron main-process extension point, and `am start --scratch` — both
+  designed in the 2026-09-20 session, neither built.
+
+---
+
 ## RESUME HERE — round of 2026-09-18 (macOS builds, 1.0.4-beta)
 
 **State.** 1.0.4-beta is prepared (version triple, CHANGELOG, upgrade guide,

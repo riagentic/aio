@@ -9,8 +9,8 @@ import { assert, assertEquals, assertMatch } from "jsr:@std/assert@^1";
 const GATED = Deno.env.get("AIO_WINE_E2E") === "1";
 const HERE = new URL("..", import.meta.url).pathname.replace(/\/$/, "");
 
-/** host READY + deno.exe/node.exe boot + 5 node cases + 3 deno cases. */
-const EXPECTED_CASES = 11;
+/** host READY + deno.exe/node.exe boot + 8 node cases + 3 deno cases. */
+const EXPECTED_CASES = 14;
 
 Deno.test({
   name:

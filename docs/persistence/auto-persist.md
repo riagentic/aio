@@ -91,9 +91,11 @@ persist: migrated the stored document single → multi (3 key(s))
 ```
 
 Retiring the old copy is part of the migration: left behind, it would come back
-as authoritative the next time the mode changed. If both layouts somehow hold
-data (an older aio, a hand-edited store), boot uses the configured one and warns
-about the other — nothing is deleted, and nothing is guessed.
+as authoritative the next time the mode changed. A migration that dies between
+the copy and the retire leaves the SAME document in both layouts; the next boot
+recognizes that, retires the old copy and says so. If both layouts hold
+DIFFERENT data (an older aio, a hand-edited store), boot uses the configured one
+and warns about the other — nothing is deleted, and nothing is guessed.
 
 ## Disabling persistence
 
@@ -129,7 +131,22 @@ what is written. It and `onRestore` are a pair, read in that order:
 - a shape that only **drops** fields needs no partner — the cell's declared
   initial fills them back in;
 - a shape that **reshapes** needs an `onRestore` that knows the new shape, or
-  the app cannot read its own store.
+  the app cannot read its own store. That `onRestore` is handed the declared
+  state **plus** every key the shape stored (a shape writing `key` restores with
+  `s.key` there to read; a shape storing `items` as a list where a record is
+  declared restores with the list), and what it leaves is trimmed back to the
+  declared shape. The stored slice is checked against what this build's
+  `onPersist` writes, not the declaration — so the shape itself is not
+  [shape drift](#changing-a-cells-shape-after-it-has-shipped), and a field
+  renamed inside it still is.
+
+A crash does not change what comes back: `journal: true` replay sends a
+recovered slice through the same `onPersist` → restore → `onRestore` round trip
+a clean restart does, so a field the shape keeps off disk is not resurrected by
+replaying the action that wrote it. The same holds for every restore hook: when
+replay changed state, a plain cell's `onRestore` (for a slice it touched) and
+the app-level `onRestore` run again on the replayed state, as they would on the
+snapshot a clean stop writes — keep them repairs (idempotent), not counters.
 
 It is **not** error-guarded, unlike the observe-only lifecycle hooks. It runs on
 the persist path, where "the write quietly stopped happening" is the worst

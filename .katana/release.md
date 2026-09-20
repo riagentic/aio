@@ -49,10 +49,14 @@ Release surfaces (must be updated, not just the code — checked, not assumed):
   `MAJOR.MINOR.PATCH-beta` with no digit after the word (`1.0.1-beta`, never
   `1.0.0-beta2`), and a stable is the same triple with the suffix dropped
 - `CHANGELOG.md` has a dated entry for this exact version
+- the agent benchmark (`.katana/onboard.md`) ran on the release commit and its
+  numbers are in the release notes
 - an upgrade guide `docs/upgrade/from-<prev>-to-<this>.md` exists and is listed
   in `docs/upgrade/README.md`
 - `docs/content.md` is regenerated (`deno task update:docs` leaves no diff) so
   new docs/examples are indexed
+- `docs/basics/every-option.md` is regenerated (`deno task update:reference`
+  leaves no diff) — every cell/run option and `aio/air` export on one page
 - `docs/api-snapshot.json` is regenerated when the public surface or VERSION
   changed (`deno task update:api`)
 - any new example/app is listed AND described in `examples/README.md` (one

@@ -55,16 +55,30 @@ export const job = cell("job", {
 
 ## Choosing a path
 
-`pickFile()` and `pickDirectory()` open the **native** dialog — zenity or
-kdialog on Linux, `osascript` on macOS, the Windows common dialogs (STA
-PowerShell). They are on `aio/server`: they spawn a desktop binary.
+`pickFile()` and `pickDirectory()` open the **native** dialog. Who opens it
+depends on who asked:
+
+- **the call came from your Electron window** — that window's main process opens
+  it (`dialog.showOpenDialog(win, …)`): owned by the window, modal, in front, no
+  child process, on all three OSes. Nothing to configure; a method or a serverFn
+  called from the window takes this path, and so does a call with no caller (a
+  schedule, `onStart`) while exactly one window is connected.
+- **anyone else** — a browser tab, a script, `am dispatch` — gets the spawned
+  desktop tool: zenity or kdialog on Linux, `osascript` on macOS, the Windows
+  common dialogs (STA PowerShell, with a TopMost owner so the dialog is in front
+  of the app).
+
+Both paths take the same `PickOptions` and give the same results, cancel
+included. The window path exists because a spawned dialog belongs to a
+background process with no relation to any window: on Windows it opened BEHIND
+the app, sometimes fully hidden, and no flag on the spawn could fix it.
 
 On Windows a double-clicked app has no console, and Windows would give every
-console program it starts — the dialog's PowerShell, `openExternal`'s `cmd`, an
-update step, your own `spawn()` — a new Terminal window, flashing up before the
-dialog. So at boot such an app attaches to one hidden console, and every child
-shares it: no window, output intact (measured on Windows 11). An app started
-from a terminal keeps its own console and is untouched.
+console program it starts — `openExternal`'s `cmd`, an update step, your own
+`spawn()`, the dialog's PowerShell on the paths that still use it — a new
+Terminal window. So at boot such an app attaches to one hidden console, and
+every child shares it: no window, output intact (measured on Windows 11). An app
+started from a terminal keeps its own console and is untouched.
 
 The contract is about the endings, because that is what a hand-rolled wrapper
 gets wrong:
@@ -76,6 +90,9 @@ gets wrong:
 | no dialog installed | **throws**, naming what to install     |
 | no desktop session  | **throws**, before spawning anything   |
 | dialog failed       | **throws**, with the tool's own stderr |
+
+(On the window path the last two rows are the window's: a dialog it could not
+open, or a window that CLOSED while the dialog was up, throws — never `null`.)
 
 A missing `zenity` and a pressed Cancel are the same exit code — three apps
 conflated them, and at least one shipped a Browse button that silently did

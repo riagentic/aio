@@ -91,7 +91,26 @@ export type DoctorFinding = {
   ok: boolean;
   detail: string;
   fix?: string;
+  /** The instance's settings that have more than one home, `name →
+   *  "value (source)"` — read from its lock (written since 1.0.6). */
+  settings?: Record<string, string>;
 };
+
+/** "Which of my flag, config and deno.json won?" — answered by the running
+ *  instance itself (feedback/frustration.md F6), one aligned line per
+ *  setting. Empty for a lock written before 1.0.6, which does not carry it. */
+export function settingsBlock(
+  appId: string,
+  settings: Record<string, string> | undefined,
+): string {
+  const rows = Object.entries(settings ?? {});
+  if (rows.length === 0) return "";
+  const w = Math.max(...rows.map(([k]) => k.length));
+  return [
+    `settings — ${appId} (value, and who decided it)`,
+    ...rows.map(([k, v]) => `  ${k.padEnd(w)}  ${v}`),
+  ].join("\n");
+}
 
 /** The finding for one running instance against the framework under
  *  `<projectDir>/dep/aio`. Exported for the test — the CLI below is the only
@@ -192,7 +211,10 @@ export async function cmdDoctor(
     return;
   }
   const findings = await Promise.all(
-    running.map((i) => checkRunningAio(root, i)),
+    running.map(async (i) => ({
+      ...await checkRunningAio(root, i),
+      settings: i.settings,
+    })),
   );
   const bad = findings.filter((f) => !f.ok);
   out({ ok: bad.length === 0, findings }, mode, () =>
@@ -210,6 +232,7 @@ export async function cmdDoctor(
         [findings.length - bad.length, "ok", "ok"],
         [bad.length, "failed", "bad"],
       ])),
+      ...findings.map((f) => indent(settingsBlock(f.appId, f.settings))),
     ));
   if (bad.length > 0) {
     outError(

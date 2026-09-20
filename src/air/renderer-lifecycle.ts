@@ -11,6 +11,27 @@ import {
   _insideMount,
   _setCurrentCollector,
 } from "./renderer-state.ts";
+import { _inSsrCall } from "./vdom-ssr.ts";
+
+/** Is the hook that is running part of a SERVER render of a component?
+ *
+ *  A server render calls component functions directly, so there is no
+ *  instance and `_currentCollector` is null — by design, not by mistake. Every
+ *  hook below then told the author they had called it "outside a component
+ *  render", in a component body, for code written exactly as the docs show:
+ *  measured, ONE ordinary component printed SEVEN of those per
+ *  `renderToString`, and the dev server sets `__aioDev` too, so an app that
+ *  server-renders in `deno task dev` buried its log under one wall of false
+ *  accusations per request. `useId` is the hook that already knew — it takes
+ *  an SSR branch and says nothing.
+ *
+ *  `_inSsrCall()` and not `_isSsrRendering()`: the latter stays true for the
+ *  whole span of a `renderToStream`, including the async gaps between chunks,
+ *  where a hook called from a timer IS the mistake the warning is for. This
+ *  is true only for the synchronous span of one server component call. */
+function _inServerRender(): boolean {
+  return _inSsrCall();
+}
 
 /** `onMount`/`onCleanup` outside a render were dropped in SILENCE, while
  *  `afterRender`, `useRef` and `useSignal` all say so for the identical
@@ -24,7 +45,7 @@ export function _inRender(): boolean {
 }
 
 function _warnOutsideRender(hook: string): void {
-  if (!isDevMode()) return;
+  if (!isDevMode() || _inServerRender()) return;
   console.warn(
     `[aio-dev] ${hook}() called outside a component render — there is no ` +
       `component to attach it to, so the callback was DROPPED. It only works ` +
@@ -261,7 +282,7 @@ export function onWindowEvent(
  */
 export function useRef<T>(initial: T): { current: T } {
   if (!_currentCollector) {
-    if (isDevMode()) {
+    if (isDevMode() && !_inServerRender()) {
       console.warn(
         "[aio-dev] useRef() called outside a component render. The ref will not persist across re-renders.",
       );
@@ -299,7 +320,7 @@ export function useRef<T>(initial: T): { current: T } {
  */
 export function useSignal<T>(initial: T): Signal<T> {
   if (!_currentCollector) {
-    if (isDevMode()) {
+    if (isDevMode() && !_inServerRender()) {
       console.warn(
         "[aio-dev] useSignal() called outside a component render. The signal will not persist across re-renders.",
       );

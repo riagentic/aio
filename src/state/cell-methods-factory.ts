@@ -30,6 +30,7 @@ import {
   resolveVisibility,
   scopeSelectors,
   validateFieldFilters,
+  warnUnmatchedSyncFields,
 } from "./cell-helpers.ts";
 import {
   buildMethodsExecutor,
@@ -192,6 +193,22 @@ export function createCellFromMethods<
     visibility,
     persistFilter,
   );
+  // The CRDT half of the same rule: `sync: { merge }` / `sync: { identity }`
+  // are keyed by top-level state field, and a key that names none is never
+  // read — the field falls back to last-write-wins with nothing said. Warned
+  // (not thrown) because a method may introduce a field the declared state
+  // does not list; see `warnUnmatchedSyncFields`.
+  if (config.sync && config.sync !== true) {
+    warnUnmatchedSyncFields(
+      name,
+      config.state as Record<string, unknown>,
+      config.sync as {
+        merge?: Record<string, unknown>;
+        identity?: Record<string, unknown>;
+      },
+      (m) => log.warn("cell", m),
+    );
+  }
 
   // listensTo (D1): normalize both forms. Object form maps ONE OR MORE foreign
   // action types → a SYNC method that handles them (alpha52: values may be

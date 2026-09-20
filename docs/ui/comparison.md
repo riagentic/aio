@@ -11,7 +11,7 @@ Step-by-step migration guide for teams moving from React to AIR.
 | **Reactivity model** | React hooks (manual deps)                       | Signals (auto-tracked)                   |
 | **Memoization**      | Manual (`React.memo`, `useCallback`, `useMemo`) | Automatic                                |
 | **Dependencies**     | React 18+, ReactDOM                             | Zero                                     |
-| **Bundle size**      | ~40KB+ (React + ReactDOM, view layer only)      | 85 KB gz — renderer AND client runtime   |
+| **Bundle size**      | ~40KB+ (React + ReactDOM, view layer only)      | 88 KB gz — renderer AND client runtime   |
 | **Events**           | React synthetic events                          | Native DOM events                        |
 | **Forms**            | Bring your own                                  | Built-in `useForm`                       |
 | **Animation**        | Bring your own                                  | Built-in `useSpring`, `<Transition>`     |
@@ -145,14 +145,16 @@ const LoginForm = () => (
 
 ```diff
 - import { useState, useEffect, useCallback, useMemo } from "react";
-+ import { useState, useEffect, useCallback, useMemo } from "aio/air/compat";
++ import { useState, useEffect, useCallback, useMemo } from "aio/air";
 ```
 
-AIR provides compat versions. Your code compiles and runs immediately.
+Your code compiles and runs immediately — the hooks behave as React 19's,
+checked side by side against real React ([React on aio](react.md)).
 
-### Step 2: Compat Hooks (automatic)
+### Step 2: The hooks run as-is
 
-In dev mode, one-time `console.info` hints suggest AIR-native alternatives.
+No hints, no rewrite needed. `useLocal`, `onMount` and `computed` are aio's own
+spellings for the same jobs, if you prefer them.
 
 ### Step 3: Optimize (optional)
 

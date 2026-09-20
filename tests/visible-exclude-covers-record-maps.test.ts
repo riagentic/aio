@@ -49,15 +49,35 @@ Deno.test("visible.exclude: a records-BY-ID map hides the field, like an array",
   assertEquals(checked, 3, "all three container shapes must be checked");
 });
 
-Deno.test("visible.exclude: a LITERAL key still wins over the container reading", () => {
-  // The control — descending into every value unconditionally would remove
-  // `x.b` when the author wrote `a.b` and `a` really has a `b`.
-  const state = { a: { b: "gone", x: { b: "kept" } } };
+Deno.test("visible.exclude: the literal path AND the container reading, both", () => {
+  // This test used to assert the opposite ("a LITERAL key still wins"), and
+  // that rule — descend only where the head is ABSENT — was the leak: whether
+  // a secret was filtered depended on whether SOME sibling key happened to
+  // equal the field name, and record ids are user-controlled. An account
+  // registered as `encSecKey` made `head in obj` true, took the literal
+  // branch, and broadcast every OTHER account's key.
+  //
+  // A name that reads both ways is ambiguous, and the only safe answer to an
+  // ambiguous name in a SECRET filter is to remove both readings.
+  const state = { a: { b: "gone", x: { b: "gone too" } } };
   const out = applyCellFieldFilter({ exclude: ["a.b"] } as never, state) as {
-    a: { b?: string; x: { b: string } };
+    a: { b?: string; x: { b?: string } };
   };
   assertEquals(out.a.b, undefined, "the literal path is removed");
-  assertEquals(out.a.x.b, "kept", "…and a same-named field elsewhere is not");
+  assertEquals(
+    out.a.x.b,
+    undefined,
+    "…and so is `b` under every record of `a`, whether or not `a` itself has " +
+      "a `b` — otherwise one colliding record id disables the filter",
+  );
+  // What that does NOT do: `a.b` says nothing about a `b` that is not under
+  // `a`. The walk only reaches the container reading after the head segment
+  // has matched.
+  const sibling = applyCellFieldFilter(
+    { exclude: ["a.b"] } as never,
+    { a: { q: 1 }, other: { b: "kept" } },
+  ) as { other: { b?: string } };
+  assertEquals(sibling.other.b, "kept", "a sibling branch is untouched");
 });
 
 Deno.test("visible.exclude: the PATCH filter agrees with the projection", async () => {

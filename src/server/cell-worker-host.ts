@@ -26,6 +26,7 @@ import { composeCells } from "../state/cell-compose.ts";
 import { context } from "../diagnostics/contexts.ts";
 import { getRegisteredCells } from "../state/cell-reactive.ts";
 import { createDispatch } from "../state/dispatch.ts";
+import { _dispatchRefusal } from "./action-ack.ts";
 import { createOwnManager } from "../state/own.ts";
 import { routeEffect } from "../state/route-effect.ts";
 import type { CellDef, Msg } from "../state/cell-types.ts";
@@ -185,6 +186,9 @@ export function startCellWorkerHost(cell: CellDef): Promise<never> {
   // before the final persist flush. Committed data already lives on the main
   // isolate; teardown noise dies with this thread.
   let closing = false;
+  /** The owner's `refusalsReject`, as `init` reports it. Until it arrives no
+   *  call has been served, so the default is only ever the 1.x one. */
+  let refusalsReject = false;
   /** Has the authoritative slice arrived? Until it does, this isolate holds
    *  its DEFAULTS, and anything it commits is not a change to ship home.
    *
@@ -324,6 +328,11 @@ export function startCellWorkerHost(cell: CellDef): Promise<never> {
       // only by Immer's `autoFreeze`, never deep-frozen, which is a narrower
       // tripwire inside a worker than outside it in dev AND prod.
       dispatchDeps.freezeState = msg.freezeState;
+      // …and on the owner's `refusalsReject`, for the same reason: this side's
+      // reduce always swallows the refusal (the composed context here is built
+      // before any message arrives), so the reply decides what the in-process
+      // caller sees. See the `refused` note below.
+      refusalsReject = msg.refusalsReject === true;
       // The authoritative slice — persistence and migrations already ran on the
       // main isolate, so this is the state of record, not our defaults.
       state = { [name]: { ...msg.state } };
@@ -393,7 +402,43 @@ export function startCellWorkerHost(cell: CellDef): Promise<never> {
       const ret = await withCtx();
       const value = settled ? await settled : ret;
       flush(); // every commit this call produced, before the caller resolves
-      post({ t: "done", id, ret: value as unknown });
+      // …AND THE REDUCE MAY HAVE REFUSED IT — the same read `action-ack.ts`
+      // performs on the main isolate, performed HERE because this is the only
+      // isolate that holds the refusal. `dispatch` resolves whether or not
+      // anything ran, so `done` was posted for a method this cell does not
+      // have, a `validate` refusal and a disabled cell alike; the main side
+      // then read its own (empty) tracker and acked the caller `ok: true` for
+      // a change that never happened.
+      //
+      // It rides home on `done`, not on `fail`: a refusal is not a throw. On
+      // the main isolate `refusalsReject` decides whether an in-process
+      // `await cell.method()` rejects, and it is OFF by default in 1.x for a
+      // stated reason ("an app doing `await c.method(); if (c.x !== want) …`
+      // would get a rejection where it had a value"). `fail` rejects, so
+      // posting one made `worker: true` answer a refused write differently
+      // from the identical cell next to it — three behaviours for one flag.
+      // The main side records the note against the caller's action object, and
+      // the ack path then answers ACTION_REFUSED the way it always has.
+      const refused = _dispatchRefusal(action);
+      if (refused && refusalsReject) {
+        post({
+          t: "fail",
+          id,
+          message: refused.message,
+          stack: refused.stack,
+          name: refused.name,
+          code: refused.code,
+        });
+        return;
+      }
+      post({
+        t: "done",
+        id,
+        ret: value as unknown,
+        ...(refused
+          ? { refused: { cell: name, reason: refused.message } }
+          : {}),
+      });
     } catch (e) {
       flush(); // partial writes still happened — main must see them
       post({

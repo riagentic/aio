@@ -422,7 +422,9 @@ on the way out. It writes to a temp file beside the destination, runs
 `quick_check` on the COPY, and only then renames it over the destination — so
 calling it on a schedule works, the destination is replaced atomically, and a
 snapshot is never silently a corrupt copy of a damaged file. At every instant
-the path holds either the previous good snapshot or the new one.
+the path holds either the previous good snapshot or the new one — across a power
+cut too: the copy is fsynced before the rename and its directory after (the
+directory step is skipped on Windows, which cannot open a directory).
 
 ```ts
 // A rolling snapshot: one file, replaced in place.
@@ -471,13 +473,30 @@ db: restored from …/state.db.snapshot — changes made AFTER that snapshot are
     not in it; the damaged original is at …
 ```
 
+Two instances sharing one data directory (`singleton: false`) recover one at a
+time: the check and any recovery run under an OS file lock beside the database
+(`<db>.recovery-lock`, released when its holder exits or dies), so the second
+waits and then finds the file the first already recovered.
+
+A check refused with "database is locked" (another instance writing the file) is
+not damage: it is retried for up to 5 s and, if the lock stays, skipped for this
+boot with a warning — nothing is moved.
+
 The snapshot is checked before it is installed. If it is damaged too, it is
 **not** restored and nothing is deleted — both files stay on disk for a real
 recovery tool, and the app says so.
 
+The damaged database moves together with its `-wal`/`-shm`, as one recorded move
+(`<db>.quarantining` exists only while it runs): a crash between the renames is
+finished by the next boot before it opens anything, so a WAL is never split from
+its database. A damaged file that cannot be moved aside at all (the rename is
+refused) refuses the boot, naming the file and why — it is never booted on.
+
 With no usable snapshot the app starts **empty** and says so, loudly, rather
-than booting on a file SQLite cannot read. Off by default: only apps holding
-data worth this deserve the per-boot scan.
+than booting on a file SQLite cannot read. A snapshot that passes the check but
+cannot be copied into place (a full disk) is not "no snapshot": the boot is
+**refused** before anything moves, and the next boot redoes the recovery. Off by
+default: only apps holding data worth this deserve the per-boot scan.
 
 `.corrupt-<timestamp>` copies are full-size copies of the database, and
 `am backup` archives whatever is in the data directory. aio keeps the **3 most

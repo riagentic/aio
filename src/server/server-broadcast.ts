@@ -4,6 +4,7 @@ import { enc, encRaw } from "../protocol/envelope.ts";
 import { userMemoKey } from "./aio-run-helpers.ts";
 import { compactPatches } from "../state/patch-compact.ts";
 import { createCoalescer } from "./broadcast-coalescer.ts";
+import { createDebtRetry } from "./debt-retry.ts";
 
 /** How often time-travel metadata may go out. Deliberately slower than the
  *  state stream: it feeds a debug panel, and no user action waits on it. */
@@ -30,6 +31,7 @@ import { log } from "../diagnostics/logger-api.ts";
 import { bytes } from "../diagnostics/fmt.ts";
 import { budgetsFor } from "../state/budgets.ts";
 import { rawStateControlAllowed } from "./server-auth.ts";
+import { overUtf8, utf8Size } from "../protocol/utf8-size.ts";
 
 /** Payload stats per client — tracked for vitals/trojan introspection */
 export type PayloadStats = Map<
@@ -172,6 +174,104 @@ export function createBroadcaster(deps: BroadcastDeps): Broadcaster {
     else if (v.attempted) _stateSerialization.ok();
   }
 
+  /** A per-PASS full-state builder: ONE serialization per distinct VIEW. A
+   *  view is the pair (user, subscriptions): two clients with the same pair
+   *  receive the same bytes, and used to pay for them twice — 100 clients on
+   *  a 213 KB state cost 20 ms a round, and each `meta.lastFullJson` held its
+   *  own copy (217 MB for 100 clients on 2.2 MB). Sharing the string shares
+   *  the memory too. Used by the round AND by the idle debt retry, which pays
+   *  every owed client at once (a thrown round owes all of them) — built per
+   *  client there, the retry repeated exactly that cost (pinned by
+   *  tests/ws-debt-retry-one-view-per-pass.test.ts). Outcomes land on
+   *  `verdict`; the caller settles it once per pass. */
+  function _viewSnapshotter(
+    verdict: SnapshotVerdict,
+  ): (meta: ClientMeta) => string | undefined {
+    const fullByView = new Map<string, string | undefined>();
+    return (meta) => {
+      const subs = meta.subscriptions
+        ? [...meta.subscriptions].sort().join(",")
+        : "*";
+      // `userMemoKey`, not a bare `JSON.stringify(meta.user)`.
+      //
+      // This key is built for EVERY client on EVERY round, inside the
+      // round-wide try — so one user record `JSON.stringify` refuses took
+      // the whole round down, for every client, on every round after it.
+      // Measured: a `resolveUser` handing back an ORM row with a BigInt
+      // `orgId` (what `node:sqlite` returns past `Number` range, and what
+      // every postgres driver returns for `int8`) froze every connected UI
+      // permanently. Health went degraded after five rounds, so it was loud
+      // on the server and invisible in the browser.
+      //
+      // `userMemoKey` is the sibling reader of the same field, hardened for
+      // exactly this and carrying the argument in its own comment: "a cache
+      // miss costs time; a wrong cache hit costs someone else's data". It
+      // answers null for a user it cannot serialize, and then there is no
+      // cache — never a shared bucket.
+      const userKey = userMemoKey(meta.user);
+      if (userKey === null) return _getFilteredFullJson(meta, verdict);
+      const key = `${userKey}|${subs}`;
+      if (fullByView.has(key)) return fullByView.get(key);
+      const json = _getFilteredFullJson(meta, verdict);
+      fullByView.set(key, json);
+      return json;
+    };
+  }
+
+  /** Account ONE state frame handed to a client — per-client payload stats,
+   *  the process-lifetime counters and the payload budget. Every state send
+   *  goes through here: the round's, and the debt payer's (idle retry and
+   *  freeze recovery), which used to set only its own bookkeeping, so a
+   *  client paid a multi-MB state over and over showed on no meter at all
+   *  (tests/ws-debt-metered.test.ts). Bytes on the SOCKET are metered by
+   *  server-ws.ts's `send` wrapper; this is the per-frame vitals view.
+   *
+   *  Gated on a vitals system. It used to run UNCONDITIONALLY while its
+   *  cleanup (server-ws `_cleanupVitals`) deleted the entry only when a vitals
+   *  system existed — so with `diagnostics: false` or `prod: { vitals: false }`
+   *  every connection left one `payloadStats` entry behind forever, and
+   *  `meta.id` is per CONNECTION, so a browser reloading grew the map without
+   *  bound. The measuring cost was the same shape: a full TextEncoder pass
+   *  over every payload, per client, per broadcast, for a diagnostic nobody
+   *  was reading. */
+  function _meterSent(meta: ClientMeta, msg: string): void {
+    if (!vitalsSystem) return;
+    vitalsSystem.serverTransport.onClientStateSent(meta.id);
+    const _bytes = _encoder.encode(msg).byteLength;
+    const _ps = payloadStats.get(meta.id);
+    if (_ps) {
+      _ps.lastPayloadBytes = _bytes;
+      _ps.totalBytes += _bytes;
+      _ps.count++;
+    } else {
+      payloadStats.set(meta.id, {
+        lastPayloadBytes: _bytes,
+        totalBytes: _bytes,
+        count: 1,
+      });
+    }
+    // …and the PROCESS-LIFETIME totals, beside the per-connection map.
+    // `payloadStats` is deleted when a client disconnects, so the Prometheus
+    // counters summed from it reset to zero — and the whole series vanished —
+    // on every browser reload. `rate()`/`increase()` over a resetting counter
+    // is garbage: a counter you cannot sum over time is not a counter.
+    _lifetime.bytes += _bytes;
+    _lifetime.count++;
+    vitalsSystem.pressureMonitor?.onBroadcast(meta.id, _bytes);
+  }
+
+  /** `am cost` for a debt payment: the whole slice went, outside any round. */
+  function _attributeDebtPaid(): void {
+    if (!costMeter) return;
+    attributeRound(costMeter, {
+      anyPatchSend: false,
+      anyFullSend: true,
+      force: false,
+      patchesToSend: [],
+      getUIState: getUIState as () => Record<string, unknown> | undefined,
+    });
+  }
+
   // Both the WS and UDS broadcasters coalesce through the SAME primitive
   // (createCoalescer) so their throttle + never-drop buffer can never diverge —
   // the class of bug behind a field report (UDS dropped patches while WS
@@ -205,46 +305,13 @@ export function createBroadcaster(deps: BroadcastDeps): Broadcaster {
       // wrong, and people act on those. Decided per client (subscriptions
       // differ), so it is observed in the loop and attributed once after it.
       let anyFullSend = false;
-      // ONE serialization per distinct VIEW per round. A view is the pair
-      // (user, subscriptions): two clients with the same pair receive the
-      // same bytes, and used to pay for them twice — 100 clients on a 213 KB
-      // state cost 20 ms a round, and each `meta.lastFullJson` held its own
-      // copy (217 MB for 100 clients on 2.2 MB). Sharing the string shares
-      // the memory too.
-      const fullByView = new Map<string, string | undefined>();
+      // ONE serialization per distinct VIEW per round (`_viewSnapshotter`).
       const snapshot: SnapshotVerdict = {
         attempted: false,
         failed: false,
         err: undefined,
       };
-      const fullFor = (meta: ClientMeta): string | undefined => {
-        const subs = meta.subscriptions
-          ? [...meta.subscriptions].sort().join(",")
-          : "*";
-        // `userMemoKey`, not a bare `JSON.stringify(meta.user)`.
-        //
-        // This key is built for EVERY client on EVERY round, inside the
-        // round-wide try — so one user record `JSON.stringify` refuses took
-        // the whole round down, for every client, on every round after it.
-        // Measured: a `resolveUser` handing back an ORM row with a BigInt
-        // `orgId` (what `node:sqlite` returns past `Number` range, and what
-        // every postgres driver returns for `int8`) froze every connected UI
-        // permanently. Health went degraded after five rounds, so it was loud
-        // on the server and invisible in the browser.
-        //
-        // `userMemoKey` is the sibling reader of the same field, hardened for
-        // exactly this and carrying the argument in its own comment: "a cache
-        // miss costs time; a wrong cache hit costs someone else's data". It
-        // answers null for a user it cannot serialize, and then there is no
-        // cache — never a shared bucket.
-        const userKey = userMemoKey(meta.user);
-        if (userKey === null) return _getFilteredFullJson(meta, snapshot);
-        const key = `${userKey}|${subs}`;
-        if (fullByView.has(key)) return fullByView.get(key);
-        const json = _getFilteredFullJson(meta, snapshot);
-        fullByView.set(key, json);
-        return json;
-      };
+      const fullFor = _viewSnapshotter(snapshot);
       let anyPatchSend = false;
       // One ROUND regardless of client count — the per-client sends below feed
       // payload/bandwidth, but the broadcasts/sec rate diagnoses dispatch
@@ -437,42 +504,8 @@ export function createBroadcaster(deps: BroadcastDeps): Broadcaster {
           meta.lastFullJsonStale = sentKind === "patch";
           if (sentKind === "full") meta.needsFull = false;
           meta.bpLastSentAt = Date.now();
-          // Everything below is vitals bookkeeping, and it is gated as such.
-          // It used to run UNCONDITIONALLY while its cleanup (server-ws
-          // `_cleanupVitals`) deleted the entry only when a vitals system
-          // existed — so with `diagnostics: false` or `prod: { vitals: false }`
-          // every connection left one `payloadStats` entry behind forever, and
-          // `meta.id` is per CONNECTION, so a browser reloading grew the map
-          // without bound. The measuring cost was the same shape: a full
-          // TextEncoder pass over every payload, per client, per broadcast,
-          // for a diagnostic nobody was reading.
-          if (vitalsSystem) {
-            vitalsSystem.serverTransport.onClientStateSent(meta.id);
-            const _bytes = _encoder.encode(msgToSend).byteLength;
-            const _ps = payloadStats.get(meta.id);
-            if (_ps) {
-              _ps.lastPayloadBytes = _bytes;
-              _ps.totalBytes += _bytes;
-              _ps.count++;
-            } else {
-              payloadStats.set(meta.id, {
-                lastPayloadBytes: _bytes,
-                totalBytes: _bytes,
-                count: 1,
-              });
-            }
-            // …and the PROCESS-LIFETIME totals, beside the per-connection map.
-            // `payloadStats` is deleted when a client disconnects, so the
-            // Prometheus counters summed from it reset to zero — and the whole
-            // series vanished — on every browser reload. `rate()`/`increase()`
-            // over a resetting counter is garbage, which is exactly what the
-            // comment above these lines argues ("a counter you cannot sum over
-            // time is not a counter"): the `kind=<uuid>` label was removed,
-            // the monotonicity was not fixed.
-            _lifetime.bytes += _bytes;
-            _lifetime.count++;
-            vitalsSystem.pressureMonitor?.onBroadcast(meta.id, _bytes);
-          }
+          // Vitals bookkeeping (gated on a vitals system) — see `_meterSent`.
+          _meterSent(meta, msgToSend);
         } catch { /* client disconnecting */ }
       }
 
@@ -497,6 +530,14 @@ export function createBroadcaster(deps: BroadcastDeps): Broadcaster {
       }
       // …and the snapshot verdict, same rule, same reason.
       _settleSnapshotVerdict(snapshot);
+      // A client this round skipped is OWED a whole state — arrange to pay it
+      // even if no round ever follows (see `_payDebts`).
+      for (const m of connections.values()) {
+        if (m.needsFull) {
+          _armDebtRetry(true);
+          break;
+        }
+      }
 
       // ── Attribution, once per round: where did those bytes come from ──
       //
@@ -546,6 +587,7 @@ export function createBroadcaster(deps: BroadcastDeps): Broadcaster {
           meta.needsFull = true;
           meta.lastFullJsonStale = true;
         }
+        _armDebtRetry(true);
       }
       _broadcastRound.fail(e);
     }
@@ -579,45 +621,157 @@ export function createBroadcaster(deps: BroadcastDeps): Broadcaster {
     // patches would have them applied on top of a state that already holds
     // them.
     coalescer.flushUrgent();
-    if (!meta.needsFull) return;
-    if (socket.readyState !== WebSocket.OPEN) return;
-    // Not draining either: the backlog skip keeps the debt for the next round
-    // rather than piling a whole state onto a socket that cannot take it.
-    if (socket.bufferedAmount > WS_BUFFER_HIGH_WATER) return;
     const verdict: SnapshotVerdict = {
       attempted: false,
       failed: false,
       err: undefined,
     };
-    const json = _getFilteredFullJson(meta, verdict);
+    const paid = { n: 0 };
+    _payDebt(
+      socket,
+      meta,
+      "recovered from a freeze",
+      _viewSnapshotter(verdict),
+      paid,
+    );
+    if (paid.n > 0) _attributeDebtPaid();
     // A failure is recorded like any round's; a success is not an `ok()` for
     // the whole broadcaster — one view building says nothing of the others.
     if (verdict.failed) _stateSerialization.fail(verdict.err);
-    if (json === undefined) return; // still owed — the next round retries
+  }
+
+  /** Send `meta` the whole state it is owed (`needsFull`), if it can take it
+   *  now. Answers whether the debt is settled — false means it is still owed
+   *  (not draining, or its view could not be built) and a later retry must
+   *  try again. The caller has already flushed the coalescer, and settles
+   *  the snapshot verdict behind `fullFor` once for its whole pass, and
+   *  attributes the pass to `am cost` once when `paid.n` moved. */
+  function _payDebt(
+    socket: WebSocket,
+    meta: ClientMeta,
+    why: string,
+    fullFor: (meta: ClientMeta) => string | undefined,
+    paid: { n: number },
+  ): boolean {
+    if (!meta.needsFull) return true;
+    if (socket.readyState !== WebSocket.OPEN) return true; // dies with it
+    // Not draining either: the backlog skip keeps the debt for the next round
+    // rather than piling a whole state onto a socket that cannot take it.
+    if (socket.bufferedAmount > WS_BUFFER_HIGH_WATER) return false;
+    const json = fullFor(meta);
+    if (json === undefined) return false; // still owed — retried later
     if (!meta.lastFullJsonStale && json === meta.lastFullJson) {
       meta.needsFull = false; // it already holds exactly this text
-      return;
+      return true;
     }
     _warnBigFullState(json, meta);
+    const frame = encRaw("state", json);
     try {
-      socket.send(encRaw("state", json));
+      socket.send(frame);
     } catch {
-      return; // client disconnecting — the debt dies with the socket
+      return true; // client disconnecting — the debt dies with the socket
     }
     meta.lastFullJson = json;
     meta.lastFullJsonStale = false;
     meta.needsFull = false;
     meta.bpLastSentAt = Date.now();
-    vitalsSystem?.serverTransport.onClientStateSent(meta.id);
+    // Metered like a round's frame — it IS one, sent outside a round.
+    _meterSent(meta, frame);
+    paid.n++;
     debug?.(
       `broadcast: sending full state (${json.length}B) — client ${
         meta.id.slice(0, 8)
-      } recovered from a freeze and its skipped rounds were lost`,
+      } ${why} and its skipped rounds were lost`,
     );
+    return true;
   }
   const _unsubscribeRecovered = vitalsSystem?.onClientRecovered?.(
     resyncRecovered,
   );
+
+  // ── Owed rounds are PAID, not merely remembered ─────────────────────────
+  //
+  // A round skipped for a client (its socket not draining, its backpressure
+  // window, a view that could not be built) marks it `needsFull` — and only a
+  // LATER round honoured that. An app that goes idle after the skip has no
+  // later round, so the client sat on the state from before the skip for as
+  // long as nothing changed: measured with four real sockets on a 1.7 MB cell,
+  // the last push and append of a burst never reached any of them, server
+  // idle, no error anywhere. The freeze watchdog's recovery hook pays its own
+  // clients (`resyncRecovered`); this is the same payment for every other
+  // skip, retried until the peer can take it. Backs off to a slow poll for a
+  // peer that never drains (a `bufferedAmount` read per retry, nothing more).
+  // Pinned by tests/ws-backlog-debt-paid-when-idle.test.ts.
+  // The timing rule (retry soon, back off, never hold the process open) is
+  // `createDebtRetry` — shared with the UDS transport, so the two cannot
+  // drift; what paying MEANS stays here.
+  const _debtRetry = createDebtRetry({
+    minMs: syncIntervalMs,
+    pay: _payDebts,
+    onError: (e) => _broadcastRound.fail(e),
+  });
+  function _armDebtRetry(fresh: boolean): void {
+    _debtRetry.arm(fresh);
+  }
+  /** One payment pass over every owed client. Answers whether anything is
+   *  still owed (the scheduler then retries with a longer delay). */
+  function _payDebts(): boolean {
+    let owed = false;
+    // ONE verdict and one view memo for the whole pass — a thrown round owes
+    // every client at once, and a round builds one snapshot per view and
+    // counts one failure, not one per client (see `_viewSnapshotter`).
+    const verdict: SnapshotVerdict = {
+      attempted: false,
+      failed: false,
+      err: undefined,
+    };
+    const fullFor = _viewSnapshotter(verdict);
+    const paid = { n: 0 };
+    try {
+      let any = false;
+      for (const [ws, meta] of connections) {
+        if (meta.needsFull && ws.readyState === WebSocket.OPEN) any = true;
+      }
+      if (!any) return false;
+      // A buffered round pays the debt itself, in order (see resyncRecovered).
+      coalescer.flushUrgent();
+      for (const [ws, meta] of connections) {
+        if (!meta.needsFull || ws.readyState !== WebSocket.OPEN) continue;
+        // A frozen client is paid by the watchdog's recovery hook, the moment
+        // it is heard from — polling it here would only repeat that.
+        if (vitalsSystem?.serverTransport.isFrozen(meta.id)) continue;
+        if (
+          meta.bpMultiplier > 1 &&
+          Date.now() - meta.bpLastSentAt < syncIntervalMs * meta.bpMultiplier
+        ) {
+          owed = true;
+          continue;
+        }
+        if (
+          !_payDebt(
+            ws,
+            meta,
+            "was skipped while it could not keep up",
+            fullFor,
+            paid,
+          )
+        ) {
+          owed = true;
+        }
+      }
+    } catch (e) {
+      owed = true;
+      _broadcastRound.fail(e);
+    } finally {
+      // Failures only: a pass covers the owed clients, not every view, so its
+      // successes are no `ok()` for the broadcaster (same rule as a recovery).
+      if (verdict.failed) _stateSerialization.fail(verdict.err);
+      // ONE attribution per pass, as a round attributes once however many
+      // clients it reached.
+      if (paid.n > 0) _attributeDebtPaid();
+    }
+    return owed;
+  }
   // Same primitive as the patch stream, so TT can never grow a second throttle
   // with different semantics (the asymmetry broadcast-coalescer.ts exists to
   // prevent). Diagnostics pace slower than state: nobody is waiting on it.
@@ -803,6 +957,7 @@ export function createBroadcaster(deps: BroadcastDeps): Broadcaster {
   }
 
   function shutdown(): void {
+    _debtRetry.dispose();
     _unsubscribeRecovered?.();
     coalescer.dispose();
     ttCoalescer.dispose();
@@ -908,14 +1063,39 @@ export function attributeRound(
  *  analyzed" — B's 2 MB cell, over B's own budget, was never named at all.
  *  `owner` is the app's identity (the WS broadcaster passes its app's
  *  `getUIState`); a caller that passes none shares the process latch. */
-type BigStateLatch = { warned: Set<string>; analyzedLen: number };
-const _processLatch: BigStateLatch = { warned: new Set(), analyzedLen: 0 };
+type BigStateLatch = {
+  warned: Set<string>;
+  /** The largest frame analyzed, in UTF-8 bytes (what the budget is in). */
+  analyzedLen: number;
+  /** …and in code units — the cheap gate that keeps this off the hot path. */
+  analyzedChars: number;
+  /** Sends the cheap gate has skipped since the last real measurement. */
+  skipped: number;
+};
+
+/** How many sends the code-unit gate may skip before the frame is measured in
+ *  BYTES again. Bounds what a length can hide (a frame that shrank in
+ *  characters while growing in bytes) to that many rounds, at one scan per
+ *  256 sends. */
+const LATCH_RECHECK_EVERY = 256;
+
+const _processLatch: BigStateLatch = {
+  warned: new Set(),
+  analyzedLen: 0,
+  analyzedChars: 0,
+  skipped: 0,
+};
 const _latches = new WeakMap<object, BigStateLatch>();
 
 function _latchFor(owner: object | undefined): BigStateLatch {
   if (owner === undefined) return _processLatch;
   let l = _latches.get(owner);
-  if (!l) _latches.set(owner, l = { warned: new Set(), analyzedLen: 0 });
+  if (!l) {
+    _latches.set(
+      owner,
+      l = { warned: new Set(), analyzedLen: 0, analyzedChars: 0, skipped: 0 },
+    );
+  }
   return l;
 }
 
@@ -933,17 +1113,53 @@ export function warnBigFullState(
   // (report 2 §9.3) — a 4 MB table pushed once a minute is not the same problem
   // as 4 MB pushed per keystroke, and only the app knows which it is.
   const limit = budgets.declared().cellState ?? BROADCAST_FULL_WARN_BYTES;
-  if (json.length <= limit) return;
-  if (json.length <= latch.analyzedLen) return; // already analyzed this size
+  // THE LATCH FIRST, on the cheap measure. Everything below walks the frame
+  // and then every cell, and this runs on EVERY full-state send: a frame no
+  // larger in code units than one already measured can only repeat that
+  // measurement, so it is dropped here without touching the string.
+  //
+  // What a length can hide is a frame that SHRANK in characters while growing
+  // in bytes — the same text turned CJK. That is why the gate reopens every
+  // `LATCH_RECHECK_EVERY` skipped sends: the miss costs at most that many
+  // rounds instead of lasting for the life of the process, and one scan per
+  // 256 sends is ~3 µs a round. (`/health`'s own `measureCellStates` measures
+  // in bytes independently, so a declared budget records the breach either
+  // way; this is the one-time log line.)
+  if (json.length <= latch.analyzedChars) {
+    if (++latch.skipped < LATCH_RECHECK_EVERY) return;
+  }
+  latch.skipped = 0;
+  // BYTES, the unit the limit is declared in — `json.length` is UTF-16 code
+  // units, and the two agree only for ASCII. A CJK state is ~3× its `length`
+  // on the wire, so an app pushing 2.7 MB per frame was reported at 900 KB and
+  // its declared budget never recorded a breach. `overUtf8` settles the common
+  // case on the length alone; nothing is counted for a frame under a third of
+  // the limit, which is every ordinary frame.
+  if (!overUtf8(json, limit)) {
+    // MEASURED, and under the limit — latched like any other measurement.
+    // `overUtf8` settles a frame on its length alone only below a THIRD of
+    // the limit, so an app with 900 KB of ASCII state, inside its 1 MiB
+    // budget and warned about nothing, counted the whole string on EVERY
+    // full-state send (0.7 ms, measured) — the exact rescan the gate above
+    // exists to stop, reached by the one path that never wrote to it.
+    latch.analyzedChars = Math.max(latch.analyzedChars, json.length);
+    return;
+  }
+  const size = utf8Size(json);
+  if (size <= latch.analyzedLen) {
+    latch.analyzedChars = json.length; // analyzed at this size already
+    return;
+  }
   try {
-    latch.analyzedLen = json.length;
+    latch.analyzedChars = json.length;
+    latch.analyzedLen = size;
     const ui = view();
     if (ui === null || typeof ui !== "object") return;
     const sizes = Object.entries(ui as Record<string, unknown>).map(
       ([cellName, v]) => {
         let n = 0;
         try {
-          n = JSON.stringify(v)?.length ?? 0;
+          n = utf8Size(JSON.stringify(v) ?? "");
         } catch { /* unserializable — 0 */ }
         return [cellName, n] as const;
       },
@@ -962,7 +1178,8 @@ export function warnBigFullState(
     if (fresh.length === 0) return;
     for (const [cellName] of fresh) latch.warned.add(cellName);
     log.warn(
-      `[aio] broadcast: a full-state frame is ${bytes(json.length)} — over ` +
+      "broadcast",
+      `a full-state frame is ${bytes(size)} — over ` +
         `the ${bytes(limit)} budget${
           budgets.declared().cellState !== undefined
             ? " you declared (aio.run({ budgets: { cellState } }))"
@@ -981,4 +1198,6 @@ export function warnBigFullState(
 export function _resetBigStateWarnings(): void {
   _processLatch.warned.clear();
   _processLatch.analyzedLen = 0;
+  _processLatch.analyzedChars = 0;
+  _processLatch.skipped = 0;
 }

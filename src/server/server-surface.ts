@@ -23,6 +23,7 @@ import {
 } from "../state/cell-reactive.ts";
 import {
   applyCellFieldFilter,
+  deepExcludePaths,
   uiKeyVisibility,
 } from "../state/state-filter.ts";
 import { decideForUser } from "./aio-composition.ts";
@@ -310,38 +311,31 @@ type AnyDef = CellDef & Record<string, unknown>;
 
 /** A dot-path exclude, with the tripwire a client read has: the dropped leaf
  *  comes back as a non-enumerable getter that reports, so
- *  `settings.account.key` refuses exactly as a top-level hidden field does
- *  (the same shape as `deepExcludeLoud` in state/cell-reactive.ts, which is
- *  not exported; the outcome is pinned by
- *  tests/server-surface-client-view.test.ts). */
+ *  `settings.account.key` refuses exactly as a top-level hidden field does.
+ *
+ *  THE rule and the client seam's own walker (`deepExcludePaths` in
+ *  state/state-filter.ts) — this used to be a fourth hand-written copy of the
+ *  traversal, and `am surface` printed what the copies disagreed about. All of
+ *  the key's paths go in one call, so a later path cannot spread away an
+ *  earlier one's tripwire. No memo: one surface call renders once. The outcome
+ *  is pinned by tests/server-surface-client-view.test.ts. */
 function excludeLoud(
   value: unknown,
-  segs: string[],
-  onRead: () => void,
+  paths: string[][],
+  onRead: (path: readonly string[]) => void,
 ): unknown {
-  if (segs.length === 0 || value === null || typeof value !== "object") {
-    return value;
-  }
-  if (Array.isArray(value)) {
-    return value.map((el): unknown => excludeLoud(el, segs, onRead));
-  }
-  const obj = value as Slice;
-  const head = segs[0]!;
-  if (segs.length === 1) {
-    const kept: Slice = { ...obj };
-    delete kept[head];
-    Object.defineProperty(kept, head, {
-      get() {
-        onRead();
-        return undefined;
-      },
-      enumerable: false,
-      configurable: true,
-    });
-    return kept;
-  }
-  if (!(head in obj)) return value;
-  return { ...obj, [head]: excludeLoud(obj[head], segs.slice(1), onRead) };
+  return deepExcludePaths(value, paths, {
+    tripwire: (obj, head, path) => {
+      Object.defineProperty(obj, head, {
+        get() {
+          onRead(path);
+          return undefined;
+        },
+        enumerable: false,
+        configurable: true,
+      });
+    },
+  });
 }
 
 /** Run `fn` (synchronously) with every registered cell answering reads the
@@ -471,16 +465,12 @@ function installClientView(
         if (vis.hidden) reportHiddenRead(id, key, vis.reason!);
         const v = view[key];
         return vis.deepSegs
-          ? vis.deepSegs.reduce(
-            (acc, segs) =>
-              excludeLoud(acc, segs, () =>
-                reportHiddenRead(
-                  id,
-                  `${key}.${segs.join(".")}`,
-                  "the field is under a visible.exclude path",
-                )),
-            v,
-          )
+          ? excludeLoud(v, vis.deepSegs, (path) =>
+            reportHiddenRead(
+              id,
+              `${key}.${path.join(".")}`,
+              "the field is under a visible.exclude path",
+            ))
           : v;
       },
       configurable: true,

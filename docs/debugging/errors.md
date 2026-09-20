@@ -225,6 +225,31 @@ await aio.run({
 | `timestamp`     | `number`             | `Date.now()` at error creation                            |
 | `stateSnapshot` | `unknown`            | Cell state at time of error (when available)              |
 
+### A method that says no is not a crash
+
+`throw new Error("not an email address")` is how a method refuses: no state
+changes and the caller's `await` rejects with that error. aio prints such a
+refusal as ONE info line — `contacts:add rejected: not an email address — …` —
+not the red error box, because correct code must not cry wolf. `onError` still
+receives it, with `err.context.rejected` set to that line, so a hook can tell a
+refusal from a bug:
+
+```ts
+onError(err) {
+  if (err.context.rejected) return; // the app said no on purpose
+  sentry.captureException(err);
+},
+```
+
+What counts as a refusal: a plain `Error` (or your own subclass) or a thrown
+string. Anything that looks like a bug stays loud — a `TypeError`,
+`ReferenceError` or other engine error anywhere in the `cause` chain, an error
+carrying a `code`, and aio's own `[tag]` messages.
+
+Every tip in the error box names its way out: an `am` command, a config key, or
+a page in these docs. `tests/every-wall-has-a-door.test.ts` fails the build if
+one does not.
+
 ---
 
 ## Log files

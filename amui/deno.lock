@@ -274,7 +274,7 @@
       "npm:immer@10.2.0"
     ],
     "links": {
-      "jsr:@riagentic/aio@1.0.5-beta": {
+      "jsr:@riagentic/aio@1.0.6-beta": {
         "dependencies": [
           "jsr:@std/assert@1.0.19",
           "jsr:@std/jsonc@1.0.2",
@@ -283,7 +283,9 @@
           "jsr:@std/yaml@1.0.9",
           "npm:esbuild@0.24.2",
           "npm:happy-dom@17.6.3",
-          "npm:immer@10.2.0"
+          "npm:immer@10.2.0",
+          "npm:react-dom@19.1.0",
+          "npm:react@19.1.0"
         ]
       }
     }

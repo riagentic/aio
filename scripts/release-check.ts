@@ -24,6 +24,7 @@
 import { VERSION } from "../src/server/aio-cli.ts";
 import { STAMP_PATH, writeStamp } from "./release-stamp.ts";
 import { descendantPids } from "../src/server/single-instance-lock.ts";
+import { machineFence } from "./test-shards.ts";
 
 const root = new URL("../", import.meta.url).pathname;
 const FAST_ONLY = Deno.args.includes("--fast");
@@ -63,10 +64,16 @@ function gateLogPath(name: string): string {
     ".log";
 }
 
+/** Every gate runs inside the same CPU fence as the test runner: off the
+ *  first cores, niced — the heavy tier (builds, onboarding, mutations) used
+ *  to take the whole machine too. See `machineFence` in test-shards.ts. */
+const FENCE = (await machineFence()).prefix;
+
 async function run(name: string, cmd: string[]): Promise<Result> {
   const t0 = Date.now();
-  const child = new Deno.Command(cmd[0]!, {
-    args: cmd.slice(1),
+  const [bin, ...args] = [...FENCE, ...cmd];
+  const child = new Deno.Command(bin!, {
+    args,
     cwd: root,
     stdout: "piped",
     stderr: "piped",
@@ -287,6 +294,15 @@ const FAST: [string, string[]][] = [
   ["check:env", ["deno", "task", "check:env"]],
   ["update:docs (no diff)", ["deno", "task", "update:docs", "--", "--check"]],
   ["check:doc-coverage", ["deno", "task", "check:doc-coverage"]],
+  // docs/basics/every-option.md — generated from the source; stale, or an
+  // option with no one-line doc, or one more entry without an example, is red.
+  ["update:reference (no diff)", [
+    "deno",
+    "task",
+    "update:reference",
+    "--",
+    "--check",
+  ]],
   ["check:sanitizers", ["deno", "task", "check:sanitizers"]],
   // The randomized rounds. FAST because they are seconds, not minutes, and
   // because what they catch is a class the other gates cannot see: every gate

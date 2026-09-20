@@ -31,8 +31,27 @@ export type OwnResource =
 
 /** Pure effect — returned from reducers/methods, handled by the runtime. */
 export type OwnEffect =
-  | { type: "__own"; kind: "set"; id: string; token: number }
+  | {
+    type: "__own";
+    kind: "set";
+    id: string;
+    token: number;
+    /** Set by `own.set(id, factory, { replace: true })`: this call replaces
+     *  whatever the key holds ON PURPOSE, so the dev "already held" warning is
+     *  not for it. Absent otherwise — the effect is then byte-identical to one
+     *  emitted before the option existed. */
+    replace?: true;
+  }
   | { type: "__own"; kind: "dispose"; id: string };
+
+/** Options for {@linkcode Own.set}. */
+export type OwnSetOptions = {
+  /** `true` = this call replaces a held key on purpose ("one watcher at a
+   *  time"). The previous resource is still disposed first — the option only
+   *  silences the dev warning that a replace happened, for THIS call; every
+   *  other `own.set` of the key, and every other key, still warns. */
+  replace?: boolean;
+};
 
 // One-shot factory side-channel — consumed by the manager on handle().
 const pendingFactories = new Map<number, () => OwnResource>();
@@ -65,8 +84,13 @@ export function _pendingFactoryCount(): number {
 
 /** Keyed disposer-slot API for cell-owned native resources. */
 export interface Own {
-  /** Acquire a resource under `id`. Same id ⇒ previous disposer runs first. */
-  set(id: string, factory: () => OwnResource): OwnEffect;
+  /** Acquire a resource under `id`. Same id ⇒ previous disposer runs first
+   *  (dev warns, once per id, unless this call passes `{ replace: true }`). */
+  set(
+    id: string,
+    factory: () => OwnResource,
+    opts?: OwnSetOptions,
+  ): OwnEffect;
   /** Dispose the resource under `id` (no-op when the slot is empty). */
   dispose(id: string): OwnEffect;
 }
@@ -133,16 +157,53 @@ function _evictStaleFactories(): void {
   }
 }
 
+/** `own.set`'s options, checked loudly. A misspelled key (`{ replaced: true }`)
+ *  or a non-boolean would otherwise leave the warning ON while the author
+ *  believes it is off — the silent kind of wrong the option exists to end. */
+function _replaceOpt(id: string, opts: OwnSetOptions | undefined): boolean {
+  if (opts === undefined) return false;
+  if (opts === null || typeof opts !== "object" || Array.isArray(opts)) {
+    throw new TypeError(
+      `own.set('${id}', factory, opts): opts must be an object like ` +
+        `{ replace: true }, got ${opts === null ? "null" : typeof opts}`,
+    );
+  }
+  for (const k of Object.keys(opts)) {
+    if (k !== "replace") {
+      throw new TypeError(
+        `own.set('${id}', factory, opts): unknown option '${k}' — the only ` +
+          `option is { replace: true }`,
+      );
+    }
+  }
+  if (opts.replace !== undefined && typeof opts.replace !== "boolean") {
+    throw new TypeError(
+      `own.set('${id}', factory, opts): replace must be a boolean, got ` +
+        `${typeof opts.replace}`,
+    );
+  }
+  return opts.replace === true;
+}
+
 /** Resource ownership for cells: `own.set(id, factory)` acquires a resource
  *  the runtime disposes for you (on replace, on cell stop, on shutdown), so a
  *  method never leaks a handle it opened. */
 export const own: Own = {
-  set(id: string, factory: () => OwnResource): OwnEffect {
+  set(
+    id: string,
+    factory: () => OwnResource,
+    opts?: OwnSetOptions,
+  ): OwnEffect {
+    // Validated BEFORE the factory is parked: a throw here must not leave a
+    // closure behind in the side-channel.
+    const replace = _replaceOpt(id, opts);
     const token = nextToken++;
     pendingFactories.set(token, factory);
     parkedAt.set(token, _now());
     _evictStaleFactories();
-    return { type: "__own", kind: "set", id, token };
+    return replace
+      ? { type: "__own", kind: "set", id, token, replace: true }
+      : { type: "__own", kind: "set", id, token };
   },
   dispose(id: string): OwnEffect {
     return { type: "__own", kind: "dispose", id };
@@ -243,15 +304,20 @@ export function createOwnManager(log: Log): {
     // field report had `close()` stop a server process, so re-registering the key
     // after a crash SIGTERMed the freshly started server a second later and the
     // app looked like it could not start at all. Nothing warned. In dev we say
-    // so, once per key, naming the id.
-    if (disposers.has(effect.id) && isDevEnv()) {
+    // so, once per key, naming the id — unless THIS call said replacing is the
+    // point (`own.set(id, f, { replace: true })`, a field report #9). An
+    // opted-in replace does not use up the key's one warning: a later plain
+    // `own.set` of the same key is a different call site and still hears it.
+    if (disposers.has(effect.id) && effect.replace !== true && isDevEnv()) {
       if (!warnedReplace.has(effect.id)) {
         warnedReplace.add(effect.id);
         log.warn(
           `own: '${effect.id}' was already held — disposing the previous ` +
             `resource before acquiring the new one (own.set replaces by key). ` +
             `If that disposer tears down something the new resource needs, use ` +
-            `a distinct id per resource. Warns once per id, dev only.`,
+            `a distinct id per resource; if replacing is the intent, say so: ` +
+            `own.set(id, factory, { replace: true }). Warns once per id, dev ` +
+            `only.`,
         );
       }
     }

@@ -23,7 +23,7 @@
 import { relative } from "@std/path";
 import { parseVersion } from "./am-versions.ts";
 import type { GlobalFlags } from "./am-types.ts";
-import { detectMode, out } from "./am-output.ts";
+import { detectMode, fail, out } from "./am-output.ts";
 import {
   isFixturePath,
   type Removal,
@@ -31,7 +31,7 @@ import {
   removalsInFile,
 } from "../state/removals.ts";
 import { appSourceFiles } from "./app-source-scope.ts";
-import { readFrameworkPinSync } from "../server/deno-json.ts";
+import { DENO_JSON_NAMES, readFrameworkPinSync } from "../server/deno-json.ts";
 
 /** Order a release series so `--from` can mean "after this".
  *
@@ -127,6 +127,17 @@ export async function scanMigrations(
   return found.sort((a, b) => a.file.localeCompare(b.file) || a.line - b.line);
 }
 
+/** Is there a FILE at this path? A plain predicate, so the refusal that
+ *  follows is written beside the question rather than inside a `catch` wide
+ *  enough to swallow it. @internal */
+function existsFile(path: string): boolean {
+  try {
+    return Deno.statSync(path).isFile;
+  } catch {
+    return false; // aio-ok: "not there" is the answer, not an error
+  }
+}
+
 /** `am migrate [--from=<release>]` — the retired spellings THIS app still uses. */
 export async function cmdMigrate(
   args: string[],
@@ -134,6 +145,23 @@ export async function cmdMigrate(
 ): Promise<void> {
   const mode = detectMode(flags);
   const root = Deno.cwd();
+  // IS THERE AN APP HERE AT ALL — asked before anything is walked.
+  //
+  // The scan root is the cwd, and a cwd that is not an app excludes nothing
+  // (the scope is read from the app's own deno.json / .gitignore), so this
+  // command used to answer two ways at once: in `~` or a checkout's parent it
+  // printed the clean bill — the most common and most reassuring outcome, so
+  // nothing looked wrong — and from `/` it first recursed the entire
+  // filesystem to get there. `am pin`, the sibling over the same scope, has
+  // always asked. Same question, same sentence.
+  if (!DENO_JSON_NAMES.some((n) => existsFile(`${root}/${n}`))) {
+    fail(
+      `No ${DENO_JSON_NAMES.join(" or ")} in ${root}.\n` +
+        `am migrate scans an app's own source, so it has to run inside one.`,
+      mode,
+      "cd <your app>   ·   am create <name>",
+    );
+  }
   const explicit = args.find((a) => a.startsWith("--from="))?.slice(7);
   // No `--from`: the app's own pin. A version the tool can look up is not a
   // thing to make someone remember, and the wrong answer here silently hides

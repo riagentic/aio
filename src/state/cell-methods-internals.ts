@@ -42,6 +42,7 @@ import {
   createPolicyStore,
   setQueueTail,
 } from "./method-policy.ts";
+import { isDeliberateRejection, rejectionLine } from "./method-rejection.ts";
 
 // ── The effect channel: s.$do (alpha52) ────────────────────────────────
 
@@ -1358,7 +1359,13 @@ export function buildMethodsExecutor(
               _onError(createAioError("EFFECT_ASYNC_ERROR", e, {
                 cellName: name,
                 actionType: `${prefix}:${_method}`,
+                ...(isDeliberateRejection(e)
+                  ? { rejected: rejectionLine(`${prefix}:${_method}`, e) }
+                  : {}),
               }));
+            } else if (isDeliberateRejection(e)) {
+              // A refusal, not a crash — method-rejection.ts.
+              log.info("cell", rejectionLine(`${prefix}:${_method}`, e));
             } else {
               log.error("cell", `${name} ${_method}() threw: ${e}`);
             }

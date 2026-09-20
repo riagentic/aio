@@ -247,8 +247,8 @@ export type WsLimits = {
  *  `CellsConfig` (`cells: [...]`); `aio-cells-bridge.ts` compiles cells down to this
  *  shape for `_run()`. Not exported from `aio` — internal to the runtime. */
 export type AioConfig<S, A, E> = {
-  /** Unique app identity — used for lock file, UDS socket, KV/SQLite paths, TLS cert dir. Mandatory. */
-  /** App identity — inferred (deno.json / main-module dir) when omitted. */
+  /** App identity — used for lock file, UDS socket, KV/SQLite paths, TLS
+   *  cert dir. Inferred (deno.json / main-module dir) when omitted. */
   appId?: string;
   reduce: (
     state: S,
@@ -344,16 +344,19 @@ export type AioConfig<S, A, E> = {
    *  the page. */
   security?: import("./security-config.ts").SecurityConfig;
   strictOrigin?: boolean; // --expose hardening: require an Origin header on WS upgrade
-  /** Behind a trusted reverse proxy, read the real client IP from this header's first hop for abuse/auth-fail/lockout bucketing (e.g. "x-forwarded-for"). Opt-in — only set it when a proxy actually fronts the app. */
+  /** Behind a trusted reverse proxy, read the real client IP from this header's LAST hop — the one the proxy itself added — for abuse/auth-fail/lockout bucketing (e.g. "x-forwarded-for"). Opt-in — only set it when a proxy actually fronts the app. (Said "first hop" until 1.0.6; the code has always read the last, which is the one a client cannot forge.) */
   trustProxyHeader?: string;
   beforeReduce?: (action: A, state: S, user?: AioUser) => A | null; // intercept actions before reduce — return null to drop
   persistKey?: string; // KV key prefix (default: "state")
   persistDebounceMs?: number; // ms between KV writes (default: 100)
   persistMode?: "single" | "multi"; // 'single' (default): one JSON blob. 'multi': one SQLite row per top-level cell — rewrites only changed cells. No size cap either way (SQLite backend).
   users?: Record<string, AioUser>; // static token map — token is key, user is value
-  /** --expose auth. Default (omitted/`false`) = **no framework auth** (the
-   *  app does its own, or is open on a trusted LAN). `"secret"` = fixed key.
-   *  `true` = a stable key generated once and persisted in the data dir. */
+  /** --expose auth. `"secret"` = fixed key. `true` = a stable key generated
+   *  once and persisted in the data dir. `false` = **no framework auth** (the
+   *  app does its own, or is open on a trusted LAN). Omitted: an exposed app
+   *  with no users/resolveUser/auth gets `true` (since alpha52 —
+   *  `defaultAppKeyConfig` in aio.ts); this line said "omitted = no auth"
+   *  until 1.0.6. */
   key?: string | boolean;
   resolveUser?: ResolveUserFn<S>; // dynamic user resolution — overrides users if both set (AIO-171)
   /** AUTH-1: enable the SQLite session store — `app.sessions.issue(user)`
@@ -399,7 +402,7 @@ export type AioConfig<S, A, E> = {
    *  OPEN" warnings — an app on the network with nothing in front of it and
    *  nothing said about it. */
   host?: string;
-  baseDir?: string; // default: ./src
+  baseDir?: string; // default: the main module's directory (paths.ts baseDirCandidates)
   /** Extra READ-ONLY roots the DEV server may serve, mapped to a URL prefix:
    *  `{ "/shared": "../core/lib" }`. Browser-reachable imports may not leave
    *  `baseDir` (it is an HTTP root, so anything outside 404s), which makes two
@@ -494,7 +497,10 @@ export type AioConfig<S, A, E> = {
   freezeState?: boolean;
   memory?: MemoryConfig; // memory pressure monitoring config
   circuitBreaker?: CircuitBreakerConfig; // auto-disable cells after N errors
-  onRestore?: (state: S) => S; // transform state after restore, before server starts
+  /** Transform state after restore, before the server starts. Mutate it and
+   *  return nothing, or return a replacement — the same rule a cell's own
+   *  `onRestore` follows. */
+  onRestore?: (state: S) => S | void;
   singleton?: boolean; // true (default)=refuse if running, false=allow multi
   /** Library/test mode: no `Deno.exit`, no SIGINT/SIGTERM handlers, no singleton
    *  lock. `app.close()` tears down and resolves, leaving the process alive so a
@@ -572,6 +578,11 @@ export type AioConfig<S, A, E> = {
   _pluginNames?: string[];
   /** Internal: cell defs flagged `worker: true` (see src/server/cell-worker.ts). */
   _workerCells?: import("../state/cell-types.ts").CellDef[];
+  /** Internal: the app's `refusalsReject`, carried to the worker pool so a
+   *  `worker: true` cell answers a REFUSED write the same way the identical
+   *  cell on the main isolate does. The composed reduce is given the flag
+   *  directly; a worker composes its own, in another isolate. */
+  _refusalsReject?: boolean;
   /** Internal: the module a cell worker boots from. Unset means
    *  `Deno.mainModule` — the app's own entry, which is the production answer.
    *  `testServer({ workers: "real" })` sets it to a real app-entry fixture,
@@ -644,6 +655,10 @@ export type AioConfig<S, A, E> = {
     string,
     import("../state/cell-types.ts").CellFieldFilter
   >;
+  /** @internal Ids of the cells with an `onPersist` shape — journal replay
+   *  sends their recovered slice through the same store round trip a clean
+   *  restart does, since a shape names no fields to keep out. */
+  _cellPersistShaped?: string[];
 };
 
 /** Cell id → state key → whether the field is persisted / exposed to the UI. */
@@ -743,6 +758,9 @@ export type CellsConfig = {
     ui?: import("../state/cell-types.ts").CellVisibility;
     persist?: import("../state/cell-types.ts").CellFieldFilter;
   };
+  /** HTTP/WS port. Order: `--port` > `AIO_PORT` > this > `AIO_DEFAULT_PORT` >
+   *  a free port picked at boot; a local Electron app may bind no TCP port
+   *  unless one is named. */
   port?: number;
   /** Bind address. Defaults to `127.0.0.1`, or `0.0.0.0` under `expose`.
    *
@@ -818,38 +836,83 @@ export type CellsConfig = {
    *  `{ sink }` hands them anywhere else. Reports honour the SAME `redactActions`
    *  rule as the journal and the timeline. See docs/debugging/feedback.md. */
   feedback?: import("./feedback-boot.ts").FeedbackInput;
+  /** `false` keeps state in memory only (also `--no-persist`); default `true`
+   *  persists to SQLite (`state.db`). */
   persist?: boolean;
+  /** The key state is stored under in SQLite (`aio_kv`) — the key PREFIX in
+   *  `persistMode: "multi"`. Default `"state"`. */
   persistKey?: string;
+  /** Minimum milliseconds between state writes to SQLite; default 100. */
   persistDebounceMs?: number;
+  /** `"single"` (default) stores all state as one JSON row; `"multi"` one row
+   *  per top-level cell, rewriting only the cells that changed. */
   persistMode?: "single" | "multi";
+  /** Window and page settings — title, width/height, entry, `<head>`,
+   *  lang/dir, theme, chrome, tray. Keys are checked at boot. Not the cell
+   *  key `visible` (which was once also called `ui`). */
   ui?: UiConfig;
+  /** Where the dev server serves the UI source from (`ui.entry` is relative
+   *  to it); default: the main module's directory. */
   baseDir?: string;
-  /** Extra read-only dev-server roots — see CellsConfig.serveDirs. */
+  /** Extra read-only roots the DEV server serves, `"/urlPrefix" → dir` —
+   *  e.g. `{ "/shared": "core/lib" }` for code shared by two apps. Dev-only:
+   *  a prod bundle resolves those modules itself (use `assets` for files
+   *  served in prod too). See docs/build/imports.md. */
   serveDirs?: Record<string, string>;
-  /** Read-only directories this app serves in dev AND prod — see
-   *  CellsConfig.assets. */
+  /** Read-only directories this app serves in dev AND prod, `"/urlPrefix" →
+   *  dir` — e.g. `{ "/media": "media" }`; a compiled build embeds them. Full
+   *  rules on `AioConfig.assets`. */
   assets?: Record<string, string>;
+  /** Which client to launch. Order: `--client` > this > deno.json `client` >
+   *  `"electron"`. */
   client?: "electron" | "browser" | "cli" | "server-only";
+  /** Electron only: keep the server running after the window closes (also
+   *  `--keep-server`); with any other client, boot is refused. */
   keepServer?: boolean;
+  /** How the local client reaches the server. `"auto"` (default): a Unix
+   *  socket for a local, non-exposed Electron app, else WebSocket.
+   *  `--transport` wins. */
   transport?: "uds" | "ws" | "auto";
-  /** See {@link CellsConfig.takeover} (`killExisting` until alpha76). */
+  /** Kill the running instance and take its singleton lock (default:
+   *  false) — the config twin of `--takeover` (`killExisting` until
+   *  alpha76). */
   takeover?: boolean;
+  /** Electron only: start as a thin client of this URL, with no server of
+   *  its own (`""` opens the connect page); exits when the window closes. */
   serverUrl?: string;
+  /** Static token → user map, compared in constant time. `resolveUser` wins
+   *  when both are set. See docs/auth/auth.md. */
   users?: Record<string, AioUser>;
-  /** --expose auth (see CellsConfig.key). */
+  /** Shared-key auth under `--expose`: `"secret"` = a fixed key, `true` = one
+   *  generated once and persisted, `false` = no framework auth. Omitted, an
+   *  exposed app with no other auth gets a persisted key. See docs/auth/auth.md. */
   key?: string | boolean;
+  /** `(token, state) => user | null` — authenticate each connection's token
+   *  against current state. Overrides `users`. */
   resolveUser?: ResolveUserFn;
-  /** AUTH-1: enable the SQLite session store (see AioConfig.sessions). */
+  /** Enable the SQLite session store: `app.sessions.issue(user)` returns a
+   *  bearer token with TTL and revocation (`true` = 30-day TTL). */
   sessions?: boolean | { ttlMs?: number };
-  /** AUTH-2/3: built-in password auth (see AioConfig.auth). */
+  /** Built-in password auth — signup/login/logout, email verify, reset,
+   *  TOTP 2FA, OIDC, HttpOnly session cookie. Implies `sessions`. */
   auth?: boolean | AuthOptions;
+  /** SQLite tables by name: a `table()` bound to a state array mirrors that
+   *  array; an unbound table is reached through `app.db`. See
+   *  docs/persistence/sqlite.md. */
   db?: Record<string, TableDef | DbMapping>;
-  /** See {@linkcode CellsConfig.perfCheck}. */
+  /** Report performance-budget violations (default: on); `false` / `"off"`
+   *  silences them. */
   perfCheck?: PerfCheck;
+  /** Time budgets per dispatch (reduce 100 ms, sync effect 5 ms by default)
+   *  that trigger a report, plus per-method `methods["cell:m"]` overrides
+   *  including `timeout`. `budgets` is the sizes. */
   perfBudget?: PerfBudget;
-  /** Declared size/rate limits — see {@link AioConfig.budgets}. */
+  /** Size and rate limits, in the units a person writes — e.g.
+   *  `{ cellState: "1MB", broadcastRate: "20/s", payload: "500KB" }`.
+   *  `perfBudget` is the times. See docs/build/scaling.md. */
   budgets?: Budgets;
-  /** Which paths the dev watcher restarts on — see {@link AioConfig.watch}.
+  /** Live reload in dev: `false` turns it off, an array narrows what is
+   *  watched (`watch: ["src/ui"]`).
    *
    *  Was allowlisted by the option validator and MISSING from this type, so
    *  the documented escape hatch (`watch: ["src/ui"]`, for an app whose boot
@@ -861,10 +924,22 @@ export type CellsConfig = {
    *  (page shell + `cfg` frame). Was accepted by the option validator but
    *  missing from this type AND dropped by the bridge; all three now agree. */
   renderBudget?: import("../vitals/types.ts").RenderBudget;
+  /** How long `await cell.method()` waits for an async method (default
+   *  30000; 0 = forever) before rejecting. The method itself is not
+   *  cancelled. */
   effectTimeoutMs?: number;
+  /** Extra deep-freeze of committed state after every reduce, on top of the
+   *  always-on Immer freeze; default `true` in dev, `false` in prod. */
   freezeState?: boolean;
-  memory?: MemoryConfig; // memory pressure monitoring config
-  circuitBreaker?: CircuitBreakerConfig; // auto-disable cells after N errors
+  /** Heap-pressure monitor: `enabled`, `interval` (10 s), `warnThreshold`
+   *  (0.75), `criticalThreshold` (0.90), `onMemoryPressure`. See
+   *  docs/debugging/troubleshooting.md (S5). */
+  memory?: MemoryConfig;
+  /** Auto-disable a cell after `maxErrors` errors (optionally within a
+   *  rolling `window` ms), calling `onTrip`. Off by default. */
+  circuitBreaker?: CircuitBreakerConfig;
+  /** Refuse to start while another instance of this appId runs (default
+   *  `true`; `--takeover` replaces it). Ignored under `libraryMode`. */
   singleton?: boolean;
   /** Fail boot loudly if a cell was defined (imported → cell() ran) but not
    *  passed to `aio.run({ cells })` — its dispatches would be silent no-ops
@@ -925,17 +1000,25 @@ export type CellsConfig = {
    *  child-window-to-arbitrary-URL is real attack surface no app should carry
    *  unless it asked for it (maintainer decision, a field report openWindow thread). */
   childWindows?: boolean;
-  libraryMode?: boolean; // no exit/signals/lock; app.close() leaves process alive
+  /** Embed aio in a bigger program or a test: no `Deno.exit`, no signal
+   *  handlers, no instance lock; `app.close()` leaves the process alive. */
+  libraryMode?: boolean;
   /** Internal (test harness): host `worker: true` cells from THIS module
    *  instead of `Deno.mainModule`. Set by `testServer({ workers: "real" })`;
    *  never set it by hand — an app's worker entry is its own entry. */
   _workerEntry?: string;
+  /** Push state to clients at most once per N ms (default 50; 0 = batch
+   *  only within the current tick). */
   syncIntervalMs?: number;
+  /** Send full state instead of a patch when the patch is larger than this
+   *  fraction of it; default 0.5. */
   fullStateThreshold?: number;
   /** Custom HTTP routes — exact path or "/prefix/*" wildcard → handler. The
    *  escape hatch for uploads, webhooks, and API endpoints that don't belong
    *  in the state channel. Reserved: /__aio and /ws. */
   routes?: Record<string, import("./route.ts").RawRouteHandler>;
+  /** Maximum concurrent WebSocket clients; further upgrades are refused.
+   *  Default 100. */
   maxConnections?: number;
   /** Flags this app answers itself — declared so aio passes them through
    *  instead of refusing them as unknown. See {@link AioConfig.appFlags}. */
@@ -957,26 +1040,60 @@ export type CellsConfig = {
   _pluginNames?: string[];
   /** --expose hardening: require an Origin header on WS upgrade. */
   strictOrigin?: boolean;
+  /** Behind a trusted reverse proxy: the header (e.g. `"x-forwarded-for"`)
+   *  whose LAST hop — the one the proxy added — is the client IP for
+   *  lockout buckets. Only set it when a proxy fronts the app. */
   trustProxyHeader?: string;
+  /** Jobs started at boot, validated first; plugin schedules run ahead of
+   *  these. See docs/state/scheduling.md. */
   schedules?: ScheduleDef[];
   /** Isolate cells — only these cells are active (dev mode convenience) */
   isolate?: string[];
+  /** Runs before every action is reduced: return the (possibly changed)
+   *  action to continue, or `null` to drop it. A throw drops it too, and is
+   *  reported. */
   beforeReduce?: (
     action: unknown,
     state: unknown,
     user?: AioUser,
   ) => unknown | null;
+  /** Observe-only: called with (action, state, user) before each action is
+   *  reduced. A throw is reported and never stops dispatch. */
   onAction?: (action: unknown, state: unknown, user?: AioUser) => void;
+  /** Observe-only: called with (effect, state, user) before each effect
+   *  runs. A throw is reported and never stops dispatch. */
   onEffect?: (effect: unknown, state: unknown, user?: AioUser) => void;
+  /** Called with the user when a WebSocket client connects. A local
+   *  Electron window on the Unix-socket transport does not call it. */
   onConnect?: (user?: AioUser) => void;
+  /** Called with the user when a WebSocket client disconnects (not for the
+   *  Unix-socket transport). */
   onDisconnect?: (user?: AioUser) => void;
+  /** Runs once after boot, when cell methods are callable — seed data,
+   *  start a timer. Not awaited; a throw or rejection is logged (see
+   *  `fatalOnStart`). */
   onStart?: (app: AioApp) => void | Promise<void>;
+  /** `true`: a throw or rejection from `onStart` ends the process with exit
+   *  code 1 instead of leaving a half-started app running (under
+   *  `libraryMode`, the app is closed instead). */
   fatalOnStart?: boolean;
-  /** Quiesce your own producers, before dispatch closes — see the twin on
-   *  `AioConfig`, which documents the rule. */
+  /** Stop YOUR OWN producers (timers, feeds) at shutdown — it runs before
+   *  dispatch closes, so a final write from here still lands. Full rule on
+   *  `AioConfig.onStopping`. */
   onStopping?: () => void | Promise<void>;
+  /** Awaited at shutdown, after the cells' `onDestroy`, before the logger
+   *  closes — `log.*` still works here. */
   onStop?: () => void | Promise<void>;
+  /** Receives every `AioError` aio reports — errors, warnings, a method's
+   *  refusal (`err.context.rejected`). See docs/debugging/errors.md. */
   onError?: (error: AioError) => void;
+  /** `(state) => state | void`, once at boot after restore, migrations and
+   *  each cell's `onRestore`. Mutate the state and return nothing, or return a
+   *  replacement; a throw (and a return that is neither) is logged and the
+   *  state kept as it was.
+   *  After a crash, when `journal: true` replay changed state, it runs again
+   *  on the replayed state — so a crash and a clean stop come back the same;
+   *  keep it a repair (idempotent), not a counter. */
   onRestore?: (state: unknown) => unknown;
   /** Structured logging — app.log (narrative), debug.log (all), error.log (errors), warning.log (warnings), perf.log (violations).
    *  Enabled by default. Set `false` to disable. Pass LogConfig to customize. */

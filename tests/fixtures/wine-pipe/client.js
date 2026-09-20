@@ -20,7 +20,13 @@ const emit = (obj) => {
   } else fs.writeSync(1, line + "\n");
 };
 
-const [pipe, httpPipe] = process.argv.slice(2);
+const [pipe, httpPipe, cpus] = process.argv.slice(2);
+// Deno's blocking pool on Windows is 4 × cores. The pool-exhaustion cases
+// need MORE pending operations than that, so they size themselves from the
+// host's own core count (the READY line carries it) — a fixed 40 passes
+// happily on a 32-core machine and proves nothing.
+const POOL = 4 * (Number(cpus) || 8);
+const OVER = POOL + 16;
 const tests = [];
 const winErr = (e) =>
   e &&
@@ -195,6 +201,128 @@ function request(opts, body) {
       );
     });
     await withTimeout(Promise.all(all), 60_000, "8 clients");
+  });
+
+  // ── The pool-exhaustion deadlock (field report §13) ────────────────────
+  //
+  // The host used to park ONE blocking-pool thread per pending pipe
+  // operation (`WaitForSingleObject`, nonblocking FFI), and every open
+  // connection always has a pending read. Deno's pool is capped (4×cores on
+  // Windows), so past the cap every further FFI call AND every async fs op
+  // queued behind threads that could only be freed by work that was itself
+  // queued: a permanent freeze, not slowness. Measured on Windows 11: 40 idle
+  // clients hung, server threads 11 → 39.
+  await test(`node ${OVER} concurrent clients (more than the blocking pool has threads)`, async () => {
+    const all = Array.from({ length: OVER }, (_, k) => {
+      const lines = makeLines(20, `p${k}`).map((l) =>
+        l.replace(/"pad":"x+"/, '"pad":""')
+      );
+      return ndjsonRoundTrip(pipe, lines).then((got) =>
+        assertEchoes(lines, got)
+      );
+    });
+    await withTimeout(Promise.all(all), 120_000, `${OVER} concurrent clients`);
+  });
+
+  // The report's own repro, verbatim: "8 idle clients then one ping → echo in
+  // 3 ms; 40 idle clients → hangs forever (not even the 40 connects
+  // complete)". An IDLE connection is the pure form of the defect — it does
+  // nothing at all, and used to cost one blocking-pool thread for as long as
+  // it stayed open, because a connection ALWAYS has a pending read.
+  await test(`node ${OVER} IDLE clients do not cost the app its blocking pool`, async () => {
+    const idle = [];
+    await withTimeout(
+      Promise.all(
+        Array.from({ length: OVER }, () =>
+          new Promise((resolve, reject) => {
+            const s = net.connect(pipe);
+            s.on("error", reject);
+            s.on("connect", () => {
+              idle.push(s);
+              resolve(null);
+            });
+          })),
+      ),
+      60_000,
+      `${OVER} idle connects`,
+    );
+    try {
+      const lines = makeLines(5, "after-idle").map((l) =>
+        l.replace(/"pad":"x+"/, '"pad":""')
+      );
+      assertEchoes(
+        lines,
+        await withTimeout(
+          ndjsonRoundTrip(pipe, lines),
+          30_000,
+          `echo while ${OVER} clients sit idle`,
+        ),
+      );
+      const r = await withTimeout(
+        request({ path: "/big.sha256", method: "GET", keepBody: true }),
+        30_000,
+        `/big.sha256 while ${OVER} clients sit idle`,
+      );
+      if (r.status !== 200) throw new Error(`/big.sha256 → ${r.status}`);
+    } finally {
+      for (const s of idle) s.destroy();
+    }
+  });
+
+  // The trigger in the real app was UNREAD BODIES, not only count: 58 `<img>`
+  // tags got a 404 with a chunked body, Chromium fired `error` at the headers
+  // and never read the rest, and the server's drain (`FlushFileBuffers`)
+  // parked a pool thread for each one — for the life of the app. So: 40
+  // responses nobody reads, and then the question that matters — does the app
+  // still answer at all?
+  await test(`node ${OVER} never-read response bodies leave the app answering`, async () => {
+    const stalled = [];
+    await withTimeout(
+      Promise.all(
+        Array.from({ length: OVER }, () =>
+          new Promise((resolve, reject) => {
+            // `/big` because the body must be bigger than what the client
+            // buffers before it stops reading: a tiny body is already in the
+            // peer's socket buffer by the time anyone "stops", and nothing
+            // ever stalls. The report's matrix used 200 KB.
+            const req = http.request(
+              { socketPath: httpPipe, path: "/big", method: "GET" },
+              (res) => {
+                // Exactly what `<img>` does with a body it has no use for:
+                // take the headers, read nothing, hold the socket open.
+                res.pause();
+                stalled.push(res);
+                resolve(res.statusCode);
+              },
+            );
+            req.on("error", reject);
+            req.end();
+          })),
+      ),
+      120_000,
+      `${OVER} unread bodies`,
+    );
+    // …and the app is still there. This is the assertion the frozen Windows
+    // app failed: a fresh connection was accepted by the kernel and never
+    // answered again.
+    const lines = makeLines(5, "after-unread").map((l) =>
+      l.replace(/"pad":"x+"/, '"pad":""')
+    );
+    assertEchoes(
+      lines,
+      await withTimeout(
+        ndjsonRoundTrip(pipe, lines),
+        30_000,
+        `echo after ${OVER} unread bodies`,
+      ),
+    );
+    const r = await withTimeout(
+      request({ path: "/big.sha256", method: "GET", keepBody: true }),
+      30_000,
+      `/big.sha256 after ${OVER} unread bodies`,
+    );
+    if (r.status !== 200) throw new Error(`/big.sha256 → ${r.status}`);
+    for (const res of stalled) res.destroy();
   });
 
   await test("node negative control: unhosted pipe fails fast (ENOENT/EBADF)", async () => {

@@ -1,6 +1,11 @@
 // Unit tests for src/electron.ts — pure function coverage (no Electron/display needed)
 import { assert, assertEquals, assertStringIncludes } from "@std/assert";
-import { tmplBounds } from "../src/electron/electron-shared.ts";
+import {
+  electronProfileName,
+  tmplBounds,
+} from "../src/electron/electron-shared.ts";
+import { appHome } from "../src/server/app-dirs.ts";
+import { lockKey, parseLockKey } from "../src/server/single-instance-lock.ts";
 import {
   electronClientScript,
   electronMainScript,
@@ -309,7 +314,14 @@ Deno.test("electron: UDS script — reports a backend outage once, with the true
 });
 
 // ── electron auto-install ────────────────────────────────
-import { autoInstallElectron } from "../src/electron/electron-spawn.ts";
+import {
+  autoInstallElectron,
+  electronConfigNotes,
+  electronImportSpec,
+  electronSpecsInText,
+} from "../src/electron/electron-spawn.ts";
+import { join } from "@std/path";
+import { dropTempDir, tempDir } from "../src/testing/temp-dir.ts";
 import { DEFAULT_ELECTRON_VERSION } from "../src/electron/electron-runtime-fetch.ts";
 
 // The contract is "is Electron INSTALLED now", not "did the installer exit
@@ -364,6 +376,148 @@ Deno.test("autoInstallElectron: answers 'is it installed', not 'did the command 
   assert(
     infos[0]!.includes(`npm:electron@${DEFAULT_ELECTRON_VERSION}`),
     `the auto-install must name the framework's version: ${infos[0]}`,
+  );
+});
+
+// A field report: `deno install --allow-scripts=npm:electron npm:electron@X`
+// takes a POSITIONAL package, so deno REWRITES the app's import-map entry to
+// X. WHICH X is policy — aio is tested with one Electron and a build ships
+// exactly that one — but editing somebody's `deno.json` in SILENCE is not, and
+// neither is leaving a second copy of the version behind so the file
+// disagrees with itself. Both are said, by the installer, for every caller.
+Deno.test("autoInstallElectron: the config rewrite is reported, never silent", async () => {
+  const root = await tempDir("aio-electron-pin-");
+  const none = await tempDir("aio-electron-none-");
+  try {
+    const pinned = JSON.stringify(
+      {
+        imports: { electron: "npm:electron@43.7.1" },
+        tasks: {
+          "install:electron":
+            "deno install --allow-scripts=npm:electron@43.7.1",
+        },
+      },
+      null,
+      2,
+    );
+    await Deno.writeTextFile(join(root, "deno.json"), pinned);
+    const said: string[] = [];
+    const log = {
+      warn: (m: string) => said.push(m),
+      error: (m: string) => said.push(m),
+    };
+    assertEquals(
+      await autoInstallElectron(
+        log,
+        // What `deno install <positional>` does to the file, measured.
+        () => {
+          const rewritten = pinned.replaceAll(
+            '"electron": "npm:electron@43.7.1"',
+            `"electron": "npm:electron@${DEFAULT_ELECTRON_VERSION}"`,
+          );
+          return Deno.writeTextFile(join(root, "deno.json"), rewritten)
+            .then(() => ({ success: true }));
+        },
+        () => Promise.resolve(true),
+        DEFAULT_ELECTRON_VERSION,
+        root,
+      ),
+      true,
+    );
+    const all = said.join("\n");
+    assertStringIncludes(all, "deno.json");
+    assertStringIncludes(all, '"npm:electron@43.7.1"');
+    assertStringIncludes(all, `"npm:electron@${DEFAULT_ELECTRON_VERSION}"`);
+    assertStringIncludes(all, "am fix");
+    // …and the copy the rewrite did NOT touch is named as a disagreement.
+    assertStringIncludes(all, "DISAGREE");
+
+    // An install that changes nothing says nothing.
+    const quiet: string[] = [];
+    await autoInstallElectron(
+      {
+        warn: (m: string) => quiet.push(m),
+        error: (m: string) => quiet.push(m),
+      },
+      () => Promise.resolve({ success: true }),
+      () => Promise.resolve(true),
+      DEFAULT_ELECTRON_VERSION,
+      none,
+    );
+    assertEquals(quiet, []);
+  } finally {
+    await dropTempDir(root);
+    await dropTempDir(none);
+  }
+});
+
+Deno.test("electronConfigNotes / electronSpecsInText: the app's copies of its Electron", () => {
+  const was = '{"imports":{"electron":"npm:electron@43.7.1"}}';
+  const now = '{"imports":{"electron":"npm:electron@44.4.1"}}';
+  assertEquals(electronConfigNotes("deno.json", was, was, "43.7.1"), []);
+  const notes = electronConfigNotes("deno.json", was, now, "44.4.1");
+  assertEquals(notes.length, 1, notes.join("\n"));
+  assertStringIncludes(notes[0]!, "43.7.1");
+  assertStringIncludes(notes[0]!, "44.4.1");
+  // A second, untouched copy is the disagreement the field report hit.
+  const stale = electronConfigNotes(
+    "deno.json",
+    was,
+    now + "\n// npm:electron@43.7.1",
+    "44.4.1",
+  );
+  assertEquals(stale.length, 2, stale.join("\n"));
+  assertStringIncludes(stale[1]!, "DISAGREE");
+  assertEquals(electronSpecsInText("npm:electron@1.2.3 npm:/electron@1.2.3"), [
+    "1.2.3",
+  ]);
+  assertEquals(electronSpecsInText("npm:electron"), []);
+  // An unparseable config never throws out of a NOTE.
+  assertEquals(electronImportSpec("{ not json", "deno.json"), null);
+});
+
+// ── One home, one Chromium profile ──────────────────────────────────
+
+// A field report: aio lets a second instance of an app run beside the first
+// when its home differs (the lock key is `lockKey(appId, home)`), but the
+// Electron userData directory was keyed by the app TITLE alone — so both
+// windows shared one Chromium profile, its cache, Local Storage and
+// IndexedDB. Measured: the second instance hit `net::ERR_CACHE_READ_FAILURE`
+// on a script and rendered a blank window; with the profile pointed
+// elsewhere, 0 failures in 1674 requests on the same machine.
+Deno.test("electron: a non-default home gets its OWN profile, keyed like the lock", () => {
+  const home = "/tmp/fbA-some-other-home";
+  const plain = electronProfileName("wallet", "My Wallet", appHome("wallet"));
+  const other = electronProfileName("wallet", "My Wallet", home);
+  // The default home is untouched — nothing already written moves.
+  assertEquals(plain, "my-wallet");
+  // …and any other home carries THE SAME tag the lock key carries. One key
+  // for both, or the two answers to "which instance is this" drift apart.
+  const tag = parseLockKey(lockKey("wallet", home)).tag;
+  assert(tag, "a non-default home must produce a tagged lock key");
+  assertEquals(other, `my-wallet@${tag}`);
+  assert(other !== plain);
+});
+
+Deno.test("electron: both shells take app.name from the profile name", () => {
+  for (
+    const s of [
+      electronMainScript("http://localhost:3000", {
+        title: "My Wallet",
+        profileName: "my-wallet@deadbeef",
+      }),
+      electronMainScriptUDS("http://localhost:3000", "/tmp/t.sock", {
+        title: "My Wallet",
+        meta: { title: "My Wallet", profileName: "my-wallet@deadbeef" },
+      }),
+    ]
+  ) {
+    assertStringIncludes(s, 'app.name = "my-wallet@deadbeef"');
+  }
+  // No profile name (the default home): the title's slug, exactly as before.
+  assertStringIncludes(
+    electronMainScript("http://localhost:3000", { title: "My Wallet" }),
+    'app.name = "my-wallet"',
   );
 });
 

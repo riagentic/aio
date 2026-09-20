@@ -62,6 +62,16 @@ export function _nameHookSignal(
   _hookSignalNames.set(sig, `<${component ?? "?"}> ${hook} #${n}`);
 }
 
+/** A signal's name for a DEV MESSAGE — one decider, so every diagnostic calls
+ *  the same signal the same thing: its explicit `signal(value, "name")`, else
+ *  the cell it belongs to, else the hook and ordinal that created it
+ *  (`<Row> useLocal #2`). Null when it has no name to give, which is the one
+ *  case a message must handle by asking for one. @internal */
+export function _signalLabel(sig: unknown): string | undefined {
+  return (sig as { _name?: string })?._name ??
+    cellSignalName(sig) ?? _hookSignalNames.get(sig as object);
+}
+
 /** While `fn` runs, give every NESTED `dispatchEvent` its own untracked frame.
  *
  *  `dispatchEvent` runs listeners synchronously, so a `resize` fired from one
@@ -128,11 +138,41 @@ export function runTrackedLifecycle(
   el?: unknown,
 ): unknown {
   _lifecycleDepth++;
+  _hookStack.push(hook);
   try {
     return runTracked(hook, component, renderDeps, fn, el);
   } finally {
+    _hookStack.pop();
     _lifecycleDepth--;
   }
+}
+
+/** The lifecycle callbacks currently on the stack, innermost last.
+ *
+ *  SEPARATE from `_lifecycleDepth` on purpose. That depth decides the burst
+ *  tripwire's CANDIDACY (an event handler fired from inside a lifecycle
+ *  callback is not input), and `onCleanup` must not change that. This stack
+ *  only NAMES the writer for the message, and there `onCleanup` matters: a
+ *  cleanup that writes state — clearing a selection as its row unmounts — runs
+ *  with a render on the stack and no render body executing, so the tripwire
+ *  called it "a render WRITING state that the same render READS" and sent the
+ *  author looking for a write that was not there (a field report). */
+const _hookStack: string[] = [];
+
+/** Run `fn` marked as `hook`, for the message only — no read tracking, no
+ *  effect on `_inLifecycleCallback`. @internal */
+export function _withLifecycleHook<T>(hook: string, fn: () => T): T {
+  _hookStack.push(hook);
+  try {
+    return fn();
+  } finally {
+    _hookStack.pop();
+  }
+}
+
+/** @internal The innermost lifecycle callback running, or null. */
+export function _currentLifecycleHook(): string | null {
+  return _hookStack.length > 0 ? _hookStack[_hookStack.length - 1]! : null;
 }
 
 /** How many lifecycle callbacks (`onMount`/`afterRender`) are on the stack.
@@ -170,8 +210,7 @@ function runTracked(
     if (renderDeps) {
       for (const sig of seen) {
         if (renderDeps.has(sig)) continue;
-        const name = (sig as { _name?: string })._name ??
-          cellSignalName(sig) ?? _hookSignalNames.get(sig as object);
+        const name = _signalLabel(sig);
         const where = component ? `<${component}>` : "a component";
         const key = `${hook}|${where}|${name ?? "?"}`;
         if (_said.has(key)) continue;

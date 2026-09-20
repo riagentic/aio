@@ -29,8 +29,8 @@
 
 import { _inRender, onCleanup, useRef } from "./renderer-lifecycle.ts";
 import { _activeRoot } from "./renderer-state.ts";
-import { _isSsrRendering } from "./vdom-ssr.ts";
-import { escapeAttr, escapeHtml } from "./ssr-utils.ts";
+import { _inSsrCall } from "./vdom-ssr.ts";
+import { attrNameOf, escapeAttr, escapeHtml } from "./ssr-utils.ts";
 import { isDevMode } from "../state/dev-flag.ts";
 
 /** One `<meta>` or `<link>` as attributes: `{ name: "description", content }`,
@@ -97,10 +97,79 @@ let _baseTitles = new WeakMap<Document, string>();
 const ATTR = "data-aio-head";
 const ONE_PER_PAGE = new Set(["canonical", "manifest", "icon"]);
 
+/** The attributes that give a `<meta>` its identity, in priority order. */
+const META_ID_ATTRS = [
+  "name",
+  "property",
+  "http-equiv",
+  "charset",
+  "itemprop",
+] as const;
+
+/** A `<meta>`'s identity: WHICH attribute names it and what that attribute
+ *  says — `name=description`, not `description`.
+ *
+ *  The value alone was the key, so two tags that name DIFFERENT things through
+ *  different attributes collided and one of them was silently dropped. The
+ *  pair Google's own markup asks for —
+ *  `<meta name="description">` beside `<meta itemprop="description">` — shipped
+ *  as ONE tag, and so did `{ name: "twitter:title" }` beside
+ *  `{ property: "twitter:title" }`. The docs list the attributes as
+ *  alternative identity SOURCES; an identity is one of them plus its value. */
+function _metaId(t: HeadTag): string | undefined {
+  for (const a of META_ID_ATTRS) {
+    const v = t[a];
+    // An attribute the writers omit (`undefined`/`false`) is not an identity.
+    if (v !== undefined && v !== false) return `${a}=${String(v)}`;
+  }
+  return undefined;
+}
+
+/** A tag with its attribute names as HTML spells them.
+ *
+ *  `httpEquiv` is the camelCase spelling `_tagKey` has always accepted as a
+ *  `<meta>`'s identity — the one aio uses everywhere else (`htmlFor` → `for`,
+ *  `stopColor` → `stop-color`), and the one a React user types from muscle
+ *  memory. Both writers emitted the key VERBATIM, so the tag shipped as
+ *  `<meta httpEquiv="refresh">`: attribute names are case-insensitive but not
+ *  hyphen-insensitive, so that is `httpequiv`, which no browser reads. The
+ *  refresh never fired, the CSP was never applied, and nothing said so — the
+ *  silent no-op `htmlFor` had before `_ATTR_NAME` fixed it in ssr-utils.ts.
+ *
+ *  Through {@linkcode attrNameOf}, the ONE table the client patcher,
+ *  hydration and both SSR writers already share — not a second rule for one
+ *  key beside it. Two deciders only ever disagree, and this pair did: a
+ *  mapping added to the table never reached `<head>`, and the hand-written
+ *  rule asked whether the hyphenated key was absent and then re-applied the
+ *  tag's own `"http-equiv": undefined` over its own answer, so a tag built by
+ *  spreading a base that mentions the key lost the attribute entirely.
+ *
+ *  Normalized ONCE, here, so `collectHead()` and the live document cannot
+ *  disagree — and so a tag that spells it both ways still writes exactly one
+ *  attribute, with the hyphenated (explicit) one winning. */
+function _htmlAttrs(t: HeadTag): HeadTag {
+  let renamed = false;
+  for (const k of Object.keys(t)) {
+    if (attrNameOf(k) !== k) {
+      renamed = true;
+      break;
+    }
+  }
+  if (!renamed) return t;
+  const out: Record<string, string | number | boolean | undefined> = {};
+  for (const [k, v] of Object.entries(t)) {
+    const name = attrNameOf(k);
+    // The explicit HTML spelling in the same tag wins, and neither spelling
+    // is written twice.
+    if (name !== k && t[name] !== undefined) continue;
+    out[name] = v;
+  }
+  return out;
+}
+
 function _tagKey(kind: "meta" | "link", t: HeadTag): string {
   if (kind === "meta") {
-    const id = t.name ?? t.property ?? t["http-equiv"] ?? t.httpEquiv ??
-      t.charset ?? t.itemprop;
+    const id = _metaId(t);
     return id === undefined ? `meta:${JSON.stringify(t)}` : `meta:${id}`;
   }
   const rel = String(t.rel ?? "");
@@ -115,11 +184,15 @@ function _merge(entries: Iterable<HeadInput>): Merged {
   const tags = new Map<string, Merged["tags"][number]>();
   for (const e of entries) {
     if (e.title !== undefined) title = e.title;
+    // Normalized BEFORE the key is taken, so the identity and the attribute
+    // that carries it are the same name (see `_htmlAttrs`).
     for (const t of e.meta ?? []) {
-      tags.set(_tagKey("meta", t), { kind: "meta", attrs: t });
+      const attrs = _htmlAttrs(t);
+      tags.set(_tagKey("meta", attrs), { kind: "meta", attrs });
     }
     for (const t of e.link ?? []) {
-      tags.set(_tagKey("link", t), { kind: "link", attrs: t });
+      const attrs = _htmlAttrs(t);
+      tags.set(_tagKey("link", attrs), { kind: "link", attrs });
     }
   }
   return { title, tags: [...tags.values()] };
@@ -203,7 +276,17 @@ function _renderDoc(): Document | undefined {
  * {@linkcode collectHead} afterwards and put the result in your `<head>`.
  */
 export function useHead(input: HeadInput): void {
-  if (_isSsrRendering()) {
+  // `_inSsrCall()` and not `_isSsrRendering()`, the same question every other
+  // hook asks: the latter is true for the WHOLE span of a `renderToStream`,
+  // including the async gaps between chunks, so a `useHead` from a timer, a
+  // promise continuation or an event handler was silently accepted and what
+  // it asked for went into the head of whatever page happened to be streaming
+  // — the title of a response changed by code with nothing to do with it, in
+  // the one hook whose entire job is the head of a page. This is true only
+  // for the synchronous span of one server component call, which is exactly
+  // when a component body runs (both writers call components through
+  // `_ssrComponent`).
+  if (_inSsrCall()) {
     _ssr.push(input);
     return;
   }

@@ -26,7 +26,8 @@ import { createOwnManager, type OwnEffect } from "./state/own.ts";
 import { routeEffect } from "./state/route-effect.ts";
 import { Listeners } from "./state/listeners.ts";
 import { signal } from "./state/signal.ts";
-import { _setCallTimeouts } from "./state/cell-impl.ts";
+import { _setCallDeadlineClock, _setCallTimeouts } from "./state/cell-impl.ts";
+import { _setSleepClock } from "./state/async-helpers.ts";
 import { bindCell, bindCellReactive, type CellDef } from "./state/cell.ts";
 import { _whileCellsBoot, makeUnboundGuard } from "./state/cell-catalog.ts";
 import { composeCells } from "./state/cell-compose.ts";
@@ -193,6 +194,10 @@ export type {
   ValidationRule,
 } from "./air/form.ts";
 export { useVirtualList } from "./air/virtual-list.ts";
+// React's hook spellings, first-class on `aio/air` since 1.0.6-beta (also on
+// `aio/air/compat`, unchanged). The first thing a React-trained developer or
+// agent writes is `import { useState } from "aio/air"` — it did not compile.
+export { useCallback, useEffect, useMemo, useState } from "./air/compat.ts";
 export type {
   VirtualListConfig,
   VirtualListState,
@@ -400,6 +405,20 @@ let _wantVirtual = false;
  *  — after that the manager exists and its timer host is fixed. */
 export function _useVirtualSchedules(): void {
   _wantVirtual = true;
+  // The call ceilings run on the same virtual clock (as well as the real one):
+  // `advance(40_000)` past a hung method's 30s ceiling gives up on it, as the
+  // app would. See `_setCallDeadlineClock`.
+  _setCallDeadlineClock(() => {
+    _scheduler();
+    return _clock;
+  });
+  // `sleep()` / `race`'s `timeout` too — `advance(10_000)` ends a method's
+  // `await sleep(10_000)`, as it would have ended by then in the app. Real
+  // time still counts as well. See `_setSleepClock`.
+  _setSleepClock(() => {
+    _scheduler();
+    return _clock;
+  });
 }
 
 /** Put the real `Date` back — set while the virtual clock is ahead of it. */

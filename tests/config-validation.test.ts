@@ -5,7 +5,11 @@ import {
   VALID_UI_KEYS,
   validateConfig,
 } from "../src/server/aio.ts";
-import { ENUM_VALUES, NUMERIC_VALUES } from "../src/server/config.ts";
+import {
+  ENUM_VALUES,
+  NUMERIC_VALUES,
+  SHAPE_VALUES,
+} from "../src/server/config.ts";
 
 /** A value each key will ACCEPT. `"test"` is fine for the free-form keys and
  *  is now a boot error for the enumerated ones — `client`, `transport`,
@@ -17,10 +21,27 @@ import { ENUM_VALUES, NUMERIC_VALUES } from "../src/server/config.ts";
  *  `NUMERIC_VALUES` is the same idea for numbers, so the same reading: a key
  *  with a range gets a number IN it. `"test"` used to pass for `port` and
  *  `maxConnections` too — this file asserting that a port could be the word
- *  "test" was itself the leniency. */
+ *  "test" was itself the leniency.
+ *
+ *  `SHAPE_VALUES` is the third: a key typed `boolean` gets a boolean, a list
+ *  gets a list, a block gets a block. `"test"` used to pass for `expose` here
+ *  too — this file asserting that `expose` could be the word "test" was the
+ *  same leniency one layer out, and `expose: "false"` booting ON THE NETWORK
+ *  is what it was hiding.
+ *
+ *  `false`, not `true`, for the booleans: this object sets EVERY key at once,
+ *  and half the couplings in `configConflicts` are about two switches both
+ *  being on (`takeover` + `libraryMode`, `singleton` + `libraryMode`). Those
+ *  ask `=== true`, so the old `"test"` sailed past them — the same leniency
+ *  again, one layer further in. */
+const SHAPE_SAMPLE = { boolean: false, array: [], object: {} } as const;
 const sample = (k: string): unknown =>
   ENUM_VALUES[k]?.[0] ??
-    (k in NUMERIC_VALUES ? NUMERIC_VALUES[k]!.min : "test");
+    (k in NUMERIC_VALUES
+      ? NUMERIC_VALUES[k]!.min
+      : k in SHAPE_VALUES
+      ? SHAPE_SAMPLE[SHAPE_VALUES[k]!]
+      : "test");
 
 // Test helper: inject fake exit that captures the code instead of killing the process
 function fakeExit(): {

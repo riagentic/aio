@@ -272,6 +272,15 @@ export function dmgRefusal(): string {
     `        • publish the .app (it is the real artifact — a .dmg only wraps it)`;
 }
 
+/** The prefix of every scratch directory a DMG build makes, here and on the
+ *  Mac. Deliberately NOT `aio-…`: `/tmp/aio*` is the namespace the repo's temp
+ *  sweepers walk (`check-orphans --clean-stale` at the start of every suite,
+ *  `clean:tmp`), and a build staging its `payload.tgz` there lost it between
+ *  `tar` and `scp` once while a suite started beside it (a field report, #7).
+ *  The sweep no longer takes a name as proof; this keeps the build out of
+ *  reach of any sweeper that still does. */
+const DMG_SCRATCH_PREFIX = "dmgstage-";
+
 /** Make a `.dmg` from an assembled `.app`, on this host or a remote Mac.
  *
  *  Returns the DMG path. Throws with {@link dmgRefusal} when no strategy is
@@ -299,7 +308,7 @@ export async function finalizeMacDmg(opts: {
   if (os === "darwin") {
     // `bash`, not `sh`: the script is written for bash (pipefail, the glob
     // loops), exactly as the remote path pins it with `bash -s`.
-    const work = await Deno.makeTempDir({ prefix: "aio-dmg-" });
+    const work = await Deno.makeTempDir({ prefix: DMG_SCRATCH_PREFIX });
     try {
       const r = await run("bash", [
         "-c",
@@ -332,9 +341,13 @@ export async function finalizeMacDmg(opts: {
   const seams = opts.remote ?? realRemoteSeams(host);
 
   // ── remote: tar the .app, ship it, run hdiutil, fetch the .dmg ──
-  const work = `/tmp/aio-dmg-${Deno.pid}`;
+  // Unique per BUILD, not per process: `/tmp/aio-dmg-<pid>` was shared by
+  // two builds from two hosts with the same pid, and by a later build that
+  // reused the pid of one whose failure left the dir behind (`rm -rf` below
+  // runs on success only).
+  const work = `/tmp/${DMG_SCRATCH_PREFIX}${crypto.randomUUID()}`;
   const appName = opts.appPath.slice(dirname(opts.appPath).length + 1);
-  const staging = await Deno.makeTempDir({ prefix: "aio-dmg-" });
+  const staging = await Deno.makeTempDir({ prefix: DMG_SCRATCH_PREFIX });
   const payload = join(staging, "payload.tgz");
 
   try {

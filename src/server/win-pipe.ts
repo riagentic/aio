@@ -11,14 +11,32 @@
  * pipe natively; there is no filesystem entry and no port.
  *
  * Shape of the I/O: every operation is started synchronously (it returns at
- * once with `ERROR_IO_PENDING`), the WAIT for it is a `nonblocking: true` FFI
- * call — `WaitForSingleObject` on the operation's own event, on a pool
- * thread — and the RESULT is read back with a synchronous
+ * once with `ERROR_IO_PENDING`), every completion arrives through ONE I/O
+ * completion port, and the RESULT is read back with a synchronous
  * `GetOverlappedResult(bWait=FALSE)` on the main thread, so `GetLastError()`
  * (thread-local) is read on the thread that owns the error. The event loop
  * never stalls. Back-pressure: one outstanding read per connection (the
  * `ReadableStream` pulls one chunk at a time), writes serialized by the
  * `WritableStream`.
+ *
+ * ONE PARKED THREAD, whatever the connection count. This used to be one
+ * `nonblocking: true` `WaitForSingleObject` per PENDING OPERATION, and every
+ * open connection always has a pending read — so N connections parked N
+ * threads of Deno's blocking pool, which is capped (4×cores on Windows). Past
+ * the cap every further nonblocking FFI call AND every async fs op queued
+ * behind waits that could only be released by work that was itself queued:
+ * the whole app froze, permanently, and a compiled app on Windows 11 did
+ * exactly that on a page with 58 unread `<img>` responses (field report §13 —
+ * status-bar clock stopped, both processes at 0% CPU, server threads 42, a
+ * fresh pipe connection accepted by the kernel and never answered). The port
+ * replaces that with a completion QUEUE: one parked
+ * `GetQueuedCompletionStatusEx`, resolving operations by their OVERLAPPED
+ * address, running only while something is pending.
+ *
+ * The other unbounded wait was `drain()` — `FlushFileBuffers` returns when the
+ * PEER has read what we wrote, i.e. never, for a response nobody reads. It is
+ * bounded now (`PIPE_DRAIN_TIMEOUT_MS`), and a peer that stops reading costs a
+ * closed connection instead of a thread for the life of the process.
  *
  * Fail loud: every Win32 failure throws an Error naming the call, the
  * GetLastError code and the path. A peer that went away is the ONE thing that
@@ -30,6 +48,7 @@
  */
 
 import type { LocalConn, LocalListener } from "./local-listen.ts";
+import { log } from "../diagnostics/logger-api.ts";
 
 // ── Win32 constants ───────────────────────────────────────────────────────
 
@@ -60,8 +79,25 @@ export const GENERIC_READ = 0x80000000;
 export const GENERIC_WRITE = 0x40000000;
 export const OPEN_EXISTING = 3;
 export const INFINITE = 0xFFFFFFFF;
-export const WAIT_OBJECT_0 = 0;
 export const SDDL_REVISION_1 = 1;
+
+/** How long a server connection waits for the peer to READ what was written
+ *  to it before it is torn down anyway.
+ *
+ *  `drain` exists because a server pipe closed with unread bytes can lose
+ *  them, and `FlushFileBuffers` is the documented way to wait; the wait ends
+ *  when the CLIENT reads, which for a body nobody reads is never. A real
+ *  client empties a 64 KB pipe buffer in microseconds — it reads into its own
+ *  buffers whether or not anything consumes them — so seconds here are
+ *  generous for every live peer and a bound for every dead one. */
+export const PIPE_DRAIN_TIMEOUT_MS = 3000;
+
+/** How many completion packets one `GetQueuedCompletionStatusEx` may take. */
+export const IOCP_BATCH = 64;
+
+/** `OVERLAPPED_ENTRY`, x64: 32 bytes.
+ *  | 0 lpCompletionKey | 8 lpOverlapped | 16 Internal | 24 bytes transferred | */
+export const OVERLAPPED_ENTRY_SIZE = 32;
 
 /** `(HANDLE)-1`. */
 export const INVALID_HANDLE_VALUE = 0xFFFFFFFFFFFFFFFFn;
@@ -121,6 +157,14 @@ export function wstr(s: string): Uint8Array {
   return out;
 }
 
+/** The `lpOverlapped` of entry `i` in a completion batch — the address that
+ *  says WHICH operation finished, and the only thing the port loop needs to
+ *  resolve one. Pure. */
+export function entryOverlapped(entries: Uint8Array, i: number): bigint {
+  return new DataView(entries.buffer, entries.byteOffset)
+    .getBigUint64(i * OVERLAPPED_ENTRY_SIZE + 8, true);
+}
+
 /** An `OVERLAPPED` struct, x64 layout (32 bytes):
  *
  *  | offset | field                              |
@@ -133,7 +177,12 @@ export function wstr(s: string): Uint8Array {
  *  Everything but `hEvent` is zero: a pipe has no file position, and the
  *  system owns `Internal`/`InternalHigh`. Fresh per operation — the kernel
  *  writes into it while the operation is pending, so one struct must never be
- *  shared by two in-flight operations. */
+ *  shared by two in-flight operations.
+ *
+ *  `hEvent` is NULL for every operation this module starts: the handle is
+ *  bound to the completion port, which is where the completion is delivered.
+ *  It must also stay EVEN — a set low bit tells the kernel to skip the port,
+ *  and the operation would then complete into nothing. */
 export function overlappedBytes(hEvent: bigint): Uint8Array {
   const buf = new Uint8Array(32);
   new DataView(buf.buffer).setBigUint64(24, hEvent, true);
@@ -194,22 +243,26 @@ const K32_SYMBOLS = {
     parameters: ["pointer", "buffer", "buffer", "i32"],
     result: "i32",
   },
-  // THE blocking wait — on a pool thread, never the event loop.
-  WaitForSingleObject: {
-    parameters: ["pointer", "u32"],
-    result: "u32",
-    nonblocking: true,
-  },
-  CreateEventW: {
-    parameters: ["pointer", "i32", "i32", "pointer"],
+  // The completion port: created once, every pipe handle bound to it, and
+  // ONE parked wait for the whole process (`IoPort`).
+  CreateIoCompletionPort: {
+    parameters: ["pointer", "pointer", "usize", "u32"],
     result: "pointer",
+  },
+  // THE blocking wait — on a pool thread, never the event loop, and exactly
+  // one of them no matter how many operations are in flight.
+  GetQueuedCompletionStatusEx: {
+    parameters: ["pointer", "buffer", "u32", "buffer", "u32", "i32"],
+    result: "i32",
+    nonblocking: true,
   },
   CloseHandle: { parameters: ["pointer"], result: "i32" },
   CancelIoEx: { parameters: ["pointer", "pointer"], result: "i32" },
   // Blocks until every byte written has been READ by the client (or the peer
-  // disconnects). A `nonblocking: true` FFI call runs on a pool thread, so the
-  // event loop keeps serving other connections while this one drains — see
-  // PipeConn#drain for why a server pipe needs it at all.
+  // disconnects) — so for a response nobody reads it blocks forever, which is
+  // why `PipeConn#drain` races it against PIPE_DRAIN_TIMEOUT_MS and closes. It has
+  // no overlapped form, so this one call still costs a pool thread; the
+  // timeout is what bounds how long.
   FlushFileBuffers: {
     parameters: ["pointer"],
     result: "i32",
@@ -265,54 +318,151 @@ function isInvalidHandle(h: Handle): boolean {
   return h === null || handleValue(h) === INVALID_HANDLE_VALUE;
 }
 
-/** A manual-reset event for one operation's OVERLAPPED. Manual-reset is what
- *  the overlapped-I/O contract wants: the system resets it when an operation
- *  starts and sets it on completion. */
-function createEvent(path: string): { h: Handle; ovl: Uint8Array } {
-  const h = k32().CreateEventW(null, 1, 0, null);
-  if (isInvalidHandle(h)) {
-    throw winError("CreateEventW", k32().GetLastError(), path);
-  }
-  return { h, ovl: overlappedBytes(handleValue(h)) };
-}
-
 function closeHandle(h: Handle): void {
   if (h !== null) k32().CloseHandle(h);
 }
 
-/** Did the blocking wait itself fail?
+/** THE completion port — one for the process, one parked wait for all of it.
  *
- *  `INFINITE` rules out `WAIT_TIMEOUT`, so anything other than `WAIT_OBJECT_0`
- *  means the wait machinery failed (a closed or invalid event handle) — not an
- *  outcome of the I/O the caller started. The distinction is the whole point:
- *  the return value used to be discarded, so a failed wait fell through to
- *  `GetOverlappedResult` on an operation that had never completed and reported
- *  whatever `GetLastError` happened to hold, under the WRONG call's name. This
- *  file's rule is that every Win32 failure throws an Error naming the call that
- *  failed. */
-export function waitFailed(rc: number): boolean {
-  return rc !== WAIT_OBJECT_0;
+ *  Every pipe handle is bound to it at creation (`attach`), so every
+ *  overlapped operation started on that handle completes as a packet on this
+ *  queue. `completion(ovl)` resolves when the packet carrying that
+ *  OVERLAPPED's address arrives. The loop runs only while something is
+ *  pending: an idle process parks nothing and holds the event loop open with
+ *  nothing, exactly as before.
+ *
+ *  Cost: ONE blocking-pool thread, for any number of connections. That is the
+ *  whole point — see the module doc for what one-thread-per-operation did to
+ *  a real app. */
+class IoPort {
+  #h: Handle = null;
+  #waiting = new Map<
+    bigint,
+    { done: () => void; fail: (e: Error) => void }
+  >();
+  #entries = new Uint8Array(OVERLAPPED_ENTRY_SIZE * IOCP_BATCH);
+  #removed = new Uint8Array(4);
+  #pumping = false;
+
+  #port(): Handle {
+    if (this.#h === null) {
+      const h = k32().CreateIoCompletionPort(
+        Deno.UnsafePointer.create(INVALID_HANDLE_VALUE),
+        null,
+        0n,
+        0,
+      );
+      if (isInvalidHandle(h)) {
+        throw winError(
+          "CreateIoCompletionPort",
+          k32().GetLastError(),
+          "the aio pipe completion port",
+        );
+      }
+      this.#h = h;
+    }
+    return this.#h;
+  }
+
+  /** Bind one pipe handle to the port. Once, at creation — the association is
+   *  permanent and a second one fails. */
+  attach(h: Handle, path: string): void {
+    if (isInvalidHandle(k32().CreateIoCompletionPort(h, this.#port(), 0n, 0))) {
+      throw winError(
+        "CreateIoCompletionPort (binding the pipe to it)",
+        k32().GetLastError(),
+        path,
+      );
+    }
+  }
+
+  /** Resolve when the operation using `ovl` completes. Registered BEFORE the
+   *  loop can dequeue anything (JS is single-threaded and the caller starts
+   *  the operation, then calls this, with no await between), so a packet can
+   *  never arrive for an address nobody is waiting on. */
+  completion(ovl: Uint8Array): Promise<void> {
+    const key = pointerOf(ovl);
+    if (this.#waiting.has(key)) {
+      throw new Error(
+        `win-pipe: two operations share one OVERLAPPED (${key}) — the kernel ` +
+          `writes into it while an operation is pending, so this would ` +
+          `corrupt both`,
+      );
+    }
+    return new Promise<void>((done, fail) => {
+      this.#waiting.set(key, { done, fail });
+      this.#pump();
+    });
+  }
+
+  #pump(): void {
+    if (this.#pumping) return;
+    this.#pumping = true;
+    void (async () => {
+      try {
+        while (this.#waiting.size > 0) {
+          const ok = await k32().GetQueuedCompletionStatusEx(
+            this.#port(),
+            this.#entries,
+            IOCP_BATCH,
+            this.#removed,
+            INFINITE,
+            0,
+          );
+          if (!ok) {
+            // INFINITE rules out a timeout, so this is the port itself: a
+            // handle that cannot be waited on. Every pending operation is
+            // unresolvable — fail them all, loudly, rather than leave the
+            // app parked on promises nothing will ever settle.
+            throw new Error(
+              "win-pipe: GetQueuedCompletionStatusEx failed on the aio pipe " +
+                "completion port — every pending pipe operation is now failed",
+            );
+          }
+          const n = readU32(this.#removed);
+          for (let i = 0; i < n; i++) {
+            const w = this.#waiting.get(entryOverlapped(this.#entries, i));
+            if (w === undefined) continue; // see `completion`: unreachable
+            this.#waiting.delete(entryOverlapped(this.#entries, i));
+            w.done();
+          }
+        }
+      } catch (e) {
+        const err = e instanceof Error ? e : new Error(String(e));
+        for (const w of [...this.#waiting.values()]) w.fail(err);
+        this.#waiting.clear();
+      } finally {
+        // Synchronous with the loop's exit: a `completion()` registered after
+        // this restarts the loop, one registered before kept it running.
+        this.#pumping = false;
+      }
+    })();
+  }
+}
+
+const ioPort = new IoPort();
+
+/** The address of a buffer, as the kernel will report it back. */
+function pointerOf(buf: Uint8Array): bigint {
+  const p = Deno.UnsafePointer.of(buf);
+  if (p === null) throw new Error("win-pipe: an OVERLAPPED with no address");
+  return BigInt(Deno.UnsafePointer.value(p));
 }
 
 /** Wait for one started overlapped operation to finish; return the byte count
  *  or the Win32 error code. Never throws for an operation OUTCOME — the caller
  *  decides what a code means on its path (a read's BROKEN_PIPE is EOF, a
- *  connect's is a failure). A failure of the WAIT is not an outcome, and has no
- *  meaning any caller could act on, so it throws. */
+ *  connect's is a failure). A failure of the completion PORT is not an
+ *  outcome, and has no meaning any caller could act on, so it throws. */
 async function finishOverlapped(
   h: Handle,
-  ev: { h: Handle; ovl: Uint8Array },
+  ovl: Uint8Array,
 ): Promise<{ ok: true; bytes: number } | { ok: false; code: number }> {
-  const rc = await k32().WaitForSingleObject(ev.h, INFINITE);
-  if (waitFailed(rc)) {
-    throw winError(
-      "WaitForSingleObject",
-      k32().GetLastError(),
-      `overlapped event (rc=0x${rc.toString(16)})`,
-    );
-  }
+  await ioPort.completion(ovl);
   const bytes = new Uint8Array(4);
-  const ok = k32().GetOverlappedResult(h, ev.ovl, bytes, 0);
+  // bWait=FALSE: the port already said it is done, and this runs on the main
+  // thread so the GetLastError below is the one that belongs to this call.
+  const ok = k32().GetOverlappedResult(h, ovl, bytes, 0);
   if (!ok) return { ok: false, code: k32().GetLastError() };
   return { ok: true, bytes: readU32(bytes) };
 }
@@ -325,30 +475,17 @@ class PipeConn implements LocalConn {
   readonly remoteAddr: Deno.Addr;
   #h: Handle;
   #closed = false;
-  #rev: { h: Handle; ovl: Uint8Array };
-  #wev: { h: Handle; ovl: Uint8Array };
-  #inFlight = new Set<Promise<unknown>>();
+  /** One OVERLAPPED per DIRECTION — a read and a write may be in flight at
+   *  once, never two of either (the streams serialize each side). The kernel
+   *  writes into it while the operation is pending, and the port resolves by
+   *  its address, so these two buffers are this connection's identity on the
+   *  queue. No event handles: the completion goes to the port. */
+  #rovl = overlappedBytes(0n);
+  #wovl = overlappedBytes(0n);
   #buf = new Uint8Array(PIPE_BUFFER_BYTES);
 
   constructor(h: Handle, readonly path: string, readonly server: boolean) {
     this.#h = h;
-    // Two allocations in a row, and this object has just taken ownership of
-    // `h`. If the SECOND one throws, the first event and the pipe handle are
-    // orphaned — and `CreateEventW` fails for exactly one reason worth
-    // planning for, which is that handles are already exhausted. Leaking two
-    // more on the way out is how that becomes permanent. `close()` is careful
-    // about handle ownership for the same reason; the constructor was not.
-    const rev = createEvent(path);
-    let wev: { h: Handle; ovl: Uint8Array };
-    try {
-      wev = createEvent(path);
-    } catch (e) {
-      closeHandle(rev.h);
-      closeHandle(h);
-      throw e;
-    }
-    this.#rev = rev;
-    this.#wev = wev;
     this.remoteAddr = { transport: "unix", path };
     this.readable = new ReadableStream<Uint8Array>({
       pull: async (ctrl) => {
@@ -365,33 +502,30 @@ class PipeConn implements LocalConn {
     });
   }
 
-  #track<T>(p: Promise<T>): Promise<T> {
-    this.#inFlight.add(p);
-    p.finally(() => this.#inFlight.delete(p)).catch(() => {});
-    return p;
-  }
-
   /** One read. `null` = the peer is gone. One outstanding at a time — the
    *  stream's `pull` guarantees it. */
   async #read(): Promise<Uint8Array | null> {
     if (this.#closed) return null;
     // lpNumberOfBytesRead is NULL for overlapped I/O (the documented shape):
     // the count is read back through GetOverlappedResult in every case, so
-    // the synchronous-completion and the pending path are ONE path.
+    // the synchronous-completion and the pending path are ONE path — and a
+    // handle bound to a completion port queues a packet for BOTH, so both
+    // are also one wait.
     const ok = k32().ReadFile(
       this.#h,
       this.#buf,
       this.#buf.length,
       null,
-      this.#rev.ovl,
+      this.#rovl,
     );
     if (!ok) {
       const code = k32().GetLastError();
       if (code !== ERROR_IO_PENDING && code !== ERROR_MORE_DATA) {
+        // A hard failure at START queues no packet: nothing to wait for.
         return this.#readFailed(code);
       }
     }
-    const r = await this.#track(finishOverlapped(this.#h, this.#rev));
+    const r = await finishOverlapped(this.#h, this.#rovl);
     if (!r.ok) return this.#readFailed(r.code);
     if (r.bytes === 0) return null;
     return this.#buf.slice(0, r.bytes);
@@ -417,13 +551,42 @@ class PipeConn implements LocalConn {
    *  FFI call is `nonblocking`, so the wait lives on a pool thread and the
    *  event loop keeps serving. A peer already gone is not an error here.
    *  Not sufficient alone: it can return while the client still has a
-   *  buffer's worth to read, which is why `close` never disconnects. */
+   *  buffer's worth to read, which is why `close` never disconnects.
+   *
+   *  BOUNDED, because "until the client has consumed the bytes" is forever
+   *  for a client that never will. A page with 58 `<img>` tags answered 404
+   *  took 58 pool threads this way and never gave one back — the app froze
+   *  for good (field report §13). The timeout closes the connection instead,
+   *  which is what a peer that stopped reading has earned, and closing the
+   *  handle releases the flush. Said out loud: a dropped response body is a
+   *  fact about the app, not a detail. Nothing on this recovery path needs
+   *  the pool — a JS timer and a synchronous `CloseHandle` — so it still runs
+   *  when the pool is the thing that is jammed. */
   async drain(): Promise<void> {
     if (!this.server || this.#closed) return;
-    await this.#track(k32().FlushFileBuffers(this.#h)).catch(() => {
+    const flush = k32().FlushFileBuffers(this.#h).catch(() => {
       // aio-ok(silent-catch): FlushFileBuffers fails only when the peer is
       // already gone — the case this drain exists to tolerate, never to report.
     });
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const timeout = new Promise<"timeout">((r) => {
+      timer = setTimeout(() => r("timeout"), PIPE_DRAIN_TIMEOUT_MS);
+    });
+    try {
+      if (
+        await Promise.race([flush.then(() => "flushed"), timeout]) !== "timeout"
+      ) return;
+    } finally {
+      clearTimeout(timer);
+    }
+    log.warn(
+      "pipe",
+      `a peer stopped reading: ${PIPE_DRAIN_TIMEOUT_MS} ms after the response was ` +
+        `written, ${this.path} still holds bytes it has not taken. Closing ` +
+        `the connection — the rest of that body is lost, and nothing else ` +
+        `waits on it.`,
+    );
+    this.close();
   }
 
   /** One write, complete: WriteFile until every byte is accepted. Serialized
@@ -442,7 +605,7 @@ class PipeConn implements LocalConn {
         data,
         data.length,
         null,
-        this.#wev.ovl,
+        this.#wovl,
       );
       if (!ok) {
         const code = k32().GetLastError();
@@ -450,7 +613,7 @@ class PipeConn implements LocalConn {
           throw winError("WriteFile", code, this.path);
         }
       }
-      const r = await this.#track(finishOverlapped(this.#h, this.#wev));
+      const r = await finishOverlapped(this.#h, this.#wovl);
       if (!r.ok) throw winError("WriteFile", r.code, this.path);
       if (r.bytes === 0) throw winError("WriteFile", ERROR_NO_DATA, this.path);
       off += r.bytes;
@@ -461,10 +624,11 @@ class PipeConn implements LocalConn {
     if (this.#closed) return;
     this.#closed = true;
     const h = this.#h;
-    // Cancel what is in flight, then close: the pending waits wake up (the
-    // event is signalled on cancellation) and read back OPERATION_ABORTED,
-    // which is end-of-stream. The events are closed only after every wait
-    // has returned — a handle closed under a waiter is undefined behaviour.
+    // Cancel what is in flight, then close: the pending operations complete
+    // onto the port with OPERATION_ABORTED, which is end-of-stream, so every
+    // waiter is released rather than left parked on a promise. Nothing else
+    // needs closing — the OVERLAPPEDs are plain buffers, kept alive by the
+    // frames awaiting them.
     //
     // A server end is CLOSED, never `DisconnectNamedPipe`d. Disconnect
     // discards what the client has not read yet and fails its next read with
@@ -476,11 +640,6 @@ class PipeConn implements LocalConn {
     // Each connection is its own pipe instance, so there is nothing to reuse.
     k32().CancelIoEx(h, null);
     closeHandle(h);
-    const rev = this.#rev, wev = this.#wev;
-    Promise.allSettled([...this.#inFlight]).then(() => {
-      closeHandle(rev.h);
-      closeHandle(wev.h);
-    });
   }
 }
 
@@ -541,6 +700,13 @@ function createInstance(path: string, first: boolean): Handle {
         path,
       );
     }
+    // Bound to the port before the first operation (the connect) starts.
+    try {
+      ioPort.attach(h, path);
+    } catch (e) {
+      closeHandle(h);
+      throw e;
+    }
     return h;
   });
 }
@@ -557,23 +723,23 @@ export function listenPipe(path: string): LocalListener {
   async function accept(): Promise<LocalConn | null> {
     if (closed) return null;
     const h = next;
-    const ev = createEvent(path);
-    try {
-      const ok = k32().ConnectNamedPipe(h, ev.ovl);
-      if (!ok) {
-        const code = k32().GetLastError();
-        if (code === ERROR_IO_PENDING) {
-          const r = await finishOverlapped(h, ev);
-          if (closed) return null;
-          if (!r.ok && r.code !== ERROR_PIPE_CONNECTED) {
-            throw winError("ConnectNamedPipe", r.code, path);
-          }
-        } else if (code !== ERROR_PIPE_CONNECTED) {
-          throw winError("ConnectNamedPipe", code, path);
+    // This OVERLAPPED belongs to the pending connect and to nothing else; the
+    // frame below keeps it alive until the port reports it.
+    const ovl = overlappedBytes(0n);
+    const ok = k32().ConnectNamedPipe(h, ovl);
+    if (!ok) {
+      const code = k32().GetLastError();
+      if (code === ERROR_IO_PENDING) {
+        const r = await finishOverlapped(h, ovl);
+        if (closed) return null;
+        if (!r.ok && r.code !== ERROR_PIPE_CONNECTED) {
+          throw winError("ConnectNamedPipe", r.code, path);
         }
+      } else if (code !== ERROR_PIPE_CONNECTED) {
+        // ERROR_PIPE_CONNECTED means the client got in first: no packet is
+        // queued for it, and there is nothing to wait for.
+        throw winError("ConnectNamedPipe", code, path);
       }
-    } finally {
-      closeHandle(ev.h);
     }
     if (closed) return null;
     // Pre-create the next instance BEFORE handing this one out.
@@ -623,7 +789,16 @@ export async function connectPipe(path: string): Promise<LocalConn> {
       u32(FILE_FLAG_OVERLAPPED),
       null,
     );
-    if (!isInvalidHandle(h)) return new PipeConn(h, path, false);
+    if (!isInvalidHandle(h)) {
+      // Bound to the port before the first read or write starts on it.
+      try {
+        ioPort.attach(h, path);
+      } catch (e) {
+        closeHandle(h);
+        throw e;
+      }
+      return new PipeConn(h, path, false);
+    }
     const code = k32().GetLastError();
     if (code === ERROR_FILE_NOT_FOUND) {
       throw new Deno.errors.NotFound(

@@ -8,6 +8,8 @@
 import { selfMethodOf } from "./self.ts";
 import { removalOf, retiredSpellingLine } from "./removals-core.ts";
 import { teachableError } from "../diagnostics/error.ts";
+import { log } from "../diagnostics/logger-api.ts";
+import { isDevMode } from "./dev-flag.ts";
 import { nearestOf } from "./cell-helpers.ts";
 import { callTimeoutFor, registerCall, resolveCall } from "./cell-impl.ts";
 import { pendingCount } from "../protocol/pending-calls.ts";
@@ -466,6 +468,19 @@ function _checkAt(time: unknown): number {
   return target;
 }
 
+/** Does this cron pattern CATCH UP after a backward wall-clock step — is its
+ *  minute field starred (`* * * * *`, or a `*` step such as every fifth
+ *  minute)? Such a job is about its minute-level cadence, so a step back does
+ *  not silence it for the length of the step. Every other pattern — hourly
+ *  `0 * * * *` included — is treated as fixed-time and never runs the same
+ *  slot twice: a non-idempotent hourly job (billing, a digest mail) must not
+ *  repeat. Narrower than vixie cron, whose "wildcard job" also counts a
+ *  starred HOUR field; deliberately. @internal */
+export function cronCatchesUp(pattern: string): boolean {
+  const [minute = ""] = pattern.trim().split(/\s+/);
+  return minute.startsWith("*");
+}
+
 /** The parsed fields, or a throw. A pattern that can NEVER match is a typo,
  *  and it is knowable here, in O(months × doms) — so it fails at the call
  *  site like every other invalid schedule instead of being discovered at the
@@ -559,7 +574,54 @@ function _requireDuration(
       SCHEDULE_DOC,
     );
   }
+  if (v < 0) _negativeDuration(fn, id, key, v);
   return v;
+}
+
+/** `(fn, id, key)` triples already warned about in production. */
+const _negativeWarned = new Set<string>();
+
+/** Test isolation for the once-per-id warning below. @internal */
+// The warning is once per process by design; `_resetAioRuntime` clears it
+// between tests so one case's warning cannot silence the next case's.
+export function _resetNegativeDurationWarnings(): void {
+  _negativeWarned.clear();
+}
+
+/** A NEGATIVE duration — finite, so {@linkcode _requireDuration}'s check let
+ *  it through, and the arithmetic's `Math.max(1, …)` clamp turned it into a
+ *  1 ms timer: `base: -1000` (a sign slip, `start - now` the wrong way round)
+ *  made a retry backoff a hot loop, and nothing said so. `schedule.after`
+ *  refuses a negative ms outright.
+ *
+ *  Dev throws at the call (dev STRICTER — CLAUDE.md category b). Production
+ *  keeps the clamp it has always had, so an upgrade does not turn a running
+ *  app's method into a failing one, and warns once per id and key. */
+function _negativeDuration(
+  fn: "backoff" | "poll",
+  id: string,
+  key: string,
+  v: number,
+): void {
+  const what = `schedule.${fn} '${id}': ${key} is negative (${v})`;
+  const fix = key === "factor"
+    ? "a factor multiplies the delay each attempt — a negative one flips its " +
+      "sign, and a negative delay runs after 1 ms. Use 1 for a constant delay, " +
+      "2 to double it"
+    : "a negative delay runs after 1 ms — a retry loop that never waits. " +
+      "Pass the delay as a positive number of milliseconds (check the sign " +
+      "of a computed `start - now`)";
+  if (isDevMode()) throw teachableError(what, fix, SCHEDULE_DOC);
+  const k = `${fn}\0${id}\0${key}`;
+  if (_negativeWarned.has(k)) return;
+  // Bounded: backoff ids are often per-entity (`retry:${orderId}`), and a
+  // warn-once set keyed by them is a slow leak. Past the cap each further id
+  // still warns — louder, never silent — it is just not remembered.
+  if (_negativeWarned.size < 256) _negativeWarned.add(k);
+  log.warn(
+    "schedule",
+    `${what} — treated as 1 ms, as before. Fix: ${fix}. (Dev throws here.)`,
+  );
 }
 
 function _backoffEffect(
@@ -1565,10 +1627,30 @@ export function createScheduleManager(
     action: { type: string; payload?: unknown },
   ): void {
     const fields = _checkCron(id, pattern);
-    function scheduleNext(first = false): void {
+    const catchesUp = cronCatchesUp(pattern);
+    /** `floor`: the deadline that just fired. Timers run on the monotonic
+     *  clock and cron reads the wall clock, so after a backward wall-clock
+     *  step (NTP/chrony, a VM resumed from a snapshot) the timer fires on time
+     *  while `now()` reads a moment BEFORE the minute it fired for — and "the
+     *  next match after now" was that same minute: the job ran twice. Under
+     *  a minute of skew the next fire is never computed from earlier than the
+     *  one just made; past that, see the periodic/fixed split below. */
+    function scheduleNext(first = false, floor = -Infinity): void {
+      // How far the wall clock now reads BEHIND the minute that just fired.
+      // Under a minute is timer/clock skew: the floor stops the same minute
+      // firing twice, for every pattern. A real step back splits (see
+      // `cronCatchesUp`): a MINUTE-starred pattern keeps its cadence on the
+      // new wall clock, re-running slots the old reading had already reached;
+      // every other pattern — hourly `0 * * * *` included — never runs a slot
+      // again.
+      const stepped = floor - clock.now();
+      const resume = catchesUp && stepped >= 60_000;
       let next: Date;
       try {
-        next = nextCronTime(fields, new Date(clock.now()));
+        next = nextCronTime(
+          fields,
+          new Date(resume ? clock.now() : Math.max(clock.now(), floor)),
+        );
       } catch (e) {
         // Unreachable for a reachable pattern (the window is nine years and
         // the impossible shapes threw above) — so this is a defect, not a
@@ -1581,6 +1663,21 @@ export function createScheduleManager(
         );
         cancelTimer(id);
         return;
+      }
+      // Either way a step back of a minute or more changes what runs next —
+      // say so, once per step.
+      if (stepped >= 60_000) {
+        log.warn(
+          `schedule: cron '${id}' — the wall clock stepped back ${
+            Math.round(stepped / 1000)
+          }s after its ${new Date(floor).toISOString()} run; ${
+            resume
+              ? `a minute-starred pattern keeps its cadence on the new wall ` +
+                `clock (slots the old reading had reached run again)`
+              : `this pattern never runs a slot twice, so the slots already ` +
+                `run are skipped`
+          }, so it next fires at ${next.toISOString()}. Times are UTC.`,
+        );
       }
       armDeadline(id, "cron", next.getTime(), () => {
         log.debug(`schedule: cron '${id}' fired`);
@@ -1600,7 +1697,7 @@ export function createScheduleManager(
         // through the shutdown drain. Repeating kinds survive a failed tick;
         // a closed dispatch loop cancels the schedule from inside safeDispatch.
         safeDispatch(id, action, "cron");
-        if (epochs.get(id) === epoch) scheduleNext();
+        if (epochs.get(id) === epoch) scheduleNext(false, next.getTime());
       }, !first);
       log.debug(
         `schedule: cron '${id}' next at ${next.toISOString()} (${
@@ -1794,12 +1891,32 @@ export function createVirtualTimers(
   /** Is any timer due at the current virtual time — what `advance(0)` would
    *  fire? Synchronous, so a caller can skip the await when nothing is. */
   hasDue: () => boolean;
+  /** A one-shot timer whose callback `advance()` AWAITS before it moves on —
+   *  for a deadline that must let real (non-virtual) work land before it
+   *  decides (the call ceilings, see `_setCallDeadlineClock`). Cleared with
+   *  `clearTimeout`. */
+  setTimeoutAwaited: (fn: () => Promise<void>, ms: number) => TimerHandle;
 } {
-  type VTimer = { id: number; due: number; fn: () => void; every: number };
+  type VTimer = {
+    id: number;
+    due: number;
+    fn: () => void | Promise<void>;
+    every: number;
+    awaited?: boolean;
+  };
   let now = start;
   let seq = 0;
   const q = new Map<number, VTimer>();
-  const arm = (fn: () => void, ms: number, every: number): TimerHandle => {
+  /** The interval whose callback is running — out of `q` until it returns,
+   *  so a `clearInterval` from inside it is recorded here instead. */
+  let firing: VTimer | null = null;
+  let firingCleared = false;
+  const arm = (
+    fn: () => void | Promise<void>,
+    ms: number,
+    every: number,
+    awaited = false,
+  ): TimerHandle => {
     const id = ++seq;
     // FAITHFUL to the platform, deliberately: V8 stores a timeout's delay in an
     // int32 and fires on the next tick when it overflows ("Timeout duration was
@@ -1807,14 +1924,16 @@ export function createVirtualTimers(
     // hide the exact defect it exists to expose, and every test written on it
     // would be green about a timer that fires 35 days early in production.
     const delay = ms > MAX_TIMER_DELAY ? 1 : Math.max(0, ms);
-    q.set(id, { id, due: now + delay, fn, every });
+    q.set(id, { id, due: now + delay, fn, every, awaited });
     return id as unknown as TimerHandle;
   };
   const clear = (h: TimerHandle): void => {
     q.delete(h as unknown as number);
+    if (firing && firing.id === (h as unknown as number)) firingCleared = true;
   };
   return {
     setTimeout: (fn, ms) => arm(fn, ms, 0),
+    setTimeoutAwaited: (fn, ms) => arm(fn, ms, 0, true),
     clearTimeout: clear,
     // The truncation applies to the PERIOD too: a real setInterval past the
     // ceiling fires every 1ms, not once now and then monthly. Only the first
@@ -1849,9 +1968,32 @@ export function createVirtualTimers(
         }
         if (!next) break;
         now = next.due;
-        if (next.every > 0) next.due = now + next.every;
-        else q.delete(next.id);
-        next.fn();
+        // An interval's repeat is RE-QUEUED, not moved in place, and only
+        // once its callback has RETURNED. A real setInterval re-arms in a
+        // `finally` after the callback, as a new entry behind every timer
+        // already armed for the same instant — including one the callback
+        // itself just armed — so on a tie it fires LAST. Kept in place it
+        // fired first (`every(100)` + `after(300, cancel it)` ran 3 ticks here
+        // and 2 in production); re-queued BEFORE the callback it still beat a
+        // timeout the callback armed for its instant ("I1 I2 T" here, "I1 T
+        // I2" on the real clock). Ties break by queue order (the strict `<`).
+        // A `clearInterval` from inside the callback is honoured; a callback
+        // that throws stays armed, as the platform's `finally` keeps it.
+        q.delete(next.id);
+        if (next.every > 0) {
+          firing = next;
+          firingCleared = false;
+          try {
+            next.fn();
+          } finally {
+            firing = null;
+            if (!firingCleared) {
+              next.due = now + next.every;
+              q.set(next.id, next);
+            }
+          }
+        } else if (next.awaited) await next.fn();
+        else next.fn();
         // The real event loop separates two timer callbacks by a full turn:
         // every microtask the first one queued has run before the second
         // starts. Firing them back-to-back made the harness MORE FORGIVING

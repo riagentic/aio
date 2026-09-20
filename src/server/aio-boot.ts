@@ -840,8 +840,9 @@ export interface BootConfig<S> {
   /** Every cell's declared `version`, migration or not — the complete map the
    *  persistence version stamp needs (see the note where it is used). */
   _cellVersions?: Record<string, number>;
-  /** User hook — transform state after restore */
-  onRestore?: (state: S) => S;
+  /** User hook — transform state after restore. Mutate it and return nothing,
+   *  or return a replacement (see the call site). */
+  onRestore?: (state: S) => S | void;
   /** Per-cell `onRestore` hooks — run BEFORE the app-level one, each scoped to
    *  its own slice. See CellConfig.onRestore. */
   cellRestores?: Map<
@@ -880,6 +881,10 @@ export interface BootConfig<S> {
     string,
     import("../state/cell-types.ts").CellFieldFilter
   >;
+  /** Ids of the cells whose `onPersist` SHAPES the stored slice — their
+   *  stored keys are the shape's, not drift, and their `onRestore` is handed
+   *  them (see {@linkcode runCellRestore}). */
+  cellPersistShaped?: string[];
   log: Log;
 }
 
@@ -1050,21 +1055,78 @@ export async function bootStorage<S>(
     }
     const open = () =>
       createDB(dbPath, dbPragmas ? { pragmas: dbPragmas } : {});
-    const db = open();
-    if (!cfg.checkIntegrityOnBoot) return db;
-    const { checkAndRecover } = await import("./db-integrity.ts");
-    const outcome = await checkAndRecover({
-      db,
-      dbPath,
-      log: {
-        info: (m: string) => log.info(m),
-        warn: (m: string) => log.warn(m),
-        error: (m: string) => log.error(m),
-      },
-    });
-    return outcome.action === "restored" || outcome.action === "quarantined"
-      ? open()
-      : db;
+    const onDisk = dbPath !== ":memory:" && !dbPath.startsWith("file::memory:");
+    const recover = async (): Promise<DB> => {
+      // BEFORE the open, and whatever `checkIntegrityOnBoot` says now: opening
+      // creates an empty file at the live path, and a restore the previous
+      // boot staged but did not live to install would then be dropped as
+      // stale — the app booting EMPTY beside a verified snapshot
+      // (db-integrity.ts).
+      if (onDisk) {
+        const { finishInterruptedRestore } = await import("./db-integrity.ts");
+        await finishInterruptedRestore({
+          dbPath,
+          log: {
+            warn: (m: string) => log.warn(m),
+            error: (m: string) => log.error(m),
+          },
+        });
+      }
+      const db = open();
+      if (!cfg.checkIntegrityOnBoot) return db;
+      const { checkAndRecover } = await import("./db-integrity.ts");
+      const outcome = await checkAndRecover({
+        db,
+        dbPath,
+        log: {
+          info: (m: string) => log.info(m),
+          warn: (m: string) => log.warn(m),
+          error: (m: string) => log.error(m),
+        },
+      });
+      // Damaged, handle closed, and not movable: using the closed handle
+      // failed later as "this handle is CLOSED" under advice to turn on the
+      // check that found it; reopening would boot on a damaged file. Refused
+      // here, by name.
+      if (outcome.stuck) {
+        throw createAioError("PERSIST_ERROR", new Error(outcome.stuck), {});
+      }
+      if (outcome.action !== "restored" && outcome.action !== "quarantined") {
+        return db;
+      }
+      // The file underneath was replaced. Open it NOW, inside the recovery
+      // lock: a restored snapshot is not in WAL mode yet, and the first open
+      // switches it — an instance waiting on the lock that opened it at the
+      // same moment was refused "database is locked" by that switch.
+      const fresh = open();
+      try {
+        await fresh.query("SELECT 1");
+      } catch (e) {
+        await fresh.close().catch(() => {
+          // aio-ok: the open itself failed; the throw below says why.
+        });
+        throw e;
+      }
+      return fresh;
+    };
+    if (!onDisk) return await recover();
+    // One recovery per database at a time, across processes (`singleton:
+    // false` shares a data dir): taken when this boot checks integrity or a
+    // previous one left a recovery to finish — the only times there is
+    // anything to race over.
+    const integrity = await import("./db-integrity.ts");
+    return cfg.checkIntegrityOnBoot || integrity.recoveryPending(dbPath)
+      ? await integrity.withRecoveryLock(
+        dbPath,
+        recover,
+        (lock) =>
+          log.warn(
+            `db: waiting for another process to finish checking/recovering ` +
+              `${dbPath} (it holds ${lock}) — this boot continues when it ` +
+              `is done`,
+          ),
+      )
+      : await recover();
   };
 
   // Sync cells need the SQLite op-log even without user tables — a
@@ -1376,6 +1438,59 @@ export async function bootStorage<S>(
   // a hook rewrite defaults it was never meant to see (a v0→v1 rename turning
   // the app's own defaults into garbage on first launch). The first successful
   // persist stamps the current versions, so the next boot is a no-op anyway.
+  // A cell whose `onPersist` SHAPES what it writes stores the SHAPE, not its
+  // declared state (`onPersist: (s) => ({ key: s.thumbKey })` stores a `key`
+  // the cell never declares; `({ items: Object.values(s.items) })` stores a
+  // list where it declares a record). Its stored slice is read against what
+  // this build's `onPersist` writes for the declared state — exactly as a
+  // plain cell's is read against its declaration. Exempting "any path under a
+  // top-level key the shape writes" instead hid every NESTED rename in the
+  // commonest shape there is (`({ cache, ...rest }) => rest` writes every
+  // key), and still refused a shape that changes a field's type.
+  const shapedCells = new Set(cfg.cellPersistShaped ?? []);
+  const shapeSchema = (): Record<string, unknown> => {
+    const declared = initialState as Record<string, unknown>;
+    const schema: Record<string, unknown> = { ...declared };
+    for (const cell of shapedCells) {
+      if (!(cell in declared)) continue;
+      // The declared state first (its shape IS the schema); the restored
+      // state when the hook cannot take the defaults (`s.list.at(-1).id`).
+      const sources = [
+        declared[cell],
+        (state as Record<string, unknown>)[cell],
+      ];
+      let error: unknown;
+      for (const src of sources) {
+        try {
+          const out = (kvGetDBState({ [cell]: src } as S) as
+            | Record<string, unknown>
+            | undefined)?.[cell];
+          // As the store writes it: `undefined` keys are not stored.
+          if (_isObj(out)) schema[cell] = JSON.parse(JSON.stringify(out));
+          error = undefined;
+          break;
+        } catch (e) {
+          error = e;
+        }
+      }
+      // The persist path reports this same throw on its first write; here it
+      // only means the slice is read against the declaration instead.
+      if (error !== undefined) {
+        log.warn(
+          `persist: ${cell} onPersist threw while reading its shape — its ` +
+            `stored slice is checked against the declared state: ${error}`,
+        );
+      }
+    }
+    return schema;
+  };
+  // Cells the migration pass handled this boot: their slice is the
+  // migration's output, which a stored value must not overwrite.
+  const migratedThisBoot = new Set<string>();
+  /** A shaped cell's raw `onMigrate` output — in the STORED form when the
+   *  migration kept it — handed to its `onRestore` in place of the stored
+   *  slice the migration replaced. */
+  const migratedRaw = new Map<string, Record<string, unknown>>();
   if (shouldPersist && kvDb && hadPersistedState && persistedSnapshot) {
     const VERSIONS_KEY = `${appId}:__versions`;
     const persistedVersions =
@@ -1391,6 +1506,11 @@ export async function bootStorage<S>(
     const kvMigrations = new Map(
       [...(cfg.cellMigrations ?? [])].filter(([c]) => !syncCellIds.includes(c)),
     );
+    // Read ONCE, before a migration rewrites any slice: the shape is this
+    // build's, and the drift walk below reads the stored slice against it.
+    const schema = shapedCells.size
+      ? shapeSchema()
+      : initialState as Record<string, unknown>;
     if (kvMigrations.size) {
       try {
         report = applyCellMigrations(
@@ -1400,6 +1520,16 @@ export async function bootStorage<S>(
           log,
           persistedSnapshot,
           initialState as Record<string, unknown>,
+          shapedCells.size
+            ? {
+              schema: Object.fromEntries(
+                [...shapedCells].filter((c) => c in schema).map((
+                  c,
+                ) => [c, schema[c]]),
+              ),
+              migratedRaw,
+            }
+            : undefined,
         );
       } catch (e) {
         // A failed migration refuses to boot (nothing is written, so the
@@ -1441,8 +1571,9 @@ export async function bootStorage<S>(
     // the rest reveal a stored field the current shape no longer declares —
     // the silent stale-shape load a rename/removal without a version bump
     // leaves behind. Warned once (summarized), and kept for `am migrations`.
+    // A shaped cell is read against its shape (see `shapeSchema`).
     const drift = detectShapeDrift(
-      initialState as Record<string, unknown>,
+      schema,
       persistedSnapshot,
       { skip: new Set(report.map((r) => r.cell)) },
     );
@@ -1476,7 +1607,7 @@ export async function bootStorage<S>(
     // migration, but silence about it is indistinguishable from silence about
     // a problem nobody looked for — the complaint that produced this line.
     const added = detectNewFields(
-      initialState as Record<string, unknown>,
+      schema,
       persistedSnapshot,
       { skip: new Set(report.map((r) => r.cell)) },
     );
@@ -1486,6 +1617,13 @@ export async function bootStorage<S>(
       declared[id] = info.version;
     }
     migrations = { declared, stored: persistedVersions, report, drift };
+    // Only a slice an `onMigrate` (or a downgrade's widening) rewrote — a
+    // first stamp or a hookless bump keeps the store's slice as it was.
+    for (const r of report) {
+      if (r.outcome === "migrated" || r.outcome === "downgrade") {
+        migratedThisBoot.add(r.cell);
+      }
+    }
   }
 
   // ── 5. onRestore hooks ────────────────────────────────────────────
@@ -1509,17 +1647,52 @@ export async function bootStorage<S>(
     for (const [id, hook] of cellRestores) {
       const slice = s[id];
       if (slice === undefined) continue;
-      try {
-        const next = hook(slice as Record<string, unknown>);
-        if (next !== undefined) s[id] = next;
-      } catch (e) {
-        log.error(`hook onRestore(${id}): ${e}`);
-      }
+      s[id] = runCellRestore(
+        id,
+        hook,
+        slice as Record<string, unknown>,
+        shapedCells.has(id)
+          ? migratedRaw.has(id)
+            // The migration's output IS this boot's stored slice.
+            ? {
+              stored: migratedRaw.get(id),
+              declared: (initialState as Record<string, unknown>)[id],
+              retyped: true,
+            }
+            : {
+              stored: persistedSnapshot?.[id],
+              declared: (initialState as Record<string, unknown>)[id],
+              retyped: !migratedThisBoot.has(id),
+            }
+          : undefined,
+        log,
+      );
     }
   }
   if (onRestore) {
     try {
-      state = onRestore(state);
+      // MUTATE OR REPLACE — the rule every other restore hook already follows:
+      // `runCellRestore` keeps the slice it handed over when the hook returns
+      // nothing, and so does the re-run journal replay does after a crash
+      // (`_rerunRestoreHooks`). This one did `state = onRestore(state)`, so a
+      // hook written the natural way — `(s) => { s.cell.online = false }` —
+      // set the whole app state to `undefined` and boot died with
+      // `TypeError: Cannot convert undefined or null to object`, on EVERY
+      // boot including a fresh install, naming neither the hook nor the app.
+      const next = onRestore(state) as unknown;
+      refuseThenable(next);
+      if (next !== undefined && next !== state) {
+        if (next === null || typeof next !== "object") {
+          // Not state and not a mutation: through the hook's own error guard,
+          // named — the app keeps the state it restored.
+          throw new Error(
+            `returned ${
+              next === null ? "null" : typeof next
+            } — return the state, or mutate it and return nothing`,
+          );
+        }
+        state = next as S;
+      }
     } catch (e) {
       log.error(`hook onRestore: ${e}`);
     }
@@ -1794,6 +1967,24 @@ export async function bootStorage<S>(
   };
 }
 
+/** Same JSON document, key order aside — the two layouts read back through
+ *  different paths (one blob vs rows ordered by key), so their key order can
+ *  differ while every value agrees. */
+function sameDocument(a: unknown, b: unknown): boolean {
+  const canon = (v: unknown): unknown =>
+    v !== null && typeof v === "object" && !Array.isArray(v)
+      ? Object.fromEntries(
+        Object.keys(v as Record<string, unknown>).sort().map((k) => [
+          k,
+          canon((v as Record<string, unknown>)[k]),
+        ]),
+      )
+      : Array.isArray(v)
+      ? v.map(canon)
+      : v;
+  return JSON.stringify(canon(a)) === JSON.stringify(canon(b));
+}
+
 /** Load the persisted snapshot and bring it to the current persistence
  *  schema (A4). Alpha-era snapshots have no `<appId>:__schema` stamp and
  *  read as version 0; snapshots from a NEWER schema throw `PERSIST_SCHEMA`
@@ -1816,6 +2007,10 @@ export async function loadAndMigrateSnapshot(
       ? kvDb.get<Record<string, unknown>>(persistKey)
       : kvDb.getMulti<Record<string, unknown>>(persistKey);
   const otherMode = persistMode === "multi" ? "single" : "multi";
+  const retireOther = async (other: Record<string, unknown>) => {
+    if (otherMode === "single") await kvDb.del(persistKey);
+    else await kvDb.setMulti(persistKey, {}, Object.keys(other));
+  };
 
   let persisted = await readCurrent();
   // `persistMode` decides the LAYOUT of the stored document (one JSON blob vs
@@ -1853,13 +2048,27 @@ export async function loadAndMigrateSnapshot(
     }
     // The copy is readable in the new layout; the old one is now a trap (a
     // later switch back would resurrect it as authoritative). Retire it.
-    if (otherMode === "single") await kvDb.del(persistKey);
-    else await kvDb.setMulti(persistKey, {}, Object.keys(other));
+    await retireOther(other);
     log.info(
       `persist: migrated the stored document ${otherMode} → ${persistMode} ` +
         `(${count(Object.keys(other).length, "key")})`,
     );
     persisted = verified;
+  } else if (persisted && other && sameDocument(persisted, other)) {
+    // Both layouts, byte-for-byte the SAME document: not an ambiguity but the
+    // exact signature of the migration above dying between its copy and its
+    // retire. Left alone, this used to take the branch below on every boot —
+    // the app wrote to its layout, the twin stayed frozen at the crash, and
+    // the next switch back booted on the twin: every acknowledged write since
+    // silently gone from view. Retiring an identical copy loses nothing.
+    await retireOther(other);
+    log.warn(
+      `persist: finished an interrupted ${otherMode} → ${persistMode} ` +
+        `layout migration — the "${otherMode}" copy was identical to the ` +
+        `"${persistMode}" one and has been retired (${
+          count(Object.keys(other).length, "key")
+        })`,
+    );
   } else if (persisted && other) {
     // Both layouts hold data — an older aio, or a hand-edited store. Never
     // guess which is newer; boot on the configured one and say what is being
@@ -2453,10 +2662,81 @@ function driftStoreLines(store: DriftStore): string {
  *  loss for a DOWNGRADE, where the "unknown" fields are what a NEWER build
  *  wrote and a later roll-forward still needs. Declared keys are untouched —
  *  the running build's types win for anything it actually reads. */
+/** One cell's `onRestore`, run the way boot runs it — error-guarded: a throw
+ *  is logged and the slice is kept as it was.
+ *
+ *  `shaped` is set for a cell whose `onPersist` SHAPES what it writes. The
+ *  restore merge drops every stored key the cell does not declare, and a
+ *  reshape stores exactly such keys: the documented pair —
+ *  `onPersist: (s) => ({ key: s.thumbKey })`, `onRestore` reading `s.key` —
+ *  had its `key` pruned before the hook ran, so the value was gone (and dev
+ *  refused to boot over the "drift"). The hook is handed the declared shape
+ *  PLUS what the store holds, the way `onMigrate` is, and what it returns is
+ *  narrowed back to the declared shape with the restore's own merge.
+ *
+ *  `retyped`: a stored value whose TYPE differs from the declared one is
+ *  handed over too. The merge keeps the declared value on a type mismatch
+ *  (schema wins), and a shape that changes a type is the ordinary compact
+ *  one — `onPersist: (s) => ({ items: Object.values(s.items) })` stores a
+ *  list where a record is declared — so its partner was handed `items: {}`
+ *  and the list was gone. Off for a cell the migration pass rewrote this
+ *  boot: its slice is the migration's, not the store's. */
+/** Throw when a restore hook handed back a THENABLE instead of state.
+ *
+ *  Restore runs before the server starts and is awaited nowhere, so
+ *  `onRestore: async (s) => …` returns a Promise. A Promise is an object, so
+ *  every shape check passed it: the app-level hook made the whole app state a
+ *  Promise (`Object.keys` of one is `[]`, so boot reported "state: 0 keys" and
+ *  started), and a cell's made that cell's slice one — every read `undefined`,
+ *  every method writing into a Promise, and the first persist storing `{}`
+ *  over the real data. Both hooks are error-guarded, so this is reported and
+ *  the restored state kept. */
+function refuseThenable(v: unknown): void {
+  if (
+    v !== null && typeof v === "object" &&
+    typeof (v as { then?: unknown }).then === "function"
+  ) {
+    throw new Error(
+      `returned a Promise — the restore hooks are SYNCHRONOUS (they run ` +
+        `before the server starts and nothing awaits them), so an \`async\` ` +
+        `hook hands back a Promise instead of state. Drop the \`async\` and ` +
+        `do the awaiting work in \`onStart\` instead.`,
+    );
+  }
+}
+
+export function runCellRestore(
+  id: string,
+  hook: (state: Record<string, unknown>) => Record<string, unknown> | void,
+  slice: Record<string, unknown>,
+  shaped:
+    | { stored: unknown; declared: unknown; retyped?: boolean }
+    | undefined,
+  log: Log,
+): Record<string, unknown> {
+  try {
+    const input = shaped && _isObj(shaped.stored)
+      ? reattachUndeclared(slice, shaped.stored, 0, shaped.retyped === true)
+      : slice;
+    const next = hook(input);
+    refuseThenable(next);
+    const out = next !== undefined ? next : input;
+    return shaped && _isObj(shaped.declared) && _isObj(out) && out !== slice
+      ? deepMerge(shaped.declared, out)
+      : out;
+  } catch (e) {
+    log.error(`hook onRestore(${id}): ${e}`);
+    return slice;
+  }
+}
+
 export function reattachUndeclared(
   merged: Record<string, unknown>,
   stored: Record<string, unknown>,
   depth = 0,
+  /** Also hand back a stored value the merge refused for its TYPE (never a
+   *  stored `null`, which carries no type) — see `runCellRestore`. */
+  retyped = false,
 ): Record<string, unknown> {
   if (depth >= 32) return merged;
   let out = merged;
@@ -2469,8 +2749,14 @@ export function reattachUndeclared(
         out[k] as Record<string, unknown>,
         stored[k] as Record<string, unknown>,
         depth + 1,
+        retyped,
       );
       if (child !== out[k]) out = { ...out, [k]: child };
+    } else if (
+      retyped && out[k] !== null && stored[k] !== null &&
+      kindOf(out[k]) !== kindOf(stored[k])
+    ) {
+      out = { ...out, [k]: stored[k] };
     }
   }
   return out;
@@ -2493,6 +2779,16 @@ export function applyCellMigrations(
   /** The declared `initialState` — onMigrate's result is narrowed to it.
    *  Omitted ⇒ the result is taken as-is (the pure unit tests). */
   initialState?: Record<string, unknown>,
+  /** Cells whose `onPersist` SHAPES what they store → what that shape looks
+   *  like for the declared state (as stored). Their migration is handed the
+   *  stored value even where its TYPE differs from the declared one (a record
+   *  stored as a list), its output is read against the shape as well as the
+   *  declaration, and the raw output is left in `migratedRaw` so the cell's
+   *  `onRestore` receives it the way it receives a stored slice. */
+  shaped?: {
+    schema: Record<string, unknown>;
+    migratedRaw: Map<string, Record<string, unknown>>;
+  },
 ): MigrationReport {
   const report: MigrationReport = [];
   for (const [cellId, info] of cellMigrations) {
@@ -2552,8 +2848,15 @@ export function applyCellMigrations(
           // whatever the store still holds; declared fields keep the merged
           // (typed) value.
           const stored = storedSnapshot?.[cellId];
+          // A shaped cell stores its SHAPE, whose field types may differ from
+          // the declaration (a record stored as a list): the merge kept the
+          // declared `{}` there, so hand the stored value back — the data the
+          // migration exists to carry over.
+          const shape = shaped && cellId in shaped.schema
+            ? shaped.schema[cellId]
+            : undefined;
           const input = _isObj(stored)
-            ? reattachUndeclared(cellState, stored)
+            ? reattachUndeclared(cellState, stored, 0, shape !== undefined)
             : cellState;
           const migrated = info.onMigrate(input, persisted);
           // The hook was HANDED the undeclared stored keys (so a rename can
@@ -2564,12 +2867,28 @@ export function applyCellMigrations(
           // is exactly what the next boot will restore.
           const declared = initialState?.[cellId];
           if (_isObj(declared) && _isObj(migrated)) {
+            const off = (schema: unknown) =>
+              new Set(
+                detectShapeDrift(
+                  { [cellId]: schema },
+                  { [cellId]: migrated },
+                ).filter((d) =>
+                  d.issue === "unknown-field" || d.issue === "type-changed"
+                ).map((d) => d.path),
+              );
+            // A shaped cell's output may be in the STORED form (what it was
+            // handed): a field is dropped only when it fits neither the
+            // declaration nor the shape. What fits the shape is its
+            // `onRestore`'s to turn back, exactly as on every other boot.
+            const offShape = _isObj(shape) ? off(shape) : undefined;
             const dropped = detectShapeDrift(
               { [cellId]: declared },
               { [cellId]: migrated },
             ).filter((d) =>
-              d.issue === "unknown-field" || d.issue === "type-changed"
+              (d.issue === "unknown-field" || d.issue === "type-changed") &&
+              (!offShape || offShape.has(d.path))
             );
+            if (_isObj(shape)) shaped!.migratedRaw.set(cellId, migrated);
             if (dropped.length) {
               log.warn(
                 `migrate: ${cellId} onMigrate (v${persisted} → ` +

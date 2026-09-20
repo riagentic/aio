@@ -5,6 +5,7 @@
 import type { ComponentFn, RenderCtx, VNode } from "./vdom.ts";
 import type { Disposable } from "../state/signal.ts";
 import { _reportHookError } from "./hook-error.ts";
+import { _withLifecycleHook } from "./untracked-read.ts";
 
 /** Handle returned by {@linkcode mount} / {@linkcode hydrate}. */
 export interface MountHandle {
@@ -205,7 +206,11 @@ export interface LifecycleCollector {
 export function _runCleanups(cbs: (() => void)[], component?: string): void {
   for (const cb of cbs) {
     try {
-      cb();
+      // Marked, so a write made HERE is reported as the cleanup it is. A
+      // cleanup runs with a render on the stack and no render body executing,
+      // which is exactly the shape the burst tripwire used to call "a render
+      // is WRITING state that the same render READS".
+      _withLifecycleHook("onCleanup", cb);
     } catch (e) {
       _reportHookError("onCleanup", e, component);
     }

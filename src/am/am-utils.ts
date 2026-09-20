@@ -100,6 +100,31 @@ function refuseAmbiguousApp(labels: string[]): never {
   fail(msg, mode);
 }
 
+/** The `am start …` that starts `id` from THIS project, or null when `id` is
+ *  not this project's to start.
+ *
+ *  Asked while composing the "not running" message, so it must ANSWER rather
+ *  than refuse: `resolveAmAppId()` with no flag does not return "I cannot tell"
+ *  for a project that declares components — it prints its own refusal and
+ *  `Deno.exit(1)`s. Reached from here that turned `am state --app=agent` on a
+ *  stopped component into "pick one with --app=agent", telling the caller to do
+ *  the thing it had just done, out of a message-composition path that kills the
+ *  process. A component IS this project's app, so it gets the same sentence
+ *  with the part named: `am start agent`. */
+function startCommandFor(id: string): string | null {
+  if (!cwdIsProject()) return null;
+  const cs = components();
+  if (cs.length > 0) {
+    const c = cs.find((c) => c.appId === id);
+    return c ? `am start ${c.label}` : null;
+  }
+  try {
+    return resolveAmAppId() === id ? "am start" : null;
+  } catch {
+    return null; // no id to infer here — the ambiguity message is the true one
+  }
+}
+
 export function resolveAmAppId(flag?: string): string {
   if (flag) {
     // `--app` names an app identity, and in a project that declares COMPONENTS
@@ -504,6 +529,21 @@ export function resolvePort(
         .join(", ")
     }.`
     : " Nothing is running.";
+  // Standing in an app's own directory with the app stopped is not an
+  // ambiguity: the id came from THIS deno.json, `am status` in the same
+  // directory answers "stopped", and the fix is to start it. Saying "am does
+  // not know which app to target … none declares a port … Name one with
+  // --app=<id>" there is a false sentence followed by two wrong fixes, with
+  // every unrelated app on the machine listed underneath as if one of them
+  // were the answer. Only a GUESSED id (a cwd with no project, or an --app=X
+  // that names nothing here) leaves am genuinely without a target.
+  const start = startCommandFor(id);
+  if (start) {
+    throw new Error(
+      `"${id}" is not running — start it: ${start} (this project: ` +
+        `${projectRoot()}).${list}`,
+    );
+  }
   throw new Error(
     `am does not know which app to target: no app named "${id}" is running ` +
       `and none declares a port (AIO_PORT, or aio.run({ port }) in the app ` +
@@ -596,6 +636,81 @@ export function resolvePath(
   return { found: true, value: cur };
 }
 
+/** Flags whose value names ONE thing, so giving two of them is a
+ *  CONTRADICTION rather than a preference for the last. Pure data — the
+ *  refusal is {@linkcode repeatedFlagError}. @internal */
+const SINGLE_VALUE_FLAGS: readonly string[] = [
+  "--app",
+  "--home",
+  "--instance",
+  "--entry",
+  "--transport",
+  "--port",
+  "--lines",
+  "--timeout",
+  "--client-index",
+  "--from",
+  "--out",
+  "--filter",
+  "--body",
+  "--args",
+];
+
+/** Flags where an EMPTY value is a mistake rather than a meaning: they name
+ *  WHAT am acts on, and an empty one used to be dropped so am inferred a
+ *  target instead (`am stop --app="$APP"` with `APP` unset stopped whatever
+ *  the cwd looks like). `--filter=` is deliberately absent — "no filter" is a
+ *  real thing to ask for. @internal */
+const NEEDS_A_VALUE: Readonly<Record<string, string>> = {
+  "--app": "--app needs an app id: --app=<id> (am instances lists them)",
+  "--entry": "--entry needs a file: --entry=src/app.ts",
+};
+
+/** The client INDEX has four spellings; this is the long one.
+ *
+ *  `-i 2` already arrives expanded, but `-i2` (attached) and the deprecated
+ *  `--client=2` do not — so a second, different index carried by one of them
+ *  went straight past {@linkcode repeatedFlagError}: `am trigger … -i2
+ *  --client-index=3` drove client 3, and the same line with its two flags
+ *  swapped drove client 2. Silent last-one-wins, in the command where that
+ *  value decides which live client is acted on. `--client=<kind>` is the app
+ *  runtime's own flag, not an index, and is left alone. Pure. @internal */
+function longClientIndex(a: string): string {
+  if (/^-i\d+$/.test(a)) return `--client-index=${a.slice(2)}`;
+  const deprecated = /^--client=(\d+)$/.exec(a);
+  return deprecated ? `--client-index=${deprecated[1]}` : a;
+}
+
+/** The refusal for a flag given twice with two different values, or null.
+ *
+ *  `am data --app=one --app=two` answered for `two`, in silence, and the verbs
+ *  on the other side of that delete data directories. `am build` already
+ *  refuses its own version of this ("targets were given twice … Use one");
+ *  this is the same call, made once for every flag. The SAME value twice is
+ *  not a contradiction and stays legal, so a wrapper script that adds a flag
+ *  the line already had still runs. Pure — `expanded` is the command line
+ *  after `--k v` has become `--k=v`, and after the `--` marker was cut off.
+ *  @internal */
+function repeatedFlagError(expanded: readonly string[]): string | null {
+  const seen = new Map<string, string>();
+  for (const raw of expanded) {
+    const a = longClientIndex(raw);
+    const eq = a.indexOf("=");
+    if (eq === -1 || !a.startsWith("--")) continue;
+    const name = a.slice(0, eq);
+    if (!SINGLE_VALUE_FLAGS.includes(name)) continue;
+    const value = a.slice(eq + 1);
+    const prev = seen.get(name);
+    if (prev === undefined) seen.set(name, value);
+    else if (prev !== value) {
+      return `${name} was given twice, with two different values ` +
+        `("${prev}" and "${value}") — am cannot act on both. Pass one: ` +
+        `${name}=${prev}`;
+    }
+  }
+  return null;
+}
+
 /** Parse CLI arguments into command, positional args, and global flags (--json, --quiet, --port, --app) */
 export function parseGlobalFlags(
   argv: string[],
@@ -663,6 +778,21 @@ export function parseGlobalFlags(
         `and "${raw[i + 1]}" on its own is read as a component name.`;
       expanded.push(`--wait=${raw[++i]}`);
     } else expanded.push(a);
+  }
+
+  // TWO VALUES FOR ONE FLAG — refused before anything is read out of them, so
+  // no verb has to grow its own opinion about which one was meant.
+  const repeated = repeatedFlagError(expanded);
+  if (repeated) flags.error ??= repeated;
+  // AN EMPTY VALUE for a flag that names a target. `--app=` set `flags.app =
+  // ""`, which is falsy, so the app id was INFERRED from the cwd and `am`
+  // addressed something the caller never named. `--home=` and `--instance=`
+  // have always refused; these two fell through.
+  for (const a of expanded) {
+    const eq = a.indexOf("=");
+    if (eq === -1 || a.length !== eq + 1) continue;
+    const msg = NEEDS_A_VALUE[a.slice(0, eq)];
+    if (msg) flags.error ??= msg;
   }
 
   // A numeric flag that does not parse is recorded as `flags.error` (first

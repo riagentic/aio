@@ -106,15 +106,29 @@ place, already load-bearing.
 ```ts
 updates: {
   source: string,             // https://… or file://… — required
+  kind?: UpdateSourceKind,    // override the inferred source kind
   channel?: string,           // default: the artifact's stamp (see resolution below)
-  interval?: number,          // ms; default by channel: dev 60_000 · test 300_000 · prod 21_600_000
-                              //   0 = never poll (manual check() only)
-  onBoot?: boolean,           // check once at startup — default true
+  check?: boolean | number,   // true (default) poll on the channel's schedule ·
+                              //   false = never poll (manual check() only) ·
+                              //   a number = the interval in ms
+  auto?: boolean,             // false (default) = ask before installing ·
+                              //   true = detect, install and restart unattended
   key?: JsonWebKey,           // pinned verify key; omitted ⇒ TOFU on first verified install
-  policy?: "notify" | "prompt" | "auto",   // default "notify"
-  prerelease?: boolean,       // default false — ignore prerelease versions in this channel
+  keys?: JsonWebKey[],        // additional accepted keys, for a rotation
+  canApply?: () => boolean | Promise<boolean>,  // may an update be applied right now?
+  allowUnsigned?: boolean,    // install unsigned releases (a private LAN build)
+  prerelease?: boolean,       // default: true on `dev`, false everywhere else
 }
 ```
+
+> This block is the SHIPPED vocabulary (`UpdatesConfig` in
+> `src/server/updates-core.ts`), not the one first proposed here. The design's
+> `interval` and `onBoot` became the single `check`, and its
+> `policy: "notify" | "prompt" | "auto"` became `auto: boolean` — the two
+> non-auto policies are one thing (ask first) and which door asks is decided by
+> whether the app has a UI. An unknown key inside `updates:` is refused at boot,
+> so the original spelling would now stop the app from starting; it is corrected
+> here rather than left as a trap.
 
 Omitted entirely ⇒ the cell is not registered, nothing polls, nothing ships in
 the client bundle. Off by default, zero cost when unused.
@@ -165,9 +179,11 @@ of work rather than a design exercise.
 The **manual check button** is `updates.check()`. That is the whole feature.
 
 The one prompt aio does own is the **TTY prompt**, because a headless service
-has no app UI to delegate to: `policy: "prompt"` on an interactive terminal asks
-y/n on stdin. `policy: "notify"` never asks (state only — the app decides).
-`policy: "auto"` applies without asking, for unattended fleets.
+has no app UI to delegate to: with `auto: false` (the default) an interactive
+terminal asks y/n on stdin, and anywhere else nothing is asked — the state is
+there and the app decides. `auto: true` applies without asking, for unattended
+fleets. (The design's `policy: "prompt" | "notify" | "auto"` shipped as this one
+boolean; see the note under Configuration.)
 
 ### Dev and prod run the same code — this is not a compiled-only feature
 
@@ -212,7 +228,7 @@ Three notes where the detail matters:
   nothing is. A CLI-launched binary checks before it opens its port, asks on the
   TTY, swaps, and re-execs. There is no downtime to manage because there is no
   running instance yet. Under systemd the prompt is impossible and unwanted, so
-  a non-TTY launch never asks — it notifies, or applies if `policy: "auto"`, and
+  a non-TTY launch never asks — it notifies, or applies if `auto: true`, and
   lets the unit's own restart do the rest.
 - **`rename()` works on a running executable.** Linux refuses a _write_ to a
   busy binary (`ETXTBSY`) but a rename only moves a directory entry; the running
@@ -291,9 +307,8 @@ Non-negotiable, each one a gate rather than a guideline:
 2. **Apply for binary/service**: `am update-app`, check-before-serving with TTY
    prompt and re-exec, health check, rollback, the backup gate.
 3. **AppImage and Electron strategies**, `am channel`, `--keep`.
-4. **`policy: "auto"`** for unattended fleets, `minFrom` forced-step releases,
-   and a documented deployment recipe (symlink layout, unit file, CI publish
-   job).
+4. **`auto: true`** for unattended fleets, `minFrom` forced-step releases, and a
+   documented deployment recipe (symlink layout, unit file, CI publish job).
 
 Each stage is shippable alone, and stage 1 carries no swap code at all — which
 is the point of putting the seam where it is.

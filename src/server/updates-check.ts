@@ -409,7 +409,16 @@ export async function fetchManifest(
   etag?: string,
   opts?: {
     /** Allow `manifest.url` to point at another host. Off by default: a
-     *  manifest that verifies says nothing about a host it merely names. */
+     *  manifest that verifies says nothing about a host it merely names.
+     *
+     *  INTERNAL — a caller's argument, NOT a config key. It is not on
+     *  `UpdatesConfig` and not in `VALID_UPDATES_KEYS`, so `updates:
+     *  { allowCrossOrigin: true }` is refused at boot as an unknown key. The
+     *  refusal above used to name that spelling as the way out, which was
+     *  inert while the nested walk skipped `updates` and boot-fatal once it
+     *  did not. Naming it in a user-facing message again needs it to become a
+     *  real config key first — a security opt-in, and a decision, not a
+     *  wording change. */
     allowCrossOrigin?: boolean;
   },
 ): Promise<ManifestFetch> {
@@ -446,8 +455,9 @@ export async function fetchManifest(
         error: `${url} points its artifact at a different host ` +
           `(${new URL(artifact).host || new URL(artifact).protocol}) — ` +
           `refusing to download from it. Fix: publish the artifact beside ` +
-          `the manifest, or opt in with ` +
-          `\`updates: { allowCrossOrigin: true }\`.`,
+          `the manifest (a relative \`url\` in the manifest is always ` +
+          `same-origin), or point \`updates.source\` at the host that ` +
+          `serves both.`,
       };
     }
     return {
@@ -578,8 +588,9 @@ export async function downloadArtifact(opts: {
       ok: false,
       error: `the artifact at ${opts.url} is on a different host than its ` +
         `manifest (${opts.manifestUrl}) — refusing to download it. Fix: ` +
-        `publish the artifact beside the manifest, or opt in with ` +
-        `\`updates: { allowCrossOrigin: true }\`.`,
+        `publish the artifact beside the manifest (a relative \`url\` in ` +
+        `the manifest is always same-origin), or point \`updates.source\` ` +
+        `at the host that serves both.`,
     };
   }
 

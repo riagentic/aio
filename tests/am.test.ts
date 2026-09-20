@@ -5,6 +5,7 @@ import {
   parsePayload,
   readPid,
   removePid,
+  resolveAmAppId,
   resolvePath,
   resolvePort,
   writePid,
@@ -334,6 +335,51 @@ Deno.test("am: resolvePort — an explicit --app never falls back to another app
     _resetTargetGuess();
     removePid(other);
     await dropTempDir(bare);
+  }
+});
+
+// Standing in an app's own directory with the app stopped is the single most
+// ordinary thing a developer or agent does — and every port-taking verb
+// answered it with a diagnosis of something else:
+//
+//   am does not know which app to target: no app named "r5a-counter" is
+//   running and none declares a port (AIO_PORT, or aio.run({ port }) …).
+//   7 apps are running: wallet @ uds, … Name one with --app=<id>, or point
+//   at a listener with --port=N.
+//
+// am knows exactly which app is meant — `am status` in the same directory says
+// `r5a-counter: stopped` — so the sentence is false, the two fixes it names are
+// both wrong (declare a port? target someone else's app?), and the list of
+// unrelated apps reads like an invitation to dispatch into one of them. The
+// fix a stopped app needs is `am start`.
+Deno.test("am: resolvePort — this project's own app, stopped, is told to start", async () => {
+  const dir = await tempDir("aio-am-stopped-");
+  const cwd = Deno.cwd();
+  try {
+    await Deno.writeTextFile(
+      join(dir, "deno.json"),
+      JSON.stringify({ appId: "r5a-stopped-app" }),
+    );
+    Deno.chdir(dir);
+    const id = resolveAmAppId();
+    assertEquals(id, "r5a-stopped-app");
+    const err = assertThrows(() => resolvePort(undefined, id), Error);
+    assertStringIncludes(err.message, `"${id}" is not running`);
+    assertStringIncludes(err.message, "am start");
+    assertEquals(
+      err.message.includes("does not know which app"),
+      false,
+      `am resolved the id from this very directory: ${err.message}`,
+    );
+    assertEquals(
+      err.message.includes("AIO_PORT"),
+      false,
+      `declaring a port does not start a stopped app: ${err.message}`,
+    );
+  } finally {
+    Deno.chdir(cwd);
+    _resetTargetGuess();
+    await dropTempDir(dir);
   }
 });
 

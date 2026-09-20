@@ -21,7 +21,7 @@
  * — see `crossCompileBlocker`.
  */
 import { join } from "@std/path";
-import { DENO_JSON_NAMES, readDenoJson } from "../server/deno-json.ts";
+import { readDenoJson } from "../server/deno-json.ts";
 import {
   DEFAULT_ELECTRON_VERSION,
   electronRuntimeDir,
@@ -30,7 +30,6 @@ import {
   ensureElectronRuntime,
 } from "../electron/electron-runtime-fetch.ts";
 import { PLATFORMS } from "./platforms.ts";
-import { HEY } from "../diagnostics/fmt.ts";
 
 export { unzipInto } from "../electron/electron-runtime-fetch.ts";
 // THE version, re-exported through the build's runtime module so `am create`
@@ -184,7 +183,9 @@ export function electronDriftNote(d: ElectronDrift): string | null {
  *   2. INSTALLING it when absent, rather than refusing a first build.
  *   3. Saying so when `deno install npm:electron` REWRITES the app's config,
  *      because a build silently editing the file it builds from is how a pin
- *      moves with nobody looking.
+ *      moves with nobody looking. That report now lives in the INSTALLER
+ *      (`electronConfigNotes`), so every caller of it inherits the same
+ *      lines — this was the only path that had them.
  *
  *  Returns the `dist` directory, or null when the runtime could not be
  *  obtained (the caller prints its own target-flavoured refusal). */
@@ -198,25 +199,19 @@ export async function ensureHostElectronDist(
   const found = await electronDistDir(root);
   if (found !== null) return found;
 
-  // BOTH config names: an app on `deno.jsonc` would otherwise never be told
-  // its config had been rewritten (`readDenoJson`'s list is the decider).
-  const before = new Map<string, string>();
-  for (const name of DENO_JSON_NAMES) {
-    const text = await Deno.readTextFile(join(root, name)).catch(() => null);
-    if (text !== null) before.set(name, text);
-  }
-  const installed = await autoInstallElectron({ error: log.error });
-  for (const [name, text] of before) {
-    const after = await Deno.readTextFile(join(root, name)).catch(() => null);
-    if (after !== null && after !== text) {
-      log.warn(
-        `${HEY} ${join(root, name)} was MODIFIED by ` +
-          `\`deno install npm:electron\` (auto-install of the Electron ` +
-          `runtime). Review the diff and commit it deliberately — the next ` +
-          `build reads its pins from this file.`,
-      );
-    }
-  }
+  // The rewrite is REPORTED by the installer itself (`electronConfigNotes`),
+  // for every caller and not just this one: `deno task install:electron` and
+  // the dev launcher run the same `deno install`, and used to edit an app's
+  // pin with no line of output at all (a field report). One decider, one
+  // place — this function used to hold a second copy of the before/after
+  // check and was the only path that said anything.
+  const installed = await autoInstallElectron(
+    { error: log.error, warn: log.warn },
+    undefined,
+    undefined,
+    undefined,
+    root,
+  );
   return installed ? await electronDistDir(root) : null;
 }
 

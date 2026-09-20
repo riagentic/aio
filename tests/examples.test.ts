@@ -70,6 +70,8 @@ async function waitFor<T>(
  *  boot that crashed and a boot that is merely slow looked identical from
  *  here: the test waited out its bound (or, before the fix above, forever) and
  *  reported "timeout", naming nothing. The child says why it died; keep it. */
+/** Each child's stderr drain, awaited by `kill` so no read outlives a test. */
+const _drain = new WeakMap<Deno.ChildProcess, Promise<void>>();
 const _why = new WeakMap<Deno.ChildProcess, { text: string }>();
 
 function spawnExample(
@@ -95,16 +97,25 @@ function spawnExample(
   _why.set(proc, box);
   // Drained continuously: a piped stream nobody reads fills its pipe buffer
   // and blocks the child — which would be a hang of our own making.
-  (async () => {
-    try {
-      for await (const chunk of proc.stderr) {
-        box.text += new TextDecoder().decode(chunk);
-        if (box.text.length > 8000) box.text = box.text.slice(-8000);
+  //
+  // The drain is KEPT, not fired and forgotten: its `op_read` outlives the
+  // child by however long the kernel takes to close the pipe, and a test that
+  // returns while it is in flight is a sanitizer leak — which is what the
+  // suite saw under load, on the two `*-remote` examples, while each passed
+  // alone. `kill()` awaits it.
+  _drain.set(
+    proc,
+    (async () => {
+      try {
+        for await (const chunk of proc.stderr) {
+          box.text += new TextDecoder().decode(chunk);
+          if (box.text.length > 8000) box.text = box.text.slice(-8000);
+        }
+      } catch {
+        // aio-ok: the stream ends when the child does; that IS the outcome.
       }
-    } catch {
-      // aio-ok: the stream ends when the child does; that IS the outcome.
-    }
-  })();
+    })(),
+  );
   proc.status.then((st) => {
     if (!st.success) {
       box.text = `the example process EXITED (code ${st.code}${
@@ -125,6 +136,8 @@ function why(proc: Deno.ChildProcess): string {
 
 async function kill(proc: Deno.ChildProcess): Promise<void> {
   await stopChild(proc, { quiet: true });
+  await _drain.get(proc); // the stderr reader, started in spawnExample
+  _drain.delete(proc);
 }
 
 /** The entry an example's own deno.json declares — the SAME answer the build

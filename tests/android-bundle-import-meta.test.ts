@@ -8,6 +8,7 @@ import { assert, assertEquals } from "@std/assert";
 import { join } from "@std/path";
 import * as esbuild from "esbuild";
 import { bundleClient } from "../src/build/client-bundle.ts";
+import { stopEsbuildService } from "../src/build/esbuild-shared.ts";
 import { evaluateBundle } from "../src/build/graph-eval.ts";
 import { isRunningFromSource } from "../src/diagnostics/logger-types.ts";
 import { dropTempDir, tempDir } from "../src/testing/temp-dir.ts";
@@ -41,7 +42,12 @@ export default function App() { return null; }
     assert(run.ok, `the bundle's module scope threw: ${JSON.stringify(run)}`);
   } finally {
     await dropTempDir(root);
-    await esbuild.stop();
+    // NOT a bare `esbuild.stop()`: that only sends the kill, and the native
+    // child was still in the process table on every measured run. Under the
+    // parallel suite its exit landed after this test ended — shard 4 failed
+    // with a leaked child process and a leaked "wait for a subprocess to
+    // exit" op, while the file alone stayed green.
+    await stopEsbuildService(() => esbuild.stop());
   }
 });
 

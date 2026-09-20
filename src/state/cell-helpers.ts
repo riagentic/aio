@@ -127,6 +127,38 @@ export function hasBothFilterModes(v: unknown): boolean {
   return Array.isArray(f.include) && Array.isArray(f.exclude);
 }
 
+/** A `persist:` OBJECT that names neither `include` nor `exclude` — a filter
+ *  that filters nothing, and the three readers of it do not agree on what
+ *  that means.
+ *
+ *  `CellFieldFilter` has no such member, so it arrives from JS, from a
+ *  `cellDefaults` built at runtime, or from `onPersist`/`onRestore` written
+ *  INSIDE `persist:` instead of beside it. The startup report and the trojan
+ *  `fields` route both resolve it as `"all"` (`renderFilter`,
+ *  `fieldIncluded`), the store's own projection resolves it as `"none"`
+ *  (`applyCellFieldFilter` falls through to `undefined`, and
+ *  `buildDBStateGetter` skips the cell), and journal replay read
+ *  `filter.exclude` as iterable. Measured on one cell: the boot report said
+ *  `persist=all`, the database held `{}` after every flush, each restart came
+ *  back empty — and the first boot after a CRASH threw an uncaught
+ *  `TypeError: filter.exclude is not iterable` before the server started, so
+ *  the app never booted again.
+ *
+ *  Refused where the intent is still visible — `persist: "none"` is the
+ *  spelling for "store nothing", and `"all"` for "store it all". THE decider
+ *  for that question, asked from two layers, exactly like
+ *  {@link hasBothFilterModes}: `cell()`'s own filter goes through
+ *  {@link validateFieldFilters}, and `aio.run({ cellDefaults })` through
+ *  `configConflicts` (`src/server/config.ts`).
+ *
+ *  `visible:` is deliberately NOT covered: `CellVisibility` allows
+ *  `{ forUser }` / `{ publicFields }` with no include/exclude, and
+ *  `normalizeUiFilter` already resolves that to "all". */
+export function namesNoFilterMode(v: unknown): boolean {
+  if (!v || typeof v !== "object" || Array.isArray(v)) return false;
+  return !("include" in v) && !("exclude" in v);
+}
+
 export function validateFieldFilters(
   name: string,
   state: Record<string, unknown> | undefined,
@@ -209,6 +241,21 @@ export function validateFieldFilters(
   };
   check("visible", ui);
   check("persist", persist);
+  // A `persist:` object that names neither list — see `namesNoFilterMode`.
+  if (namesNoFilterMode(persist)) {
+    const keys = Object.keys(persist as Record<string, unknown>);
+    throw new Error(
+      `[cell:${name}] persist names neither \`include\` nor \`exclude\`${
+        keys.length ? ` (it has ${keys.map((k) => `\`${k}\``).join(", ")})` : ""
+      } — it is not a filter, and nothing of this cell reaches the database: ` +
+        `the boot report says \`persist=all\`, every flush writes an empty ` +
+        `document for it, and each restart comes back at the declared ` +
+        `defaults. FIX: \`persist: "all"\` (the default — store the whole ` +
+        `slice) or \`persist: "none"\` (store nothing), or name the fields ` +
+        `with \`include\`/\`exclude\`. \`onPersist\`/\`onRestore\` are cell ` +
+        `options of their own — they go BESIDE \`persist:\`, not inside it.`,
+    );
+  }
   // publicFields must name real fields too — a typo'd opt-out silently fails to
   // opt out (the secret warning keeps firing, or worse, masks a rename).
   for (const key of extractPublicFields(ui) ?? []) {
@@ -218,6 +265,76 @@ export function validateFieldFilters(
           `field of this cell. Declared state: ${
             [...stateKeys].join(", ") || "(none)"
           }. Check the spelling.`,
+      );
+    }
+  }
+}
+
+/** Warn about `sync: { merge }` / `sync: { identity }` keys that name no field
+ *  of the cell's declared state — the CRDT half of {@link
+ *  validateFieldFilters}.
+ *
+ *  Both maps are keyed by TOP-LEVEL state field: the engine's `conflictWork`
+ *  walks `Object.keys(after)` — the cell's own state — and looks each field up
+ *  in `merge` (and, for the set strategies, in `identity`). A key that matches
+ *  no field is therefore never read: the field it meant to configure resolves
+ *  last-write-wins, which is the exact outcome `normalizeSyncConfig` REFUSES a
+ *  typo'd strategy for ("lost data, later, on someone else's machine"),
+ *  reached through the other half of the same entry. A nested path
+ *  (`"profile.tags"`) is the same miss with a different cause — nothing walks
+ *  into a field, so only the head could ever match.
+ *
+ *  WARNED rather than thrown, and the difference from the filter check above
+ *  is not timidity: a method may introduce a top-level field the declared
+ *  state does not list, so a refusal could be wrong about a cell that works,
+ *  and this runs for every app that already ships a sync cell. Same warning in
+ *  dev and in prod — nothing branches on it.
+ *
+ *  Pure apart from the log call: same cell, same state, same message. */
+export function warnUnmatchedSyncFields(
+  name: string,
+  state: Record<string, unknown> | undefined,
+  sync:
+    | { merge?: Record<string, unknown>; identity?: Record<string, unknown> }
+    | undefined,
+  warn: (msg: string) => void,
+): void {
+  if (!sync) return;
+  const stateKeys = new Set(Object.keys(state ?? {}));
+  for (const which of ["merge", "identity"] as const) {
+    const map = sync[which];
+    if (!map || typeof map !== "object") continue;
+    for (const key of Object.keys(map)) {
+      if (stateKeys.has(key) || key.startsWith("__aio")) continue;
+      // What is LOST, said for the map that was written. A `merge` key that
+      // never matches leaves the field on the default strategy; an `identity`
+      // key that never matches leaves the set strategies on `"id"`.
+      const consequence = which === "merge"
+        ? `so the strategy never runs and that field resolves ` +
+          `last-write-wins instead — the symptom is lost data, later, on ` +
+          `someone else's machine`
+        : `so nothing reads it — set-add/set-remove keep matching items by ` +
+          `"id"`;
+      const head = key.includes(".") ? key.split(".")[0]! : "";
+      const near = head ? null : nearestOf(key, stateKeys);
+      const why = head
+        ? `${which} is keyed by TOP-LEVEL state field and a nested path ` +
+          `never matches${
+            stateKeys.has(head)
+              ? ""
+              : `, and "${head}" is not a state field of this cell either`
+          }`
+        : `it is not a field of this cell's declared state${
+          near ? ` — did you mean "${near}"?` : ""
+        }`;
+      const fix = head && stateKeys.has(head)
+        ? ` FIX: configure "${head}" itself, or lift the field to the top level.`
+        : "";
+      warn(
+        `${name}: sync.${which}["${key}"] names no state field — ${why}, ` +
+          `${consequence}.${fix} Declared state: ${
+            [...stateKeys].join(", ") || "(none)"
+          }.`,
       );
     }
   }

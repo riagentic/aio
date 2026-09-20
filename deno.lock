@@ -23,7 +23,9 @@
     "npm:electron@44.4.1": "44.4.1",
     "npm:esbuild@0.24.2": "0.24.2",
     "npm:happy-dom@17.6.3": "17.6.3",
-    "npm:immer@10.2.0": "10.2.0"
+    "npm:immer@10.2.0": "10.2.0",
+    "npm:react-dom@19.1.0": "19.1.0_react@19.1.0",
+    "npm:react@19.1.0": "19.1.0"
   },
   "jsr": {
     "@deno/installer-shell-setup@0.3.4": {
@@ -235,8 +237,8 @@
       "os": ["win32"],
       "cpu": ["x64"]
     },
-    "@types/node@24.13.5": {
-      "integrity": "sha512-TXyindR+lBr22aJIdMQzCFHPHR6cR4js838mRDCSz5hOKWZvZwsXSSiXDmjRj4iJmgl+sR9O+1mkoVBSMadNug==",
+    "@types/node@24.13.6": {
+      "integrity": "sha512-SGrw/h3KPFshy3OE6ZL53LMBG5vGQQ8/gIpiqz/kRZhPJ7HgwCEs8LBuNtWLa8dvGZVpSF7+Bf+c11HUrCb/yg==",
       "dependencies": [
         "undici-types"
       ]
@@ -309,6 +311,19 @@
     },
     "progress@2.0.3": {
       "integrity": "sha512-7PiHtLll5LdnKIMw100I+8xJXR5gW2QwWYkT6iJva0bXitZKa/XMrSbdmg3r2Xnaidz9Qumd0VPaMrZlF9V9sA=="
+    },
+    "react-dom@19.1.0_react@19.1.0": {
+      "integrity": "sha512-Xs1hdnE+DyKgeHJeJznQmYMIBG3TKIHJJT95Q58nHLSrElKlGQqDTR2HQ9fx5CN/Gk6Vh/kupBTDLU11/nDk/g==",
+      "dependencies": [
+        "react",
+        "scheduler"
+      ]
+    },
+    "react@19.1.0": {
+      "integrity": "sha512-FS+XFBNvn3GTAWq26joslQgWNoFu08F4kl0J4CgdNKADkdSGXQyTCnKteIAJy96Br6YbpEU1LSzV5dYtjMkMDg=="
+    },
+    "scheduler@0.26.0": {
+      "integrity": "sha512-NlHwttCI/l5gCPR3D1nNXtWABUmBwvZpEQiD4IXSbIDq8BzLIK/7Ir5gTFSGZDUu37K5cMNp0hFtzO38sC7gWA=="
     },
     "semver@7.8.5": {
       "integrity": "sha512-Y7/KDsb8LjooZpwaqGyulO6DQlksgCncchHGk+sZIY4SBvUocMBEFH5Ur1fI4dV+Jvl0w6cjvucaIi40puRioA==",
@@ -491,7 +506,9 @@
       "jsr:@std/yaml@1.0.9",
       "npm:esbuild@0.24.2",
       "npm:happy-dom@17.6.3",
-      "npm:immer@10.2.0"
+      "npm:immer@10.2.0",
+      "npm:react-dom@19.1.0",
+      "npm:react@19.1.0"
     ],
     "packageJson": {
       "dependencies": [

@@ -170,6 +170,16 @@ export function camelToKebab(s: string): string {
 // a11y warning recommends the shape, and `docs/ui/air-lifecycle.md` ships it.
 const _ATTR_NAME: Readonly<Record<string, string>> = {
   htmlFor: "for",
+  // The two HTML (non-SVG) attributes whose camelCase prop name is
+  // HYPHENATED. Missing here, they were emitted verbatim — and an attribute
+  // name is case-insensitive but not hyphen-insensitive, so `httpEquiv`
+  // parses as `httpequiv` and `acceptCharset` as `acceptcharset`: the refresh
+  // never fired, the CSP was never applied, the form encoding was never set,
+  // and nothing said so. `useHead` normalized `httpEquiv` for its own
+  // `<meta>` tags (481c2751); a key honoured in one surface and dropped in
+  // another is the bug, so it is the ONE table that answers.
+  httpEquiv: "http-equiv",
+  acceptCharset: "accept-charset",
   // `<form nativeSubmit>` opts out of the SPA submit interception
   // (vdom-events.ts reads `data-native-submit` off the element). The prop was
   // promised in that comment and never mapped, so it landed as a

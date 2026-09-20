@@ -273,7 +273,14 @@ export function _trackingProxy(
   if (depth > 100) return obj; // AIO-261: depth limit for circular references
   return new Proxy(obj as Record<string, unknown>, {
     get(target, prop: string | symbol) {
-      if (typeof prop === "string" && !_BLOCKED_KEYS.has(prop)) {
+      // `constructor` / `prototype` are skipped only when INHERITED: as own
+      // keys they are ordinary state (legal in every method kind), and
+      // skipping them by name left such a read — and everything read through
+      // it — out of the subscription. `__proto__` is never a path.
+      if (
+        typeof prop === "string" && prop !== "__proto__" &&
+        (!_BLOCKED_KEYS.has(prop) || Object.hasOwn(target, prop))
+      ) {
         const fullPath = parentPath ? `${parentPath}.${prop}` : prop;
         const value = Reflect.get(target, prop);
         if (value && typeof value === "object" && !Array.isArray(value)) {

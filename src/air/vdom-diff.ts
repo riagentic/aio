@@ -29,6 +29,7 @@ import {
 import {
   _advance,
   _firstLive,
+  _liveFirstDom,
   _removeDomCleanup,
   getDom,
   isChildOf,
@@ -251,7 +252,7 @@ function _diffNode(
     (typeof next === "object" && typeof old === "object" &&
       (next as VNode).tag !== (old as VNode).tag)
   ) {
-    const anchor = getDom(old) ?? oldDom;
+    const anchor = _liveFirstDom(old) ?? oldDom;
     const newDom = createDom(next, ctx, isSvg, parent);
     if (newDom && anchor && isChildOf(anchor, parent)) {
       parent.insertBefore(newDom, anchor);
@@ -407,7 +408,7 @@ function _liveRegionFirst(
   if (ov._rendered === undefined) {
     for (const child of ov.children) {
       if (_domNodeCount(child) === 0) continue;
-      const d = getDom(child);
+      const d = _liveFirstDom(child);
       if (d && isChildOf(d, parent)) return d;
       break;
     }
@@ -429,7 +430,16 @@ function _diffComponent(
   // deno-lint-ignore no-explicit-any
   if (hookState && (hookState as any).skip) {
     nv._rendered = ov._rendered;
-    nv._dom = ov._dom;
+    // The LIVE first node of the output, not `ov`'s copy of it. A component
+    // BELOW this one re-renders on its own and swaps its root element — one
+    // dialog giving way to the next — and no ancestor's copy hears about it.
+    // Carrying the copy across an auto-memo skip handed the child reconciler a
+    // DETACHED node as this child's position, and the caller then re-inserted
+    // that node: a list whose rows moved in the same pass grew a second,
+    // resurrected copy of the swapped-away element (`<p>L</p>` back beside the
+    // `<b>L</b>` that replaced it). Its quieter half is the dev alignment
+    // tripwire calling a correct render a desync (a field report).
+    nv._dom = _liveFirstDom(ov) ?? ov._dom;
     ctx.hooks?.afterComponent(nv, nv._rendered ?? null, hookState);
     return nv._dom ?? null;
   }
@@ -452,7 +462,7 @@ function _diffComponent(
       // finish. Unwinding instead abandoned the parent's diff half-applied.
       if (ctx.hooks?.isolateComponentError?.(nv, ov, e, hookState)) {
         nv._rendered = ov._rendered;
-        nv._dom = ov._dom;
+        nv._dom = _liveFirstDom(ov) ?? ov._dom; // live, as on the skip path
         return nv._dom ?? null;
       }
     }
@@ -479,7 +489,12 @@ function _diffComponent(
         ov._rendered ?? null,
         ctx,
         isSvg,
-        ov._dom ?? oldDom,
+        // The LIVE first node, not this vnode's copy of it: a component below
+        // that re-rendered on its own swapped the node without telling any
+        // ancestor's copy, so the old position handed to the diff was a
+        // detached node and a pass that moved nodes walked from the wrong
+        // place.
+        _liveFirstDom(ov) ?? oldDom,
       );
     } catch (e) {
       // A child's render failed — record this component on the chain.
@@ -650,7 +665,14 @@ export function _assertRegionAlignment(
     if (count === 0) continue; // Portal / component that rendered nothing
     if (!cursor) return bad(`ran out of DOM nodes at child ${i}`);
     if (typeof child === "object") {
-      const d = getDom(child);
+      // `_liveFirstDom`, not the vnode's own `_dom`: a component child whose
+      // nested component re-rendered on its own and swapped its root still
+      // carries the detached node in its copy, and comparing against THAT
+      // reported a desync for a render in which nothing was wrong (a field
+      // report: "holds the wrong node at child 6", twice, one dialog giving
+      // way to the next). A tripwire that fires when nothing is wrong teaches
+      // the reader to ignore the real one.
+      const d = _liveFirstDom(child);
       if (d && d !== cursor) {
         return bad(`holds the wrong node at child ${i}`);
       }

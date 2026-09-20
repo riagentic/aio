@@ -333,9 +333,10 @@ export const LEDGER: readonly Mutation[] = [
   {
     what:
       "--expose stops defaulting to off: every app that says nothing binds to the LAN, public by default in the strongest sense",
-    file: "src/server/aio.ts",
-    find: "  if (cli.expose ?? config.expose ?? false) return true;",
-    replace: "  if (cli.expose ?? config.expose ?? true) return true;",
+    // The default lives in the ONE decider since 1.0.6 (config-sources.ts).
+    file: "src/server/config-sources.ts",
+    find: '  pickOr(false, ["flag", cli.expose], ["config", config.expose]);',
+    replace: '  pickOr(true, ["flag", cli.expose], ["config", config.expose]);',
     test: "tests/expose-config.test.ts",
     filter:
       "expose: ONE decider \u2014 CLI wins, config carries, default false",
@@ -419,8 +420,8 @@ export const LEDGER: readonly Mutation[] = [
     what:
       "a corrupt SQLite file is opened and served \u2014 the app returns half the data and writes on top of the damage, with no quarantine copy kept",
     file: "src/server/db-integrity.ts",
-    find: "    result = await opts.db.checkIntegrity();",
-    replace: "    result = { ok: true, problems: [] };",
+    find: "      checked = await opts.db.checkIntegrity();",
+    replace: "      checked = { ok: true, problems: [] };",
     test: "tests/db-integrity.test.ts",
     filter:
       "integrity: a damaged file is QUARANTINED and restored from a snapshot",

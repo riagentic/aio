@@ -9,7 +9,7 @@
 </p>
 
 <p align="center">
-  <code>v1.0.5-beta</code> · <a href="LICENSE">MIT</a> ·
+  <code>v1.0.6-beta</code> · <a href="LICENSE">MIT</a> ·
   <a href="docs/content.md">Docs</a> ·
   <a href="docs/basics/quickstart.md">Quickstart</a> ·
   <a href="CHANGELOG.md">Changelog</a>
@@ -133,17 +133,17 @@ screen, `am trigger` acts on it.
 
 ## 📦 What you get
 
-|                |                                                                            |
-| -------------- | -------------------------------------------------------------------------- |
-| 💾 **Data**    | worker-thread SQLite · CRDT sync · offline queue · migrations · backup     |
-| 🎨 **UI**      | signals renderer · a default theme · routing · forms · SSR + hydrate       |
-| 🔐 **Auth**    | sessions · per-user tokens · TOTP · OIDC · PIN pairing                     |
-| 🧪 **Testing** | `testCell` / `testUI` — semantic, selector-free · time-travel              |
-| 🚚 **Ship**    | browser · Electron · Android · iOS client · CLI · service · signed updates |
-| 🛠️ **Operate** | `am` — status, health, logs, state, dispatch, pins, installs               |
+|                |                                                                             |
+| -------------- | --------------------------------------------------------------------------- |
+| 💾 **Data**    | worker-thread SQLite · CRDT sync · offline queue · migrations · backup      |
+| 🎨 **UI**      | signals renderer · a default theme · routing · forms · `renderToString` SSR |
+| 🔐 **Auth**    | sessions · per-user tokens · TOTP · OIDC · PIN pairing                      |
+| 🧪 **Testing** | `testCell` / `testUI` — semantic, selector-free · time-travel               |
+| 🚚 **Ship**    | browser · Electron · Android · iOS client · CLI · service · signed updates  |
+| 🛠️ **Operate** | `am` — status, health, logs, state, dispatch, pins, installs                |
 
-A whole client — renderer, protocol, offline queue, CRDT merge — is **85 KB
-gzipped**, 74 KB brotli. `deno task bench:bundle` prints it, and
+A whole client — renderer, protocol, offline queue, CRDT merge — is **87 KB
+gzipped**, 76 KB brotli. `deno task bench:bundle` prints it, and
 `tests/bundle-size.test.ts` keeps this sentence true — both numbers.
 
 ## 🏃 Run any aio app, from its repo

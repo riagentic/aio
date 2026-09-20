@@ -1,6 +1,18 @@
 // transport-shared.ts — the small pieces every transport (browser WS, CLI WS,
 // Electron UDS) must agree on. One authority instead of hand-copied snippets.
 
+/** RFC 6455 close code 1009: "message too big". Both sides of this rule live
+ *  here — the server refuses such a frame outbound (`peerFrameCeiling`,
+ *  server-ws.ts) and a client has to recognise one it was killed by. */
+export const FRAME_TOO_LARGE_CLOSE = 1009;
+
+/** Is this socket error the RUNTIME refusing an oversized message? Deno's
+ *  WebSocket reports it on the error channel and then closes, so it is the
+ *  only evidence a client gets that a reconnect will end the same way. */
+export function isFrameTooLarge(message: string): boolean {
+  return /frame too large|message too (?:large|big)/i.test(message);
+}
+
 /** Reconnect backoff constants — shared by real code AND interpolated into
  *  generated client scripts (electron-uds), which can't import modules. */
 export const BACKOFF_BASE_MS = 1000;

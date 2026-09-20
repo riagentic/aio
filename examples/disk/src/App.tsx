@@ -42,7 +42,7 @@ function Row({ entry, largest }: { entry: Entry; largest: number }) {
             style={{
               height: "4px",
               width: `${pct}%`,
-              background: "#00a6cc",
+              background: "#00809f",
               borderRadius: "2px",
             }}
           />

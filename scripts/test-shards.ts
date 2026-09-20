@@ -142,11 +142,68 @@ export function portSliceFor(i: number, n: number): string {
   return `${first + i * span}-${first + (i + 1) * span - 1}`;
 }
 
+/** The cores a test run may use, and the command prefix that holds it there.
+ *
+ *  The run used to take the whole machine: 16 shards, each spawning apps,
+ *  browsers and Electron, saturated all 32 cores and starved the maintainer's
+ *  own work ("I need at least 4 cores free"). Linux pins every shard — and so
+ *  every child it spawns, which inherits the mask — off the first `free`
+ *  cores with `taskset`, and `nice`s it below interactive work. Elsewhere, or
+ *  without taskset, it is `nice` alone and fewer shards. Pure, for its test. */
+export function cpuFence(
+  cores: number,
+  free: number,
+  os: string,
+  have: { taskset: boolean; nice: boolean },
+): { usable: number; prefix: string[] } {
+  const usable = Math.max(1, cores - free);
+  const nice = have.nice ? ["nice", "-n", "10"] : [];
+  if (os === "linux" && have.taskset && cores > free) {
+    return {
+      usable,
+      prefix: ["taskset", "-c", `${free}-${cores - 1}`, ...nice],
+    };
+  }
+  return { usable, prefix: nice };
+}
+
+async function onPath(cmd: string): Promise<boolean> {
+  try {
+    const r = await new Deno.Command(cmd, {
+      args: ["--version"],
+      stdout: "null",
+      stderr: "null",
+    }).output();
+    return r.success;
+  } catch {
+    return false; // aio-ok: not installed — the fence degrades to what exists
+  }
+}
+
+/** THE fence for this machine — the runner and `check:release` share it.
+ *  `AIO_TEST_FREE_CORES` (default 4) is how many cores stay untouched. */
+export async function machineFence(): Promise<
+  ReturnType<typeof cpuFence> & { cores: number }
+> {
+  const cores = navigator.hardwareConcurrency ?? 4;
+  return {
+    cores,
+    ...cpuFence(
+      cores,
+      Number(Deno.env.get("AIO_TEST_FREE_CORES") ?? 4),
+      Deno.build.os,
+      { taskset: await onPath("taskset"), nice: await onPath("nice") },
+    ),
+  };
+}
+
 if (import.meta.main) {
   const flag = Deno.args.find((a) => a.startsWith("--shards="));
-  const cores = navigator.hardwareConcurrency ?? 4;
+  const fence = await machineFence();
+  const cores = fence.cores;
   const n = flag ? Number(flag.slice(9)) : Number(
-    Deno.env.get("AIO_TEST_SHARDS") ?? Math.max(1, Math.min(16, cores >> 1)),
+    Deno.env.get("AIO_TEST_SHARDS") ??
+      Math.max(1, Math.min(16, fence.usable >> 1)),
   );
   const named = Deno.args.filter((a) => !a.startsWith("--"));
   const files = named.length ? named : await discover(["tests", "amui/src"]);
@@ -165,7 +222,10 @@ if (import.meta.main) {
   await Deno.mkdir(OUT, { recursive: true });
   const started = performance.now();
   console.log(
-    `${files.length} test files → ${shards.length} parallel shards ` +
+    `${files.length} test files → ${shards.length} parallel shards on ` +
+      `${fence.usable} of ${cores} cores (${
+        fence.prefix.join(" ") || "no fence"
+      }) ` +
       `(${windowed.size} real-window tests serialized in shard 0) · logs: ${
         relative(ROOT, OUT)
       }/`,
@@ -178,8 +238,10 @@ if (import.meta.main) {
     const log = join(OUT, `${i}.log`);
     const junit = join(OUT, `${i}.xml`);
     const t0 = performance.now();
-    const { code, stdout, stderr } = await new Deno.Command(Deno.execPath(), {
+    const [cmd, ...pre] = [...fence.prefix, Deno.execPath()];
+    const { code, stdout, stderr } = await new Deno.Command(cmd!, {
       args: [
+        ...pre,
         "test",
         "-A",
         "--sanitize-ops",

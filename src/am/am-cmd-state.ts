@@ -8,6 +8,7 @@ import type { GlobalFlags } from "./am-types.ts";
 import {
   describe,
   detectMode,
+  fail,
   out,
   outError,
   outValue,
@@ -258,10 +259,68 @@ export function _pathOfArgs(args: readonly string[]): string | undefined {
   return args.find((a) => !a.startsWith("-"));
 }
 
+/** The refusal for `am state` given more than one path, or null.
+ *
+ *  `_pathOfArgs` reads the FIRST positional, so every other one used to be
+ *  dropped without a word: `am state counter count` — the dot forgotten —
+ *  answered `{"count": 5}` with exit 0, a whole object where a number was
+ *  asked for. This is the primary scripting surface, and its value goes
+ *  straight into a shell variable or an agent's next step, so a silently
+ *  narrowed question is the worst answer it can give.
+ *
+ *  The message carries the fix, and there are two of them, because there are
+ *  two ways to get here. The forgotten dot is one. The other is the SHELL:
+ *  `am state fleet[0].{name,active}` is a real path syntax and bash expands
+ *  the braces before `am` sees them, so it arrives as two arguments and the
+ *  pick silently became its first field. Quoting is the fix there, and
+ *  `.{name,active}` is not a dotted path, so the two hints are told apart by
+ *  the shape of what arrived. Pure. @internal */
+export function _extraPathError(args: readonly string[]): string | null {
+  const paths = args.filter((a) => !a.startsWith("-"));
+  if (paths.length < 2) return null;
+  const head = `am state reads ONE state path, and ${paths.length} were ` +
+    `given (${paths.join(" ")}) — the rest would have been dropped in ` +
+    `silence.`;
+  const brace = _braceHint(paths);
+  if (brace) {
+    return `${head} That is a field pick the shell expanded — quote it: ` +
+      `am state '${brace}'`;
+  }
+  // No shared `prefix.`, so the two readings are INDISTINGUISHABLE from here
+  // and both are named. `{counter,page}` — "pick from root" — is documented
+  // path syntax, and bash expands it to exactly the two arguments a forgotten
+  // dot makes; naming only the dot sent a caller who wrote the documented
+  // form to `am state counter.page`, a path that does not resolve, for a
+  // second wrong answer in a row.
+  return `${head} A path is dotted: am state ${paths.join(".")} — or, if ` +
+    `that was a field pick from the root, quote it: ` +
+    `am state '{${paths.join(",")}}'`;
+}
+
+/** The `prefix{a,b}` these expanded paths came from, or null when they do not
+ *  share a prefix ending at a `.` — i.e. when this was a forgotten dot rather
+ *  than a shell brace expansion. Pure. @internal */
+export function _braceHint(paths: readonly string[]): string | null {
+  const first = paths[0]!;
+  let i = 0;
+  while (i < first.length && paths.every((p) => p[i] === first[i])) i++;
+  const cut = first.lastIndexOf(".", i - 1) + 1;
+  if (cut === 0) return null;
+  const prefix = first.slice(0, cut);
+  const tails = paths.map((p) => p.slice(cut));
+  if (tails.some((t) => t === "")) return null;
+  return `${prefix}{${tails.join(",")}}`;
+}
+
 export async function cmdState(
   args: string[],
   flags: GlobalFlags,
 ): Promise<void> {
+  // ONE path per call — asked before the app is even resolved, because a
+  // second positional means the question is not the one that would be
+  // answered. (`--ui` too: its argument is a single user.)
+  const extra = _extraPathError(args);
+  if (extra) fail(extra, detectMode(flags));
   // `--ui`: the filtered UI-state projection (optionally per user) instead of
   // raw state — the command that used to be spelled `am ui`.
   if (flags.ui) return uiProjection(args, flags);
@@ -523,6 +582,65 @@ export async function readFlagPayload(
   return { ok: true, value };
 }
 
+/** The first number literal in `json` that JSON.parse cannot hold EXACTLY —
+ *  an integer beyond ±2^53 (it is rounded: a 19-digit id arrives as another
+ *  id) or one past the double range (`Infinity`, which the wire then carries
+ *  as `null`) — or null. Not JSON at all is null too: the caller keeps such a
+ *  value as a string, which is exact.
+ *
+ *  Fractions are not judged: `0.1` is inexact in binary by nature and nobody
+ *  typing a decimal expects otherwise. An INTEGER that silently changes is a
+ *  different thing — an account number, a snowflake, a card number.
+ *
+ *  Pure — reads each literal's SOURCE text (JSON.parse source access). */
+export function lossyNumberLiteral(json: string): string | null {
+  let hit: string | null = null;
+  try {
+    JSON.parse(json, (_k: string, v: unknown, ctx?: { source?: string }) => {
+      if (hit === null && typeof v === "number") {
+        const src = ctx?.source ?? String(v);
+        if (!Number.isFinite(v) || (/^-?\d+$/.test(src) && !exactInt(src, v))) {
+          hit = src;
+        }
+      }
+      return v;
+    });
+  } catch {
+    return null; // not JSON — kept as a string, which is exact
+  }
+  return hit;
+}
+
+/** Whether the integer literal `src` reached JSON.parse as `v` UNCHANGED: `v`
+ *  is that integer (not a neighbour) and prints back as `src` (what the wire,
+ *  `am state` and every JSON consumer shows). Past ±2^53 plenty of integers
+ *  are both — 2^53 itself, 10^20 — and `Number.isSafeInteger` refused them
+ *  with "would reach the method as 9007199254740992, a different value",
+ *  naming the very number typed. `-0` arrives as 0, the same number. */
+function exactInt(src: string, v: number): boolean {
+  if (Number.isSafeInteger(v)) return true;
+  return String(v) === src && BigInt(v) === BigInt(src);
+}
+
+/** The refusal for a {@linkcode lossyNumberLiteral} hit. */
+function lossyNumberRefusal(literal: string, type: string | undefined): string {
+  const n = Number(literal);
+  // Printed as the value it IS. `String(n)` is the shortest spelling that
+  // parses back to `n`, which can be the literal itself (1152921504606847000
+  // is really 2^60) — then only the exact digits show the difference.
+  const became = !Number.isFinite(n)
+    ? "null"
+    : String(n) === literal
+    ? `${BigInt(n)}`
+    : String(n);
+  return `${literal} is a number JSON cannot hold exactly — it would reach ` +
+    `the method as ${became}, a different value, under ok.\n` +
+    `  to send it as text (an id, an account number): ` +
+    `am dispatch ${type ?? "<cell:method>"} '"${literal}"'  (or ` +
+    `--args='["${literal}"]')\n` +
+    `  every integer up to ±${Number.MAX_SAFE_INTEGER} is exact`;
+}
+
 /** Parse `--args` — a JSON ARRAY of positional arguments for a cell method.
  *
  *  Pure, and loud on both near-misses: `--args='"x"'` and `--args='{"host":…}'`
@@ -604,6 +722,29 @@ export async function cmdDispatch(
       return;
     }
     if (r.value !== flags[k]) flags = { ...flags, [k]: r.value };
+  }
+  // Every value below is auto-parsed as JSON, and JSON.parse ROUNDS a number
+  // it cannot hold: `am dispatch bot:setChannel 1234567890123456789` stored
+  // 1234567890123456800 under {"ok":true}. Refused here, on the raw text,
+  // while the literal the person typed still exists to be named.
+  {
+    const named = args.slice(1).some(isNamedArg);
+    const texts = [
+      flags.jsonArgs,
+      flags.jsonBody,
+      // Named form: only a pair's VALUE is parsed (a bare word there is a
+      // `true` flag, never JSON). Positional form: every argument.
+      ...args.slice(1).map((a) =>
+        !named ? a : isNamedArg(a) ? a.slice(a.indexOf("=") + 1) : undefined
+      ),
+    ];
+    for (const t of texts) {
+      const lossy = t === undefined ? null : lossyNumberLiteral(t);
+      if (lossy !== null) {
+        outError(lossyNumberRefusal(lossy, args[0]), mode);
+        Deno.exit(1);
+      }
+    }
   }
   let action: unknown;
   if (flags.jsonArgs !== undefined) {

@@ -1,11 +1,17 @@
 // Lifecycle & client launch — globals, onStart, schedules, startup logging, electron/browser
 // Extracted from aio.ts _run() to keep the orchestrator lean.
 
+import { keepServerOf, windowSizeOf } from "./config-sources.ts";
 import type { UiConfig } from "./aio-types.ts";
 import { join } from "@std/path";
 import { isPipePath } from "./local-listen.ts";
 import { hasDesktopSession, openExternalBestEffort } from "./open-external.ts";
-import { type AioMeta, launchElectron } from "../electron/electron.ts";
+import {
+  type AioMeta,
+  electronProfileName,
+  launchElectron,
+} from "../electron/electron.ts";
+import { appDirs } from "./app-dirs.ts";
 import type { ServerHandle } from "./server-types.ts";
 import type { UDSHandle } from "./uds.ts";
 import type { TlsCert } from "./tls.ts";
@@ -447,9 +453,30 @@ export function startLifecycle<S, A>(deps: LifecycleDeps<S, A>): void {
       const timer = setInterval(() => {
         if (isProcessAlive(parentPid)) return;
         clearInterval(timer);
-        log.warn(
-          `parent process ${parentPid} is gone (AIO_PARENT_PID) — shutting down`,
-        );
+        // SAY WHAT IT MEANS. Under the dev cell-restart supervisor this line
+        // is the end of the dev session, and it used to name an env var and a
+        // pid: the app vanished, the browser sat on a dead socket, and nothing
+        // on screen said what had happened or what to do (a field report saw
+        // it three times in one session). The supervisor is the app's OWN
+        // former process, so "the parent" means nothing to the reader — the
+        // sentence has to name the session and the way back.
+        if (isSupervisedChild()) {
+          log.error(
+            `the dev restart supervisor (pid ${parentPid}) is gone, so this ` +
+              `app is shutting down with it — a supervised child cannot ` +
+              `outlive its supervisor (it would hold the port and the ` +
+              `single-instance lock with nothing watching it).\n` +
+              `      NOTHING WILL RESTART IT. Run your dev command again ` +
+              `(\`deno task dev\`). The supervisor is the process your cell ` +
+              `edit turned into one; it dies with the terminal that started ` +
+              `it, so a closed terminal, a detached tmux/ssh session or an ` +
+              `IDE restarting its shell ends the session here.`,
+          );
+        } else {
+          log.warn(
+            `parent process ${parentPid} is gone (AIO_PARENT_PID) — shutting down`,
+          );
+        }
         stopProcess(0);
       }, 2000);
       // A watch must never be the thing that keeps an otherwise-finished
@@ -706,7 +733,7 @@ export function startLifecycle<S, A>(deps: LifecycleDeps<S, A>): void {
   // (aio-cli.ts), one decider for the whole electron-only family. It used to
   // be refused here: after the success banner, as an unhandled rejection that
   // named the config key even when the operator had typed the flag.
-  const keepServer = cli.keepServer ?? configKeepServer ?? false;
+  const keepServer = keepServerOf(cli, configKeepServer).value;
 
   // Launch client
   if (isHeadless) {
@@ -759,11 +786,17 @@ export function startLifecycle<S, A>(deps: LifecycleDeps<S, A>): void {
   } else if (useElectron) {
     const meta: AioMeta = {
       title,
-      width: cli.width ?? ui.width,
-      height: cli.height ?? ui.height,
+      width: windowSizeOf(cli, ui).width?.value,
+      height: windowSizeOf(cli, ui).height?.value,
       childWindows,
       chrome: ui.chrome,
       tray: ui.tray,
+      // WHICH Chromium profile this window opens. Two homes of one app are
+      // two instances (the lock key says so) and must not share one userData
+      // directory — the shared cache is what answered
+      // net::ERR_CACHE_READ_FAILURE and left the second window blank. Same
+      // key as the lock, so there is one answer to "which instance is this".
+      profileName: electronProfileName(appId, title, appDirs(appId).home),
     };
     const electronUrl = token ? `${localUrl}?token=${token}` : localUrl;
     // NOT distDir — that can be the binary's embedded VFS copy, which this

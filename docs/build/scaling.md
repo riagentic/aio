@@ -204,6 +204,14 @@ both correctly.
 An explicit `vitals.pressure` still **wins** — it is the more specific
 instruction.
 
+Sizes are **UTF-8 bytes** — what the wire and the disk carry, and what `"1MB"`
+says. Non-ASCII text is up to 3 bytes per character, so a cell holding 900 000
+characters of Japanese is 2.7 MB against a `"1MB"` budget. The same unit is used
+by the persist size guardrails and the oversized-frame warnings.
+(`wsLimits.maxMessageBytes` still _refuses_ an inbound frame by character count,
+so nothing that is accepted today starts being refused — but a frame over the
+limit in bytes is now said, once per connection.)
+
 ### They fail, not just warn
 
 A warning is for a person watching a dev server. A budget is a limit the app
@@ -331,6 +339,14 @@ produce one.
   line to that client's log store (readable with `am logs`), and sends the
   client back an error frame carrying `message_too_large`, code `1009`, and the
   size it rejected
+- **Outbound frames to a Deno peer are capped at 64 MiB** — Deno's WebSocket
+  fails the connection on a larger message and cannot be raised, so a full state
+  over that is never written to a `connectCli` / `am` / server-to-server peer (a
+  browser is not limited). The server logs it, writes it to that client's log
+  store, and tells the peer once (`ws-frame-ceiling`), which a CLI client prints
+  — instead of the socket dying and reconnecting into the same frame. That
+  client has no state until the app's state is smaller: bulk rows belong in
+  `db:` tables, binaries in files
 - **Offline send queue is bounded at 100 actions** — `send()` does not drop when
   the server is unreachable, it queues. At the cap the OLDEST queued action is
   dropped (newest wins — one policy everywhere), and the drop is loud: a warning

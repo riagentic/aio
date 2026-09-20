@@ -72,7 +72,25 @@ function methodThrew(
   // word the app author wrote or can look up.
   const ownKeys = /trap result did not include '(type_|scope_|base_|copy_)'/
     .test(orig);
-  const message = immer
+  // `s.c["__proto__"] = v` — the author ASSIGNED. The draft's set trap hands a
+  // `__proto__` write to the inherited accessor, and Deno's setter turns it
+  // into `Object.defineProperty` (V8's own one into `setPrototypeOf`), which
+  // the draft refuses. Blaming a call the author never wrote, and prescribing
+  // the assignment that had just failed, sent them in a circle. The accessor
+  // is on the stack as the RUNTIME's own frame (`at Proxy.__proto__
+  // (ext:…)` in Deno) — matched exactly, so an app helper that merely has
+  // `__proto__` in its name keeps the defineProperty wording.
+  const protoSetter = immer !== null && e instanceof Error &&
+    /\n\s*at (?:Proxy|Object)\.(?:set )?__proto__(?: \[as __proto__\])? \((?:ext:|<anonymous>|native)/
+      .test(e.stack ?? "");
+  const message = protoSetter
+    ? `[${cellName}:${methodName}] assigning a key named "__proto__" on cell ` +
+      `state is refused (an async method's live state refuses it too) — in ` +
+      `JavaScript that name is the prototype accessor, not an ordinary key, ` +
+      `so the write would re-parent the object rather than store a value. ` +
+      `Use a different key name, e.g. prefix user-supplied keys: ` +
+      `s.map["k:" + key] = value.`
+    : immer
     ? `[${cellName}:${methodName}] ${immer[1]}(…) cannot be used on cell ` +
       `state — an async method's live state refuses it too. Assign instead: ` +
       `s.field = value.`

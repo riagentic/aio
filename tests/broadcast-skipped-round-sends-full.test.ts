@@ -35,6 +35,7 @@ function fakeClient() {
 }
 const kind = (frame: string) => JSON.parse(frame).t as string;
 const settle = () => new Promise((r) => setTimeout(r, 60));
+const tick = () => new Promise((r) => setTimeout(r, 0));
 
 Deno.test("broadcast: a round skipped under backpressure makes the next one a full state", async () => {
   const state = { c: { pad: "p".repeat(400), items: [0] } };
@@ -61,7 +62,9 @@ Deno.test("broadcast: a round skipped under backpressure makes the next one a fu
         ops: [{ op: "add", path: ["items", 1], value: 1 }],
       }] as PatchEntry[],
     );
-    await settle();
+    // One tick, not a settle: the round has run, and the owed full state is
+    // not yet paid by the idle retry (tests/ws-backlog-debt-paid-when-idle).
+    await tick();
     assertEquals(sent.length, 0, "the throttled round was skipped");
     // Round 3: eligible again. The patch alone would leave items[1] missing.
     meta.bpMultiplier = 1;

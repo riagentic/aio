@@ -9,8 +9,9 @@
 // structural sharing — unchanged subtrees are reference-equal, so recursion
 // prunes at the first `===`, making the cost proportional to what actually
 // changed (usually a handful of leaves), not to state size. Only the compact
-// diff is retained, so `prev`/`next` are free to GC — memory stays bounded to
-// the ring capacity regardless of state size.
+// diff is retained, so `prev`/`next` are free to GC. The diff still holds the
+// changed leaves' VALUES, so the ring is bounded by retained bytes as well as
+// by count (`TIMELINE_MAX_BYTES`) — a count alone let a 1 MB value cost 500 MB.
 
 import {
   isRedactedAction,
@@ -19,6 +20,10 @@ import {
 } from "../diagnostics/redact.ts";
 import type { Redactor } from "../diagnostics/redact.ts";
 import { workerPatchCell } from "./journal.ts";
+import {
+  approxRetainedBytes,
+  RETAINED_SAMPLE,
+} from "../diagnostics/retained-bytes.ts";
 
 /** One changed leaf: a dotted path and its before/after values. */
 export type DiffEntry = {
@@ -185,7 +190,32 @@ export type Timeline = {
   clear(): void;
   /** Current retained count. */
   size(): number;
+  /** Has any entry been dropped since boot (or the last `clear`)? The ring is
+   *  bounded by count AND by retained bytes, so "fewer than
+   *  {@linkcode TIMELINE_RING} entries" does not mean "everything since
+   *  boot" — this does. */
+  rotated(): boolean;
 };
+
+/** Retained-bytes budget for the live ring, estimated per entry from its
+ *  payload and diff values.
+ *
+ *  The ring was bounded by COUNT alone, under a header that promised "memory
+ *  stays bounded to the ring capacity regardless of state size". It is not:
+ *  an entry keeps the payload and the before/after VALUES of every changed
+ *  leaf, so an app whose method replaces a 1 MB value held 500 of them —
+ *  measured in a `--prod` run, heap 17 MB → 519 MB for a 1 MB cell, 500× the
+ *  state it describes, and a 10 MB value would take a server past 5 GB. Always
+ *  on, in production. Big entries now push old ones out by size as well. */
+export const TIMELINE_MAX_BYTES = 64 * 1024 * 1024;
+
+/** A cheap estimate of what `v` keeps alive, stopping as soon as it passes
+ *  `budget`. Lives in `diagnostics/retained-bytes.ts` — dev time travel bounds
+ *  its history with the SAME measure, and two estimators would be two answers
+ *  — and is re-exported here because this ring is what it was written for.
+ *  Large containers are sampled; the header there states the accuracy bound
+ *  (pinned by tests/retained-bytes.test.ts). */
+export { approxRetainedBytes, RETAINED_SAMPLE };
 
 /** Create a ring-buffer timeline holding the last `cap` dispatches.
  *
@@ -207,9 +237,14 @@ export const TIMELINE_RING = 500;
 export function createTimeline(
   cap = TIMELINE_RING,
   redact: Redactor = noRedaction,
+  maxBytes = TIMELINE_MAX_BYTES,
 ): Timeline {
   let ring: TimelineEntry[] = [];
   let last = 0;
+  // Estimated retained bytes per entry, and their sum over the ring.
+  const sizes = new WeakMap<TimelineEntry, number>();
+  let bytes = 0;
+  let rotated = false;
   // `_callId` → the entry that call was recorded as. Kept apart from the
   // payload, which the redactor may have replaced — a redacted call that threw
   // still threw.
@@ -261,18 +296,37 @@ export function createTimeline(
           ),
       };
       ring.push(entry);
+      const size = approxRetainedBytes(
+        [entry.payload, entry.diff],
+        maxBytes,
+      );
+      sizes.set(entry, size);
+      bytes += size;
       const callId = callIdOf(payload);
       if (callId !== undefined) byCallId.set(callId, entry);
-      if (ring.length > cap) {
-        const gone = ring.slice(0, ring.length - cap);
-        ring = ring.slice(ring.length - cap);
+      // By count, and by bytes — the newest entry always stays, however big.
+      let drop = Math.max(0, ring.length - cap);
+      if (bytes > maxBytes) {
+        let over = bytes - maxBytes;
+        let k = 0;
+        while (k < ring.length - 1 && (k < drop || over > 0)) {
+          over -= sizes.get(ring[k]!) ?? 0;
+          k++;
+        }
+        drop = Math.max(drop, k);
+      }
+      if (drop > 0) {
+        rotated = true;
+        const gone = ring.slice(0, drop);
+        ring = ring.slice(drop);
+        for (const e of gone) bytes -= sizes.get(e) ?? 0;
         for (const e of gone) {
           const id = callIdOf(e.payload);
           if (id !== undefined && byCallId.get(id) === e) byCallId.delete(id);
         }
         // A redacted entry's payload no longer names its call — sweep by
         // identity so the map never outlives the ring.
-        if (byCallId.size > cap) {
+        if (byCallId.size > ring.length) {
           const live = new Set(ring);
           for (const [id, e] of byCallId) if (!live.has(e)) byCallId.delete(id);
         }
@@ -296,10 +350,15 @@ export function createTimeline(
     clear() {
       ring = [];
       last = 0;
+      bytes = 0;
+      rotated = false;
       byCallId.clear();
     },
     size() {
       return ring.length;
+    },
+    rotated() {
+      return rotated;
     },
   };
 }

@@ -98,7 +98,10 @@ try {
     return new Response("not found", { status: 404 });
   });
 
-  console.log(`READY ${pipe} ${httpPipe}`);
+  // The CPU count too: Deno's blocking pool is 4×cores on Windows, and the
+  // pool-exhaustion cases size themselves from it (a fixed N proves nothing
+  // on a machine with more cores than the author's).
+  console.log(`READY ${pipe} ${httpPipe} ${navigator.hardwareConcurrency}`);
 } catch (e) {
   console.error(`HOST ERROR ${(e as Error).stack ?? e}`);
   Deno.exit(1);

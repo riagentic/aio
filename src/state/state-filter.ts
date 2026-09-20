@@ -26,61 +26,258 @@ export type PatchFilterFields = {
   deepIncludes?: string[][];
 };
 
-/** Deep-remove the field at `segs` under `value`. Arrays are traversed
- *  element-wise — the intuitive reading of `"accounts.encSecKey"` when
- *  `accounts` is a list. Clones only along the removal path; untouched
- *  branches keep referential identity. */
-export function deepExclude(value: unknown, segs: string[]): unknown {
-  if (segs.length === 0 || value === null || typeof value !== "object") {
-    return value;
-  }
-  if (Array.isArray(value)) {
+// ── The ONE deep-exclude rule ──────────────────────────────────────────────
+//
+// `visible: { exclude: ["accounts.encSecKey"] }` has FOUR deciders — the wire
+// filter, the patch path, the client read seam (cell-reactive), the `am
+// surface` view — plus `restoreExcluded` on the persistence read-back. Four
+// hand-written copies of one traversal is how a leak survives: each was
+// individually plausible and they disagreed. They all call this walker now,
+// and the two seam-specific bits (a refusing tripwire, a memo) are hooks.
+//
+// THE RULE, at one object node, for one path whose head is `h`:
+//   1. If the node HAS `h` as an OWN property, the literal reading applies —
+//      drop it (last segment) or descend into it with the tail.
+//   2. AND the container reading applies to every REMAINING key: a
+//      records-by-id map is the most ordinary state shape there is, so
+//      `accounts.encSecKey` must also mean "`encSecKey` under each record".
+//
+// Both, always — that is the deliberate part. Doing (2) only when `h` was
+// ABSENT (the rule until this fix) made the filter switchable from the
+// OUTSIDE: record ids are user-controlled (usernames, slugs), so registering
+// an account literally named `encSecKey` made `head in obj` true, took the
+// literal branch, and broadcast every OTHER account's key — on the full frame,
+// the patch path, the client read seam and the restore. When a name is
+// ambiguous the only safe answer is to remove BOTH readings.
+//
+// `Object.hasOwn`, never `in`: `in` walks the PROTOTYPE CHAIN, so
+// `"constructor" in obj` / `"__proto__" in obj` / `"toString"` / `"valueOf"`
+// are true for every plain object — excluding `a.constructor` took the literal
+// branch on an object that has no such own field and removed nothing anywhere.
+
+/** Where one exclude path has got to at the current node. */
+type Cursor = { readonly path: readonly string[]; readonly d: number };
+/** A cursor set plus its memo key (computed once, reused down the walk). */
+type Active = { readonly cur: readonly Cursor[]; readonly key: string };
+
+/** Install a refusing stand-in for the dropped leaf. Called only on objects
+ *  this walk BUILT (never on frozen app state), and only when the node
+ *  actually changed — see `deepExcludePaths`. */
+export type ExcludeTripwire = (
+  obj: Record<string, unknown>,
+  head: string,
+  path: readonly string[],
+) => void;
+
+export type DeepExcludeOptions = {
+  tripwire?: ExcludeTripwire;
+  /** Per-cursor-set memo, source value → filtered view. State is immutable
+   *  (Immer autoFreeze), so same source ⇒ same view is exact. Pass a shared
+   *  Map to keep view identity stable across reads (the client seam). */
+  memos?: Map<string, WeakMap<object, unknown>>;
+};
+
+/** `obj[k] = v` — except for `__proto__`, where plain assignment would hit
+ *  `Object.prototype`'s setter and set the PROTOTYPE instead of creating the
+ *  own property, silently dropping the key from the rebuilt object. */
+function setKey(
+  obj: Record<string, unknown>,
+  k: string,
+  v: unknown,
+): void {
+  if (k === "__proto__") {
+    Object.defineProperty(obj, k, {
+      value: v,
+      writable: true,
+      enumerable: true,
+      configurable: true,
+    });
+  } else obj[k] = v;
+}
+
+const cursorKey = (cur: readonly Cursor[]): string =>
+  cur.map((c) => `${c.d}:${c.path.join(".")}`).sort().join("|");
+
+/** Deep-remove every field named by `paths` under `value`, in ONE pass.
+ *
+ *  One pass and not one call per path on purpose: each pass rebuilds objects
+ *  with a spread, which copies own ENUMERABLE properties only — so a second
+ *  pass silently dropped the first pass's non-enumerable tripwire and
+ *  `["a.b", "a.c"]` left `a.b` reading as a clean `undefined` while `a.c`
+ *  refused. "undefined as data" is the exact trap this seam exists to close.
+ *
+ *  Arrays are traversed element-wise (an index never consumes a segment).
+ *  Clones only along changed branches; an untouched branch — including a
+ *  Date/Map/Set/TypedArray, which has no own enumerable keys to walk — keeps
+ *  its identity and its value. */
+export function deepExcludePaths(
+  value: unknown,
+  paths: readonly (readonly string[])[],
+  opts: DeepExcludeOptions = {},
+): unknown {
+  const live = paths.filter((p) => p.length > 0);
+  if (live.length === 0) return value;
+  const { tripwire, memos } = opts;
+  const cur = live.map((path) => ({ path, d: 0 }));
+
+  const walk = (v: unknown, act: Active): unknown => {
+    if (v === null || typeof v !== "object") return v;
+    const memo = memos
+      ? memos.get(act.key) ??
+        (() => {
+          const m = new WeakMap<object, unknown>();
+          memos.set(act.key, m);
+          return m;
+        })()
+      : undefined;
+    // `build` never answers `undefined` (an object, or the source itself), so
+    // a miss and a memoized `undefined` cannot be confused.
+    const hit = memo?.get(v as object);
+    if (hit !== undefined) return hit;
+    const out = build(v as object, act);
+    memo?.set(v as object, out);
+    return out;
+  };
+
+  const build = (v: object, act: Active): unknown => {
+    if (Array.isArray(v)) {
+      let changed = false;
+      const out = v.map((el) => {
+        const next = walk(el, act);
+        if (next !== el) changed = true;
+        return next;
+      });
+      return changed ? out : v;
+    }
+    const obj = v as Record<string, unknown>;
     let changed = false;
-    const out = value.map((el) => {
-      const next = deepExclude(el, segs);
+    const out: Record<string, unknown> = {};
+    // One derived cursor set per MATCHING key; every other key is a plain
+    // record and reuses the parent's set (and its memo key) untouched.
+    let derived: Map<string, Active> | undefined;
+    for (const k of Object.keys(obj)) {
+      let matched = false;
+      let drop = false;
+      for (const c of act.cur) {
+        if (c.path[c.d] !== k) continue;
+        matched = true;
+        // The literal path ends here: the field goes, whatever else any other
+        // path would have done under it.
+        if (c.d === c.path.length - 1) drop = true;
+      }
+      if (drop) {
+        changed = true;
+        continue;
+      }
+      let next: unknown;
+      if (!matched) {
+        next = walk(obj[k], act);
+      } else {
+        derived ??= new Map();
+        let child = derived.get(k);
+        if (!child) {
+          const cc = act.cur.map((c) =>
+            c.path[c.d] === k ? { path: c.path, d: c.d + 1 } : c
+          );
+          child = { cur: cc, key: memos ? cursorKey(cc) : "" };
+          derived.set(k, child);
+        }
+        next = walk(obj[k], child);
+      }
+      if (next !== obj[k]) changed = true;
+      setKey(out, k, next);
+    }
+    const leaves = tripwire
+      ? act.cur.filter((c) => c.d === c.path.length - 1)
+      : [];
+    if (!changed) {
+      // Nothing under here was excluded. Hand back the SOURCE — a rebuilt `{}`
+      // would turn a Date/Map/Set/TypedArray (no own enumerable keys to walk)
+      // into an empty object on this seam while the wire kept the value.
+      //
+      // The one exception is a PLAIN object on a seam that reports: the
+      // refusing getter has to go somewhere, and committed state is frozen
+      // (Immer autoFreeze), so it goes on a copy. The copy is value-identical
+      // — the wire's frame and this view still serialize the same — and the
+      // wire filter itself never takes this branch (no tripwire, no copy).
+      // Without it the field the WIRE already removed reads back as a clean
+      // `undefined` here, which is the trap this seam exists to close.
+      const proto = leaves.length > 0 ? Object.getPrototypeOf(obj) : false;
+      if (proto !== Object.prototype && proto !== null) return v;
+    }
+    for (const c of leaves) tripwire!(out, c.path[c.d]!, c.path);
+    return out;
+  };
+
+  return walk(value, { cur, key: memos ? cursorKey(cur) : "" });
+}
+
+/** One cell slice with what a dot-path exclude keeps OUT of the store put back
+ *  to its boot value (or removed, where boot had none) — the mirror of
+ *  {@linkcode deepExcludePaths}, walking the same shape by the same rule:
+ *  the own head is restored literally AND every remaining key is walked as a
+ *  record. A head boot HAS but the replay does not means a replayed action
+ *  deleted the field, and a clean restart would fill boot's value back in
+ *  (restore merges over the declared shape), so this does too. Clones only
+ *  along the changed path. */
+export function restoreExcluded(
+  now: unknown,
+  was: unknown,
+  segs: readonly string[],
+): unknown {
+  if (segs.length === 0 || now === null || typeof now !== "object") return now;
+  if (Array.isArray(now)) {
+    let changed = false;
+    const out = now.map((el, i) => {
+      const next = restoreExcluded(
+        el,
+        Array.isArray(was) ? was[i] : undefined,
+        segs,
+      );
       if (next !== el) changed = true;
       return next;
     });
-    return changed ? out : value;
+    return changed ? out : now;
   }
-  const obj = value as Record<string, unknown>;
+  const obj = now as Record<string, unknown>;
+  const base = was !== null && typeof was === "object" && !Array.isArray(was)
+    ? was as Record<string, unknown>
+    : undefined;
   const head = segs[0]!;
-  if (!(head in obj)) {
-    // A CONTAINER, not a miss. An array of records is traversed element-wise
-    // above; a records-BY-ID map — the most ordinary state shape there is —
-    // was not, so `exclude: ["accounts.secret"]` removed the field from
-    // `accounts: [{secret}]` and removed NOTHING from
-    // `accounts: { alice: { secret } }`. No warning fired either, because the
-    // head segment IS a real top-level field; the value was broadcast to every
-    // client with nothing said. The documented example ("accounts.encSecKey")
-    // reads as if it covers both.
-    //
-    // Descending only when the key is ABSENT keeps the literal reading first:
-    // for `a.b` where `a` really has a `b`, `a.b` is still what is removed.
-    let touched = false;
-    const mapped: Record<string, unknown> = {};
-    for (const [k, v] of Object.entries(obj)) {
-      const next = v !== null && typeof v === "object"
-        ? deepExclude(v, segs)
-        : v;
-      if (next !== v) touched = true;
-      mapped[k] = next;
+  const leaf = segs.length === 1;
+  const keys = new Set(Object.keys(obj));
+  // Boot has the field and the replay dropped it — put it back where it was.
+  if (leaf && base && Object.hasOwn(base, head)) keys.add(head);
+  let changed = false;
+  const out: Record<string, unknown> = {};
+  for (const k of keys) {
+    if (k === head) {
+      if (leaf) {
+        if (base && Object.hasOwn(base, head)) {
+          if (!Object.hasOwn(obj, head) || obj[head] !== base[head]) {
+            changed = true;
+          }
+          setKey(out, head, base[head]);
+        } else changed = true; // boot had none → the field goes
+        continue;
+      }
+      if (!Object.hasOwn(obj, head)) continue; // no branch to restore under
+      const child = restoreExcluded(obj[head], base?.[head], segs.slice(1));
+      if (child !== obj[head]) changed = true;
+      setKey(out, head, child);
+      continue;
     }
-    return touched ? mapped : value;
+    const next = restoreExcluded(obj[k], base?.[k], segs);
+    if (next !== obj[k]) changed = true;
+    setKey(out, k, next);
   }
-  if (segs.length === 1) {
-    const { [head]: _dropped, ...kept } = obj;
-    return kept;
-  }
-  const child = deepExclude(obj[head], segs.slice(1));
-  if (child === obj[head]) return value;
-  return { ...obj, [head]: child };
+  return changed ? out : now;
 }
 
 const MISSING: unique symbol = Symbol("missing");
 
 /** The value at ONE dotted path, or MISSING. The mirror of
- *  {@linkcode deepExclude}, including its array rule: a path through an array
+ *  {@linkcode deepExcludePaths}, including its array rule: a path through an array
  *  applies to EVERY element (`rows.name` keeps `name` from each row), so
  *  `include` and `exclude` read the same spelling the same way. An element
  *  without the path becomes `{}` — the array keeps its shape and indices. */
@@ -158,18 +355,15 @@ export function applyCellFieldFilter(
     return result;
   }
   if ("exclude" in filter) {
-    let result: Record<string, unknown> = { ...cellState };
+    const result: Record<string, unknown> = { ...cellState };
+    const deep: string[][] = [];
     for (const key of filter.exclude) {
-      if (key.includes(".")) {
-        result = deepExclude(result, key.split(".")) as Record<
-          string,
-          unknown
-        >;
-      } else {
-        delete result[key];
-      }
+      if (key.includes(".")) deep.push(key.split("."));
+      else delete result[key];
     }
-    return result;
+    // ONE pass over all dot paths — the same call the client seam makes, so
+    // the two cannot drift.
+    return deepExcludePaths(result, deep) as Record<string, unknown>;
   }
   return undefined;
 }
@@ -212,46 +406,32 @@ export function uiKeyVisibility(
   return { hidden: false };
 }
 
-/** Match an Immer patch path against a deep-exclude path. Op-path segments
- *  that are CONTAINER KEYS are skipped — the exclude path names fields, not
- *  positions or record ids.
+/** Match an Immer patch path against a deep-exclude path — the delta path's
+ *  reading of THE RULE above, and it has to be the same reading: the full
+ *  frame and the patches that follow it build the same client projection.
  *
- *  It used to skip numeric segments only, so it and `deepExclude` disagreed
- *  about a records-BY-ID map: measured, `exclude: ["accounts.secret"]` DROPPED
- *  the patch at `accounts.7.secret` and SENT the one at
- *  `accounts.alice.secret`. For a numeric-keyed map the developer watching a
- *  live app saw the field frozen and concluded it was hidden — while it
- *  arrived in full on every connect and every full-state resync.
+ *  So: the exclude segments must appear in the op path in order, and any
+ *  other op segment is a record id or an array index that consumes nothing —
+ *  exactly what `deepExcludePaths` does when a key does not match the head.
+ *  Matching only AFTER the first segment had matched (the rule until this
+ *  fix) said `exclude: ["a.b"]` ignores a patch at `["x","a","b"]` while the
+ *  full frame strips `x.a.b` from the same state: the field arrived on the
+ *  very next delta.
  *
- *  A segment is skippable only AFTER one has matched, which is what keeps this
- *  from over-matching: `exclude: ["a.b"]` still ignores a patch at
- *  `["x","y","a","b"]`, because nothing has matched at the point `x` is seen.
- *  Within a path that HAS started matching, skipping can only ever hide more
- *  — the safe direction for a privacy filter. */
+ *  A NUMBER is an Immer array index and never consumes a segment; a numeric
+ *  STRING is an ordinary object key (a records-by-id map keyed "7") and reads
+ *  like any other — it used to be skipped unconditionally, so `exclude:
+ *  ["a.0"]` could not drop the patch that carried `a.0`. */
 function matchDeepPath(
   opPath: (string | number)[],
   segs: string[],
 ):
   | { kind: "within" } // op targets the excluded field or below → drop op
-  | { kind: "ancestor"; rest: string[] } // op value CONTAINS it → strip value
-  | { kind: "none" } {
-  let i = 0, j = 0;
-  while (i < opPath.length && j < segs.length) {
+  | { kind: "ancestor"; rest: string[] } { // op value CONTAINS it → strip value
+  let j = 0;
+  for (let i = 0; i < opPath.length && j < segs.length; i++) {
     const seg = opPath[i]!;
-    if (typeof seg === "number" || /^\d+$/.test(String(seg))) {
-      i++;
-      continue;
-    }
-    if (String(seg) !== segs[j]) {
-      // A record id inside a container we have already entered.
-      if (j > 0) {
-        i++;
-        continue;
-      }
-      return { kind: "none" };
-    }
-    i++;
-    j++;
+    if (typeof seg !== "number" && seg === segs[j]) j++;
   }
   if (j === segs.length) return { kind: "within" };
   return { kind: "ancestor", rest: segs.slice(j) };
@@ -314,7 +494,6 @@ export function filterPatchesByStrategy(
           kept.push(op);
           continue;
         }
-        if (ancestorRests.length === 0) continue; // a sibling path — not ours
         // The op replaces/removes an ANCESTOR of an included path. A remove
         // carries no data, so it passes through as-is (the client must drop
         // the branch too). A replacement carries the whole ancestor value, so
@@ -344,20 +523,23 @@ export function filterPatchesByStrategy(
       if (ff.fields.has(seg)) continue;
       let out = op;
       let dropped = false;
+      // ONE pass over all the paths whose tail can still be inside this op's
+      // value, so the payload is filtered exactly as the full frame is.
+      const rests: string[][] = [];
       for (const segs of ff.deepExcludes ?? []) {
-        const m = matchDeepPath(out.path, segs);
+        const m = matchDeepPath(op.path, segs);
         if (m.kind === "within") {
           dropped = true;
           break;
         }
-        // An `append` carries a string suffix: nothing excluded can be
-        // inside it, so it passes as-is (a `replace` of the same ancestor
-        // would carry an object and be stripped below).
-        if (m.kind === "ancestor" && "value" in out && out.op !== "append") {
-          // The op replaces an ancestor — its value carries the excluded
-          // field. Strip it from the payload before sending.
-          out = { ...out, value: deepExclude(out.value, m.rest) };
-        }
+        rests.push(m.rest);
+      }
+      // An `append` carries a string suffix: nothing excluded can be inside
+      // it, so it passes as-is (a `replace` of the same ancestor would carry
+      // an object and be stripped here).
+      if (!dropped && rests.length > 0 && "value" in op && op.op !== "append") {
+        const value = deepExcludePaths(op.value, rests);
+        if (value !== op.value) out = { ...op, value };
       }
       if (!dropped) kept.push(out);
     }

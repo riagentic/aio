@@ -316,13 +316,56 @@ const bootOpts = {
   record("proxy-array-10k", "ms/op", samples);
 }
 
+// ── 7. read-your-writes overlay: a write loop over a 10k-key map ──────
+// The other half of the live proxy's cost: every read AFTER a write resolves
+// the overlay. It was rebuilt from a full structuredClone of the cell per
+// write, which made this shape quadratic — a field report measured one sweep
+// over ~11k keys at 70.7 s of structuredClone with the event loop stalled for
+// 54 s. The overlay is incremental now; this metric is what keeps it so.
+{
+  const N = 10_000;
+  const seed: Record<string, number> = {};
+  for (let i = 0; i < N; i++) seed[`k${i}`] = i;
+  const sweeper = cell("bench-overlay", {
+    state: { sol: seed, hits: 0 },
+    methods: {
+      async sweep(s: { sol: Record<string, number>; hits: number }) {
+        await Promise.resolve(); // past the await: reads go via the overlay
+        let n = 0;
+        for (const k of Object.keys(s.sol)) {
+          s.sol[k] = s.sol[k]! + 1; // read-your-writes, once per key
+          n++;
+        }
+        s.hits = n;
+      },
+    },
+  });
+  const app = await aio.run({
+    cells: [sweeper],
+    appId: "bench-overlay",
+    ...bootOpts,
+  });
+  const samples: number[] = [];
+  for (let i = 0; i < 8; i++) { // first 2 are warmup
+    const t0 = performance.now();
+    // deno-lint-ignore no-explicit-any
+    await (sweeper as any).sweep();
+    if (i >= 2) samples.push(performance.now() - t0);
+  }
+  await app.close();
+  _resetAioRuntime();
+  record("overlay-write-loop-10k", "ms/op", samples);
+}
+
 // ── report ────────────────────────────────────────────────────────────
 const fmt = (v: number) => v >= 100 ? v.toFixed(1) : v.toFixed(3);
-console.log("\nmetric           unit       p10   median      p95    n");
-console.log("─".repeat(56));
+console.log(
+  "\nmetric                 unit       p10   median      p95    n",
+);
+console.log("─".repeat(62));
 for (const [name, m] of Object.entries(metrics)) {
   console.log(
-    `${name.padEnd(16)} ${m.unit.padEnd(5)} ${fmt(m.p10).padStart(9)} ${
+    `${name.padEnd(22)} ${m.unit.padEnd(5)} ${fmt(m.p10).padStart(9)} ${
       fmt(m.median).padStart(8)
     } ${fmt(m.p95).padStart(8)} ${String(m.n).padStart(4)}`,
   );

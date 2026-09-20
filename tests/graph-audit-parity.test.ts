@@ -40,7 +40,10 @@ import {
 } from "../src/server/graph-validator.ts";
 import { transpile } from "../src/server/server-transpile.ts";
 import { buildBrowserImportMap } from "../src/server/server-html-importmap.ts";
-import { ESBUILD_SPEC } from "../src/build/esbuild-shared.ts";
+import {
+  ESBUILD_SPEC,
+  stopEsbuildService,
+} from "../src/build/esbuild-shared.ts";
 import { BUNDLE_ENTRY_KEY } from "../src/build/client-bundle.ts";
 import { childCoverageDir } from "../src/testing/temp-dir.ts";
 
@@ -130,8 +133,10 @@ await runBundle({
 
 async function stopEsbuild() {
   const mod = await import(ESBUILD_SPEC);
-  await mod.stop();
-  await new Promise((r) => setTimeout(r, 10));
+  // The shared wait (`esbuild-shared.ts`): a bare `stop()` only sends the
+  // kill, and the fixed 10 ms that used to follow it here was the same guess
+  // that leaked the Android bundle test's child under the parallel suite.
+  await stopEsbuildService(() => mod.stop());
 }
 
 const APP = (body: string, pre = "") =>

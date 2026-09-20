@@ -114,6 +114,16 @@ export type ToWorker =
      *  remove. Tests are the strictest environment, never the most permissive.
      */
     dev: boolean;
+    /** The owner's `refusalsReject`, carried across the thread.
+     *
+     *  It decides what an IN-PROCESS `await cell.method()` sees when the reduce
+     *  refuses the write: resolve (the 1.x default, with a dev warning) or
+     *  reject. The worker composes its own reduce and never received the flag,
+     *  so the refusal is always swallowed on that side and the decision has to
+     *  be made where the reply is posted — `fail` rejects the caller, `done`
+     *  with a `refused` note does not. Without it `worker: true` answered a
+     *  refused write differently from the identical cell on the main isolate. */
+    refusalsReject: boolean;
   }
   /** Run one action. `id` correlates the reply. */
   | { t: "call"; id: number; action: Msg; ctx?: AmbientContext }
@@ -159,8 +169,20 @@ export type FromWorker =
   /** Effects the method returned — executed on the main isolate (schedules and
    *  cross-cell dispatches live there). */
   | { t: "effects"; list: Msg[] }
-  /** The call settled. `ret` is the method's transported return value. */
-  | { t: "done"; id: number; ret?: unknown }
+  /** The call settled. `ret` is the method's transported return value.
+   *
+   *  `refused` carries a rejection the reduce recorded in THIS isolate — the
+   *  only isolate that holds it — so the main side can record it against the
+   *  caller's own action object and `action-ack.ts` answers `ACTION_REFUSED`
+   *  exactly as it does for a main-isolate cell. It rides on `done` and not on
+   *  `fail` because a refusal is not a throw: with `refusalsReject` off the
+   *  in-process `await` resolves. */
+  | {
+    t: "done";
+    id: number;
+    ret?: unknown;
+    refused?: { cell: string; reason: string };
+  }
   /** The call threw. `message`/`stack` are carried as plain data. */
   | {
     t: "fail";

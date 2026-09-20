@@ -83,17 +83,23 @@ Behavior depends on **where** it's called:
 
 ```tsx
 onMount(() => {
-  if (typeof document === "undefined") return; // SSR/testUI: no DOM here
+  if (typeof document === "undefined") return; // testUI: no global document
   const handler = (e: KeyboardEvent) => console.log(e.key);
   document.addEventListener("keydown", handler);
   onCleanup(() => document.removeEventListener("keydown", handler));
 });
 ```
 
-> **`onMount` also runs without a DOM** — under SSR and in `testUI`'s
-> server-side pass there is no global `document`, so guard DOM access (the
-> unguarded version throws `document is not defined` in exactly the harness you
-> test with). And register listeners on `document` (or
+> **`onMount` does not run on the server.** `renderToString` and
+> `renderToStream` produce a string — there is nothing to mount into, so mount
+> callbacks are never called (and, since that is by design, never warned about).
+> Anything the server HTML must contain belongs in the component body, not in
+> `onMount`.
+
+> **It does run without a global `document`** — under `testUI` the component is
+> mounted in a happy-dom window that is not `globalThis`, so guard DOM access
+> (the unguarded version throws `document is not defined` in exactly the harness
+> you test with). And register listeners on `document` (or
 > `el.ownerDocument.defaultView`), never on the Deno global — a listener on
 > `globalThis` never fires under `testUI`, and the harness warns when it sees
 > one.

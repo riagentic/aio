@@ -17,6 +17,7 @@ import {
   tmplKeyboardShortcuts,
   tmplParentWatch,
   tmplRendererDiagnostics,
+  tmplSocketFetch,
   tmplTray,
   tmplWillNavigate,
   tmplWindowShape,
@@ -61,7 +62,10 @@ export function electronMainScriptUDS(url: string, socketPath: string, opts: {
 }): string {
   const w = opts.meta?.width ?? 800;
   const h = opts.meta?.height ?? 600;
-  const slug = toSlug(opts.meta?.title ?? opts.title ?? "aio-app");
+  // The userData directory — the title's slug, or the profile the
+  // lifecycle derived from this run's HOME (electronProfileName).
+  const slug = opts.meta?.profileName ??
+    toSlug(opts.meta?.title ?? opts.title ?? "aio-app");
   const title = opts.title ?? "aio";
   const hasCSS = opts.hasCSS ?? false;
   // The window is sized from `meta`; the shell metas must agree with it, so
@@ -128,55 +132,7 @@ if (USE_PROTOCOL) {
   }]);
 }
 
-// One request to the app's HTTP handler over its local socket — a Unix socket,
-// or a named pipe (\\\\.\\pipe\\...) on Windows; Node's own http.request speaks
-// both natively (the socketPath option, libuv underneath), so the page, its
-// modules and every asset arrive through the SAME handler an http:// fetch
-// would have reached — headers, status and bytes intact, nothing re-encoded.
-//
-// STREAMED, both ways. The Response wraps the Node response body as a web
-// ReadableStream (Readable.toWeb), so the promise resolves on HEADERS and
-// Chromium reads the body as the app writes it: a 100 MB route response is
-// never buffered in this process, and an <img> starts decoding on the first
-// chunk. A request body (POST/PUT) is piped in the same way.
-function socketFetch(reqPath, method, headers, body) {
-  return new Promise((resolve) => {
-    const { Readable } = require('stream');
-    // The socket when this app has one; otherwise the HTTP server (forced
-    // aio:// in dev). A self-signed --expose cert is this app's own — the
-    // http:// branch trusts it the way certificate-error does below.
-    let target, http;
-    if (HTTP_SOCK) { http = require('http'); target = { socketPath: HTTP_SOCK }; }
-    else {
-      const u = new URL(HTTP_URL);
-      http = require(u.protocol === 'https:' ? 'https' : 'http');
-      target = { host: u.hostname, port: u.port, rejectUnauthorized: false };
-    }
-    const r = http.request(
-      { ...target, path: reqPath, method: method || 'GET', headers: headers || {} },
-      (res) => {
-        const h = {};
-        for (const [k, v] of Object.entries(res.headers)) {
-          if (typeof v === 'string') h[k] = v;
-          else if (Array.isArray(v)) h[k] = v.join(', ');
-        }
-        const status = res.statusCode || 200;
-        // A body-less status must not carry a stream — Response() throws.
-        const noBody = status === 204 || status === 304 || (method || 'GET') === 'HEAD';
-        if (noBody) res.resume();
-        resolve(new Response(noBody ? null : Readable.toWeb(res), { status, headers: h }));
-      },
-    );
-    // A dead socket must not hang the window forever on a blank page. Say what
-    // failed, in the window, where the developer is already looking.
-    r.on('error', (e) => resolve(new Response(
-      'aio: cannot reach the app over its ' + (HTTP_SOCK ? 'socket (' + HTTP_SOCK + ')' : 'HTTP server (' + HTTP_URL + ')') + ': ' + e.message,
-      { status: 502, headers: { 'Content-Type': 'text/plain' } },
-    )));
-    if (body && typeof body.getReader === 'function') Readable.fromWeb(body).pipe(r);
-    else { if (body) r.write(body); r.end(); }
-  });
-}
+${tmplSocketFetch()}
 
 // THE server's table, not a copy of it. A hand-kept subset here served every
 // font, .webp, .mp4 and .pdf in dist/ as application/octet-stream in the
@@ -563,6 +519,62 @@ ${tmplRendererDiagnostics(true)}
     }
   });
 
+  // ── Native dialogs the SERVER asks for (pickFile / pickDirectory) ──
+  //
+  // A dialog the server spawns itself (PowerShell, osascript, zenity) belongs
+  // to a background process with no relation to this window; on Windows the
+  // foreground lock left it BEHIND the window the user had just clicked in (a
+  // field report, #10). Opened here it is OWNED by the window: modal, in
+  // front, no child process, on every OS. The server sends a \`dialog\` frame
+  // only to a connection that announced \`caps: ["dialog"]\` (on connect,
+  // below), and always gets exactly one \`dialog-result\` back per id —
+  // answered, cancelled, or the reason it could not open.
+  function _dialogResult(id, r) {
+    if (!sock || sock.destroyed) return; // the server side settles on close
+    try {
+      sock.write(JSON.stringify({ v: 2, t: 'dialog-result', d: Object.assign({ id: id }, r) }) + '\\n');
+    } catch (e) { console.warn('[aio:electron] could not answer a dialog: ' + e); }
+  }
+  function _openDialog(line) {
+    let d = null;
+    try { d = JSON.parse(line).d; } catch { d = null; }
+    if (!d || typeof d.id !== 'string') {
+      console.warn('[aio:electron] malformed dialog request — ignored');
+      return;
+    }
+    if (win.isDestroyed()) return _dialogResult(d.id, { error: 'the window is gone' });
+    const props = d.kind === 'directory'
+      ? ['openDirectory', 'createDirectory']
+      : (d.kind === 'files' ? ['openFile', 'multiSelections'] : ['openFile']);
+    // title: Windows/Linux caption; message: macOS shows it on the panel
+    // (its open panel has no title bar) — the spawned osascript's prompt.
+    const o = { title: String(d.title || ''), message: String(d.title || ''), properties: props };
+    if (typeof d.defaultPath === 'string' && d.defaultPath) o.defaultPath = d.defaultPath;
+    if (d.kind !== 'directory' && Array.isArray(d.filters) && d.filters.length > 0) o.filters = d.filters;
+    // Owned by the window when it is on screen. A window hidden to the tray or
+    // minimised would take the dialog with it, out of sight — then the dialog
+    // opens unowned instead: still this process's, still in front.
+    const owner = win.isVisible() && !win.isMinimized() ? win : null;
+    let p;
+    try {
+      p = owner ? require('electron').dialog.showOpenDialog(owner, o) : require('electron').dialog.showOpenDialog(o);
+    } catch (e) {
+      return _dialogResult(d.id, { error: String((e && e.message) || e) });
+    }
+    Promise.resolve(p).then(
+      (r) => _dialogResult(d.id, { canceled: !!(r && r.canceled), paths: (r && r.filePaths) || [] }),
+      (e) => _dialogResult(d.id, { error: String((e && e.message) || e) }),
+    );
+  }
+  // Frames addressed to THIS process rather than the renderer. A switch on
+  // purpose: tests/wire-serves.test.ts reads its case labels as SERVES.electronMain.
+  function _forMain(kind, line) {
+    switch (kind) {
+      case "dialog": _openDialog(line); return true;
+      default: return false;
+    }
+  }
+
   function connectUDS() {
     // A connection that died mid-frame leaves half a line here. Carrying it
     // into the NEXT connection glued it onto that connection's first frame —
@@ -576,6 +588,9 @@ ${tmplRendererDiagnostics(true)}
       if (down) { console.info("[aio:electron] backend connection restored (" + SOCK + ")"); down = false; }
       retry = 0; lastErrCode = null; lastFullState = null;
       lastProto = null; lastCfg = null; // a new connection speaks its own hello
+      // What this main process can do for the server, said first on every
+      // connection: open native dialogs owned by the window (see _openDialog).
+      sock.write('{"v":2,"t":"type","d":{"kind":"electron","caps":["dialog"]}}\\n');
       while (_ipcQueue.length > 0 && sock && !sock.destroyed) sock.write(_ipcQueue.shift() + '\\n');
       if (!closing && rendererReady) { win.webContents.send('__aio:open'); _pump(); }
     });
@@ -592,6 +607,7 @@ ${tmplRendererDiagnostics(true)}
         // cached as the full-state replay and handed to the next renderer as
         // if it were a snapshot. dec()-then-switch removes the whole class.
         const kind = frameKind(line);
+        if (_forMain(kind, line)) continue;
         if (kind === 'state') lastFullState = line;
         else if (kind === 'proto') lastProto = line;
         else if (kind === 'cfg') lastCfg = line;

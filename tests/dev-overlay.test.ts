@@ -186,3 +186,32 @@ Deno.test("no document (SSR, a worker, a Deno test) is a silent no-op", () => {
     if (prev) (globalThis as D).document = prev;
   }
 });
+
+Deno.test("clear leaves no text behind, not just no pixels", async () => {
+  // A field report: after "clear" the root was hidden and `_render` returned
+  // before updating the badge, so the overlay's TEXT still read
+  // "aio: 1 problem". A script watching it — a demo recorder, a CDP scrape, an
+  // accessibility tree — reads text, not pixels, and saw a phantom error on
+  // every tick with nothing on screen to explain it.
+  await withPage((doc) => {
+    setDevModeOverride(true);
+    installDevOverlay();
+    _report("error", "boom", "the detail");
+    const root = doc.getElementById("aio-dev-overlay")!;
+    assert(root.textContent.includes("aio: 1 problem"), "it is shown first");
+    const clear = [...root.querySelectorAll("button")].find((b: D) =>
+      b.textContent === "clear"
+    );
+    assert(clear, "the open panel offers a clear button");
+    clear.click();
+    assertEquals(_overlayEntries().length, 0, "the entries are gone");
+    assertEquals(root.style.getPropertyValue("display"), "none");
+    assertEquals(
+      root.textContent.trim(),
+      "",
+      `a cleared overlay must claim nothing: ${
+        JSON.stringify(root.textContent)
+      }`,
+    );
+  });
+});

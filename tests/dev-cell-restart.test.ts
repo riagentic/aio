@@ -17,6 +17,24 @@ import {
 } from "../src/server/dev-restart.ts";
 import { instances } from "../src/server/single-instance-lock.ts";
 import { freePort } from "../src/testing/server-test.ts";
+import { dropTempDir, tempDir } from "../src/testing/temp-dir.ts";
+import { childEnv } from "./e2e-app-harness.ts";
+
+/** `childEnv()` without `AIO_PARENT_PID`.
+ *
+ *  The sandbox half is load-bearing here in BOTH directions: it pins the app's
+ *  home away from `~/.<appId>` (check:home-clean fails a release for one such
+ *  directory) and it points THIS process at the same `AIO_APPS_DIR`, which is
+ *  how `livePortOf` finds the lock of the app it just spawned.
+ *
+ *  What must not come with it is `AIO_PARENT_PID`: these cases are about the
+ *  supervisor the app starts for itself, and a pid pinned from outside is the
+ *  variable under test answered in advance. */
+function devChildEnv(): Record<string, string> {
+  const env = childEnv();
+  delete env.AIO_PARENT_PID;
+  return env;
+}
 
 Deno.test("dev-restart: refuses to restart what it cannot faithfully relaunch", async () => {
   // This test process runs with -A, so nothing blocks it…
@@ -155,6 +173,7 @@ async function restartJourney(
   const child = new Deno.Command(Deno.execPath(), {
     args: ["run", "-A", join(dir, "app.ts")],
     cwd: dir,
+    env: devChildEnv(),
     stdout: "piped",
     stderr: "piped",
   }).spawn();
@@ -236,6 +255,200 @@ Deno.test({
     );
     assertEquals(r.portAfter, r.portBefore, "the port did not move");
     assertStringIncludes(r.text, "restarting the app");
+  },
+});
+
+Deno.test({
+  name:
+    "dev-restart e2e: SIGHUP to the supervisor does not end the dev session",
+  // A field report, three times in one session: after a cell edit the app was
+  // gone for good and the child had logged "parent process N is gone
+  // (AIO_PARENT_PID) — shutting down".
+  //
+  // A headless app IGNORES SIGHUP on purpose so it outlives its shell
+  // (aio-lifecycle.ts). The moment a cell edit turns that process into the
+  // restart supervisor, its app has shut down and released that listener — so
+  // the supervisor took SIGHUP's default action and died, while the child it
+  // had just spawned still ignored SIGHUP and then killed ITSELF two seconds
+  // later because its parent was gone. Nothing restarted it. Measured on this
+  // exact shape before the fix.
+  ignore: Deno.build.os === "windows",
+  async fn() {
+    const appId = "dev-restart-sighup";
+    const dir = await tempDir("aio-dev-restart-hup-");
+    const repo = new URL("../", import.meta.url).pathname;
+    await Deno.writeTextFile(
+      join(dir, "deno.json"),
+      JSON.stringify({
+        imports: {
+          "aio": `${repo}mod.ts`,
+          "aio/": `${repo}src/`,
+          "immer": "npm:immer@10.2.0",
+          "@std/path": "jsr:@std/path@1.1.2",
+        },
+      }),
+    );
+    const port = freePort();
+    await Deno.writeTextFile(join(dir, "app.ts"), appSource(appId, port));
+    await Deno.writeTextFile(join(dir, "cell.ts"), cellSource("v1"));
+    const url = `http://127.0.0.1:${port}`;
+
+    const top = new Deno.Command(Deno.execPath(), {
+      args: ["run", "-A", join(dir, "app.ts")],
+      cwd: dir,
+      env: devChildEnv(),
+      stdout: "piped",
+      stderr: "piped",
+    }).spawn();
+
+    let served: string | null = null;
+    let supervisorAlive = false;
+    let text = "";
+    try {
+      assertEquals(
+        await waitFor(() => servedMark(url), 60_000),
+        "v1",
+        "the app booted",
+      );
+      // The edit that turns this process into the supervisor.
+      await Deno.writeTextFile(join(dir, "cell.ts"), cellSource("v2"));
+      assertEquals(
+        await waitFor(
+          async () => (await servedMark(url)) === "v2" ? "v2" : null,
+          60_000,
+        ),
+        "v2",
+        "the supervised child is serving the new cell",
+      );
+      // The hang-up an aio app is specifically built to survive.
+      Deno.kill(top.pid, "SIGHUP");
+      // Longer than the child's 2 s parent-watch tick, twice over.
+      await new Promise((r) => setTimeout(r, 6000));
+      try {
+        Deno.kill(top.pid, 0);
+        supervisorAlive = true;
+      } catch {
+        supervisorAlive = false;
+      }
+      served = await servedMark(url);
+    } finally {
+      try {
+        top.kill("SIGTERM");
+      } catch { /* already gone */ }
+      const out = await top.output();
+      text = new TextDecoder().decode(out.stdout) +
+        new TextDecoder().decode(out.stderr);
+      await dropTempDir(dir);
+    }
+    assertEquals(
+      supervisorAlive,
+      true,
+      `the supervisor took SIGHUP's default action and died:\n${text}`,
+    );
+    assertEquals(
+      served,
+      "v2",
+      `the app is gone after a SIGHUP it is built to ignore:\n${text}`,
+    );
+    assertEquals(
+      text.includes("is gone (AIO_PARENT_PID)"),
+      false,
+      `the child killed itself over its supervisor's death:\n${text}`,
+    );
+  },
+});
+
+Deno.test({
+  name:
+    "dev-restart e2e: a SIGHUP with no child to forward to still ends the supervisor",
+  // The forwarding handler replaced SIGHUP's default action for the WHOLE life
+  // of the supervisor, including every stretch in which there is no child to
+  // forward to — above all `waitForSourceChange()`, which is unbounded: the
+  // saved file does not load, the supervisor stays up on purpose and waits for
+  // the next save. Close the terminal there and the hang-up was swallowed
+  // outright: an orphaned supervisor with a recursive `Deno.watchFs`, outliving
+  // the session that started it, with nothing on screen and no child to show
+  // for it. A supervisor with no child IS a plain process, and a plain process
+  // takes the hang-up.
+  ignore: Deno.build.os === "windows",
+  async fn() {
+    const appId = "dev-restart-hup-nochild";
+    const dir = await tempDir("aio-dev-restart-hup2-");
+    const repo = new URL("../", import.meta.url).pathname;
+    await Deno.writeTextFile(
+      join(dir, "deno.json"),
+      JSON.stringify({
+        imports: {
+          "aio": `${repo}mod.ts`,
+          "aio/": `${repo}src/`,
+          "immer": "npm:immer@10.2.0",
+          "@std/path": "jsr:@std/path@1.1.2",
+        },
+      }),
+    );
+    const port = freePort();
+    await Deno.writeTextFile(join(dir, "app.ts"), appSource(appId, port));
+    await Deno.writeTextFile(join(dir, "cell.ts"), cellSource("v1"));
+    const url = `http://127.0.0.1:${port}`;
+
+    const top = new Deno.Command(Deno.execPath(), {
+      args: ["run", "-A", join(dir, "app.ts")],
+      cwd: dir,
+      env: devChildEnv(),
+      stdout: "piped",
+      stderr: "piped",
+    }).spawn();
+
+    let alive = true;
+    let text = "";
+    try {
+      assertEquals(
+        await waitFor(() => servedMark(url), 60_000),
+        "v1",
+        "the app booted",
+      );
+      // A cell that does not parse: the edit makes this process a supervisor,
+      // its first child dies on load, and the loop parks in
+      // `waitForSourceChange()` with `stop.child === null`.
+      await Deno.writeTextFile(
+        join(dir, "cell.ts"),
+        `import { cell } from "aio";\nexport const probe = cell("probe", {\n`,
+      );
+      // The app stops serving once the broken child fails to come up.
+      assertEquals(
+        await waitFor(
+          async () => (await servedMark(url)) === null ? "gone" : null,
+          60_000,
+        ),
+        "gone",
+        "the broken cell took the app down",
+      );
+      // Give the loop time to reach the park.
+      await new Promise((r) => setTimeout(r, 3000));
+      Deno.kill(top.pid, "SIGHUP");
+      for (let i = 0; i < 40 && alive; i++) {
+        await new Promise((r) => setTimeout(r, 250));
+        try {
+          Deno.kill(top.pid, 0);
+        } catch {
+          alive = false;
+        }
+      }
+    } finally {
+      try {
+        top.kill("SIGKILL");
+      } catch { /* already gone */ }
+      const out = await top.output();
+      text = new TextDecoder().decode(out.stdout) +
+        new TextDecoder().decode(out.stderr);
+      await dropTempDir(dir);
+    }
+    assertEquals(
+      alive,
+      false,
+      `the supervisor swallowed a hang-up it had no child to forward to and ` +
+        `outlived its terminal:\n${text}`,
+    );
   },
 });
 

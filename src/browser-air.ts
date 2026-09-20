@@ -73,6 +73,17 @@ export {
 
 // ── Time travel ─────────────────────────────────────────────────────
 export { useTimeTravel } from "./air/time-travel-air.ts";
+// React's hook spellings, first-class on `aio/air` since 1.0.6-beta (also on
+// `aio/air/compat`, unchanged). The first thing a React-trained developer or
+// agent writes is `import { useState } from "aio/air"` — it did not compile.
+export { useCallback, useEffect, useMemo, useState } from "./air/compat.ts";
+// On the curated `aio/air` all along, missing here until 1.0.6-beta: an app
+// using them type-checked and then failed the browser build's resolve.
+export { on, watch } from "./state/watch.ts";
+export type { WatchOptions } from "./state/watch.ts";
+export { useFieldArray, useForm } from "./air/form.ts";
+export { useVirtualList } from "./air/virtual-list.ts";
+export { renderToString } from "./air/vdom.ts";
 
 // ── AIR renderer primitives (AIO-70) ────────────────────────────────
 export {

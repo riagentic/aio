@@ -446,7 +446,6 @@ export async function scan(
 // reason this file exists — a wiring somebody believed was there.
 
 export const LEDGER: readonly string[] = [
-  "src/air/compat.ts|_resetHints",
   "src/air/dev-readonly-hint.ts|_resetReadOnlyHint",
   "src/air/renderer-flush.ts|_setFlushBudget",
   "src/air/time-travel-panel.ts|setSendFn",

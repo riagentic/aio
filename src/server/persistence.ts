@@ -27,6 +27,7 @@ import {
   stringifyWithIssues,
 } from "./persist-guard.ts";
 import { bytes } from "../diagnostics/fmt.ts";
+import { overUtf8, utf8Size } from "../protocol/utf8-size.ts";
 
 // ── Per-cell size guardrails ─────────────────────────────────────────
 //
@@ -37,9 +38,13 @@ import { bytes } from "../diagnostics/fmt.ts";
 // AT WRITE TIME, naming the right tier instead (bulk rows → `db:` tables,
 // binaries → files — see docs/persistence/big-data.md).
 //
-// Sizes are measured on the JSON the flush ALREADY produces (string length ≈
-// bytes for the ASCII-dominant JSON that state serializes to) — no extra
-// serialization pass.
+// Sizes are measured on the JSON the flush ALREADY produces — no extra
+// serialization pass — and in UTF-8 BYTES, the unit these thresholds are
+// declared in. `json.length` is UTF-16 code units, which under-reports a CJK
+// cell by up to 3×: a 900 KB Japanese document was reported at 900 KB and is
+// 2.7 MB on disk and on every frame. Counting is skipped entirely for a cell
+// that cannot be over the warn threshold whatever it holds (`overUtf8`), so
+// the common flush pays a length comparison and nothing else.
 // A config knob (`persist: { warnBytes, hardBytes }`) lands in alpha53; until
 // then these exported constants are the single source of truth.
 
@@ -336,6 +341,15 @@ export function createPersistenceManager(
   // Size guardrail bookkeeping: one WARN per cell per process; the HARD
   // overrun deliberately has no such set — it reports on every flush.
   const _warnedBigCells = new Set<string>();
+  /** The size the guardrail judges: UTF-8 bytes, counted only for a cell whose
+   *  JSON could possibly be over the warn threshold. Below that the code-unit
+   *  length is returned — it is a LOWER bound on the byte size, and both are
+   *  under every threshold, so no verdict can differ. */
+  function _guardBytes(json: string): number {
+    return overUtf8(json, PERSIST_CELL_WARN_BYTES)
+      ? utf8Size(json)
+      : json.length;
+  }
   function _guardCellSize(cellName: string, size: number): void {
     if (size > PERSIST_CELL_HARD_BYTES) {
       // Loud on EVERY flush, and the write still happens: refusing it would
@@ -879,9 +893,13 @@ export function createPersistenceManager(
             path: i.path ? `${cellName}.${i.path}` : cellName,
           });
         }
-        _guardCellSize(cellName, json.length);
+        const guarded = _guardBytes(json);
+        _guardCellSize(cellName, guarded);
         changed[cellName] = v;
-        pendingSer.push([cellName, { ref: v, size: json.length }]);
+        // The cached size is the one the guardrail judges (see `_guardBytes`),
+        // so an unchanged cell keeps reporting the same verdict without
+        // re-counting anything.
+        pendingSer.push([cellName, { ref: v, size: guarded }]);
       }
     } else {
       // Not a per-cell document (an engine-level caller): there is no cell to

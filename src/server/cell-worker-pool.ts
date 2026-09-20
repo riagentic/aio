@@ -97,6 +97,10 @@ export function createCellWorkerPool(opts: {
   prod: boolean;
   /** The owner's resolved `freezeState`, forwarded to every worker. */
   freezeState: boolean;
+  /** The owner's `refusalsReject`, forwarded to every worker — it decides what
+   *  an in-process caller sees for a REFUSED write, and a worker that never
+   *  learned it answered differently from the cell beside it. */
+  refusalsReject: boolean;
   /** Read a cell's authoritative slice (post-restore) to seed its worker. */
   getSlice: (cell: string) => Record<string, unknown>;
   /** The RAW dispatch — worker patches are applied through it. */
@@ -118,6 +122,7 @@ export function createCellWorkerPool(opts: {
     entry,
     prod,
     freezeState,
+    refusalsReject,
     getSlice,
     dispatch,
     runEffect,
@@ -156,6 +161,7 @@ export function createCellWorkerPool(opts: {
         entry,
         prod,
         freezeState,
+        refusalsReject,
         // `""` (app unknown) is no identity to hand over — the worker then
         // resolves as it always did.
         ...(appId ? { appId } : {}),

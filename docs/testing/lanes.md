@@ -16,7 +16,10 @@ while seam and hunter coverage stay obligatory.
 ## How the full run is parallel
 
 `scripts/test-shards.ts` splits the files over N separate `deno test` processes
-(default: half the cores, at most 16; `--shards=N` or `AIO_TEST_SHARDS`).
+(default: half the usable cores, at most 16; `--shards=N` or `AIO_TEST_SHARDS`).
+The run never takes the whole machine: on Linux every shard, and everything it
+spawns, is pinned off the first 4 cores (`taskset`) and niced; `check:release`
+runs every gate in the same fence. `AIO_TEST_FREE_CORES=N` keeps N cores free.
 Processes, not `deno test --parallel`: that shares `Deno.cwd()` and `Deno.env`
 between files, and dozens of tests change both. Each process gets its own
 `AIO_APPS_DIR` (`.aio-test-shards/<n>/.aio-test-home`).

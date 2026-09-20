@@ -9,7 +9,12 @@
 // a verb the help must name.
 
 import { assert, assertEquals } from "@std/assert";
-import { HELP_TEXT, helpBlock, helpSummary } from "../src/am/am-cmd-meta.ts";
+import {
+  HELP_TEXT,
+  helpBlock,
+  helpCommandText,
+  helpSummary,
+} from "../src/am/am-cmd-meta.ts";
 import { styleWith } from "../src/diagnostics/fmt.ts";
 
 /** The registry keys, read from source — importing src/am.ts would run its CLI. */
@@ -61,4 +66,91 @@ Deno.test("am help: the summary lists every command, one line each", async () =>
     [],
     "a summary row is a signature and one description — nothing else",
   );
+});
+
+// A row is a signature and THAT command's own description. Two ways it stopped
+// being one, both in the shipped `am help`:
+//
+//   help                     This message expect, DRIVE with dispatch, READ the…
+//   record [out] [--from=J] GENERATE A TEST — writes a bootCells replay test from
+//                            the RUNNING app's timeline, so a bug you reproduced…
+//
+// The first is a column-0 PARAGRAPH below the list read as a group heading and
+// its indented continuation glued onto the last row — the same bug the `--json:`
+// footnote had, re-opened the moment a paragraph was added above it, because the
+// boundary was spelled `--` instead of derived. The second is an entry whose
+// signature exactly fills the description column, so ONE space separates the
+// two and the 2-space rule saw no description at all: the whole line became the
+// signature and the entry's SECOND line was promoted to its description.
+
+/** Every row of the compact help, parsed back out of the rendered text. */
+function summaryRows(): { sig: string; desc: string }[] {
+  const lines = helpSummary(HELP_TEXT, styleWith(false)).split("\n");
+  const rows: { sig: string; desc: string }[] = [];
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i]!;
+    if (!/^ {2}\S/.test(line)) continue;
+    const parts = line.slice(2).split(/ {2,}/);
+    // A signature too wide for the column carries its description on the next.
+    const wrapped = /^ {4,}\S/.test(lines[i + 1] ?? "")
+      ? lines[i + 1]!.trim()
+      : "";
+    rows.push({
+      sig: parts[0]!,
+      desc: parts.slice(1).join(" ").trim() || wrapped,
+    });
+  }
+  return rows;
+}
+
+Deno.test("am help: a row's description comes from that command's own entry", () => {
+  const norm = (s: string) => s.replace(/\s+/g, " ").trim();
+  const wrong = summaryRows().filter((r) => {
+    if (!r.desc) return false;
+    const block = helpBlock(HELP_TEXT, r.sig.split(/\s/)[0]!);
+    return block !== null && !norm(block).includes(r.desc.replace(/…$/, ""));
+  });
+  assertEquals(
+    wrong,
+    [],
+    "these rows describe something other than themselves — prose from BELOW " +
+      "the command list leaked into the last entry: " + JSON.stringify(wrong),
+  );
+});
+
+Deno.test("am help: an entry whose signature fills the column keeps its description", () => {
+  // The help text's own layout is the contract: continuation lines all start at
+  // one column, and that column is where a description begins. An entry whose
+  // signature reaches it is separated by a single space — still a description,
+  // and the row must show it rather than swallow the sentence into the
+  // signature (`record [out] [--from=J] GENERATE A TEST — writes a bootCells…`).
+  const body = helpCommandText(HELP_TEXT).split("\n");
+  const indents = body.filter((l) => /^ {4,}\S/.test(l)).map((l) =>
+    /^ */.exec(l)![0].length
+  );
+  const col = [...new Set(indents)].sort((a, b) =>
+    indents.filter((i) => i === b).length -
+    indents.filter((i) => i === a).length
+  )[0]!;
+  assert(col > 4, `no description column found in the help text: ${col}`);
+  const rows = summaryRows();
+  const lost: string[] = [];
+  for (const line of body) {
+    if (!/^ {2}\S/.test(line) || line.length <= col) continue;
+    const head = line.slice(2, col);
+    // A signature that runs past the column separates itself with 2+ spaces
+    // instead, and the ordinary rule already reads it.
+    if (!head.endsWith(" ") || !head.trim()) continue;
+    const sig = head.trim();
+    const row = rows.find((r) => r.sig === sig);
+    if (!row) lost.push(`no row for ${JSON.stringify(sig)}`);
+    else if (!row.desc) {
+      lost.push(
+        `${JSON.stringify(sig)} lost its description ${
+          JSON.stringify(line.slice(col))
+        }`,
+      );
+    }
+  }
+  assertEquals(lost, [], "\n" + lost.join("\n"));
 });

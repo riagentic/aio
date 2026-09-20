@@ -72,7 +72,9 @@ export type Kind =
   | "sfn" // C→S — server-function invocation
   | "sfnr" // S→C — server-function result
   | "ctl" // C→S — control-plane request {id,path,method,headers?,body?}
-  | "ctlr"; // S→C — control-plane reply {id,status,headers?,body}
+  | "ctlr" // S→C — control-plane reply {id,status,headers?,body}
+  | "dialog" // S→C — open a native file dialog in the window {id,kind,title,defaultPath?,filters?}
+  | "dialog-result"; // C→S — its answer {id,canceled,paths} | {id,error}
 
 /** Runtime list of every kind — the test pins this against the union. */
 export const FRAME_KINDS: readonly Kind[] = [
@@ -117,6 +119,8 @@ export const FRAME_KINDS: readonly Kind[] = [
   "sfnr",
   "ctl",
   "ctlr",
+  "dialog",
+  "dialog-result",
 ] as const;
 
 const KIND_SET: ReadonlySet<string> = new Set(FRAME_KINDS);
@@ -161,7 +165,7 @@ export function isIgnorableKind(t: string): boolean {
  *  S→C-only kinds are absent from ws/uds and C→S-only kinds from browser by
  *  direction, not by choice. */
 export const SERVES: Record<
-  "ws" | "uds" | "browser" | "am",
+  "ws" | "uds" | "browser" | "am" | "electronMain",
   ReadonlySet<Kind>
 > = {
   ws: new Set<Kind>([
@@ -203,6 +207,9 @@ export const SERVES: Record<
     // up in `am clients`, and was mailed a full state snapshot on every
     // `am state`.
     "type",
+    // The Electron main process answering a `dialog` it was sent — the
+    // window-owned pickFile/pickDirectory (dialog-host.ts).
+    "dialog-result",
   ]),
   browser: new Set<Kind>([
     "notify",
@@ -237,6 +244,12 @@ export const SERVES: Record<
   // same reason as the other three — a reply kind no router handles is a frame
   // dead on the wire, and this is the transport that carries it.
   am: new Set<Kind>(["ctlr"]),
+  // The ELECTRON MAIN PROCESS (the generated main.cjs in electron-uds.ts) — a
+  // fifth router. It relays every server frame to the renderer untouched,
+  // except the ones addressed to IT: `dialog`, which it answers itself with a
+  // native dialog owned by the app window (dialog-host.ts). The server sends
+  // one only to a connection whose main process announced `caps: ["dialog"]`.
+  electronMain: new Set<Kind>(["dialog"]),
 };
 
 /** One decoded wire frame. `d` is kind-specific (see payload types below).

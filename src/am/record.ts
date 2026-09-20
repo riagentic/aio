@@ -535,9 +535,10 @@ export async function cmdRecord(
     // flow's start may already be gone, and a replay missing its first steps
     // re-runs a sequence the app never ran — say so rather than imply it is
     // complete.
-    if (live.entries.length >= TIMELINE_RING) {
+    if (live.rotated ?? live.entries.length >= TIMELINE_RING) {
       console.error(
-        `[am] ⚠ the live timeline is full (${TIMELINE_RING} dispatches) — ` +
+        `[am] ⚠ the live timeline is full (${TIMELINE_RING} dispatches, ` +
+          `fewer when they carry big values) — ` +
           `earlier actions have rotated out, so this replay may start ` +
           `mid-flow. Restart the app, reproduce, then record.`,
       );
@@ -646,13 +647,16 @@ export async function cmdRecord(
 async function liveTimeline(
   flags: GlobalFlags,
 ): Promise<
-  { ok: true; entries: TimelineEntry[] } | { ok: false; error: string }
+  | { ok: true; entries: TimelineEntry[]; rotated?: boolean }
+  | { ok: false; error: string }
 > {
   const ctx = amCtx(flags);
   const r = await trojanGet(ctx.port, "timeline", ctx.appId);
   if (!r.ok) return { ok: false, error: r.error };
+  const data = r.data as { entries?: TimelineEntry[]; rotated?: boolean };
   return {
     ok: true,
-    entries: (r.data as { entries?: TimelineEntry[] })?.entries ?? [],
+    entries: data?.entries ?? [],
+    ...(typeof data?.rotated === "boolean" ? { rotated: data.rotated } : {}),
   };
 }

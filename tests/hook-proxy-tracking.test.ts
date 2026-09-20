@@ -360,3 +360,31 @@ Deno.test("proxy does not interfere with destructuring", () => {
   assertEquals(_accessedPaths.has("myCell.counter.label"), true);
   _resetTracking();
 });
+
+// `constructor` / `prototype` are ordinary state keys (a word count, a map
+// keyed by user input — legal since 547e86d7e), but the tracking proxy
+// skipped them BY NAME: a read of an OWN key of that name recorded no path,
+// and an object under it came back raw, so nothing read through it was
+// tracked either. Only the inherited ones (the prototype chain) are noise.
+Deno.test("an OWN key named constructor/prototype is tracked like any key; inherited ones and __proto__ are not", () => {
+  _resetTracking();
+  const raw = {
+    words: { constructor: 3 },
+    meta: { prototype: { n: 1 } },
+    plain: { x: 1 },
+    odd: JSON.parse('{"__proto__":{"a":1}}'),
+  };
+  const state = _trackingProxy(raw, "c") as typeof raw;
+  assertEquals(state.words.constructor, 3);
+  assertEquals(state.meta.prototype.n, 1);
+  assertEquals(_accessedPaths.has("c.words.constructor"), true);
+  assertEquals(_accessedPaths.has("c.meta.prototype"), true);
+  assertEquals(_accessedPaths.has("c.meta.prototype.n"), true);
+  // Inherited: `plain.constructor` is Object — not state, not a path.
+  assertEquals(typeof state.plain.constructor, "function");
+  assertEquals(_accessedPaths.has("c.plain.constructor"), false);
+  // `__proto__` is never a subscription path, own key or not.
+  void (state.odd as Record<string, unknown>)["__proto__"];
+  assertEquals(_accessedPaths.has("c.odd.__proto__"), false);
+  _resetTracking();
+});

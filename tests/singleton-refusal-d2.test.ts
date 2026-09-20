@@ -11,7 +11,13 @@ import {
   acquireSingletonLock,
 } from "../src/server/aio-run-helpers.ts";
 import { registerRuntime } from "../src/server/shutdown.ts";
-import { removeLock, writeLock } from "../src/server/single-instance-lock.ts";
+import {
+  lockDir,
+  lockKey,
+  removeLock,
+  writeLock,
+} from "../src/server/single-instance-lock.ts";
+import { appHome } from "../src/server/app-dirs.ts";
 
 Deno.test({
   name:
@@ -110,4 +116,128 @@ Deno.test("singleton refusal: --takeover that failed gets the fact, not the advi
     `it just ran with --takeover. Got: ${msg}`,
   );
   assert(!msg.includes("(pid"), `no pid known — say nothing. Got: ${msg}`);
+});
+
+// A refusal across two homes was believed impossible ("a second boot from a
+// DIFFERENT home is a different instance by construction"), so the message
+// printed the caller's OWN home as the running instance's and went on to
+// explain that both processes share one database. MEASURED, by running a
+// compiled artifact under a temp $HOME beside the ordinary instance:
+//
+//   [AIO] Already running: r5a-counter at http://localhost:62290 (pid 1552822)
+//         (home /tmp/…/r5a-prodhome/.r5a-counter)
+//     If that is a DIFFERENT project … both would read and write one database.
+//
+// Every location in it is wrong: pid 1552822's home is ~/.r5a-counter, the
+// directory named is this boot's own, the two databases are different files,
+// and renaming the app would not have helped. $HOME alone does not scope the
+// lock — `lockDir()` scopes on AIO_APPS_DIR, deliberately and for a reason
+// (an e2e under a temp HOME once reached the production instance) — so this
+// refusal is reachable, and the fix it owes the reader is that env var.
+Deno.test("singleton refusal: a refusal across two homes names the RUNNING one", () => {
+  const msg = _alreadyRunningMessage({
+    appId: "todo",
+    port: 9010,
+    pid: 4242,
+    home: "/tmp/sandbox/.todo",
+    otherHome: "/home/u/.todo",
+    takeover: false,
+  });
+  assertStringIncludes(
+    msg,
+    "home /home/u/.todo",
+    "the head must name where the RUNNING instance keeps its data",
+  );
+  assertStringIncludes(msg, "/tmp/sandbox/.todo");
+  assertStringIncludes(msg, "AIO_APPS_DIR");
+  assert(
+    !msg.includes("one database"),
+    `two homes are two databases — say what is true. Got: ${msg}`,
+  );
+});
+
+// …and what it says about WHERE the lock is has to be true on this machine.
+//
+// The two-home branch explained the collision with "(it lives in
+// $XDG_RUNTIME_DIR)". `lockDir()` reads `$XDG_RUNTIME_DIR ?? "/tmp"` on posix
+// and `%TEMP%` on Windows — so on macOS, on Windows, in a container and over
+// plain ssh (every host with no systemd user session) that sentence names an
+// env var that does not exist, about a file that is somewhere else. A refusal
+// whose whole job is to send the reader to the right place cannot guess at it:
+// it knows the directory, so it says the directory.
+Deno.test("singleton refusal: the two-home branch names the real lock directory", () => {
+  const msg = _alreadyRunningMessage({
+    appId: "todo",
+    port: 9010,
+    pid: 4242,
+    home: "/tmp/sandbox/.todo",
+    otherHome: "/home/u/.todo",
+    takeover: false,
+  });
+  assertStringIncludes(
+    msg,
+    lockDir(),
+    "the reader is being sent to the lock — name where it actually is",
+  );
+  assert(
+    !msg.includes("$XDG_RUNTIME_DIR"),
+    `that variable is unset on macOS, on Windows and in any container — the ` +
+      `lock is then in /tmp or %TEMP%. Got: ${msg}`,
+  );
+});
+
+// …and the refusal has to CARRY the running instance's home to that message.
+// Reproduced the way it happens: $HOME moves, so each process derives its own
+// `~/.<appId>` and both land on the same lock key (lockDir scopes on
+// AIO_APPS_DIR, not on $HOME — deliberately).
+Deno.test({
+  name: "singleton refusal: the running instance's home reaches the message",
+  async fn() {
+    const appId = `d2-home-${Deno.pid}`;
+    const realHome = Deno.env.get("HOME");
+    // AIO_APPS_DIR is the env var that DOES isolate (lockDir scopes on it), so
+    // the collision only exists without one — and a sibling test file in this
+    // process may have set it. Removed for the duration, restored after.
+    const realApps = Deno.env.get("AIO_APPS_DIR");
+    if (realApps !== undefined) Deno.env.delete("AIO_APPS_DIR");
+    const l = Deno.listen({ port: 0, hostname: "127.0.0.1" });
+    const port = (l.addr as Deno.NetAddr).port;
+    // The holder's $HOME. Its home IS its `appHome`, so its lock key is the
+    // bare appId — which is exactly why the second boot collides with it.
+    Deno.env.set("HOME", "/tmp/r5a-other-home");
+    const other = appHome(appId);
+    writeLock({
+      appId,
+      pid: 1,
+      port,
+      startedAt: Date.now() - 60_000,
+      status: "started",
+      cwd: Deno.cwd(),
+      home: other,
+    });
+    const unregister = registerRuntime(() => Promise.resolve());
+    try {
+      Deno.env.set("HOME", "/tmp/r5a-this-home"); // the second boot
+      const err = await assertRejects(
+        () => acquireSingletonLock(appId, undefined, port, true, false),
+        Error,
+        "Already running",
+      );
+      assertStringIncludes(
+        err.message,
+        `home ${other}`,
+        "the head must name the home of the process that HOLDS the lock",
+      );
+      assertStringIncludes(err.message, "/tmp/r5a-this-home");
+    } finally {
+      unregister();
+      // Both spellings: the key depends on $HOME at the moment it is computed,
+      // and this case exists BECAUSE those two moments disagree.
+      removeLock(lockKey(appId, other));
+      removeLock(appId);
+      l.close();
+      if (realHome !== undefined) Deno.env.set("HOME", realHome);
+      if (realApps !== undefined) Deno.env.set("AIO_APPS_DIR", realApps);
+    }
+  },
 });

@@ -30,8 +30,9 @@ async function fixture(): Promise<string> {
     `${dir}/settings.ts`,
     `import { cell } from "${REPO}mod.ts";
 export const settings = cell("sv-settings", {
-  state: { theme: "light", apiKey: "", account: { name: "", key: "" } },
-  visible: { exclude: ["apiKey", "account.key"] },
+  state: { theme: "light", apiKey: "", account: { name: "", key: "" },
+           rooms: {} as Record<string, { name: string; key: string }> },
+  visible: { exclude: ["apiKey", "account.key", "rooms.key"] },
   selectors: { keyLen: (s: { apiKey: string }) => s.apiKey.length },
   methods: { setTheme(s, t: string) { s.theme = t; } },
 });
@@ -65,6 +66,8 @@ export default function App() { return h("main", null, ${body}); }
     "DeepName",
     `h("p", null, "name:" + settings.account.name)`,
   );
+  await component("RoomKey", `h("p", null, "k:" + settings.rooms.r1.key)`);
+  await component("RoomName", `h("p", null, "n:" + settings.rooms.r1.name)`);
   await component("UiOnly", `h("p", null, "note:" + notes.upper())`);
   await component("UiOnlyCall", `h("p", null, String(notes.setText("x")))`);
   return dir;
@@ -75,6 +78,7 @@ const LIVE = {
     theme: "dark",
     apiKey: "lightkey:secret1235",
     account: { name: "ada", key: "deep-secret" },
+    rooms: { r1: { name: "lobby", key: "room-secret" } },
   },
 };
 
@@ -129,6 +133,21 @@ Deno.test("headless surface: a dot-path exclude refuses the nested read", async 
   const name = await renderHeadlessSurface(`${dir}/DeepName.ts`);
   assert(name.ok, !name.ok ? name.error : "");
   assertStringIncludes(JSON.stringify(name.roots), "name:ada");
+});
+
+Deno.test("headless surface: a dot-path exclude reaches into a records-by-id map", async () => {
+  // `rooms` is keyed by id, so the excluded `key` is one level further down
+  // than the path reads. The wire filter has descended into such a container
+  // since that hole was closed; this twin returned the map untouched, and the
+  // surface printed a secret the broadcast removes.
+  await setup();
+  const k = await renderHeadlessSurface(`${dir}/RoomKey.ts`);
+  assertFalse(k.ok, `rendered a secret in a records map: ${JSON.stringify(k)}`);
+  assertStringIncludes(k.error, "sv-settings.rooms.key");
+  assertFalse(k.error.includes("room-secret"), k.error);
+  const n = await renderHeadlessSurface(`${dir}/RoomName.ts`);
+  assert(n.ok, !n.ok ? n.error : "");
+  assertStringIncludes(JSON.stringify(n.roots), "n:lobby");
 });
 
 Deno.test("headless surface: a cell only the UI imports renders its selectors", async () => {

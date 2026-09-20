@@ -10,7 +10,6 @@ import {
   type MountHandle,
 } from "../src/air/aio-renderer.ts";
 import {
-  _resetHints,
   useCallback,
   useEffect,
   useMemo,
@@ -232,43 +231,38 @@ Deno.test({
   },
 });
 
-// ── Dev hints ──────────────────────────────────────────────────────
+// ── Silence on correct code ─────────────────────────────────────────
 
 Deno.test({
-  name: "compat: dev hints fire once per name",
+  name:
+    "compat: React's hooks print nothing in dev — correct code is not a warning",
   async fn() {
     const { document, root, cleanup } = createDOM();
     _setDocument(document);
-
-    // Enable dev mode
     (globalThis as Record<string, unknown>).__aioDev = true;
-    _resetHints();
-
-    const infos: string[] = [];
-    const origInfo = console.info;
-    console.info = (...args: unknown[]) => {
-      infos.push(String(args[0]));
+    const said: string[] = [];
+    const orig = { info: console.info, warn: console.warn, log: console.log };
+    console.info = console.warn = console.log = (...args: unknown[]) => {
+      said.push(String(args[0]));
     };
-
     try {
       const App = () => {
-        useState(0);
-        useState(1); // second call — should NOT hint again
+        const [n] = useState(0);
+        useEffect(() => {}, [n]);
+        useMemo(() => n * 2, [n]);
         useCallback(() => {}, []);
-        useCallback(() => {}, []); // second call — no hint
         return h("div", null, "test");
       };
       const handle = mount(root, App);
-
-      // useState hint once, useCallback hint once
-      assertEquals(infos.filter((m) => m.includes("useState")).length, 1);
-      assertEquals(infos.filter((m) => m.includes("useCallback")).length, 1);
-
+      assertEquals(
+        said,
+        [],
+        "a hint on useState/useEffect/useMemo/useCallback",
+      );
       _unmount(handle);
     } finally {
-      console.info = origInfo;
+      Object.assign(console, orig);
       (globalThis as Record<string, unknown>).__aioDev = false;
-      _resetHints();
     }
     await cleanup();
   },

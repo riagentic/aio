@@ -8,6 +8,8 @@ import { electronMainScriptUDS } from "./electron-uds.ts";
 import { log } from "../diagnostics/logger-api.ts";
 import { classifyElectronLine } from "./electron-renderer-log.ts";
 import { isCompiled } from "../server/paths.ts";
+import { DENO_JSON_NAMES, parseDenoJson } from "../server/deno-json.ts";
+import { HEY } from "../diagnostics/fmt.ts";
 import { spawnInheritingOrNull } from "../server/no-console.ts";
 import {
   bakedElectronVersion,
@@ -344,14 +346,104 @@ export async function electronPkgDirs(root = "."): Promise<string[]> {
   return [`${root}/node_modules/electron`, ...(await denoElectronDirs(root))];
 }
 
+/** Every config file an app may keep its Electron pin in, with the text it
+ *  held before an install. Missing files are simply absent. */
+async function readDenoConfigTexts(root: string): Promise<Map<string, string>> {
+  const out = new Map<string, string>();
+  for (const name of DENO_JSON_NAMES) {
+    const text = await Deno.readTextFile(join(root, name)).catch(() => null);
+    if (text !== null) out.set(name, text);
+  }
+  return out;
+}
+
+/** `imports.electron` as a config TEXT spells it, or null. Pure; tolerant —
+ *  an unparseable file answers null rather than throwing, because this is
+ *  only ever used to REPORT what an install did. */
+export function electronImportSpec(text: string, file: string): string | null {
+  try {
+    const cfg = parseDenoJson(text, file) as {
+      imports?: Record<string, string>;
+    };
+    const spec = cfg?.imports?.["electron"];
+    return typeof spec === "string" ? spec : null;
+  } catch {
+    // aio-ok(silent-catch): a config this installer cannot parse is the app's
+    // own problem, reported by every command that actually reads it; a
+    // post-install NOTE must never be the thing that throws.
+    return null;
+  }
+}
+
+/** Every `npm:electron@x.y.z` a config text names, in order, deduped. Pure.
+ *  An app keeps more than one copy of the choice — the import map, a task
+ *  spelling `--allow-scripts=npm:electron@…` — and the whole §12 defect is the
+ *  copies silently DISAGREEING after an install. */
+export function electronSpecsInText(text: string): string[] {
+  const out: string[] = [];
+  for (const m of text.matchAll(/npm:\/?electron@(\d+\.\d+\.\d+[^"'\s,]*)/g)) {
+    if (!out.includes(m[1]!)) out.push(m[1]!);
+  }
+  return out;
+}
+
+/** What the app's author must be TOLD about their config after an install.
+ *
+ *  `deno install --allow-scripts=npm:electron npm:electron@<v>` takes a
+ *  POSITIONAL package, so deno rewrites `imports.electron` to `<v>`. aio is
+ *  tested with ONE Electron and a build ships exactly that one, so `<v>` is
+ *  aio's — the version choice is policy (`am pin` / `am fix` keep an app's
+ *  copies on it). Editing somebody's `deno.json` in SILENCE is not: a field
+ *  report found an app whose pin had been rewritten with no line of output,
+ *  and another copy of the version left behind, so the file disagreed with
+ *  itself. Both are said here, once, at the install that caused them.
+ *
+ *  Pure: the two texts in, the lines out (empty when nothing moved). */
+export function electronConfigNotes(
+  file: string,
+  before: string,
+  after: string,
+  installed: string,
+): string[] {
+  const notes: string[] = [];
+  const was = electronImportSpec(before, file);
+  const now = electronImportSpec(after, file);
+  if (was !== now) {
+    notes.push(
+      `${HEY} the Electron pin in ${file} was rewritten by \`deno install\`: ` +
+        `${was === null ? "(none)" : `"${was}"`} → ${
+          now === null ? "(none)" : `"${now}"`
+        }. aio is tested with ONE Electron and a build ships exactly that one, ` +
+        `so the install asks for it BY VERSION — and a positional package ` +
+        `rewrites the import map. Review the diff and commit it deliberately; ` +
+        `\`am fix\` is what keeps an app's copies aligned.`,
+    );
+  }
+  const stale = electronSpecsInText(after).filter((v) => v !== installed);
+  if (stale.length > 0) {
+    notes.push(
+      `${HEY} ${file} still names npm:electron@${
+        stale.join(", npm:electron@")
+      } while the installed runtime is ${installed} — the app's copies of its ` +
+        `Electron version DISAGREE. Align them (\`am fix\`), or the next ` +
+        `command that reads the other copy runs a different Chromium.`,
+    );
+  }
+  return notes;
+}
+
 /** Force-install electron in the app cwd so `dev:electron` / `compile:electron`
  *  work OUT OF THE BOX — even when the app didn't declare electron as a dep.
  *  The positional `npm:electron` adds + installs it; `--allow-scripts` runs its
  *  postinstall (downloads the binary). Returns true when the command succeeded.
  *  `run` is the command seam (injected in tests; real `deno install` here). */
 export async function autoInstallElectron(
-  log: { info?: (m: string) => void; error: (m: string) => void },
-  run: () => Promise<{ success: boolean }> = () =>
+  log: {
+    info?: (m: string) => void;
+    warn?: (m: string) => void;
+    error: (m: string) => void;
+  },
+  run: (version: string) => Promise<{ success: boolean }> = (v: string) =>
     new Deno.Command(Deno.execPath(), {
       // PINNED to the framework's one version, not bare `npm:electron`.
       // Bare resolves to whatever is latest at INSTALL time, so a dev tree
@@ -362,7 +454,7 @@ export async function autoInstallElectron(
       args: [
         "install",
         "--allow-scripts=npm:electron",
-        `npm:electron@${version}`,
+        `npm:electron@${v}`,
       ],
       stdout: "inherit",
       stderr: "inherit",
@@ -378,14 +470,29 @@ export async function autoInstallElectron(
   /** The exact version to install — aio's tested one unless `am fix` asks
    *  for the one the app's PINNED aio is tested with. */
   version: string = DEFAULT_ELECTRON_VERSION,
+  /** Where the app's config lives — the file `deno install` REWRITES, read
+   *  before and after so the rewrite is reported rather than silent. */
+  root = ".",
 ): Promise<boolean> {
   (log.info ?? console.log)(
     `electron: not installed — auto-installing (deno install ` +
       `--allow-scripts=npm:electron npm:electron@${version})… ` +
       `first run downloads the Electron binary (~100MB), this can take a minute.`,
   );
+  const before = await readDenoConfigTexts(root);
+  const report = async () => {
+    const say = log.warn ?? log.error;
+    for (const [file, text] of before) {
+      const after = await Deno.readTextFile(join(root, file)).catch(() => null);
+      if (after === null) continue;
+      for (const note of electronConfigNotes(file, text, after, version)) {
+        say(note);
+      }
+    }
+  };
   try {
-    await run();
+    await run(version);
+    await report();
     if (await isInstalled()) return true;
     // The install "succeeded" and the runtime is NOT there.
     //

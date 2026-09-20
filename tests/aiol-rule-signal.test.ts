@@ -244,15 +244,6 @@ const VIOLATIONS: Case[] = [
     expect: "deno.json not found",
   },
   {
-    name: "appId in deno.json only",
-    files: app({
-      "deno.json": denoJson({ appId: "probe" }),
-      "src/app.ts":
-        `import { aio } from "aio";\nimport { counter } from "./cell.ts";\nawait aio.run({ cells: { counter } });\n`,
-    }),
-    expect: "move to aio.run",
-  },
-  {
     name: "appId in deno.json AND aio.run()",
     files: app({ "deno.json": denoJson({ appId: "probe" }) }),
     expect: "in deno.json AND aio.run()",
@@ -1539,6 +1530,19 @@ Deno.test("aiol: every report() site in checks.ts has a fixture", () => {
 type Clean = { name: string; files: Record<string, string>; forbid: string };
 
 const LEGAL: Clean[] = [
+  {
+    // The brief's own advice: pin appId in deno.json. A compiled binary embeds
+    // deno.json and resolves the same id, so "move to aio.run() (compiled
+    // builds can't read deno.json)" was a stale false alarm — it told an agent
+    // following the brief to undo it (F3 benchmark, 2026-09-19).
+    name: "appId pinned in deno.json only is the recommended shape",
+    forbid: "appId",
+    files: app({
+      "deno.json": denoJson({ appId: "probe" }),
+      "src/app.ts":
+        `import { aio } from "aio";\nimport { counter } from "./cell.ts";\nawait aio.run({ cells: { counter } });\n`,
+    }),
+  },
   {
     // `\{[^}]*\}` stops at the FIRST `}` — the inner one — so the caller's own
     // `retry.timeout` field was read as call()'s deprecated option, reported as

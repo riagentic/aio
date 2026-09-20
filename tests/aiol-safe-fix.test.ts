@@ -226,49 +226,37 @@ Deno.test("safe-fix: an existing `client` key wins over a stale `target`", async
   assertEquals(fixed.client, "browser", "the explicit client is not clobbered");
 });
 
-// ── appId: the fix that used to DELETE an app's identity ──────────────
+// ── appId: deno.json is the place to pin it ──────────────────────────
 //
 // `appId` names the lock file, the SQLite path and the UDS socket. The rule
-// says, correctly, that a compiled build cannot read deno.json — so the value
-// has to reach `aio.run()`. The fix performed only the DELETE half: one
-// `--safe-fix` on a clean app left `appId` nowhere, the source untouched, and
-// the next boot came up under a different identity with its own data orphaned
-// on disk. A safe fix may not change behaviour; renaming the app is the
-// largest behaviour change there is.
+// once said a compiled build cannot read deno.json and moved the key into
+// `aio.run()` — false since alpha54/59 (the binary embeds deno.json and
+// resolves the same id; tests/app-identity-differential.test.ts), and it told
+// an agent following the `am agent` brief ("pin appId in deno.json") to undo
+// it. So there is nothing to fix: the key stays, the entry is untouched. A
+// safe fix may not change behaviour; renaming the app is the largest
+// behaviour change there is.
 
-Deno.test("safe-fix: appId MOVES to aio.run() — it is never just deleted", async () => {
-  const dj = JSON.parse(project({})["deno.json"]!) as Record<string, unknown>;
-  dj.appId = "vault-9";
-  const { files } = await safeFixed(project({
-    "deno.json": JSON.stringify(dj, null, 2),
-    "src/app.ts":
+Deno.test("safe-fix: an appId pinned in deno.json is left exactly where it is", async () => {
+  for (
+    const entry of [
       `import { aio } from "aio";\nimport { counter } from "./cell.ts";\nawait aio.run({ cells: { counter } });\n`,
-  }));
-  assertStringIncludes(
-    files["src/app.ts"]!,
-    'appId: "vault-9"',
-    "the identity must land in the entry BEFORE it leaves deno.json",
-  );
-  assertEquals(
-    (JSON.parse(files["deno.json"]!) as { appId?: string }).appId,
-    undefined,
-    "…and only then may the deno.json key go",
-  );
-});
-
-Deno.test("safe-fix: the zero-config `aio.run()` gains an options object", async () => {
-  const dj = JSON.parse(project({})["deno.json"]!) as Record<string, unknown>;
-  dj.appId = "zero-arg";
-  const { files } = await safeFixed(project({
-    "deno.json": JSON.stringify(dj, null, 2),
-    "src/app.ts":
       `import "./cell.ts";\nimport { aio } from "aio";\nawait aio.run();\n`,
-  }));
-  assertStringIncludes(files["src/app.ts"]!, 'aio.run({ appId: "zero-arg" })');
-  assertEquals(
-    (JSON.parse(files["deno.json"]!) as { appId?: string }).appId,
-    undefined,
-  );
+    ]
+  ) {
+    const dj = JSON.parse(project({})["deno.json"]!) as Record<string, unknown>;
+    dj.appId = "vault-9";
+    const { files } = await safeFixed(project({
+      "deno.json": JSON.stringify(dj, null, 2),
+      "src/app.ts": entry,
+    }));
+    assertEquals(files["src/app.ts"], entry, "the entry is not rewritten");
+    assertEquals(
+      (JSON.parse(files["deno.json"]!) as { appId?: string }).appId,
+      "vault-9",
+      "the identity stays pinned",
+    );
+  }
 });
 
 Deno.test("safe-fix: with nowhere to put appId, deno.json keeps it", async () => {

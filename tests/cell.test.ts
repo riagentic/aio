@@ -630,20 +630,32 @@ Deno.test("cell with empty methods map is a valid state-only cell (thin-client s
 });
 
 Deno.test("validateConfig: every typed UiConfig key is accepted (ui.entry regression)", async () => {
-  const { validateConfig, VALID_UI_KEYS, NUMERIC_VALUES } = await import(
-    "../src/server/config.ts"
-  );
+  const { validateConfig, VALID_UI_KEYS, NUMERIC_VALUES, SHAPE_VALUES } =
+    await import(
+      "../src/server/config.ts"
+    );
   // Every key the UiConfig type documents must validate — a typed option that
   // exits the process at boot is the worst kind of bug.
   //
   // The sample VALUE has to suit the key: `width` and `height` are numbers and
-  // are range-checked (`NUMERIC_VALUES`), so handing them a string would test
-  // the opposite of this test's claim — it would assert that a nonsense value
-  // is ACCEPTED. The one table that knows which keys are numeric decides here
-  // too, so a key that becomes numeric later cannot quietly re-lenient this.
+  // are range-checked (`NUMERIC_VALUES`), `showStatus` is a boolean and is
+  // shape-checked (`SHAPE_VALUES`), so handing either a string would test the
+  // opposite of this test's claim — it would assert that a nonsense value is
+  // ACCEPTED. The tables that know which keys are numeric and which have a
+  // declared shape decide here too, so a key that gains either later cannot
+  // quietly re-lenient this.
   const typedUiKeys = ["title", "width", "height", "showStatus", "entry"];
+  const SHAPE_SAMPLE: Record<string, unknown> = {
+    boolean: true,
+    array: ["x"],
+    object: {},
+  };
   const sample = (k: string): unknown =>
-    k in NUMERIC_VALUES ? (NUMERIC_VALUES[k]?.min ?? 0) + 1 : "x";
+    k in NUMERIC_VALUES
+      ? (NUMERIC_VALUES[k]?.min ?? 0) + 1
+      : k in SHAPE_VALUES
+      ? SHAPE_SAMPLE[SHAPE_VALUES[k]!] ?? "x"
+      : "x";
   for (const k of typedUiKeys) {
     let exited = false;
     validateConfig(

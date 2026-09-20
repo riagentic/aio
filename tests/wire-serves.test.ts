@@ -90,12 +90,25 @@ Deno.test("SERVES.am matches the control client's handled kinds", async () => {
   );
 });
 
+// The Electron MAIN process is a router too: it relays server frames to the
+// renderer, except the ones addressed to it (`dialog` — the window-owned
+// pickFile). Its switch lives in the generated main.cjs template.
+Deno.test("SERVES.electronMain matches the Electron main process's handled kinds", async () => {
+  assertEquals(
+    sorted(await fileKinds("src/electron/electron-uds.ts")),
+    sorted(SERVES.electronMain),
+    "electron-uds.ts's main-process switch handles a different kind set " +
+      "than SERVES.electronMain records",
+  );
+});
+
 Deno.test("every frame kind is served by at least one transport", () => {
   const union = new Set<Kind>([
     ...SERVES.ws,
     ...SERVES.uds,
     ...SERVES.browser,
     ...SERVES.am,
+    ...SERVES.electronMain,
   ]);
   const unrouted = FRAME_KINDS.filter((k) => !union.has(k));
   assertEquals(

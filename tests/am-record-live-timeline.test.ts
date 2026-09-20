@@ -113,6 +113,17 @@ await new Promise(() => {});
       // Redaction is the timeline's, applied before `am` ever sees it.
       assert(!test.includes("hunter2"), `a redacted payload leaked:\n${test}`);
       assertStringIncludes(test, "UNREPRODUCIBLE: c:unlock was redacted");
+      // Three dispatches rotated nothing — and the app SAYS so (the ring is
+      // bounded by bytes too, so `am` cannot infer it from the count). The
+      // whole wiring: aio.ts → aio-server → trojan route → am.
+      assert(
+        !r.stderr.includes("rotated out"),
+        `a three-dispatch ring was reported rotated:\n${r.stderr}`,
+      );
+      const tl = await (await fetch(
+        `http://127.0.0.1:${port}/__aio/trojan/timeline`,
+      )).json() as { entries: unknown[]; rotated?: boolean };
+      assertEquals(tl.rotated, false, "the timeline route says it rotated");
     } finally {
       try {
         child.kill("SIGTERM");

@@ -281,6 +281,48 @@ async function superviseForever(port: number | undefined): Promise<never> {
       });
     } catch { /* signal not supported here */ }
   }
+  // SIGHUP — the supervisor must not be the weakest link in its own session.
+  //
+  // A headless app IGNORES SIGHUP on purpose (`aio-lifecycle.ts`: "the one
+  // role whose entire purpose is running unattended must not need a wrapper to
+  // do it"). The moment a cell edit turns that process into a supervisor its
+  // app has shut down and released that listener, so the supervisor is a plain
+  // process again — SIGHUP's default action TERMINATES it — while the child it
+  // spawned still ignores SIGHUP. Two seconds later the child's parent watch
+  // fires and kills the app: "parent process N is gone (AIO_PARENT_PID) —
+  // shutting down", with nothing left to restart it and a message that blames
+  // a pid. Measured end to end on this shape (a field report saw it three
+  // times in one session): the mechanism that keeps an app alive across a cell
+  // edit was defeating the one that keeps it alive across a hang-up.
+  //
+  // Forwarded, never swallowed: the CHILD decides, exactly as it does for
+  // SIGINT/SIGTERM. A headless child ignores it and the session goes on; a
+  // terminal-attached one dies on the default action, and the loop's own exit
+  // rules below then take the supervisor with it — which is the documented
+  // "a dev server attached to a terminal SHOULD go when the terminal does".
+  try {
+    Deno.addSignalListener("SIGHUP", () => {
+      // NO CHILD, NO FORWARDING — and then this process is a plain process
+      // again, so it takes the hang-up itself. Forwarding replaced SIGHUP's
+      // default action for the supervisor's whole life, including the stretch
+      // that has no child at all: `waitForSourceChange()`, which is unbounded
+      // by design (the saved file does not load, so the loop waits for the
+      // next save). Closing the terminal there swallowed the hang-up outright
+      // and left an orphaned supervisor with a recursive `Deno.watchFs`,
+      // outliving the session that started it with nothing to show for it.
+      if (!stop.child) Deno.exit(0);
+      try {
+        stop.child.kill("SIGHUP");
+      } catch {
+        // aio-ok: the child exited between the read and the kill — there is
+        // nothing left to forward the hang-up to, and the loop below is
+        // already awaiting its status.
+      }
+    });
+  } catch {
+    // aio-ok: a platform with no SIGHUP (windows). Nothing can send one, so
+    // there is nothing to forward and nothing to report.
+  }
   let rapidStreak = 0;
   let saidStorm = false;
   while (true) {

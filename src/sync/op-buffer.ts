@@ -183,6 +183,18 @@ export interface OpBuffer {
    *  handler can be written for is emitted here, by name (a gate reads them).
    *  Optional: additive on the interface. */
   dropStale?(cell: string, opId: string): Promise<void>;
+  /** Ops this buffer discarded on its OWN initiative — the backpressure
+   *  eviction inside {@link OpBuffer.add} — since the last call, which also
+   *  clears the list.
+   *
+   *  The engine needs the difference between "this op left the queue" and
+   *  "this op left the queue AND nobody here folded it": the second is a twin
+   *  tab having confirmed it, and costs a re-sync of the cell; an eviction is
+   *  neither and costs nothing. Only `add` evicts, and only the engine calls
+   *  `add`, so draining right after it attributes every eviction exactly.
+   *  Optional: additive on the interface — a buffer without it puts the engine
+   *  back on the previous (over-attributing) behaviour, never on damage. */
+  takeEvicted?(): { cell: string; id: string }[];
   getMeta(
     cell: string,
   ): Promise<{ lastHlc: HLC | null; lastServerTs?: number } | undefined>;
@@ -207,8 +219,11 @@ export interface OpBufferDropCallback {
   (
     op: SyncOp,
     /** `stale-evicted`: an UNCONFIRMED op past its TTL, discarded to make room
-     *  under backpressure. It never reached the server — this is the app's one
-     *  chance to know a local mutation was abandoned.
+     *  under backpressure. This is the app's one chance to know a local
+     *  mutation was abandoned — but NOT proof that it never landed: the op was
+     *  sent, and it may have been applied on the server with its ack lost on a
+     *  dropped socket. `dropReport` is the wording; do not upgrade the unknown
+     *  to a "never arrived" in a handler either.
      *  `prune-failed`: the buffer was over its cap and pruning could not free a
      *  slot, so the NEW op was refused.
      *
@@ -223,6 +238,71 @@ export interface OpBufferDropCallback {
      *  reader would reasonably conclude aio distinguishes a case it does not. */
     reason: "prune-failed" | "stale-evicted" | "stale-beyond-retention",
   ): void;
+}
+
+/** The reasons an op leaves the buffer without being confirmed — the argument
+ *  {@link OpBufferDropCallback} gets, and the key {@link dropReport} answers.
+ *  @internal Engine/framework wiring — not public API. */
+export type OpDropReason =
+  | "prune-failed"
+  | "stale-evicted"
+  | "stale-beyond-retention";
+
+/** What a drop reason actually PROVES, in one sentence plus what to do — the
+ *  one wording the console line and the `sync-op-dropped` diagnostic share.
+ *
+ *  One sentence used to cover all three: "this mutation never reached the
+ *  server and is now gone." True of `prune-failed` (the buffer refused the op
+ *  before it was ever sent) and of `stale-beyond-retention` (the SERVER
+ *  refused it, so it was not applied). Not true of `stale-evicted`: that op
+ *  was sent, and it may have been applied and acked with the ack lost on a
+ *  dropped socket — whether the server holds the change is exactly what nobody
+ *  knows. Telling the user it never arrived turns an unknown into a false
+ *  negative, and the natural repair (make the change again) then writes it
+ *  twice. A report that overstates is the same class of bug as one that stays
+ *  silent; each reason gets the sentence its evidence supports.
+ *
+ *  Pure: same reason in, same strings out. */
+export function dropReport(
+  reason: OpDropReason,
+): { what: string; hint: string } {
+  switch (reason) {
+    case "prune-failed":
+      return {
+        what:
+          "the offline queue is full (pending cap reached), so this change " +
+          "was refused before it was ever sent — it never reached the server " +
+          "and is gone.",
+        hint:
+          "The offline queue holds SYNC_DEFAULTS.pendingCap unconfirmed ops " +
+          "per cell and is full, so the client has not reached the server in " +
+          "a long time. Check connectivity and backpressure.",
+      };
+    case "stale-evicted":
+      return {
+        what:
+          "this change sat unconfirmed past its retention and was evicted to " +
+          "make room in a full offline queue. The server never acknowledged " +
+          "it, so it may have been applied there (an ack can be lost with the " +
+          "socket) or may never have arrived — this client will not re-send " +
+          "it either way.",
+        hint:
+          "Read the cell's state to see whether the change is there; nothing " +
+          "on this side can tell. Raise the cell's sync offline.retention to " +
+          "keep unsent changes longer, and check connectivity/backpressure.",
+      };
+    case "stale-beyond-retention":
+      return {
+        what:
+          "the server refused it as stamped older than its tombstone window — " +
+          "it could no longer tell a resend from a new change, so the change " +
+          "was NOT applied and will not be re-sent.",
+        hint:
+          "This client was offline longer than the server's tombstone window " +
+          "(24h, or the cell's offline.retention when longer). Make the " +
+          "change again, or raise the retention on both sides.",
+      };
+  }
 }
 
 /**
@@ -258,6 +338,13 @@ export function createOpBuffer(
   const staleAfterOf = (cell: string): number =>
     opts?.staleAfterFor?.(cell) ?? defaultStaleAfterMs;
 
+  // Evictions since the last `takeEvicted()` — see the interface note. Bounded
+  // because a host that never drains it must not grow a list forever: past the
+  // bound the oldest entry is forgotten, and the engine is back on its previous
+  // behaviour for that one op (one spurious re-sync), never on damage.
+  const EVICTED_CAP = SYNC_DEFAULTS.pendingCap;
+  let _evicted: { cell: string; id: string }[] = [];
+
   return {
     async add(op: SyncOp): Promise<boolean> {
       const count = await storage.countUnconfirmed(op.cell);
@@ -288,6 +375,11 @@ export function createOpBuffer(
           // thrown away, so the exact offline-queue mutations this subsystem
           // exists to preserve disappeared with nothing to observe.
           await storage.pruneStale(op.cell, staleOp.id);
+          // Cell + id, not the op: the payload was just discarded, and
+          // keeping a copy of it alive until the next drain would be a second
+          // queue nobody asked for.
+          _evicted.push({ cell: staleOp.cell, id: staleOp.id });
+          if (_evicted.length > EVICTED_CAP) _evicted.shift();
           onDrop?.(staleOp, "stale-evicted");
           evictedCount++;
         }
@@ -337,6 +429,13 @@ export function createOpBuffer(
 
     pruneConfirmed: (cell) => storage.pruneConfirmed(cell),
     pruneStale: (cell, opId) => storage.pruneStale(cell, opId),
+
+    takeEvicted(): { cell: string; id: string }[] {
+      if (_evicted.length === 0) return [];
+      const out = _evicted;
+      _evicted = [];
+      return out;
+    },
 
     async dropStale(cell, opId) {
       // Read before prune: `onDrop` names the op (cell, action, id), and the
