@@ -29,6 +29,7 @@
 - [App architectures — the two canonical shapes](basics/app-architectures.md) — Almost every aio deployment is one of two shapes.
 - [Architecture](basics/architecture.md) — AIO is a full-stack Deno/TypeScript application framework built around cells
 - [Core Concepts](basics/concepts.md) — Everything you need to understand about how aio works.
+- [Every option, one page](basics/every-option.md) — cell(name, { … }) — the keys a cell takes.
 - [FAQ](basics/faq.md) — Common questions about what aio does, doesn't do, and why.
 - [AIO Documentation](basics/index.md) — one table: Deno., hidden fields, tracked reads, and what refuses you
 - [Migrating to AIO](basics/migration.md) — You have an existing Deno application and want to integrate AIO.
@@ -58,7 +59,7 @@
 
 ## UI — AIR renderer — components, signals, routing, forms
 
-- [Rendering & UI](ui/README.md) — AIO uses AIR — a built-in signal-based renderer (85 KB gzipped with the
+- [Rendering & UI](ui/README.md) — AIO uses AIR — a built-in signal-based renderer (88 KB gzipped with the
 - [AIR Advanced Patterns](ui/air-advanced.md) — SSR, portals, islands, code splitting, virtual scrolling, dimensions, deferred
 - [AIR Animation](ui/air-animation.md) — CSS-first declarative transitions for enter/exit animations, imperative spring
 - [AIR vs React vs Best-in-Class — Full Comparison](ui/air-comparison.md) — Reference frameworks: React 19, Solid.js 1.9 (signal pioneer), Svelte
@@ -73,6 +74,7 @@
 - [Tailwind, PostCSS, Sass — a CSS toolchain](ui/css-toolchain.md) — aio runs your CSS build for you.
 - [`aio/ui` — the component kit](ui/kit.md) — A small, deliberately basic set of components for aio's core use case —
 - [React components in aio — islands](ui/react-islands.md) — aio's renderer is AIR, not React.
+- [React on aio](ui/react.md) — Write React and it works.
 - [Reactivity — what is tracked, and where](ui/reactivity-tracking.md) — A field report gave up an hour to this and asked for exactly one thing: "nowhere
 - [The default theme](ui/theme.md) — aio ships a complete stylesheet — typography, colour in light and dark, forms,
 
@@ -163,10 +165,10 @@
 
 ## Upgrade guides — version-to-version migration notes
 
-- [Upgrade Guides](upgrade/README.md) — every one, newest first (80 pages)
+- [Upgrade Guides](upgrade/README.md) — every one, newest first (81 pages)
+- [Upgrading from 1.0.5-beta to 1.0.6-beta](upgrade/from-1.0.5-beta-to-1.0.6-beta.md) — Nothing was removed and no signature changed.
 - [Upgrading from 1.0.4-beta to 1.0.5-beta](upgrade/from-1.0.4-beta-to-1.0.5-beta.md) — needed.
 - [Upgrading from 1.0.3-beta to 1.0.4-beta](upgrade/from-1.0.3-beta-to-1.0.4-beta.md) — is no migration step to perform.
-- [Upgrading from 1.0.2-beta to 1.0.3-beta](upgrade/from-1.0.2-beta-to-1.0.3-beta.md) — is no migration step to perform.
 - [The aio restructure — alpha27/alpha28 breaking changes](upgrade/restructure.md) — This guide tracks every breaking change of the restructure
 
 ## Design specs — decision records — background, not manuals

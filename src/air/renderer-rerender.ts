@@ -43,7 +43,11 @@ import {
 } from "./renderer-state.ts";
 import { _flushPending } from "./renderer-flush.ts";
 import { _inEventHandler } from "./vdom-events.ts";
-import { _inLifecycleCallback } from "./untracked-read.ts";
+import {
+  _currentLifecycleHook,
+  _inLifecycleCallback,
+  _signalLabel,
+} from "./untracked-read.ts";
 import { _componentName } from "./hook-error.ts";
 import { count } from "../diagnostics/fmt.ts";
 
@@ -95,13 +99,29 @@ export function _scheduleComponentRender(inst: ComponentInstance): void {
   if (isDevMode() && (!_inEventHandler() || _inLifecycleCallback())) {
     inst._devLoopCandidate = true;
   }
-  // …and WHERE it came from, so the tripwire's advice fits: a write made in a
-  // render or a lifecycle callback is the loop it describes; one from nowhere
-  // on the stack is a server push, a timer, a promise or a socket.
+  // …and WHERE it came from, so the tripwire's advice fits.
+  //
+  // ONLY A RENDER BODY IS A RENDER. This asked `_instanceStack.length > 0` —
+  // "some component, anywhere, is rendering" — which is true for the whole
+  // flush of a subtree, including every moment no body is executing at all: an
+  // `onCleanup` clearing a selection as its row unmounts, a `ref`/`use` action
+  // running at commit, a socket frame or a stream's next chunk landing in the
+  // middle of a pass. All of them were reported as "a render is WRITING state
+  // that the same render READS", and the author went looking for a write that
+  // was not there (a field report: renders driven entirely from OUTSIDE, by a
+  // stream, with neither component writing in render).
+  //
+  // `_currentCollector` is set exactly while a component BODY runs (and while
+  // a lifecycle callback runs, which the hook stack distinguishes) — so it is
+  // the one honest answer to "did a render write this?". The writer's name
+  // comes along: the render that wrote is often NOT the component that loops.
   if (isDevMode()) {
-    _devOrigin.set(
+    const hook = _currentLifecycleHook();
+    const body = !hook && _currentCollector !== null;
+    _devOrigin.set(inst, hook ? "lifecycle" : body ? "render" : "push");
+    _devWriter.set(
       inst,
-      _instanceStack.length > 0 || _inLifecycleCallback() ? "render" : "push",
+      hook ?? (body ? (_currentCollector?._component ?? "a render") : ""),
     );
   }
   root.pendingComponents.add(inst);
@@ -126,7 +146,52 @@ function _scheduleLentRender(inst: ComponentInstance): void {
 const DEV_RENDER_LIMIT = 50;
 
 /** What scheduled an instance's latest counted render (dev only). */
-const _devOrigin = new WeakMap<ComponentInstance, "render" | "push">();
+const _devOrigin = new WeakMap<
+  ComponentInstance,
+  "render" | "lifecycle" | "push"
+>();
+
+/** …and WHO: the component whose body wrote, or the lifecycle hook that did. */
+const _devWriter = new WeakMap<ComponentInstance, string>();
+
+/** Dev only: dependency name → when it last fired a render of this instance.
+ *
+ *  A TIME, not a set. `_triggerSignals` is the DevTools feed and is emptied
+ *  only while a DevTools handle is attached, so with nobody looking it is
+ *  every dependency that ever fired this instance — and the burst message was
+ *  reading it as "the dependencies that fired THESE renders". A value that
+ *  fired once at boot got listed beside the stream that is actually looping,
+ *  which is the reader hunting a dependency that had nothing to do with it:
+ *  the same class of lie this whole tripwire was fixed for. The message's
+ *  window is one second, so the answer has to be too. */
+const _devFiredAt = new WeakMap<ComponentInstance, Map<string, number>>();
+
+/** The named signals whose change fired this instance's renders IN THE BURST
+ *  WINDOW, as one clause — the tripwire's "which dependency did this?" half.
+ *
+ *  A burst message that cannot name what fired the renders leaves the reader
+ *  with the whole component to bisect (a field report asked for exactly this).
+ *  Unnamed signals answer `anonymous`, which says nothing, so they are dropped
+ *  and the one-liner that gives them names is offered instead. Cell signals are
+ *  named after their cell, so the common case reads
+ *  `fired by: cell:chat, streaming`. */
+function _firedBy(inst: ComponentInstance, now: number): string {
+  const cutoff = now - 1000;
+  const fired = _devFiredAt.get(inst);
+  const all = fired
+    ? [...fired].filter(([, at]) => at >= cutoff).map(([n]) => n)
+    : [];
+  const named = all.filter((n) => n && n !== "anonymous");
+  if (named.length > 0) {
+    return ` The renders were fired by: ${named.slice(0, 6).join(", ")}${
+      named.length > 6 ? `, … (${named.length} in all)` : ""
+    }.`;
+  }
+  return all.length > 0
+    ? ` The signals that fired them are unnamed — \`signal(value, "name")\` ` +
+      `makes this message name them.`
+    : "";
+}
 
 /** Dev tripwire: the state hooks (`useRef`/`useSignal`/`useId`) are matched
  *  across renders BY CALL ORDER — index 0 is index 0 forever.
@@ -179,22 +244,44 @@ export function _rerenderComponent(inst: ComponentInstance): void {
       const name = typeof inst.vnode.tag === "function"
         ? (inst.vnode.tag.name || "Anonymous")
         : "Component";
+      const origin = _devOrigin.get(inst) ?? "push";
+      const writer = _devWriter.get(inst) ?? "";
+      const head =
+        `[aio-dev] ${name} re-rendered ${DEV_RENDER_LIMIT} times in under a second`;
       console.warn(
-        _devOrigin.get(inst) === "push"
-          ? `[aio-dev] ${name} re-rendered ${DEV_RENDER_LIMIT} times in under ` +
-            `a second from writes made outside any render or event handler — ` +
-            `server pushes, timers, promises, sockets. For a text input bound ` +
-            `to a cell (one push per keystroke re-renders every reader), keep ` +
-            `the draft in useLocal and commit it on blur/submit; for a timer ` +
-            `or a stream, throttle or batch the writes. (A render that WRITES ` +
-            `state it READS loops the same way — move that write into an ` +
-            `event handler or onMount.)`
-          : `[aio-dev] ${name} re-rendered ${DEV_RENDER_LIMIT} times in under ` +
-            `a second — a render is WRITING state that the same render READS, ` +
-            `so every render schedules the next one. Two fixes: move the ` +
-            `write into an event handler or onMount (a render must only ` +
-            `read), or wrap the read in untrack(() => …) if the value is ` +
-            `genuinely a one-shot initialisation that must not subscribe.`,
+        origin === "render"
+          ? `${head} — ${
+            writer && writer !== name
+              ? `<${writer}>'s render is`
+              : "a render is"
+          } WRITING state that ${
+            writer && writer !== name ? "this render" : "the same render"
+          } READS, so every render schedules the next one.${
+            _firedBy(inst, now)
+          } ` +
+            `Two fixes: move the write into an event handler or onMount (a ` +
+            `render must only read), or wrap the read in untrack(() => …) if ` +
+            `the value is genuinely a one-shot initialisation that must not ` +
+            `subscribe.`
+          : origin === "lifecycle"
+          ? `${head} — its ${writer} callback is WRITING state this render ` +
+            `READS, so every render schedules the next one.${
+              _firedBy(inst, now)
+            } ` +
+            `Write only when the value really changed (compare first), or read ` +
+            `it with untrack(() => …) so the write cannot feed back.`
+          // NOT "a render is writing": nothing of ours was on the stack when
+          // the write happened, so the renders are driven from outside and
+          // naming a render-write sends the reader hunting for code that does
+          // not exist (a field report).
+          : `${head} from writes made outside any render, lifecycle callback ` +
+            `or event handler — a server push, a timer, a promise, a socket.` +
+            `${
+              _firedBy(inst, now)
+            } For a text input bound to a cell (one push per ` +
+            `keystroke re-renders every reader), keep the draft in useLocal ` +
+            `and commit it on blur/submit; for a timer or a stream, throttle ` +
+            `or batch the writes.`,
       );
     }
   }
@@ -554,7 +641,19 @@ export function _subscribeComponentDeps(
     const subscriber = {
       execute: () => {
         if (!inst._triggerSignals) inst._triggerSignals = new Set();
-        inst._triggerSignals.add(dep._name ?? "anonymous");
+        // `_signalLabel`, not `_name` alone: a `useLocal`/`useSignal` value has
+        // no explicit name and a cell's is its cell — both answer "anonymous"
+        // through the raw field, which is the one thing a diagnostic must not
+        // say when the reader needs to know WHICH dependency fired.
+        const label = _signalLabel(dep) ?? "anonymous";
+        inst._triggerSignals.add(label);
+        // WHEN it fired, for the burst message's one-second window — the set
+        // above is the DevTools feed and outlives any window.
+        if (isDevMode()) {
+          let fired = _devFiredAt.get(inst);
+          if (!fired) _devFiredAt.set(inst, fired = new Map());
+          fired.set(label, performance.now());
+        }
         _scheduleComponentRender(inst);
       },
     };

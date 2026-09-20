@@ -12,7 +12,11 @@
 // and CSRF die there. External identities get a users row (never password-
 // verifiable) so role management and admin listing see them.
 
-import type { UserStore } from "./auth-users.ts";
+import {
+  EXTERNAL_ID_PREFIX,
+  externalCreatorOf,
+  type UserStore,
+} from "./auth-users.ts";
 import type { SessionStore } from "./sessions.ts";
 import type { AioUser } from "./aio-types.ts";
 import { log } from "../diagnostics/logger-api.ts";
@@ -193,8 +197,10 @@ export async function verifyIdToken(
   return claims;
 }
 
-/** Prefix marking a users row as an EXTERNAL (IdP-owned) identity. */
-export const OIDC_ID_PREFIX = "oidc:";
+/** Prefix marking a users row as an EXTERNAL (IdP-owned) identity. Defined by
+ *  the store (`EXTERNAL_ID_PREFIX`), which is what has to REFUSE the namespace
+ *  to every other caller — one spelling, two readers. */
+export const OIDC_ID_PREFIX = EXTERNAL_ID_PREFIX;
 
 /** EXTERNAL IDENTITIES ARE A DIFFERENT NAMESPACE FROM LOCAL ONES.
  *
@@ -220,9 +226,9 @@ export function externalId(issuer: string, sub: string): string {
 }
 
 /** True when a users row belongs to an external identity provider — it has no
- *  usable password, so password-shaped flows (reset) must skip it. */
-export const isExternalId = (id: string): boolean =>
-  id.startsWith(OIDC_ID_PREFIX);
+ *  usable password, so password-shaped flows (signup, reset) must refuse it.
+ *  THE predicate lives with the prefix, in the store. */
+export { isExternalId } from "./auth-users.ts";
 
 export interface OidcDeps {
   cfg: OidcConfig;
@@ -490,7 +496,13 @@ export async function oidcCallback(
     // External identity — random unusable password (never password-verifiable).
     const rnd = b64url(crypto.getRandomValues(new Uint8Array(24)));
     try {
-      const rec = await deps.users.create(id, rnd, { role, email });
+      // The external-identity door — the one caller that owns the `oidc:`
+      // namespace `create` reserves. A store that is not ours has no such
+      // namespace, so its plain `create` is the right call there.
+      const createExternal = externalCreatorOf(deps.users);
+      const rec = createExternal
+        ? await createExternal(id, rnd, { role, email })
+        : await deps.users.create(id, rnd, { role, email });
       if (email !== undefined) deps.users.markVerified(id); // provider vouched for it
       user = { id: rec.id, role: rec.role };
     } catch (e) {

@@ -7,6 +7,7 @@ import type { RenderCtx, VNode } from "./vdom-types.ts";
 import {
   _cancelExitFor,
   _firstLive,
+  _liveFirstDom,
   _markExitKey,
   _nextLive,
   getDom,
@@ -257,7 +258,12 @@ function diffUnkeyed(
   let cursor: Node | null = regionStart;
   for (let i = 0; i < oldChildren.length; i++) {
     const child = oldChildren[i]!;
-    const dom = getDom(child);
+    // `_liveFirstDom`: a component child's own `_dom` is a copy that goes stale
+    // the moment a component BELOW it re-renders on its own and swaps its root
+    // — this snapshot is what every insert, move and removal in the pass is
+    // anchored to, so a detached node here walks the whole region from the
+    // wrong place.
+    const dom = _liveFirstDom(child);
     if (dom) {
       oldDoms.push(dom);
       const count = _domNodeCount(child);
@@ -427,7 +433,7 @@ function diffKeyed(
       }
     } else {
       oldNonKeyed.push(oc);
-      const dom = getDom(oc);
+      const dom = _liveFirstDom(oc); // live, not the stale copy — see above
       if (dom) {
         oldNonKeyedDoms.push(dom);
         const count = _domNodeCount(oc);

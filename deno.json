@@ -1,6 +1,6 @@
 {
   "name": "@riagentic/aio",
-  "version": "1.0.5-beta",
+  "version": "1.0.6-beta",
   "appId": "aio",
   "exports": {
     ".": "./mod.ts",
@@ -89,7 +89,9 @@
     "@std/jsonc": "jsr:@std/jsonc@1.0.2",
     "@std/assert": "jsr:@std/assert@1.0.19",
     "@std/yaml": "jsr:@std/yaml@1.0.9",
-    "happy-dom": "npm:happy-dom@17.6.3"
+    "happy-dom": "npm:happy-dom@17.6.3",
+    "react": "npm:react@19.1.0",
+    "react-dom": "npm:react-dom@19.1.0"
   },
   "fmt": {
     "exclude": [
@@ -171,6 +173,7 @@
     "fmt": "deno fmt",
     "update:api-ref": "deno doc --html --name=aio --output=docs/api-ref mod.ts",
     "update:docs": "deno run --allow-read --allow-write scripts/gen-doc-index.ts",
+    "update:reference": "deno run --allow-read --allow-write --allow-run scripts/gen-reference.ts",
     "update:examples": "deno run -A scripts/sync-examples.ts",
     "check:matrix": "AIO_APPS_DIR=$INIT_CWD/.aio-test-home deno test -A tests/examples.test.ts tests/examples-ui.test.ts && AIO_APPS_DIR=$INIT_CWD/.aio-test-home AIO_ONBOARD_E2E=1 deno test -A --no-check=remote tests/onboarding-e2e.test.ts && AIO_BUILD_SMOKE=1 deno test -A tests/am-onboard.test.ts",
     "check:test-lanes": "deno run --allow-read scripts/check-test-lanes.ts",

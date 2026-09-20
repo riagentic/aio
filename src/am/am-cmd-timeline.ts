@@ -20,7 +20,7 @@ import {
 import type { DiffEntry, TimelineEntry } from "../server/timeline.ts";
 import { TIMELINE_RING } from "../server/timeline.ts";
 import { count } from "../diagnostics/fmt.ts";
-import { TT_RESTORE_TYPE } from "../server/journal.ts";
+import { staleStamps, TT_RESTORE_TYPE } from "../server/journal.ts";
 
 /** hh:mm:ss for a ms timestamp (local time). */
 function clock(ts: number): string {
@@ -105,13 +105,18 @@ function renderJournalRows(rows: JournalRow[]): string {
 }
 
 /** Did the RING decide the answer, rather than the history? True only when
- *  more was asked for than came back AND what came back is the whole ring —
- *  three dispatches are three dispatches, not a truncation. Pure. */
+ *  more was asked for than came back AND the ring has dropped entries — three
+ *  dispatches are three dispatches, not a truncation. `rotated` is the app's
+ *  own answer (the ring is bounded by retained bytes as well as count, so a
+ *  ring of 40 big entries may already have dropped some); an app that does not
+ *  say is judged by count, as before. Pure. */
 export function timelineCapped(
   limit: number | undefined,
   returned: number,
+  rotated?: boolean,
 ): boolean {
-  return limit !== undefined && limit > returned && returned >= TIMELINE_RING;
+  return limit !== undefined && limit > returned &&
+    (rotated ?? returned >= TIMELINE_RING);
 }
 
 /** `am timeline [--from=<journal>] [--lines=N] [--json]`. */
@@ -157,13 +162,14 @@ export async function cmdTimeline(
     );
     Deno.exit(1);
   }
-  const entries = (r.data as { entries?: TimelineEntry[] })?.entries ?? [];
+  const data = r.data as { entries?: TimelineEntry[]; rotated?: boolean };
+  const entries = data?.entries ?? [];
   // A request for more than the ring holds is answered with the ring, and used
   // to be answered SILENTLY: `--lines=20000` returned 500 rows with nothing to
   // say they were the last 500 of an unknown number. "Everything there is" and
   // "as much as I keep" are different answers, and only one of them means you
   // can stop looking. The journal is the unbounded history; name it.
-  const capped = timelineCapped(limit, entries.length);
+  const capped = timelineCapped(limit, entries.length, data?.rotated);
   out(
     capped
       ? {
@@ -179,7 +185,8 @@ export async function cmdTimeline(
       renderTimeline(entries) +
       (capped
         ? `\n\n${entries.length} of the ${limit} asked for — the live ` +
-          `timeline keeps the last ${TIMELINE_RING} dispatches. The full ` +
+          `timeline keeps the last ${TIMELINE_RING} dispatches (fewer when ` +
+          `they carry big values). The full ` +
           `history is the journal: am timeline --from=<journal>`
         : ""),
   );
@@ -201,7 +208,15 @@ export type ReplaySkipReason =
   | "effect"
   | "write-set"
   | "time-travel"
-  | "internal";
+  | "internal"
+  | "version";
+
+/** The running app's cell versions, as its trojan `cell-versions` route says
+ *  them — what a journal line's version stamp is checked against. */
+export type RunningCellVersions = Record<
+  string,
+  { version: number; migrates: boolean }
+>;
 
 /** What `am replay` will send, and what it will not — decided ONCE, so the
  *  dry run and the real run cannot count differently. */
@@ -209,7 +224,13 @@ export type ReplayPlan = {
   /** Rows re-dispatched, in seq order. */
   send: JournalRow[];
   /** Rows the running app re-creates on its own (or that are not actions). */
-  skip: { seq: number; type: string; reason: ReplaySkipReason }[];
+  skip: {
+    seq: number;
+    type: string;
+    reason: ReplaySkipReason;
+    /** For `version`: the stamp that refused it (`"w" v1 → v2`). */
+    detail?: string;
+  }[];
   /** Rows written before the journal recorded `cause`: nothing says which of
    *  them an earlier action produced, so an effect-born one among them is
    *  sent AND re-created — applied twice. */
@@ -226,6 +247,9 @@ export const REPLAY_SKIP_WHY: Record<ReplaySkipReason, string> = {
   "time-travel": "a time-travel jump — a state restore, not an action; the " +
     "live app is not rewound, so the rows after it run on different state",
   internal: "framework-internal — not dispatchable",
+  version: "written under a cell version the running app does not run (the " +
+    "same rule boot recovery applies) — its method is not this build's, and " +
+    "re-running it through the new one would be a guess",
 };
 
 /** Split journal rows into what `am replay` sends and what it leaves to the
@@ -240,7 +264,14 @@ export const REPLAY_SKIP_WHY: Record<ReplaySkipReason, string> = {
  *  A row's `cause` says which it is. A journal written before `cause` existed
  *  cannot say, so its `__` rows are still recognised as internal and the rest
  *  are sent — and counted, so the run can say its answer may double-apply. */
-export function planReplay(rows: JournalRow[]): ReplayPlan {
+export function planReplay(
+  rows: JournalRow[],
+  /** The running app's cell versions. Present ⇒ a line whose version stamp
+   *  the app would refuse at boot (`staleStamps`) is not sent either: a v1
+   *  `add(5)` meaning "+5 units", re-sent to a v2 app whose `add` takes
+   *  cents, reproduces a state no build ever held. */
+  versions?: RunningCellVersions,
+): ReplayPlan {
   const plan: ReplayPlan = { send: [], skip: [], unattributed: 0 };
   for (const r of rows) {
     const method = r.type.slice(r.type.indexOf(":") + 1);
@@ -256,6 +287,24 @@ export function planReplay(rows: JournalRow[]): ReplayPlan {
       : null;
     if (reason) {
       plan.skip.push({ seq: r.seq, type: r.type, reason });
+      continue;
+    }
+    const stale = versions
+      ? staleStamps(
+        (r as { v?: unknown }).v,
+        (c) => versions[c]?.version ?? 0,
+        (c) => versions[c]?.migrates ?? false,
+      )
+      : [];
+    if (stale.length > 0) {
+      plan.skip.push({
+        seq: r.seq,
+        type: r.type,
+        reason: "version",
+        detail: stale.map(([c, v]) =>
+          `"${c}" v${v} → v${versions![c]?.version ?? 0}`
+        ).join(", "),
+      });
       continue;
     }
     if (cause === undefined) plan.unattributed++;
@@ -290,7 +339,16 @@ function renderSkips(plan: ReplayPlan): string[] {
   const by = new Map<ReplaySkipReason, number>();
   for (const s of plan.skip) by.set(s.reason, (by.get(s.reason) ?? 0) + 1);
   const lines = [...by].map(([reason, n]) =>
-    `⊘ ${count(n, "row")} not sent: ${REPLAY_SKIP_WHY[reason]}`
+    `⊘ ${count(n, "row")} not sent: ${REPLAY_SKIP_WHY[reason]}${
+      reason === "version"
+        ? ` (${
+          plan.skip.filter((k) => k.reason === "version")
+            .map((k) =>
+              `#${k.seq} ${k.detail}`
+            ).join("; ")
+        })`
+        : ""
+    }`
   );
   if (plan.unattributed > 0) {
     lines.push(
@@ -375,7 +433,42 @@ export async function cmdReplay(
     Deno.exit(1);
   }
 
-  const plan = planReplay(rows);
+  // The running app's cell versions — a line stamped with a version it
+  // would refuse at boot is not sent either (see `planReplay`). The real run
+  // needs the app anyway; a dry run asks when one answers, and says so when
+  // none does.
+  const stamped = rows.some((r) => (r as { v?: unknown }).v !== undefined);
+  let versions: RunningCellVersions | undefined;
+  let unchecked: string | undefined;
+  let ctx: ReturnType<typeof amCtx> | undefined;
+  try {
+    ctx = amCtx(flags);
+  } catch (e) {
+    if (!dry) throw e;
+    unchecked = e instanceof Error ? e.message : String(e);
+  }
+  if (stamped && ctx) {
+    const r = await trojanGet(ctx.port, "cell-versions", ctx.appId);
+    if (r.ok && r.data && typeof r.data === "object") {
+      versions = r.data as RunningCellVersions;
+      // An app built before the route existed answers `{}` or a 404 — no
+      // versions to check against, which is not the same as "all match".
+      if (Object.keys(versions).length === 0) {
+        versions = undefined;
+        unchecked = "the running app does not report its cell versions " +
+          "(an older aio build)";
+      }
+    } else {
+      unchecked = r.ok ? "no answer" : r.error;
+    }
+  }
+  const versionNote = stamped && !versions
+    ? `⚠ version stamps NOT checked — ${unchecked ?? "no running app"}. A ` +
+      `line written under another cell version would be sent through this ` +
+      `build's method.`
+    : undefined;
+
+  const plan = planReplay(rows, versions);
 
   // Dry run: show what WOULD replay, dispatch nothing. The count is the
   // plan's — the same rows the real run sends.
@@ -386,6 +479,7 @@ export async function cmdReplay(
           `would replay ${count(plan.send.length, "action")}:`,
           renderJournalRows(plan.send),
           ...renderSkips(plan),
+          ...(versionNote ? [versionNote] : []),
         ].join("\n")
         : {
           dryRun: true,
@@ -396,6 +490,7 @@ export async function cmdReplay(
             why: REPLAY_SKIP_WHY[k.reason],
           })),
           ...(plan.unattributed > 0 ? { unattributed: plan.unattributed } : {}),
+          ...(versionNote ? { versionsUnchecked: versionNote } : {}),
         },
       mode,
     );
@@ -403,7 +498,7 @@ export async function cmdReplay(
   }
 
   // Re-dispatch each action against the running app, in order.
-  const ctx = amCtx(flags);
+  if (!ctx) throw new Error("unreachable: the real run resolved its app");
   const results: {
     seq: number;
     type: string;
@@ -474,6 +569,7 @@ export async function cmdReplay(
       );
     }
     lines.push(...renderSkips(plan));
+    if (versionNote) lines.push(versionNote);
     out(lines.join("\n"), mode);
   } else {
     out({
@@ -482,6 +578,7 @@ export async function cmdReplay(
       results,
       notSent: plan.skip.map((k) => ({ ...k, why: REPLAY_SKIP_WHY[k.reason] })),
       ...(plan.unattributed > 0 ? { unattributed: plan.unattributed } : {}),
+      ...(versionNote ? { versionsUnchecked: versionNote } : {}),
     }, mode);
   }
   if (failed) Deno.exit(1);

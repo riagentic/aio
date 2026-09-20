@@ -823,7 +823,8 @@ Android, CLI, server binaries.
   methods). Defaults for the rest: icon + accent hue from the appId, window chrome, a free port,
   the data dir.
 - NO: fetch/REST between your UI and your server · stores/reducers/action files · useEffect to load
-  · useState for shared data · setTimeout to chain actions · mutating state outside a method.
+  · useState for SHARED data (per-component; shared = a cell) · setTimeout to chain actions ·
+  mutating state outside a method.
 - YES: methods are the ONLY writes · components read cells directly · effects via s.$do · server
   I/O in async methods or *.server.ts · routes/serverFns only for true edges (webhooks, uploads).
 - am state = SERVER truth (raw). am surface = what the CLIENT renders. Different questions.`;
@@ -972,16 +973,20 @@ ${show(CELL_TS)}
 - the cell IS the state: notes.items, notes.open(), notes.add(…) → Promise. type alias, not interface.
 - more: am agent --task=cell`;
 
-const UI = `## UI — AIR: signals + JSX (jsxImportSource "aio"), NOT React
+const UI = `## UI — AIR: React-shaped JSX on signals (jsxImportSource "aio")
 
 ${show(APP_TSX)}
 
 - **render model** a component re-runs when a cell/signal it READ during render changes (per cell).
   Reads subscribe ONLY in the body / computed / effect — NOT in handlers, onMount, timers, after
   await. State right + DOM stale = a deferred read.
-- **local state** const [v, setV] = useLocal(init) (or useSignal). NO: signal() in a body (resets
-  every render). YES: useLocal/useSignal, or signal() at module scope; sig.update(fn) (sig.set(fn)
-  is no updater; sig.value is read-only in a component); .peek() reads untracked.
+- **one way per job** server state: import the cell, read notes.items, call notes.add() · local
+  UI state: useLocal · run on mount: onMount · derived: computed · cell test: testCell · UI test:
+  testUI. React's useState/useEffect/useMemo/useCallback also work from "aio/air" — same behaviour,
+  checked against React 19 (tests/react-patterns.test.ts); write whichever you know.
+- **local state** const [v, setV] = useLocal(init) (≡ useState, useSignal). NO: signal() in a body
+  (resets every render). YES: useLocal/useSignal, or signal() at module scope; sig.update(fn)
+  (sig.set(fn) is no updater; sig.value is read-only in a component); .peek() reads untracked.
 - **JSX** class="a b" (string) · className={{ on: cond }} or class={cx("a", on && "b")} ·
   onChange on a raw input/textarea/select fires per keystroke (kit <Input onInput>) · handled
   <form onSubmit> auto-prevents default (data-native-submit opts out) · style={{ fontSize: 14 }} ·

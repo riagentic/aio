@@ -302,3 +302,7 @@ await aio.run({
   fatalOnStart: true, // process exits if onStart throws
 });
 ```
+
+A throw and an async rejection both count; the exit code is 1. Under
+`libraryMode` (no `Deno.exit`) the app is closed instead. Before 1.0.6 this
+covered only aio's own start step, not your `onStart` — the app kept running.

@@ -144,48 +144,6 @@ async function insertAppIdIntoRun(
   return true;
 }
 
-/** Move `appId` out of deno.json and INTO `aio.run()` — one migration, not
- *  half of one.
- *
- *  This fix used to be the delete alone. A compiled build cannot read
- *  deno.json, so the rule is right that the value has to reach `aio.run()` —
- *  but deleting the only place that states it, without adding the other half,
- *  renames the app: `appId` names the lock file, the SQLite path and the UDS
- *  socket, so the next boot came up under a DIFFERENT identity and the app's
- *  own data was orphaned on disk. Insert first; delete only once the insert
- *  landed. */
-export function fixMoveAppIdToRun(
-  entryPath: string,
-): (projectDir: string) => Promise<boolean> {
-  return async (projectDir: string) => {
-    const cfg = await readConfig(projectDir);
-    if (!cfg) {
-      console.error(
-        `[aiol] cannot safe-fix appId: ${projectDir}'s config is missing or ` +
-          `is not plain JSON — move it by hand (aio.run({ appId: … })), then ` +
-          `delete the key.`,
-      );
-      return false;
-    }
-    const appId = typeof cfg.config.appId === "string" ? cfg.config.appId : "";
-    if (!appId) return false;
-    // 1. the value reaches the code that a compiled build actually runs …
-    if (!await insertAppIdIntoRun(entryPath, appId)) return false;
-    // 2. … and only THEN does deno.json stop stating it.
-    if (
-      !await patchDenoJson(projectDir, (c) => {
-        delete c.appId;
-      })
-    ) {
-      console.error(
-        `[aiol] appId "${appId}" is now set in ${entryPath}, but could not be ` +
-          `removed from deno.json — harmless (aio.run() wins), delete it by hand.`,
-      );
-    }
-    return true;
-  };
-}
-
 /** Rename deno.json `target` → `client` (alpha52 one-vocabulary rename: the
  *  key names the default client SHELL, and "target" collided with
  *  build.targets — a different axis). Key rename IN PLACE — the key keeps its

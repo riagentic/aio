@@ -196,3 +196,165 @@ Deno.test("end to end: the shaped slice is what reaches disk, and onRestore read
     await dropTempDir(dir);
   }
 });
+
+// The documented RESHAPE pair (`cell-config-types.ts`): `onPersist` writes a
+// key the cell does not declare, `onRestore` reads it. The restore merge
+// pruned `key` before the hook ran, so the value was gone: dev refused to
+// boot over "shape drift", prod booted with `thumbKey: ""`. The hook is now
+// handed what the store holds, and the result is narrowed to the declared
+// shape — no `key` in live state.
+Deno.test("end to end: a RESHAPING onPersist round-trips through its onRestore partner", async () => {
+  const dir = await tempDir("persist-transform-reshape-");
+  const mk = () =>
+    cell("thumbs", {
+      state: { thumbKey: "", thumb: "" },
+      onPersist: (s: { thumbKey: string }) => ({ key: s.thumbKey }),
+      onRestore: (s: D) => {
+        s.thumbKey = s.key ?? "";
+        s.thumb = `T(${s.key})`;
+      },
+      methods: {
+        set(s: { thumbKey: string; thumb: string }, k: string) {
+          s.thumbKey = k;
+          s.thumb = `LIVE(${k})`;
+        },
+      },
+    } as D);
+  const appId = `persisttf-reshape-${Deno.pid}`;
+  const boot = (c: unknown) =>
+    aio.run({
+      cells: [c],
+      appId,
+      client: "server-only",
+      libraryMode: true,
+      singleton: false,
+      port: freePort(),
+      baseDir: dir,
+    } as D);
+  try {
+    const first = mk();
+    const app = await boot(first);
+    try {
+      await (first as D).set("k-9");
+    } finally {
+      await app.close();
+    }
+    const app2 = await boot(mk());
+    try {
+      assertEquals((app2.getState() as D).thumbs, {
+        thumbKey: "k-9",
+        thumb: "T(k-9)",
+      });
+    } finally {
+      await app2.close();
+    }
+  } finally {
+    await dropTempDir(dir);
+  }
+});
+
+// A shape that changes a field's type (a record stored as a list) restores
+// through its onRestore — also on the boot that first stamps a `version:`,
+// which converts nothing: the slice is still the store's, not a migration's.
+Deno.test("end to end: a type-changing shape restores on the boot that first stamps a version", async () => {
+  const dir = await tempDir("persist-transform-retype-stamp-");
+  const mk = (version: number) =>
+    cell("recs", {
+      version,
+      state: { items: {} as Record<string, { id: string }> },
+      onPersist: (s: D) => ({ items: Object.values(s.items) }),
+      onRestore: (s: D) => {
+        if (Array.isArray(s.items)) {
+          s.items = Object.fromEntries(s.items.map((i: D) => [i.id, i]));
+        }
+      },
+      methods: {
+        add(s: D, id: string) {
+          s.items[id] = { id };
+        },
+      },
+    } as D);
+  const appId = `persisttf-retype-stamp-${Deno.pid}`;
+  const boot = (c: unknown) =>
+    aio.run({
+      cells: [c],
+      appId,
+      client: "server-only",
+      libraryMode: true,
+      singleton: false,
+      port: freePort(),
+      baseDir: dir,
+    } as D);
+  try {
+    const first = mk(0);
+    const app = await boot(first);
+    try {
+      await (first as D).add("a");
+    } finally {
+      await app.close();
+    }
+    const app2 = await boot(mk(1));
+    try {
+      assertEquals((app2.getState() as D).recs, { items: { a: { id: "a" } } });
+    } finally {
+      await app2.close();
+    }
+  } finally {
+    await dropTempDir(dir);
+  }
+});
+
+// A shape is not a licence to drift. `onPersist: ({ cache, ...rest }) => rest`
+// — the commonest shape there is — writes every other top-level key, and the
+// drift gate exempted any stored path under a key the shape writes: a nested
+// field renamed without a version bump (`settings.old`) booted in dev with the
+// stored value silently pruned, where the same cell without `onPersist`
+// refuses. A shaped cell's stored slice is read against what its `onPersist`
+// writes for the declared state — the shape — not exempted from the check.
+Deno.test("end to end: a shaped cell's nested drift is still refused in dev", async () => {
+  const dir = await tempDir("persist-transform-nested-drift-");
+  const appId = `persisttf-nested-drift-${Deno.pid}`;
+  const mk = (state: D) =>
+    cell("s", {
+      state,
+      onPersist: ({ cache: _c, ...rest }: D) => rest,
+      methods: {
+        set(s: D) {
+          s.settings.old = "x";
+          s.cache = 5;
+        },
+      },
+    } as D);
+  const boot = (c: unknown) =>
+    aio.run({
+      cells: [c],
+      appId,
+      client: "server-only",
+      libraryMode: true,
+      singleton: false,
+      port: freePort(),
+      baseDir: dir,
+    } as D);
+  try {
+    const first = mk({ settings: { theme: "light", old: "" }, cache: 0 });
+    const app = await boot(first);
+    try {
+      await (first as D).set();
+    } finally {
+      await app.close();
+    }
+    let refused = "";
+    try {
+      const app2 = await boot(mk({ settings: { theme: "light" }, cache: 0 }));
+      await app2.close();
+    } catch (e) {
+      refused = e instanceof Error ? e.message : String(e);
+    }
+    assert(
+      refused.includes("settings.old"),
+      `the renamed nested field must be refused as drift: ${refused}`,
+    );
+  } finally {
+    await dropTempDir(dir);
+  }
+});

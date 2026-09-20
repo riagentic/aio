@@ -8,7 +8,7 @@
 // `exclude: ["meta.cache"]` came back `meta.cache: 0` after the clean stop and
 // `meta.cache: 4242` after the kill — the replayed write resurrected it. The
 // by-id map spelling (`accounts.secret` over `accounts: { alice: {…} }`, the
-// container `deepExclude` descends) is pinned beside it, because that is the
+// container `deepExcludePaths` descends) is pinned beside it, because that is the
 // shape an excluded secret usually lives in, and so is a list (`rows.tmp`).
 import { assertEquals } from "@std/assert";
 import { freePort } from "../src/testing/server-test.ts";

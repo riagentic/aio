@@ -369,13 +369,47 @@ export function createServerSyncHandler(
   // re-refusal says the same thing the first one did, rather than quoting a
   // drift that has since shrunk.
   const REFUSED_IDS_CAP = 4096;
-  const _refusedForDrift = new Map<string, string>();
+  const _refused = new Map<string, string>();
   function rememberRefusal(opId: string, reason: string): void {
-    _refusedForDrift.set(opId, reason);
-    if (_refusedForDrift.size > REFUSED_IDS_CAP) {
+    _refused.delete(opId); // re-inserted: the newest refusal is evicted last
+    _refused.set(opId, reason);
+    if (_refused.size > REFUSED_IDS_CAP) {
       // Maps iterate in insertion order — evict the oldest.
-      _refusedForDrift.delete(_refusedForDrift.keys().next().value!);
+      _refused.delete(_refused.keys().next().value!);
     }
+  }
+  /** Re-refuse an op this server already refused — same reason, same frame.
+   *
+   *  Every refusal the server DECIDES sticks to the op id, not only the drift
+   *  one: a `validate` refusal or a method that threw on the server's state is
+   *  just as much a decision the origin has already acted on (`onRejected`
+   *  fired, the view rolled back, the op left its buffer). Those used to be
+   *  forgotten with the deleted row, so the same op still in flight — the
+   *  op frame and a `sync-req` carrying it as pending, or a duplicated frame —
+   *  was dispatched AGAIN, and when the state had moved in between (a peer
+   *  re-added the item the method needed) it was accepted: applied on the
+   *  server and every peer, while its author had been told it was refused and
+   *  kept a confirmed state without it, forever. (Found by the r3 sync hunt,
+   *  2026-09-19; pinned by tests/sync/refusal-sticks.test.ts.)
+   *
+   *  Checked at the door AND again under the cell's lock: a duplicate queued
+   *  behind the lock passed the door before the first delivery was refused. */
+  function refuseIfRefusedBefore(
+    opId: string,
+    cell: string,
+    socket: WebSocket,
+  ): boolean {
+    const reason = _refused.get(opId);
+    if (reason === undefined) return false;
+    sendTo(
+      socket,
+      enc("op-rejected", { opId, cell, reason }),
+      `op-rejected (${opId}, refused before)`,
+    );
+    deps.log.debug(
+      `[sync:server] op ${opId} (${cell}) arrived again — refused again: ${reason}`,
+    );
+    return true;
   }
   function refuseIfDrifted(
     opId: string,
@@ -383,19 +417,14 @@ export function createServerSyncHandler(
     hlc: HLC,
     socket: WebSocket,
   ): boolean {
-    const remembered = _refusedForDrift.get(opId);
     const ahead = hlc[0] - Date.now();
-    if (remembered === undefined && ahead <= SYNC_DEFAULTS.maxDrift) {
-      return false;
-    }
-    const reason = remembered ??
+    if (ahead <= SYNC_DEFAULTS.maxDrift) return false;
+    const reason =
       `clock drift: this change is stamped ${Math.round(ahead / 1000)}s ` +
-        `ahead of the server (limit ${
-          SYNC_DEFAULTS.maxDrift / 1000
-        }s). It is ` +
-        `refused because it would win every last-write-wins comparison until ` +
-        `the clocks meet. Correct this device's system clock (turn on ` +
-        `automatic time sync) and the change can be made again.`;
+      `ahead of the server (limit ${SYNC_DEFAULTS.maxDrift / 1000}s). It is ` +
+      `refused because it would win every last-write-wins comparison until ` +
+      `the clocks meet. Correct this device's system clock (turn on ` +
+      `automatic time sync) and the change can be made again.`;
     rememberRefusal(opId, reason);
     sendTo(
       socket,
@@ -804,6 +833,7 @@ export function createServerSyncHandler(
       // Refuse before persist: an ack is a durability promise, and a
       // quarantined cell cannot keep it (see `refuseIfQuarantined`).
       if (refuseIfQuarantined(op.id, op.cell, socket)) return;
+      if (refuseIfRefusedBefore(op.id, op.cell, socket)) return;
       if (refuseIfDrifted(op.id, op.cell, op.hlc, socket)) return;
       // AUTH-1: enforce the cell's declarative `access` rule on the sync path
       // too. Without this, a client that passes /ws (any authed user in
@@ -828,6 +858,9 @@ export function createServerSyncHandler(
       }
 
       await withLock(op.cell, async () => {
+        // Under the lock: the first delivery may have been refused while this
+        // one waited for it (see `refuseIfRefusedBefore`).
+        if (refuseIfRefusedBefore(op.id, op.cell, socket)) return;
         // Under the lock, before the persist — see `refuseIfStale`.
         if (await refuseIfStale(op.id, op.cell, op.hlc, socket)) return;
         clock.receive(op.hlc);
@@ -921,6 +954,7 @@ export function createServerSyncHandler(
         }
 
         if (rejectedReason !== null) {
+          rememberRefusal(op.id, rejectedReason);
           sendTo(
             socket,
             enc("op-rejected", {
@@ -1131,6 +1165,7 @@ export function createServerSyncHandler(
           // reconnect's whole offline queue, so it is the one that would put
           // the most undurable writes into a log nobody can fold.
           if (refuseIfQuarantined(pending.id, pending.cell, socket)) continue;
+          if (refuseIfRefusedBefore(pending.id, pending.cell, socket)) continue;
           if (
             refuseIfDrifted(pending.id, pending.cell, pending.hlc, socket)
           ) continue;
@@ -1159,6 +1194,7 @@ export function createServerSyncHandler(
             // The path that carries the OLDEST ops — a reconnect's whole
             // offline queue — so the one most likely to hold a resend the
             // store no longer recognises. See `refuseIfStale`.
+            if (refuseIfRefusedBefore(pending.id, pending.cell, socket)) return;
             if (
               await refuseIfStale(pending.id, pending.cell, pending.hlc, socket)
             ) return;
@@ -1248,6 +1284,7 @@ export function createServerSyncHandler(
               }
             }
             if (rejectedReason !== null) {
+              rememberRefusal(pending.id, rejectedReason);
               sendTo(
                 socket,
                 enc("op-rejected", {

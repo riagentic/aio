@@ -165,6 +165,8 @@ export interface ServerConfig {
      *  refuses a short call with it. */
     cellMethodArity?: () => Record<string, Record<string, number>>;
     cellFields?: () => import("./aio-types.ts").CellFieldFlags;
+    /** Cell id → running `version` + whether it declares `onMigrate`. */
+    cellVersions?: () => Record<string, { version: number; migrates: boolean }>;
     /** UDS clients (Electron IPC) — for am client command */
     udsClients?: () => { index: number; id: string }[];
     /** Send a request to a UDS client and wait for its "client-state" reply */

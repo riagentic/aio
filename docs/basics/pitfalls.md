@@ -57,9 +57,10 @@ derived data, session junk included. Opt out per field
 
 **Everything broadcasts by default.** Same for `visible: "all"` — every
 connected client sees the whole cell. Secrets need `visible: { exclude: […] }`
-(dot-paths reach into arrays: `"accounts.encSecKey"`), `forUser`, or
-`visible: "none"`. Boot warnings flag secret-looking exposed fields — don't
-ignore them.
+(dot-paths reach into arrays AND into records-by-id maps: `"accounts.encSecKey"`
+covers `accounts: [{encSecKey}]` and `accounts: { alice: { encSecKey } }`
+alike), `forUser`, or `visible: "none"`. Boot warnings flag secret-looking
+exposed fields — don't ignore them.
 
 **`include` is top-level only.** `include: ["a.b"]` warns and matches nothing.
 Deep paths are for `exclude`.

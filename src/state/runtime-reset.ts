@@ -17,6 +17,7 @@ import { _resetReturnEffectHints } from "./cell-methods-internals.ts";
 import { _resetArrayRefStats } from "./state-array-utils.ts";
 import { _resetPerfThrottle } from "../diagnostics/error.ts";
 import { _resetActionWarnings } from "./action-encode.ts";
+import { _resetNegativeDurationWarnings } from "./schedule.ts";
 import { _resetSwallowedRefusals } from "./cell-compose-reduce.ts";
 import { _resetShortCallWarnings } from "./cell-methods-internals.ts";
 import { resetDiagnosticsOptOut } from "../diagnostics/diagnostics-optout.ts";
@@ -99,6 +100,7 @@ export function _resetAioRuntime(): void {
   // that could grow without a bound in a long-lived client; the cap lives with
   // the set itself.
   _resetActionWarnings();
+  _resetNegativeDurationWarnings();
   // "have I already said this method's refusal was swallowed?" — the same
   // order-dependent memory as the hint sets above.
   _resetSwallowedRefusals();

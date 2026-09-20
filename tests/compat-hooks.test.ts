@@ -9,7 +9,7 @@ import { signal } from "../src/state/signal.ts";
 import { h } from "../src/air/vdom.ts";
 import { _setDocument, _unmount, mount } from "../src/air/aio-renderer.ts";
 import { _resetEventWarnings } from "../src/air/vdom-events.ts";
-import { _resetHints, useEffect } from "../src/air/compat.ts";
+import { useEffect } from "../src/air/compat.ts";
 
 function createDOM(): {
   document: Document;
@@ -28,7 +28,6 @@ const flush = () => new Promise((r) => setTimeout(r, 0));
 Deno.test({
   name: "7.1: deps [a] — runs after mount, re-runs ONLY when a changes",
   async fn() {
-    _resetHints();
     const { document, root, cleanup } = createDOM();
     _setDocument(document);
     const sig = signal(0); // drives re-render
@@ -61,7 +60,6 @@ Deno.test({
 Deno.test({
   name: "7.1: cleanup runs before re-run and on unmount",
   async fn() {
-    _resetHints();
     const { document, root, cleanup } = createDOM();
     _setDocument(document);
     const sig = signal(0);
@@ -89,7 +87,6 @@ Deno.test({
 Deno.test({
   name: "7.1: signal auto-tracking is DISABLED inside deps-driven effects",
   async fn() {
-    _resetHints();
     const { document, root, cleanup } = createDOM();
     _setDocument(document);
     const tracked = signal(0); // read INSIDE the effect, not in deps
@@ -123,7 +120,6 @@ Deno.test({
 Deno.test({
   name: "7.1: no deps array — runs after every render",
   async fn() {
-    _resetHints();
     const { document, root, cleanup } = createDOM();
     _setDocument(document);
     const sig = signal(0);
@@ -287,7 +283,6 @@ Deno.test("8.2: in PROD it ALSO throws — never commits the half-applied draft"
 Deno.test({
   name: "7.1: an effect survives re-renders that don't change its deps",
   async fn() {
-    _resetHints();
     const { document, root, cleanup } = createDOM();
     _setDocument(document);
     const sig = signal(0); // drives re-renders; NOT a dep

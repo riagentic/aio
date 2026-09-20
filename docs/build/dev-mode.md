@@ -31,7 +31,7 @@ deno task dev --port=3000 --client=browser --no-persist --title="My App"
 | `--key=X`             | Deprecated alias of `--tls-key` (`--cert` = alias of `--tls-cert`)                                                                                                                                              |
 | `--connect`           | Open the Electron thin-client connect page (enter any server URL)                                                                                                                                               |
 | `--channel=X`         | Follow release channel X for updates (`dev`, `test`, `prod`, …)                                                                                                                                                 |
-| `--db-path=PATH`      | Override the SQLite file (`:memory:` for throwaway runs)                                                                                                                                                        |
+| `--db-path=PATH`      | The SQLite file (`:memory:` for throwaway runs); a `dbPath` in `aio.run()` wins, with a warning                                                                                                                 |
 | `--no-backup-logs`    | Wipe the log directory on start instead of rotating (keeping previous logs — rotate to `.1`, `.2`, … — is the default)                                                                                          |
 | `--log-budget=N`      | Byte ceiling for the log directory (e.g. `200MB`; `0` = unlimited)                                                                                                                                              |
 | `--no-data-migrate`   | Skip moving a legacy data layout into `~/.<appId>`                                                                                                                                                              |
@@ -56,7 +56,21 @@ Active flags are logged on startup:
 
 ## Verbose mode
 
-`--verbose` logs the entire pipeline in real time:
+`--verbose` first says, in the boot report, where every setting with more than
+one home came from — a flag, `aio.run()`, deno.json, an env var, or aio's
+default:
+
+```
+setting expose      false (default)
+setting persist     false (config)
+setting width       420 (flag)
+```
+
+Each line comes from the same resolver that decides the value
+(`src/server/config-sources.ts`), so the label cannot disagree with it. A
+running app answers the same question with `am doctor`.
+
+Then it logs the entire pipeline in real time:
 
 ```
 [12:00:00][DEBUG] config: port=52341 persist=true electron=false title="My App" baseDir=./src

@@ -1,6 +1,10 @@
 // Shared types, helpers, and CJS template fragments for Electron script generators
 
-import { slugify } from "../server/single-instance-lock.ts";
+import {
+  lockKey,
+  parseLockKey,
+  slugify,
+} from "../server/single-instance-lock.ts";
 import { generateHTML } from "../server/server-html-gen.ts";
 import type { TrayConfig, UiTheme } from "../server/aio-types.ts";
 import {
@@ -57,6 +61,10 @@ export type AioMeta = {
   chrome?: "standard" | "themed" | "none";
   /** `ui.tray` — a system tray icon, menu and close-to-tray. See UiConfig. */
   tray?: boolean | TrayConfig;
+  /** Electron's `app.name` — i.e. WHICH Chromium profile (userData directory)
+   *  this window uses. `electronProfileName`; absent ⇒ the title's slug, which
+   *  is what a default-home app has always had. */
+  profileName?: string;
 };
 
 /** Slugifies a title for use as Electron app name (stable userData path).
@@ -64,6 +72,31 @@ export type AioMeta = {
  *  app's lock id are the same identity and must reduce a title the same way. */
 export function toSlug(s: string): string {
   return slugify(s);
+}
+
+/** Electron's `app.name` for an app running from `home` — i.e. the userData
+ *  directory its Chromium profile lives in.
+ *
+ *  ONE key with the lock. aio lets a second instance of an app run beside the
+ *  first when its home differs (`lockKey(appId, home)` →
+ *  `<appId>@<hash8(home)>`), but the profile was keyed by the app TITLE alone,
+ *  so the two instances shared one Chromium profile — one cache, one Local
+ *  Storage, one IndexedDB. A field report measured what that does: the second
+ *  instance answered `net::ERR_CACHE_READ_FAILURE` on a script and showed a
+ *  blank window; pointed at a profile of its own, 0 failures in 1674 requests
+ *  on the same machine.
+ *
+ *  The default home keeps the plain slug — nothing already written moves —
+ *  and every other home carries the lock key's own tag, so "which instance is
+ *  this" has one answer and not two. */
+export function electronProfileName(
+  appId: string,
+  title: string,
+  home?: string,
+): string {
+  const slug = toSlug(title);
+  const tag = parseLockKey(lockKey(appId, home)).tag;
+  return tag ? `${slug}@${tag}` : slug;
 }
 
 // ── Reusable CJS template fragments (embedded in generated Electron main.cjs) ──
@@ -559,6 +592,139 @@ export const CONNECT_HTML = `<!DOCTYPE html>
 </html>`;
 
 // ── UDS-mode template helpers ──
+
+/** The Electron main process's ONE door to the app: a request to the app's
+ *  HTTP handler over its local socket — a Unix socket, or a named pipe
+ *  (`\\.\pipe\…`) on Windows. Node's `http.request` speaks both natively (the
+ *  `socketPath` option, libuv underneath), so the page, its modules and every
+ *  asset arrive through the SAME handler an `http://` fetch would have
+ *  reached — headers, status and bytes intact, nothing re-encoded.
+ *
+ *  Emitted as source rather than written inline in the generated main so a
+ *  test can run it against a real server on a real socket; the two shapes
+ *  below are behaviour, not text, and were found by a frozen app.
+ *
+ *  ① BOUNDED CONNECTIONS. It used to use Node's global agent —
+ *  `maxSockets: Infinity`, keep-alive — so a page with N `<img src>` opened N
+ *  connections at once, each holding a pending read on the server. Chromium
+ *  itself caps a host at 6; this does the same, for the same reason.
+ *
+ *  ② A BODY NOBODY READS IS READ HERE. `<img>` fires `error` at a 404's
+ *  headers and never reads the rest, so the response stream was never
+ *  cancelled, Node kept the socket open and unread, and the server sat in its
+ *  drain until the app froze (field report §13: 58 unread 404 bodies). A body
+ *  that is declared small, or that belongs to an error status, is therefore
+ *  consumed here before the Response resolves — the connection is done with
+ *  whatever the renderer does next. Everything else still STREAMS (a 100 MB
+ *  route response is never buffered in this process), and dropping that
+ *  stream destroys the response instead of leaking it. */
+export function tmplSocketFetch(): string {
+  return `
+// Chromium's own per-host cap, applied to the app's socket: a page with 60
+// <img> tags must not open 60 connections to it.
+const AIO_MAX_SOCKETS = 6;
+// The body sizes worth taking in one piece here rather than streaming.
+const AIO_SMALL_BODY = 64 * 1024;
+const __aioAgents = new Map();
+function __aioAgent(mod, key) {
+  let a = __aioAgents.get(key);
+  if (!a) { a = new mod.Agent({ keepAlive: true, maxSockets: AIO_MAX_SOCKETS }); __aioAgents.set(key, a); }
+  return a;
+}
+function socketFetch(reqPath, method, headers, body) {
+  return new Promise((resolve) => {
+    const { Readable } = require('stream');
+    // The socket when this app has one; otherwise the HTTP server (forced
+    // aio:// in dev). A self-signed --expose cert is this app's own — the
+    // http:// branch trusts it the way certificate-error does below.
+    let target, http, key;
+    if (HTTP_SOCK) { http = require('http'); key = 'sock'; target = { socketPath: HTTP_SOCK }; }
+    else {
+      const u = new URL(HTTP_URL);
+      key = u.protocol === 'https:' ? 'https' : 'http';
+      http = require(key);
+      target = { host: u.hostname, port: u.port, rejectUnauthorized: false };
+    }
+    const r = http.request(
+      { ...target, agent: __aioAgent(http, key), path: reqPath, method: method || 'GET', headers: headers || {} },
+      (res) => {
+        const h = {};
+        for (const [k, v] of Object.entries(res.headers)) {
+          if (typeof v === 'string') h[k] = v;
+          else if (Array.isArray(v)) h[k] = v.join(', ');
+        }
+        const status = res.statusCode || 200;
+        // A body-less status must not carry a stream — Response() throws.
+        const noBody = status === 204 || status === 304 || (method || 'GET') === 'HEAD';
+        if (noBody) { res.resume(); resolve(new Response(null, { status, headers: h })); return; }
+        // Small-and-declared, or an error: read it out now. Nobody reads a
+        // 404's body, and an unread body is a connection the server cannot
+        // finish with.
+        const len = Number(res.headers['content-length']);
+        if ((Number.isFinite(len) && len <= AIO_SMALL_BODY) || status >= 400) {
+          const chunks = [];
+          let got = 0;
+          let capped = false;
+          res.on('data', (c) => {
+            got += c.length;
+            chunks.push(c);
+            // An error body with no content-length is unbounded: take the
+            // first page of it and drop the rest rather than buffer a stream
+            // that was never meant for a human.
+            if (got > AIO_SMALL_BODY) { capped = true; res.destroy(); }
+          });
+          // A DECLARED length that did not all arrive is a truncated
+          // resource, and the streaming branch below fails loudly on exactly
+          // that (the reader's \`for await\` throws \`aborted\`). Buffering must
+          // not turn it into a 200 with a short body and the original
+          // content-length: a module or stylesheet cut in half would reach
+          // the page as a syntax error with nothing naming the cause. The
+          // app's own socket CAN cut one short — win-pipe's drain closes a
+          // connection whose peer stopped reading (PIPE_DRAIN_TIMEOUT_MS).
+          const done = () => {
+            if (!capped && Number.isFinite(len) && got < len) {
+              resolve(new Response(
+                'aio: the app closed the connection after ' + got + ' of ' + len +
+                  ' bytes of ' + reqPath + ' — the response is truncated',
+                { status: 502, headers: { 'Content-Type': 'text/plain' } },
+              ));
+              return;
+            }
+            resolve(new Response(Buffer.concat(chunks), { status, headers: h }));
+          };
+          res.on('end', done);
+          res.on('close', done);
+          res.on('error', done);
+          return;
+        }
+        // Everything else streams. cancel() DESTROYS the response: a renderer
+        // that drops the stream must cost this process a closed socket, not a
+        // connection the app is still writing into.
+        resolve(new Response(new ReadableStream({
+          start(c) {
+            res.on('data', (chunk) => {
+              try { c.enqueue(new Uint8Array(chunk)); } catch { res.destroy(); return; }
+              if (c.desiredSize !== null && c.desiredSize <= 0) res.pause();
+            });
+            res.on('end', () => { try { c.close(); } catch {} });
+            res.on('error', (e) => { try { c.error(e); } catch {} });
+          },
+          pull() { res.resume(); },
+          cancel() { res.destroy(); },
+        }), { status, headers: h }));
+      },
+    );
+    // A dead socket must not hang the window forever on a blank page. Say what
+    // failed, in the window, where the developer is already looking.
+    r.on('error', (e) => resolve(new Response(
+      'aio: cannot reach the app over its ' + (HTTP_SOCK ? 'socket (' + HTTP_SOCK + ')' : 'HTTP server (' + HTTP_URL + ')') + ': ' + e.message,
+      { status: 502, headers: { 'Content-Type': 'text/plain' } },
+    )));
+    if (body && typeof body.getReader === 'function') Readable.fromWeb(body).pipe(r);
+    else { if (body) r.write(body); r.end(); }
+  });
+}`;
+}
 
 /** Generates preload script CJS code (contextBridge IPC + AIO-54 navigate relay) */
 export function udsPreloadScript(): string {

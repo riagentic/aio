@@ -62,6 +62,11 @@ interface Loaded<P extends Record<string, unknown>> {
  * @example
  * ```tsx
  * import { reactIsland } from "aio/air";
+ * // Your loaders — import() of your own React modules:
+ * declare const loadChartComponent: Parameters<typeof reactIsland>[0]["component"];
+ * declare const loadReact: Parameters<typeof reactIsland>[0]["react"];
+ * declare const loadReactDom: Parameters<typeof reactIsland>[0]["reactDomClient"];
+ * declare const market: { prices: number[] };
  * const PriceChart = reactIsland({
  *   component: loadChartComponent, // your React component module
  *   react: loadReact,              // your react runtime loader

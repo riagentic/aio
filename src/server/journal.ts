@@ -180,6 +180,14 @@ export type JournalEntry = {
    *  had; absent for server-origin actions (schedules, effects), which is
    *  exactly the `undefined` they ran under. */
   user?: AioUser;
+  /** The `version` of each cell this entry writes, as the build that ran it
+   *  declared it (0 for a cell with none). A method is only its build's: a
+   *  v1 `add(5)` meaning "+5 units" re-run through the v2 `add` of a cell
+   *  that migrated to cents recovered `cents: 5` where a clean restart gave
+   *  500. Replay refuses an entry whose stamp is not the running build's —
+   *  see `replayJournal`. Absent on journals written before this field
+   *  existed, which replay as they always did. */
+  v?: Record<string, number>;
 };
 
 export type Journal = {
@@ -192,6 +200,7 @@ export type Journal = {
       user?: AioUser;
       cause?: ActionCause;
       call?: string;
+      v?: Record<string, number>;
     },
     ts: number,
   ): number;
@@ -244,8 +253,9 @@ export type Journal = {
 export type SkippedEntry = {
   seq: number;
   type: string;
-  reason: "redacted" | "threw";
-  /** The reducer's message, for `threw`. */
+  reason: "redacted" | "threw" | "version";
+  /** The reducer's message, for `threw`; the version mismatch, for
+   *  `version`. */
   error?: string;
 };
 
@@ -271,6 +281,35 @@ export function isUnreplayable(e: JournalEntry): boolean {
   return e.redacted === true || e.payload === REDACTED;
 }
 
+/** The cells whose version stamp on a journal line refuses it, as
+ *  `[cell, stamped version]` — the ONE rule both boot recovery
+ *  ({@linkcode replayJournal}) and `am replay` apply.
+ *
+ *  A stamp equal to the running build's version replays. A NEWER one (a
+ *  downgrade) is always refused. An OLDER one is refused only for a cell that
+ *  converts its state across versions (`cellMigrates`, i.e. it declares an
+ *  `onMigrate`): a cell that converts nothing keeps its stored shape, so the
+ *  tail on top of it is in that shape too. Absent `cellMigrates` ⇒ every
+ *  mismatch is refused. An unstamped line (a journal written before `v`
+ *  existed) is never refused here. Pure. */
+export function staleStamps(
+  v: unknown,
+  cellVersion: (cell: string) => number,
+  cellMigrates?: (cell: string) => boolean,
+): [string, number][] {
+  if (!v || typeof v !== "object" || Array.isArray(v)) return [];
+  const out: [string, number][] = [];
+  for (const [c, stamped] of Object.entries(v as Record<string, unknown>)) {
+    const now = cellVersion(c);
+    if (now === stamped) continue;
+    const older = typeof stamped === "number" && stamped < now;
+    if (!cellMigrates || !older || cellMigrates(c)) {
+      out.push([c, stamped as number]);
+    }
+  }
+  return out;
+}
+
 /** Replay journalled actions on top of a restored snapshot — pure. Re-reduces
  *  each action for its STATE transition only (effects are discarded), so I/O is
  *  never repeated. Entries are applied in seq order.
@@ -290,6 +329,19 @@ export function replayJournal<S, A>(
    *  snapshot (or the reverse), and re-reducing it whole applied the part
    *  already on disk twice. Absent ⇒ every change is taken. */
   keyWatermark?: (key: string) => number,
+  /** The running build's `version` of a cell (0 for none). An entry stamped
+   *  with a different version for any cell it writes is SKIPPED as
+   *  `version`: it ran through a method this build no longer has, and
+   *  re-running it through the new one on migrated state is a guess, not a
+   *  recovery (see `JournalEntry.v`). Absent ⇒ no entry is refused for it. */
+  cellVersion?: (cell: string) => number,
+  /** Whether this build CONVERTS the cell's state across a version change
+   *  (it declares an `onMigrate`). An older stamp on a cell that converts
+   *  nothing is replayed: boot keeps that cell's snapshot as stored (a first
+   *  `version:` is only stamped), so the tail on top of it is in the same
+   *  shape, and refusing it lost acked writes for nothing. A NEWER stamp (a
+   *  downgrade) is always refused. Absent ⇒ every mismatch is refused. */
+  cellMigrates?: (cell: string) => boolean,
 ): ReplayResult<S> {
   let s = state;
   let replayed = 0;
@@ -313,6 +365,23 @@ export function replayJournal<S, A>(
       skipped.push({ seq: e.seq, type: e.type, reason: "redacted" });
       continue;
     }
+    const stale = cellVersion
+      ? staleStamps(e.v, cellVersion, cellMigrates)
+      : [];
+    const versionSkip = (cells: [string, number][]): SkippedEntry => ({
+      seq: e.seq,
+      type: e.type,
+      reason: "version",
+      error: cells.map(([c, v]) => `"${c}" v${v} → v${cellVersion!(c)}`)
+        .join(", "),
+    });
+    // A time-travel line carries EVERY cell's state, so a stamp stale for one
+    // cell refuses that cell's fields only — the rest are the jump the other
+    // cells really made, under their own (matching) versions.
+    if (stale.length > 0 && e.type !== TT_RESTORE_TYPE) {
+      skipped.push(versionSkip(stale));
+      continue;
+    }
     if (e.type === TT_RESTORE_TYPE) {
       // Not an action: the state a time-travel jump put in place. Applied as
       // the store applies a snapshot — each persisted field replaced, fields
@@ -328,8 +397,14 @@ export function replayJournal<S, A>(
         });
         continue;
       }
+      const refused = new Set(stale.map(([c]) => c));
+      if (stale.length > 0) {
+        skipped.push(versionSkip(stale));
+        if (Object.keys(cells).every((c) => refused.has(c))) continue;
+      }
       const next = { ...(s as Record<string, unknown>) };
       for (const [cell, fields] of Object.entries(cells)) {
+        if (refused.has(cell)) continue;
         const cur = next[cell];
         // A cell this build does not declare has no slice to restore into —
         // inventing one would put an undeclared key into live state.
@@ -715,6 +790,7 @@ export function createJournal(
         ...(action.user !== undefined ? { user: action.user } : {}),
         ...(action.cause !== undefined ? { cause: action.cause } : {}),
         ...(action.call !== undefined ? { call: action.call } : {}),
+        ...(action.v !== undefined ? { v: action.v } : {}),
         // The marker travels WITH the entry: replay must be able to refuse it
         // without pattern-matching a sentinel string, and the file outlives
         // the config that redacted it (a journal written under

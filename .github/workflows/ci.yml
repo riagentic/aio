@@ -49,6 +49,8 @@ jobs:
         run: deno task check:env
       - name: Docs index (content.md matches the docs tree)
         run: deno task update:docs -- --check
+      - name: Every-option reference (generated from the source, not stale)
+        run: deno task update:reference -- --check
       - name: Docs coverage (every public export documented — roadmap B2)
         run: deno task check:doc-coverage
       - name: API snapshot (public surface locked — roadmap A2)

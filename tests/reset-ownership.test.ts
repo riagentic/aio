@@ -74,6 +74,10 @@ const OWNERS: Record<string, [Owner, string]> = {
     "and hands it a document",
   ],
   _resetCallTimeouts: ["RUNTIME", "per-call timeout registry"],
+  _resetNegativeDurationWarnings: [
+    "RUNTIME",
+    "once-per-id negative backoff/poll duration warnings",
+  ],
   _resetDegraded: ["RUNTIME", "process-global degraded registry"],
   _resetBigStateWarnings: [
     "MANUAL",
@@ -272,7 +276,6 @@ const OWNERS: Record<string, [Owner, string]> = {
   _resetEventWarnings: ["MANUAL", "event warn dedup"],
   _resetBrowserSync: ["MANUAL", "browser sync client"],
   _resetVendorCache: ["MANUAL", "build vendor cache"],
-  _resetHints: ["MANUAL", "aiol hint dedup"],
 };
 
 async function exportedResets(dir: string): Promise<Set<string>> {

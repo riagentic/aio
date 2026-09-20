@@ -151,17 +151,15 @@ export const checkConfig: Checker = (ctx) => {
     return;
   }
 
-  // appId — must reach aio.run(), because a compiled build can't read deno.json.
-  //
-  // Only warn when the MOVE HAS NOT HAPPENED. Warning "move to aio.run({ appId })"
-  // at an app that already passes it there describes a move already made, and a
-  // linter that reports work you've done is a linter people stop reading
-  //. A deno.json `appId` alongside an explicit one is
-  // redundant, not broken — `am` reads it to find the app — so that case is a
-  // hint about the duplication, not a warning about a missing move.
+  // appId in deno.json is THE place to pin it — the `am agent` brief says so,
+  // and it is right: a compiled binary embeds its deno.json and resolves the
+  // same id from it (resolveAppId; tests/app-identity-differential.test.ts).
+  // This rule used to WARN "move to aio.run({ appId }) (compiled builds can't
+  // read deno.json)" — true at alpha2, false since alpha54/59 — so an agent
+  // that followed the brief was told by the linter to undo it (the F3
+  // benchmark, 2026-09-19). Only the duplication is worth a word.
   // …and only for an APP. `appId: "aio"` in the framework's own deno.json is
-  // the framework's package identity; "move it into aio.run()" names a call
-  // that does not exist in this repo.
+  // the framework's package identity.
   if (dj.appId && ctx.isApp) {
     // Read on CODE offsets: the scaffold's own entry opens with a comment that
     // names `appId`, and a raw `.test()` calls that "already moved".
@@ -169,41 +167,19 @@ export const checkConfig: Checker = (ctx) => {
     const passesAppId = entry
       ? codeMatches(entry.content, /\bappId\s*:/g).length > 0
       : false;
-    // Where the value would GO. Without a real `aio.run(` in code there is no
-    // second half of the migration, and the fix must not perform the first —
-    // deleting `appId` alone renames the app's lock file, SQLite path and UDS
-    // socket, orphaning its data on the next boot.
-    const runSite = entry
-      ? codeMatches(entry.content, /\baio\.run\s*\(\s*(\{|\))/g).length > 0
-      : false;
-    report(
-      passesAppId ? "hint" : "warn",
-      "config",
-      passesAppId
-        ? `appId "${dj.appId}" is in deno.json AND aio.run() — the aio.run() one wins; the deno.json key only helps \`am\` find the app`
-        : `appId "${dj.appId}" in deno.json — move to aio.run({ appId: "${dj.appId}" }) (compiled builds can't read deno.json)`,
-      {
-        ...(entry ? { file: entry.relative } : {}),
-        fix: passesAppId
-          ? 'Optional: remove "appId" from deno.json (aio.run() already sets it)'
-          : `Add appId: "${dj.appId}" to aio.run() FIRST, then remove the key ` +
-            `from deno.json — --safe-fix does both, in that order`,
-        // Only offer the codemod when the value isn't already in the entry —
-        // otherwise --safe-fix would "fix" a correct app.
-        ...(passesAppId
-          ? {}
-          : runSite
-          ? { safeFix: fix.fixMoveAppIdToRun(entry!.path) }
-          : {
-            manual: entry
-              ? `the safe fix declines: no \`aio.run(\` call in ${entry.relative} ` +
-                `to put appId into, and deleting the key alone would rename the app`
-              : `the safe fix declines: no entry module found, and deleting the ` +
-                `key alone would rename the app (appId names its lock file, ` +
-                `SQLite path and UDS socket)`,
-          }),
-      },
-    );
+    if (passesAppId) {
+      report(
+        "hint",
+        "config",
+        `appId "${dj.appId}" is in deno.json AND aio.run() — the aio.run() one wins; the deno.json key only helps \`am\` find the app`,
+        {
+          ...(entry ? { file: entry.relative } : {}),
+          fix:
+            "Keep ONE: deno.json (am, dev and compiled builds all read it) " +
+            "or aio.run() — and if both stay, keep them equal",
+        },
+      );
+    }
   }
 
   // deno.json `target` → `client` (alpha52 one-vocabulary rename). The old
@@ -6245,7 +6221,9 @@ export const checkSyncMethodIO: Checker = (ctx) => {
 // one), AND that parameter appears in the call's REMAINING arguments (the
 // factory) — the resource depends on the id, the key does not. A literal key
 // in a function without such a parameter, a template key, or a factory that
-// does not use the id are not hits.
+// does not use the id are not hits. Neither is a call whose LAST top-level
+// argument is `{ replace: true }` — the author saying one-at-a-time in the
+// runtime's own words (a field report #9), which the runtime also honours.
 
 const ID_PARAM_RE =
   /(?:^|[a-z_])(?:id|key|name|path|url|uri|host|port|file|dir|handle|addr|address)$/i;
@@ -6262,6 +6240,25 @@ function _balancedParen(stripped: string, open: number): number {
     }
   }
   return -1;
+}
+
+/** Is the call's last TOP-LEVEL argument exactly `{ replace: true }`? Only
+ *  that position counts: a `replace: true` inside the factory (an object it
+ *  returns) is not the option, and `{ replace: false }` is not an opt-in. */
+function _lastArgIsReplaceTrue(args: string): boolean {
+  let depth = 0, cut = -1;
+  for (let i = 0; i < args.length; i++) {
+    const ch = args[i]!;
+    if (ch === "(" || ch === "[" || ch === "{") depth++;
+    else if (ch === ")" || ch === "]" || ch === "}") depth--;
+    else if (ch === "," && depth === 0 && args.slice(i + 1).trim() !== "") {
+      cut = i;
+    }
+  }
+  if (cut === -1) return false;
+  return /^\s*\{\s*replace\s*:\s*true\s*,?\s*\}\s*,?\s*$/.test(
+    args.slice(cut + 1),
+  );
 }
 
 /** Innermost function (header params + body span) enclosing `at`. */
@@ -6301,6 +6298,7 @@ export const checkOwnKeyIdentity: Checker = (ctx) => {
       const key = /^(["'])((?:(?!\1).)*)\1\s*,/.exec(argsRaw);
       if (!key) continue; // template / variable key: identity is the author's
       const rest = code.slice(open + 1 + key[0].length, close);
+      if (_lastArgIsReplaceTrue(rest)) continue; // replace is the stated intent
       const fn = _enclosingFn(code, open);
       if (!fn) continue;
       const id = fn.params.find((p) =>
@@ -6322,7 +6320,7 @@ export const checkOwnKeyIdentity: Checker = (ctx) => {
           `because replacing is the contract.\n` +
           `      fix: key by the resource's identity — ` +
           `own.set(\`${key[2]}:\${${id}}\`, …) — or, if one-at-a-time is the ` +
-          `intent, say so: // aio-ok: one ${key[2]} at a time`,
+          `intent, say so: own.set("${key[2]}", …, { replace: true })`,
         {
           file: file.relative,
           line,

@@ -1,6 +1,6 @@
 # Rendering & UI
 
-AIO uses **AIR** — a built-in signal-based renderer (85 KB gzipped with the
+AIO uses **AIR** — a built-in signal-based renderer (88 KB gzipped with the
 client runtime, zero dependencies).
 
 - [Tailwind, PostCSS, Sass](css-toolchain.md) — `build.css`: your CSS toolchain,

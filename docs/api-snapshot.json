@@ -87,17 +87,18 @@
         },
         "AioMeta": {
           "kind": "typeAlias",
-          "sig": "b374fc330106223c",
+          "sig": "a3d4ec7be2c37d70",
           "members": {
             "title": "opt:2fb40568533c1a6d",
             "width": "opt:f6522636230fa080",
             "height": "opt:f6522636230fa080",
             "childWindows": "opt:0ecca0fe3beba89b",
             "chrome": "opt:0cb8e5493e58cfb7",
-            "tray": "opt:bb7b2f54156b6da6"
+            "tray": "opt:bb7b2f54156b6da6",
+            "profileName": "opt:2fb40568533c1a6d"
           },
           "sigs": [
-            "b374fc330106223c"
+            "a3d4ec7be2c37d70"
           ]
         },
         "AioUser": {
@@ -1160,15 +1161,16 @@
         },
         "OwnEffect": {
           "kind": "typeAlias",
-          "sig": "a142d3509098eddc",
+          "sig": "4a1d38bd36765976",
           "members": {
             "type": "req:1a4e3e0f0345a7ff",
             "kind": "req:f5b82f6c8e1ff05e",
             "id": "req:2fb40568533c1a6d",
-            "token": "req:f6522636230fa080"
+            "token": "req:f6522636230fa080",
+            "replace": "opt:0ad1e428adc65d4b"
           },
           "sigs": [
-            "a142d3509098eddc"
+            "4a1d38bd36765976"
           ]
         },
         "OwnResource": {
@@ -1180,6 +1182,16 @@
           },
           "sigs": [
             "8dc34844b66acff0"
+          ]
+        },
+        "OwnSetOptions": {
+          "kind": "typeAlias",
+          "sig": "8876ae61a80f8e7d",
+          "members": {
+            "replace": "opt:0ecca0fe3beba89b"
+          },
+          "sigs": [
+            "8876ae61a80f8e7d"
           ]
         },
         "PerfBudget": {
@@ -3082,6 +3094,19 @@
             "6e88f1c4b02e8fdc"
           ]
         },
+        "useCallback": {
+          "kind": "function",
+          "sig": "d3eea642a484488d",
+          "members": {
+            "param0": "req:4565b02f8cbf4cea|e74101a9f8ac492f~T",
+            "param1": "opt:a8c66f838a06c264|e2e9e83e047a6f75~unknown",
+            "return": "req:5735b1a0dd3aa0f1",
+            "typeParams": "req:ddf4493b60497953"
+          },
+          "sigs": [
+            "a693ee84847cdfd7"
+          ]
+        },
         "useConnected": {
           "kind": "function",
           "sig": "209ed045c0221c65",
@@ -3125,6 +3150,18 @@
           },
           "sigs": [
             "bbab9780385f54ba"
+          ]
+        },
+        "useEffect": {
+          "kind": "function",
+          "sig": "dd19b6aa9973076f",
+          "members": {
+            "param0": "req:4509061b8b16ec65|3401859efeb750d0~fnOrConstructor",
+            "param1": "opt:a8c66f838a06c264|e2e9e83e047a6f75~unknown",
+            "return": "req:b5f6ae1b8a43e31d"
+          },
+          "sigs": [
+            "f98cd816e4d7e4a3"
           ]
         },
         "useFieldArray": {
@@ -3209,6 +3246,19 @@
           },
           "sigs": [
             "ac8423c036b6d8fd"
+          ]
+        },
+        "useMemo": {
+          "kind": "function",
+          "sig": "bfa7fc6865d8fcc8",
+          "members": {
+            "param0": "req:0f93ca432633198f|8c807311cea02758~fnOrConstructor",
+            "param1": "opt:a8c66f838a06c264|e2e9e83e047a6f75~unknown",
+            "return": "req:4081745670bb80df",
+            "typeParams": "req:ddf4493b60497953"
+          },
+          "sigs": [
+            "cd836dd611e13a39"
           ]
         },
         "useNavigate": {
@@ -3327,6 +3377,18 @@
           },
           "sigs": [
             "134bd0e1426c045e"
+          ]
+        },
+        "useState": {
+          "kind": "function",
+          "sig": "491ba166ea06e7e2",
+          "members": {
+            "param0": "req:5877c13ce64b2559|87399cfadddd8e82~T+e1931086287d113b~parenthesized",
+            "return": "req:ed3e69690d31d2de",
+            "typeParams": "req:ddf4493b60497953"
+          },
+          "sigs": [
+            "1977d561648661bc"
           ]
         },
         "useTimeTravel": {
@@ -4310,7 +4372,7 @@
         },
         "AioErrorContext": {
           "kind": "typeAlias",
-          "sig": "52cbdcba2f0fd6f1",
+          "sig": "d665950a38d1b31a",
           "members": {
             "cellName": "opt:2fb40568533c1a6d",
             "actionType": "opt:2fb40568533c1a6d",
@@ -4320,10 +4382,11 @@
             "budget": "opt:f6522636230fa080",
             "machineState": "opt:2fb40568533c1a6d",
             "callStack": "opt:6941c580c10685fb",
-            "repeatOffender": "opt:0ecca0fe3beba89b"
+            "repeatOffender": "opt:0ecca0fe3beba89b",
+            "rejected": "opt:2fb40568533c1a6d"
           },
           "sigs": [
-            "52cbdcba2f0fd6f1"
+            "d665950a38d1b31a"
           ]
         },
         "AioErrorSource": {
@@ -4555,7 +4618,7 @@
         },
         "LockData": {
           "kind": "typeAlias",
-          "sig": "992fe58f8e26aa09",
+          "sig": "1a9338af6378c117",
           "members": {
             "appId": "req:2fb40568533c1a6d",
             "pid": "req:f6522636230fa080",
@@ -4574,10 +4637,11 @@
             "cdpPort": "opt:f6522636230fa080",
             "client": "opt:2fb40568533c1a6d",
             "dataDir": "opt:2fb40568533c1a6d",
-            "startToken": "opt:2fb40568533c1a6d"
+            "startToken": "opt:2fb40568533c1a6d",
+            "settings": "opt:09b94ba87da5c3f0"
           },
           "sigs": [
-            "992fe58f8e26aa09"
+            "1a9338af6378c117"
           ]
         },
         "markAsync": {

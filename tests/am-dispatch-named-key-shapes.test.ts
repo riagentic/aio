@@ -49,3 +49,25 @@ Deno.test("isNamedArg: URLs, sentences and JSON stay positional", () => {
     assertEquals(isNamedArg(positional), false, positional);
   }
 });
+
+// `am dispatch x:y __proto__='{"a":1}' b=2` sent `{"b":2}`: the pair was
+// assigned into a plain object, which runs the `__proto__` accessor instead of
+// storing a key, so it vanished — no error, and the method got a payload
+// without it. The server (the trojan route's `JSON.parse`, like `--body`)
+// takes that key as ordinary DATA, so the CLI must carry it as data too.
+Deno.test("parsePayload: a __proto__ pair is carried as an own key, never dropped or re-parenting", () => {
+  assertEquals(isNamedArg('__proto__={"a":1}'), true);
+  const p = parsePayload(['__proto__={"a":1}', "b=2"]);
+  assertEquals(Object.getPrototypeOf(p), Object.prototype);
+  assertEquals(Object.keys(p), ["__proto__", "b"]);
+  assertEquals(JSON.stringify(p), '{"__proto__":{"a":1},"b":2}');
+  assertEquals((p as Record<string, unknown>).a, undefined);
+  // The bare-flag form, and a repeated key (last wins, like any other key).
+  const q = parsePayload(["__proto__", "__proto__=3"]);
+  assertEquals(JSON.stringify(q), '{"__proto__":3}');
+  // What the server's JSON.parse makes of the same text — the parity pinned.
+  assertEquals(
+    JSON.stringify(JSON.parse(JSON.stringify(p))),
+    JSON.stringify(p),
+  );
+});

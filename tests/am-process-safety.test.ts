@@ -453,19 +453,23 @@ Deno.test({
           }`,
         );
         if (why.includes("not an aio process")) {
-          // The name, but only when the pid is still OURS. A pid we spawned
-          // can be recycled while the suite is under load, and then this reads
-          // a stranger's name — a full run once reported
-          // "it is running: tokio-runtime-w" here, which is a Rust thread and
-          // nothing to do with aio. The invariant this test exists for is the
-          // line above (the refusal never trails off after the colon) and it
-          // held; asserting someone else's process name is not the subject,
-          // and a flake that lands on a different test each run reads as a new
-          // failure every time.
+          // The name, when the pid is still OURS. Which name is honest
+          // depends on the instant it was read: after execve it is `sleep`;
+          // in the fork→exec window the child still carries the name of the
+          // Deno thread that forked it (`tokio-runtime-w`). A full run once
+          // failed here on exactly that — the refusal was read before exec,
+          // the check below after it. (It was first blamed on pid reuse.)
+          // Both are real names; the subject is the line above: never
+          // trailing off after the colon.
           const stillOurs = (await Deno.readTextFile(
             `/proc/${p.pid}/cmdline`,
           ).catch(() => "")).includes("sleep");
-          if (stillOurs) assertStringIncludes(why, "sleep");
+          if (stillOurs) {
+            assert(
+              why.includes("sleep") || why.includes("tokio-runtime"),
+              `names neither the program nor the forking thread: ${why}`,
+            );
+          }
         }
       } finally {
         try {

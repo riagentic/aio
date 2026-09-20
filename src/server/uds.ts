@@ -61,6 +61,12 @@ import {
 import { _dispatchRefusal, _dispatchShort } from "./action-ack.ts";
 import { invokeServerFn } from "./server-fns.ts";
 import {
+  _registerDialogHost,
+  type DialogHost,
+  type DialogReply,
+  runWithDialogCaller,
+} from "./dialog-host.ts";
+import {
   type ActionPayload,
   type CtlPayload,
   dec,
@@ -202,7 +208,12 @@ export type UDSHandle = {
    *  is a plausible number that is wrong. */
   broadcastState: (
     forceOrPatches?: boolean | PatchEntry[],
-  ) => { full: number; patch: number };
+  ) => { full: number; patch: number; owed?: boolean };
+  /** Pay every client a round was lost for (`needsFull`) its whole state NOW,
+   *  without waiting for a round that an idle app never has. `full` counts
+   *  the frames sent; `owed` says a debt is still unpaid (its snapshot could
+   *  not be built) and the caller must retry. See `createDebtRetry`. */
+  payDebts?: () => { full: number; owed: boolean };
   shutdown: () => void;
   socketPath: string;
   clients: () => UDSClient[];
@@ -506,6 +517,14 @@ export function createUDSListener(
     else if (v.attempted) _stateSerialization.ok();
   }
 
+  /** Does any client carry a debt? A whole state already queued for it also
+   *  counts until it lands (that is when `needsFull` clears) — the payer
+   *  recognises that frame and does not send it twice. */
+  function _anyOwed(): boolean {
+    for (const c of clientMap.values()) if (c.needsFull) return true;
+    return false;
+  }
+
   /** The single-client doors (accept, `subs`, `resync`): one snapshot IS the
    *  round, so its verdict is settled on the spot. */
   function _fullJsonFor(
@@ -680,7 +699,47 @@ export function createUDSListener(
       }
       if (failed.length === 0) _broadcastRound.ok();
       _settleSnapshotVerdict(verdict);
-      return { full, patch };
+      return { full, patch, owed: _anyOwed() };
+    },
+    payDebts: () => {
+      let full = 0, owed = false;
+      // One verdict for the pass; failures only (a pass covers the owed
+      // clients, not every view — the WS payer's rule, same reason).
+      const verdict: SnapshotVerdict = {
+        attempted: false,
+        failed: false,
+        err: undefined,
+      };
+      for (const [conn, client] of clientMap) {
+        if (!client.needsFull) continue;
+        const json = _snapshot(client, verdict);
+        if (json === undefined) {
+          owed = true; // still owed — the caller retries later
+          continue;
+        }
+        // Already queued (or held): a whole state for exactly this text is on
+        // its way, and `needsFull` clears when it lands. Sending it twice is
+        // the biggest frame this transport has, for nothing.
+        if (json === client.queuedJson) {
+          // Nothing in flight and the peer holds exactly this text: the view
+          // healed back to what it already has — nothing is owed at all.
+          if (json === client.lastFullJson) client.needsFull = false;
+          continue;
+        }
+        full++;
+        client.queuedJson = json;
+        sendTo(conn, encRaw("state", json), () => {
+          client.lastFullJson = json;
+          client.needsFull = false;
+        });
+        debug(
+          `uds: sending full state (${json.length}B) — client ` +
+            `${client.index} lost a round and the app has not produced ` +
+            `another, so its debt is paid now`,
+        );
+      }
+      if (verdict.failed) _stateSerialization.fail(verdict.err);
+      return { full, owed };
     },
     clients: () => [...clientMap.values()],
     requestClientState: (
@@ -770,6 +829,89 @@ function _handleUDSConn(
   const decoder = new TextDecoder();
   const MAX_BUF = udsFrameCeiling(maxFrameBytes);
   let buf = "";
+
+  // This connection's native-dialog host — set once its peer (an Electron
+  // main process) announces `caps: ["dialog"]` in a `type` frame. Every action
+  // and serverFn from this connection runs as a call FROM it
+  // (`runWithDialogCaller`), so a pickFile inside opens in this window. See
+  // dialog-host.ts.
+  let dialog:
+    | {
+      host: DialogHost;
+      pending: Map<
+        string,
+        { resolve: (r: DialogReply) => void; reject: (e: Error) => void }
+      >;
+      unregister: () => void;
+      /** Shared with the host closure: a call that took this host into its
+       *  scope may reach `open()` AFTER the window closed (a long method that
+       *  picks at the end). The frame would go to a dead socket and nothing
+       *  would ever answer it — a hang, which is the one ending this API does
+       *  not have. */
+      gone: { yes: boolean };
+    }
+    | null = null;
+  const _dialogCaller = <T>(fn: () => T): T =>
+    runWithDialogCaller(dialog?.host ?? null, fn);
+  function _becomeDialogHost(): void {
+    if (dialog) return;
+    const index = clientMap.get(conn)?.index;
+    const pending = new Map<
+      string,
+      { resolve: (r: DialogReply) => void; reject: (e: Error) => void }
+    >();
+    const gone = { yes: false };
+    const host: DialogHost = {
+      label: `the Electron window (client ${index ?? "?"})`,
+      open: (req) =>
+        new Promise<DialogReply>((resolve, reject) => {
+          if (gone.yes) {
+            reject(new Error("the window closed before the dialog opened"));
+            return;
+          }
+          const id = crypto.randomUUID();
+          pending.set(id, { resolve, reject });
+          try {
+            sendTo(conn, enc("dialog", { id, ...req }));
+          } catch (e) {
+            pending.delete(id);
+            reject(e instanceof Error ? e : new Error(String(e)));
+          }
+        }),
+    };
+    dialog = { host, pending, unregister: _registerDialogHost(host), gone };
+    debug(`uds: client #${index ?? "?"} opens native dialogs for the server`);
+  }
+  function _settleDialog(d: unknown): void {
+    const r = (d ?? {}) as { id?: unknown } & Record<string, unknown>;
+    const waiter = typeof r.id === "string"
+      ? dialog?.pending.get(r.id)
+      : undefined;
+    if (!waiter) {
+      // An answer to nothing: a dialog this connection never asked for, or one
+      // whose caller already gave up. Said, not dropped.
+      log.warn(
+        "uds",
+        `dialog-result for an unknown dialog (id ${
+          typeof r.id === "string" ? r.id : "missing"
+        }) — dropped`,
+      );
+      return;
+    }
+    dialog!.pending.delete(r.id as string);
+    const { id: _id, ...reply } = r;
+    waiter.resolve(reply as DialogReply);
+  }
+  function _closeDialogHost(): void {
+    if (!dialog) return;
+    dialog.gone.yes = true;
+    dialog.unregister();
+    for (const w of dialog.pending.values()) {
+      w.reject(new Error("the window closed before the dialog was answered"));
+    }
+    dialog.pending.clear();
+    dialog = null;
+  }
 
   // Minimal structural WebSocket stand-in for the sync handler — it only
   // ever calls .send(). One stable object per conn so broadcast exclusion
@@ -861,10 +1003,20 @@ function _handleUDSConn(
               // index `am surface N` addresses, and must not be mailed state
               // broadcasts it will never render. `clientMap` keys BOTH the
               // roster and the broadcast loop, so leaving it is the whole fix.
-              const kind = (frame.d as { kind?: string } | undefined)?.kind;
+              const t = frame.d as
+                | { kind?: string; caps?: unknown }
+                | undefined;
+              const kind = t?.kind;
               if (kind === "control") {
                 _forgetClientDegraded(clientMap.get(conn));
                 clientMap.delete(conn);
+              } else if (
+                kind === "electron" && Array.isArray(t?.caps) &&
+                t.caps.includes("dialog") && clientMap.has(conn)
+              ) {
+                // An Electron MAIN PROCESS that opens native dialogs owned by
+                // its window — pickFile/pickDirectory route to it (#10).
+                _becomeDialogHost();
               }
               continue;
             }
@@ -898,6 +1050,10 @@ function _handleUDSConn(
                 // Close after the error message flushes through the write queue.
                 sendTo(conn, "", () => closeAfterDrain(conn));
               }
+              continue;
+            }
+            case "dialog-result": {
+              _settleDialog(frame.d);
               continue;
             }
             case "client-state":
@@ -1041,7 +1197,7 @@ function _handleUDSConn(
               // predicate) escaped as an unhandled rejection, and aio's crash
               // handler is a last-words logger, not a survival net — one bad
               // serverFn took the whole server down.
-              invokeServerFn(ns, name, args)
+              _dialogCaller(() => invokeServerFn(ns, name, args))
                 .then((result) => {
                   try {
                     sendTo(conn, enc("sfnr", { cid, ...result }));
@@ -1128,17 +1284,62 @@ function _handleUDSConn(
             }
             case "action": {
               const action = (frame.d ?? {}) as ActionPayload;
+              // A refused frame that carries a cid is TOLD — the WS twin's
+              // rule (`refuseAction` in server-ws.ts), which this door did
+              // not have. The client registered an ack for it, so a bare
+              // `continue` left `await cell.method()` waiting out its whole
+              // ack ceiling for a method that was never dispatched. On a
+              // desktop app this IS the only door (no TCP port is open at
+              // all), so the hang had nowhere else to be noticed.
+              const refuseAction = (msg: string): void => {
+                log.warn("uds", msg);
+                const cid = (action as { cid?: unknown } | null)?.cid;
+                if (typeof cid === "string" && cid.length > 0) {
+                  try {
+                    sendTo(
+                      conn,
+                      enc("ack", {
+                        cid,
+                        ok: false,
+                        ...errorFields(new Error(msg)),
+                      }),
+                    );
+                  } catch {
+                    // aio-ok: the refusal is already a WARN line above; a peer
+                    // that vanished between its own frame and this answer has
+                    // nothing left to be told, and the disconnect settles its
+                    // pending calls on the client side.
+                  }
+                }
+              };
               if (!action || typeof action.type !== "string") {
-                log.warn("uds", "invalid action — missing type field");
+                refuseAction("uds: invalid action — missing type field");
                 continue;
               }
               // Block framework-internal action types from UDS sources —
               // parity with the WS server. Internal actions carry trusted
               // payload shapes that bypass cell method bodies (audit F-1).
               if (_isFrameworkInternalActionType(action.type)) {
-                log.warn(
-                  "uds",
-                  `rejected framework-internal action type "${action.type}"`,
+                refuseAction(
+                  `uds: rejected framework-internal action type "${action.type}"`,
+                );
+                continue;
+              }
+              // The payload SHAPE gate the WS door and the trojan door both
+              // have, and this one did not: an array or a primitive payload
+              // was dispatched here and refused on the other two. It is not
+              // cosmetic — `dispatchNetwork` spreads the payload to stamp
+              // `_callId`, so `payload:[1,2]` reached the method as
+              // `{0:1,1:2}` and a methods-form cell read zero arguments out
+              // of a call that named two.
+              if (
+                action.payload !== undefined &&
+                (typeof action.payload !== "object" ||
+                  action.payload === null ||
+                  Array.isArray(action.payload))
+              ) {
+                refuseAction(
+                  "uds: invalid action — payload must be a plain object",
                 );
                 continue;
               }
@@ -1146,7 +1347,7 @@ function _handleUDSConn(
               // `_source:"UI"` — ONE decider for all three network entry
               // points (sanitizeClientAction, server-ws.ts).
               sanitizeClientAction(action as Record<string, unknown>, "uds");
-              const result = onAction(action);
+              const result = _dialogCaller(() => onAction(action));
               // AIO-402 + return-value transport: per-action ack — parity with
               // the WS server. Settles the Promise of an awaited method call
               // over UDS+IPC, carrying the method's RETURN value. We wait for
@@ -1229,6 +1430,7 @@ function _handleUDSConn(
       reader.releaseLock();
     } catch { /* stream may be errored (AIO-149) */ }
     connections.delete(conn);
+    _closeDialogHost();
     _settlePendingForGone(pendingState, clientMap.get(conn));
     _forgetClientDegraded(clientMap.get(conn));
     clientMap.delete(conn);

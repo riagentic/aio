@@ -23,14 +23,18 @@
  * SIZES and RATES. Two blocks, each coherent, rather than one that means both.
  */
 
+import { overUtf8, utf8Size } from "../protocol/utf8-size.ts";
+
 /** What an app may declare. Values are human strings or plain numbers.
  *
  *  A number means the base unit — bytes for a size, per-second for a rate — so
  *  `cellState: 1_048_576` and `cellState: "1MB"` are the same budget. */
 export type Budgets = {
   /** Largest a single cell's serialized state may get before aio says so.
-   *  `"1MB"`, `"512KB"`, or bytes. Cell state is pushed to every client on
-   *  change, so this is the number that decides what a page costs. */
+   *  `"1MB"`, `"512KB"`, or bytes — measured as UTF-8 BYTES of the cell's
+   *  JSON, which is what the wire and the disk carry (a CJK cell is ~3× its
+   *  character count). Cell state is pushed to every client on change, so this
+   *  is the number that decides what a page costs. */
   cellState?: string | number;
   /** Broadcast rounds per second before aio says so. `"20/s"` or `20`. */
   broadcastRate?: string | number;
@@ -215,7 +219,13 @@ export function createBudgetLedger(budgets: ResolvedBudgets): BudgetLedger {
       ) {
         let n = 0;
         try {
-          n = JSON.stringify(slice)?.length ?? 0;
+          // UTF-8 BYTES — the unit `cellState` is declared in. `length` is
+          // UTF-16 code units, which under-reports a CJK cell by up to 3×;
+          // `overUtf8` keeps the check to a length comparison for a slice that
+          // cannot be over the limit whatever it contains.
+          const json = JSON.stringify(slice) ?? "";
+          if (!overUtf8(json, budgets.cellState)) continue;
+          n = utf8Size(json);
         } catch {
           continue; // aio-ok: an unserializable slice is never broadcast either
         }

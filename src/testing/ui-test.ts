@@ -233,7 +233,17 @@ export interface UIElementHandle {
    *  (`{ ctrlKey, metaKey, altKey, shiftKey }`) — lets you drive chords like
    *  Ctrl+Enter. A bare `"Enter"` inside a form also submits it (browser
    *  implicit submission); a modified Enter does not, so a Ctrl+Enter
-   *  shortcut handler is testable. */
+   *  shortcut handler is testable.
+   *
+   *  Implicit submission follows the HTML rule, not "always": the form's first
+   *  submit button is CLICKED, and a form without one submits only while at
+   *  most one field blocks implicit submission — two text/number fields and a
+   *  `type="button"` Send are dead to Enter here exactly as in the browser.
+   *  Constraint validation then runs: an invalid field (a `required` blank, a
+   *  `type="number"` holding "1.5" with the default `step` of 1) REFUSES the
+   *  submit and throws with the field and its `validationMessage`, where a
+   *  browser would show its bubble and submit nothing. `noValidate` on the
+   *  `<form>` opts out, as it does in the browser. */
   press(key: string, mods?: KeyModifiers): Promise<void>;
   /** Hold a key DOWN — no keyup until {@linkcode keyUp}. The interaction
    *  `press` (a tap) cannot express: "hold left for 10 frames", drag by
@@ -1314,6 +1324,47 @@ async function _buildTestUI(
       configurable: true,
     });
     _ownedGlobals.push("matchMedia");
+  }
+
+  // A relative `fetch("/media/x.txt")` has no server to reach under testUI.
+  //
+  // The component is right: in a browser the path resolves against the page's
+  // origin and the app's own server answers. testUI runs the component in THIS
+  // process with no HTTP server, so Deno's fetch said only `Invalid URL:
+  // '/media/x.txt'` — true, and no help (a wall with no door). The call still
+  // fails exactly as before; the error now says why and what to do instead.
+  // Absolute URLs, `URL` objects and `Request`s pass through untouched.
+  {
+    const origFetch = globalThis.fetch;
+    const guarded = function (
+      input: string | URL | Request,
+      init?: RequestInit,
+    ): Promise<Response> {
+      // Call through FIRST: a test that stubbed fetch before the mount may
+      // answer relative URLs on purpose, and it must keep doing so. Only a
+      // failure on a relative URL gets the better message.
+      return Promise.resolve(origFetch(input, init)).catch((e: unknown) => {
+        if (
+          typeof input === "string" && !URL.canParse(input) &&
+          e instanceof TypeError
+        ) {
+          throw new TypeError(
+            `testUI: fetch("${input}") is a relative URL, and testUI runs the ` +
+              `component with no HTTP server to answer it. Test what the ` +
+              `server serves with testServer() from "aio/testing" (a real ` +
+              `server: \`await srv.fetch("${input}")\`), or replace ` +
+              `globalThis.fetch for this test to hand the component a Response.`,
+            { cause: e },
+          );
+        }
+        throw e;
+      });
+    } as typeof globalThis.fetch;
+    globalThis.fetch = guarded;
+    _restoreGlobals.push(() => {
+      // Only undo OUR wrapper — a test that replaced fetch keeps its own.
+      if (globalThis.fetch === guarded) globalThis.fetch = origFetch;
+    });
   }
 
   // A UI listener registered on the DENO GLOBAL never fires under testUI.

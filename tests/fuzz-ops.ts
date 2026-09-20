@@ -35,6 +35,9 @@ export const initData = (): Data => ({
 
 export type Op = { kind: string; i: number; v: number };
 
+/** Names that are ordinary state keys yet also resolve on the prototype chain. */
+const RESERVED_WORDS = ["constructor", "prototype", "toString", "valueOf"];
+
 /** One program step, interpreted identically for both backends. Reads append
  *  PRIMITIVES to `log` (object reads would compare proxy vs draft identity,
  *  which is not the contract — values are). */
@@ -327,6 +330,68 @@ export function applyOp(s: { data: Data }, op: Op, log: unknown[]): void {
     case "set_shadow_key":
       d.obj[op.i % 2 === 0 ? "toString" : "hasOwnProperty"] = op.v;
       break;
+    // A map keyed by user words, reserved-looking names included, guarded the
+    // standard way. The async write-set used to refuse `constructor` and
+    // `prototype` by name, and the live view's `Object.hasOwn` answered `true`
+    // for every inherited name (tests/async-constructor-key.test.ts,
+    // tests/async-hasown-inherited-key.test.ts).
+    case "count_reserved_word": {
+      const w = ["constructor", "prototype", "toString", "valueOf"][op.i % 4]!;
+      const had = Object.hasOwn(d.obj, w);
+      log.push(had);
+      d.obj[w] = (had ? d.obj[w] as number : 0) + op.v;
+      break;
+    }
+    // The same reserved names as a PATH segment, not only a leaf: a nested
+    // write walks an OWN `constructor`/`prototype` object (the async gate's
+    // walkOwn must let it through, and nothing may reach a real prototype).
+    // Boxes live under `deep.l1`, numbers under `obj` — never `object + n`,
+    // which the live proxy refuses by design (valueOf on live state).
+    case "reserved_nested_write": {
+      const w = RESERVED_WORDS[op.i % 4]!;
+      const l1 = d.deep.l1 as Record<string, unknown>;
+      const cur = Object.hasOwn(l1, w) ? l1[w] : undefined;
+      if (cur === null || typeof cur !== "object") l1[w] = { n: 0 };
+      const box = l1[w] as { n: number };
+      box.n += op.v;
+      log.push(box.n);
+      break;
+    }
+    case "reserved_delete": {
+      const w = RESERVED_WORDS[op.i % 4]!;
+      delete d.obj[w];
+      log.push(Object.hasOwn(d.obj, w));
+      break;
+    }
+    // Every own-key question a guard might ask, answered for a reserved name.
+    case "reserved_own_reads": {
+      const w = RESERVED_WORDS[op.i % 4]!;
+      log.push(
+        w in d.obj,
+        Object.prototype.hasOwnProperty.call(d.obj, w),
+        Object.prototype.propertyIsEnumerable.call(d.obj, w),
+        JSON.stringify(Object.getOwnPropertyDescriptor(d.obj, w)?.value),
+        Object.keys(d.obj).includes(w),
+        JSON.stringify(Object.entries(d.obj).filter(([k]) => k === w)),
+      );
+      break;
+    }
+    // A reserved key on an array ELEMENT and on a deep object.
+    case "reserved_item_field": {
+      const w = RESERVED_WORDS[op.i % 4]!;
+      const it = d.items[op.i % 3];
+      if (it) (it as Record<string, unknown>)[w] = op.v;
+      const l1 = d.deep.l1 as Record<string, unknown>;
+      log.push(Object.hasOwn(l1, w));
+      l1[w] = { n: op.v };
+      break;
+    }
+    case "reserved_spread_back": {
+      const w = RESERVED_WORDS[op.i % 4]!;
+      d.obj = { ...d.obj, [w]: op.v };
+      log.push(JSON.stringify(d.obj));
+      break;
+    }
     case "set_undefined":
       d.obj.x = undefined;
       break;
@@ -638,6 +703,127 @@ export function applyOp(s: { data: Data }, op: Op, log: unknown[]): void {
       });
       break;
     }
+    // ── a WRITE and a copy-READ at the SAME path, back to back ──────
+    //
+    // The read-your-writes overlay used to hand every read a fresh clone, so
+    // "the array is the same object" proved "its contents did not move". It
+    // now applies each new write INTO the array it already handed out, which
+    // makes that proof false and every per-path read memo a place a stale
+    // answer can hide. `toSorted` after a push is the one that was caught;
+    // these are the rest of the family — one op per intercepted copy-method,
+    // each preceded by an in-place mutation of the very array it reads, at
+    // depth 1 (`nums`/`items`), depth 3 (`deep.l1.l2.l3`) and inside a nested
+    // array (`grid[0]`), because the memo is keyed by PATH.
+    case "push_then_to_spliced":
+      d.nums.push(op.v);
+      log.push(d.nums.toSpliced(0, 1).join(","));
+      break;
+    case "push_then_to_sorted":
+      d.nums.push(op.v);
+      log.push(d.nums.toSorted((x, y) => x - y).join(","));
+      break;
+    case "push_then_to_reversed":
+      d.nums.push(op.v);
+      log.push(d.nums.toReversed().join(","));
+      break;
+    case "push_then_flat_map":
+      d.nums.push(op.v);
+      log.push(d.nums.flatMap((n) => [n, n + 1]).join(","));
+      break;
+    case "push_then_every":
+      d.nums.push(op.v);
+      log.push(d.nums.every((n) => n >= 0));
+      break;
+    case "push_then_reduce_right":
+      d.nums.push(op.v);
+      log.push(d.nums.reduceRight((a, n) => a * 2 + n, 0));
+      break;
+    case "push_then_last_index_of":
+      d.nums.push(op.v);
+      log.push(d.nums.lastIndexOf(op.v));
+      break;
+    case "push_then_slice_join":
+      d.nums.push(op.v);
+      log.push(d.nums.slice(1).join(","));
+      break;
+    case "splice_then_to_sorted":
+      d.nums.splice(op.i % (d.nums.length + 1), 0, op.v);
+      log.push(d.nums.toSorted((x, y) => x - y).join(","));
+      break;
+    case "sort_then_map_join":
+      d.nums.sort((x, y) => x - y);
+      log.push(d.nums.map((n) => n + 1).join(","));
+      break;
+    case "reverse_then_index_of":
+      d.nums.reverse();
+      log.push(d.nums.indexOf(op.v % 4));
+      break;
+    case "fill_then_to_sorted":
+      d.nums.fill(op.v, 0, 1);
+      log.push(d.nums.toSorted((x, y) => x - y).join(","));
+      break;
+    case "unshift_then_concat_len":
+      d.nums.unshift(op.v);
+      log.push(d.nums.concat([op.i]).length);
+      break;
+    case "set_idx_then_to_sorted":
+      // Guarded: `arr_set_length` can leave `nums` empty, and a write at a
+      // non-index key (`NaN`) is the sparse-array shape that has no parity
+      // target — see the note on `arr_set_length`.
+      if (d.nums.length > 0) d.nums[op.i % d.nums.length] = op.v;
+      log.push(d.nums.toSorted((x, y) => x - y).join(","));
+      break;
+    case "objarr_push_then_map_q":
+      d.items.push({ id: 60 + (op.i % 3), q: op.v });
+      log.push(d.items.map((x) => x.q).join(","));
+      break;
+    case "objarr_push_then_to_sorted_q":
+      d.items.push({ id: 61 + (op.i % 3), q: op.v });
+      log.push(d.items.toSorted((x, y) => x.q - y.q).map((x) => x.q).join(","));
+      break;
+    case "objarr_write_then_filter_len":
+      if (d.items.length > 0) d.items[op.i % d.items.length]!.q = op.v;
+      log.push(d.items.filter((x) => x.q > op.v / 2).length);
+      break;
+    case "deep_push_then_to_sorted":
+      d.deep.l1.l2.l3.push(op.v);
+      log.push(d.deep.l1.l2.l3.toSorted((x, y) => x - y).join(","));
+      break;
+    case "deep_push_then_map":
+      d.deep.l1.l2.l3.push(op.v);
+      log.push(d.deep.l1.l2.l3.map((n) => n * 2).join(","));
+      break;
+    case "grid_inner_push_then_flat":
+      if (d.grid.length > 0) d.grid[op.i % d.grid.length]!.push(op.v);
+      log.push(d.grid.flat().join(","));
+      break;
+    case "grid_inner_push_then_inner_to_sorted": {
+      const row = d.grid.length > 0 ? d.grid[op.i % d.grid.length]! : [];
+      row.push(op.v);
+      log.push(row.toSorted((x, y) => x - y).join(","));
+      break;
+    }
+    // A write to an UNRELATED path between a read and its repeat: the memo is
+    // invalidated by the write-set cursor, which grows for every write no
+    // matter where it lands, so this must still answer the same value twice.
+    case "read_write_elsewhere_read": {
+      const a = d.nums.map((n) => n).join(",");
+      d.obj[`u${op.i % 3}`] = op.v;
+      log.push(a);
+      log.push(d.nums.map((n) => n).join(","));
+      break;
+    }
+    // Object path: a key written, then the whole object re-read two ways.
+    case "obj_set_then_reread":
+      d.obj[`k${op.i % 3}`] = op.v;
+      log.push(JSON.stringify(d.obj));
+      d.obj[`k${op.i % 3}`] = op.v + 1;
+      log.push(JSON.stringify(d.obj));
+      break;
+    case "obj_del_then_reread":
+      delete d.obj[`k${op.i % 3}`];
+      log.push(Object.keys(d.obj).sort().join(","));
+      break;
   }
 }
 
@@ -694,6 +880,12 @@ export const KINDS = [
   "read_flat",
   "set_numeric_key",
   "set_shadow_key",
+  "count_reserved_word",
+  "reserved_nested_write",
+  "reserved_delete",
+  "reserved_own_reads",
+  "reserved_item_field",
+  "reserved_spread_back",
   "set_undefined",
   "set_null",
   "set_nan",
@@ -751,6 +943,32 @@ export const KINDS = [
   "objarr_pop_write_push",
   "objarr_splice_ret_write",
   "objarr_shift_read_after",
+  // A write and a copy-READ at the same path, back to back — see the block of
+  // the same name in `applyOp`.
+  "push_then_to_spliced",
+  "push_then_to_sorted",
+  "push_then_to_reversed",
+  "push_then_flat_map",
+  "push_then_every",
+  "push_then_reduce_right",
+  "push_then_last_index_of",
+  "push_then_slice_join",
+  "splice_then_to_sorted",
+  "sort_then_map_join",
+  "reverse_then_index_of",
+  "fill_then_to_sorted",
+  "unshift_then_concat_len",
+  "set_idx_then_to_sorted",
+  "objarr_push_then_map_q",
+  "objarr_push_then_to_sorted_q",
+  "objarr_write_then_filter_len",
+  "deep_push_then_to_sorted",
+  "deep_push_then_map",
+  "grid_inner_push_then_flat",
+  "grid_inner_push_then_inner_to_sorted",
+  "read_write_elsewhere_read",
+  "obj_set_then_reread",
+  "obj_del_then_reread",
 ];
 
 /** Ops whose value is a row REMOVED from an array — `pop`/`shift`/`splice`.

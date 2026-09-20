@@ -19,6 +19,8 @@ page is the short door.
 
 ## Reference
 
+- [Every option, one page](every-option.md) — each cell option, `aio.run` option
+  and `aio/air` export: signature, one line, example (generated)
 - [API Reference](api-reference.md) — all exports
 - [Where code runs](where-code-runs.md) — six contexts, one table
 - [FAQ](faq.md) — design decisions, including `am doctor` / `fix` / `migrate`

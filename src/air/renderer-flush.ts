@@ -26,6 +26,7 @@ import { auditContrast } from "./contrast-audit.ts";
 import { auditIdSelectors } from "./selector-audit.ts";
 import { runTrackedLifecycle } from "./untracked-read.ts";
 import { isDevMode } from "../state/dev-flag.ts";
+import { _inSsrCall } from "./vdom-ssr.ts";
 
 // ── afterRender queue (per-root isolated) ────────────────────────────
 
@@ -59,7 +60,14 @@ export function afterRender(fn: () => void): void {
   // before, dev additionally says so. Not a throw — this is reachable from
   // legitimate transition paths where the root has already unmounted, and
   // breaking those to report a no-op would be the worse trade.
-  if ((globalThis as Record<string, unknown>).__aioDev === true) {
+  //
+  // …except on the SERVER, where there is no render cycle BY DESIGN: a server
+  // render produces a string, so `afterRender` has nothing to run after and
+  // the author's component body is correct as written. See `_inServerRender`
+  // in renderer-lifecycle.ts.
+  if (
+    (globalThis as Record<string, unknown>).__aioDev === true && !_inSsrCall()
+  ) {
     console.warn(
       "[aio] afterRender() called outside a render — no render cycle is " +
         "active, so the callback was DROPPED. It only works during a " +

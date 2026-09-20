@@ -10,6 +10,7 @@ import {
   type TTState,
 } from "../diagnostics/time-travel.ts";
 import { createCoalescer } from "./broadcast-coalescer.ts";
+import { createDebtRetry } from "./debt-retry.ts";
 import { attributeRound } from "./server-broadcast.ts";
 import type { VitalsSystem } from "../vitals/mod.ts";
 import type { ComposedCells } from "../state/cell.ts";
@@ -26,6 +27,7 @@ import { launchElectronClient } from "../electron/electron.ts";
 import { getLogger, log } from "../diagnostics/logger-api.ts";
 import { snapshotCellsError, snapshotShapeError } from "./server-static.ts";
 import { findUnserializable, PersistSerializeError } from "./persist-guard.ts";
+import { deepFreeze } from "../state/immutable.ts";
 
 /** Cache key for a user — a STABLE serialization of everything `ui.forUser`
  *  can observe, not just the id.
@@ -270,7 +272,15 @@ export function buildAppObject<S, A>(refs: {
         );
         if (mismatch) throw new Error(mismatch);
       }
-      refs.setState(parsed as S);
+      // FROZEN, like every other state the app holds. It went in as the raw
+      // parse: a write outside a method (`getState().cell.x.y = 1`) then
+      // SUCCEEDED in both modes until the next dispatch — and after it only
+      // in production, where a slice stayed writable until its own cell
+      // committed (dev's full-tree freeze pass caught every cell at once).
+      // The initial state has the same rule and is frozen in both modes
+      // (`cell-compose.ts`); parsed JSON is plain data, so this cannot trip on
+      // a typed array or a Map.
+      refs.setState(deepFreeze(parsed) as S);
       // Worker cells hold their own copy of their slice — a wholesale swap has
       // to reach them, or they'd keep mutating the state we just replaced.
       refs.onStateReplaced?.();
@@ -379,6 +389,9 @@ export function createUdsBroadcastController(refs: {
     const handle = refs.getUdsHandle();
     if (!handle) return;
     const sent = handle.broadcastState(forceOrPatches);
+    // A round that left a client owed arranges its payment — an idle app has
+    // no later round to do it (see `payDebts` below).
+    if (sent?.owed) debtRetry.arm(true);
     // Attribute what ACTUALLY left the socket. `am cost` used to see nothing
     // on UDS — the transport a local desktop app uses for every client,
     // because it opens no TCP ports at all — so the one command that answers
@@ -400,6 +413,41 @@ export function createUdsBroadcastController(refs: {
       getUIState: refs.getUIState ?? (() => undefined),
     });
   };
+  // ── Owed rounds are PAID on this transport too ─────────────────────────
+  //
+  // `uds.ts` marks a window `needsFull` when its round threw or its snapshot
+  // could not be built, and only a later round honoured that — so an app that
+  // went idle after the loss left its desktop window on stale state for as
+  // long as nothing changed. The WS broadcaster got an idle retry for this;
+  // the SAME scheduler drives both (`createDebtRetry`). Buffered patches go
+  // first, exactly as on WS: a round in the buffer pays the debt itself, in
+  // order. A payment is metered like a round — it is bytes on the wire.
+  // Pinned by tests/uds-debt-paid-when-idle.test.ts.
+  const payDebts = (): boolean => {
+    const handle = refs.getUdsHandle();
+    if (!handle?.payDebts) return false;
+    coalescer.flushUrgent();
+    const paid = handle.payDebts();
+    if (paid.full > 0) {
+      const meter = refs.costMeter?.();
+      if (meter) {
+        attributeRound(meter, {
+          anyFullSend: true,
+          anyPatchSend: false,
+          force: false,
+          patchesToSend: [],
+          getUIState: refs.getUIState ?? (() => undefined),
+        });
+      }
+    }
+    return paid.owed;
+  };
+  const debtRetry = createDebtRetry({
+    minMs: refs.syncIntervalMs,
+    pay: payDebts,
+    onError: (e) =>
+      log.error("uds", `paying a lost round's debt failed — ${e}; retrying`),
+  });
   // The shared coalescer buffers patches (and a pending force-full) across the
   // queue/throttle window and flushes them as ONE send — identical semantics
   // to the WS broadcaster, because both now use the same primitive. This is
@@ -425,7 +473,10 @@ export function createUdsBroadcastController(refs: {
     // Interactive priority (see Coalescer.flushUrgent): client actions call
     // this so their patches never wait out the background throttle window.
     flushUrgent: () => coalescer.flushUrgent(),
-    dispose: () => coalescer.dispose(),
+    dispose: () => {
+      debtRetry.dispose();
+      coalescer.dispose();
+    },
   };
 }
 
@@ -453,13 +504,39 @@ export function _alreadyRunningMessage(o: {
   pid: number;
   home: string;
   takeover: boolean;
+  /** The data home the RUNNING instance recorded in its lock, when it knows
+   *  one. Usually `home` — but not always, see {@linkcode _alreadyRunningMessage}. */
+  otherHome?: string;
 }): string {
   const where = o.port > 0 ? ` at http://localhost:${o.port}` : "";
   const who = o.pid > 0 ? ` (pid ${o.pid})` : "";
+  // The home of the instance that HOLDS the lock, which is the one the reader
+  // has to go and find. It used to print the caller's own, on the belief that
+  // a cross-home refusal cannot happen; it can — `lockDir()` scopes on
+  // AIO_APPS_DIR, deliberately, so a temp $HOME relocates the data and not the
+  // lock, and the refusal then named a directory that did not exist yet.
+  const elsewhere = o.otherHome !== undefined &&
+    resolve(o.otherHome) !== resolve(o.home);
   const head = `[AIO] ${
     o.takeover ? "Failed to take over" : "Already running"
-  }: ${o.appId}${where}${who} (home ${o.home})`;
+  }: ${o.appId}${where}${who} (home ${o.otherHome ?? o.home})`;
   if (o.takeover) return head; // --takeover already tried; the rest is noise
+  if (elsewhere) {
+    return head + `\n` +
+      // The DIRECTORY, not the env var that usually names it: `lockDir()` is
+      // `$XDG_RUNTIME_DIR ?? "/tmp"` on posix and `%TEMP%` on Windows, so
+      // "it lives in $XDG_RUNTIME_DIR" named an unset variable — and a file
+      // somewhere else — on macOS, on Windows, in a container and over plain
+      // ssh. A refusal whose job is to send the reader to the lock knows
+      // where it is, so it says where it is.
+      `  This boot's data home is ${o.home} — a DIFFERENT directory, but ` +
+      `$HOME alone does not scope the lock, which lives in ${lockDir()}. ` +
+      `For a second, fully isolated instance: AIO_APPS_DIR=<dir> (it moves ` +
+      `both).\n` +
+      `  Or stop that one: \`am stop --app=${o.appId}\`${
+        o.pid > 0 ? ` (or \`kill ${o.pid}\`)` : ""
+      }, or re-run with \`--takeover\`.`;
+  }
   return head + `\n` +
     // `am stop <appId>` does NOT work: `stop`'s positional argument is a
     // COMPONENT label (deno.json → build.targets), so in the ordinary
@@ -495,6 +572,7 @@ export async function acquireSingletonLock(
       port: ex.port,
       pid: ex.pid,
       home: appLock.home,
+      otherHome: ex.home,
       takeover,
     });
     // Alone in the process: the refusal IS the exit, and a clean one-line

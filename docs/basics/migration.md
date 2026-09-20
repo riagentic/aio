@@ -267,19 +267,17 @@ be `async`.
 
 ## Migrating from React
 
-During migration, React's hooks are available from the compat entry — each logs
-a one-time dev hint pointing at the AIR-native equivalent:
+React's hooks work as-is, from `aio/air` (since 1.0.6-beta; `aio/air/compat`
+keeps working too). They behave as React 19's — see
+[React on aio](../ui/react.md):
 
 ```ts
-import { useEffect, useState } from "aio/air/compat";
+import { useEffect, useState } from "aio/air";
 ```
 
-| React         | AIR native                                                  |
-| ------------- | ----------------------------------------------------------- |
-| `useState`    | `useLocal()` for object state, `signal()` for module-scoped |
-| `useEffect`   | `onMount()` for setup/teardown, `effect()` for reactive     |
-| `useMemo`     | `computed()`                                                |
-| `useCallback` | unnecessary — components are auto-optimized                 |
-
-React compat hooks live **only** at `aio/air/compat` — they are not exported
-from `aio/air`. (`useRef` is a native AIR primitive and stays on `aio/air`.)
+| React         | aio's own spelling for the same job (optional)          |
+| ------------- | ------------------------------------------------------- |
+| `useState`    | `useLocal()` (also `.patch` for objects)                |
+| `useEffect`   | `onMount()` for setup/teardown, `effect()` for reactive |
+| `useMemo`     | `computed()`                                            |
+| `useCallback` | `useCallback` — a stable identity for effect deps       |

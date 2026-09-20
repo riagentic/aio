@@ -9,6 +9,8 @@ import {
   parseCreateArgs,
   scaffold,
 } from "../src/am/am-cmd-create.ts";
+import { entryTaskWords } from "../src/am/am-cmd-process.ts";
+import { dropTempDir, tempDir } from "../src/testing/temp-dir.ts";
 import { AIO_ENTRY_PATHS } from "../src/entries.ts";
 import type { GlobalFlags } from "../src/am/am-types.ts";
 import { h } from "../src/air/vdom.ts";
@@ -17,6 +19,26 @@ import { testUI } from "../src/testing/ui-test.ts";
 
 const ROOT = new URL("../", import.meta.url).pathname.replace(/\/$/, "");
 const files = scaffold("demo", "counter", true);
+
+/** This machine's REAL module cache, resolved BEFORE any child is handed a
+ *  fake `$HOME`.
+ *
+ *  `DENO_DIR` defaults to `$HOME/.cache/deno`, so a child given an isolated
+ *  HOME (which the two scaffold-boot cases below need, to keep the lock dir
+ *  and `~/.<appId>` off the real one) silently gets an isolated MODULE cache
+ *  as well — and re-downloads the whole JSR graph from the network on every
+ *  run. It cost `am start` its ten-second boot window under load:
+ *
+ *    {"error":"still starting after 10s (pid … alive, no port yet)"}
+ *    Download https://jsr.io/@std/path/1.1.3/mod.ts
+ *    … 60 more
+ *
+ *  which reads as "the cli scaffold does not boot" and is nothing of the
+ *  kind. The app under test is the one on disk, never the network — same
+ *  reasoning, same spelling as `REAL_DENO_DIR` in tests/seam-paths.test.ts
+ *  and `denoDir()` in tests/version-query.test.ts. */
+const REAL_DENO_DIR = Deno.env.get("DENO_DIR") ??
+  join(Deno.env.get("HOME") ?? "/tmp", ".cache", "deno");
 
 Deno.test("scaffold .gitignore ignores .env (the README promises it) but not .env.example", () => {
   const lines = files[".gitignore"]!.split("\n");
@@ -302,8 +324,11 @@ Deno.test({
         ),
       }),
     );
-    // An isolated HOME: the lock dir and ~/.<appId> must not touch the real one.
-    const env = { HOME: home, XDG_RUNTIME_DIR: home };
+    // An isolated HOME: the lock dir and ~/.<appId> must not touch the real
+    // one. DENO_DIR is pinned to the real cache alongside it — see
+    // REAL_DENO_DIR: an isolated HOME would otherwise take the module cache
+    // with it and send the child to the network.
+    const env = { HOME: home, XDG_RUNTIME_DIR: home, DENO_DIR: REAL_DENO_DIR };
     const serve = new Deno.Command(Deno.execPath(), {
       args: ["run", "-A", "--no-check", "src/app.ts", "serve"],
       cwd: dir,
@@ -351,4 +376,97 @@ Deno.test({
       await Deno.remove(dir, { recursive: true }).catch(() => {});
     }
   },
+});
+
+// …and the form the scaffold's own README tells an AGENT to use.
+//
+// `deno task dev` was taught the command word and nothing else was: `am start`
+// ran `deno run -A src/app.ts` with no word, so the very first supervised
+// launch of a `--template=cli` app died instantly with
+//
+//   r5a-cli did not start — the child (pid …) exited immediately.
+//     it said:  error: missing command — run `todo --help`
+//
+// while `deno task dev` in the same directory worked. One fact ("this app's
+// entry takes a command word"), two launchers, one of them fixed — so `am
+// start`, `am restart`, `am status`, `am stop` and every verb that needs a
+// running app were unreachable for that template. am now reads the word out of
+// the app's OWN dev task, which is the only place it is ever declared.
+Deno.test({
+  name: "--template=cli: `am start` boots the server `deno task dev` declares",
+  ignore: Deno.build.os === "windows",
+  async fn() {
+    const cli = scaffold("clistart", "cli", true, "cli");
+    const dir = await tempDir("aio-cli-amstart-");
+    const home = join(dir, "home");
+    await Deno.mkdir(home);
+    for (const [rel, content] of Object.entries(cli)) {
+      if (rel === "deno.json") continue;
+      const path = join(dir, rel);
+      await Deno.mkdir(join(path, ".."), { recursive: true });
+      await Deno.writeTextFile(path, content);
+    }
+    await Deno.writeTextFile(
+      join(dir, "deno.json"),
+      JSON.stringify({
+        ...JSON.parse(cli["deno.json"]!),
+        imports: Object.fromEntries(
+          Object.entries(AIO_ENTRY_PATHS).map(([k, v]) => [k, `${ROOT}/${v}`]),
+        ),
+      }),
+    );
+    // An isolated HOME (the am registry and the lock dir must not touch the
+    // real one), with DENO_DIR pinned to the real cache beside it — see
+    // REAL_DENO_DIR. `am start` gives the child ten seconds to bind a port,
+    // and a child re-downloading the JSR graph does not make it.
+    const env = { HOME: home, XDG_RUNTIME_DIR: home, DENO_DIR: REAL_DENO_DIR };
+    const am = (args: string[]) =>
+      new Deno.Command(Deno.execPath(), {
+        args: ["run", "-A", "--no-check", `${ROOT}/src/am.ts`, ...args],
+        cwd: dir,
+        env,
+        stdout: "piped",
+        stderr: "piped",
+      }).output();
+    const text = (r: { stdout: Uint8Array; stderr: Uint8Array }) =>
+      new TextDecoder().decode(r.stdout) + new TextDecoder().decode(r.stderr);
+    try {
+      const started = await am(["start", "--json"]);
+      assertEquals(
+        started.code,
+        0,
+        `am start must boot the cli scaffold:\n${text(started)}`,
+      );
+      assertStringIncludes(text(started), '"status":"started"');
+      // It is the SERVER that came up, not some process that merely survived:
+      // the cell the template owns answers.
+      const state = await am(["state", "--json"]);
+      assertEquals(state.code, 0, text(state));
+      assertStringIncludes(text(state), "todos");
+    } finally {
+      await am(["stop", "--json"]).catch(() => {});
+      await dropTempDir(dir);
+    }
+  },
+});
+
+Deno.test("am start: a dev task with no command word adds nothing", () => {
+  const root = "/p";
+  const entry = "/p/src/app.ts";
+  assertEquals(entryTaskWords("deno run -A src/app.ts serve", entry, root), [
+    "serve",
+  ]);
+  // The browser scaffold's own dev task: a flag is am's business, never a word.
+  assertEquals(entryTaskWords("deno run -A src/app.ts", entry, root), []);
+  assertEquals(
+    entryTaskWords("deno run -A src/app.ts --client=electron", entry, root),
+    [],
+  );
+  // A task that launches something else entirely (the android orchestrator)
+  // says nothing about this entry.
+  assertEquals(
+    entryTaskWords("deno run -A dep/aio/src/build/android-dev.ts", entry, root),
+    [],
+  );
+  assertEquals(entryTaskWords(undefined, entry, root), []);
 });

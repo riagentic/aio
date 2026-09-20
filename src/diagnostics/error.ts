@@ -113,6 +113,11 @@ export type AioErrorContext = {
    *  advice. The dispatcher counts (it is where the violations pass); the
    *  remedy stays in `errorTip`, once. */
   repeatOffender?: boolean;
+  /** Set when the method threw ON PURPOSE (a refusal, not a crash): the one
+   *  info-level line to print instead of the error box. The caller, the
+   *  `onError` hook and the log still receive the error — see
+   *  state/method-rejection.ts. */
+  rejected?: string;
 };
 
 export type ReportErrorOpts = {
@@ -120,6 +125,7 @@ export type ReportErrorOpts = {
   logger?: {
     error: (msg: string, data?: Record<string, unknown>) => void;
     warn?: (msg: string, data?: Record<string, unknown>) => void;
+    info?: (msg: string, data?: Record<string, unknown>) => void;
   };
   tt?: {
     markError: (
@@ -498,11 +504,13 @@ export function generateTip(err: AioError): string | undefined {
           : err.context.actionType?.split(":")[1] ?? "?";
         return `Tip: Proxy state error in method "${method}" of cell "${
           err.context.cellName ?? "?"
-        }". Avoid .map()/.spread/Object.keys() on live proxy state — use explicit property access or snapshot first: const items = [...s.items]`;
+        }". Avoid .map()/.spread/Object.keys() on live proxy state — use explicit property access or snapshot first: \`const items = [...s.items]\``;
       }
       return `Tip: Reducer for "${
         err.context.actionType ?? "?"
-      }" threw — check action payload shape and inspect state at crash.`;
+      }" threw — check action payload shape and inspect state at crash: ` +
+        `\`am timeline\` lists recent actions with their payload and the ` +
+        `state they ran on. See docs/debugging/errors.md.`;
     }
     case "EFFECT_ERROR": {
       const et = String(err.context.effectType ?? "?");
@@ -521,14 +529,14 @@ export function generateTip(err: AioError): string | undefined {
             runner === "__exec"
               ? "Check the async method's own body and the arguments it was called with."
               : "Check the effect or write-set the method produced."
-          }`;
+          } See docs/state/methods.md.`;
       }
-      return `Tip: Sync effect "${et}" threw. If doing I/O, move to an async method or return a promise.`;
+      return `Tip: Sync effect "${et}" threw. If doing I/O, move to an async method or return a promise — \`async m(s) { … await … }\`, see docs/state/methods.md.`;
     }
     case "EFFECT_TIMEOUT":
       return `Tip: Effect "${err.context.effectType ?? "?"}" timed out after ${
         err.context.duration ?? "?"
-      }ms. Check for network issues or increase effectTimeoutMs.`;
+      }ms. Check for network issues or increase \`aio.run({ effectTimeoutMs })\`.`;
     case "EFFECT_ASYNC_ERROR": {
       // An async METHOD that threw is the common case here; "execute handler"
       // and `call({ retries })` are the actions-form vocabulary and sent
@@ -538,24 +546,29 @@ export function generateTip(err: AioError): string | undefined {
         return `Tip: async method ${at}() threw after it started. The caller ` +
           `that awaited it was rejected with this error, and writes it made ` +
           `before the throw are already state — catch inside the method to ` +
-          `record a failure the UI can show, or catch at the call site.`;
+          `record a failure the UI can show, or catch at the call site ` +
+          `(\`await cell.m().catch(…)\`). See docs/state/methods.md.`;
       }
       return `Tip: Async effect "${
         err.context.effectType ?? "?"
-      }" rejected. Add error handling in your execute handler or use call({ retries }).`;
+      }" rejected. Add error handling in your execute handler or use \`call({ retries })\`.`;
     }
     case "HOOK_ERROR":
       return `Tip: Hook "${
         err.context.hookName ?? "?"
-      }" threw. Hooks should be side-effect-free observers — avoid mutations or throwing.`;
+      }" threw. Hooks should be side-effect-free observers — avoid mutations or throwing. ` +
+        `Dispatch carried on; wrap the hook body in \`try { … } catch\` if it may fail. ` +
+        `See docs/state/lifecycle.md.`;
     case "INIT_ERROR":
       return `Tip: Cell "${
         err.context.cellName ?? "?"
-      }" onInit threw. Check for missing dependencies or invalid initial state.`;
+      }" onInit threw. Check for missing dependencies or invalid initial state. ` +
+        `\`am logs\` shows what ran before it; see docs/state/lifecycle.md.`;
     case "DESTROY_ERROR":
       return `Tip: Cell "${
         err.context.cellName ?? "?"
-      }" onDestroy threw. Cleanup should be best-effort — guard against already-cleaned resources.`;
+      }" onDestroy threw. Cleanup should be best-effort — guard against already-cleaned resources. ` +
+        `See docs/state/lifecycle.md.`;
     case "ACCESS_DENIED":
       return `Tip: the caller was refused by the \`access:\` rule on cell "${
         err.context.cellName ?? "?"
@@ -574,17 +587,17 @@ export function generateTip(err: AioError): string | undefined {
         err.context.machineState ?? "?"
       }" blocked this action. Check your machine config or add the transition.`;
     case "QUEUE_OVERFLOW":
-      return `Tip: Action queue exceeded ${10_000} entries. You may have a dispatch loop — check effects that dispatch synchronously.`;
+      return `Tip: Action queue exceeded ${10_000} entries. You may have a dispatch loop — check effects that dispatch synchronously. \`am timeline\` shows which action repeats.`;
     case "DISPATCH_LOOP":
-      return `Tip: the drain loop hit its iteration ceiling (the message names it — the same bound as the action queue). A reducer or effect is dispatching back to itself. Break the cycle.`;
+      return `Tip: the drain loop hit its iteration ceiling (the message names it — the same bound as the action queue). A reducer or effect is dispatching back to itself. Break the cycle — \`am timeline\` shows which action repeats.`;
     case "DISPATCH_DRAINING":
-      return "Tip: the app is closing — running methods are finishing their writes; this action was new input. Stop dispatching once shutdown starts.";
+      return "Tip: the app is closing — running methods are finishing their writes; this action was new input. Stop dispatching once shutdown starts (see docs/state/lifecycle.md).";
     case "DISPATCH_CLOSED":
-      return `Tip: Action dispatched after the app/cell was closed — it was not applied. Stop dispatching during/after shutdown, or guard awaited calls.`;
+      return `Tip: Action dispatched after the app/cell was closed — it was not applied. Stop dispatching during/after shutdown, or guard awaited calls. See docs/state/lifecycle.md.`;
     case "DISPATCH_ABORTED":
-      return `Tip: The drain loop threw outside every per-action guard, so these actions were never applied and dispatch was reset. The preceding error names the cause — a common one is a non-plain value (typed array, Map/Set) in cell state under freezeState. Retry the actions once the cause is fixed.`;
+      return `Tip: The drain loop threw outside every per-action guard, so these actions were never applied and dispatch was reset. The preceding error names the cause — a common one is a non-plain value (typed array, Map/Set) in cell state under freezeState. Retry the actions once the cause is fixed. \`am logs\` shows the preceding error.`;
     case "MEMORY_PRESSURE":
-      return `Tip: Heap usage rising. Check per-cell state sizes — prune unbounded arrays or move large data to SQLite.`;
+      return `Tip: Heap usage rising. Check per-cell state sizes — prune unbounded arrays or move large data to SQLite. See docs/debugging/troubleshooting.md (S5).`;
     case "MEMORY_CRITICAL":
       return `Tip: Heap critically high — OOM imminent. Emergency prune large state or increase memory limit with --v8-flags=--max-old-space-size=N.`;
     case "BUDGET_REDUCE":
@@ -619,7 +632,7 @@ export function generateTip(err: AioError): string | undefined {
       // on restart" about a row that is on disk is the one sentence a
       // durability report must never say falsely.
       if (err.original?.name === PERSIST_WRITTEN_ANYWAY) {
-        return "Tip: The write still happened and is on disk. The message names what the store could not keep exactly (a value JSON changes on the way, a cell over the size limit, a version stamp that was skipped) — fix that at its source.";
+        return "Tip: The write still happened and is on disk. The message names what the store could not keep exactly (a value JSON changes on the way, a cell over the size limit, a version stamp that was skipped) — fix that at its source. See docs/persistence/how-it-works.md.";
       }
       // The disk advice only when the failure IS a disk-class failure: a
       // planner refusal ("bound to a state value that is not an array"), a
@@ -638,11 +651,15 @@ export function generateTip(err: AioError): string | undefined {
         /os error|\bE(ACCES|NOSPC|ROFS|PERM|IO|BUSY|MFILE|DQUOT)\b|permission denied|no space|disk is full|read-?only|SQLITE_(FULL|READONLY|CANTOPEN|IOERR|BUSY|LOCKED)|disk i\/o|database is locked|unable to open database/i
           .test(cause);
       return disk
-        ? "Tip: State persist failed — changes are in memory but will be lost on restart. Check disk space and file permissions."
-        : "Tip: State persist failed — changes are in memory but will be lost on restart. The message names what the store refused (a row shape, a constraint, a value it cannot hold) — fix that at its source; this does not look like a disk-space or permissions failure.";
+        ? "Tip: State persist failed — changes are in memory but will be lost on restart. Check disk space and file permissions (\`df -h\` and the owner of the app's data dir)."
+        : "Tip: State persist failed — changes are in memory but will be lost on restart. The message names what the store refused (a row shape, a constraint, a value it cannot hold) — fix that at its source; this does not look like a disk-space or permissions failure. See docs/persistence/how-it-works.md.";
     }
     case "PERSIST_SCHEMA":
-      return "Tip: Stored state and framework persistence-schema versions are incompatible. Upgrade aio (older store) or restore a backup (newer store); as a last resort clear the app's KV store.";
+      return "Tip: Stored state and framework persistence-schema versions are incompatible. Upgrade aio (older store) or restore a backup (newer store); as a last resort clear the app's KV store. \`am backup\` first; see docs/persistence/how-it-works.md.";
+    case "TX_CONFLICT":
+      // The message names the three ways out; this names where they are
+      // explained. It was the one emitted code with no tip at all.
+      return 'Tip: a transactional method\'s reads went stale while it awaited. Read through `s.$live`, retry the call, or set `transaction: { conflict: "warn" }` — see docs/state/transactional-methods.md.';
     case "UI_FREEZE":
       return "Tip: The UI thread stalled — look for synchronous heavy work in render paths or event handlers. Compute-bound work belongs off-thread (schedule.blocking on the server, a Worker in the browser); splitting it across frames only hides it.";
     case "TRANSPORT_STALL":
@@ -872,8 +889,15 @@ export function reportError(err: AioError, opts: ReportErrorOpts = {}): void {
     // and the diagnostic bus below still see every occurrence).
     const { suppress, coalesced } = _perfThrottle(err);
 
+    // A refusal (the method threw on purpose) is the method's answer, not a
+    // crash: one info line, no box, no "check the payload" advice.
+    const rejected = err.context.rejected;
+    if (rejected !== undefined && !suppress) {
+      log.info("cell", rejected);
+    }
+
     // Console output
-    if (!suppress) {
+    if (rejected === undefined && !suppress) {
       const suffix = coalesced > 0
         ? ` (${coalesced} more suppressed in the last ${
           _perfThrottleMs / 1000
@@ -902,8 +926,12 @@ export function reportError(err: AioError, opts: ReportErrorOpts = {}): void {
       // that throws on every dispatch, a payload a client can craft) fills the
       // disk while the console stays tidy. Nothing reports a log eating a disk.
       payload.stateSnapshot = boundSnapshot(err.stateSnapshot);
-      const write = isWarn && logger.warn ? logger.warn : logger.error;
-      write(formatErrorCompact(err), payload);
+      const write = rejected !== undefined
+        ? logger.info ?? logger.warn ?? logger.error
+        : isWarn && logger.warn
+        ? logger.warn
+        : logger.error;
+      write(rejected ?? formatErrorCompact(err), payload);
     }
 
     // onError hook (guarded) — BOTH ways it can fail. The type says `void`, but

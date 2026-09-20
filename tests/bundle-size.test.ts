@@ -120,9 +120,41 @@ const CEILING_GZ = {
   //     dblclick, pointer hover, Escape on a modal). It runs in the page, so
   //     production downloads it too — the dev-only chunk (todo.md, 9.3 KB gz
   //     measured) is where this comes back.
-  air: 86,
+  //
+  // Raised 86 → 87 on 2026-09-20 (measured 87; app 90), +1.1 KB gz for four
+  // field-report fixes, every one of them with a red-without-it test:
+  //   · ui-trigger (+0.6 KB gz) — constraint validation on implicit submit.
+  //     The harness ran a submit the browser refuses (a `type="number"`
+  //     holding "1.5" with the default step of 1), so a form that was dead in
+  //     the app was green in every test; the refusal names the field and
+  //     quotes the browser's own message, which is the half a DOM without
+  //     `validationMessage` cannot supply.
+  //   · renderer-rerender (+0.35 KB gz) — the render-burst tripwire's three
+  //     origins. It claimed "a render is WRITING state that the same render
+  //     READS" for renders driven from outside, and named no dependency; it
+  //     now names the writer, the lifecycle hook, or neither, plus the signals
+  //     that fired the renders.
+  //   · vdom-remove / vdom-diff (+0.15 KB gz) — `_liveFirstDom`, which also
+  //     stopped a node RESURRECTING (an auto-memo skip re-inserted the
+  //     detached node a nested component had swapped away).
+  //
+  // Raised 87 → 88 on 2026-09-20 (measured 88; app 91), +0.7 KB gz for the
+  // review round over those four fixes, each with a red-without-it test:
+  //   · ui-trigger — the validation refusal was refusing what Chromium
+  //     SUBMITS: a `preventDefault()` in a submit button's `onClick` was
+  //     invisible (AIR delegates click to the mount root, so the app's
+  //     handler runs after the probe's), `<fieldset disabled>` descendants
+  //     were not barred, the step base is `min` rather than 0, and
+  //     minlength/maxlength were applied to a value the user never edited.
+  //     A harness that refuses a working form is the same defect as one that
+  //     accepts a broken one.
+  //   · renderer-rerender — "the renders were fired by …" read the DevTools
+  //     feed, which is only drained while a DevTools handle is attached, so
+  //     with nobody looking it named every dependency that had ever fired
+  //     that instance. The clause now reads the burst's own signals.
+  air: 88,
   /** The same, plus one cell — measured 2 KB, which is what a cell costs. */
-  app: 89,
+  app: 91,
 };
 
 const RUN = Deno.env.get("AIO_BUNDLE_SIZE") === "1";

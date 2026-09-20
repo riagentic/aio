@@ -69,10 +69,14 @@ testUI(App, "add a todo end-to-end", async (ui) => {
   - `press("Enter")` in a text field fires `change`, then runs HTML **implicit
     submission**: the form's first submit button is CLICKED (its `onClick` runs,
     `e.submitter` names it); a disabled one means no submit; with no submit
-    button the form submits only if it has at most one text-like field. In a
-    `<textarea>` Enter inserts `"\n"`; on a button, link or `<summary>` it
-    clicks. `press(" ")` on a button or checkbox clicks it. `press("Escape")`
-    closes the top modal `<dialog>` (`cancel`, then `close`).
+    button the form submits only if it has at most one text-like field.
+    Constraint validation then runs: an invalid field (a blank `required`, a
+    `type="number"` holding `"1.5"` with the default `step` of 1) refuses the
+    submit and throws with the field and its message, exactly where a browser
+    shows its bubble and submits nothing — `novalidate` on the `<form>` opts
+    out. In a `<textarea>` Enter inserts `"\n"`; on a button, link or
+    `<summary>` it clicks. `press(" ")` on a button or checkbox clicks it.
+    `press("Escape")` closes the top modal `<dialog>` (`cancel`, then `close`).
   - `click()` moves focus to the clicked control (a non-focusable target blurs)
     and commits the field being edited (`change`) first.
   - `type()` fires `keydown` · `keypress` · `beforeinput` · `input` · `keyup`,
@@ -144,9 +148,12 @@ testUI(App, "add a todo end-to-end", async (ui) => {
   read real time plus the time advanced, so `schedule.at(Date.now() + 5000)`
   written after `advance(10_000)` fires 5 s later, and a TTL checked against
   `Date.now()` expires. The real `Date` is back when the mount is disposed;
-  `performance.now()` is never moved. What it does NOT move is anything on a raw
-  `setTimeout`, including `aio/ui`'s `toast()` auto-dismiss: give that a short
-  `duration` and `await ui.waitFor(() => ui.absent("…"))`.
+  `performance.now()` is never moved. `sleep(ms)` and `race`'s `timeout: ms`
+  branch answer to it too: `advance(10_000)` ends a method's
+  `await sleep(10_000)` (without an advance they still end in real time, as
+  before). What it does NOT move is anything on a raw `setTimeout`, including
+  `aio/ui`'s `toast()` auto-dismiss: give that a short `duration` and
+  `await ui.waitFor(() => ui.absent("…"))`.
 - **`settle()`, `waitFor` and `expectCell` run what is already due** — a
   `schedule.next` or `schedule.after(id, 0, …)` runs right after the method, as
   a real server runs it. Anything later still waits for `advance(ms)`.
@@ -322,6 +329,12 @@ code would reach — `ui.window.dispatchEvent(new ui.window.Event("resize"))`,
 `ui.document.activeElement`, a listener registered where the component's one
 lives. `localStorage` is a fresh in-memory store per mount (`{ persist: true }`
 keeps it). Nothing is installed twice: a `document` you pass in is used as-is.
+
+There is no HTTP server under `testUI`, so a component's relative
+`fetch("/media/x.txt")` fails — with an error that says so and points to
+`testServer()` (below), instead of Deno's bare `Invalid URL`. To test the
+component alone, replace `globalThis.fetch` before the mount; a stub you install
+is called first and keeps answering relative URLs.
 
 For the binding every app needs, there is a primitive:
 

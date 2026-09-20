@@ -362,6 +362,21 @@ async loadItems(s) {
 Supported array mutators: `push`, `pop`, `shift`, `unshift`, `splice`, `sort`,
 `reverse`, `fill`, `copyWithin`.
 
+A key named `__proto__` (it can only reach state as parsed JSON data) is
+readable, but an async method refuses any write whose path runs through it —
+`delete s.m.__proto__`, `s.m.__proto__.a = 1`, or `s.y = { ...s.m }` copying it
+along with live state. The error names the cell, the method and the path. Rename
+such keys where the data enters state (e.g. prefix user-supplied keys:
+`"k:" + key`). Assigning a key of that name (`s.c["__proto__"] = v`) is refused
+in both method kinds.
+
+An async method's write is capped at **32 path levels** (`s.a.b.….x` counting
+every key, `s` excluded) — the same bound restore merges state to. A deeper
+write, or a value holding live state from deeper than that, throws at the write,
+naming the path and its depth; a sync method has no such cap. Flatten the
+structure (an id-keyed map of nodes rather than literal nesting), or make that
+write from a sync method.
+
 ### Read patterns
 
 The live proxy supports the read patterns you'd expect:
@@ -543,6 +558,21 @@ change — but if the disposer tears down something the new resource needs (one
 app's `close()` stopped a server process, so re-registering after a crash
 SIGTERMed the freshly started one), give each resource its own id. Dev warns,
 once per key, when a `set` displaces a live resource.
+
+When replacing IS the point — one workspace watcher, swapped whenever another
+folder opens — say so at the call, and that call stays quiet:
+
+```ts
+s.$do(own.set("workspace:watcher", () => watchDir(dir, onChange), {
+  replace: true, // one watcher at a time: the previous one is disposed, silently
+}));
+```
+
+`{ replace: true }` changes nothing about what happens (the previous disposer
+still runs first); it only tells dev that the replace was intended, for that
+call. Every other `own.set` of the key still warns, and an unknown option or a
+non-boolean `replace` throws. `aiol`'s constant-key rule accepts it too, so it
+replaces an `// aiol-ok: one … at a time` comment.
 
 **Getting a value back out of the factory** (a pid, a port, a handle the UI must
 show): the factory's return value is the DISPOSER — it does not flow into state,

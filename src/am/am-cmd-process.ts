@@ -92,6 +92,68 @@ const DENO_RUNTIME_FLAG =
   /^(--env-file|--env|--config|--no-config|--import-map|--importmap|--reload|--no-remote|--cached-only|--lock|--no-lock|--frozen|--cert|--unstable|--unstable-[\w-]+|--v8-flags|--seed|--location|--inspect|--inspect-brk|--inspect-wait|--allow-[\w-]+|--deny-[\w-]+|--no-npm|--node-modules-dir|--vendor)(=|$)/;
 const isDenoRuntimeFlag = (a: string): boolean => DENO_RUNTIME_FLAG.test(a);
 
+/** The positional WORDS an app's own `dev` task hands its entry — `serve` in
+ *  `deno run -A src/app.ts serve`. Flags are deliberately excluded: they are
+ *  am's to decide (--client, --port, the display plan), and only the command
+ *  word is a fact about the app that am cannot derive any other way.
+ *
+ *  The `cli` scaffold is ONE binary with two roles and routes on that word, so
+ *  `deno run -A src/app.ts` with no word exits 2 with "missing command — run
+ *  `todo --help`". That was fixed for `deno task dev` and nowhere else, so
+ *  `am start` — the form the scaffold's own README tells an agent to use,
+ *  because `deno task dev` dies with its terminal — was dead on arrival for
+ *  that template. The dev task is the app's declaration of how it starts;
+ *  reading it is what keeps the two from differing again.
+ *
+ *  A task is a SHELL line, and am is not a shell. So only a plain positional
+ *  word is taken, and the first token that is anything else ends the read: an
+ *  operator (`&& || ; | &`), a redirection, a quote, a `$` or a backtick. The
+ *  naive "every token that does not start with `-`" handed the child argv it
+ *  never should have seen —
+ *
+ *    deno run -A <entry> serve --title="My App"  → serve, App"
+ *    deno run -A <entry> serve && echo done      → serve, &&, echo, done
+ *    deno run -A <entry> > out.log 2>&1          → >, out.log, 2>&1
+ *
+ *  — which is the "child exited immediately, it said: unknown command" this
+ *  function was written to remove, re-created for a different task line. A
+ *  quoted entry (`deno run -A "<entry>" serve`) matched no token at all, so
+ *  the word was dropped and the cli scaffold was quietly broken again.
+ *
+ *  Pure: no task, no match, or no words → nothing added, today's launch. */
+/** A character that makes a token the shell's business rather than an argument:
+ *  an operator or redirection (`& | ; < >`), a quote, a variable or command
+ *  substitution (`$`, a backtick), a subshell/group, or a glob. Listed as what
+ *  DISQUALIFIES a token rather than as an allowlist of what a word may contain,
+ *  so an ordinary argument am has not thought of — `mode=dev`, a non-ASCII
+ *  command word — is still passed on. */
+const SHELL_CHAR = /[&|;<>$`(){}\[\]*?!~\\'"]/;
+/** A double- or single-quoted entry names the same file the bare token does. */
+const unquote = (t: string): string =>
+  (t.length > 1 && (t[0] === '"' || t[0] === "'") && t.at(-1) === t[0])
+    ? t.slice(1, -1)
+    : t;
+
+export function entryTaskWords(
+  devTask: string | undefined,
+  entry: string,
+  root: string,
+): string[] {
+  if (!devTask) return [];
+  const tokens = devTask.split(/\s+/).filter(Boolean);
+  const at = tokens.findIndex((t) =>
+    !t.startsWith("-") && resolve(root, unquote(t)) === resolve(entry)
+  );
+  if (at < 0) return [];
+  const words: string[] = [];
+  for (const t of tokens.slice(at + 1)) {
+    if (t.startsWith("-")) continue; // a flag — am decides those
+    if (SHELL_CHAR.test(t)) break; // the shell's, not this command's
+    words.push(t);
+  }
+  return words;
+}
+
 /** Assemble the `deno run` argv: runtime flags (--env-file, …) BEFORE the entry
  *  script, app flags (--port, …) after it — placement Deno requires. Exported
  *  so the ordering contract is unit-tested. */
@@ -748,9 +810,17 @@ export async function cmdStart(
   const cwd = projectRoot();
   writeLaunchInfo(appId, { flags: [...passthrough], entry, cwd });
   if (reused !== undefined) passthrough.push(`--port=${reused}`);
+  // The command word this app's own `dev` task gives its entry (`serve`), in
+  // FRONT of the flags — the cli scaffold routes on `Deno.args[0]`. Derived at
+  // every launch rather than recorded: the launch info is REPLAYED by
+  // `am restart`, where a positional would be read as a component label.
+  const devTasks = ((await readDenoJson(cwd))?.config ?? {}) as {
+    tasks?: Record<string, string>;
+  };
+  const words = entryTaskWords(devTasks.tasks?.dev, entry, cwd);
   // Deno-runtime flags before the entry script; app flags after it (see
   // buildDenoArgs) — a misplaced --env-file is silently ignored by Deno.
-  const denoArgs = buildDenoArgs(entry, passthrough);
+  const denoArgs = buildDenoArgs(entry, [...words, ...passthrough]);
 
   // Detached background spawn — the child must survive am's exit, its output
   // must land in the log file, and its real PID must come back on stdout. The

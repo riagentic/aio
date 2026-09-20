@@ -1172,6 +1172,8 @@ export async function cmdCreate(
       template: opts.template,
       target: opts.target,
       aioVersion: pinnedVersion ?? null,
+      /** Where `dep/aio` points (source mode), or null for JSR pins. */
+      framework: aioPath ?? null,
       files: Object.keys(files),
       git,
       /** The home an earlier app with this appId left, or null. */
@@ -1200,6 +1202,7 @@ export async function cmdCreate(
       }`,
       `    ${dim(dir)}`,
       `    ${dim(gitSentence(git))}`,
+      `    ${dim(frameworkSentence(pinnedVersion, aioPath, !!opts.mirror))}`,
       ...(existingData
         ? [`  ${st.yellow("⚠")} ${priorAppDataLine(appId, existingData)}`]
         : []),
@@ -1989,3 +1992,18 @@ export default function App(): JSX.Element {
   );
 }
 `;
+
+/** Which framework the new app runs — said, not left to be discovered. The
+ *  F3 benchmark's agent found `dep/aio` pointing at the installed release,
+ *  not the checkout it expected, and "nothing said this would happen". */
+export function frameworkSentence(
+  pinned: string | undefined,
+  aioPath: string | undefined,
+  mirror: boolean,
+): string {
+  if (!aioPath) return `framework aio ${pinned ?? VERSION} from JSR (--jsr)`;
+  return mirror
+    ? `framework: your checkout, live · dep/aio → ${aioPath}`
+    : `framework aio ${pinned ?? "?"} (release pin) · dep/aio → ${aioPath} · ` +
+      `--mirror=<checkout> to build against a local tree`;
+}

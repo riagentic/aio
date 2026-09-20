@@ -2,8 +2,14 @@
 // error mapping, bitmask hygiene — proven on every OS. The FFI half runs only
 // on windows (and under Wine in CI: tests/wine-pipe-e2e.test.ts).
 
-import { assert, assertEquals, assertMatch } from "@std/assert";
 import {
+  assert,
+  assertEquals,
+  assertMatch,
+  assertStringIncludes,
+} from "@std/assert";
+import {
+  entryOverlapped,
   ERROR_BROKEN_PIPE,
   ERROR_FILE_NOT_FOUND,
   ERROR_INVALID_HANDLE,
@@ -17,16 +23,16 @@ import {
   GENERIC_WRITE,
   INVALID_HANDLE_VALUE,
   isPeerGoneError,
+  OVERLAPPED_ENTRY_SIZE,
   overlappedBytes,
   overlappedEvent,
   PIPE_ACCESS_DUPLEX,
+  PIPE_DRAIN_TIMEOUT_MS,
   PIPE_SDDL,
   readU32,
   readU64,
   securityAttributesBytes,
   u32,
-  WAIT_OBJECT_0,
-  waitFailed,
   winError,
   wstr,
 } from "../src/server/win-pipe.ts";
@@ -138,19 +144,87 @@ Deno.test("isPipePath: exactly the \\\\.\\pipe\\ namespace", () => {
   assert(!isPipePath("//./pipe/x"));
 });
 
-// `WaitForSingleObject`'s return value used to be discarded, so a wait that
-// FAILED fell through to `GetOverlappedResult` on an operation that had never
-// completed — reporting whatever `GetLastError` held under the wrong call's
-// name. With `INFINITE` there is no timeout to tolerate: signalled or broken.
-Deno.test("win-pipe: only WAIT_OBJECT_0 means the wait completed", () => {
-  assertEquals(WAIT_OBJECT_0, 0);
-  assertEquals(waitFailed(WAIT_OBJECT_0), false);
-  // WAIT_ABANDONED (0x80), WAIT_TIMEOUT (0x102) and WAIT_FAILED (0xFFFFFFFF)
-  // are all "the wait did not complete normally" — none of them may be read as
-  // an operation that finished.
-  for (const rc of [0x80, 0x102, 0xFFFFFFFF, 1, 42]) {
-    assertEquals(waitFailed(rc), true, `rc=0x${rc.toString(16)}`);
-  }
+// ── One parked thread, whatever the connection count (field report §13) ──
+//
+// Every pending operation used to park its own `nonblocking: true`
+// `WaitForSingleObject` on a blocking-pool thread, and every open connection
+// ALWAYS has a pending read. The pool is capped (4×cores on Windows, 32 on
+// unix), so past the cap every further nonblocking FFI call and every async
+// fs op queued behind waits only queued work could release: a permanent
+// freeze of the whole app. Measured on Windows 11 — 40 idle clients hung, 40
+// never-read responses hung, server threads 11 → 39 — and reproduced in the
+// Wine rig, where the host stops answering at 4×cores+16 clients.
+//
+// The shape that fixes it cannot be unit-tested on Linux, but the RULE can:
+// no per-operation blocking wait may exist in this file at all.
+Deno.test("win-pipe: no per-operation blocking wait — the completion port is the only one", async () => {
+  const src = await Deno.readTextFile(
+    new URL("../src/server/win-pipe.ts", import.meta.url),
+  );
+  const code = src.replace(/\/\/[^\n]*|\/\*[\s\S]*?\*\//g, "");
+  assertEquals(
+    code.includes("WaitForSingleObject"),
+    false,
+    "one wait per pending operation is the deadlock — operations complete " +
+      "onto the I/O completion port",
+  );
+  // Every blocking-pool call in the file, named, with why it is bounded.
+  const parked = [...code.matchAll(/(\w+):\s*\{[^}]*nonblocking:\s*true/g)]
+    .map((m) => m[1]);
+  // …and the COUNT, independently of the shape the symbol is written in.
+  // The name-matching regex above stops at the first `}`, so a declaration
+  // holding a nested object (`parameters: [{ struct: [...] }]`, a struct
+  // `result`) hides its `nonblocking: true` from it — a new unbounded parked
+  // call could then be added with this gate still green. Verified by adding
+  // exactly that symbol: the list below stayed correct, this count did not.
+  assertEquals(
+    (code.match(/nonblocking:\s*true/g) ?? []).length,
+    parked.length,
+    "a `nonblocking: true` the name list above cannot see — every parked FFI " +
+      "call must be NAMED here, whatever shape its declaration is written in",
+  );
+  assertEquals(
+    parked.sort(),
+    // GetQueuedCompletionStatusEx: ONE, for the whole process, only while
+    // something is pending. FlushFileBuffers: bounded by PIPE_DRAIN_TIMEOUT_MS,
+    // then the connection is closed. WaitNamedPipeW: bounded, 2 s, and only
+    // when every pipe instance is mid-connect.
+    ["FlushFileBuffers", "GetQueuedCompletionStatusEx", "WaitNamedPipeW"],
+    "a new parked FFI call needs a bound — an unbounded one is the freeze",
+  );
+  // The drain's bound is a number, and the timeout closes the connection.
+  assert(Number.isFinite(PIPE_DRAIN_TIMEOUT_MS) && PIPE_DRAIN_TIMEOUT_MS > 0);
+  const drain = code.slice(code.indexOf("async drain("));
+  assertStringIncludes(
+    drain.slice(0, drain.indexOf("async #write")),
+    "this.close()",
+    "a peer that stops reading must cost a CLOSED connection",
+  );
+});
+
+Deno.test("OVERLAPPED_ENTRY: lpOverlapped at offset 8 identifies the operation", () => {
+  assertEquals(OVERLAPPED_ENTRY_SIZE, 32);
+  const entries = new Uint8Array(OVERLAPPED_ENTRY_SIZE * 3);
+  const v = new DataView(entries.buffer);
+  v.setBigUint64(0 * 32 + 8, 0x1111_2222_3333_4440n, true);
+  v.setBigUint64(1 * 32 + 8, 0x0000_0000_dead_beefn, true);
+  v.setBigUint64(2 * 32 + 8, 0x7fff_ffff_ffff_fff0n, true);
+  assertEquals(entryOverlapped(entries, 0), 0x1111_2222_3333_4440n);
+  assertEquals(entryOverlapped(entries, 1), 0xdeadbeefn);
+  assertEquals(entryOverlapped(entries, 2), 0x7fff_ffff_ffff_fff0n);
+  // A completion key or a byte count must never be mistaken for it.
+  v.setBigUint64(1 * 32, 0xffff_ffff_ffff_ffffn, true); // lpCompletionKey
+  v.setUint32(1 * 32 + 24, 4096, true); // bytes transferred
+  assertEquals(entryOverlapped(entries, 1), 0xdeadbeefn);
+});
+
+// An OVERLAPPED whose hEvent has its LOW BIT SET tells the kernel to skip the
+// completion port — the operation would then complete into nothing and its
+// promise would never settle. Every OVERLAPPED this module starts carries 0.
+Deno.test("win-pipe: hEvent is NULL, so the completion goes to the port", () => {
+  const o = overlappedBytes(0n);
+  assertEquals(overlappedEvent(o), 0n);
+  assertEquals(overlappedEvent(o) & 1n, 0n, "a set low bit skips the port");
 });
 
 // Measured on real Windows 11 (2026-09-18): `DisconnectNamedPipe` on the

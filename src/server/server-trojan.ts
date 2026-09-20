@@ -85,6 +85,8 @@ export interface TrojanDeps {
       after?: number,
       limit?: number,
     ) => import("./timeline.ts").TimelineEntry[];
+    /** Has the live ring dropped anything since boot (by count or bytes)? */
+    getTimelineRotated?: () => boolean;
     /** Boot migration + shape-drift picture. */
     getMigrations?: () =>
       | import("./aio-boot.ts").MigrationSummary
@@ -100,6 +102,10 @@ export interface TrojanDeps {
     /** Cell id → method name → required argument count (methods-form cells). */
     cellMethodArity?: () => Record<string, Record<string, number>>;
     cellFields?: () => import("./aio-types.ts").CellFieldFlags;
+    /** Cell id → the running build's `version` and whether it converts
+     *  state across versions (declares `onMigrate`) — what `am replay` checks
+     *  a journal line's version stamp against. */
+    cellVersions?: () => Record<string, { version: number; migrates: boolean }>;
     udsClients?: () => { index: number; id: string }[];
     requestUdsClientState?: (index: number, msg?: string) => Promise<unknown>;
   };
@@ -529,8 +535,13 @@ function handleGet(
     if (!after.ok) return err(after.error, 400);
     const limit = numParam(q, "limit", { min: 1 });
     if (!limit.ok) return err(limit.error, 400);
+    // `rotated`: the ring is bounded by retained BYTES as well as by count,
+    // so a reader cannot infer "earlier dispatches are gone" from the entry
+    // count alone — it is said.
+    const rotated = trojan.getTimelineRotated?.();
     return json({
       entries: trojan.getTimeline?.(after.value, limit.value) ?? [],
+      ...(rotated !== undefined ? { rotated } : {}),
     });
   }
 
@@ -552,6 +563,7 @@ function handleGet(
   // Cell id → method names — the surface for "run a method" buttons.
   if (route === "cells") return json(trojan.cellMethods?.() ?? {});
   if (route === "fields") return json(trojan.cellFields?.() ?? {});
+  if (route === "cell-versions") return json(trojan.cellVersions?.() ?? {});
 
   if (route === "metrics") {
     // Per-cell serialized state size — the "why is it slow / heavy" signal

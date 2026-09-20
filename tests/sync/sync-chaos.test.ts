@@ -239,6 +239,17 @@ async function runEpisode(seed: number, stats: Stats): Promise<void> {
 
   _resetServerTsForTest();
   const { db, close } = createTestDb();
+  // Declared OUT here so the teardown can reach it: every engine below is a
+  // real one, and a real one owns a send pacer whose drain timer RE-ARMS
+  // itself for as long as frames are queued (`send-pacer.ts` `arm`/`drain`).
+  // The engine's `dispose()` is what disarms it — the episode never called it,
+  // so an episode that ended with the pacer still holding paced op frames
+  // (every one of them already confirmed by then: the invariants above prove
+  // the buffers drained) left a ~17 ms timer armed. Whether the last episode
+  // of a 60-episode run ends that way depends on the schedule AND on how long
+  // the settle phase took, which is why the parallel suite saw "a timer was
+  // started in this test, but never completed" and a lone run did not.
+  const clients: Client[] = [];
   try {
     // Ground truth: every op id issued, and every one the server refused.
     // The ledger is keyed by the PAYLOAD id (what the reducer journals); the
@@ -258,7 +269,6 @@ async function runEpisode(seed: number, stats: Stats): Promise<void> {
       const action = a.type.slice(idx + 1);
       serverState[cell] = reduceCell(serverState[cell]!, action, a.payload);
     };
-    const clients: Client[] = [];
     const broadcastRaw = {
       fn: (msg: string, exclude?: WebSocket) => {
         for (const c of clients) {
@@ -725,6 +735,9 @@ async function runEpisode(seed: number, stats: Stats): Promise<void> {
       stats.clientDedupDrops += c.dedupDrops();
     }
   } finally {
+    // What a real page does when its connection goes away — and what every
+    // engine here has been owed since the episode began.
+    for (const c of clients) c.engine.dispose();
     close();
   }
 }

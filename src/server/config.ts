@@ -1,7 +1,12 @@
 import { log } from "../diagnostics/logger-api.ts";
 import { inertAllowlistEntries } from "./server-auth.ts";
+import { MAX_SESSION_TTL_MS } from "./sessions.ts";
 import { teachMessage } from "../diagnostics/error.ts";
-import { hasBothFilterModes, nearestOf } from "../state/cell-helpers.ts";
+import {
+  hasBothFilterModes,
+  namesNoFilterMode,
+  nearestOf,
+} from "../state/cell-helpers.ts";
 import { classifySource } from "./updates-core.ts";
 import { type Removal, removalsInDenoJson } from "../state/removals.ts";
 
@@ -257,6 +262,7 @@ export const VALID_AIO_CONFIG_KEYS = new Set<string>([
   "_onCheckpointRestore",
   "_cellNames",
   "_pluginNames",
+  "_refusalsReject",
   "_workerCells",
   "_workerEntry",
   "_healthGetter",
@@ -275,6 +281,7 @@ export const VALID_AIO_CONFIG_KEYS = new Set<string>([
   "_cellMethodArity",
   "_cellFields",
   "_cellPersist",
+  "_cellPersistShaped",
   "_cellMigrations",
   "_cellRestores",
   "_cellVersions",
@@ -428,7 +435,10 @@ export const CONFIG_DOCS: Record<string, [string, string]> = {
     "undefined",
     "bind ONE address instead of the expose default (same as --host=; the flag wins)",
   ],
-  baseDir: ['"./src"', "source directory for transpilation"],
+  baseDir: [
+    "main module's dir",
+    "source directory the dev server serves (a compiled binary falls back to <cwd>/src)",
+  ],
   client: ['"electron"', '"electron" | "browser" | "cli" | "server-only"'],
   keepServer: ["false", "keep server running after client closes"],
   transport: ['"auto"', '"uds" | "ws" | "auto" — IPC transport'],
@@ -926,6 +936,9 @@ export function validateConfig(
       exit(1);
     }
   }
+  // The SHAPE — see `refuseWrongShapes`, which `aio.run()` also calls before
+  // the plugin merge, because by here the merge has already read these keys.
+  refuseWrongShapes(obj, label, exit);
   // ── Couplings between keys that are each individually valid ──────────
   //
   // ── Nested objects, validated as configs in their own right ─────────
@@ -1099,6 +1112,19 @@ export const NUMERIC_VALUES: Record<string, NumericSpec> = {
 export const NESTED_CONFIGS: Record<string, () => Set<string>> = {
   ui: () => VALID_UI_KEYS,
   wsLimits: () => VALID_WS_LIMITS_KEYS,
+  // The SECURITY blocks. A misspelled key here was accepted in silence and
+  // the control the author asked for was simply absent: `sessions: { ttlMS }`
+  // kept the built-in thirty days for a five-minute session, `auth:
+  // { requireVerifed: true }` left email verification off, `tls: { certt }`
+  // broke the cert/key pair so a real certificate stopped being served, and
+  // the `updates` manifest-trust options went to the floor. Each of these is
+  // a union type (`auth: true`, `tls: "auto"`, `updates: "https://…"`), and
+  // the walk below enters only the object spelling — which is exactly when
+  // the keys exist to be misspelled.
+  auth: () => VALID_AUTH_KEYS,
+  sessions: () => VALID_SESSIONS_KEYS,
+  tls: () => VALID_TLS_KEYS,
+  updates: () => VALID_UPDATES_KEYS,
 };
 
 /** Every key of `WsLimits` (aio-types.ts). */
@@ -1107,6 +1133,204 @@ export const VALID_WS_LIMITS_KEYS: Set<string> = new Set([
   "messagesPerSec",
   "bytesPerSec",
 ]);
+
+/** Every key of `AuthOptions` (aio-types.ts) — both halves of the
+ *  `requireVerified`/`sendMail` intersection. */
+export const VALID_AUTH_KEYS: Set<string> = new Set([
+  "signup",
+  "ttlMs",
+  "cookie",
+  "totp",
+  "oidc",
+  "requireVerified",
+  "sendMail",
+]);
+
+/** Every key of the object spelling of `sessions` (aio-types.ts). */
+export const VALID_SESSIONS_KEYS: Set<string> = new Set(["ttlMs"]);
+
+/** Every key of the object spelling of `tls` (aio-types.ts). */
+export const VALID_TLS_KEYS: Set<string> = new Set(["cert", "key"]);
+
+/** Every key of `UpdatesConfig` (updates-core.ts). */
+export const VALID_UPDATES_KEYS: Set<string> = new Set([
+  "source",
+  "kind",
+  "auto",
+  "check",
+  "channel",
+  "key",
+  "keys",
+  "canApply",
+  "allowUnsigned",
+  "prerelease",
+]);
+
+/** The runtime SHAPE a config value must have. */
+export type ConfigShape = "boolean" | "object" | "array";
+
+/** Config keys whose value must have a given SHAPE — the third question about
+ *  an option, after "is this a real key" and "is this one of the words".
+ *
+ *  It had no answer at all, and the silence ran the wrong way every time:
+ *
+ *   • `expose: "false"` — the natural spelling of "I turned it off", and one a
+ *     deno.json can hold without a compiler ever seeing it — booted the app ON
+ *     THE NETWORK, because every reader of `expose` asks it for truthiness and
+ *     a non-empty string is truthy.
+ *   • `allowedOrigins: "https://app.example.com"` (one origin, not a list) was
+ *     spread and iterated as a STRING: `frameAncestors` walked it character by
+ *     character and the Origin gate became a substring test.
+ *   • `wsLimits: 5`, `ui: 42` were dropped WHOLE — the nested pass below skips
+ *     anything that is not a plain object, so every option inside them
+ *     vanished without a line. The WS DoS guard stack and the window/theme
+ *     block are exactly the two whose absence is invisible until it matters.
+ *   • `cells: {}` booted an app with no cells.
+ *
+ *  `tests/config-shape-values.test.ts` reads the declarations out of
+ *  `aio-types.ts` and refuses a public `?: boolean` or `?: T[]` option that is
+ *  missing here, so the table cannot fall behind the type. */
+export const SHAPE_VALUES: Record<string, ConfigShape> = {
+  // ── plain booleans ────────────────────────────────────────────────────
+  expose: "boolean",
+  persist: "boolean",
+  checkIntegrityOnBoot: "boolean",
+  strictOrigin: "boolean",
+  keepServer: "boolean",
+  takeover: "boolean",
+  freezeState: "boolean",
+  singleton: "boolean",
+  libraryMode: "boolean",
+  fatalOnStart: "boolean",
+  guardDispatches: "boolean",
+  journal: "boolean",
+  childWindows: "boolean",
+  strictCells: "boolean",
+  refusalsReject: "boolean",
+  localFirst: "boolean",
+  showStatus: "boolean",
+  layout: "boolean",
+  // ── lists ─────────────────────────────────────────────────────────────
+  cells: "array",
+  allowedOrigins: "array",
+  appFlags: "array",
+  dbPragmas: "array",
+  redactActions: "array",
+  isolate: "array",
+  plugins: "array",
+  // `schedules` is deliberately NOT here: `validateSchedules` already owns
+  // its container AND its entries, and it THROWS (catchable, with the entry
+  // named) where this table exits. Two gates on one key is the shape this
+  // repo keeps removing — see the exemption list in
+  // tests/config-shape-values.test.ts, which is what keeps this an omission
+  // on purpose rather than a gap.
+  // ── blocks ────────────────────────────────────────────────────────────
+  ui: "object",
+  wsLimits: "object",
+  routes: "object",
+  serveDirs: "object",
+  assets: "object",
+  db: "object",
+  perfBudget: "object",
+  budgets: "object",
+  renderBudget: "object",
+  memory: "object",
+  circuitBreaker: "object",
+  security: "object",
+  cellDefaults: "object",
+};
+
+/** Refuse every {@linkcode SHAPE_VALUES} key whose value is not the shape the
+ *  key needs — the shape pass of {@linkcode validateConfig}, split out so it
+ *  can run BEFORE the first reader rather than beside the other two questions.
+ *
+ *  It has to. `aio.run()` merges plugins FIRST, deliberately ("before any
+ *  other config key is read, so no code path can be written that forgets
+ *  plugins exist"), and that merge READS the very keys this table guards:
+ *
+ *      allowedOrigins: [...new Set([...(fc.allowedOrigins ?? []), ...plugin])]
+ *
+ *  Spreading a bare string yields its CHARACTERS. So with any plugin loaded,
+ *  `allowedOrigins: "https://app.example.com"` reached `validateConfig` as a
+ *  perfectly good array of 23 one-character origins, passed, and turned the
+ *  Origin gate into the substring test this table was written to stop —
+ *  measured: exit 1 without a plugin, booted clean with one. `routes` is the
+ *  same shape of hole (a spread string is an object), and `plugins` itself is
+ *  read one line earlier still.
+ *
+ *  One decider, called at two moments: `validateConfig` still runs it, so a
+ *  caller that never reaches the early call is not left ungated, and the
+ *  second run is a no-op because a valid shape cannot be merged into an
+ *  invalid one.
+ *
+ *  `null` and `undefined` stay "not said" — `pick`'s documented meaning in
+ *  config-sources.ts, the ONE decider, and a gate that read them differently
+ *  would be a second one. */
+export function refuseWrongShapes(
+  obj: Record<string, unknown>,
+  label: string,
+  exit: (code: number) => never = Deno.exit as (code: number) => never,
+): void {
+  for (const [key, shape] of Object.entries(SHAPE_VALUES)) {
+    const v = obj[key];
+    if (v === undefined || v === null) continue;
+    const bad = shapeRefusal(v, shape);
+    if (!bad) continue;
+    log.error(
+      teachMessage(
+        `${label}.${key} is ${describeValue(v)}, which is ${bad}`,
+        shapeFix(key, shape),
+      ),
+    );
+    exit(1);
+  }
+}
+
+/** A config value as the refusal should print it.
+ *
+ *  `JSON.stringify` is not safe on a value that arrived at this gate BECAUSE
+ *  it is the wrong kind of thing: it returns `undefined` for a function or a
+ *  symbol, and THROWS on a BigInt and on anything circular — so the one gate
+ *  whose whole job is to refuse a value would itself die on the value, with a
+ *  TypeError out of the validator instead of the sentence that names the key.
+ *  Pure. */
+function describeValue(v: unknown): string {
+  try {
+    return JSON.stringify(v) ?? String(v);
+  } catch {
+    // aio-ok: the fallback IS the answer — a value JSON cannot hold is
+    // described by its type, and the key and the fix carry the rest.
+    return typeof v === "object"
+      ? "an object that cannot be printed"
+      : `a ${typeof v}`;
+  }
+}
+
+/** Why `v` is not the `shape` the key needs — or `null` when it is. Pure. */
+export function shapeRefusal(v: unknown, shape: ConfigShape): string | null {
+  if (shape === "boolean") {
+    return typeof v === "boolean" ? null : `not true or false`;
+  }
+  if (shape === "array") {
+    if (Array.isArray(v)) return null;
+    return typeof v === "string"
+      ? "a bare string, not a list — it would be read one character at a time"
+      : "not a list";
+  }
+  if (Array.isArray(v)) return "a list, not a block of options";
+  return v !== null && typeof v === "object" ? null : "not a block of options";
+}
+
+/** The one-line fix half of a shape refusal. Pure. */
+export function shapeFix(key: string, shape: ConfigShape): string {
+  if (shape === "boolean") {
+    return `write ${key}: true or ${key}: false — anything else is read for ` +
+      `TRUTHINESS, so "false" and 0 do the opposite of what they read like`;
+  }
+  if (shape === "array") return `write ${key}: [ … ], one entry per item`;
+  return `write ${key}: { … } — any other value is dropped whole, and every ` +
+    `option inside it with it`;
+}
 
 /** Why `v` is not a value `spec` accepts — or `null` when it is. Pure. */
 export function numericRefusal(v: unknown, spec: NumericSpec): string | null {
@@ -1261,6 +1485,22 @@ export function configConflicts(
         doc: "docs/state/cells.md",
       });
     }
+  }
+
+  // ── 3b. a persist filter that names neither list — see `namesNoFilterMode` ──
+  if (namesNoFilterMode(defaults?.persist)) {
+    out.push({
+      level: "error",
+      keys: ["cellDefaults.persist"],
+      what:
+        `cellDefaults.persist names neither include nor exclude, so it is not a filter: ` +
+        `the boot report says persist=all and the store writes an empty document for ` +
+        `every cell it applies to — nothing survives a restart, silently`,
+      fix:
+        `use persist: "all" (store the whole slice) or persist: "none" (store nothing), ` +
+        `or name the fields with include/exclude`,
+      doc: "docs/state/cells.md",
+    });
   }
 
   // ── 4. updates: nothing polls, but a manual check auto-installs ──────
@@ -1455,8 +1695,12 @@ export function configConflicts(
   ) {
     if (raw === undefined) continue;
     const ttl = typeof raw === "number" ? raw : NaN;
-    const MAX_TTL = 100 * 365 * 24 * 60 * 60_000; // a century, generously
-    if (!Number.isFinite(ttl) || ttl <= 0 || ttl > MAX_TTL) {
+    // The STORE's bound, not a second copy of it: a gate that blesses a value
+    // `openSessionStore` then throws on is one fact validated twice, in two
+    // places, with two answers. `ttl < 1` for the same reason the store has
+    // it — under a millisecond, `now + ttlMs` IS `now`, so the session is born
+    // expired.
+    if (!Number.isFinite(ttl) || ttl < 1 || ttl > MAX_SESSION_TTL_MS) {
       out.push({
         level: "error",
         keys: [where],
@@ -1466,8 +1710,8 @@ export function configConflicts(
           }, which cannot become an expiry: a session's ` +
           `expiry is stored as \`now + ttlMs\`, and this app would boot, ` +
           `issue tokens, and then fail every request that presents one`,
-        fix: `use a positive number of milliseconds under a century — e.g. ` +
-          `${7 * 24 * 60 * 60_000} for a week`,
+        fix: `use a whole number of milliseconds, at least 1 and under a ` +
+          `century — e.g. ${7 * 24 * 60 * 60_000} for a week`,
         doc: "docs/auth/auth.md",
       });
     }

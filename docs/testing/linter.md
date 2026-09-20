@@ -48,16 +48,15 @@ Issues that can be auto-fixed are marked `[fixable]` in the output.
 
 **deno.json config additions:**
 
-| Fix                                | What it adds                                   |
-| ---------------------------------- | ---------------------------------------------- |
-| Remove `appId` from deno.json      | appId belongs in aio.run(), not deno.json      |
-| Add `appId` to aio.run()           | Derives from deno.json appId or directory name |
-| Add `nodeModulesDir: "auto"`       | npm package resolution                         |
-| Add `@types/react` import          | JSX type checking (intrinsic element types)    |
-| Add `esbuild` import               | Dev mode transpilation                         |
-| Add `compilerOptions` (jsx config) | JSX transform settings                         |
-| Add `dev` task                     | `deno run -A src/app.ts`                       |
-| Add `test` task                    | `deno test -A tests/`                          |
+| Fix                                | What it adds                                |
+| ---------------------------------- | ------------------------------------------- |
+| Add `appId` to aio.run()           | Only when there is no appId anywhere        |
+| Add `nodeModulesDir: "auto"`       | npm package resolution                      |
+| Add `@types/react` import          | JSX type checking (intrinsic element types) |
+| Add `esbuild` import               | Dev mode transpilation                      |
+| Add `compilerOptions` (jsx config) | JSX transform settings                      |
+| Add `dev` task                     | `deno run -A src/app.ts`                    |
+| Add `test` task                    | `deno test -A tests/`                       |
 
 **Source file cleanup:**
 
@@ -105,8 +104,9 @@ manual attention.
 
 Validates `deno.json` for common mistakes:
 
-- `appId` in deno.json (should be in `aio.run()`)
-- Missing `appId` in `aio.run()`
+- No `appId` anywhere (an error: it names the lock file and the data paths).
+  `appId` pinned in deno.json is the recommended place — dev and compiled builds
+  both read it; set in both deno.json and `aio.run()` is a hint
 - Missing required imports (`aio`, `esbuild`)
 - Missing `compilerOptions.jsx` for JSX
 - Missing `nodeModulesDir`
@@ -207,9 +207,12 @@ Static analysis of `cell()` calls:
   lexically inside a function/method with a parameter whose name is resource-id
   shaped (ends in `id`/`key`/`name`/`path`/`url`/`uri`/`host`/
   `port`/`file`/`dir`/`handle`/`addr`/`address`, case-insensitive), AND that
-  parameter appears in the call's remaining arguments (the factory). Fix:
-  ``own.set(`KEY:${id}`, …)`` — or `// aiol-ok: one KEY at a time` when
-  replacing is the intent.
+  parameter appears in the call's remaining arguments (the factory), and the
+  call's last argument is not `{ replace: true }`. Fix:
+  ``own.set(`KEY:${id}`, …)`` — or, when replacing is the intent, say so in the
+  runtime's words: `own.set("KEY", …, { replace: true })` (which also silences
+  the dev "already held" warning), or `// aiol-ok: one KEY at a
+  time`.
 
 ### 10. Build Readiness
 

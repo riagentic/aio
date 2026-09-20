@@ -299,8 +299,10 @@ Inspect:
                           it SERVES; this says what it is holding on to
   top [secs]              Live runtime view (per-cell state sizes); --json = one shot
   health                  HTTP health check
-  doctor                  DIAGNOSE running process vs dep/aio on disk (→ am restart).
-                          Not config (that is \`deno task doctor\`) and not migrate.
+  doctor                  DIAGNOSE running process vs dep/aio on disk (→ am restart),
+                          and each multi-source setting with who decided it
+                          (flag / config / deno.json / env / default).
+                          Not config checks (\`deno task doctor\`), not migrate.
   open [--print]          Open THIS app in a browser (--print writes the URL)
   discover [--timeout=ms] Find exposed aio apps on the LAN (UDP broadcast)
   profile [--out=file]    Export this app's .aioapp profile (cert + key) for the client
@@ -319,7 +321,7 @@ Scaffold:
                           a namespace nobody imports is registered nowhere
 
 Diagnose / repair / migrate (three different questions — do not conflate):
-  doctor                  running process vs aio on disk? → am restart if stale
+  doctor                  running process vs aio on disk? + who decided each setting
   fix                     clone/checkout repair: symlink, env, electron, tasks
                           (--dry-run / --no-download). Not an API migrator.
   link                    Just the dep/aio symlink (fix does this and more)

@@ -124,6 +124,53 @@ type Orphan = { pid: number; appId: string; port: number; dir: string };
 const orphans: Orphan[] = [];
 const staleDirs: string[] = [];
 
+/** Everything a lock dir ever holds: `<key>.lock`, the app's `.sock` /
+ *  `.http.sock`, am's `<appId>.launch.json`, and the dev watcher's
+ *  `watch-<pid>.tmp` sentinel (see `lockDir()` and its callers). Files only —
+ *  a lock dir has no subdirectories.
+ *
+ *  A lock dir is named `aio` / `aio-<scope>`, and so is every other aio temp
+ *  directory in `/tmp` — a test's scratch, a build's staging dir. The sweep
+ *  used to take the NAME as proof, so any `/tmp/aio*` dir with no live lock in
+ *  it was "a finished run's lock dir" and was removed recursively at the start
+ *  of every `deno task test`: a macOS `.dmg` build lost its `payload.tgz`
+ *  between `tar` and `scp` that way while a suite started beside it (a field
+ *  report, #7). A directory holding anything else is somebody else's.
+ *
+ *  `xephyr-<N>.auth` is deliberately NOT on this list although aio writes it
+ *  (nested-display.ts keeps it in `<runtime>/aio` or `<runtime>/aio-u<uid>`,
+ *  the very names this walks): a live nested display's cookie sits there with
+ *  no lock beside it, and sweeping that directory takes the display's access
+ *  file with it while the display is still up. Counting it as foreign leaves
+ *  the directory alone, which is the only safe answer. */
+function isLockDirEntry(e: Deno.DirEntry): boolean {
+  if (e.isDirectory) return false;
+  return /\.(?:lock|sock|launch\.json)$/.test(e.name) ||
+    /^watch-\d+\.tmp$/.test(e.name);
+}
+
+/** A lock dir touched this recently belongs to a run that is making it right
+ *  now (a lock is written after its directory is created) — never debris.
+ *  The same window the ownerless-temp-home sweep below has always used.
+ *
+ *  Read BEFORE this pass touches the directory itself. `--clean` removes the
+ *  dead locks inside it first, and removing a file bumps its parent's mtime to
+ *  NOW — so asking afterwards answered "a run is making it right now" about a
+ *  directory this very process had just emptied, and `clean:tmp` reported
+ *  "0 stale lock dir(s) removed" having emptied every one of them. */
+const LOCK_DIR_RECENT_MS = 10 * 60_000;
+function dirMtime(dir: string): number | null {
+  try {
+    return Deno.statSync(dir).mtime?.getTime() ?? 0;
+  } catch {
+    return null; // cannot tell — leave it alone
+  }
+}
+function touchedRecently(mtime: number | null): boolean {
+  if (mtime === null) return true;
+  return Date.now() - mtime < LOCK_DIR_RECENT_MS;
+}
+
 for (const root of lockRoots()) {
   let entries: Deno.DirEntry[] = [];
   try {
@@ -142,6 +189,12 @@ for (const root of lockRoots()) {
     } catch {
       continue;
     }
+    // Not a lock dir (see isLockDirEntry): its live locks are still READ — an
+    // orphan is an orphan wherever its lock sits — but nothing in it is ever
+    // removed, file or directory.
+    const foreign = files.some((f) => !isLockDirEntry(f));
+    // Before the loop below removes anything from it — see `dirMtime`.
+    const mtime = dirMtime(dir);
     for (const f of files) {
       if (!f.isFile) continue;
       const path = join(dir, f.name);
@@ -201,7 +254,7 @@ for (const root of lockRoots()) {
             port: lock?.port ?? 0,
             dir,
           });
-        } else if (clean) {
+        } else if (clean && !foreign) {
           Deno.removeSync(path);
         }
       } else if (f.name.startsWith("watch-") && f.name.endsWith(".tmp")) {
@@ -209,10 +262,12 @@ for (const root of lockRoots()) {
         // name carries the PID of the process that wrote it.
         const pid = Number(f.name.slice(6, -4));
         if (pid > 0 && alive(pid)) live++;
-        else if (clean) Deno.removeSync(path);
+        else if (clean && !foreign) Deno.removeSync(path);
       }
     }
-    if (scoped && live === 0) staleDirs.push(dir);
+    if (scoped && live === 0 && !foreign && !touchedRecently(mtime)) {
+      staleDirs.push(dir);
+    }
   }
 }
 

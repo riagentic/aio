@@ -11,6 +11,8 @@ import { AsyncLocalStorage } from "node:async_hooks";
 import { isCompiled } from "../server/paths.ts";
 import { log } from "../diagnostics/logger-api.ts";
 import { looksLikeWrite, statementVerb } from "./sql-shape.ts";
+import { syncDir, syncFile } from "./durable.ts";
+import { dirname, resolve } from "@std/path";
 
 /** Marker phrase every "the db worker isn't in this binary" error carries, so
  *  the condition is recognised by ONE predicate wherever it surfaces. */
@@ -841,7 +843,13 @@ export function createDB(path: string, opts: DBOpts = {}): DB {
             );
           }
         });
+        // Durable, not only atomic: the copy's bytes reach the disk BEFORE
+        // the rename names them (else a power cut can leave a zero-length or
+        // torn snapshot under the good name — the file recovery restores),
+        // and the directory after it (else the rename itself can be lost).
+        await syncFile(tmp);
         await Deno.rename(tmp, path); // atomic replace
+        await syncDir(dirname(resolve(path)));
       } catch (e) {
         await Deno.remove(tmp).catch(() => {/* never written */});
         throw e;

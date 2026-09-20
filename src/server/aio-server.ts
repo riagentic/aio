@@ -1,6 +1,7 @@
 // Server & transport setup — TLS, HTTP server, UDS listener, signal handlers
 // Extracted from aio.ts _run() to keep the orchestrator lean.
 
+import { hostOf } from "./config-sources.ts";
 import { enc } from "../protocol/envelope.ts";
 import { installProcessSignals, stopProcess } from "./shutdown.ts";
 import { restartForCellChange } from "./dev-restart.ts";
@@ -217,12 +218,17 @@ export interface ServerSetupDeps<S, A> {
   cellMethodArity?: Record<string, Record<string, number>>;
   /** Cell id → per-field persist/ui flags — for the trojan `fields` route. */
   cellFields?: import("./aio-types.ts").CellFieldFlags;
+  /** Cell id → running `version` + whether it declares `onMigrate` — trojan
+   *  `cell-versions` (`am replay`'s version-stamp check). */
+  cellVersions?: Record<string, { version: number; migrates: boolean }>;
   asyncDb: { query: (sql: string) => Promise<{ rows: unknown[] }> } | null;
   /** In-memory dispatch timeline — the trojan `timeline` route. */
   getTimeline?: (
     after?: number,
     limit?: number,
   ) => import("./timeline.ts").TimelineEntry[];
+  /** Has the live ring dropped anything since boot? — trojan `timeline`. */
+  getTimelineRotated?: () => boolean;
   /** Boot migration + shape-drift picture — trojan `migrations`. */
   migrations?: import("./aio-boot.ts").MigrationSummary;
   // Lock
@@ -427,7 +433,7 @@ export async function setupTransport<S, A>(
   // aio opens) reads `bindHost` from the result — deriving it a second time is
   // how an app came to advertise `localhost` while listening only on a LAN
   // address, so `deno task dev --host=…` opened a window at a dead URL.
-  const _host = parseCli().host ?? config.host;
+  const _host = hostOf(parseCli(), config)?.value;
   const bindHost = _host ?? (expose ? "0.0.0.0" : "127.0.0.1");
   // `localhost` resolves to 127.0.0.1 (or ::1) SPECIFICALLY — an app bound to
   // 127.0.0.2 or a LAN address does not answer there. So the friendly name is
@@ -935,7 +941,11 @@ export async function setupTransport<S, A>(
         cellAsyncMethods: () => deps.cellAsyncMethods ?? {},
         cellMethodArity: () => deps.cellMethodArity ?? {},
         cellFields: () => deps.cellFields ?? {},
+        cellVersions: () => deps.cellVersions ?? {},
         ...(deps.getTimeline ? { getTimeline: deps.getTimeline } : {}),
+        ...(deps.getTimelineRotated
+          ? { getTimelineRotated: deps.getTimelineRotated }
+          : {}),
         ...(deps.migrations ? { getMigrations: () => deps.migrations } : {}),
         ...(tt ? { getTTHistory: tt.getTTBroadcast } : {}),
         // "Force persist" means the write is ON DISK when the reply comes

@@ -2,6 +2,7 @@
 // runner (scripts/test-changed.ts): their pure planning functions.
 import { assert, assertEquals } from "@std/assert";
 import {
+  cpuFence,
   failures,
   junitTimes,
   plan,
@@ -126,4 +127,25 @@ Deno.test("relativeImports: static, re-export, dynamic, side-effect", () => {
     "./e.ts",
     "./multi.ts",
   ]);
+});
+
+Deno.test("cpuFence: a run leaves the first cores free and runs niced", () => {
+  const all = { taskset: true, nice: true };
+  // 32 cores, 4 kept free: pinned to 4-31, 28 usable — the shard count is
+  // derived from `usable`, not from the whole machine.
+  assertEquals(cpuFence(32, 4, "linux", all), {
+    usable: 28,
+    prefix: ["taskset", "-c", "4-31", "nice", "-n", "10"],
+  });
+  // No taskset (or not linux): nice alone, still fewer shards.
+  assertEquals(cpuFence(32, 4, "darwin", all).prefix, ["nice", "-n", "10"]);
+  assertEquals(
+    cpuFence(32, 4, "linux", { taskset: false, nice: true }).usable,
+    28,
+  );
+  // A machine smaller than the reserve still runs — on one core, unpinned.
+  assertEquals(cpuFence(4, 4, "linux", all), {
+    usable: 1,
+    prefix: ["nice", "-n", "10"],
+  });
 });

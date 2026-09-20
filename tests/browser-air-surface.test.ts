@@ -28,17 +28,8 @@ import * as browser from "../src/browser-air.ts";
  *  entry does not ship, each with the reason. Shrinking this list is always
  *  allowed; growing it is a decision. */
 const ABSENT_ON_BROWSER: Record<string, string> = {
-  // Known gaps — these are renderer helpers the android entry DOES ship, so a
-  // form-using app builds for android and fails the browser esbuild resolve.
-  // Closing the gap is an additive surface change (a deliberate release
-  // decision), so it is recorded here instead of smuggled in.
-  on: "gap: watch/on not re-exported on the browser entry yet",
-  watch: "gap: watch/on not re-exported on the browser entry yet",
-  useForm: "gap: form helpers not re-exported on the browser entry yet",
-  useFieldArray: "gap: form helpers not re-exported on the browser entry yet",
-  useVirtualList: "gap: virtual list not re-exported on the browser entry yet",
-  renderToString:
-    "gap: only the streaming SSR entry (renderToStream) is shipped",
+  // (The known gaps — on/watch, useForm/useFieldArray, useVirtualList,
+  // renderToString — closed in 1.0.6-beta: an additive re-export each.)
   // Different spelling on this entry, by design.
   connectAioDevTools:
     "the browser entry ships connectDevTools/disconnectDevTools",

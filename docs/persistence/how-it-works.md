@@ -256,6 +256,18 @@ recovered instead of lost.
   past the store's watermark (a clean stop compacts it empty) has nothing to
   invent history with: it is kept, its base moved back to the store, and the
   next crash replays normally.
+- **A line is replayed only by the cell version that wrote it.** Each line
+  records the `version` of the cell it writes. When a build that bumped that
+  version boots on a crashed tail from the old one, the old methods are gone and
+  the snapshot under the tail was just migrated — re-running a v1 `add(5)`
+  through the v2 `add` is a guess, not a recovery. Boot skips those lines and
+  says so
+  (`journal: … COULD NOT be replayed — they ran under a cell version
+  this build has migrated away from ("w" v1 → v2) …`).
+  A clean stop before an upgrade leaves no tail, so nothing is lost that way. A
+  version bump with no `onMigrate` converts nothing (boot keeps that snapshot as
+  stored), so the tail under it still replays; a line from a NEWER version (a
+  downgrade) never does.
 - Each append is a synchronous write, so it survives **process** death. It is
   not fsynced, so power loss can still take the tail. (`sync: true` inside the
   journal implementation would fsync every append; it is not reachable from

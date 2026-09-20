@@ -59,6 +59,9 @@ export function sourced(s: Sourced<unknown> | undefined): string | undefined {
 
 /** The optional extras the boot sequence knows and this module cannot derive. */
 export type BootExtras = {
+  /** `--verbose` only: `name=value (from)` for every setting that has more
+   *  than one home (flag, config, env, deno.json) — config-sources.ts. */
+  sources?: [string, string][];
   /** Plugin names, in the order they were applied. */
   plugins?: string[];
   /** Which client shell this app runs — and who decided. The question that
@@ -142,6 +145,11 @@ export function bootLines(
     ["platform", `${facts.platform} · ${facts.runtime}`],
   ];
   if (extra.pid !== undefined) lines.push(["pid", String(extra.pid)]);
+  // One label per key: the report is keyed by label, so a shared "setting"
+  // label kept only the last line (measured — the first version printed one).
+  for (const [name, s] of extra.sources ?? []) {
+    lines.push([`setting ${name}`, s]);
+  }
   // WHO DECIDED, not just what. `client` is the line that prompted all of
   // this — a target can come from a flag, deno.json, aio.run() or nothing at
   // all, and the running app was the one thing that could not say which.

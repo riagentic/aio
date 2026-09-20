@@ -329,7 +329,8 @@ _setSsrStartHook(() => {
  *
  * @example
  * ```tsx
- * import { mount } from "aio/air";
+ * import { h, mount } from "aio/air";
+ * const App = () => h("p", null, "hello");
  * mount(document.getElementById("app")!, App);
  * ```
  */

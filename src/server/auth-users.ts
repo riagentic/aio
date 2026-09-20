@@ -70,6 +70,88 @@ const normId = (id: unknown): string =>
  *  ids that differ only by one are indistinguishable to the operator. */
 const HAS_INVISIBLE = /[\p{Cc}\p{Cf}\p{Zl}\p{Zp}\p{Zs}]/u;
 
+/** Prefix that marks an account id as EXTERNAL — owned by an identity
+ *  provider, never password-verifiable. `auth-oidc.ts` builds those ids
+ *  (`oidc:<issuer>:<sub>`) and re-exports this as `OIDC_ID_PREFIX`; it lives
+ *  HERE because the store is what has to refuse the namespace, and a second
+ *  spelling of the prefix is how the two would drift.
+ *
+ *  A RESERVED NAMESPACE IS RESERVED FROM BOTH SIDES. `externalId` exists so
+ *  that "no OIDC login can ever land on a local account"; nothing stopped the
+ *  other direction, and `POST /__aio/auth/signup` is open by default. An
+ *  anonymous caller could sign up as `oidc:<issuer>:<victim-sub>` with a
+ *  password of their choosing; the real SSO user then signed in, the callback
+ *  found that row (`existing`), issued a session for it and never consulted
+ *  `role(claims)` — and the attacker's password went on opening the SSO
+ *  identity indefinitely, with no access to the provider at all. Classic
+ *  account pre-hijacking, measured end to end against a mock IdP.
+ *
+ *  So the store refuses it, for every door at once (`/auth/signup`,
+ *  `am auth add`, `app.auth.create`), and the one caller that legitimately
+ *  owns the namespace comes through `externalCreatorOf` — a separate door,
+ *  not a flag on `UserStore.create`, because that interface is frozen public
+ *  surface (the same reason `AccountLockout` and `TotpReplay` live beside it
+ *  rather than on it). */
+export const EXTERNAL_ID_PREFIX = "oidc:";
+
+/** True when an account id belongs to an external identity provider — it has
+ *  no usable password, so password-shaped flows (reset) must refuse it. THE
+ *  predicate; `auth-oidc.ts` re-exports it. EXACT, because it answers "what
+ *  IS this row": only the callback mints these ids, and it mints them
+ *  lowercase. For "may this id be claimed", see {@linkcode claimsExternalNamespace}. */
+export const isExternalId = (id: string): boolean =>
+  id.startsWith(EXTERNAL_ID_PREFIX);
+
+/** True when an id CLAIMS the external namespace — the reservation predicate.
+ *
+ *  A RESERVATION IS ONLY AS STRONG AS THE FOLDING UNIQUENESS USES. Account
+ *  ids are unique case-INSENSITIVELY (`selCi`, `COLLATE NOCASE`: `Neighbour`
+ *  cannot join `neighbour`) while lookups stay exact. Reserving the namespace
+ *  with a case-SENSITIVE `startsWith` therefore let the land-grab back in one
+ *  shift key later: `OIDC:<issuer>:<sub>` passed the reservation, and then
+ *  collided with the real SSO id at the uniqueness check, where nothing can be
+ *  done about it any more. The victim's first SSO login looked the account up
+ *  EXACTLY (a miss), tried to create it, was refused as a duplicate — and
+ *  answered 401. On every login after that too: an anonymous signup took an
+ *  SSO identity out of service permanently, and left a row that reads like the
+ *  real one in `am auth users`.
+ *
+ *  So the reservation folds exactly as far as uniqueness does, and a little
+ *  further (JS case folding covers more than SQLite's ASCII `NOCASE`) —
+ *  refusing more ids than collide is safe; refusing fewer is the bug above. */
+const claimsExternalNamespace = (id: string): boolean =>
+  id.slice(0, EXTERNAL_ID_PREFIX.length).toLowerCase() === EXTERNAL_ID_PREFIX;
+
+/** The id/password policy `create` enforces, asked as a pure QUESTION.
+ *
+ *  Same rule, one decider: `createRow` throws exactly what this returns, and
+ *  the signup route asks it BEFORE it spends a budget. These three refusals
+ *  are decided from the request alone — no hash, no row, no lookup — so a
+ *  request they refuse costs the server nothing and reveals nothing. Charging
+ *  it was the same outage the account budget had already been fixed for once:
+ *  `{"id":"a","password":"1"}` is 25 bytes, and ten of them left signup
+ *  `429 too_many_accounts` for an HOUR for everyone sharing the bucket — and
+ *  thirty-one of them answered `429 too_many_attempts` to a correct password,
+ *  because the per-minute work meter is LOGIN's too.
+ *
+ *  `user_exists` is deliberately NOT here: a collision needs the store, and it
+ *  is the id-enumeration channel the account budget exists to bound. */
+export function signupPolicyRefusal(
+  rawId: unknown,
+  password: unknown,
+): "invalid_id" | "reserved_id" | "password_too_short" | null {
+  const id = normId(rawId);
+  if (id.length < 1 || id.length > 256 || HAS_INVISIBLE.test(id)) {
+    return "invalid_id";
+  }
+  if (claimsExternalNamespace(id)) return "reserved_id";
+  // NIST floor — 8 chars minimum.
+  if (typeof password !== "string" || password.length < 8) {
+    return "password_too_short";
+  }
+  return null;
+}
+
 async function pbkdf2(
   password: string,
   salt: Uint8Array,
@@ -140,8 +222,12 @@ export type TokenKind = "verify" | "reset" | "totp" | "oidc";
 // snake_case (they double as the HTTP wire error); catch and map for
 // programmatic callers (`app.auth.create`).
 export interface UserStore {
-  /** Create a user. THROWS "user_exists" / "invalid_id" /
-   *  "password_too_short" (policy). Role defaults to "user". */
+  /** Create a user. THROWS "user_exists" / "invalid_id" / "reserved_id" /
+   *  "password_too_short" (policy). Role defaults to "user".
+   *
+   *  "reserved_id": the id is in the IdP-owned namespace (see
+   *  {@linkcode EXTERNAL_ID_PREFIX}). The OIDC callback, which owns it, goes
+   *  through `externalCreatorOf` instead. */
   create(
     id: string,
     password: string,
@@ -281,6 +367,25 @@ const _totpReplays = new WeakMap<UserStore, TotpReplay>();
  *  for any other implementation (which keeps only the in-memory guard). */
 export function totpReplayOf(store: UserStore): TotpReplay | null {
   return _totpReplays.get(store) ?? null;
+}
+
+/** Create an account in the IdP-owned namespace `create` refuses — the ONE
+ *  door into it. Same arguments as `create`; same throws. Internal, like
+ *  `AccountLockout` and `TotpReplay`, because `UserStore` is frozen public
+ *  surface and this must not become a flag anyone can pass. */
+export type ExternalCreate = (
+  id: string,
+  password: string,
+  opts?: { role?: string; email?: string },
+) => Promise<AuthUserRecord>;
+
+const _externalCreators = new WeakMap<UserStore, ExternalCreate>();
+
+/** The external-identity door of a store opened by `openUserStore`; null for
+ *  any other implementation — which has no reserved namespace of ours to get
+ *  past, so its plain `create` is the right call. */
+export function externalCreatorOf(store: UserStore): ExternalCreate | null {
+  return _externalCreators.get(store) ?? null;
 }
 
 /** Options for `openUserStore`.
@@ -523,14 +628,24 @@ export function openUserStore(
     }
   };
 
-  const store: UserStore = {
-    async create(rawId, password, opts) {
+  /** The one row-creating body, with WHO is asking as a parameter — so the
+   *  public `create` and the external-identity door cannot grow two different
+   *  ideas of what a valid account is. */
+  const createRow = async (
+    rawId: string,
+    password: string,
+    opts: { role?: string; email?: string } | undefined,
+    external: boolean,
+  ): Promise<AuthUserRecord> => {
+    {
       const id = normId(rawId);
-      if (id.length < 1 || id.length > 256 || HAS_INVISIBLE.test(id)) {
-        throw new Error("invalid_id");
-      }
-      if (typeof password !== "string" || password.length < 8) {
-        throw new Error("password_too_short"); // NIST floor — 8 chars minimum
+      // The whole policy, in one place — see `signupPolicyRefusal`, which the
+      // signup route asks BEFORE it spends a budget on a request that cannot
+      // create anything. This is still where it is ENFORCED; the route asking
+      // first is an optimization of who pays, never a second rule.
+      const refusal = signupPolicyRefusal(rawId, password);
+      if (refusal !== null && !(refusal === "reserved_id" && external)) {
+        throw new Error(refusal);
       }
       const pw = await hashPassword(password);
       const createdAt = Date.now();
@@ -552,6 +667,12 @@ export function openUserStore(
         verified: false,
         totpEnabled: false,
       };
+    }
+  };
+
+  const store: UserStore = {
+    create(rawId, password, opts) {
+      return createRow(rawId, password, opts, false);
     },
     verify(rawId, password) {
       const id = normId(rawId);
@@ -572,7 +693,25 @@ export function openUserStore(
         // Hash FIRST, unconditionally — locked, unknown, and wrong-password
         // paths all cost one PBKDF2, so timing reveals nothing.
         const ok = await verifyPassword(password, row?.pw ?? DECOY);
-        if (!row) return null;
+        // AN EXTERNAL IDENTITY IS NEVER PASSWORD-VERIFIABLE — here, not just
+        // in the comments. It was true only because one caller happens to
+        // mint an unusable random password, and that is a convention, not a
+        // property. Two things it now holds for:
+        //
+        //  · the UPGRADE. The reservation that refuses `oidc:<issuer>:<sub>`
+        //    at signup is new, so an app that ran the version before it can
+        //    hold a row an anonymous caller created under the victim's SSO id
+        //    with a password of their choosing — the pre-hijack that fix was
+        //    written for, still opening with a 200 on every login. `reset`
+        //    already refuses "a token that predates that rule"; login did not.
+        //  · one caller mistake — an `externalCreatorOf` handed a known
+        //    password — no longer turns an IdP-owned identity into a password
+        //    account.
+        //
+        // After the hash, so it costs exactly what every other path costs;
+        // and the same generic `null`. No oracle is lost either way — the
+        // namespace is a PREFIX of the id the caller just supplied.
+        if (!row || isExternalId(id)) return null;
         // Wrong password (or unknown user) ALWAYS returns a generic null — the
         // "locked" signal is never handed to a caller who can't prove they
         // know the password, so a wrong-guessing attacker can't distinguish
@@ -803,6 +942,12 @@ export function openUserStore(
       }
     });
   }
+  // The one door into the reserved `oidc:` namespace — see
+  // `EXTERNAL_ID_PREFIX` and `externalCreatorOf`.
+  _externalCreators.set(
+    store,
+    (id, password, opts) => createRow(id, password, opts, true),
+  );
   _lockouts.set(store, {
     fail(rawId) {
       const id = normId(rawId);

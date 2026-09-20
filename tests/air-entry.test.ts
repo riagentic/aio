@@ -16,16 +16,22 @@ Deno.test("air entry: exports all AIR-native hooks", async () => {
   assertExists(air.useRef);
 });
 
-Deno.test("air entry: React compat hooks are NOT on the main surface", async () => {
-  // useState/useEffect/useMemo/useCallback live only at "aio/air/compat".
+Deno.test("air entry: React's hook names are on the main surface — the SAME functions as compat", async () => {
+  // Since 1.0.6-beta: `import { useState } from "aio/air"` is the first line a
+  // React-trained developer or agent writes, and it did not compile. One
+  // implementation, two doors — never a second copy with its own contract.
   const air = await import("../src/air.ts") as Record<string, unknown>;
-  assertEquals(air.useState, undefined);
-  assertEquals(air.useEffect, undefined);
-  assertEquals(air.useCallback, undefined);
-  assertEquals(air.useMemo, undefined);
-  // memo and useRef are native AIR primitives — they stay on "aio/air".
+  const compat = await import("../src/air-compat.ts") as Record<
+    string,
+    unknown
+  >;
+  for (
+    const name of ["useState", "useEffect", "useMemo", "useCallback", "useRef"]
+  ) {
+    assertExists(air[name], name);
+    assertEquals(air[name], compat[name], `${name}: one function, not a twin`);
+  }
   assertExists(air.memo);
-  assertExists(air.useRef);
 });
 
 Deno.test("air/compat: exports the React migration hooks", async () => {

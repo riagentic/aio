@@ -210,11 +210,16 @@ server, and context Providers (the route context, your own) reach their children
 exactly as they do in the browser:
 
 ```tsx
-import { collectHead, renderToString, routePath } from "aio/air";
+import { collectHead, renderToString, routePath, routeSearch } from "aio/air";
 import App from "./App.tsx";
 
 Deno.serve((req) => {
-  routePath.set(new URL(req.url).pathname);
+  const url = new URL(req.url);
+  // Both signals, or `useRoute().search` is empty on the server and full in
+  // the browser — a page that hydrates into different markup than it shipped.
+  // `routePath` is the PATHNAME only: the query lives in `routeSearch`.
+  routePath.set(url.pathname);
+  routeSearch.set(url.searchParams);
   const body = renderToString(<App />);
   return new Response(
     `<!doctype html><head>${collectHead()}</head><body>${body}</body>`,

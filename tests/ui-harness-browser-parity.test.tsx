@@ -188,6 +188,220 @@ Deno.test("press Enter: HTML implicit submission, as Chromium does it", async ()
   );
 });
 
+// ── 2b. the two shapes a field report caught ──────────────────────────
+//
+// Both were recorded from a live window while the app's own suite was green:
+// the harness submitted where the browser would not, so `press("Enter")`
+// "worked" in every test and the form was dead to Enter in the app.
+//
+//  • TWO fields that block implicit submission and a `type="button"` Send: no
+//    default button, more than one blocking field, so Chromium does nothing.
+//  • `<input type="number">` with no `step`: step is 1, so "1.5" is a
+//    stepMismatch and Chromium refuses the submit and shows a bubble. The DOM
+//    under the harness computes the same `validity` and says nothing about it,
+//    which is why the refusal below names the field and its message.
+
+const twoFieldLog: string[] = [];
+const TwoFieldSend = () => (
+  <form onSubmit={() => twoFieldLog.push("submit")}>
+    <input t="Dest" name="dest" type="text" />
+    <input t="Amount" name="amount" type="number" />
+    <button t="Send" type="button" onClick={() => twoFieldLog.push("click")}>
+      Send
+    </button>
+  </form>
+);
+
+Deno.test("press Enter: two blocking fields and no submit button stays dead", async () => {
+  await using ui = await testUI(TwoFieldSend);
+  twoFieldLog.length = 0;
+  await ui.Dest.type("someone");
+  await ui.Amount.setValue("2");
+  await ui.Dest.press("Enter");
+  await ui.Amount.press("Enter");
+  assertEquals(
+    twoFieldLog.join("|"),
+    "",
+    "Chromium submits neither — two fields block implicit submission and the " +
+      "Send button is type=button",
+  );
+  // …and the same form DOES submit once one of the two fields is gone.
+  await ui.Send.click();
+  assertEquals(twoFieldLog.join("|"), "click");
+});
+
+const Amounts = () => (
+  <form onSubmit={() => twoFieldLog.push("submit")}>
+    <input t="Amount" name="amount" type="number" />
+  </form>
+);
+
+Deno.test("press Enter: an invalid field refuses the submit and names itself", async () => {
+  await using ui = await testUI(Amounts);
+  twoFieldLog.length = 0;
+  await ui.Amount.setValue("1.5"); // step defaults to 1
+  const err = await assertRejects(() => ui.Amount.press("Enter"), Error);
+  assertEquals(twoFieldLog.join("|"), "", "the submit must not happen");
+  assert(
+    err.message.includes('<input type="number" name="amount">'),
+    `the refusal must name the field: ${err.message}`,
+  );
+  assert(
+    err.message.includes("The two nearest valid values are 1 and 2."),
+    `the refusal must carry the browser's own message: ${err.message}`,
+  );
+  // The step the browser accepts submits, so the rule is not "numbers refuse".
+  await ui.Amount.setValue("2");
+  await ui.Amount.press("Enter");
+  assertEquals(twoFieldLog.join("|"), "submit");
+});
+
+const RequiredForm = () => (
+  <form onSubmit={() => twoFieldLog.push("submit")}>
+    <input t="Name" name="who" type="text" required />
+    <button t="Go" type="submit" onClick={() => twoFieldLog.push("click")}>
+      Go
+    </button>
+  </form>
+);
+
+Deno.test("press Enter: the default button still runs, then validation refuses", async () => {
+  await using ui = await testUI(RequiredForm);
+  twoFieldLog.length = 0;
+  const err = await assertRejects(() => ui.Name.press("Enter"), Error);
+  // Chromium runs the button's activation behaviour and only then blocks the
+  // submission — the click is NOT swallowed by the refusal.
+  assertEquals(twoFieldLog.join("|"), "click");
+  assert(
+    err.message.includes("Please fill out this field."),
+    `the refusal must carry the browser's own message: ${err.message}`,
+  );
+  twoFieldLog.length = 0;
+  await ui.Name.type("x");
+  await ui.Name.press("Enter");
+  assertEquals(twoFieldLog.join("|"), "click|submit");
+});
+
+const NoValidateForm = () => (
+  <form
+    noValidate
+    onSubmit={() => twoFieldLog.push("submit")}
+  >
+    <input t="Amount" name="amount" type="number" />
+  </form>
+);
+
+Deno.test("press Enter: novalidate submits an invalid form, as the browser does", async () => {
+  await using ui = await testUI(NoValidateForm);
+  twoFieldLog.length = 0;
+  await ui.Amount.setValue("1.5");
+  await ui.Amount.press("Enter");
+  assertEquals(twoFieldLog.join("|"), "submit");
+});
+
+// ── 2c. the refusal must not fire where Chromium SUBMITS ──────────────
+//
+// A refusal the browser would not make is the same defect in the other
+// direction: it turns a working form into a red test in every suite that
+// already drives it. Each block below is a shape Chromium submits and the DOM
+// the harness mounts (happy-dom) calls invalid.
+
+const CancelledSubmit = () => (
+  <form onSubmit={() => twoFieldLog.push("submit")}>
+    <input t="Name" name="who" type="text" required />
+    <button
+      t="Go"
+      type="submit"
+      onClick={(e: Ev) => {
+        twoFieldLog.push("click");
+        e.preventDefault();
+      }}
+    >
+      Go
+    </button>
+  </form>
+);
+
+Deno.test("press Enter: preventDefault on the default button cancels the submission, not a refusal", async () => {
+  await using ui = await testUI(CancelledSubmit);
+  twoFieldLog.length = 0;
+  // Chromium runs the button's activation behaviour; a cancelled one never
+  // reaches form submission, so no constraint validation and no bubble.
+  await ui.Name.press("Enter");
+  assertEquals(twoFieldLog.join("|"), "click");
+});
+
+const DisabledFieldset = () => (
+  <form onSubmit={() => twoFieldLog.push("submit")}>
+    <input t="Name" name="who" type="text" />
+    <fieldset disabled>
+      <input t="Inner" name="inner" type="text" required />
+    </fieldset>
+    <button t="Go" type="submit">Go</button>
+  </form>
+);
+
+Deno.test("press Enter: a control in a disabled <fieldset> is barred from validation", async () => {
+  await using ui = await testUI(DisabledFieldset);
+  twoFieldLog.length = 0;
+  await ui.Name.type("x");
+  await ui.Name.press("Enter");
+  assertEquals(twoFieldLog.join("|"), "submit");
+});
+
+const MinBase = () => (
+  <form onSubmit={() => twoFieldLog.push("submit")}>
+    <input t="N" name="n" type="number" min="0.5" />
+  </form>
+);
+
+Deno.test("press Enter: min is the step base, as in the browser", async () => {
+  await using ui = await testUI(MinBase);
+  twoFieldLog.length = 0;
+  // step defaults to 1 and the step base is min, so 0.5/1.5/2.5 are valid.
+  await ui.N.setValue("1.5");
+  await ui.N.press("Enter");
+  assertEquals(twoFieldLog.join("|"), "submit");
+  // …and a value off that ladder still refuses, naming the right neighbours.
+  twoFieldLog.length = 0;
+  await ui.N.setValue("1.4");
+  const err = await assertRejects(() => ui.N.press("Enter"), Error);
+  assert(
+    err.message.includes("The two nearest valid values are 0.5 and 1.5."),
+    err.message,
+  );
+});
+
+const MinLengthControlled = () => {
+  const text = useSignal("ab");
+  return (
+    <form onSubmit={() => twoFieldLog.push("submit")}>
+      <input
+        t="Name"
+        name="who"
+        type="text"
+        minLength={5}
+        value={text.value}
+        onInput={(e: Ev) => text.set(e.currentTarget.value as string)}
+      />
+    </form>
+  );
+};
+
+Deno.test("press Enter: minlength only blocks a value the USER edited", async () => {
+  await using ui = await testUI(MinLengthControlled);
+  twoFieldLog.length = 0;
+  // The value came from the render, never from a user edit: the dirty-value
+  // flag the spec's "too short" depends on was never set, so Chromium submits.
+  await ui.Name.press("Enter");
+  assertEquals(twoFieldLog.join("|"), "submit");
+  // Typing into it makes the same value too short, exactly as in Chromium.
+  twoFieldLog.length = 0;
+  await ui.Name.type("c");
+  await assertRejects(() => ui.Name.press("Enter"), Error);
+  assertEquals(twoFieldLog.join("|"), "");
+});
+
 // ── 3. click moves focus ──────────────────────────────────────────────
 
 Deno.test("click: focus moves to the button, and the edited field commits first", async () => {
@@ -441,6 +655,9 @@ Deno.test("burst tripwire: timer/push writes get push advice, not render advice"
   }
   const hit = warns.find((w) => w.includes("Ticker re-rendered 50 times"));
   assert(hit, `no tripwire: ${JSON.stringify(warns)}`);
-  assert(hit.includes("server pushes, timers"), hit);
+  assert(hit.includes("a server push, a timer"), hit);
   assert(hit.includes("useLocal"), hit);
+  // …and it names what fired them, so the reader is not left with the whole
+  // component to bisect (see tests/render-burst-blame.test.tsx).
+  assert(hit.includes("The renders were fired by:"), hit);
 });

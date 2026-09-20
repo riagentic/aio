@@ -18,7 +18,10 @@ specifically.
    it.
 1. The app's own `CLAUDE.md` / `README.md`, if it has one.
 2. [`docs/content.md`](content.md) — the generated index of every page, by
-   question. Search it before searching the source.
+   question. Search it before searching the source. To look up ONE name — a cell
+   option, an `aio.run` key, an `aio/air` hook — use
+   [`basics/every-option.md`](basics/every-option.md): signature, one line,
+   example, generated from the source.
 3. [`AGENTS.md`](AGENTS.md) — `am expect`, `am dispatch`, `am surface`,
    `am timeline`, `am replay`. The pattern that costs agents the most time is
    composing primitives they already know instead of finding the verb that
@@ -34,6 +37,10 @@ specifically.
 `am start`, then write tests for the methods you kept. Do not rewrite the
 scaffold test five times before the app has ever run — that is the most common
 agent time sink on a fresh app.
+
+Write the UI the way you already know: React's hooks work from `aio/air` and
+behave as React 19's. The one-way-per-job table (local state, mount, derived,
+tests) is in [React on aio](ui/react.md) — pick from it instead of guessing.
 
 A cell's `state` type must be a **`type` alias, not an `interface`**. An
 interface is not a `CellState`; TypeScript fails inside aio and every `s.field`

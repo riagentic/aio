@@ -50,10 +50,33 @@ Deno.exit(0);
         stderr: "null",
       }).output();
       const deno = Deno.execPath();
+      // …and `--no-code-cache`, because `deno cache` does NOT cover the other
+      // half of "Deno's own cache writes".
+      //
+      // This was a real red test, and the instrument was the thing that was
+      // wrong. `deno cache` warms the module GRAPH; the V8 CODE cache is
+      // written by `deno run`, on first execution of each module, into the
+      // shared `$DENO_DIR/v8_code_cache_v2` — which on a developer's machine
+      // is a SQLite file of well over a gigabyte. RLIMIT_FSIZE is a limit on
+      // the resulting FILE SIZE, not on the write, so every append to that
+      // file is past 5000 blocks by four orders of magnitude, and it happens
+      // while the module graph is still being evaluated — before one line of
+      // aio has run, and therefore before `AppLock` can install the SIGXFSZ
+      // listener this test is about. The app died at exit 153 having logged
+      // exactly its two composition lines.
+      //
+      // It looked like load because load is what made the code cache cold:
+      // a fresh checkout, a new worktree, a changed file — any of those, and
+      // the first run under the limit is the one that pays. Measured both
+      // ways on a cold cache: with the code cache, exit 153/SIGXFSZ every
+      // time; with `--no-code-cache`, exit 0 and the refused write reported.
+      // The flag makes the app's OWN writes the only writes under the limit,
+      // which is precisely the claim being tested.
       const { code, signal, stdout, stderr } = await new Deno.Command("bash", {
         args: [
           "-c",
-          `ulimit -f 5000; exec "$0" run -A --no-check --config "$1" "$2"`,
+          `ulimit -f 5000; exec "$0" run -A --no-check --no-code-cache ` +
+          `--config "$1" "$2"`,
           deno,
           join(REPO, "deno.json"),
           file,

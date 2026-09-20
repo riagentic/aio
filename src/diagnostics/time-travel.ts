@@ -1,5 +1,9 @@
-// Time-travel debugger — pure functions, no side effects
+// Time-travel debugger — pure functions (one exception: `record` says ONCE,
+// through the logger, when it starts dropping history for size)
 // Active in dev mode, zero cost in prod
+
+import { approxDeltaBytes } from "./retained-bytes.ts";
+import { log } from "./logger-api.ts";
 
 /** Phase-level timing breakdown inside a single reduce cycle (ms) */
 export type ReduceBreakdown = {
@@ -24,6 +28,10 @@ export type HistoryEntry<S, A> = {
   action: A;
   state: S;
   ts: number;
+  /** Estimated bytes this entry's state keeps alive that its predecessor did
+   *  not (`approxDeltaBytes`) — what the history pays to hold it. Written by
+   *  `record`; the byte budget is the sum over the entries. */
+  bytes?: number;
   perf?: PerfMetric; // only populated in dev mode
   error?: {
     code: string;
@@ -38,6 +46,11 @@ export type TTState<S, A> = {
   index: number;
   paused: boolean;
   nextId: number;
+  /** How many entries have been dropped because the history passed
+   *  {@linkcode TT_MAX_BYTES} — 0/absent means the window really is "the last
+   *  {@linkcode MAX_ENTRIES} actions". A reader that says "the whole history"
+   *  has to be able to tell. */
+  droppedForBytes?: number;
 };
 
 /** Wire format — no state snapshots, action type only */
@@ -70,7 +83,23 @@ export type TTCommand =
 // clone made necessary. With entries this cheap the window is deep: history
 // is a dev inspector with a BOUNDED window, not a replay mechanism — apps
 // that need replay should record inputs (see docs/debugging/time-travel.md).
-const MAX_ENTRIES = 2_000;
+export const MAX_ENTRIES = 2_000;
+
+/** Retained-bytes budget for the history, beside the count cap.
+ *
+ *  Structural sharing makes an entry free for what an action did NOT change,
+ *  and full price for what it replaced: a method writing a fresh 1 MB value
+ *  leaves a whole new 1 MB tree per entry, so {@linkcode MAX_ENTRIES} of them
+ *  is ~2 GB held by a dev inspector nobody has opened — the same trap the
+ *  always-on timeline's ring had (`TIMELINE_MAX_BYTES`, timeline.ts), on a
+ *  history that retains far more per entry. Dev-only, and observe-only in the
+ *  sense that matters: it changes how far BACK the inspector can travel,
+ *  never what the app does.
+ *
+ *  Larger than the timeline's 64 MiB because this history is the deeper
+ *  window (2 000 entries against 500) and its owner is a developer with a
+ *  debugger open, not a production server. */
+export const TT_MAX_BYTES = 128 * 1024 * 1024;
 
 /** Creates empty TT state */
 export function createTT<S, A>(): TTState<S, A> {
@@ -97,17 +126,52 @@ export function record<S, A>(
     state,
     ts: Date.now(),
     perf,
+    // What holding this entry COSTS: only what it keeps alive that its
+    // predecessor did not. Cheap — the walk prunes at the first shared
+    // reference and samples large containers (retained-bytes.ts).
+    bytes: approxDeltaBytes(
+      entries[entries.length - 1]?.state,
+      state,
+      TT_MAX_BYTES,
+    ),
   };
   entries.push(entry);
 
   // Cap at MAX_ENTRIES — evict oldest
   if (entries.length > MAX_ENTRIES) entries.shift();
 
+  // …and by retained BYTES, because a count cap alone let one replaced 1 MB
+  // value cost 2 GB. Oldest first, and the newest entry always stays: it is
+  // the one a jump lands on, however big it is.
+  let held = 0;
+  for (const e of entries) held += e.bytes ?? 0;
+  let dropped = 0;
+  while (held > TT_MAX_BYTES && entries.length > 1) {
+    held -= entries.shift()!.bytes ?? 0;
+    dropped++;
+  }
+  const droppedForBytes = (tt.droppedForBytes ?? 0) + dropped;
+  // ONCE per history, and loud: a debugger silently shortening its own window
+  // is a debugger that lies about what happened. (The only side effect in this
+  // module, and it is a dev inspector's own log line.)
+  if (dropped > 0 && (tt.droppedForBytes ?? 0) === 0) {
+    log.warn(
+      "time travel",
+      `the dev history passed its ${
+        Math.round(TT_MAX_BYTES / (1024 * 1024))
+      }MB budget and is dropping its OLDEST actions — an action here replaces ` +
+        `a big value, so each one retains a whole new copy of it. The window ` +
+        `is shorter than the ${MAX_ENTRIES} actions it advertises; move bulk ` +
+        `rows to db: tables (docs/persistence/big-data.md) to get it back.`,
+    );
+  }
+
   return {
     entries,
     index: entries.length - 1,
     paused: false,
     nextId: tt.nextId + 1,
+    ...(droppedForBytes > 0 ? { droppedForBytes } : {}),
   };
 }
 

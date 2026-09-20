@@ -15,7 +15,11 @@
  */
 import { randomUuid } from "../rand.ts";
 import { createSyncEngine, type SyncEngine } from "../sync/sync-engine.ts";
-import { createOpBuffer, parseRetention } from "../sync/op-buffer.ts";
+import {
+  createOpBuffer,
+  dropReport,
+  parseRetention,
+} from "../sync/op-buffer.ts";
 import { REDUCER_FAILED, type SyncReducerResult } from "../sync/rebase.ts";
 import { diagEmit } from "../diagnostics/diagnostic-bus.ts";
 import {
@@ -374,10 +378,14 @@ export function initBrowserSync(
         staleAfterFor: (cell) => _retentionMsOf(cells, cell),
         onDrop: (op, reason) => {
           const what = `${op.cell}:${op.action}`;
+          // What this drop PROVES, per reason — never the worst case. One
+          // shared sentence told the user an EVICTED op "never reached the
+          // server", which nobody knows: it was sent, and its ack may have
+          // died with the socket. See `dropReport`.
+          const said = dropReport(reason);
           console.error(
-            `[aio:sync] DROPPED an unsynced change (${reason}): ${what} — this ` +
-              `mutation never reached the server and is now gone. The offline ` +
-              `queue is full (or this op sat unconfirmed past its retention).`,
+            `[aio:sync] DROPPED an unsynced change (${reason}): ${what} — ` +
+              said.what,
           );
           diagEmit({
             type: "sync-op-dropped",
@@ -385,9 +393,7 @@ export function initBrowserSync(
             source: "sync",
             message: `Unsynced change dropped (${reason}): ${what}`,
             detail: { cell: op.cell, action: op.action, opId: op.id, reason },
-            hint:
-              "The client could not reach the server long enough to flush its " +
-              "queue. Check connectivity/backpressure, or raise pendingCap.",
+            hint: said.hint,
           });
         },
       },

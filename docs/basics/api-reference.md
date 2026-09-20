@@ -4,6 +4,10 @@
 > [docs/upgrade/restructure.md](../upgrade/restructure.md) for the removed
 > `actions`/`reduce`/`machine`/`generators`/middleware surface.
 
+> Looking up one name? [Every option, one page](every-option.md) lists each cell
+> option, `aio.run` option and `aio/air` export with its signature — generated
+> from the source, so it is never stale.
+
 Universal: `import { aio, cell, log } from "aio"` (state, lifecycle, logging)
 
 Rendering: `import { signal } from "aio/air"`
@@ -84,7 +88,7 @@ Everything below is the full reference, organized by category.
 
 | Key               | Description                                                                                                                                                                                                                                                     |
 | ----------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `freezeState`     | Deep-freeze committed state after every reduce so an illegal mutation throws (default: `true` in dev, `false` in prod)                                                                                                                                          |
+| `freezeState`     | Extra full-tree deep-freeze after every reduce (default: `true` in dev, `false` in prod). Committed state is frozen in every mode regardless (Immer), so an illegal mutation throws in prod too                                                                 |
 | `guardDispatches` | Supervised runtime: an unhandled promise rejection is logged, checkpointed and the process SURVIVES (default `true` since alpha61; `false` = fail-fast). A rejected top-level `await` of the script itself still exits 1                                        |
 | `childWindows`    | Let the Electron client open CHILD windows to arbitrary http(s) URLs via `__aioIPC.openWindow` (default `false` -- real attack surface, opt in)                                                                                                                 |
 | `refusalsReject`  | A write the reduce REFUSED (a `validate` hook) rejects `await cell.method()` in process, the way the wire already answers it (`ACTION_REFUSED`). Default `false`, because it changes what an in-process `await` does; dev warns once per method while it is off |

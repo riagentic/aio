@@ -11,7 +11,11 @@ import {
 // constant. This file had its own 100 beside it.
 import { WS_MAX_QUEUE } from "../protocol/protocol-types.ts";
 import { connectLocal, type LocalConn } from "./local-listen.ts";
-import { backoffDelay } from "../protocol/transport-shared.ts";
+import {
+  backoffDelay,
+  FRAME_TOO_LARGE_CLOSE,
+  isFrameTooLarge,
+} from "../protocol/transport-shared.ts";
 import {
   type AckPayload,
   dec,
@@ -338,6 +342,9 @@ export function connectCli<S>(
   let retry = 0;
   let wasConnected = false;
   let reconnectTimer: ReturnType<typeof setTimeout> | undefined;
+  /** Consecutive connections killed by an oversized frame — the reconnect
+   *  backoff grows with it instead of restarting at 1 s on every open. */
+  let _tooLarge = 0;
   const queue: Array<{ type: string; payload?: unknown }> = [];
   const listeners = new Set<(state: S) => void>();
   /** Which app answered on this URL, learned on the first connect.
@@ -801,8 +808,24 @@ export function connectCli<S>(
         case "css":
         case "boot":
         case "tt-state":
-        case "diag":
           return;
+        // A server-side refusal aimed at THIS client (an oversized frame it
+        // will never receive, a rejected subscription): the browser paints it
+        // in the overlay, and a terminal client dropped it — so the one
+        // message explaining why no state ever arrives was thrown away.
+        // Errors only: informational diagnostics are the panel's business.
+        case "diag": {
+          const d = frame.d as
+            | { severity?: string; message?: string; hint?: string }
+            | null;
+          if (d && d.severity === "error" && typeof d.message === "string") {
+            log.error(
+              "cli",
+              `server diagnostic: ${d.message}${d.hint ? ` (${d.hint})` : ""}`,
+            );
+          }
+          return;
+        }
         // Per-action acks for bound-cell method calls.
         //
         // The ack carries `ok`, the method's return `value`, and on refusal
@@ -868,6 +891,12 @@ export function connectCli<S>(
           return;
         case "state":
         case "patches": {
+          // STATE arrived: this connection really can carry the app's traffic,
+          // so the oversized-frame streak (and the backoff it holds up) ends.
+          // Deliberately not "any frame": an old server sends its small `proto`
+          // hello before the state that kills the socket, and resetting on that
+          // put the retry clock back to 1 s on every attempt.
+          _tooLarge = 0;
           state = applyServerFrame(state, frame, () => {
             // desync — request full state from server
             if (socket.readyState === WebSocket.OPEN && pacer) {
@@ -889,7 +918,16 @@ export function connectCli<S>(
       }
     };
 
-    socket.onerror = () => {};
+    // The error channel is not noise: the runtime reports "Frame too large"
+    // here and then closes, and this handler used to throw that away — so a
+    // server pushing a state over the 64 MiB WebSocket message ceiling read as
+    // an ordinary disconnect and was retried, at full speed, forever, with
+    // nothing said anywhere. Kept as a REASON for the close below, which is
+    // where one line is worth printing.
+    let closeReason = "";
+    socket.onerror = (e) => {
+      closeReason = e instanceof ErrorEvent ? e.message : String(e);
+    };
 
     socket.onclose = (ev) => {
       stopHeartbeat();
@@ -930,6 +968,26 @@ export function connectCli<S>(
       }
       ws = null;
       if (closed) return;
+      // A frame this runtime cannot take: 64 MiB is Deno's WebSocket message
+      // ceiling and there is no option to raise it, so reconnecting gets the
+      // same frame and the same death. Say so — every time, because the app is
+      // getting no state at all — and never let the reconnect clock reset to
+      // its 1 s floor for it: an aio server refuses such a frame and tells the
+      // peer (`ws-frame-ceiling`), and anything older kept the loop spinning.
+      if (isFrameTooLarge(closeReason) || ev.code === FRAME_TOO_LARGE_CLOSE) {
+        _tooLarge++;
+        retry = Math.max(retry, _tooLarge);
+        log.error(
+          "cli",
+          `the server sent a frame this runtime refuses: ${
+            closeReason || "message too large"
+          }. Deno's WebSocket takes at most 64 MiB per message and cannot be ` +
+            `raised, so every reconnect ends the same way — the app's state ` +
+            `is too big to push to a terminal client (bulk rows belong in ` +
+            `db: tables, binaries in files — docs/persistence/big-data.md). ` +
+            `Retrying in ${backoffDelay(retry)}ms.`,
+        );
+      }
       if (!wasConnected && retry === 2) {
         // A `wss://` dial that NEVER opened is, more often than not, the
         // self-signed cert an exposed aio server generates: Deno's WebSocket

@@ -25,6 +25,52 @@ export function getDom(vnode: VNode | string | number): Node | null {
   return null;
 }
 
+/** Where a vnode's realized nodes ACTUALLY start — asked of the OUTPUT rather
+ *  than of the vnode's own copy of it.
+ *
+ *  A component, a boundary and a fragment have no DOM of their own: `_dom` is a
+ *  COPY of the output's first node, and it is refreshed only when THAT vnode is
+ *  diffed. A component nested below re-renders on its own signal and swaps its
+ *  root element — one dialog giving way to the next, `<p>` becoming
+ *  `<section>` — and the node under every ancestor vnode changes while none of
+ *  their copies hears about it. The next parent diff then reads a detached node
+ *  as "where child i is": the dev alignment tripwire called a perfectly correct
+ *  render a desync ("holds the wrong node at child 6", a field report), and a
+ *  pass that DID move nodes would have walked from the wrong place.
+ *
+ *  The output always knows — an element's `_dom` is the node itself, and a
+ *  component's output is kept current by its own re-render. `_dom` stays the
+ *  answer wherever there is no realized output to ask: a component that renders
+ *  a bare string owns a text node no vnode carries, and an empty fragment owns
+ *  only its anchor comment.
+ *
+ *  The structure mirrors {@linkcode _domNodeCount}, which decides the SPAN the
+ *  same cases occupy — the two are read together at every call site, so they
+ *  answer from one shape. */
+export function _liveFirstDom(child: VNode | string | number): Node | null {
+  if (typeof child !== "object" || child === null) return null;
+  const tag = child.tag;
+  if (typeof tag === "function") {
+    const r = child._rendered;
+    return (r != null ? _liveFirstDom(r) : null) ?? child._dom ?? null;
+  }
+  if (tag === Fragment || tag === ErrorBoundary || tag === Suspense) {
+    // A boundary showing its FALLBACK sets `_rendered`; on the happy path it
+    // (and every Fragment) leaves it undefined and splats its children inline.
+    if (child._rendered !== undefined) {
+      return (child._rendered !== null
+        ? _liveFirstDom(child._rendered)
+        : null) ?? child._dom ?? null;
+    }
+    for (const c of child.children) {
+      if (_domNodeCount(c) === 0) continue; // occupies nothing: not the start
+      return _liveFirstDom(c) ?? child._dom ?? null;
+    }
+    return child._dom ?? null;
+  }
+  return child._dom ?? null;
+}
+
 /** True when `node` is a live child of `parent`. A plain `.parentNode ===
  *  parent` identity check breaks under happy-dom, which wraps <form> in a
  *  Proxy (named-element access): a child's .parentNode may be the raw node or

@@ -1,5 +1,223 @@
 # Changelog
 
+## v1.0.6-beta — a Windows app that cannot freeze, a loop that cannot crawl, and a config that cannot be ignored (2026-09-20)
+
+> **The public surface is additive only** (`check:api` reports the additions
+> below and no removals or changed signatures). A handful of things that used to
+> pass in SILENCE now refuse out loud — every one of them was already giving the
+> app the opposite of what it asked for. They are listed under
+> [what you may notice](docs/upgrade/from-1.0.5-beta-to-1.0.6-beta.md).
+
+Ten hunt rounds and three field reports, each fix paired with a test that was
+seen red, and every round of fixes attacked by a separate reviewer round — which
+is how a third of these were found: in the previous round's fix.
+
+### The agent benchmark
+
+A fresh agent that had never seen aio, one fixed task ("a notes app: add, list,
+delete, and they survive a restart — then run it and show me it works"),
+measured from its own command log: **68 s to a running, reachable app**,
+`deno task check` green on the **first** try, **zero** reads of the framework's
+`src/`, **4/4** behaviours proven by driving the app (including two restarts).
+Second release in a row passing.
+
+Its friction list is the valuable half, and one item is a real gap: with "no
+window may open" as a constraint there is **no headless UI client**, so
+`am trigger` cannot be reached at all and `testUI` in a test file is the only
+way to drive a click. That, and four smaller ones, are in `todo.md`.
+
+### A Windows desktop app cannot freeze on its own pipe
+
+A field report (Windows 11, a page of 88 cards) froze an app for good: 58 image
+routes answered 404, the browser never read those bodies, and the app stopped
+answering anything — clock stopped, both processes idle, a fresh connection
+accepted and never served.
+
+The cause was ours, in three layers, and all three are fixed:
+
+- `win-pipe.ts` parked one blocking-pool thread per pending operation, and
+  Deno's pool is capped (32 here). Past the cap, every further operation queued
+  behind the parked ones forever. It now binds every handle to ONE I/O
+  completion port with a single parked completion loop: constant cost for any
+  number of connections.
+- `drain()` waited for the peer to read, with no bound — a peer that never reads
+  cost a parked thread for the life of the app. It now gives the peer 3 s, says
+  so, and closes the connection.
+- the Electron side opened one pipe connection per concurrent request with no
+  ceiling. It is now a keep-alive agent capped at 6, error and small declared
+  bodies are read whole, and a dropped response stream destroys its request.
+
+Measured on the real Windows 11 machine, same app built both ways, 60 failing
+images: before — the clock stops, `/ping` times out twice, the page never
+reloads, server threads 18 → 39. After — the clock keeps ticking, `/ping`
+answers 200, the page reloads, server threads 18 → **17**.
+
+### Two loops that crawled
+
+- **An async method that writes in a loop.** After an `await`, every read
+  rebuilt the method's working copy from committed state and replayed the whole
+  batch. One loop over N keys was N full clones of the cell. It now applies only
+  the writes added since the last read: **19.2 s → 46 ms** at 10 000 keys, and
+  200 writes cost **1** clone instead of ~200.
+- **A field hidden from clients** (`visible: { exclude: [...] }`) re-copied the
+  whole array on EVERY read, and broke identity memoization downstream. It is
+  now memoized per source value — exact, because state is immutable: **820 ms →
+  0.05 ms** for 200 reads of 10 000 rows, and the client sees the same object
+  between reads again.
+
+### Data that cannot be lost quietly
+
+The persistence round, found by crash-injecting at every step and by comparing a
+crash to a clean stop:
+
+- two instances sharing a data dir: the second read the first's LIVE database as
+  damaged, moved it aside and put an older snapshot in its place. A locked file
+  is now retried, then left alone with a warning.
+- a good snapshot that could not be copied (disk full) booted EMPTY; a
+  half-finished quarantine could split a database from its WAL; a crash during a
+  cross-device move left a torn `state.db` to boot on; a damaged file that could
+  not be moved handed the boot a CLOSED database. Each now completes on the next
+  boot or refuses it by name.
+- `db.snapshot()` fsyncs its copy before the rename and the directory after, so
+  a power cut cannot lose it; recovery of one database is serialized across
+  processes by a lock.
+- journal lines carry the cell version that wrote them, and a line is replayed
+  only by that version; restore hooks run again on the state replay produced, so
+  a crash and a clean stop agree.
+- three `onRestore`/`persist` shapes our own docs allow crashed every boot or
+  wrote `{}` over real data: an async `onRestore`, an app-level hook that
+  mutates and returns nothing, and a `persist:` object naming neither `include`
+  nor `exclude`.
+
+### Sync that cannot lose an edit
+
+Attacked with a randomized multi-tab model (500+ episodes per run) whose
+invariants were themselves mutation-tested:
+
+- an op made in one tab was dropped by its twin, which saw it in the shared
+  queue and waited for an ack it could never receive.
+- a re-sync request that died with its connection was never asked again, leaving
+  the tab on a state the server never had — permanently, while fully connected.
+- a refusal the server repeated was reported to the app twice; an op the buffer
+  evicted was blamed on a twin tab; a dropped op was reported as "never reached
+  the server" when that was not known.
+- a `sync.merge`/`identity` key naming no state field silently fell back to
+  last-write-wins. It is now said out loud.
+
+### Auth
+
+- **An SSO identity could be claimed before its owner ever signed in.** Signup
+  is open by default and checked ids for shape only, so anyone could register
+  the exact id an OIDC login would later resolve to, with a password of their
+  choosing, and the real user's first sign-in landed on that account. The IdP
+  namespace is now reserved by the store itself — in every case folding
+  uniqueness uses — and a password can never verify an external identity, so an
+  account squatted by an older build stops working too.
+- ten malformed requests could take signup offline for an hour, and ~31 of them
+  could answer `429` to a CORRECT password. A request the store would refuse now
+  spends no budget.
+- `sessions.refresh` had none of `issue`'s ttl guard: a fractional or absurd ttl
+  produced an immortal session, a session that was already dead, or a row that
+  broke every later read.
+
+### A hidden field stays hidden
+
+`visible.exclude` / `persist.exclude` had two ways to hand a client the field
+you asked it to strip, and one was attacker-reachable:
+
+- a dot path descended into the records of its container **only when the
+  container had no key of that name itself**. One record id equal to the field
+  name — and record ids are usernames and slugs — sent every OTHER record's
+  secret to every client, on the full frame, the patch path, the client read
+  seam and the restore path.
+- the check for that name walked the prototype chain, so excluding
+  `a.constructor`, `a.__proto__`, `a.toString` or `a.valueOf` removed nothing,
+  anywhere.
+
+Both are fixed the fail-closed way: at each level the excluder drops the literal
+path AND walks every remaining key as a record, so an ambiguous name loses both
+readings. The five deciders that answered this question separately — including
+one closure no test could reach — are now one walker, which is why the bug
+survived a round of fixes that copied the wrong rule into the other two. The
+live-update path learned the same rule (an op whose path starts with a record
+id, or carries a numeric-string key, used to slip past the filter the full frame
+applied). The standing regression is a 280-shape fuzzer run against every seam:
+wire, client read, `am surface`, SSR, worker cells, time travel and the
+persistence round trip.
+
+### Config that cannot be ignored
+
+- a value of the wrong SHAPE was read for truthiness: `expose: "false"` — the
+  natural spelling of "off", and one a JSON file can carry without a compiler
+  seeing it — **put the app on the network**. `allowedOrigins: "https://x"` was
+  iterated as 23 characters, turning the origin check into a substring test, and
+  a wrong-shaped `wsLimits`/`ui` was dropped whole with the guard stack it
+  carries. All refused now, at declaration, before the plugin merge that used to
+  read them first.
+- a misspelled key inside `auth`, `sessions`, `tls` or `updates` was dropped in
+  silence: `ttlMS` left a 5-minute session at the built-in 30 days, a typo in
+  the cert pair stopped a real certificate being served. Refused, with a
+  did-you-mean derived from the type itself.
+
+### The renderer, SSR and `<head>`
+
+- a component whose root element swaps on its own re-render left its parent
+  holding a stale node: a false desync warning, and — worse — a detached element
+  RE-INSERTED beside its replacement in a list that reordered in the same pass.
+- server rendering accused ordinary components of calling hooks "outside a
+  component render", 7 times per render, with the dev server logging every one.
+- `<meta name="description">` beside `<meta itemprop="description">` shipped as
+  ONE tag; `httpEquiv` and `acceptCharset` shipped as attributes no browser
+  reads, so a refresh or a CSP was silently dead; `useHead` called in a stream's
+  async gap was treated as part of whatever page was streaming.
+- the re-render burst warning blamed "a render writing state" when the renders
+  came from outside. It now names the component or the lifecycle hook that
+  actually wrote, or claims no write at all — and always names the dependencies
+  that fired.
+
+### The harness stops being more permissive than a browser
+
+- `sleep()` and `race()`'s timeout honour the harness's `advance()`.
+- pressing Enter runs constraint validation and refuses out loud, naming the
+  field and the browser's own wording, where a real browser would refuse.
+- a refused call on a `worker: true` cell is answered the way a main-isolate
+  cell answers it — adding `worker: true` no longer changes what callers see.
+- three suite tests failed only under load; all three were real leaks (a pacer
+  timer, a chmod after a released write, an esbuild child that outlived its
+  kill).
+
+### `am`
+
+- `am start` boots the `cli` scaffold, which its own README told you to start
+  that way — and reads the dev task as a shell line, so `&&` or a redirect in it
+  is not passed to your app.
+- a stopped app in its own directory is told to start it, instead of a paragraph
+  about other people's apps.
+- an empty or repeated global flag is refused, not guessed: `--app="$APP"` with
+  an unset variable no longer targets a different app.
+- `am state` takes ONE path and says so; `am migrate` refuses where there is no
+  app instead of printing a clean bill; `am help` rows show their own
+  description; `am dispatch` sends an exact large integer and refuses one JSON
+  would round; `am replay` applies the journal's version stamp.
+
+### Desktop
+
+- a native file dialog opens from Electron itself, parented to the window, so it
+  cannot open behind the app (verified on the Windows 11 machine: the dialog is
+  the foreground window and its owner is the app).
+- a second instance under a different home gets its own Chromium profile, where
+  it used to share the first's cache and render a blank window.
+- `own.set(id, factory, { replace: true })` says a replace is intended, so the
+  dev warning stays for the accidental case.
+- a dev reload no longer kills the app for good: the restart supervisor forwards
+  SIGHUP to its child instead of dying of it.
+
+### Additions (surface)
+
+`own.set`'s `{ replace: true }`, `AioMeta.profileName`, the `cell-versions`
+control route, `am replay`'s `version` skip reason, and a handful of `@internal`
+helpers. Nothing was removed or changed.
+
 ## v1.0.5-beta — aio decides the Electron, and a suite ten times faster (2026-09-18)
 
 > **The public surface is byte-identical to 1.0.4-beta** (`check:api` reports no

@@ -24,6 +24,7 @@
 
 import {
   accountLockoutOf,
+  signupPolicyRefusal,
   totpReplayOf,
   type UserStore,
 } from "./auth-users.ts";
@@ -327,21 +328,22 @@ export async function handleAuthFlow(
   switch (route.slice(5)) {
     case "signup": {
       if (!cfg.signup) return json(403, { error: "signup_disabled" });
-      // A SUCCESSFUL signup records no failure, so the failure budget never
-      // throttled it: 60 anonymous signups in 665 ms — 60 PBKDF2-600k runs, 60
-      // permanent rows, 60 real `role:"user"` sessions. Two budgets, because
-      // there are two costs: the hashing work, and the account itself.
-      if (!chargeAuthWork(clientKey)) {
-        return json(429, { error: "too_many_attempts" });
-      }
-      // …and `chargeSignup` is ALSO the id-enumeration bound this route used
-      // the failure budget for: it charges every ATTEMPT, collisions included,
-      // so 10 per hour is a far tighter cap on probing than 10 failures in
-      // five minutes — and it does not let someone else's failed LOGINS refuse
-      // a stranger's signup.
-      if (!chargeSignup(clientKey)) {
-        return json(429, { error: "too_many_accounts" });
-      }
+      // THE SHAPE FIRST, THE BUDGETS SECOND.
+      //
+      // Both charges used to happen before the body was read, so ten
+      // `POST /signup` with `{}` — no id, no password, nothing to create and
+      // nothing to enumerate — answered `400 id_and_password_required` and
+      // then left signup `429 too_many_accounts` for the next HOUR (measured).
+      // Per IP that is self-harm; behind the reverse proxy `docs/auth/auth.md`
+      // prescribes without `trustProxyHeader` every client shares one bucket,
+      // so ten junk requests are an hour-long signup outage for everyone —
+      // the same shape as the login outage this file already refuses to have,
+      // with a window twelve times longer.
+      //
+      // Parsing a body already capped at 16 KiB is not a cost worth metering.
+      // Everything the budgets exist to cap still pays: an account creation,
+      // and the id COLLISION that is the enumeration channel — both reach
+      // `users.create` below, past both charges.
       const b = body();
       const id = str(b?.id), password = str(b?.password);
       const email = str(b?.email) ?? undefined;
@@ -353,6 +355,43 @@ export async function handleAuthFlow(
       }
       if (cfg.requireVerified && !email) {
         return json(400, { error: "email_required" });
+      }
+      // …AND THE STORE'S SHAPE TOO, NOT JUST THE ROUTE'S.
+      //
+      // `users.create` refuses `invalid_id`, `reserved_id` and
+      // `password_too_short` from the request alone — before a hash, a row or
+      // a lookup — but it does so one line PAST both charges, so the outage
+      // above came back with one more field in the body:
+      // `{"id":"a","password":"1"}` is 25 bytes and ten of them left signup
+      // `429 too_many_accounts` for the next hour. Worse, the per-minute work
+      // meter is LOGIN's too, so thirty-one of them answered
+      // `429 too_many_attempts` to a correct password — the one thing
+      // `docs/auth/auth.md` promises this budget never does.
+      //
+      // `signupPolicyRefusal` is the store's own rule, asked as a question;
+      // `createRow` still throws it, so there is one decider, not two.
+      const refusal = signupPolicyRefusal(id, password);
+      if (refusal !== null) return json(400, { error: refusal });
+      // A SUCCESSFUL signup records no failure, so the failure budget never
+      // throttled it: 60 anonymous signups in 665 ms — 60 PBKDF2-600k runs, 60
+      // permanent rows, 60 real `role:"user"` sessions. Two budgets, because
+      // there are two costs: the hashing work, and the account itself.
+      if (!chargeAuthWork(clientKey)) {
+        return json(429, { error: "too_many_attempts" });
+      }
+      // …and `chargeSignup` is ALSO the id-enumeration bound this route used
+      // the failure budget for: it charges every creation ATTEMPT, collisions
+      // included, so 10 per hour is a far tighter cap on probing than 10
+      // failures in five minutes — and it does not let someone else's failed
+      // LOGINS refuse a stranger's signup.
+      if (!chargeSignup(clientKey)) {
+        // Hand the work unit back. This request hashed nothing and touched no
+        // row — the ACCOUNT cap refused it — so letting it stand would let the
+        // hour-long cap spend down the per-minute meter LOGIN shares, and a
+        // burst of signups past the account cap would answer
+        // `429 too_many_attempts` to a valid credential.
+        refundAuthWork(clientKey);
+        return json(429, { error: "too_many_accounts" });
       }
       let user: AioUser;
       try {

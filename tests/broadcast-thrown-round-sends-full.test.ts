@@ -52,6 +52,7 @@ function fakeClient(id: string) {
 }
 const kind = (frame: string) => JSON.parse(frame).t as string;
 const settle = () => new Promise((r) => setTimeout(r, 60));
+const tick = () => new Promise((r) => setTimeout(r, 0));
 
 Deno.test("broadcast: a round lost to a THROW makes the next one a full state, for every client", async () => {
   // A value the wire cannot carry — the round's `JSON.stringify` throws on it.
@@ -85,7 +86,9 @@ Deno.test("broadcast: a round lost to a THROW makes the next one a full state, f
         ops: [{ op: "add", path: ["items", 1], value: 1n }],
       }] as unknown as PatchEntry[],
     );
-    await settle();
+    // One tick, not a settle: the round has run, and the owed full state is
+    // not yet paid by the idle retry (tests/ws-backlog-debt-paid-when-idle).
+    await tick();
     assertEquals(a.sent.length, 0, "the thrown round delivered nothing");
     assertEquals(b.sent.length, 0, "the thrown round delivered nothing");
     assertEquals(a.meta.needsFull, true, "client a is owed a full state");

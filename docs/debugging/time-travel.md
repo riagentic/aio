@@ -44,7 +44,12 @@ action (Immer), so an entry costs nothing to record and history memory grows
 with the _deltas_ between actions, not entries × state size. Undo / redo / goto
 are O(1) — the entry's state is simply served.
 
-- Window: **2000 entries**, oldest evicted.
+- Window: **2000 entries**, oldest evicted — and **128 MB** of retained state,
+  whichever comes first. Structural sharing makes an entry free for what an
+  action did not change and full price for what it replaced, so a method writing
+  a fresh 1 MB value would hold ~2 GB at the count cap alone. When the byte
+  budget evicts, aio says so once in the log — the window is then shorter than
+  2000 actions.
 - Dev only: `if (prod) return false` — by design, not by accident.
 - Off switch: `diagnostics: { dev: { timeTravel: false } }`.
 - UI: `useTimeTravel()` in any AIR component; server side drives it over the

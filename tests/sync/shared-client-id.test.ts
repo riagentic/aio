@@ -102,10 +102,14 @@ Deno.test("M4: a genuine own-op echo is still suppressed", async () => {
   assertEquals(a.confirmed().items, ["mine"]);
 });
 
-Deno.test("M4: an unconfirmed op resent from a previous session is still suppressed", async () => {
+Deno.test("M4: an unconfirmed op resent from a previous session is applied exactly once", async () => {
   // A reload keeps the offline queue but starts a new session nonce, so a
-  // resent op carries the OLD prefix. It is still ours and still awaiting an
-  // ack — the pending buffer is what says so.
+  // resent op carries the OLD prefix. It is still in our queue — but "still
+  // awaiting an ack" is not something the queue can promise THIS session
+  // (a twin tab sharing the queue may be the one that sent it, and it gets
+  // the ack — tests/sync/twin-tab-peer-op.test.ts). So its broadcast folds it
+  // at its position, and an ack that does come confirms it without a second
+  // application.
   const a = makeClone();
   const stale: SyncOp = {
     id: `${SHARED}-oldsess-1`,
@@ -117,11 +121,14 @@ Deno.test("M4: an unconfirmed op resent from a previous session is still suppres
   };
   await a.buffer.add(stale);
   await a.engine.handleRemoteOp({ ...stale, confirmed: true, serverTs: 13 });
+  assertEquals(a.confirmed().items, ["resent"], "folded at its broadcast");
+  await a.engine.handleAck(CELL, stale.id, [2000, 0, "server"], 13);
   assertEquals(
     a.confirmed().items,
-    [],
-    "an op we are still awaiting an ack for enters confirmed state via the ack",
+    ["resent"],
+    "its ack confirms it — one application, not two",
   );
+  assertEquals(await a.buffer.getUnconfirmed(CELL), [], "and drains it");
 });
 
 Deno.test("M4 (server): a catch-up carries the clone's ops but not the requester's own", async () => {

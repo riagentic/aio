@@ -122,8 +122,31 @@ async function withApp(
     _resetAioRuntime();
     await dropTempDir(dir);
   }
-  return warned.filter((l) => l.includes("shapeguard"));
+  return warned.filter(saidAboutShape);
 }
+
+/** Every line the two shape DECIDERS wrote about this cell — and nothing else.
+ *
+ *  This used to be `l.includes("shapeguard")`, which is the cell's NAME, not
+ *  the guard's voice: any subsystem that happened to mention the cell landed
+ *  in the collector. Under load the perf budget did exactly that —
+ *  `[BUDGET_REDUCE] shapeguard reduce exceeded budget: 167.4ms > 100ms` — and
+ *  three of these tests went red on a sentence that has nothing to do with
+ *  declared shapes. The assertions are about what the guard SAYS; the
+ *  predicate has to be about that too.
+ *
+ *  Both prefixes are load-bearing, not one with the other for safety: the
+ *  write-time guard (`declared-shape-guard.ts`, every message) says
+ *  `state write:`, and the persist-time dev watcher (`restoreDropWatcher` in
+ *  aio-boot.ts) says `persist (dev):`. They share a `said` set so one fact is
+ *  one line, and the `w.length === del.length` assertions below are what pin
+ *  that — they can only do it while BOTH voices reach this list.
+ *
+ *  Not vacuous: the four tests that assert a non-empty `w` fail if this ever
+ *  stops matching the guard. */
+const saidAboutShape = (l: string): boolean =>
+  l.includes("shapeguard") &&
+  (l.includes("state write:") || l.includes("persist (dev):"));
 
 for (const mode of ["dev", "prod"] as const) {
   Deno.test(`declared-shape guard (${mode}): deleting a declared key warns once, with the advice`, async () => {

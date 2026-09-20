@@ -161,10 +161,17 @@ try {
   if ((await run(["chmod", "-R", "u+rwX,go+rX", work])) !== 0) {
     throw new Error("chmod");
   }
+  // The CPU budget is the machine's, not this rig's: a 5 GB Wine image with
+  // two Windows runtimes in it will take every core it is given. `AIO_WINE_
+  // CPUSET=4-7` pins it — and, because Windows sizes Deno's blocking-FFI pool
+  // at 4×cores, it is also what makes "more pending pipe operations than the
+  // pool has threads" reachable here at all.
+  const cpuset = Deno.env.get("AIO_WINE_CPUSET");
   const docker = [
     RT,
     "run",
     "--rm",
+    ...(cpuset ? ["--cpuset-cpus", cpuset] : []),
     "--name",
     `aio-wine-pipe-${Date.now()}`,
     "-v",

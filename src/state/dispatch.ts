@@ -17,6 +17,7 @@ import {
   setCorrelationId,
 } from "../diagnostics/error.ts";
 import { diagEmit } from "../diagnostics/diagnostic-bus.ts";
+import { isDeliberateRejection, rejectionLine } from "./method-rejection.ts";
 export type { AioError } from "../diagnostics/error.ts";
 
 /** Performance check — warn on violations, or stay silent.
@@ -770,26 +771,34 @@ export function createDispatch<S, A, E>(
           try {
             reduced = reduce(getState(), current);
           } catch (e) {
+            // A refusal (`throw new Error("insufficient")`) is reported as one
+            // info line, a bug as the error box — method-rejection.ts.
+            const refusal = isDeliberateRejection(e);
             const err = createAioError("REDUCE_ERROR", e, {
               cellName: actionType?.split(":")[0],
               actionType,
+              ...(refusal
+                ? { rejected: rejectionLine(actionType ?? "?", e) }
+                : {}),
             }, getState() as Record<string, unknown>);
             reportAioError(err, _reportOpts);
             // Emit a diag event so the health overlay / diagnostic bus
             // subscribers see reduce failures — previously only EFFECT_ERROR
             // paths emitted, so the blank-screen health card stayed silent
             // while a reducer crashed on every dispatch.
-            diagEmit({
-              type: "reduce-error",
-              severity: "error",
-              source: "dispatch",
-              message: `Reduce threw for action '${actionType ?? "?"}': ${
-                e instanceof Error ? e.message : String(e)
-              }`,
-              detail: { actionType, cellName: actionType?.split(":")[0] },
-              hint:
-                "Check the cell method body — the reducer threw before producing a new state.",
-            });
+            if (!refusal) {
+              diagEmit({
+                type: "reduce-error",
+                severity: "error",
+                source: "dispatch",
+                message: `Reduce threw for action '${actionType ?? "?"}': ${
+                  e instanceof Error ? e.message : String(e)
+                }`,
+                detail: { actionType, cellName: actionType?.split(":")[0] },
+                hint:
+                  "Check the cell method body — the reducer threw before producing a new state.",
+              });
+            }
             // B-4: a reducer throw means the state change never applied —
             // `await cell.method()` must learn the action failed, not resolve
             // cleanly. Mirrors QUEUE_OVERFLOW / DISPATCH_CLOSED contract.
@@ -882,9 +891,24 @@ export function createDispatch<S, A, E>(
           // tells it whether this app is in dev, so a captured flag was
           // permanently the default. The block already reads `deps.debug` the
           // same way; the cost is a property load per commit.
+          // The ROOT is frozen in EVERY mode, and the full tree only when
+          // `freezeState` is on (dev by default).
+          //
+          // Immer freezes what a producer produced — and the composed reduce
+          // does not hand one back: it returns `{ ...fullState, [cell]:
+          // nextSlice }` (cell-compose-reduce.ts), a fresh plain object built
+          // AFTER `produce`, holding frozen slices. So in production the
+          // slices threw on a write and the object holding them did not:
+          // `getState().myCell = {…}`, `delete getState().myCell` and
+          // `getState().newKey = …` all SUCCEEDED, stuck (the next method
+          // composed its root from the mutated one), and reached no client and
+          // no state.db — while dev's full-tree pass threw at the line. A
+          // silent dev/prod divergence with prod the PERMISSIVE side, which is
+          // the one shape CLAUDE.md rules out. Shallow and O(cells), so it
+          // costs the same in both modes.
           const nextState = deps.freezeState
             ? deepFreeze(reduced.state)
-            : reduced.state;
+            : Object.freeze(reduced.state);
           setState(nextState);
           if (
             deps.debug && prev !== reduced.state &&

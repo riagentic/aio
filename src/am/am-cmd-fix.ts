@@ -25,9 +25,9 @@ import {
   latestTag,
   MAIN,
   parseVersion,
+  pinnedFrameworkPath,
   readPin,
   sortVersions,
-  versionPath,
   writePin,
 } from "./am-versions.ts";
 import { meetsMinDeno, MIN_DENO } from "../server/deno-version.ts";
@@ -578,7 +578,13 @@ export async function cmdFix(
           pin = null;
         }
       } else if (pin) {
-        root = versionPath(pin); // dry run: report, provision nothing
+        // Dry run: report, provision nothing — but through THE decider for
+        // "where must dep/aio point", not a second spelling of it.
+        // `versionPath` alone joined the version store with the whole pin, so a
+        // local-dev (`path:`) pin previewed a repair towards
+        // `…/aio-versions/path:/home/dev/code/aio` — a directory that cannot
+        // exist — on an app whose link the real run reports as already ok.
+        root = pinnedFrameworkPath(pin);
       }
     }
     // SEAL an unpinned app. Until a version is recorded, "it built last month"

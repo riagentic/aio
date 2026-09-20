@@ -1,13 +1,8 @@
 /**
  * @module
- * React migration hooks — `aio/air/compat`, off the main surface (AIO-7.6).
- *
- * These exist so React code compiles during migration; each logs a one-time
- * dev hint pointing at the AIR-native equivalent:
- * - `useState` → `useLocal()` / `signal()`
- * - `useEffect` → `onMount()` / `effect()`
- * - `useMemo` → `computed()`
- * - `useCallback` → unnecessary (components are auto-optimized)
+ * React's hooks — the same functions `aio/air` exports since 1.0.6-beta, kept
+ * here so every import written for this entry keeps working. They behave as
+ * React 19's (tests/react-patterns.test.ts) and print nothing.
  *
  * Stability: **permanent** (A5 decision, 2026-07-06). This entry is part of
  * the stable 1.0 surface — React migrations don't finish on our schedule.

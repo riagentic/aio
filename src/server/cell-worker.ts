@@ -23,6 +23,7 @@ import {
   WORKER_CLOSE_DEADLINE_MS,
 } from "./cell-worker-protocol.ts";
 import { serverRequest, serverUser } from "./auth-context.ts";
+import { recordRejection } from "../state/rejection-tracker.ts";
 import { resolveCall } from "../state/cell-impl.ts";
 import { log } from "../diagnostics/logger-api.ts";
 
@@ -44,6 +45,10 @@ export type CellWorkerDeps = {
   /** The owner's resolved `freezeState` — forwarded to the worker so both
    *  isolates freeze on one decision (see ToWorker["init"]). */
   freezeState: boolean;
+  /** The owner's `refusalsReject` — forwarded so the worker's reply decides
+   *  what an in-process `await cell.method()` sees for a REFUSED write the
+   *  same way a main-isolate cell does. See `ToWorker.init`. */
+  refusalsReject: boolean;
   /** The owner's resolved appId, handed to the worker (see cellWorkerName). */
   appId?: string;
 };
@@ -117,6 +122,10 @@ export function createCellWorker(
       resolve: (v: unknown) => void;
       reject: (e: Error) => void;
       callId?: string;
+      /** The caller's OWN action object — what `action-ack.ts` keys a refusal
+       *  to. The worker refused a structured clone of it in another isolate,
+       *  so the note comes home as data and is recorded against this one. */
+      action: Msg;
     }
   >();
   let closed = false;
@@ -199,6 +208,14 @@ export function createCellWorker(
       case "done": {
         const entry = inflight.get(msg.id);
         inflight.delete(msg.id);
+        // The reduce refused this write in the WORKER's isolate, where the
+        // tracker that `action-ack.ts` reads does not reach. Recorded here
+        // against the caller's own action object, so the ack path answers
+        // `ACTION_REFUSED` exactly as it does for a main-isolate cell — and
+        // the in-process promise still RESOLVES, which is what
+        // `refusalsReject: false` means (the worker posts `fail` instead when
+        // it is on).
+        if (msg.refused && entry) recordRejection(entry.action, msg.refused);
         // Async method: the awaiter holds the registry promise — settle it
         // with the value the worker's executor produced. (No-op if the
         // caller-side ceiling already gave up; the late value is dropped,
@@ -269,6 +286,7 @@ export function createCellWorker(
     prod: deps.prod,
     freezeState: deps.freezeState,
     dev: devFlag(),
+    refusalsReject: deps.refusalsReject,
   });
 
   return {
@@ -282,6 +300,7 @@ export function createCellWorker(
         prod: deps.prod,
         freezeState: deps.freezeState,
         dev: devFlag(),
+        refusalsReject: deps.refusalsReject,
       });
     },
     cancel(actionType: string): void {
@@ -318,7 +337,7 @@ export function createCellWorker(
       }
       const id = ++seq;
       const p = new Promise<unknown>((resolve, reject) => {
-        inflight.set(id, { resolve, reject, callId });
+        inflight.set(id, { resolve, reject, callId, action });
       });
       try {
         send({ t: "call", id, action, ctx: ambient() });

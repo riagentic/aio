@@ -19,7 +19,9 @@ import {
 export function electronMainScript(url: string, meta?: AioMeta): string {
   const w = meta?.width ?? 800;
   const h = meta?.height ?? 600;
-  const slug = toSlug(meta?.title ?? "aio-app");
+  // The userData directory — the title's slug, or the profile the
+  // lifecycle derived from this run's HOME (electronProfileName).
+  const slug = meta?.profileName ?? toSlug(meta?.title ?? "aio-app");
   // The tray icon is the app's own monogram, fetched from the app itself —
   // the WebSocket shell has no app dir to read `icon.png` from.
   const trayIcon =

@@ -88,6 +88,8 @@ class BrowserWindow {
   on() {} center() {} setIcon() {} setMenuBarVisibility() {}
   loadURL(u) { _curUrl = u; ev({ ev: 'loadURL', url: u }); }
   isDestroyed() { return false; }
+  isVisible() { return process.env.AIO_STUB_HIDDEN !== '1'; }
+  isMinimized() { return false; }
   getBounds() { return { x: 0, y: 0, width: 800, height: 600 }; }
 }
 module.exports = {
@@ -106,6 +108,19 @@ module.exports = {
     handle: (_scheme, fn) => { protoHandler = fn; },
   },
   shell: { openExternal: (u) => ev({ ev: 'openExternal', url: u }) },
+  // Records how the dialog was opened (owned by the window or not, with which
+  // options) and answers by title: "cancel" cancels, "reject" fails.
+  dialog: {
+    showOpenDialog: (a, b) => {
+      const owned = b !== undefined;
+      const o = owned ? b : a;
+      ev({ ev: 'dialog', owned, ownerIsWindow: owned && a instanceof BrowserWindow, opts: o });
+      if (o.title === 'reject') return Promise.reject(new Error('boom'));
+      return Promise.resolve(o.title === 'cancel'
+        ? { canceled: true, filePaths: [] }
+        : { canceled: false, filePaths: ['/picked/a.txt', '/picked/b c.txt'] });
+    },
+  },
   nativeImage: { createFromDataURL: () => ({}) },
 };
 `;
@@ -126,6 +141,9 @@ type Ev = {
   endedAt?: number;
   body?: string;
   privileges?: Record<string, boolean>;
+  owned?: boolean;
+  ownerIsWindow?: boolean;
+  opts?: Record<string, unknown>;
 };
 
 const encoder = new TextEncoder();
@@ -196,6 +214,7 @@ async function startMain(
     httpSocketPath?: string;
     baseDir?: string;
     childWindows?: boolean;
+    hidden?: boolean;
   } = {},
 ) {
   const dir = await Deno.makeTempDir({ prefix: "aio-emain-" });
@@ -239,7 +258,11 @@ async function startMain(
   const proc = new Deno.Command(Deno.execPath(), {
     args: ["run", "-A", "--quiet", join(dir, "main.cjs")],
     cwd: dir,
-    env: { AIO_CTRL: ctrlPath, AIO_STUB_DIR: dir },
+    env: {
+      AIO_CTRL: ctrlPath,
+      AIO_STUB_DIR: dir,
+      ...(opts.hidden ? { AIO_STUB_HIDDEN: "1" } : {}),
+    },
     stdout: "piped",
     stderr: "piped",
   }).spawn();
@@ -434,6 +457,7 @@ async function withHarness(
     httpSocket?: boolean;
     baseDir?: (dir: string) => Promise<string>;
     childWindows?: boolean;
+    hidden?: boolean;
   } = {},
 ): Promise<void> {
   const dir = await Deno.makeTempDir({ prefix: "aio-esock-" });
@@ -443,6 +467,7 @@ async function withHarness(
     httpSocketPath: opts.httpSocket ? join(dir, "http.sock") : undefined,
     baseDir: opts.baseDir ? await opts.baseDir(dir) : undefined,
     childWindows: opts.childWindows,
+    hidden: opts.hidden,
   });
   try {
     // Startup DONE before any test reads `main.events`: the socket connects
@@ -1602,4 +1627,105 @@ Deno.test("electron main: openWindow refusals name the guardrail; a valid reques
       return app;
     },
   });
+});
+
+// ── The window-owned native dialog (pickFile / pickDirectory, #10) ─────────
+//
+// A field report: the dialog the SERVER spawned (powershell.exe) opened behind
+// the app window on Windows. The main process now opens it itself, owned by
+// the window. What must hold on the wire: main announces the capability on
+// connect; a `dialog` frame is answered by main and NEVER reaches the
+// renderer; every request gets exactly one `dialog-result` — paths, cancel, or
+// the error — carrying its id.
+Deno.test("electron main: announces dialogs, answers a dialog frame itself, never relays it", async () => {
+  await withHarness(async (srv, main) => {
+    await main.waitFor(() => srv.inbound.length > 0);
+    assertEquals(
+      JSON.parse(srv.inbound[0]!),
+      { v: 2, t: "type", d: { kind: "electron", caps: ["dialog"] } },
+      "the capability is the FIRST thing main says on a connection",
+    );
+    await main.rendererReady();
+
+    await srv.writeLine(JSON.stringify({
+      v: 2,
+      t: "dialog",
+      d: {
+        id: "d1",
+        kind: "files",
+        title: "Pick clips",
+        defaultPath: "/home/u",
+        filters: [{ name: "Video", extensions: ["mp4"] }],
+      },
+    }));
+    await srv.writeLine(JSON.stringify({
+      v: 2,
+      t: "dialog",
+      d: { id: "d2", kind: "directory", title: "cancel", filters: [] },
+    }));
+    await srv.writeLine(JSON.stringify({
+      v: 2,
+      t: "dialog",
+      d: { id: "d3", kind: "file", title: "reject" },
+    }));
+    const results = () =>
+      srv.inbound.map((l) => JSON.parse(l)).filter((f) =>
+        f.t === "dialog-result"
+      );
+    await main.waitFor(() => results().length === 3);
+
+    const byId = Object.fromEntries(results().map((f) => [f.d.id, f.d]));
+    assertEquals(byId.d1, {
+      id: "d1",
+      canceled: false,
+      paths: ["/picked/a.txt", "/picked/b c.txt"],
+    });
+    assertEquals(byId.d2, { id: "d2", canceled: true, paths: [] });
+    assertEquals(byId.d3.id, "d3");
+    assert(/boom/.test(byId.d3.error), JSON.stringify(byId.d3));
+
+    const opened = main.events.filter((e) => e.ev === "dialog");
+    assertEquals(opened.length, 3);
+    assert(
+      opened.every((e) => e.owned && e.ownerIsWindow),
+      "a visible window OWNS the dialog — that is the whole fix",
+    );
+    assertEquals(opened[0]!.opts, {
+      title: "Pick clips",
+      message: "Pick clips",
+      properties: ["openFile", "multiSelections"],
+      defaultPath: "/home/u",
+      filters: [{ name: "Video", extensions: ["mp4"] }],
+    });
+    assertEquals(
+      opened[1]!.opts!.properties,
+      ["openDirectory", "createDirectory"],
+    );
+    assertEquals(opened[1]!.opts!.filters, undefined, "no filters on a folder");
+    assertEquals(opened[2]!.opts!.properties, ["openFile"]);
+
+    assertEquals(
+      main.msgs().map(kindOf).filter((k) => k === "dialog"),
+      [],
+      "a dialog frame is main's, never the renderer's",
+    );
+  });
+});
+
+Deno.test("electron main: a window hidden to the tray does not take the dialog out of sight", async () => {
+  await withHarness(async (srv, main) => {
+    await main.waitFor(() => srv.inbound.length > 0);
+    await srv.writeLine(JSON.stringify({
+      v: 2,
+      t: "dialog",
+      d: { id: "h1", kind: "file", title: "Choose a file" },
+    }));
+    await main.waitFor(() => main.events.some((e) => e.ev === "dialog"));
+    const e = main.events.find((e) => e.ev === "dialog")!;
+    assertEquals(
+      e.owned,
+      false,
+      "an unowned dialog, not one parented to a hidden window",
+    );
+  }, { hidden: true });
 });

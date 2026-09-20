@@ -92,6 +92,14 @@ Deno.test("logger: a flush that times out says the tail is missing", async () =>
     release?.();
     // deno-lint-ignore no-explicit-any
     (Deno as any).writeTextFile = realWrite;
+    // The write released above lands AFTER the deadline, and its own `.then`
+    // tightens the file it created (`tightenOnce` → `Deno.chmod`). Returning
+    // here left that chmod in flight: on an idle machine it finished inside
+    // the sanitizer's grace, under the parallel suite's load it did not, and
+    // the shard failed with a leaked async op. A second `flush()` awaits the
+    // same pending set — the tail this test deliberately stalled is drained
+    // before the test ends, on every machine.
+    await l.flush();
   }
 
   assert(

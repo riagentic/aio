@@ -118,7 +118,7 @@ let hostErr = "";
   for await (const c of host.stderr) hostErr += new TextDecoder().decode(c);
 })();
 
-let ready: [string, string] | null = null;
+let ready: [string, string, string] | null = null;
 {
   const reader = host.stdout.getReader();
   const dec = new TextDecoder();
@@ -137,8 +137,8 @@ let ready: [string, string] | null = null;
     ]);
     if (r.done) break;
     buf += dec.decode(r.value, { stream: true });
-    const m = buf.match(/^READY (\S+) (\S+)$/m);
-    if (m) ready = [m[1]!, m[2]!];
+    const m = buf.match(/^READY (\S+) (\S+) (\S+)$/m);
+    if (m) ready = [m[1]!, m[2]!, m[3]!];
   }
   if (ready) {
     results.push({
@@ -146,7 +146,7 @@ let ready: [string, string] | null = null;
       ok: true,
       ms: Date.now() - t0,
     });
-    console.log(`  ✓ READY ${ready[0]} ${ready[1]}`);
+    console.log(`  ✓ READY ${ready[0]} ${ready[1]} (${ready[2]} cpus)`);
     // Keep draining so the host never blocks on a full stdout pipe.
     (async () => {
       try {
@@ -167,12 +167,12 @@ let ready: [string, string] | null = null;
 }
 
 if (ready) {
-  const [pipe, httpPipe] = ready;
+  const [pipe, httpPipe, cpus] = ready;
   console.log("▸ node.exe client (libuv — Electron main's path)");
   const nodeResult = `${HOME}/wine-node-result.txt`;
   await Deno.remove(nodeResult).catch(() => {});
   const n = await sh(
-    ["wine", `${WIN}/node.exe`, "client.js", pipe, httpPipe],
+    ["wine", `${WIN}/node.exe`, "client.js", pipe, httpPipe, cpus],
     400_000,
     { RESULT_FILE: `Z:${nodeResult.replaceAll("/", "\\")}` },
   );

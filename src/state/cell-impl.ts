@@ -230,6 +230,87 @@ export type CellMethods<S extends Record<string, unknown>> = Record<
 // Tracks in-flight async method calls keyed by UUID.
 // Used by direct calling (bindCell) and resolveCall (executor completion).
 
+/** A second clock the call deadlines also run on — the test harness's
+ *  virtual clock (`bootCells`/`testUI`). @internal */
+export type CallDeadlineClock = {
+  /** A timer whose callback the clock AWAITS before it moves time on. */
+  setTimeoutAwaited: (
+    fn: () => Promise<void>,
+    ms: number,
+  ) => ReturnType<typeof setTimeout>;
+  clearTimeout: (h: ReturnType<typeof setTimeout>) => void;
+};
+let _deadlineClock: (() => CallDeadlineClock | null) | null = null;
+
+/** Let the harness run call ceilings on its virtual clock AS WELL AS the real
+ *  one — whichever reaches the ceiling first fires it.
+ *
+ *  The harness moves `Date.now()` and every schedule with `advance(ms)`, but
+ *  the ceilings were armed on the real clock only. So a method hung for 100 s
+ *  of test time was still "running" — `await cell.method()` never gave up
+ *  where the app would at 30 s, and a hung `skipIfRunning` tick skipped every
+ *  later one (1 start where production had 4, with no ceiling warning): the
+ *  harness more forgiving than production. Real time still counts, so a
+ *  genuine hang in a test that never advances is caught exactly as before.
+ *  `null` uninstalls. @internal */
+export function _setCallDeadlineClock(
+  get: (() => CallDeadlineClock | null) | null,
+): void {
+  _deadlineClock = get;
+}
+
+/** How long, in REAL time, a call whose ceiling the virtual clock reached
+ *  still gets to finish before it is given up on.
+ *
+ *  `advance()` moves virtual time without running real macrotasks, so a
+ *  method whose real work — a fetch, a file read, a dynamic import — takes
+ *  5ms was still "in flight" when an `advance(5_000)` swept past its 1s
+ *  ceiling, and was rejected ("stopped waiting after 1000ms") where the app
+ *  completes it in milliseconds: a failure production cannot have. The
+ *  virtual clock cannot tell real work from a hang, so at the virtual
+ *  deadline the call gets this long to land (the clock waits, so nothing due
+ *  later fires first), and only a call still pending after it is given up on.
+ *  The same order as the harness's own "parked, not working" budget (bootCells'
+ *  settle: 50 rounds of 5ms). */
+export const CALL_CEILING_VIRTUAL_GRACE_MS = 250;
+
+/** A timer armed on the real clock and, when the harness installed one, on
+ *  its virtual clock too. The first to fire runs `fn` once and disarms both —
+ *  the virtual one only after the call has had its real-time grace (above). */
+type CallTimer = { clear: () => void };
+function _armCallTimer(fn: () => void, ms: number): CallTimer {
+  const v = _deadlineClock?.() ?? null;
+  let done = false;
+  let vh: ReturnType<typeof setTimeout> | undefined;
+  let grace: ReturnType<typeof setTimeout> | undefined;
+  let endGrace: (() => void) | undefined;
+  const clear = (): void => {
+    done = true;
+    clearTimeout(real);
+    if (grace !== undefined) clearTimeout(grace);
+    if (v && vh !== undefined) v.clearTimeout(vh);
+    // A call that settles inside its grace releases the clock at once.
+    endGrace?.();
+  };
+  const fire = (): void => {
+    if (done) return;
+    clear();
+    fn();
+  };
+  const real = setTimeout(fire, ms);
+  if (v) {
+    vh = v.setTimeoutAwaited(
+      () =>
+        done ? Promise.resolve() : new Promise<void>((resolve) => {
+          endGrace = resolve;
+          grace = setTimeout(fire, CALL_CEILING_VIRTUAL_GRACE_MS);
+        }),
+      ms,
+    );
+  }
+  return { clear };
+}
+
 const _pending = new Map<
   string,
   {
@@ -237,10 +318,10 @@ const _pending = new Map<
     reject: (e: Error) => void;
     /** The deadline timer, kept so a human wait can cancel it (see
      *  `pauseCallDeadlines`). Undefined for an explicitly unbounded call. */
-    timer?: ReturnType<typeof setTimeout>;
+    timer?: CallTimer;
     /** The half-way heartbeat timer (see `CEILING_HEARTBEAT_FRACTION`) —
      *  paused and re-armed with `timer`, cleared with it on settle. */
-    heartbeat?: ReturnType<typeof setTimeout>;
+    heartbeat?: CallTimer;
     /** Arms the heartbeat for a fresh window — kept so a resume can re-arm. */
     armHeartbeat?: () => void;
     /** The ceiling this call was registered with — what a resume re-arms. */
@@ -305,15 +386,15 @@ export function callWithOpts(
     }
     if (!timeoutMs) return p;
     return new Promise((resolve, reject) => {
-      const timer = setTimeout(
+      const timer = _armCallTimer(
         () => reject(new Error(`call(): timeout after ${timeoutMs}ms`)),
         timeoutMs,
       );
       p.then((v) => {
-        clearTimeout(timer);
+        timer.clear();
         resolve(v);
       }, (e) => {
-        clearTimeout(timer);
+        timer.clear();
         reject(e);
       });
     });
@@ -568,14 +649,14 @@ export function registerCall(
         ),
       );
     };
-    const timer = setTimeout(expire, timeoutMs);
+    const timer = _armCallTimer(expire, timeoutMs);
     // ONE heartbeat per call, however many times its window is re-armed
     // (a pause/resume restarts the clock; the line must not repeat).
     let beat = false;
     const armHeartbeat = () => {
       const entry = _pending.get(callId);
       if (!entry || beat) return;
-      entry.heartbeat = setTimeout(() => {
+      entry.heartbeat = _armCallTimer(() => {
         const e = _pending.get(callId);
         if (e) e.heartbeat = undefined;
         if (!e || beat) return;
@@ -593,7 +674,7 @@ export function registerCall(
       // one on the entry, and the entry is what `resolveCall` disarms (see
       // `disarm`) — this covers the `expire`→reject path, where the entry
       // is already gone and only the original handles are left to clear.
-      clearTimeout(timer);
+      timer.clear();
     };
     _pending.set(callId, {
       // The timer is kept so a HUMAN WAIT can cancel it — see
@@ -693,12 +774,12 @@ export function _cloneAcrossWorkerBoundary(
  *  the registration closure never saw). */
 function disarm(
   p: {
-    timer?: ReturnType<typeof setTimeout>;
-    heartbeat?: ReturnType<typeof setTimeout>;
+    timer?: CallTimer;
+    heartbeat?: CallTimer;
   },
 ): void {
-  if (p.timer !== undefined) clearTimeout(p.timer);
-  if (p.heartbeat !== undefined) clearTimeout(p.heartbeat);
+  p.timer?.clear();
+  p.heartbeat?.clear();
   p.timer = undefined;
   p.heartbeat = undefined;
 }
@@ -776,8 +857,8 @@ export function pauseCallDeadlines(): () => void {
   const paused: Array<{
     id: string;
     entry: {
-      timer?: ReturnType<typeof setTimeout>;
-      heartbeat?: ReturnType<typeof setTimeout>;
+      timer?: CallTimer;
+      heartbeat?: CallTimer;
       armHeartbeat?: () => void;
       timeoutMs?: number;
       expire?: () => void;
@@ -785,12 +866,12 @@ export function pauseCallDeadlines(): () => void {
   }> = [];
   for (const [id, p] of _pending.entries()) {
     if (p.timer !== undefined && p.timeoutMs !== undefined && p.expire) {
-      clearTimeout(p.timer);
+      p.timer.clear();
       p.timer = undefined;
       // The heartbeat pauses with the deadline it is half of: a person at a
       // picker is not the method being slow.
       if (p.heartbeat !== undefined) {
-        clearTimeout(p.heartbeat);
+        p.heartbeat.clear();
         p.heartbeat = undefined;
       }
       paused.push({ id, entry: p });
@@ -803,7 +884,7 @@ export function pauseCallDeadlines(): () => void {
       // load-bearing — a timer armed for a finished call would be a garbage
       // wakeup that a test's op sanitizer rightly reports as a leak.
       if (_pending.get(id) !== entry || entry.timer !== undefined) continue;
-      entry.timer = setTimeout(entry.expire!, entry.timeoutMs!);
+      entry.timer = _armCallTimer(entry.expire!, entry.timeoutMs!);
       entry.armHeartbeat?.();
     }
   };
@@ -861,9 +942,19 @@ export function setKey(method: string): string {
 
 // ── Mutation helpers ───────────────────────────────────────────────
 
-/** Path keys that would walk into JS prototype chain — banned to prevent
- *  prototype pollution via crafted mutation payloads from network sources. */
-const BANNED_PATH_KEYS = new Set(["__proto__", "constructor", "prototype"]);
+/** The one path key banned BY NAME: `__proto__` is an accessor, so even a
+ *  leaf write through it swaps a prototype rather than setting a key.
+ *
+ *  `constructor` and `prototype` used to be banned here too, and they are
+ *  ordinary state keys — a word count, a map keyed by user input. The
+ *  identical method body committed as a sync method (Immer draft) and threw
+ *  "blocked unsafe mutation" as an async one. What the ban protected against —
+ *  a crafted path walking the prototype chain (`["constructor", "prototype",
+ *  "x"]` reaching `Object.prototype`) — is refused by what it DOES instead:
+ *  {@linkcode walkOwn} refuses any segment that is not the tree's own key yet
+ *  resolves to something. That also covers `["m", "toString", "x"]`, a write
+ *  onto a shared builtin the name list never caught. */
+const BANNED_PATH_KEYS = new Set(["__proto__"]);
 
 /** Bound on path depth to reject pathological payloads early. */
 const MAX_MUTATION_PATH_DEPTH = 32;
@@ -877,6 +968,39 @@ function isSafeMutationPath(path: unknown): path is string[] {
     if (BANNED_PATH_KEYS.has(k)) return false;
   }
   return true;
+}
+
+/** One step of a mutation path, OWN keys only.
+ *
+ *  A segment the tree does not hold itself but that resolves anyway came from
+ *  the prototype chain (`constructor`, `toString`, `prototype` of a function
+ *  reached that way…), and writing through it writes into a shared builtin.
+ *  Refused, loudly. A segment that resolves to nothing is an ordinary missing
+ *  parent and is left to the caller's dropped-mutation handling. */
+function walkOwn(current: unknown, key: string, m: Mutation): unknown {
+  if (current === null || current === undefined) return undefined;
+  const c = current as Record<string, unknown>;
+  if (Object.hasOwn(c, key)) return c[key];
+  if (c[key] !== undefined) {
+    _rejectUnsafeMutation(
+      `path walks "${key}", which is not the state's own key but an ` +
+        `inherited one — a banned key: only keys the state itself holds may ` +
+        `be walked`,
+      m,
+    );
+  }
+  return undefined;
+}
+
+/** {@linkcode walkOwn} over a whole path. */
+function getOwnPath(
+  obj: unknown,
+  path: readonly string[],
+  m: Mutation,
+): unknown {
+  let current = obj;
+  for (const key of path) current = walkOwn(current, key, m);
+  return current;
 }
 
 /** Hard reject a mutation that would compromise integrity (prototype pollution etc).
@@ -897,7 +1021,7 @@ function _rejectUnsafeMutation(reason: string, m: Mutation): never {
     message: msg,
     detail,
     hint:
-      "Mutation path contained __proto__/constructor/prototype, an unknown array op, or a malformed shape. " +
+      "Mutation path contained __proto__, walked an inherited (prototype-chain) key, used an unknown array op, or had a malformed shape. " +
       "Likely a malicious or buggy framework-internal action received from an untrusted source.",
   });
   throw new Error(msg);
@@ -1112,7 +1236,7 @@ function deleteNestedKey(
       );
       return;
     }
-    current = (current as Record<string, unknown>)[path[i]!];
+    current = walkOwn(current, path[i]!, m);
   }
   if (current === null || current === undefined) {
     _warnDroppedMutation(`null parent for delete leaf`, m, strict);
@@ -1250,9 +1374,10 @@ function resolveRefs(
   root: unknown,
   container: unknown,
   refs: LiveRef[] | undefined,
+  m: Mutation,
 ): unknown {
   if (!refs || refs.length === 0) return container;
-  const targets = refs.map((r) => getNestedValue(root, r.ref));
+  const targets = refs.map((r) => getOwnPath(root, r.ref, m));
   let out = container;
   for (let i = 0; i < refs.length; i++) {
     const at = refs[i]!.at;
@@ -1262,7 +1387,7 @@ function resolveRefs(
     }
     let cur = out as Record<string, unknown>;
     for (let j = 0; j < at.length - 1; j++) {
-      cur = cur[at[j]!] as Record<string, unknown>;
+      cur = walkOwn(cur, at[j]!, m) as Record<string, unknown>;
     }
     cur[at[at.length - 1]!] = targets[i];
   }
@@ -1356,7 +1481,7 @@ function setNestedValue(
       );
       return;
     }
-    current = (current as Record<string, unknown>)[path[i]!];
+    current = walkOwn(current, path[i]!, m);
   }
   if (current === null || current === undefined) {
     _warnDroppedMutation(`null parent for set leaf`, m, strict);
@@ -1366,6 +1491,7 @@ function setNestedValue(
     obj,
     ownedValue(m.value),
     m.refs,
+    m,
   );
 }
 
@@ -1395,7 +1521,7 @@ function applyArrayOp(
   m: Mutation,
   strict: boolean,
 ): void {
-  const arr = m.path.length === 0 ? obj : getNestedValue(obj, m.path);
+  const arr = m.path.length === 0 ? obj : getOwnPath(obj, m.path, m);
   if (!Array.isArray(arr)) {
     _warnDroppedMutation(
       `target at path is not an array (op=${m.op})`,
@@ -1414,6 +1540,7 @@ function applyArrayOp(
     obj,
     (m.args ?? []).map(ownedValue),
     m.refs,
+    m,
   ) as unknown[];
   // A recorded ORDER, replayed as a pure permutation — see the `sort` branch
   // in the mutator interception. Never the comparator again.
@@ -1447,6 +1574,13 @@ export function applyMutations(
    *  applied must FAIL the method rather than be warned about and skipped.
    *  Left `false` for the read-your-writes overlay, which is a preview. */
   strict = false,
+  /** The identity memo (see {@linkcode ownedValue}) this pass runs under.
+   *  Omitted → a fresh one, i.e. one self-contained pass. The read-your-writes
+   *  overlay hands in ITS memo so that applying only the mutations recorded
+   *  since the last read onto the already-overlaid root is the same tree as
+   *  replaying the whole batch from scratch would be — one pass, split across
+   *  reads. See `effectiveRoot`. */
+  memo?: Map<object, unknown>,
 ): void {
   if (!Array.isArray(mutations)) {
     _rejectUnsafeMutation(
@@ -1455,7 +1589,7 @@ export function applyMutations(
     );
   }
   const outerMemo = _ownedMemo;
-  _ownedMemo = new Map();
+  _ownedMemo = memo ?? new Map();
   try {
     applyMutationsPass(s, mutations, strict);
   } finally {
@@ -1477,7 +1611,7 @@ function applyMutationsPass(
     }
     if (!isSafeMutationPath(m.path)) {
       _rejectUnsafeMutation(
-        "path contains banned key (__proto__/constructor/prototype), non-string segment, or exceeds depth",
+        "path contains the banned key __proto__, a non-string segment, or exceeds depth",
         m,
       );
     }
@@ -1495,7 +1629,7 @@ function applyMutationsPass(
           !isSafeMutationPath(r.ref)
         ) {
           _rejectUnsafeMutation(
-            "live-reference path contains banned key (__proto__/constructor/prototype), non-string segment, or exceeds depth",
+            "live-reference path contains the banned key __proto__, a non-string segment, or exceeds depth",
             m,
           );
         }
@@ -1782,7 +1916,15 @@ type StaleLedger = {
    *  array read-method interception. Lives here because the ledger is already
    *  the one object threaded through every proxy of one method call, and its
    *  `log.length` is exactly the invalidation cursor the memo checks. */
-  live?: Map<string, { src: unknown[]; live: unknown[]; birth: number }>;
+  live?: Map<string, {
+    src: unknown[];
+    live: unknown[];
+    birth: number;
+    /** The write-set cursor the view was built at. The overlay applies new
+     *  writes INTO the array it already handed out, so array identity alone
+     *  no longer proves the contents are unchanged — see `effectiveRoot`. */
+    cursor: number;
+  }>;
   /** Array iterators open in this invocation — see `liveIndices`. */
   iters?: Set<LiveIter>;
 };
@@ -1973,13 +2115,23 @@ function throwLiveStateError(
  *  repeat across two different batches — the memo then served the PREVIOUS
  *  batch's overlay and a method read its own write back as the pre-write value.
  *  Within one batch the array is stable and only grows, so identity + length is
- *  exact. */
+ *  exact.
+ *
+ *  That "only grows" is also what makes the overlay INCREMENTAL: the memo keeps
+ *  how many mutations it has already applied (`count`) and the identity memo of
+ *  the pass that applied them (`owned`), so a read after a write applies just
+ *  the new tail instead of re-cloning committed state and replaying the batch
+ *  from the start. See `effectiveRoot`. */
 type OverlayBox = {
   v: {
     base: unknown;
     arr: readonly unknown[];
     count: number;
     root: unknown;
+    /** The `ownedValue` memo of the overlay pass — carried across the
+     *  incremental applies so the split pass aliases exactly like the single
+     *  pass that commits the same batch. */
+    owned: Map<object, unknown>;
   } | null;
 };
 
@@ -2060,6 +2212,92 @@ export function createLiveProxy<S extends Record<string, unknown>>(
         `and persisted as JSON, which drops a symbol key entirely, so it ` +
         `would exist in this process and nowhere else. Use a string key.`,
     );
+  };
+  /** A write whose path runs through a key named `__proto__`, refused at the
+   *  write site, by name.
+   *
+   *  Such a key reaches state only as parsed JSON data. A write-set path
+   *  through it has always been refused — at the COMMIT, by the same gate that
+   *  vets network-sourced mutations — which surfaced as "blocked unsafe
+   *  mutation — path contains the banned key __proto__, a non-string segment,
+   *  or exceeds depth (path=["y"])": no cell, no method, three candidate
+   *  causes, and for a spread (`s.y = { ...s.m }`) a path without the key in
+   *  it. The refusal stands (this side is deliberately the stricter one; a
+   *  sync method's draft takes most of these); the words are the fix. */
+  const protoKeyRefused = (what: string): never => {
+    throw new Error(
+      `[${cellName}:${methodName}] ${what} — a key named "__proto__" ` +
+        `cannot be written through by an async method: in JavaScript that ` +
+        `name is the prototype accessor, so an async method's write-set ` +
+        `refuses any path that runs through it (such a key only exists as ` +
+        `parsed JSON data). Fix: rename the key where the data enters state ` +
+        `(e.g. prefix user-supplied keys: "k:" + key), or copy the value ` +
+        `without it before writing.`,
+    );
+  };
+  const atOf = (p: readonly string[]): string =>
+    p.length === 0 ? "s" : "s." + p.join(".");
+  /** A write-set path past {@linkcode MAX_MUTATION_PATH_DEPTH}, refused at
+   *  the write site. The commit gate refuses it anyway; what it said there
+   *  ("path contains the banned key __proto__, a non-string segment, or
+   *  exceeds depth", under a hint about untrusted framework-internal actions)
+   *  named none of the cell, the method, the depth or a fix. */
+  const depthRefused = (what: string, levels: number): never => {
+    throw new Error(
+      `[${cellName}:${methodName}] ${what} is ${levels} levels deep — an ` +
+        `async method's write-set is capped at ${MAX_MUTATION_PATH_DEPTH} ` +
+        `path levels (the same bound restore merges state to; a sync ` +
+        `method's draft has no such cap). Fix: flatten the structure (e.g. ` +
+        `an id-keyed map of nodes instead of literal nesting), or make this ` +
+        `write from a sync method.`,
+    );
+  };
+  /** Refuse, at the write site and by name, a recorded write the commit gate
+   *  (`isSafeMutationPath`) would refuse anonymously: a path — the written
+   *  one, or either address of a live reference inside the value — that runs
+   *  through `__proto__` or is deeper than the cap. Checks exactly what that
+   *  gate checks, so nothing it would accept is refused here. `where` is the
+   *  written path. */
+  const vetWritePaths = (
+    where: readonly string[],
+    refs: readonly LiveRef[] | undefined,
+    verb: string,
+  ): void => {
+    if (where.includes("__proto__")) {
+      protoKeyRefused(`${verb} ${atOf(where)}`);
+    }
+    if (where.length > MAX_MUTATION_PATH_DEPTH) {
+      depthRefused(`${verb} ${atOf(where)}`, where.length);
+    }
+    if (refs === undefined) return;
+    for (const r of refs) {
+      if (r.at.includes("__proto__")) {
+        protoKeyRefused(
+          `the value written to ${atOf(where)} holds live state under a key ` +
+            `named "__proto__" (${atOf([...where, ...r.at])})`,
+        );
+      }
+      if (r.ref.includes("__proto__")) {
+        protoKeyRefused(
+          `the value written to ${atOf(where)} is live state read through ` +
+            `a key named "__proto__" (${atOf(r.ref)})`,
+        );
+      }
+      if (r.at.length > MAX_MUTATION_PATH_DEPTH) {
+        depthRefused(
+          `the value written to ${atOf(where)} holds live state nested ` +
+            `inside it that`,
+          r.at.length,
+        );
+      }
+      if (r.ref.length > MAX_MUTATION_PATH_DEPTH) {
+        depthRefused(
+          `the value written to ${atOf(where)} is live state read from ` +
+            `${atOf(r.ref)}, which`,
+          r.ref.length,
+        );
+      }
+    }
   };
   const _liveArrays = (_stale.live ??= new Map());
   const noteRead = _watch ? (k: string) => _watch.reads.add(k) : undefined;
@@ -2244,10 +2482,33 @@ export function createLiveProxy<S extends Record<string, unknown>>(
     const pending = batcher.pending();
     if (pending.length === 0) return committed;
     const memo = _overlay.v;
-    if (
-      memo && memo.base === committed && memo.arr === pending &&
-      memo.count === pending.length
-    ) {
+    if (memo && memo.base === committed && memo.arr === pending) {
+      if (memo.count === pending.length) return memo.root as S;
+      // The batch only ever GROWS in place (`add` pushes; `flush`/`discard`
+      // swap in a fresh array, which the identity check above catches), so the
+      // writes made since this overlay was last brought up to date are exactly
+      // `pending.slice(memo.count)`. Apply that tail onto the overlay we
+      // already have, under the same identity memo: same mutations, same
+      // order, same aliasing — one pass, split across reads. Replaying the
+      // whole batch onto a fresh structuredClone instead made a read-then-write
+      // loop QUADRATIC: a field report measured 70.7 s of structuredClone in a
+      // 150 s profile for one sweep over ~11 000 keys, with the event loop
+      // stalled for 54 s of it.
+      const tail = (pending as Mutation[]).slice(memo.count);
+      try {
+        applyMutations(
+          memo.root as Record<string, unknown>,
+          tail,
+          false,
+          memo.owned,
+        );
+      } catch (e) {
+        // A half-applied tail must never be re-applied on the next read: drop
+        // the memo so the next read rebuilds from committed state.
+        _overlay.v = null;
+        throw e;
+      }
+      memo.count = pending.length;
       return memo.root as S;
     }
     const root = snapshotForRead(committed);
@@ -2256,8 +2517,15 @@ export function createLiveProxy<S extends Record<string, unknown>>(
     if (root === committed || root === null || typeof root !== "object") {
       return committed;
     }
-    applyMutations(root as Record<string, unknown>, pending);
-    _overlay.v = { base: committed, arr: pending, count: pending.length, root };
+    const owned = new Map<object, unknown>();
+    applyMutations(root as Record<string, unknown>, pending, false, owned);
+    _overlay.v = {
+      base: committed,
+      arr: pending,
+      count: pending.length,
+      root,
+      owned,
+    };
     return root as S;
   }
   const effectiveAt = (): unknown =>
@@ -2385,16 +2653,24 @@ export function createLiveProxy<S extends Record<string, unknown>>(
             // a 10k array that is 10k key strings and 10k Map lookups to hand
             // back the identical proxies.
             //
-            // Reused only when BOTH are true, and both are conservative:
-            //   • the underlying array is the SAME object, so the elements and
-            //     their indices cannot have changed; and
+            // Reused only when ALL THREE are true, and each is conservative:
+            //   • the underlying array is the SAME object; and
+            //   • this invocation has recorded no further write, so that same
+            //     object cannot have been mutated IN PLACE by the overlay
+            //     (which applies each new write onto the tree it already
+            //     handed out — before that, a push produced a fresh array and
+            //     identity alone carried this proof); and
             //   • the stale log has not grown by even one entry, so nothing
             //     anywhere has invalidated a child proxy.
-            // Either one different ⇒ rebuild. It can be too cautious (a write
+            // Any one different ⇒ rebuild. It can be too cautious (a write
             // to an unrelated path busts it); it cannot be wrong.
+            const cursor = batcher.pending().length;
             const memo = _liveArrays.get(pathKey);
             let live: unknown[];
-            if (memo && memo.src === arr && memo.birth === _stale.log.length) {
+            if (
+              memo && memo.src === arr && memo.cursor === cursor &&
+              memo.birth === _stale.log.length
+            ) {
               live = memo.live;
             } else {
               live = new Array(arr.length);
@@ -2418,6 +2694,7 @@ export function createLiveProxy<S extends Record<string, unknown>>(
                 src: arr,
                 live,
                 birth: _stale.log.length,
+                cursor,
               });
             }
             // deno-lint-ignore no-explicit-any
@@ -2501,6 +2778,7 @@ export function createLiveProxy<S extends Record<string, unknown>>(
             // boundary) than the one this recorded before aliases existed.
             if (rec.refs) m.refs = rec.refs;
           }
+          vetWritePaths(path, m.refs, `${key}() on`);
           batcher.add(methodName, m);
           // Index-moving mutators re-address existing elements — a captured
           // element proxy would silently read a DIFFERENT element afterwards.
@@ -2591,13 +2869,14 @@ export function createLiveProxy<S extends Record<string, unknown>>(
     set(_target, prop, value) {
       if (typeof prop === "symbol") symbolKeyRefused(prop, "written");
       assertFresh();
-      noteWrite?.(path.length === 0 ? prop : pathKey + PATH_SEP + prop);
       // recordValue, not materializeValue: a LIVE reference inside the written
       // value is recorded as an ALIAS of its path rather than copied, which is
       // what the Immer draft a sync method runs on does with a nested draft
       // assigned into another slot. See recordValue.
       const rec = recordValue(value);
       const m: Mutation = { path: [...path, prop as string], value: rec.value };
+      vetWritePaths(m.path, rec.refs, "writing");
+      noteWrite?.(path.length === 0 ? prop : pathKey + PATH_SEP + prop);
       if (rec.refs) m.refs = rec.refs;
       const writeKey = path.length === 0 ? prop : pathKey + PATH_SEP + prop;
       noteDetach(writeKey);
@@ -2610,6 +2889,7 @@ export function createLiveProxy<S extends Record<string, unknown>>(
     deleteProperty(_target, prop) {
       if (typeof prop === "symbol") symbolKeyRefused(prop, "deleted");
       assertFresh();
+      vetWritePaths([...path, prop], undefined, "deleting");
       noteWrite?.(path.length === 0 ? prop : pathKey + PATH_SEP + prop);
       noteDetach(path.length === 0 ? prop : pathKey + PATH_SEP + prop);
       batcher.add(methodName, {
@@ -2686,7 +2966,12 @@ export function createLiveProxy<S extends Record<string, unknown>>(
       if (fresh === null || fresh === undefined) return undefined; // AIO-232
       // Check fresh state directly — target may be stale if state was replaced.
       const freshObj = fresh as Record<string, unknown>;
-      if (!(prop in freshObj)) return undefined;
+      // OWN keys only. `prop in freshObj` walks the prototype chain, so
+      // `Object.hasOwn(s.words, "constructor")` — the guard for a map keyed by
+      // user input — answered `true` on an empty object, the guarded read got
+      // `Object`, and the method threw where the sync twin (an Immer draft,
+      // own keys only) counted the word.
+      if (!Object.hasOwn(freshObj, prop)) return undefined;
       // Array targets: `length` is non-configurable on the target, so the
       // reported descriptor must match (ES proxy invariant) or the trap throws.
       if (prop === "length" && Array.isArray(fresh)) {

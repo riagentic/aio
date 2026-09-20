@@ -193,10 +193,14 @@ deliberately-vendored framework code.
 **Related:** `am doctor` asks the other half of the question — is the process
 answering `am state` running the framework that is on disk right now? A newer
 `dep/aio` (a pull, an `am fix`) than the instance's start time is a finding, and
-the finding names its fix: `am restart`. `deno task doctor` diagnoses deno.json
-config only (read-only, PASS/FAIL); `am link` is the narrow primitive that only
-(re)creates the `dep/aio` symlink (`--aio=<path>` / `$AIO_HOME` to point it
-elsewhere). `am fix` includes both.
+the finding names its fix: `am restart`. It also lists each running instance's
+settings that have more than one home, with who decided each —
+`persist  false (config)`, `dbPath  "/srv/x.db" (flag)` — so "which of my flag,
+config and deno.json won?" is answered by the process itself (the same lines
+`--verbose` prints at boot). `deno task doctor` diagnoses deno.json config only
+(read-only, PASS/FAIL); `am link` is the narrow primitive that only (re)creates
+the `dep/aio` symlink (`--aio=<path>` / `$AIO_HOME` to point it elsewhere).
+`am fix` includes both.
 
 ## App identity
 
@@ -229,6 +233,13 @@ to `deno.json` as a dev convenience.
 | `--quiet`      | Suppress output (exit code only)                                                                                                                                                                                        |
 | `--home=DIR`   | Target the instance of the app running from data home `DIR` — an isolated second boot (`appDir`) beside the user's own. `AIO_APPS_DIR` is the env form                                                                  |
 | `--timeout=MS` | `surface`/`trigger`: how long to wait for the live client (default 8000; must exceed the server's own 5000 ms client wait)                                                                                              |
+
+A value `am` cannot act on is refused before any verb runs, never guessed:
+`--app=` and `--entry=` with nothing after the `=` are errors (an unset shell
+variable used to make `am` infer a target the script never named), and the same
+flag given twice with two different values — `--app=one --app=two` — is a
+contradiction rather than a preference for the last one. The same value twice is
+fine, and after `--` anything flag-shaped is an argument.
 
 ## Reaching an app that has auth (`control.key`)
 
@@ -537,9 +548,9 @@ deno task am state                          # full state (raw, unfiltered)
 deno task am state counter                  # single cell slice
 deno task am state counter.count            # nested path
 deno task am state fleet[0].stats           # array index traversal
-deno task am state fleet[0].{name,active}   # pick specific fields
-deno task am state fleet[*].{pair,status}   # wildcard: pluck from every element
-deno task am state {counter,page}           # pick from root
+deno task am state 'fleet[0].{name,active}' # pick specific fields (QUOTE it:
+deno task am state 'fleet[*].{pair,status}' # …the shell expands bare braces)
+deno task am state '{counter,page}'         # pick from root
 deno task am state counter --wait=5         # poll every 5s
 deno task am state --ui                     # UI state (cell-level ui filtered)
 deno task am state --ui alice               # UI state for specific user
@@ -553,21 +564,17 @@ comparison op needs exactly one value; `exists`/`absent` take none. Quote a
 value with spaces.
 
 Path syntax: `fleet[0].stats.pnl` for traversal, `{id,name}` for field picking,
-`[*]` for wildcard over arrays. `am state` = raw server state. `am state --ui` =
-what the browser sees (it was spelled `am ui` before alpha52 — `am ui` now opens
-**amui**, the visual app manager).
+`[*]` for wildcard over arrays. **Quote a `{…}` pick** — bash expands bare
+braces, so `am state fleet[0].{name,active}` reaches `am` as two arguments; it
+takes one path and refuses the rest rather than answering the first. `am state`
+= raw server state. `am state --ui` = what the browser sees (it was spelled
+`am ui` before alpha52 — `am ui` now opens **amui**, the visual app manager).
 
 ## Action dispatch
 
 ```sh
 # Cell methods — POSITIONAL args (no =): increment(5), setHost("10.0.0.1")
 deno task am dispatch counter:increment 5                    # increment(5)
-
-For a cell declared `access: false` (public read, server-only write), a network
-dispatch is refused — including `am`'s. The operator door is
-`am dispatch <cell:method> --as-server`: it dispatches with server provenance,
-past the `access` gate. Dev-only, loopback-only and logged, like the rest of
-the control plane; the denial message names it at the moment you need it.
 deno task am dispatch conn:setHost 10.0.0.1                  # setHost("10.0.0.1")
 deno task am dispatch counter:reset                          # reset()
 deno task am dispatch wallet:balance                         # → prints the method's RETURN value
@@ -595,6 +602,12 @@ deno task am dispatch --body='{"type":"conn:setHost","payload":{"args":["192.168
 deno task am actions                       # the time-travel history (the whole window)
 deno task am actions 50                    # the newest 50 (= --lines=50; adds shown/total)
 ```
+
+For a cell declared `access: false` (public read, server-only write), a network
+dispatch is refused — including `am`'s. The operator door is
+`am dispatch <cell:method> --as-server`: it dispatches with server provenance,
+past the `access` gate. Dev-only, loopback-only and logged, like the rest of the
+control plane; the denial message names it at the moment you need it.
 
 A cell method is called with POSITIONAL arguments. Bare values (no `=`) become
 those arguments, and `--args='[…]'` is the same list written as JSON — the
@@ -674,7 +687,12 @@ deno task am record flow.test.ts --from=J   # …the same, from a journal file
   it (both outputs list them, with why). A tick of the app's `schedules:` is an
   input. Where such lines fell between two inputs, the recorded gap is kept (up
   to 5 s) so the timer lands where it did. A journal written before `cause` was
-  recorded says so: its caused lines cannot be told apart and may apply twice.
+  recorded says so: its caused lines cannot be told apart and may apply twice. A
+  line stamped with a cell `version` the running app would refuse at boot
+  (older, on a cell with an `onMigrate`; or newer) is not sent either — the same
+  rule as crash recovery — and is listed with its stamp. When no running app
+  reports its versions (a `--dry` with none up), the output says the stamps were
+  not checked.
 - **`am record [out.test.ts]`** writes a `bootCells` test that re-calls, in
   order, every method the **running** app dispatched since boot — its live
   timeline (the last 500 dispatches; a full ring is warned about, since the
@@ -1205,6 +1223,11 @@ fixture rather than treated as work, the same call `am pin` makes. It reads the
 same source `am pin` does — cell-config keys only inside a cell config literal,
 and nothing the app excludes in deno.json `exclude` / `fmt.exclude` or
 `.gitignore`.
+
+It scans the app you are standing in, so it refuses to run where there is no
+`deno.json` / `deno.jsonc` — the same question `am pin` asks, and for the same
+reason: the clean bill is this command's most common answer, and a directory
+that is not an app would have produced one about code it never opened.
 
 It exits 1 when anything is found, so it works as a CI step. `--from` narrows
 the registry to what was removed AFTER that release; omitted, it reads the app's

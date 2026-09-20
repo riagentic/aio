@@ -79,8 +79,13 @@ export type MethodsCellConfig<
   States extends string = string,
   Sel extends Record<string, SelectorDef<S>> = Record<string, SelectorDef<S>>,
 > = {
+  /** The cell's initial state — a plain JSON-shaped object. It is also the
+   *  type every method's `s` gets, and what a reset returns to. */
   state: S;
-  /** Optional: `cell-create.ts` accepts an empty OR omitted methods map —
+  /** The cell's methods — `name(s, ...args)` reads and writes the state `s`;
+   *  call it as `cell.name(...args)`, from the UI or the server.
+   *
+   *  Optional: `cell-create.ts` accepts an empty OR omitted methods map —
    *  state-only cells (thin-client stubs, selectors-only read models) are a
    *  supported shape, and a required `methods` here made the type refuse what
    *  the runtime runs. */
@@ -329,7 +334,10 @@ export type MethodsCellConfig<
    *  ```
    *  Mutate the draft, or return a replacement. Error-guarded like every
    *  lifecycle hook: a throw is reported and boot continues with the restored
-   *  state unchanged — a repair that fails must not cost you the app. */
+   *  state unchanged — a repair that fails must not cost you the app. After a
+   *  crash it runs again on a slice `journal: true` replay changed, so a
+   *  crash and a clean stop come back the same — keep it a repair
+   *  (idempotent), not a counter. */
   onRestore?: (state: NoInfer<S>) => NoInfer<S> | void;
   /** Shape this cell's state on its way TO the store — the mirror of
    *  {@linkcode MethodsCellConfig.onRestore}.
@@ -357,11 +365,17 @@ export type MethodsCellConfig<
    *  Refused on a `sync: true` cell, for the same reason a `persist` filter is:
    *  an op IS the method call's payload, written raw. */
   onPersist?: (state: NoInfer<S>) => Record<string, unknown>;
-  /** `initState` is the cell's DECLARED default state — the registry passes it
+  /** Runs once at boot, after the cells it depends on are initialized — open
+   *  a connection, start a watcher. `app` is scoped to this cell.
+   *
+   *  `initState` is the cell's DECLARED default state — the registry passes it
    *  (`cell-compose-registry.ts`) because `app.getState()` may not yet reflect
    *  `__init` when the hook runs. It was passed at runtime and missing from
    *  this type, so `onInit(app, initState)` — the shape the docs teach — was a
    *  compile error for every app that wrote it. */
   onInit?: (app: ScopedApp<NoInfer<S>>, initState: NoInfer<S>) => void;
+  /** Runs when the app shuts down (cells in reverse order) or the cell is
+   *  disabled — close what `onInit` opened. Errors are reported, never
+   *  thrown: one cell's cleanup cannot stop another's. */
   onDestroy?: (app: ScopedApp<NoInfer<S>>) => void;
 };

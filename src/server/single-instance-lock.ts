@@ -90,6 +90,10 @@ export type LockData = {
    *  alpha69 and on platforms that cannot report it, where the pid alone is
    *  all there is. */
   startToken?: string;
+  /** Every setting with more than one home (flag, config, env, deno.json),
+   *  as `name → "value (source)"` — what `am doctor` shows. Decided by
+   *  config-sources.ts; absent on locks written before 1.0.6. */
+  settings?: Record<string, string>;
 };
 
 /** What a boot records about itself beyond identity — see {@linkcode LockData}. */
@@ -100,6 +104,10 @@ export type LockMeta = {
   /** The directory the app's DATA actually lives in — see {@linkcode LockData}
    *  `dataDir`. */
   dataDir?: string;
+  /** Every setting with more than one home (flag, config, env, deno.json),
+   *  as `name → "value (source)"` — what `am doctor` shows. Decided by
+   *  config-sources.ts; absent on locks written before 1.0.6. */
+  settings?: Record<string, string>;
 };
 
 /** Instance info returned by instances() — lock data + liveness */
@@ -932,6 +940,7 @@ export class AppLock {
       ...(meta.cdpPort !== undefined ? { cdpPort: meta.cdpPort } : {}),
       ...(meta.client !== undefined ? { client: meta.client } : {}),
       ...(meta.dataDir !== undefined ? { dataDir: meta.dataDir } : {}),
+      ...(meta.settings !== undefined ? { settings: meta.settings } : {}),
     });
 
     for (let i = 0; i < maxRetries; i++) {

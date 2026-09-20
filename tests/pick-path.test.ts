@@ -256,3 +256,19 @@ Deno.test("pickSpec: powershell dialogs are -STA and quote-safe", () => {
   const dir = pickSpec("windows", "powershell", "directory", {})!;
   assertStringIncludes(dir.args.at(-1)!, "FolderBrowserDialog");
 });
+
+Deno.test("pickSpec: the Windows dialog has a TopMost OWNER — never ShowDialog() with none", () => {
+  // A field report (#10): an unowned dialog belongs to a background
+  // powershell.exe, and the foreground lock left it BEHIND the app window the
+  // user had just clicked in. Every Windows dialog gets a TopMost owner form.
+  for (const kind of ["file", "files", "directory"] as const) {
+    const ps = pickSpec("windows", "powershell", kind, {})!.args.at(-1)!;
+    assertStringIncludes(ps, "TopMost=$true");
+    assertStringIncludes(ps, "ShowDialog($o)");
+    assertEquals(
+      /ShowDialog\(\)/.test(ps),
+      false,
+      `an unowned ShowDialog() is back (${kind})`,
+    );
+  }
+});

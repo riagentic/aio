@@ -6,7 +6,8 @@
 //      from a network-sourced caller — these carry server-trusted payload shapes
 //      (e.g. mutation lists) that bypass cell method bodies.
 //   2. cell-impl.ts applyMutations rejects mutation paths that include
-//      __proto__/constructor/prototype, are non-string/non-array, or exceed depth.
+//      __proto__, walk an INHERITED key (constructor/prototype/toString… not
+//      held by the state itself), are non-string/non-array, or exceed depth.
 //
 // Without these, an authenticated WS client could send
 //   {type: "anycell:__setAnyMethod",
@@ -49,16 +50,25 @@ Deno.test("F-1: applyMutations rejects constructor.prototype in path", () => {
   assertEquals(({} as any).pwned, undefined);
 });
 
-Deno.test("F-1: applyMutations rejects bare 'prototype' segment", () => {
+// `prototype` is refused by what it DOES, not by name: walked as an INHERITED
+// key (`items.constructor.prototype` is `Array.prototype`) it is a banned key;
+// held by the state itself it is an ordinary one, exactly as it is for the
+// sync method's Immer draft (tests/async-constructor-key.test.ts).
+Deno.test("F-1: applyMutations rejects an inherited 'prototype' segment", () => {
   const state: Record<string, unknown> = { items: [{}] };
   assertThrows(
     () =>
       applyMutations(state, [
-        { path: ["items", "prototype", "x"], value: 1 },
+        { path: ["items", "constructor", "prototype", "x"], value: 1 },
       ]),
     Error,
     "banned key",
   );
+  // deno-lint-ignore no-explicit-any
+  assertEquals((Array.prototype as any).x, undefined);
+  const own: Record<string, unknown> = { m: { prototype: { x: 0 } } };
+  applyMutations(own, [{ path: ["m", "prototype", "x"], value: 1 }]);
+  assertEquals(own.m, { prototype: { x: 1 } });
 });
 
 Deno.test("F-1: applyMutations rejects non-array path", () => {

@@ -324,7 +324,12 @@ export { own } from "./src/state/own.ts";
 export { notify } from "./src/state/notify.ts";
 export type { NotifyEffect, NotifyOptions } from "./src/state/notify.ts";
 /** Own effect type for keyed resource slots */
-export type { OwnDisposer, OwnEffect, OwnResource } from "./src/state/own.ts";
+export type {
+  OwnDisposer,
+  OwnEffect,
+  OwnResource,
+  OwnSetOptions,
+} from "./src/state/own.ts";
 /** Union of everything a method may return as an effect — use as the return
  *  annotation when a method references its own cell (breaks TS7022/7023). */
 export type { CellEffect } from "./src/state/cell-impl.ts";

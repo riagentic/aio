@@ -251,6 +251,14 @@ A failing cron tick is logged and the schedule keeps its cadence (one bad tick
 does not switch a nightly job off). If the dispatch loop is closing — the app is
 shutting down — the schedule stops instead of re-arming into the drain.
 
+**When the wall clock steps back** (an NTP correction, a VM resumed from a
+snapshot), cron warns once per step. A **minute-starred** pattern (`* * * * *`,
+`*/5 * * * *`) keeps its cadence on the new wall clock, running slots the old
+reading had already reached. **Every other pattern** — hourly `0 * * * *`
+included — never runs the same slot twice, however far the clock went back, so a
+non-idempotent job (billing, a digest mail) cannot repeat. A step of under a
+minute is skew and fires nothing twice, for any pattern.
+
 ### `schedule.backoff(id, attempt, action, opts)` — exponential retry delay
 
 A one-shot `after` whose delay grows exponentially with `attempt`:
@@ -283,6 +291,11 @@ after-chain or backoff clock in state. The option key is `factor` and the action
 is the 3rd argument; the old `backoff` key and the old argument order were both
 REMOVED in alpha70 — dev and every test throw by name, production logs the
 removal line and degrades. `aiol --safe-fix` renames and reorders them.
+
+For both: every duration and `factor` must be a finite number, and none may be
+**negative** — a negative delay would run after 1 ms, a retry loop that never
+waits. Dev and every test throw at the call, naming the key; production keeps
+that 1 ms delay (as before) and warns once per id and key.
 
 ```ts
 methods: {

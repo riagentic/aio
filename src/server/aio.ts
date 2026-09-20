@@ -1,3 +1,4 @@
+import { produce } from "immer";
 import { validateMemoryConfig } from "../diagnostics/memory-monitor.ts";
 import { refuseRetired } from "../state/removals.ts";
 import { installBundleSourceMap } from "./sourcemap-boot.ts";
@@ -43,9 +44,17 @@ import {
 } from "../diagnostics/error.ts";
 
 // Phase modules — extracted _run() logic
-import { bootStorage, isDevBoot, replaySyncOps } from "./aio-boot.ts";
+import {
+  bootStorage,
+  isDevBoot,
+  replaySyncOps,
+  runCellRestore,
+} from "./aio-boot.ts";
+import { deepMerge } from "../state/deep-merge.ts";
+import { restoreExcluded } from "../state/state-filter.ts";
 import {
   type ActionCause,
+  type JournalEntry,
   type JournalGap,
   replayJournal,
   syncJournalWatermarkKey,
@@ -69,7 +78,20 @@ import {
   physicalMemoryBytes,
   reportHeapCeiling,
 } from "./heap-policy.ts";
-import type { Provenance } from "./boot-facts.ts";
+import type { Provenance, Sourced } from "./boot-facts.ts";
+import {
+  dbPathOf,
+  exposeFlagOf,
+  hostOf,
+  keepServerOf,
+  persistOf,
+  pick,
+  pickOr,
+  serverUrlOf,
+  sourceLines,
+  tlsOf,
+  windowSizeOf,
+} from "./config-sources.ts";
 import {
   appDirs,
   checkUnpackLocation,
@@ -119,6 +141,7 @@ import {
   _mapCallResult,
   _setCallTimeouts,
 } from "../state/cell-impl.ts";
+import { _moveRejections } from "../state/rejection-tracker.ts";
 import {
   buildLegacyConfig,
   filterCellsByIsolate,
@@ -224,6 +247,7 @@ export {
 } from "./config.ts";
 import {
   misplacedDenoJsonKeys,
+  refuseWrongShapes,
   retiredDenoJsonKeys,
   VALID_AIO_CONFIG_KEYS,
   VALID_FEATURES_CONFIG_KEYS,
@@ -286,8 +310,8 @@ export function _exposeOf(
   cli: { expose?: boolean; host?: string },
   config: { expose?: boolean; host?: string },
 ): boolean {
-  if (cli.expose ?? config.expose ?? false) return true;
-  return _hostIsExposed(cli.host ?? config.host);
+  if (exposeFlagOf(cli, config).value) return true;
+  return _hostIsExposed(hostOf(cli, config)?.value);
 }
 
 /** WHY this app counts as exposed, spelled the way its author wrote it.
@@ -517,7 +541,22 @@ export function _appVersion(): Promise<string> {
  *  else deno.json's build target, else electron. Boot and `--help` both read
  *  this one function, so what help prints is what boot does. */
 export function defaultClientFor(configClient?: string): string {
-  return configClient ?? _denoJsonTargetClient() ?? "electron";
+  return clientOf({}, { client: configClient }).value;
+}
+
+/** THE client decider: `--client` > `aio.run({ client })` > the app's
+ *  deno.json `client` > electron — value and source from one list. It was
+ *  spelled out at three sites, with its source re-derived at a fourth. */
+export function clientOf(
+  cli: { client?: string },
+  config: { client?: string },
+): Sourced<string> {
+  return pickOr<string>(
+    "electron",
+    ["flag", cli.client],
+    ["config", config.client],
+    ["deno.json", _denoJsonTargetClient()],
+  );
 }
 
 /** What `--help` says about THIS invocation: a compiled binary is run by its
@@ -749,6 +788,15 @@ async function _runAsApp(a?: any, b?: any): Promise<AioApp<any, any>> {
   // meaning "the app wrote it", and warning there fired on every boot of every
   // app about hooks it had never mentioned.
   validateCallableConfig(fc as unknown as Record<string, unknown>);
+  // The SHAPE of every key, BEFORE the first reader of one — and the plugin
+  // merge just below is that reader. It spreads `allowedOrigins` and `routes`,
+  // and a spread bare string becomes its characters, so with a plugin loaded
+  // `allowedOrigins: "https://app.example.com"` reached `validateConfig` as a
+  // valid array of 23 one-character origins and the Origin gate became the
+  // substring test SHAPE_VALUES exists to stop. `resolvePlugins(fc.plugins…)`
+  // on the next line reads one more. Same function `validateConfig` runs
+  // below — one decider, called at the moment the answer is first needed.
+  refuseWrongShapes(fc as unknown as Record<string, unknown>, "CellsConfig");
   // ── Plugins ──
   //
   // FIRST, before any other config key is read, so every reader below sees one
@@ -873,7 +921,19 @@ async function _runAsApp(a?: any, b?: any): Promise<AioApp<any, any>> {
   declareAppFlags(fc.appFlags);
   if (fc.ui) {
     validateConfig(fc.ui as Record<string, unknown>, VALID_UI_KEYS, "ui");
-    if (fc.memory) validateMemoryConfig(fc.memory as Record<string, unknown>);
+  }
+  // An app with `memory` and no `ui` had its memory keys accepted unchecked,
+  // typos and all — the check lived inside the `ui` one. It still boots (the
+  // surface is frozen: refusing what booted yesterday is a break), but the
+  // typo is now said out loud. With `ui` it was always a refusal.
+  if (fc.memory && !fc.ui) {
+    try {
+      validateMemoryConfig(fc.memory as Record<string, unknown>);
+    } catch (e) {
+      log.warn(`${(e as Error).message}\n  (ignored — this key does nothing)`);
+    }
+  } else if (fc.memory) {
+    validateMemoryConfig(fc.memory as Record<string, unknown>);
   }
   // …and the OTHER file people put aio config in. `aio.run()` refuses an
   // unknown key loudly; deno.json accepted `ui: { width, height }` at the top
@@ -1271,7 +1331,19 @@ async function _runAsApp(a?: any, b?: any): Promise<AioApp<any, any>> {
     // Guarded for a sync throw AND an async rejection: an `async onStart` used
     // to bypass the catch entirely and surface as an unhandled rejection.
     if (fc.onStart) {
-      const failed = (e: unknown) => log.error(`onStart hook error: ${e}`);
+      // `fatalOnStart` is documented to end the process when `onStart` fails
+      // (docs/state/lifecycle.md), and it only ever guarded aio's OWN start
+      // hook (aio-lifecycle.ts) — this, the app's hook, logged and carried on,
+      // so `fatalOnStart: true` left the half-started app running. Same exit
+      // as the lifecycle's; under `libraryMode` (no `Deno.exit` allowed) the
+      // app is closed instead, so the embedder is not left holding a broken one.
+      const failed = (e: unknown) => {
+        log.error(`onStart hook error: ${e}`);
+        if (!fc.fatalOnStart) return;
+        log.error("fatalOnStart is true — exiting due to onStart failure");
+        if (fc.libraryMode) void app.close();
+        else Deno.exit(1);
+      };
       try {
         const r = fc.onStart(app) as unknown;
         if (r && typeof (r as Promise<unknown>).then === "function") {
@@ -1564,27 +1636,46 @@ async function _runPhases<S, A, E>(
   const _envPort = envPort();
   // `AIO_DEFAULT_PORT=0` is "pick a free one" — saying nothing, so no rung.
   const _defaultPort = envDefaultPort() || undefined;
-  const port = cli.port ?? _envPort ?? config.port ?? _defaultPort ??
-    await findFreePort();
-  // The default rung fills only the slot a free port would: it is not a port
-  // anyone NAMED, so it never opts a local Electron app out of zero ports.
-  const _portFromDefaultRung = cli.port === undefined &&
-    _envPort === undefined && config.port === undefined &&
-    _defaultPort !== undefined;
-  const portFrom: Provenance = cli.port
-    ? "flag"
-    : _envPort !== undefined
-    ? "env"
-    : config.port
-    ? "config"
-    : _portFromDefaultRung
-    ? "env"
-    : "default"; // …i.e. picked by findFreePort — worth saying, since a port
-  // that changes between runs is otherwise a mystery.
+  // Value and source from ONE candidate list (config-sources.ts): the source
+  // used to be re-derived with truthiness checks, so `--port=0` was labelled
+  // "default" while it was the flag that decided.
+  const _portPick = pick<number>(
+    ["flag", cli.port],
+    ["env", _envPort],
+    ["config", config.port],
+    ["env", _defaultPort],
+  );
+  const port = _portPick?.value ?? await findFreePort();
+  // Did anyone NAME a port? That opts a local Electron app out of zero TCP
+  // ports. The default rung does not count (it fills only the slot a free
+  // port would), and neither does `--port=0` / `port: 0` ("pick one") — the
+  // exact predicate this had when the source was derived by truthiness, kept
+  // now that the source label is honest about a 0.
+  const _portRequested = !!cli.port || _envPort !== undefined ||
+    !!config.port;
+  // "default" = picked by findFreePort — worth saying, since a port that
+  // changes between runs is otherwise a mystery.
+  const portFrom: Provenance = _portPick?.from ?? "default";
+
+  // Every setting with more than one home, and WHO decided it — from the same
+  // resolvers that decide it (config-sources.ts), so a label cannot disagree
+  // with its value. Into the lock (for `am doctor`) and, under `--verbose`,
+  // the boot report. `client` and `port` have report lines of their own.
+  const _settings = sourceLines([
+    ["host", hostOf(cli, config)],
+    ["expose", exposeFlagOf(cli, config)],
+    ["persist", persistOf(cli, config)],
+    ["dbPath", dbPathOf(cli, config)],
+    ["serverUrl", serverUrlOf(cli, config)],
+    ["width", windowSizeOf(cli, config.ui ?? {}).width],
+    ["height", windowSizeOf(cli, config.ui ?? {}).height],
+    ["keepServer", keepServerOf(cli, config.keepServer)],
+  ]);
 
   // Singleton lock — libraryMode implies no lock (embeddable / testable).
   const singletonMode = config.libraryMode ? false : (config.singleton ?? true);
-  const takeover = (config.takeover ?? false) || (cli.takeover ?? false);
+  // Either one asks for it — an OR, not a precedence.
+  const takeover = config.takeover === true || cli.takeover === true;
   const appLock = await acquireSingletonLock(
     appId,
     appDirs(appId, config.appDir).home,
@@ -1594,12 +1685,14 @@ async function _runPhases<S, A, E>(
     {
       aioVersion: VERSION,
       cdpPort: cdpPort(),
+      // What `am doctor` shows: each multi-home setting and who decided it.
+      settings: Object.fromEntries(_settings),
       // The CLIENT, so `am` can answer "is there a window here at all?"
       // without guessing. `am shot` used to tell the operator of a browser app
       // to restart with `--cdp` and try again — a path that ends nowhere,
       // because a browser app has no window to shoot. Same rule as the
       // electron-only refusal below.
-      client: cli.client ?? defaultClientFor(config.client),
+      client: clientOf(cli, config).value,
       // Where the DATA is, which is not the same question as `home` — see
       // LockData.dataDir. `am instances` prints it so "why is my data not
       // where I think it is" stops being answered by reading source.
@@ -1629,7 +1722,7 @@ async function _runPhases<S, A, E>(
   // pure decider (aio-cli.ts) names what was typed and the client it needs.
   const _electronOnly = electronOnlyFlagRefusal(
     cli,
-    cli.client ?? defaultClientFor(config.client),
+    clientOf(cli, config).value,
     config,
   );
   if (_electronOnly) {
@@ -1639,7 +1732,7 @@ async function _runPhases<S, A, E>(
 
   // Thin client mode
   if (
-    await handleThinClient(cli.serverUrl ?? config.serverUrl, (_v) => {
+    await handleThinClient(serverUrlOf(cli, config)?.value, (_v) => {
       /* multi-instance (D2): no process-wide running flag */
     })
   ) return null!;
@@ -1657,7 +1750,7 @@ async function _runPhases<S, A, E>(
 
   // Prod detection
   let distDir = resolve(join(Deno.cwd(), "dist"));
-  let prod = cli.prod ?? false;
+  let prod = cli.prod === true;
   if (!prod && isCompiled()) {
     // Entry-relative (the binary's EMBEDDED dist/) first, real filesystem after
     // — so a compiled binary detects prod from ANY cwd. See distCandidates.
@@ -1770,17 +1863,10 @@ async function _runPhases<S, A, E>(
   // Client mode: CLI flag > aio.run config > app deno.json `target` >
   // electron. The deno.json step is what makes `am create --target=X` +
   // `deno task dev` (no --client flag) actually run target X.
-  const client = cli.client ?? defaultClientFor(config.client);
+  const { value: client, from: clientFrom } = clientOf(cli, config);
   // …and WHO decided, kept beside the decision so the two cannot drift. The
   // boot report says `client electron (deno.json)` instead of leaving someone
   // to grep three files for the one that won.
-  const clientFrom: Provenance = cli.client
-    ? "flag"
-    : config.client
-    ? "config"
-    : _denoJsonTargetClient()
-    ? "deno.json"
-    : "default";
   const useElectron = client === "electron";
   const isHeadless = client === "server-only" || client === "cli";
 
@@ -1846,7 +1932,29 @@ async function _runPhases<S, A, E>(
     onStop,
     onError,
   } = config;
-  const shouldPersist = (cli.persist ?? config.persist) !== false;
+  const shouldPersist = persistOf(cli, config).value !== false;
+  // ONE decider for the database file. Three sites used to decide it: storage
+  // opened `config ?? cli`, while the shutdown "database is GONE" check and the
+  // boot report read `config.dbPath` alone — so a run with only
+  // `--db-path=/tmp/x.db` reported the default file as the database and ended
+  // with a false "GONE" alarm about a file it never used.
+  //
+  // The CONFIG wins when both are set, as storage always had it. Every other
+  // flag beats its config twin, and so should this one — but flipping it
+  // would open a DIFFERENT database under a deployment that passes both, and
+  // an app that boots onto an empty store looks exactly like data loss. So:
+  // unchanged, and said out loud. (A v2 candidate: the flag should win.)
+  const dbPath = dbPathOf(cli, config)?.value;
+  if (
+    config.dbPath !== undefined && cli.dbPath !== undefined &&
+    config.dbPath !== cli.dbPath
+  ) {
+    log.warn(
+      `--db-path=${cli.dbPath} is ignored: aio.run({ dbPath: ` +
+        `${JSON.stringify(config.dbPath)} }) is set, and the config wins for ` +
+        `this key. Remove one of the two.`,
+    );
+  }
   // autoGetUIState is always defined by composeCellsWiring (ui defaults to "all"),
   // so the (s) => s fallback here is a safety net, not the primary path.
   const _rawGetUIState = config._getUIState ?? ((s: S, _user?: AioUser) => s);
@@ -1928,7 +2036,7 @@ async function _runPhases<S, A, E>(
 
   const boot = await bootStorage({
     appId,
-    dbPath: config.dbPath ?? cli.dbPath,
+    dbPath,
     dbPragmas: config.dbPragmas,
     checkIntegrityOnBoot: config.checkIntegrityOnBoot,
     initialState,
@@ -1959,6 +2067,7 @@ async function _runPhases<S, A, E>(
     journal: config.journal,
     redactActions: config.redactActions,
     cellPersist: config._cellPersist,
+    cellPersistShaped: config._cellPersistShaped,
     log,
   });
   state = boot.state as S;
@@ -2022,6 +2131,185 @@ async function _runPhases<S, A, E>(
     return (out ?? replayed) as S;
   }
 
+  /** The replayed state, with every `onPersist`-shaped cell the replay
+   *  touched sent through the round trip a clean restart gives it: the slice
+   *  is shaped exactly as the store writes it (filter, then `onPersist`, then
+   *  JSON), merged over the declared state, and repaired by the cell's
+   *  `onRestore`.
+   *
+   *  A shape names no fields, so `_keepUnpersistedFields` cannot read one:
+   *  `onPersist: (s) => ({ data: s.data })` kept `cache` off disk, and a
+   *  `setBoth(7)` came back `cache: 0` after a clean stop and `cache: 7` after
+   *  a SIGKILL — the journal replayed the write the shape exists to drop.
+   *  Only the round trip itself is exact for a shape that RESHAPES, too.
+   *
+   *  A shape that throws here is the same failure the persist path reports on
+   *  its next write; the replayed slice is kept and the throw is said now. */
+  function _roundTripShapedCells(restored: S, replayed: S): S {
+    const shaped = config._cellPersistShaped;
+    if (!shaped?.length || replayed === restored) return replayed;
+    const from = restored as Record<string, unknown>;
+    const declared = initialState as Record<string, unknown>;
+    const restores = config._cellRestores;
+    let out: Record<string, unknown> | null = null;
+    for (const cell of shaped) {
+      const now = (replayed as Record<string, unknown>)[cell];
+      if (now === from[cell] || !_isRecord(now) || !_isRecord(declared[cell])) {
+        continue;
+      }
+      let slice: Record<string, unknown>;
+      let disk: Record<string, unknown>;
+      try {
+        const stored = (getDBState({ [cell]: now } as S) as
+          | Record<string, unknown>
+          | undefined)?.[cell];
+        disk = stored === undefined
+          ? {}
+          : JSON.parse(JSON.stringify(stored)) as Record<string, unknown>;
+        slice = deepMerge(
+          structuredClone(declared[cell]) as Record<string, unknown>,
+          disk,
+        );
+      } catch (e) {
+        log.error(
+          `journal: could not shape the replayed "${cell}" slice the way ` +
+            `the store writes it — it keeps what replay produced, including ` +
+            `whatever its onPersist keeps off disk: ${
+              e instanceof Error ? e.message : String(e)
+            }`,
+        );
+        continue;
+      }
+      const hook = restores?.get(cell);
+      if (hook) {
+        slice = runCellRestore(cell, hook, slice, {
+          stored: disk,
+          declared: declared[cell],
+          retyped: true,
+        }, log);
+      }
+      out ??= { ...(replayed as Record<string, unknown>) };
+      out[cell] = slice;
+    }
+    return (out ?? replayed) as S;
+  }
+
+  /** Say it when the tail holds lines with NO version stamp for a cell this
+   *  boot migrated (an `onMigrate` ran, or a downgrade).
+   *
+   *  The stamp (`JournalEntry.v`) is how replay refuses a line written under
+   *  another cell version; a journal from a build before the stamp cannot be
+   *  judged. Such a line ran either under the snapshot's version — then
+   *  re-running it through the new method on migrated state is a guess (a v1
+   *  "+5 units" replayed as "+5 cents") — or under the new one, by a build
+   *  that migrated in memory and crashed before its first snapshot, where
+   *  replaying it is right. Neither is provable from the file, so replay keeps
+   *  doing what it always did with them; it used to do it silently. */
+  function _warnUnstampedAcrossMigration(tail: JournalEntry[]): void {
+    const moved = new Map<string, { from: number; to: number }>();
+    for (const r of migrationSummary?.report ?? []) {
+      if (r.outcome === "migrated" || r.outcome === "downgrade") {
+        moved.set(r.cell, { from: r.from, to: r.to });
+      }
+    }
+    if (moved.size === 0) return;
+    const hits = new Map<string, number[]>();
+    for (const e of tail) {
+      if (e.v !== undefined) continue;
+      const cells = e.type === TT_RESTORE_TYPE
+        ? Object.keys(
+          (e.payload as Partial<TimeTravelRestore> | undefined)?.cells ?? {},
+        )
+        : [
+          workerPatchCell(e.type, e.payload) ??
+            (e.origin ?? e.type).slice(
+              0,
+              Math.max(0, (e.origin ?? e.type).indexOf(":")),
+            ),
+        ];
+      for (const c of cells) {
+        if (!moved.has(c)) continue;
+        const seqs = hits.get(c) ?? [];
+        seqs.push(e.seq);
+        hits.set(c, seqs);
+      }
+    }
+    for (const [cell, seqs] of hits) {
+      const m = moved.get(cell)!;
+      reportAioError(
+        createAioError(
+          "PERSIST_ERROR",
+          new Error(
+            `journal: ${count(seqs.length, "line")} for "${cell}" (seq ${
+              seqs.length > 8
+                ? `${seqs.slice(0, 8).join(", ")}, …${seqs.at(-1)}`
+                : seqs.join(", ")
+            }) carry no version stamp — ` +
+              `written by an aio build from before stamps existed — and this ` +
+              `boot migrated "${cell}" v${m.from} → v${m.to}. They are ` +
+              `REPLAYED through this build's methods on the migrated state, ` +
+              `as before; if they ran under v${m.from}, the recovered ` +
+              `"${cell}" may be wrong (a v${m.from} argument read with ` +
+              `v${m.to} meaning). Check it, and compare against ` +
+              `\`am timeline --from=${journal?.path ?? "<journal>"}\`.`,
+          ),
+          { cellName: cell },
+        ),
+        _reportOpts,
+      );
+    }
+  }
+
+  /** The restore hooks a clean restart runs, run again on what journal
+   *  replay produced — so a crash and a clean stop come back the same.
+   *
+   *  Boot ran them on the SNAPSHOT, and the tail then replayed on top: after a
+   *  clean stop the hooks see every action (the final snapshot holds them);
+   *  after a SIGKILL the tail's actions landed AFTER them, so what a hook
+   *  repairs ("nobody is online after a restart") was undone by the replayed
+   *  action that set it — measured `online: false` after a clean stop and
+   *  `online: true` after a crash. Only when replay changed state, in the
+   *  clean restart's order: each plain cell's `onRestore` whose slice the
+   *  replay touched (a shaped cell's already ran in its round trip), then the
+   *  app-level one. Error-guarded like boot's own run: a throw is logged and
+   *  the state kept as the replay left it. */
+  function _rerunRestoreHooks(restored: S, replayed: S): S {
+    if (replayed === restored) return replayed;
+    let next = replayed;
+    const restores = config._cellRestores;
+    if (restores?.size) {
+      const shaped = new Set(config._cellPersistShaped ?? []);
+      const was = restored as Record<string, unknown>;
+      next = produce(next, (d) => {
+        const s = d as Record<string, unknown>;
+        for (const [id, hook] of restores) {
+          if (shaped.has(id) || !_isRecord(s[id])) continue;
+          if ((replayed as Record<string, unknown>)[id] === was[id]) continue;
+          s[id] = runCellRestore(
+            id,
+            hook,
+            s[id] as Record<string, unknown>,
+            undefined,
+            log,
+          );
+        }
+      });
+    }
+    const appHook = config.onRestore;
+    if (appHook) {
+      try {
+        next = produce(next as unknown, (d: unknown) => {
+          const r = appHook(d as S) as unknown;
+          // Mutated in place (or handed the draft back) ⇒ the draft's edits.
+          return r === undefined || r === d ? undefined : r;
+        }) as S;
+      } catch (e) {
+        log.error(`hook onRestore (after journal replay): ${e}`);
+      }
+    }
+    return next;
+  }
+
   function _isRecord(v: unknown): v is Record<string, unknown> {
     return v !== null && typeof v === "object" && !Array.isArray(v);
   }
@@ -2051,74 +2339,24 @@ async function _runPhases<S, A, E>(
       }
       return slice;
     }
+    // A filter object that names NEITHER key keeps everything — the answer
+    // `fieldIncluded`, the store's own projection and the startup report all
+    // give it (it is a type error, so it arrives from JS, from a runtime-built
+    // `cellDefaults`, or from `onPersist` written inside `persist:`; boot says
+    // so out loud). This was the one decider that instead read `undefined` as
+    // iterable: the first boot after a CRASH threw before the server started,
+    // and so did every boot after it.
+    if (!("exclude" in filter)) return now;
     for (const path of filter.exclude) {
       if (!path.includes(".")) revert(path);
       else {
-        slice = _restoreExcluded(slice, was, path.split(".")) as Record<
+        slice = restoreExcluded(slice, was, path.split(".")) as Record<
           string,
           unknown
         >;
       }
     }
     return slice;
-  }
-
-  /** The mirror of `deepExclude` (state/state-filter.ts), walking the same
-   *  shape the same way: where the store's projection REMOVES the field at
-   *  `segs` from `now`, this puts boot's value there instead. Arrays pair
-   *  element by index; a head the object does not have is a records-by-id
-   *  container whose every value is walked — unless boot HAS that head, in
-   *  which case a replayed action deleted the field, and a clean restart
-   *  would fill boot's value back in (restore merges over the declared
-   *  shape), so this does too. Clones only along the changed path. */
-  function _restoreExcluded(
-    now: unknown,
-    was: unknown,
-    segs: string[],
-  ): unknown {
-    if (segs.length === 0 || now === null || typeof now !== "object") {
-      return now;
-    }
-    if (Array.isArray(now)) {
-      let changed = false;
-      const out = now.map((el, i) => {
-        const next = _restoreExcluded(
-          el,
-          Array.isArray(was) ? was[i] : undefined,
-          segs,
-        );
-        if (next !== el) changed = true;
-        return next;
-      });
-      return changed ? out : now;
-    }
-    const obj = now as Record<string, unknown>;
-    const base = _isRecord(was) ? was : undefined;
-    const head = segs[0]!;
-    if (head in obj || (base && head in base)) {
-      if (segs.length === 1) {
-        if (!base || !(head in base)) {
-          const { [head]: _dropped, ...kept } = obj;
-          return kept;
-        }
-        return obj[head] === base[head] && head in obj
-          ? now
-          : { ...obj, [head]: base[head] };
-      }
-      if (!(head in obj)) return now; // no branch to restore under
-      const child = _restoreExcluded(obj[head], base?.[head], segs.slice(1));
-      return child === obj[head] ? now : { ...obj, [head]: child };
-    }
-    let touched = false;
-    const mapped: Record<string, unknown> = {};
-    for (const [k, v] of Object.entries(obj)) {
-      const next = v !== null && typeof v === "object"
-        ? _restoreExcluded(v, base?.[k], segs)
-        : v;
-      if (next !== v) touched = true;
-      mapped[k] = next;
-    }
-    return touched ? mapped : now;
   }
 
   /** Refuse a journal replay across a hole (see `JournalGap`), keep the
@@ -2236,6 +2474,7 @@ async function _runPhases<S, A, E>(
     }
     if (gap) await _refuseJournalAcrossGap(journal, gap);
     const tail = gap ? [] : journal.readTail();
+    if (tail.length > 0) _warnUnstampedAcrossMigration(tail);
     if (tail.length > 0) {
       const before = state;
       const replay = replayJournal(
@@ -2243,8 +2482,16 @@ async function _runPhases<S, A, E>(
         tail,
         config.reduce as (s: S, a: A) => { state: S },
         (key) => journal.watermarkFor(key),
+        (cell) => config._cellVersions?.[cell] ?? 0,
+        (cell) => !!config._cellMigrations?.get(cell)?.onMigrate,
       );
-      state = _keepUnpersistedFields(state, replay.state);
+      state = _rerunRestoreHooks(
+        state,
+        _roundTripShapedCells(
+          state,
+          _keepUnpersistedFields(state, replay.state),
+        ),
+      );
       // A sync cell's replayed writes are live again but in no snapshot, and
       // no fold is pending for them: fold now, or a client catching up is
       // served a history without them and a second crash depends on the
@@ -2278,11 +2525,19 @@ async function _runPhases<S, A, E>(
           .map(([type, n]) => (n > 1 ? `${type} x${n}` : type))
           .join(", ");
         const seqs = replay.skipped.map((s) => s.seq);
-        const threw = replay.skipped.filter((s) => s.reason === "threw");
-        const why = threw.length === 0
+        // A version bump between the crash and this boot: those entries ran
+        // through methods this build no longer has, on a snapshot this boot
+        // just migrated — re-running them through the new methods is a
+        // guess (a v1 "+5 units" replayed as "+5 cents").
+        const stale = replay.skipped.filter((s) => s.reason === "version");
+        const rest = replay.skipped.filter((s) => s.reason !== "version");
+        const threw = rest.filter((s) => s.reason === "threw");
+        const whyRest = rest.length === 0
+          ? ""
+          : threw.length === 0
           ? `their payload was dropped by redactActions, so the arguments ` +
             `needed to re-run them are gone`
-          : threw.length === replay.skipped.length
+          : threw.length === rest.length
           ? `the reducer REJECTED them: ${
             [...new Set(threw.map((s) => s.error ?? "threw"))].join("; ")
           }`
@@ -2290,6 +2545,16 @@ async function _runPhases<S, A, E>(
             `were rejected by the reducer: ${
               [...new Set(threw.map((s) => s.error ?? "threw"))].join("; ")
             }`;
+        const whyStale = stale.length === 0
+          ? ""
+          : `${
+            stale.length === replay.skipped.length ? "they" : stale.length
+          } ` +
+            `ran under a cell version this build has migrated away from (${
+              [...new Set(stale.map((s) => s.error ?? "version"))].join("; ")
+            }), so the methods that wrote them are not this build's and ` +
+            `re-running them on the migrated state would guess`;
+        const why = [whyRest, whyStale].filter(Boolean).join("; and ");
         log.warn(
           `journal: ${
             count(replay.skipped.length, "action")
@@ -2725,7 +2990,8 @@ async function _runPhases<S, A, E>(
     compensate: () => Promise<void> = () => persistence.flushPersist(),
   ): number {
     try {
-      const seq = journal!.append(entry, ts);
+      const v = _journalVersions(entry.type, entry.payload, entry.origin);
+      const seq = journal!.append(v ? { ...entry, v } : entry, ts);
       _journalHealth.ok();
       return seq;
     } catch (e) {
@@ -2754,6 +3020,35 @@ async function _runPhases<S, A, E>(
       // entries and the journal's lines stay aligned for replay.
       return journal!.currentSeq();
     }
+  }
+
+  /** The `version` of every declared cell a journal line writes — see
+   *  `JournalEntry.v`. A method's cell is its type's prefix (a write-set's
+   *  origin names the same cell, a worker batch's payload names it); a
+   *  time-travel line writes every cell it carries. Undefined when the line
+   *  names no declared cell. */
+  const _declaredCells = new Set(config._cellNames ?? []);
+  function _journalVersions(
+    type: string,
+    payload: unknown,
+    origin: string | undefined,
+  ): Record<string, number> | undefined {
+    const cells = type === TT_RESTORE_TYPE
+      ? Object.keys(
+        (payload as Partial<TimeTravelRestore> | undefined)?.cells ?? {},
+      )
+      : [
+        workerPatchCell(type, payload) ??
+          (origin ?? type).slice(0, Math.max(0, (origin ?? type).indexOf(":"))),
+      ];
+    const out: Record<string, number> = {};
+    let any = false;
+    for (const c of cells) {
+      if (!_declaredCells.has(c)) continue;
+      out[c] = config._cellVersions?.[c] ?? 0;
+      any = true;
+    }
+    return any ? out : undefined;
   }
 
   // One per app, shared by the dispatch loop and the worker pool's effect
@@ -2886,12 +3181,17 @@ async function _runPhases<S, A, E>(
   _syncDispatchRef.fn = (a) => dispatch(a as unknown as A);
 
   const freezeEnabled = config.freezeState ?? !prod;
+  // `freezeState: false (prod default)` on its own read as "state is not
+  // frozen in production" — false: Immer's autoFreeze is never off, so every
+  // commit is frozen in every mode (tests/prod-committed-state-frozen.test.ts).
+  // The option only gates the EXTRA full-tree freeze pass after each commit.
   log.info(
     `freezeState: ${freezeEnabled}${
       config.freezeState === undefined
         ? (prod ? " (prod default)" : " (dev default)")
         : ""
-    }`,
+    } — committed state is frozen in every mode; this toggles only the ` +
+      `extra full-tree freeze pass after each commit`,
   );
 
   // Vitals periodic check
@@ -2991,6 +3291,11 @@ async function _runPhases<S, A, E>(
     // prints — one decider, so a worker cell is never freeze-checked more
     // loosely than a local one.
     freezeState: freezeEnabled,
+    // …and the SAME `refusalsReject` the composed reduce was given, for the
+    // same reason: it decides what an in-process `await cell.method()` sees
+    // when the reduce refuses the write, and a worker that never learned it
+    // answered its callers differently from the cell sitting next to it.
+    refusalsReject: config._refusalsReject === true,
     // EVERY worker cell, hosted or not: the pool refuses what a thread
     // boundary cannot honour (selectors, sync, listensTo, a machine) before it
     // decides whether to host. It used to be handed `[]` under libraryMode, so
@@ -3109,11 +3414,20 @@ async function _runPhases<S, A, E>(
       );
     }
     const out = dispatch(sent);
-    return Promise.resolve(out).then((v) =>
-      v === undefined
+    // The refusal follows the action across the same boundary the value does.
+    // `action-ack.ts` keys "did this action actually DO anything?" to the
+    // action OBJECT, and the reducer refused the CLONE — so a method this cell
+    // does not have (a rename, a stale client) was acked `ok: true` here while
+    // the identical frame on a main-isolate cell was `ok:false,
+    // ACTION_REFUSED`. Moved in the same turn, by the code that made the
+    // stand-in, before the ack path asks.
+    _moveRejections(sent, a);
+    return Promise.resolve(out).then((v) => {
+      _moveRejections(sent, a); // …and again for a refusal recorded on commit
+      return v === undefined
         ? v
-        : _cloneAcrossWorkerBoundary(v, "return value", cellId)
-    );
+        : _cloneAcrossWorkerBoundary(v, "return value", cellId);
+    });
   }) as typeof dispatch;
 
   const _routed = workerPool.route((a) => dispatch(a as unknown as A));
@@ -3178,10 +3492,10 @@ async function _runPhases<S, A, E>(
         // database that was never meant to be on disk. A false alarm in the one
         // message that must be believed the day it is real is worse than no
         // message: it is how a reader learns to discount this exact line.
-        const dbFile = config.dbPath ? resolve(config.dbPath) : _dirs.stateDb;
-        const inMemory = config.dbPath === ":memory:" ||
-          config.dbPath === "file::memory:" ||
-          String(config.dbPath ?? "").startsWith(":memory:");
+        const dbFile = dbPath ? resolve(dbPath) : _dirs.stateDb;
+        const inMemory = dbPath === ":memory:" ||
+          dbPath === "file::memory:" ||
+          String(dbPath ?? "").startsWith(":memory:");
         const gone = inMemory ? false : await Deno.stat(dbFile).then(
           () => false,
           (e) => e instanceof Deno.errors.NotFound,
@@ -3389,7 +3703,7 @@ async function _runPhases<S, A, E>(
     appId,
     appVersion: await _appVersion(),
     port,
-    portRequested: portFrom !== "default" && !_portFromDefaultRung,
+    portRequested: _portRequested,
     prod,
     distDir,
     electronDistDir,
@@ -3437,9 +3751,9 @@ async function _runPhases<S, A, E>(
     // TLS: ONE decider for the flag/config pair. The flags are per-launch and
     // win; `tls` in config is how a compiled binary — a service unit passes no
     // shell flags — declares the same thing (R-7).
-    cliCert: cli.cert ?? _tls.cert,
-    cliKey: cli.key ?? _tls.key,
-    cliNoTls: cli.noTls ?? _tls.noTls,
+    cliCert: tlsOf(cli, _tls).cert?.value,
+    cliKey: tlsOf(cli, _tls).key?.value,
+    cliNoTls: tlsOf(cli, _tls).noTls?.value,
     // Which of the two said so — the warning names what was actually written.
     noTlsSource: cli.noTls !== undefined ? "flag" : "config",
     certSource: cli.cert !== undefined || cli.key !== undefined
@@ -3503,10 +3817,19 @@ async function _runPhases<S, A, E>(
     cellAsyncMethods: config._cellAsyncMethods ?? {},
     cellMethodArity: config._cellMethodArity ?? {},
     cellFields: config._cellFields ?? {},
+    // The same version / converts-state facts boot replay reads, for every
+    // declared cell — `am replay` applies the one stamp rule (staleStamps).
+    cellVersions: Object.fromEntries(
+      (config._cellNames ?? []).map((c) => [c, {
+        version: config._cellVersions?.[c] ?? 0,
+        migrates: !!config._cellMigrations?.get(c)?.onMigrate,
+      }]),
+    ),
     asyncDb,
     // In-memory dispatch timeline — the trojan `timeline` route.
     getTimeline: (after?: number, limit?: number) =>
       timeline.entries(after, limit),
+    getTimelineRotated: () => timeline.rotated(),
     // Boot migration + shape-drift picture — trojan `migrations`.
     migrations: migrationSummary,
     appLock,
@@ -3642,6 +3965,10 @@ async function _runPhases<S, A, E>(
     // it owns, and what it is actually running.
     bootExtras: {
       pid: Deno.pid,
+      // `--verbose`: every setting with more than one home, the value it
+      // resolved to and WHO decided — from the same resolvers that decided it
+      // (config-sources.ts), so the label cannot disagree with the value.
+      sources: VERBOSE ? _settings : undefined,
       client: { value: client, from: clientFrom },
       // An app that binds no TCP port has no port fact to report. It used to
       // print one anyway — `findFreePort()` runs before the transport is even
@@ -3662,7 +3989,7 @@ async function _runPhases<S, A, E>(
       // one resolves against CWD — so the `data` line above was pointing at a
       // directory the state was not in. Resolved, because "./rel.db" is not an
       // answer to "where is it".
-      dbFile: config.dbPath ? resolve(config.dbPath) : undefined,
+      dbFile: dbPath ? resolve(dbPath) : undefined,
       logs: { dir: _dirs.logs, level: cli.verbose ? "debug" : "info" },
       journal: config.journal
         ? (typeof config.journal === "string" ? config.journal : _dirs.journal)

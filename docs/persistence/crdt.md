@@ -92,6 +92,14 @@ const inventory = cell("inventory", {
 });
 ```
 
+`merge` and `identity` are keyed by **top-level state field**. A key that names
+no field of the cell's state — a typo, or a nested path like `"profile.tags"` —
+is never read: that field would resolve last-write-wins instead of the strategy
+you declared. `cell()` warns at creation naming the key, the cell and the
+nearest real field. (A warning, not an error: a method may introduce a top-level
+field the declared state does not list.) A merge **strategy** aio does not
+implement is refused outright.
+
 ## Architecture
 
 **The offline queue** lives in `localStorage`, one document per cell, so unsent
@@ -353,7 +361,12 @@ constants (`SYNC_DEFAULTS` from `aio/sync`), not per-cell options:
 
 - `pendingCap` — 500 unconfirmed ops per cell. At the cap the client evicts
   unconfirmed ops older than `offline.retention` (`onDrop`, `stale-evicted`),
-  and drops the new op if that frees nothing (`onDrop`, `prune-failed`).
+  and drops the new op if that frees nothing (`onDrop`, `prune-failed`). The two
+  are not the same fact: a `prune-failed` op was never sent, so it certainly
+  never reached the server; a `stale-evicted` one WAS sent and was never
+  acknowledged, so it may have been applied with its ack lost — the client says
+  so rather than guessing, and does not re-send it. Read the cell's state if you
+  need the answer.
 - `maxDrift` — 60 s. An op stamped further **ahead** than this is refused by the
   server with an `op-rejected` naming the skew — it would win every
   last-write-wins comparison until the clocks meet. Ops stamped in the **past**

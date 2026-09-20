@@ -1,7 +1,8 @@
-// React migration compat hooks for AIR.
-// Allow React code to compile and run when imported from 'aio/air'.
-// Dev-mode hints guide toward AIR-native alternatives.
-// Isolated — deletable when no longer needed.
+// React's hook spellings for AIR — first-class, exported from `aio/air` and
+// `aio/air/compat` alike. They run silently: `useState` is correct code, and a
+// dev hint on correct code is a warning that cries wolf (they printed one
+// until 1.0.6-beta). AIR re-executes components the React way, so each behaves
+// as its React namesake — pinned by tests/react-patterns.test.ts.
 
 import { effect, type Signal, signal, untrack } from "../state/signal.ts";
 import {
@@ -11,39 +12,19 @@ import {
   useRef as rendererUseRef,
 } from "./aio-renderer.ts";
 
-// ── Dev hints (once per function name per session) ─────────────────
-
-const _hinted = new Set<string>();
-
-function _hint(name: string, msg: string): void {
-  if (!(globalThis as Record<string, unknown>).__aioDev) return;
-  if (_hinted.has(name)) return;
-  _hinted.add(name);
-  console.info(msg);
-}
-
-/** Reset hint tracking (for testing). */
-export function _resetHints(): void {
-  _hinted.clear();
-}
-
 /** Re-export useRef from renderer for compat */
 export const useRef = rendererUseRef;
 
 // ── useState ───────────────────────────────────────────────────────
 
 /**
- * React-compatible `useState`, signal-backed. Migration shim — prefer
- * `useLocal()` for object state or `signal()` for module-scoped state.
+ * React's `useState`, signal-backed: `const [v, setV] = useState(0)`.
+ * Same job as `useLocal` (aio's spelling, which also offers `.patch` for
+ * objects); either is correct.
  */
 export function useState<T>(
   initial: T | (() => T),
 ): [T, (next: T | ((prev: T) => T)) => void] {
-  _hint(
-    "useState",
-    "[aio] useState() is signal-backed in AIR. Recommended: useLocal() for object state, signal() for module-scoped.",
-  );
-
   const ref = rendererUseRef<Signal<T> | null>(null);
   if (ref.current === null) {
     // Matches React behavior: functions are always treated as lazy initializers.
@@ -69,18 +50,14 @@ export function useState<T>(
 // ── useEffect ──────────────────────────────────────────────────────
 
 /**
- * React-compatible `useEffect` mapped to AIR lifecycle primitives; deps are
- * honored (React semantics). Migration shim — prefer `onMount()` / `effect()`.
+ * React's `useEffect`: runs after mount, re-runs when a dep changes
+ * (`Object.is`), cleanup before each re-run and on unmount. `onMount()` is the
+ * same job for the run-once case; `effect()` auto-tracks signals.
  */
 export function useEffect(
   fn: () => void | (() => void),
   deps?: unknown[],
 ): void {
-  _hint(
-    "useEffect",
-    "[aio] useEffect() mapped to AIR primitives. Deps are honored (React semantics). Signal-native alternative: effect() auto-tracks reads.",
-  );
-
   if (deps && deps.length > 0) {
     // AIO-7.1: real React semantics — run after mount, re-run only when deps
     // differ by Object.is on a later render, cleanup before re-run. Signal
@@ -201,25 +178,16 @@ export function useEffect(
  * underscore is history, not a claim.
  */
 export function useCallback<T>(fn: T, _deps?: unknown[]): T {
-  _hint(
-    "useCallback",
-    "[aio] useCallback() is a migration shim — prefer a plain function, or " +
-      "computed() for a cached derivation.",
-  );
   return useMemo(() => fn, _deps);
 }
 
 // ── useMemo ────────────────────────────────────────────────────────
 
 /**
- * React-compatible `useMemo` with dep comparison. Migration shim — prefer
- * `computed()` for cached derivations.
+ * React's `useMemo`: recomputes when a dep changes (`Object.is`, length
+ * first). `computed()` is the signal-native way for derived values.
  */
 export function useMemo<T>(fn: () => T, _deps?: unknown[]): T {
-  _hint(
-    "useMemo",
-    "[aio] useMemo() is unnecessary in AIR — use computed() for cached derivations. Safe to remove.",
-  );
   const ref = useRef<{ deps: unknown[] | undefined; value: T } | null>(null);
   // LENGTH first. An element-wise compare judges a SHRINKING deps array
   // unchanged whenever its surviving prefix matches, so `useMemo(fn, [...ids])`

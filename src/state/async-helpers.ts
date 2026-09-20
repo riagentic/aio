@@ -10,6 +10,8 @@
 //     s.status = "paid";
 //   }
 
+import type { ScheduleTimers } from "./schedule.ts";
+
 /** Options for {@linkcode until}. */
 export interface UntilOptions {
   /** Give up after this many ms (default 30_000). Throws UntilTimeoutError. */
@@ -85,18 +87,18 @@ export async function race<T extends Record<string, Promise<unknown> | number>>(
   // a CLI command that had its answer and would not exit, a test the op
   // sanitizer fails. The promise branches are the app's to stop (`s.$signal`);
   // the timers are ours, and every one is cleared once a winner is known.
-  const timers: ReturnType<typeof setTimeout>[] = [];
+  const timers: (() => void)[] = [];
   const entries = Object.entries(branches).map(([key, v]) =>
     typeof v === "number"
       ? new Promise<void>((r) => {
-        timers.push(setTimeout(r, v));
+        timers.push(_armSleep(r, v));
       }).then(() => ({ winner: key, value: undefined }))
       : (v as Promise<unknown>).then((value) => ({ winner: key, value }))
   );
   try {
     return await Promise.race(entries) as RaceResult<T>;
   } finally {
-    for (const t of timers) clearTimeout(t);
+    for (const clear of timers) clear();
   }
 }
 
@@ -122,5 +124,42 @@ export type RaceResult<T> = {
 
 /** Promise sleep — the method-native `yield* ctx.sleep`. */
 export function sleep(ms: number): Promise<void> {
-  return new Promise((r) => setTimeout(r, ms));
+  return new Promise((r) => {
+    _armSleep(r, ms);
+  });
+}
+
+/** The virtual clock a test harness drives with `advance(ms)`. */
+export type SleepClock = Pick<ScheduleTimers, "setTimeout" | "clearTimeout">;
+let _sleepClock: (() => SleepClock | null) | null = null;
+
+/** Test harness only: the virtual clock `sleep()` and `race`'s `timeout`
+ *  branch also answer to. `sleep()` used to take REAL time however far a test
+ *  advanced — `await sleep(10_000)` in a method outlived `await h.advance(
+ *  10_000)`, so the test waited ten real seconds or asserted on a state that
+ *  had not happened yet. Real time still counts (see {@linkcode _armSleep}),
+ *  so a test that never advances waits exactly as it always did. Installed by
+ *  the harness next to the call ceilings' clock; `null` uninstalls.
+ *  @internal */
+export function _setSleepClock(get: (() => SleepClock | null) | null): void {
+  _sleepClock = get;
+}
+
+/** Arm `fn` after `ms` on the real clock and, when a harness installed one, on
+ *  its virtual clock too — the first to fire runs `fn` once and disarms the
+ *  other (the call ceilings' rule, `_armCallTimer`). Returns the disarm. */
+function _armSleep(fn: () => void, ms: number): () => void {
+  const v = _sleepClock?.() ?? null;
+  let vh: ReturnType<typeof setTimeout> | undefined;
+  const clear = (): void => {
+    clearTimeout(real);
+    if (v && vh !== undefined) v.clearTimeout(vh);
+  };
+  const fire = (): void => {
+    clear();
+    fn();
+  };
+  const real = setTimeout(fire, ms);
+  if (v) vh = v.setTimeout(fire, ms);
+  return clear;
 }

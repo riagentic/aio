@@ -214,9 +214,10 @@ export {
 // `testCell` and `testUI` — one import path per symbol since alpha70
 // (src/state/removals.ts); `aiol --safe-fix` rewrites the old `aio/air` import.
 
-// React migration compat hooks (useState/useEffect/useMemo/useCallback) live
-// at "aio/air/compat" only — off the main surface. `useRef` is a native AIR
-// primitive and remains exported above.
+// React's hook spellings, first-class on `aio/air` since 1.0.6-beta (also on
+// `aio/air/compat`, unchanged). The first thing a React-trained developer or
+// agent writes is `import { useState } from "aio/air"` — it did not compile.
+export { useCallback, useEffect, useMemo, useState } from "./air/compat.ts";
 
 /** Ask for desktop-notification permission from a click handler — the one
  *  place a browser grants it. See `notify()` and docs/clients/notifications.md. */
