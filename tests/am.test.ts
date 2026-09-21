@@ -514,7 +514,17 @@ Deno.test("am: parseGlobalFlags — state --wait=5 parsed", () => {
 
 // ── Integration: trojan endpoints via live server ────────────
 
-const AM_TEST_PORT = freePort();
+/** The port the trojan server for THE CURRENT TEST is on.
+ *
+ *  Taken fresh per server, not once per file. A cached port is not a RESERVED
+ *  port: `freePort()` answers "free right now", this file's server is created
+ *  and shut down per test, and in between another test file in the same shard
+ *  is handed the very same port by the slice allocator — legitimately, because
+ *  by then it is free. The next `withTrojanServer` then failed to listen with
+ *  "port N already in use", which reads as a product bug and is a harness one.
+ *  Caching it turned a microsecond window into one that stayed open for the
+ *  whole file. */
+let AM_TEST_PORT = 0;
 
 /** What the server's `loadSnapshot` was handed, or null when it was not called
  *  — so `am snapshot load` can be proved to have DELIVERED the file, not just
@@ -525,6 +535,7 @@ async function withTrojanServer(
   fn: (url: string) => Promise<void>,
 ): Promise<void> {
   lastLoaded = null;
+  AM_TEST_PORT = freePort();
   const dir = await tempDir("aio-am-");
   await Deno.writeTextFile(join(dir, "App.tsx"), "export default () => null");
   const appState = { count: 10, items: ["a", "b"] };

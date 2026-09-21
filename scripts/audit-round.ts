@@ -493,9 +493,39 @@ function round5(r: () => number): void {
   }
   // The basic policy must never restrict what an app already loads.
   const basic = contentSecurityPolicy(undefined, "'self'")!;
-  for (const forbidden of ["default-src", "script-src", "connect-src"]) {
+  for (const forbidden of ["default-src", "connect-src"]) {
     if (basic.includes(forbidden)) {
       finding("5", `the DEFAULT policy contains ${forbidden}`);
+    }
+  }
+  // `script-src` is the one exception, and the rule is stated rather than
+  // spelled as "absent". It is present on purpose: without it Chromium's
+  // `_isEvalAllowed()` is true, so every packaged Electron app ran `eval` and
+  // logged an insecure-CSP warning at launch. What keeps the promise intact is
+  // that the directive NAMES every source a page could already use and
+  // withholds exactly one capability — so the invariant to hold is not "no
+  // script-src" but "this script-src takes nothing else away". Checking the
+  // property rather than the absence is also the stronger gate: a later
+  // tightening to `'self'` would be invisible to the old spelling and is
+  // caught by this one.
+  const script = /(?:^|;)\s*script-src ([^;]*)/.exec(basic)?.[1]?.trim();
+  if (script !== undefined) {
+    for (const needed of ["*", "data:", "blob:", "'unsafe-inline'"]) {
+      if (!script.split(/\s+/).includes(needed)) {
+        finding(
+          "5",
+          `the DEFAULT script-src drops ${needed}, so it restricts what an ` +
+            `app already loads: ${JSON.stringify(script)}`,
+        );
+      }
+    }
+    // WebAssembly is not eval, and any bare `script-src` would take it from an
+    // app that had it.
+    if (!script.includes("'wasm-unsafe-eval'")) {
+      finding("5", `the DEFAULT script-src forbids WebAssembly: ${script}`);
+    }
+    if (script.includes("'unsafe-eval'")) {
+      finding("5", `the DEFAULT script-src allows eval again: ${script}`);
     }
   }
 }

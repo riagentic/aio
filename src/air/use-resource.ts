@@ -207,7 +207,7 @@ export function _openResourceCount(): number {
  *  - THE CLOSE IS ATTACHED TO THE OPEN. Changing the key closes the old
  *    resource before opening the new one, so two pipelines never fight over
  *    one device.
- */
+ *  @tier Kit */
 export function useResource<T>(cfg: UseResourceConfig<T>): ResourceHandle<T> {
   // A `use*` HOOK, which it was named like and did not behave like.
   //

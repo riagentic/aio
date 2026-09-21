@@ -12,6 +12,7 @@ import { scaffold } from "../src/am/am-cmd-create.ts";
 import { stripVersionToken } from "../src/build/build-version.ts";
 import { descendantPids } from "../src/server/single-instance-lock.ts";
 import { aioTestDir } from "../src/testing/test-strict.ts";
+import type { Template } from "../src/am/am-help-text.ts";
 
 export const REPO_ROOT = resolve(import.meta.dirname!, "..");
 const dec = new TextDecoder();
@@ -20,7 +21,10 @@ const dec = new TextDecoder();
  *  app gets a UNIQUE name so its appId (deno.json name → single-instance lock,
  *  compiled-binary identity) never collides with a sibling test's server. */
 export async function makeApp(
-  tpl: "counter" | "todo" = "counter",
+  // Every template, typed from the one list — a hand-kept `"counter"|"todo"`
+  // here is what stopped the onboarding gate from ever scaffolding `cli`,
+  // `canvas` or `assets`. `scaffold` already accepts them all.
+  tpl: Template = "counter",
   prefix = "onboard-",
   target?: Parameters<typeof scaffold>[3],
 ): Promise<string> {

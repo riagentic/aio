@@ -66,7 +66,9 @@ export function noCdpMessage(
     }Restart with the flag: am restart ${appId} --cdp ` +
     `(or run the app with --cdp / AIO_CDP=1), then am ${need.verb} again. ` +
     `Opt-in on purpose: --cdp binds a loopback port, and an app that did not ` +
-    `ask binds none.`;
+    `ask binds none. Without restarting anything, \`am surface ${appId} ` +
+    `--json\` reads the live UI as text — every component and element with ` +
+    `its current text, value and checked state.`;
 }
 
 export async function cmdShot(

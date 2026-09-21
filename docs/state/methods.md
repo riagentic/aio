@@ -1173,12 +1173,14 @@ committed, on every door (a server, `bootCells`, `testUI` and `testCell` alike).
 One consequence follows, and it is consistent everywhere: a queued self-call
 **survives its caller's throw**. If `addTwice()` calls `notes.add("a")` and then
 throws, the caller is rejected and its own writes are rolled back — but the
-queued `add("a")` is its own action and still commits. `testCell` says so on a
-debug line
+queued `add("a")` is its own action and still commits. Both dispatchers say so,
+in the same words — a running app on a **warn** line, `testCell` on a debug one
 (`self-call notes:add runs although its caller notes:addTwice
-threw`). If the
-nested write must share the caller's fate, use `s.$call` (same draft, same
-commit) instead.
+threw — the caller's own write is rolled back, the queued self-call commits as
+its own action`)
+— because the rejection printed beside it says "no state changed", which is true
+of the caller and false of the app. If the nested write must share the caller's
+fate, use `s.$call` (same draft, same commit) instead.
 
 `s.$call.bench(kind)` is none of those. The sibling's body runs against **your**
 draft, in **your** commit:

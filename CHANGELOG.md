@@ -1,5 +1,457 @@
 # Changelog
 
+## v1.0.7-beta — a packaged app with no open doors, a page that cannot leak into another's, and an app that cannot lose your last change (2026-09-21)
+
+> **The public surface is additive only** (`check:api` reports the additions
+> below and no removals or changed signatures). Two optional `electron` keys are
+> new. What changes behaviour is a set of doors that should never have been open
+> in a shipped desktop app — see
+> [what you may notice](docs/upgrade/from-1.0.6-beta-to-1.0.7-beta.md).
+
+This release is an audit of the packaged desktop app, done against a wallet,
+where a leaked key is money — plus the field reports that arrived after
+1.0.6-beta. Every fix was attacked by a separate reviewer round, which is how a
+third of the previous release's findings were made, and they were made the same
+way here.
+
+### Three doors a packaged app left open
+
+- **The state-snapshot route answered in a PACKAGED build**, not only in dev. It
+  is dev-only now.
+- **The Content-Security-Policy never reached the packaged renderer.** It was
+  sent as an HTTP header, and the packaged load ignores headers — so the policy
+  existed, was correct, and applied to nothing. It is a `<meta>` in the shell.
+- **The RENDERER could ask for an unsandboxed child window**
+  (`openWindow({ sandbox: false })`) and get one. The app decides now, with
+  `electron: { unsandboxedChildWindows: true }`; the renderer cannot ask.
+
+### And three more the audit found
+
+- **`AIO_ELECTRON_ARGS` forwarded any switch Chromium would parse** —
+  `--no-sandbox`, `--disable-web-security`, `--remote-debugging-port` included.
+  It is an allow-list now, and anything not on it is refused by name.
+- **The preload script was written 0644 at a predictable path.** It is written
+  mode 0600 into a private `mkdtemp` directory.
+- **The `/tmp` socket fallback did not check whose directory it was.** It
+  verifies the directory is ours before using it.
+
+### The verify round found six more, inside those very fixes
+
+A separate reviewer attacks every round of fixes, because a third of the last
+release's findings were made that way. This round it was six, each measured
+against real Electron rather than read:
+
+- **The preload's private directory leaked on every normal shutdown.** The sweep
+  ran on `window-all-closed`, but aio's own shutdown is SIGTERM — so every
+  Ctrl-C'd `deno task dev --client=electron`, every dev restart and every test
+  that stopped an app left a directory behind. Where the bug being fixed left
+  one FILE per pid, its fix left one DIRECTORY per launch. The sweep runs on the
+  way out now, and re-raises the signal.
+- **`requireSandbox: true` degraded instead of refusing.** The throw landed in
+  the generic launch `catch`, which logs _"the server is still running at
+  &lt;url&gt;; open it in a browser"_ and keeps serving — so an app that said it
+  would rather not open than open unsandboxed had its UI reachable anyway, in a
+  client nothing verified. The same downgrade, one step later. It stops the
+  process now, exit 1, and only for that case.
+- **`AIO_ELECTRON_ARGS` screened the switch NAME and took any VALUE**, control
+  characters included. `--lang=en\0--no-sandbox` reached `Deno.Command`, which
+  threw `nul byte found in provided data` — the window never opened and the
+  message named neither the variable nor the token.
+- **A refusal's reason could come off `Object.prototype`**: `--toString` was
+  refused and then explained by V8 with `function toString() { [native code] }`.
+- **The lock/socket directory check followed symlinks.** "Create 0700, then
+  LOOK" used `statSync`. Measured: with `/tmp/aio` a symlink to a directory we
+  own, the check returned "usable" and files written through it landed in the
+  link's target — so on a host with no `$XDG_RUNTIME_DIR`, another local user
+  could pre-create that link and choose where the app's lock files and control
+  socket go.
+- **The packaged shell's `&lt;meta&gt;` CSP carried `frame-ancestors`**, which a
+  document cannot deliver: Chromium logged an error on every packaged launch,
+  and the artifact E2E asserts an error-free renderer — so `test:electron` was
+  RED before the verify round touched anything. The meta now carries only what a
+  document can deliver; the HTTP header is unchanged.
+
+And one the round routed back rather than fixed, now done: **the environment was
+not screened at all.** `AIO_ELECTRON_ARGS` is an allow-list because the launch
+environment is not written by the app — and the spawn inherited that same
+environment whole. `ELECTRON_RUN_AS_NODE=1` turns the app's Electron into plain
+Node (measured: `Node.js v24.21.0`, no window), and `NODE_OPTIONS` loads
+anything into it. Both are removed, loudly, and the warning admits it is
+partial: an environment you do not control can also set `PATH` or `LD_PRELOAD`.
+
+### `access` gates CALLS. `visible` gates READS. Neither implies the other
+
+Two fixes and a sentence, all from the same audit section:
+
+- **A cell calling another cell is the server calling itself**, and was being
+  treated as a client, so an `access` rule on the callee refused it. The origin
+  is MARKED by the call path (`inServerOrigin`) — never inferred from the
+  transport, never carried on an action — so it holds where server and client
+  share one isolate and no client frame can forge it.
+- **A bug report is screened through the cell's real `visible` filter**, dot
+  paths included. A value your clients cannot see no longer travels in a support
+  ticket, or in a time-travel journal line.
+- **Boot says so** when a cell hides secret-shaped state and nothing gates the
+  call side — the pairing is a choice, and an accidental one had no signal.
+
+### …and five in the report screening, by a randomized differential
+
+The second verify round attacked the "a bug report cannot carry what a client
+cannot see" fix, with a 500-seed differential against the wire as the oracle:
+
+- **`visible: { forUser }` put the WHOLE cell in the report.** The wire screens
+  such a cell TWICE — the structural filter, then the per-client decision — and
+  the report applied only the first. A `forUser`-only cell has no first, so
+  **every user's rows** went into the file `feedback:` writes to disk and POSTs,
+  with nothing in `truncated` to say so. It fail-closes at the bridge now: one
+  decider, which the report state, the timeline leaves and the async payload
+  withholding all inherit.
+- **An array index was read as an object key.** A timeline path spells both
+  `"0"`, and a frame projects an array element-wise — so `include: ["rows.0"]`
+  put `[{}, {}]` on the wire while the report handed back row 0 whole. Found by
+  seed 906.
+- **`onPersist` was skipped by the time-travel journal line**, so pressing undo
+  wrote a session token the store has never held into the durable journal — read
+  back off disk after a SIGKILL to prove it.
+- **`exclude: ["a.b"]` had two answers for a key literally named `"a.b"`.** The
+  client read seam, `am surface` and the `fields` badge said hidden and refused
+  the read; the frame and the delta path shipped the value. The field sat in the
+  client's own state, unreadable by its own component.
+- **`visible: { exclude: "secret" }` — a string where a list belongs — was
+  silently dropped**, and the cell resolved to `visible: "all"`. Every named
+  field broadcast, the startup report said `visible=all`, and no warning was
+  printed anywhere. It is refused at both layers now, naming the cell, the
+  consequence and the fix in the app's own field name.
+
+Each was red-first and mutation-checked by reverting that fix alone — both
+layers of the last one separately. `check:vacuous` then caught four weak
+assertions in the round's own new tests, which were fixed rather than waived.
+
+### …and one in the `access` marker: a render was running as the server
+
+The third verify round attacked the "a cell calling another cell is server
+origin" fix, and found that the marker LEAKED into client code.
+
+The scope is continuation-local, so it also reaches every other continuation
+opened inside a method body — and the framework opens one there. A live-proxy
+write inside an **async** method commits synchronously, the signal flush queues
+the batched re-render from inside that commit, and the queued microtask
+inherited the marker. So **the component body ran as the server**: a `<div>`
+calling a cell with `access: () => false` straight from its render was ALLOWED,
+and so was a `setTimeout` that render started. A **sync** method did not leak at
+all, which made it a sync/async parity break too — a suite green or red at a
+distance.
+
+`testUI` was therefore more permissive than production about AUTHORIZATION,
+which is the single worst subject for the divergence this project forbids. The
+flush now runs subscribers outside the scope (a real `AsyncLocalStorage.exit`,
+because the flush only QUEUES the render — a synchronous flag cannot reach it).
+A probe intercepting every `queueMicrotask`/`setTimeout` from `air/` and
+`browser/` counted six scheduled inside the scope before the fix and zero after,
+and the probe was checked against the broken tree first so it could not be
+vacuously green.
+
+Two more from the same round: `own.set`'s factory and disposer are the app's own
+server code but are called by the effect manager, outside the body that emitted
+them — unmarked, so a factory calling an internal cell was refused. And
+`onInit`'s marker was inert at boot: the harness installed the scope inside the
+access gate, which goes in after the boot, so `isServerOrigin()` read false
+inside the one hook three separate places documented as server origin. The scope
+moves ahead of the boot, and a test pins the claim instead of the prose.
+
+### Tools that cannot lie about what they did
+
+- **`deno task install:android` refuses an APK older than your sources.** It
+  took the newest `.apk` by timestamp and never asked whether the app had
+  changed since, so editing your code and running install put the PREVIOUS build
+  on the phone — under the same version number — and printed `✓`. A field report
+  spent a session testing old code. It now names the file that changed, how long
+  after the build, and the two commands that fix it.
+- **The physical-proof matrix says what its gates prove.** `windows (real)` was
+  written by a gate that checks the LAB's viewer and share, not an app — so it
+  is `windows (lab-vm)` now, and the app-level claims are separate rows,
+  honestly marked NO GATE with the note that those runs were driven by hand.
+  `cli (binary)` and `web (real-browser)` are new rows, written by release gates
+  that were already running and simply never recorded themselves. The matrix's
+  own honesty has a gate too: a claim with no `recordProof` behind it, a gate
+  recording a row the matrix never prints, or two claims sharing a key.
+- **The onboarding gate scaffolds every template.** It looped `counter` and
+  `todo`; `cli`, `canvas` and `assets` each shipped a starter test that nothing
+  ever ran. It reads the one `TEMPLATES` list now.
+
+### The Electron warning, the cache that never forgot, and a macOS app that would have broken itself
+
+Three items the 1.0.6 review round found and left open, closed here. Each was
+established by RUNNING the code rather than reading it.
+
+- **Every packaged app logged
+  `Electron Security Warning (Insecure Content-Security-Policy)`, and the
+  `<meta>` CSP above did not stop it.** Electron's check is one line —
+  `if (!mainFrame._isEvalAllowed())` — and the default policy said nothing about
+  scripts, so `eval` still ran. `"basic"` now carries
+  `script-src * data: blob: 'unsafe-inline' 'wasm-unsafe-eval'`: every source a
+  page could already reach, minus `'unsafe-eval'`. Measured on a real Electron
+  44.4.1 window loading the real generated shell over `aio://` — warning gone,
+  `EVAL: blocked`, `WASM: allowed`, `INLINE: allowed`, module still loading. The
+  environment switch that HIDES the message was not used, and a test keeps it
+  out of `src/`. An app that evaluates strings says so:
+  `cspDirectives: { "script-src": false }`.
+- **`am prune` — the shared Electron runtime cache, which had never lost an
+  entry.** 32 entries, **7.7 GB**, Electron 41.2.1 through 44.4.2 on the machine
+  this was found on. It is machine-wide, so nothing here is automatic and
+  nothing is deleted before it has been printed: `am prune` reports every entry
+  with its size and the sentence that decided it, and `--yes` removes exactly
+  that list. A launch now stamps the runtime it started from, so age comes from
+  USE rather than from version order; the Electron this aio ships is never
+  offered at any age; unknown age is never "unused"; a lock is never touched;
+  `--keep=43.4.1` protects a version an app of yours is pinned to.
+  Prune-on-launch, keep-N-newest and keep-this-platform were each rejected in
+  writing — every one of them deletes the runtime some other app on the box
+  starts from.
+- **Every `<webview>` close lit the dev error badge, permanently** (wallet report §11).
+  Measured on Electron 44.4.1, not read: attaching a `<webview>` to a real
+  window and removing it throws `Uncaught Error: Invalid guestInstanceId: 2`
+  from `node:electron/js2c/isolated_bundle:1:7012`, with no app frame in the
+  stack, on every removal — the guest is already gone and the page cannot
+  prevent it
+  ([electron#53989](https://github.com/electron/electron/issues/53989)). It is
+  now ANNOTATED rather than filtered: the line still reaches the log, at info,
+  reading "… — known upstream issue (electron#53989), not this app: …", and it
+  no longer reaches `errors=N`, no longer colours the overlay badge and no
+  longer opens the panel — it is listed there as a muted notice. A badge that is
+  red from the first panel close until the window shuts is the fail-loud rule
+  inverted: it teaches you to ignore the one thing that means "look". The
+  recognition needs the message AND the source file, both anchored, so an app
+  that throws the same words from its own bundle stays loud and an Electron that
+  renames the bundle goes back to noisy rather than quietly mislabelled — a
+  blanket substring filter could promise neither. One decider: the Electron main
+  script's copy is stringified from the same list, and a test pins that the two
+  agree on every case.
+
+- **A macOS `.app` would have installed an update over itself and broken its own
+  code signature.** Measured before the fix: a bundle's executable path
+  classified as `"binary"`, and `installableTargets` answered `["binary"]` — so
+  a plain-binary release would have been renamed over `Contents/MacOS/<exe>`, a
+  file inside a signed bundle, leaving an app macOS will not open. It is its own
+  shape now (`"macos-app"`, an INSTALLED shape, not a shippable one — the frozen
+  `UPDATE_TARGETS` is untouched), it installs nothing, and it answers a newer
+  release with the download link and the manual step, the way Android already
+  did. A real in-place strategy for a signed bundle needs a Mac to verify and is
+  written down in `todo.md`.
+
+### `am help` is a screen again
+
+192 lines to 51. Bare `am help` is the 16 everyday verbs, `am help --commands`
+is one line for all 71 (what bare used to print), and `am help --all` is the
+full text, unchanged. The item had been reported, marked already-done, and
+re-checked as not done — `helpSummary` did compress every entry to one line, and
+one line × 71 commands is 192 of them. You cannot compress a list that is too
+long; the list has to get shorter.
+
+### A version can say how finished it is: `"version": "1.2-beta"`
+
+`-alpha`, `-beta` or `-rc` on the declared version rides the derived build
+number into one string — `1.2.345-beta` — and every reader already agreed on
+that string: `--version`, the boot line, the status bar, `/__aio/health`,
+artifact names, the ship manifest and the update check.
+
+Before, aio refused any prerelease, so an app that wanted to say `-alpha`
+appended it on DISPLAY only, and had two versions: the status bar said
+`0.1.377-alpha`, the download page said `0.1.377`, and the update check —
+ordering by build number alone — would have offered an alpha over the beta that
+replaced it. Stages rank `alpha < beta < rc < release`, which the update
+comparator already did; it was never given a string to do it to.
+
+An install whose own version carries a stage follows its own line by default — a
+release channel does not offer prereleases, and every build of a staged app is
+one, so without that rule saying how finished you are would have switched your
+own updates off and reported it as "up to date". Found by a verifier attacking
+this change, by running it.
+
+`"1.2-rc1"` is still refused: the build count already numbers the build, and
+`rc1` would be a second counter to disagree with it. A dirty staged build is
+`1.2.345-beta.dirty.<hash8>`, and the artifact-name splitter learned that shape
+in the same commit — a version the resolver can emit and a name parser cannot
+read would have installed a staged app under half its name.
+
+### The build stopped replacing `dist/`, and the lab stopped printing a 404
+
+A field report, and an afternoon: `am lab windows` bind-mounts the app's `dist/`
+into the container and serves it to the guest. Rebuild, and the guest gets a
+**404 for the file the hand-off just named** — for the life of the lab.
+
+A bind mount follows the **inode**, not the path. The fleet build renamed
+`dist/` aside and `mkdir`ed a fresh one, so the container was left holding an
+orphaned directory while every host-side reading stayed correct:
+`shareServing: true`, the share server genuinely running, the right filename
+printed. A 404 from a server you were just shown serving that exact file reads
+as "the lab is broken" or "the build is broken", and both are wrong.
+
+`dist/` is **emptied now, never replaced** — and a bind mount was only the
+loudest victim: an open `cd dist`, a file watcher and an editor's tree hold that
+inode too. A guard test fails on the next `remove`-then-`mkdir` of a directory
+the build hands out.
+
+And the hand-off asks the guest what it can actually see, so the cases aio's
+build cannot fix — a `rm -rf dist`, a `git clean`, an older aio — are a sentence
+naming the remedy instead of a command that 404s.
+
+### A leak the suite caught under load, in this release's own fix
+
+The preload directory swept on SIGTERM (above) armed its handler **after**
+creating the directory. A signal in that window takes the default action and the
+directory outlives the process — which is how the full suite failed it under
+load, after the sweep had already shipped. The sweep is armed first now, before
+anything exists to clean, and the ordering is what the test asserts.
+
+### An APK stops asking for the camera it never uses
+
+`android.permission.CAMERA` and a camera `uses-feature` were in **every**
+generated manifest, with a comment about QR scanning. So a todo list told its
+user — on the install screen, and on its Play listing — that it could use the
+camera, and Play flags an unused camera permission.
+
+It is opt-in now, default off: `{ "android": { "camera": true } }` in
+`deno.json`. Deleting it outright would have broken the apps that really do scan
+a code, in the worst available way (`getUserMedia` denied by the OS, a bare
+`NotAllowedError` in the page, nothing naming the missing permission), so the
+same flag reaches `MainActivity.kt` — a page asking for a camera this APK cannot
+give it gets an `E aio:` line in logcat naming the exact key to add. One decider
+fills both surfaces, and a value that is neither `true` nor `false` is refused
+by name on every build, not only an `--android` one.
+
+Building the APK for real found a second defect in the very line being replaced:
+its comment promised that "install stays possible on camera-less devices", and
+`aapt2 dump badging` on the built artifact disagreed — requesting CAMERA makes
+Android imply a **required** `android.hardware.camera`, which declaring
+`camera.any` alone does not suppress. Both features are declared optional now,
+and the test links both shapes with aapt2 instead of reading back the manifest
+it just wrote.
+
+### Server-only names no longer break an Android build
+
+A cell module importing `serverUser`, `serverRequest`, `serverAuth` or
+`blocking` — the shape `docs/auth/auth.md` and `docs/debugging/performance.md`
+both use — refused the APK bundle outright:
+`No matching export in "src/standalone-air.ts" for import "serverUser"`, an
+esbuild error naming an aio internal rather than the app's own import. The
+browser entry closed this in 1.0.5-beta; the android entry had not.
+
+It now carries the same facades: the import resolves, and a **call** throws,
+naming the runtime it actually ran on and pointing at `--android --remote`.
+Never `undefined` — a client reading `serverUser()` as "anonymous" is an
+authorization check that passed because there was nobody to check. The header of
+`src/server/auth-context.ts` had claimed the opposite; a metafile gate now pins
+that no client bundle contains that module at all.
+
+### Two pages rendered at once no longer swap each other's `<head>`
+
+`renderToString` was always safe — it returns before anything else can start a
+render. Two concurrent `renderToStream`s were not: they shared one `useId`
+counter, one `useHead` collection and one open-`<select>` stack. Measured, by
+pulling two streams one chunk at a time: one visitor's title, description and
+canonical URL served inside another visitor's page; every id after the first a
+hydration mismatch, so every `<label for>` the server wrote pointed at the wrong
+element; and an interleaved stream marking the OTHER render's `<option>`
+selected. Each render carries its own state now. `renderToStream(vnode, key?)`
+and `collectHead(key?)` take an additive optional key naming a response, and an
+unkeyed `collectHead()` THROWS when two streams overlapped rather than guess.
+
+### The server wrote attribute NAMES the client refuses
+
+`{"x onload=alert(1)": 1}` reached the document as raw HTML from
+`renderToString` and `renderToStream`, where escaping the value does nothing —
+while the client path already threw. Server-permissive, client-strict is the
+forbidden direction. Both writers now share one predicate (the XML `Name`
+production, exactly what `setAttribute` enforces) and throw naming the attribute
+and the element.
+
+### An Android app cannot lose a change to a kill any more
+
+A standalone APK persisted through the WebView's `localStorage`, which commits
+on its own lazy schedule. Measured on an API 35 emulator: a kill 122 ms after a
+change brought the app back without it — silently. At 933 ms it survived, which
+is why every earlier test, all of which waited, called it fine. A swipe-away, an
+OOM kill and a crash are all that kill. There is a native store now — temp file
+→ `fsync` → atomic rename — and the write debounce is REMOVED for it rather than
+shortened. Re-measured: killed at 52 ms, restored with the change. An app
+already on someone's phone keeps its state: the first launch after the upgrade
+adopts what the previous build left in `localStorage` and says so. `targetSdk`
+is 34 → 35, which forced edge-to-edge and was drawing the page under the status
+bar until the WebView was given the bars as padding.
+
+### An embedded app no longer dies on a disk quota, and a hung peer cannot wedge the transport
+
+The SIGXFSZ guard rode on the single-instance lock, which `libraryMode`
+deliberately does not take — so a write past `ulimit -f` killed an embedded app
+outright, with no error and no final save. The guard belongs to the process, so
+every boot holds one now, lock or no lock. Separately, `socketFetch` had no
+timeout: six never-answered requests filled the socket pool and everything after
+them waited forever. It is bounded to the FIRST byte, so SSE, long polls and
+slow downloads are untouched.
+
+### The Windows transport is verified on Windows, and one claim was withdrawn
+
+Handle ownership in `win-pipe.ts` is generation-stamped, so no deferred
+`CancelIoEx`/`CloseHandle` can act on a value the kernel has since reissued.
+Verifying it on a real Windows 11 machine — 1000 NDJSON lines including a 1 MB
+frame, 8 concurrent clients, a 20 MB streamed GET checked by sha256, a 5 MB POST
+byte-for-byte — also disproved the fix's own headline claim: with `bWait=FALSE`,
+`GetOverlappedResult` ignores its handle argument, so the read paths could not
+have returned a stranger's byte count. Both module comments now carry the
+measurement instead of the claim.
+
+That machine found what Linux could not: **`mintControlKey` refused every
+directory on Windows**, because the code assumed Windows reports no permission
+bits and it reports `0o666` — so `am` could not mint or read its own credential
+there. One named decider (`modeBitsAreMeaningful`) fixes all four doors.
+
+### `am check` stopped inventing errors, and `am surface` stopped calling a working button inert
+
+An app whose config is `deno.jsonc` — Deno reads it natively — got three
+fabricated blocking errors from `am check` saying its aio imports were missing.
+They were not: nothing readable and "read it, declares none" were the same
+value. `deno.jsonc` is read properly now, workspace members inherit the root's
+import map, and an unreadable config skips the gate and SAYS it did. And
+`am surface` reported `events: []` for a `<button>` inside a `<form onSubmit>`
+while `am trigger … click` genuinely ran the handler — so anything choosing a
+target from the surface alone read the one working button as dead.
+
+### `onUnmount`, and twenty recipes that are run, not printed
+
+`onCleanup` in a component body runs on unmount AND before every re-render. That
+is right for what the body re-creates each render and wrong for a place in a
+download queue or an armed safety timer — a field report shipped the wrong one
+four times in four components. `onUnmount(fn)` runs once, when the component
+goes away, including when the body threw before it ever mounted; `aiol` flags
+the mistake and names it. `docs/basics/cookbook.md` is twenty copy-paste
+recipes, every one DRIVEN by `tests/cookbook-recipes.test.ts` — writing them
+caught three snippets that did not work, including a cancel recipe that did not
+cancel.
+
+### `errors=` on the stopped line counts every error
+
+It counted only async method failures, so an app that lost every write to a
+deleted database still ended `errors=0` — a summary disagreeing with the log
+right above it. Both halves are pinned: an error-level line is counted, and an
+ordinary boot → dispatch → clean close still reports zero, so the number keeps
+meaning something.
+
+### Smaller
+
+- **Every hook on `aio/air` declares `@tier Core | Kit | Advanced`** in its
+  JSDoc, so an editor tooltip says whether a first app needs it. 23 hooks were
+  on the surface and the examples between them used one.
+- **`am shot` without a DevTools port** now names `am surface --json`, which
+  reads the live UI as text without restarting anything, beside the existing
+  `am restart --cdp`.
+- **The agent brief no longer contradicts itself** about React's hooks: one
+  stale line said `aio/air/compat` was "for React migration only" while another
+  told agents they work from `aio/air`.
+- **`t="…"` is documented for out-of-process drivers.** It never reaches the DOM
+  by design; `am surface`/`am trigger` reach the same handles over the wire, on
+  a phone exactly as on a desktop.
+
 ## v1.0.6-beta — a Windows app that cannot freeze, a loop that cannot crawl, and a config that cannot be ignored (2026-09-20)
 
 > **The public surface is additive only** (`check:api` reports the additions

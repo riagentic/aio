@@ -3,6 +3,7 @@
 
 import { enc } from "../protocol/envelope.ts";
 import { degraded } from "../diagnostics/degraded.ts";
+import { upstreamRendererNoise } from "../diagnostics/upstream-noise.ts";
 import type { ClientLogEntry } from "../air/dom-inspector-types.ts";
 
 /** Returns whether the frame reached the wire, when the transport can say.
@@ -163,6 +164,11 @@ export function _forward(
 // Named handlers for cleanup
 let _errorHandler: ((ev: ErrorEvent) => void) | null = null;
 let _rejectionHandler: ((ev: PromiseRejectionEvent) => void) | null = null;
+let _cspHandler: ((ev: Event) => void) | null = null;
+/** The eval hint is said once per install — the same eval usually runs in a
+ *  loop, and one explanation is help while fifty is the noise this project
+ *  refuses. */
+let _saidEvalHint = false;
 let _origConsole: {
   log: (...args: unknown[]) => void;
   info: (...args: unknown[]) => void;
@@ -225,6 +231,17 @@ export function installConsoleIntercept(
 
   _errorHandler = (ev: ErrorEvent) => {
     const stack = _stackFrom(ev.error);
+    // An error the RUNTIME threw and the page cannot prevent is forwarded at
+    // INFO, annotated with the upstream issue. Not dropped: the line still
+    // reaches the app log and `am logs`, so anyone who looks finds it and its
+    // explanation. What it must not do is tick `errors=N` — an error count
+    // that is permanently non-zero for something the app did not do is the
+    // fail-loud rule inverted, and it trains people to ignore the number.
+    const known = upstreamRendererNoise(ev.message, ev.filename);
+    if (known) {
+      _forward("info", [`[uncaught] ${known.annotated}`]);
+      return;
+    }
     const msg = "[uncaught] " + (ev.message ?? String(ev.error));
     _forward("error", stack ? [msg, stack] : [msg]);
   };
@@ -236,11 +253,41 @@ export function installConsoleIntercept(
     _forward("error", stack ? [msg, stack] : [msg]);
   };
 
+  // aio's CSP withholds `'unsafe-eval'`, and the browser's refusal names
+  // neither aio nor the way back. THE BETA PROMISE (.katana/goals.md) is that
+  // a change announces itself at the site: "a break discovered by debugging is
+  // a broken promise." An app that loads a template engine, an expression
+  // evaluator or a plugin host would otherwise meet only
+  //
+  //     Refused to evaluate a string as JavaScript because 'unsafe-eval' is
+  //     not an allowed source of script
+  //
+  // and have nothing to search for. Said ONCE — the same eval usually runs in
+  // a loop — and observe-only, so prod behaves exactly as dev does: the
+  // browser still refuses the eval either way, this only explains it.
+  _cspHandler = (ev: Event) => {
+    const e = ev as Event & {
+      violatedDirective?: string;
+      blockedURI?: string;
+    };
+    if (e.violatedDirective !== "script-src" || e.blockedURI !== "eval") return;
+    if (_saidEvalHint) return;
+    _saidEvalHint = true;
+    _forward("warn", [
+      "[aio] this page just tried to run `eval` / `new Function`, and aio's " +
+      "Content-Security-Policy withholds `'unsafe-eval'` — every other " +
+      "script source a page could use is still allowed. If your app needs " +
+      "it (a template engine, an expression evaluator, a plugin host), opt " +
+      'out by name: security: { cspDirectives: { "script-src": false } }.',
+    ]);
+  };
+
   globalThis.addEventListener("error", _errorHandler as EventListener);
   globalThis.addEventListener(
     "unhandledrejection",
     _rejectionHandler as EventListener,
   );
+  globalThis.addEventListener("securitypolicyviolation", _cspHandler);
 }
 
 /** Remove interceptors and restore original console methods. */
@@ -267,5 +314,10 @@ export function uninstallConsoleIntercept(): void {
     );
     _rejectionHandler = null;
   }
+  if (_cspHandler) {
+    globalThis.removeEventListener("securitypolicyviolation", _cspHandler);
+    _cspHandler = null;
+  }
+  _saidEvalHint = false;
   _installed = false;
 }

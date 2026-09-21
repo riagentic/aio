@@ -632,11 +632,33 @@ function keyClicks(el: AnyEl, space: boolean): boolean {
 const _ENTER_CLICKS = _BUTTON_TYPES.split(" ");
 const _SPACE_CLICKS = [..._ENTER_CLICKS, "checkbox", "radio"];
 
+/** Is this a form's SUBMIT control? HTML's own rule, written ONCE.
+ *
+ *  Two tiers ask it and they must never disagree: the trigger asks it to find
+ *  the button implicit submission clicks, and the semantic surface
+ *  (`ui-surface.ts`) asks it to report that clicking this button drives the
+ *  FORM's `submit` handler. The surface used to answer that question with the
+ *  button's own `on*` props alone, so `<button>Add</button>` inside a
+ *  `<form onSubmit>` came back as `events: []` — an agent choosing a target
+ *  from the surface read the one button that works as inert (measured on
+ *  `examples/todo`: `am trigger "App:AddButton" click` added the todo while
+ *  its surface entry listed nothing).
+ *
+ *  `tag` / `type` exactly as HTML sees them: a `<button>` with no `type` IS a
+ *  submit button (that is the default that surprises everyone), an `<input>`
+ *  with no `type` is a text field and is not. Pure. */
+export function isSubmitControl(tag: string, type?: string): boolean {
+  const t = tag.toLowerCase();
+  const ty = type?.toLowerCase();
+  if (t === "button") return (ty ?? "submit") === "submit";
+  return t === "input" && (ty === "submit" || ty === "image");
+}
+
 function isSubmitButton(el: AnyEl): boolean {
-  const tag = tagOf(el);
-  if (tag === "button") return String(el.type ?? "submit") === "submit";
-  return tag === "input" &&
-    (inputTypeOf(el) === "submit" || inputTypeOf(el) === "image");
+  return isSubmitControl(
+    tagOf(el),
+    el?.type == null ? undefined : String(el.type),
+  );
 }
 
 /** How a field names itself in a refusal — `name`, else `id`, else the

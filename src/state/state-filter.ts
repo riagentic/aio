@@ -358,14 +358,116 @@ export function applyCellFieldFilter(
     const result: Record<string, unknown> = { ...cellState };
     const deep: string[][] = [];
     for (const key of filter.exclude) {
+      // BOTH READINGS of a dotted entry, exactly as `deepExcludePaths` takes
+      // both readings of an ambiguous name: the path a → b, AND a top-level
+      // key literally CALLED "a.b". The literal one is not hypothetical — the
+      // client read seam (`uiKeyVisibility`), the `am surface` view and the
+      // trojan `fields` badge all matched the key string and answered
+      // "hidden", while this frame and the delta path read only the path and
+      // broadcast the value: the field sat in the client's own state and
+      // refused to be read by the component that owns it.
+      delete result[key];
       if (key.includes(".")) deep.push(key.split("."));
-      else delete result[key];
     }
     // ONE pass over all dot paths — the same call the client seam makes, so
     // the two cannot drift.
     return deepExcludePaths(result, deep) as Record<string, unknown>;
   }
   return undefined;
+}
+
+/** What a cell's filter leaves of a value known to live at `segs` INSIDE the
+ *  cell's slice — `["seeds", "0", "encSeed"]` for a timeline diff leaf, say.
+ *
+ *  `{ hidden: true }` ⇒ the filter removes the value itself (nothing of it may
+ *  be shown); otherwise `value` is what survives, with anything the filter
+ *  excludes BELOW that point removed — a whole row keeps its label and loses
+ *  its ciphertext.
+ *
+ *  It is the same reading as the full frame, and provably so: the path is
+ *  re-nested into a slice-shaped object and run through
+ *  {@linkcode applyCellFieldFilter}, so there is no second traversal to drift.
+ *
+ *  A path segment says nothing about the CONTAINER it indexes — `"0"` is an
+ *  array index in `{ rows: [ … ] }` and an ordinary key in a records-by-id map
+ *  keyed `"0"`, and a timeline path (`DiffEntry.segments`, built with
+ *  `Object.keys`) spells both the same way. The two readings do not agree:
+ *  the full frame projects an ARRAY element-wise, so `include: ["rows.0"]`
+ *  leaves `[{}, {}]` there, while the object reading hands back row 0 whole —
+ *  a value the client never receives. Ambiguous ⇒ BOTH readings apply, the
+ *  same answer `deepExcludePaths` gives a key that is both a literal field and
+ *  a record id: the value is screened through each in turn, so what comes out
+ *  is never more than either would have shown. */
+export function visibleValueAt(
+  filter: CellFieldFilter | undefined,
+  segs: readonly string[],
+  value: unknown,
+): { hidden: true } | { hidden: false; value: unknown } {
+  if (!filter || filter === "all") return { hidden: false, value };
+  if (filter === "none") return { hidden: true };
+  // An index-like segment is the ambiguous case; anything else nests one way.
+  const ambiguous = segs.some((s) => /^(0|[1-9][0-9]*)$/.test(s));
+  let cur = value;
+  for (const asArray of ambiguous ? [false, true] : [false]) {
+    const seen = _visibleValueAt1(filter, segs, cur, asArray);
+    if (seen.hidden) return seen;
+    cur = seen.value;
+  }
+  return { hidden: false, value: cur };
+}
+
+/** One reading of {@linkcode visibleValueAt} — `asArray` nests an index-like
+ *  segment as a one-element ARRAY (what the wire walks element-wise) instead
+ *  of as an object key. */
+function _visibleValueAt1(
+  filter: Exclude<CellFieldFilter, "all" | "none">,
+  segs: readonly string[],
+  value: unknown,
+  asArray: boolean,
+): { hidden: true } | { hidden: false; value: unknown } {
+  if (segs.length === 0) {
+    // The leaf IS the whole slice (a root replacement). A slice that is not a
+    // plain object has no fields to name: an `exclude` removes nothing from it
+    // (and must not turn `undefined` into `{}`, or a report would show a cell
+    // arriving where one vanished), while an `include` finds nothing in it and
+    // so shows nothing — the closed direction, which is the right one here.
+    if (value === null || typeof value !== "object" || Array.isArray(value)) {
+      return "include" in filter ? { hidden: true } : { hidden: false, value };
+    }
+    const projected = applyCellFieldFilter(
+      filter,
+      value as Record<string, unknown>,
+    );
+    return projected === undefined
+      ? { hidden: true }
+      : { hidden: false, value: projected };
+  }
+  let nested: unknown = value;
+  // The key to read back at each level — `"0"`, not the real index, wherever
+  // a segment was nested as a one-element array. The POSITION cannot matter:
+  // both walkers treat every element of an array alike, so one element stands
+  // in for index 9999 at a ten-thousandth of the allocation.
+  const read: string[] = [...segs];
+  for (let i = segs.length - 1; i >= 0; i--) {
+    const seg = segs[i]!;
+    // The head segment is a key of the cell SLICE, which is always an object.
+    if (asArray && i > 0 && /^(0|[1-9][0-9]*)$/.test(seg)) {
+      nested = [nested];
+      read[i] = "0";
+    } else nested = { [seg]: nested };
+  }
+  let cur = applyCellFieldFilter(filter, nested as Record<string, unknown>);
+  for (const seg of read) {
+    if (
+      cur === null || typeof cur !== "object" ||
+      !Object.hasOwn(cur as Record<string, unknown>, seg)
+    ) {
+      // The projection dropped the path on the way down — the field is hidden.
+      return { hidden: true };
+    }
+    cur = (cur as Record<string, unknown>)[seg] as Record<string, unknown>;
+  }
+  return { hidden: false, value: cur };
 }
 
 /** Client-read visibility of ONE state key under a cell's visibility filter.
@@ -467,6 +569,12 @@ export function filterPatchesByStrategy(
     // strategy === "filter"
     const ff = filterFields.get(entry.cell);
     if (!ff) return undefined; // filter strategy but no field config -> safety
+    // The LITERAL reading of each dotted exclude — a top-level key called
+    // "a.b", which the frame drops (`applyCellFieldFilter`). Computed once per
+    // cell, not once per op: this is the delta path.
+    const literalDrops = ff.mode === "exclude" && ff.deepExcludes
+      ? new Set(ff.deepExcludes.map((segs) => segs.join(".")))
+      : undefined;
     const kept: Patch[] = [];
     for (const op of entry.ops) {
       if (op.path.length === 0) return undefined; // root replacement -> full fallback
@@ -521,6 +629,11 @@ export function filterPatchesByStrategy(
       }
       // exclude mode: top-level drop, then deep-path handling
       if (ff.fields.has(seg)) continue;
+      // …and the literal reading of a DOTTED entry: a top-level key called
+      // "a.b" is dropped from the frame, so no op at it — or under it — may
+      // ride in behind the frame's back. An op path's first segment is always
+      // a top-level key, so an exact match is the whole rule.
+      if (literalDrops?.has(seg)) continue;
       let out = op;
       let dropped = false;
       // ONE pass over all the paths whose tail can still be inside this op's

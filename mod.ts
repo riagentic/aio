@@ -67,6 +67,11 @@ export type { TrayConfig, TrayMenuItem } from "./src/server/aio-types.ts";
  *  imports this type rather than re-typing the union", a rule the framework
  *  kept internally and could not offer to an app. */
 export type { AuthOptions, UiTheme, WsLimits } from "./src/server/aio-types.ts";
+/** `electron: { … }` — the Electron process's own security decisions. Added
+ *  with the key itself, because a config type an app writes and cannot NAME
+ *  is one the app has to re-declare and keep in sync by hand; the gate
+ *  (tests/config-types-reachable.test.ts) caught it the same day. */
+export type { ElectronConfig } from "./src/server/aio-types.ts";
 /** `security: { … }` — the HTTP hardening block (CSP, headers, limits). */
 export type { SecurityConfig } from "./src/server/security-config.ts";
 /** What `feedback:` / `updates:` accept — the shorthand and the full config as

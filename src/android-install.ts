@@ -21,12 +21,19 @@
  * It REFUSES an emulator unless asked (`--emulator`): "install to my phone"
  * silently landing on a virtual device is the kind of helpfulness that costs an
  * hour, and the emulator already has `dev:android`.
+ *
+ * It also refuses an APK OLDER than the app's sources (`staleApkRefusal`), for
+ * the same reason spelled differently: a field report edited its app, ran this,
+ * read `✓`, and tested the previous build on the phone for a while — same
+ * version number on screen, so nothing disagreed. `--build` builds first;
+ * `--apk=<file>` installs a named artifact regardless.
  */
 import { isAbsolute, join } from "@std/path";
 import { resolveSdk } from "./build/build-helpers.ts";
 import { androidApplicationId } from "./build/build-android.ts";
 import { stripVersionToken } from "./build/build-version.ts";
 import { outDirOf } from "./build/build-manifest.ts";
+import { APP_STYLE } from "./server/app-files.ts";
 
 const dec = new TextDecoder();
 
@@ -192,6 +199,87 @@ export function pickApk(
   return { apk: newest.name };
 }
 
+/** Files that decide whether an APK is current. Everything the build READS,
+ *  and nothing it WRITES — `dist/` holds the APK itself, so counting it would
+ *  compare the artifact to itself and always answer "fresh". */
+const SOURCE_DIRS = ["src", "assets", "public", "static"];
+const SOURCE_FILES = ["deno.json", "deno.jsonc", APP_STYLE, "index.html"];
+const SKIP_DIRS = new Set([
+  "dist",
+  "dep",
+  "node_modules",
+  ".git",
+  "build",
+  ".gradle",
+]);
+
+/** The newest source file under `root`, or null when there is none.
+ *  Walks with `Deno.readDirSync` rather than a glob so one unreadable
+ *  directory cannot decide the answer by being skipped silently — it throws,
+ *  and the caller says so. */
+export function newestSource(
+  root: string,
+  readDir: (p: string) => Iterable<Deno.DirEntry> = Deno.readDirSync,
+  stat: (p: string) => { mtime: Date | null } = Deno.statSync,
+): { path: string; mtime: number } | null {
+  let best: { path: string; mtime: number } | null = null;
+  const consider = (path: string) => {
+    const mtime = stat(path).mtime?.getTime() ?? 0;
+    if (!best || mtime > best.mtime) best = { path, mtime };
+  };
+  const walk = (dir: string) => {
+    for (const e of readDir(dir)) {
+      if (e.isDirectory) {
+        if (SKIP_DIRS.has(e.name) || e.name.startsWith(".")) continue;
+        walk(join(dir, e.name));
+      } else if (e.isFile) consider(join(dir, e.name));
+    }
+  };
+  for (const d of SOURCE_DIRS) {
+    try {
+      walk(join(root, d));
+    } catch { /* aio-ok: an app need not have every one of these dirs */ }
+  }
+  for (const f of SOURCE_FILES) {
+    try {
+      consider(join(root, f));
+    } catch { /* aio-ok: same — deno.jsonc exists xor deno.json does */ }
+  }
+  return best;
+}
+
+/** Why installing this APK would put OLD code on the phone, or null.
+ *
+ *  The reported failure, and the worst kind: `install:android` picked the
+ *  newest `.apk` by mtime, installed it, and printed `✓`. Edit the app, run
+ *  install, and the phone runs the previous build — with the same version
+ *  number, so nothing on screen disagrees. The tool reported success for the
+ *  opposite of what was asked.
+ *
+ *  `--build` is the answer rather than building implicitly: one decider. The
+ *  command whose name is "install" installs; asking it to build is a word you
+ *  type. Pure, so both answers are testable without a phone or a build. */
+export function staleApkRefusal(
+  apk: { name: string; mtime: number },
+  newest: { path: string; mtime: number } | null,
+): string | null {
+  if (!newest || newest.mtime <= apk.mtime) return null;
+  const ago = Math.round((newest.mtime - apk.mtime) / 1000);
+  const age = ago < 90
+    ? `${ago}s`
+    : ago < 5400
+    ? `${Math.round(ago / 60)}min`
+    : `${Math.round(ago / 3600)}h`;
+  return `${apk.name} is OLDER than your sources — ${newest.path} changed ` +
+    `${age} after it was built.\n` +
+    `  Installing it would put the PREVIOUS build on the phone, under the ` +
+    `same version number, and report success.\n` +
+    `  fix: \`deno task install:android --build\` (builds, then installs), ` +
+    `or \`deno task build --targets=android\` first.\n` +
+    `  To install this exact artifact anyway, name it: ` +
+    `\`--apk=${apk.name}\`.`;
+}
+
 async function main(): Promise<void> {
   const args = Deno.args;
   const flag = (n: string) =>
@@ -268,6 +356,20 @@ async function main(): Promise<void> {
     fail(chosenApk.error, ...(chosenApk.hint ? [chosenApk.hint] : []));
   }
   const apk = chosenApk.apk;
+
+  // Is this APK still the app? Skipped after `--build` (it was just built) and
+  // when `--apk=` named this exact file — an explicit artifact is a choice,
+  // not an accident, and the refusal itself offers that escape hatch.
+  if (!has("build") && !flag("apk")) {
+    const chosen = files.find((f) => f.name === apk);
+    const refusal = chosen
+      ? staleApkRefusal(chosen, newestSource(Deno.cwd()))
+      : null;
+    if (refusal) {
+      const [head, ...rest] = refusal.split("\n");
+      fail(head!, ...rest.map((l) => l.trim()));
+    }
+  }
 
   const listed = await run(adb, ["devices", "-l"]);
   if (listed.code !== 0) {

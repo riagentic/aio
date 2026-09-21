@@ -20,7 +20,7 @@ const ROOT = new URL("..", import.meta.url).pathname;
 const OUT = "docs/basics/every-option.md";
 
 /** Entries with no example today. Lower it when you add one; never raise it. */
-const MAX_WITHOUT_EXAMPLE = 156;
+const MAX_WITHOUT_EXAMPLE = 128;
 
 // deno-lint-ignore no-explicit-any
 type Json = any;

@@ -159,6 +159,82 @@ export function namesNoFilterMode(v: unknown): boolean {
   return !("include" in v) && !("exclude" in v);
 }
 
+/** A filter whose `include`/`exclude` CANNOT BE APPLIED — it is not a list of
+ *  field names. Returns the offending mode and what was written, or null.
+ *
+ *  `CellFieldFilter` types both as arrays, so this arrives from JS, from a
+ *  `cellDefaults` built at runtime, or from JSON config. MEASURED, and it is
+ *  the worst of the three shapes this file refuses: `normalizeUiFilter` keeps
+ *  only an ARRAY, so `visible: { exclude: "secret" }` was dropped on the
+ *  floor, the cell resolved to `visible: "all"`, and every field the
+ *  declaration named went to every client — with the startup report saying
+ *  `visible=all` and no warning anywhere. The same spelling under `persist:`
+ *  writes the whole slice to disk. A declaration that cannot be applied must
+ *  never quietly become "apply nothing".
+ *
+ *  A LIST holding a non-string already stopped the boot, from inside the
+ *  walker (`key.includes is not a function`) — loud, and naming neither the
+ *  cell nor the fix. Same refusal, so the message is the same quality.
+ *
+ *  Asked from two layers, exactly like {@link hasBothFilterModes} and
+ *  {@link namesNoFilterMode}: `cell()` goes through
+ *  {@link validateFieldFilters}, `aio.run({ cellDefaults })` through
+ *  `configConflicts` (`src/server/config.ts`). */
+export function unusableFilterList(
+  v: unknown,
+): {
+  mode: "include" | "exclude";
+  /** What was written, for the message. */
+  got: string;
+  /** The list it most likely meant — the same names, spelled as an array. */
+  suggest: string;
+} | null {
+  if (!v || typeof v !== "object" || Array.isArray(v)) return null;
+  const f = v as Record<string, unknown>;
+  for (const mode of ["include", "exclude"] as const) {
+    if (!(mode in f) || f[mode] === undefined) continue;
+    const list = f[mode];
+    if (!Array.isArray(list)) {
+      // A single field name is the mistake this catches most often, so the
+      // fix is that name in a list — not a placeholder the reader has to
+      // translate back.
+      return {
+        mode,
+        got: typeof list === "string"
+          ? JSON.stringify(list)
+          : `${list === null ? "null" : typeof list}`,
+        suggest: typeof list === "string"
+          ? `[${JSON.stringify(list)}]`
+          : `["field"]`,
+      };
+    }
+    const bad = list.findIndex((k) => typeof k !== "string");
+    if (bad >= 0) {
+      return {
+        mode,
+        got: `the entry ${JSON.stringify(list[bad]) ?? String(list[bad])}`,
+        suggest: `[${
+          list.map((k) => typeof k === "string" ? JSON.stringify(k) : `"…"`)
+            .join(", ")
+        }]`,
+      };
+    }
+  }
+  return null;
+}
+
+/** What a filter that never runs costs, said for the side it was written on. */
+export function unusableFilterConsequence(
+  kind: "visible" | "ui" | "persist",
+): string {
+  return kind === "persist"
+    ? `the filter is discarded and the WHOLE slice is written to the ` +
+      `database — every field you named among it`
+    : `the filter is discarded and the cell resolves to \`visible: "all"\` — ` +
+      `every field you named is sent to every client, with the startup ` +
+      `report saying \`visible=all\``;
+}
+
 export function validateFieldFilters(
   name: string,
   state: Record<string, unknown> | undefined,
@@ -190,6 +266,22 @@ export function validateFieldFilters(
           }. FIX: pick one — \`include\` to allow-list the fields, or ` +
           `\`exclude\` to deny-list them (\`exclude\` accepts nested paths ` +
           `like "a.secret", \`include\` does not).`,
+      );
+    }
+    // A list that is not a list of field names — see `unusableFilterList`.
+    // Checked BEFORE the per-key loop, which skips a non-array outright and so
+    // let the one shape that silently exposes everything through.
+    const unusable = unusableFilterList(f);
+    if (unusable) {
+      throw new Error(
+        `[cell:${name}] ${kind}.${unusable.mode} is ${unusable.got}, not a ` +
+          `list of field names, so ${unusableFilterConsequence(kind)}. FIX: ` +
+          `${kind}: { ${unusable.mode}: ${unusable.suggest} } — an array, one ` +
+          `string per field${
+            unusable.mode === "exclude"
+              ? ` (a nested path like "row.secret" is one string too)`
+              : ""
+          }.`,
       );
     }
     for (const mode of ["include", "exclude"] as const) {

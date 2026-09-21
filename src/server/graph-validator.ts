@@ -14,7 +14,11 @@ import {
   isAioOwnSpec,
   SERVER_ONLY_SPECS,
 } from "./server-only-specs.ts";
-import { SERVER_FILE_RE } from "../entries.ts";
+import {
+  AIO_LIBRARY_ENTRIES,
+  entrySubpath,
+  SERVER_FILE_RE,
+} from "../entries.ts";
 import { WHERE_HINT } from "../diagnostics/contexts.ts";
 
 /** Error categories for module validation failures */
@@ -219,6 +223,41 @@ export function resolveSpecifier(
   }
   // Unknown scheme — treat as external (user knows what they're doing)
   return { kind: "external", url: mapped };
+}
+
+/** The deno.json line that would map `spec`, inferred from the `aio/*`
+ *  mappings the app ALREADY has — so the advice names the app's OWN framework
+ *  source (a `./dep/aio` checkout, a JSR pin) instead of a guess.
+ *
+ *  Exported for {@link validateGraph}'s test and for any surface that has to
+ *  say the same sentence; there is exactly one wording. */
+export function appImportFixLine(
+  spec: string,
+  appImports: Record<string, string>,
+): string {
+  const tail = AIO_LIBRARY_ENTRIES[spec];
+  const entries = Object.entries(appImports).filter(
+    ([k, v]) => typeof v === "string" && k in AIO_LIBRARY_ENTRIES,
+  );
+  // Vendored: "aio/air" → "./dep/aio/src/air.ts", so the base is everything
+  // before the entry's path-from-package-root.
+  if (tail) {
+    for (const [k, v] of entries) {
+      const kt = AIO_LIBRARY_ENTRIES[k]!;
+      if (v.endsWith("/" + kt)) {
+        return `"${spec}": "${v.slice(0, v.length - kt.length)}${tail}"`;
+      }
+    }
+  }
+  // Registry pin: "aio/air" → "jsr:@riagentic/aio@1.2.3/air".
+  for (const [k, v] of entries) {
+    if (!v.startsWith("jsr:") && !v.startsWith("npm:")) continue;
+    const sub = entrySubpath(k);
+    if (sub && !v.endsWith(sub)) continue;
+    const base = sub ? v.slice(0, v.length - sub.length) : v;
+    return `"${spec}": "${base}${entrySubpath(spec)}"`;
+  }
+  return `"${spec}": "<the same aio source your other imports name>"`;
 }
 
 // Server-only SYMBOLS exported from the isomorphic "aio"/"aio/db" entries —
@@ -433,6 +472,31 @@ export type TranspileFn = (source: string, filepath: string) => Promise<string>;
 const MAX_FILES = 500;
 const MAX_FILE_SIZE = 1_000_000; // 1MB — skip likely vendor bundles
 
+/** Extra facts the walk cannot read off the browser import map. */
+export type GraphValidateOptions = {
+  /** The app's OWN `deno.json` `imports` — what DENO resolves with, as opposed
+   *  to the browser map this function walks.
+   *
+   *  The two are not the same map and never were: `buildBrowserImportMap`
+   *  injects `aio`, `aio/ui`, `aio/jsx-runtime` … unconditionally (they are
+   *  served from `/__aio/*`), so deleting `"aio"` from an app's deno.json left
+   *  the graph walk resolving everything and `am check` printing "client graph
+   *  OK" for an app that Deno itself refuses to start
+   *  (`Import "aio" not a dependency and not in import map`). A gate that
+   *  cannot fire is worse than no gate, so pass this wherever it is knowable.
+   *
+   *  Omitted ⇒ the check does not run (the dev server's own walk has no
+   *  deno.json to read in some embeddings); {} is a real, checked answer —
+   *  "I read the config and it declares no aio imports".
+   *
+   *  That distinction is load-bearing and was once lost: `readAppDenoImports`
+   *  returned {} both for "read it, empty" and for "found nothing readable",
+   *  so an app whose config is `deno.jsonc` — or a Deno workspace member whose
+   *  imports live in the workspace root — got three fabricated BLOCKING errors
+   *  from a `deno check`-clean tree. Never pass {} for "I don't know"; omit. */
+  appImports?: Record<string, string>;
+};
+
 /** Validate the full import graph starting from entrypoint.
  *  Returns errors with actionable fix instructions for every broken module. */
 /** Categories that BLOCK the app (a guaranteed blank screen), as opposed to
@@ -577,6 +641,7 @@ export async function validateGraph(
   transpile: TranspileFn,
   fileExists?: (path: string) => boolean,
   prodGraph?: ProdGraphCheck,
+  opts?: GraphValidateOptions,
 ): Promise<GraphResult> {
   const start = performance.now();
   const modules = new Map<string, ModuleNode>();
@@ -595,6 +660,13 @@ export async function validateGraph(
   // Static imports of the framework's own SERVER entry (`aio/server`), judged
   // by the same static+eager rule. See SERVER_ONLY_SPECS.
   const serverEntryImports: { file: string; spec: string; line: number }[] = [];
+  // `aio/*` specifiers the graph imports that the APP's deno.json does not
+  // map. One entry per specifier (the first site that names it) — the same
+  // missing key in forty files is one edit, not forty findings.
+  const missingAppImports = new Map<
+    string,
+    { file: string; line: number; lineText?: string }
+  >();
 
   async function walk(filePath: string, importerPath?: string): Promise<void> {
     if (visited.has(filePath)) {
@@ -742,6 +814,24 @@ export async function validateGraph(
       if (staticSpecs.has(spec) && SERVER_ONLY_SPECS.has(spec)) {
         serverEntryImports.push({ file: filePath, spec, line: specLine(spec) });
       }
+      // DENO's map, not the browser's. Restricted to aio's own library
+      // entries because those are the ones nothing else can resolve — no
+      // node_modules, no workspace, no registry fallback — so a missing key is
+      // a certainty, never a guess. Static or dynamic alike: a dynamic
+      // `await import("aio/db")` inside a cell method needs the mapping too,
+      // and it fails at the worst possible moment (in production, in a method)
+      // rather than at boot.
+      if (
+        opts?.appImports && spec in AIO_LIBRARY_ENTRIES &&
+        !(spec in opts.appImports) && !missingAppImports.has(spec)
+      ) {
+        const line = specLine(spec);
+        missingAppImports.set(spec, {
+          file: filePath,
+          line,
+          lineText: source.split("\n")[line - 1]?.trim(),
+        });
+      }
       const resolution = resolveSpecifier(
         spec,
         filePath,
@@ -883,6 +973,25 @@ export async function validateGraph(
       // quieted; defer it too.
       e.deferred = true;
     }
+  }
+
+  // Pushed AFTER the browser-map downgrades above, and deliberately outside
+  // them: those rules ("@std/* and node:* resolve server-side", "a dynamic-only
+  // chunk is the server's to resolve") are statements about the BROWSER map,
+  // and every one of them is backwards here — this IS the server's map, and a
+  // dynamic import is exactly where it hurts most.
+  for (const [spec, at] of missingAppImports) {
+    errors.push({
+      file: at.file,
+      line: at.line,
+      lineText: at.lineText,
+      category: "missing-import-map",
+      message:
+        `"${spec}" is missing from this app's deno.json "imports" — aio's own browser map serves it, so the page would load, but DENO cannot resolve it: the server, \`deno check\`, \`deno test\` and \`deno task build\` all fail with \`Import "${spec}" not a dependency and not in import map\``,
+      fix: `Add ${
+        appImportFixLine(spec, opts!.appImports!)
+      } to "imports" in deno.json (\`am fix\` re-seals the whole map).`,
+    });
   }
 
   // Post-walk: compute per-module valid/errors now that the full error list is finalized

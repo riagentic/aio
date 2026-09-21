@@ -1,6 +1,7 @@
 import { assertEquals } from "@std/assert";
 import { lint } from "../src/server/aio.ts";
 import { join } from "@std/path";
+import { dropTempDir, tempDir } from "../src/testing/temp-dir.ts";
 
 async function withTmpDir(fn: (dir: string) => Promise<void>): Promise<void> {
   const dir = await Deno.makeTempDir();
@@ -353,16 +354,20 @@ Deno.test("lint: an npm package the import map DOES resolve is not warned about"
   });
 });
 
-Deno.test("import map: a deno.jsonc-only app is told why its imports vanish", async () => {
-  // The browser import map is built from deno.json ONLY. An app whose config is
-  // deno.jsonc (Deno accepts it, `am` and the file watcher accept it) got an
-  // import map with none of its packages and a browser that fails to resolve a
-  // specifier the server resolves fine — a blank screen caused by a file
-  // extension, with nothing said anywhere.
+Deno.test("import map: a deno.jsonc app's imports are READ, not lamented", async () => {
+  // The browser import map was built from `deno.json` ONLY. An app whose
+  // config is `deno.jsonc` (Deno accepts it, `am` and the file watcher accept
+  // it) got an import map with none of its packages and a browser that fails
+  // to resolve a specifier the server resolves fine.
+  //
+  // Warning about it was half an answer. Deno reads `deno.jsonc` natively and
+  // this repo already has THE JSONC-aware reader (`readDenoJsonSync`, both
+  // names), so the app gets the real map — and `am check` gets a real gate
+  // instead of three fabricated "missing from deno.json" errors.
   const { _resetImportMapWarnings, readAppDenoImports } = await import(
     "../src/server/server-html-importmap.ts"
   );
-  const dir = await Deno.makeTempDir({ prefix: "aio-jsonc-" });
+  const dir = await tempDir("aio-jsonc-");
   const cwd = Deno.cwd();
   const warned: string[] = [];
   const origWarn = console.warn;
@@ -373,21 +378,74 @@ Deno.test("import map: a deno.jsonc-only app is told why its imports vanish", as
       '{ // comment\n  "imports": { "chart.js": "npm:chart.js@4" }\n}',
     );
     _resetImportMapWarnings();
-    // cwd is the third candidate, so it has to be the app itself for this to
-    // be the real "no readable deno.json anywhere" case.
     Deno.chdir(dir);
     console.warn = (...a: unknown[]) =>
       void warned.push(a.map(String).join(" "));
-    const imports = readAppDenoImports(join(dir, "src"));
-    assertEquals(imports, {});
+    assertEquals(readAppDenoImports(join(dir, "src")), {
+      "chart.js": "npm:chart.js@4",
+    });
   } finally {
     console.warn = origWarn;
     Deno.chdir(cwd);
-    await Deno.remove(dir, { recursive: true });
+    await dropTempDir(dir);
+  }
+  assertEquals(
+    warned.join("\n"),
+    "",
+    "a config that WAS read must say nothing",
+  );
+});
+
+Deno.test("import map: no readable config is null, never an empty map", async () => {
+  // `{}` is a checked answer ("this app declares no imports") and every gate
+  // downstream treats it as one — `am check` turns it into BLOCKING errors
+  // naming imports that are right there in the file. "I found no config" has
+  // to be a different value, or the two questions have one answer.
+  const { readAppDenoImports } = await import(
+    "../src/server/server-html-importmap.ts"
+  );
+  const dir = await tempDir("aio-noconfig-");
+  const cwd = Deno.cwd();
+  try {
+    await Deno.mkdir(join(dir, "app", "src"), { recursive: true });
+    Deno.chdir(join(dir, "app"));
+    assertEquals(readAppDenoImports(join(dir, "app", "src")), null);
+    await Deno.writeTextFile(join(dir, "app", "deno.json"), '{ "name": "x" }');
+    assertEquals(
+      readAppDenoImports(join(dir, "app", "src")),
+      {},
+      "a config that WAS read and declares no imports is {}",
+    );
+  } finally {
+    Deno.chdir(cwd);
+    await dropTempDir(dir);
+  }
+});
+
+Deno.test("import map: an unparseable config is SAID, then falls through", async () => {
+  const { _resetImportMapWarnings, readAppDenoImports } = await import(
+    "../src/server/server-html-importmap.ts"
+  );
+  const dir = await tempDir("aio-badconfig-");
+  const cwd = Deno.cwd();
+  const warned: string[] = [];
+  const origWarn = console.warn;
+  try {
+    await Deno.mkdir(join(dir, "src"));
+    await Deno.writeTextFile(join(dir, "deno.json"), '{ "imports": ');
+    _resetImportMapWarnings();
+    Deno.chdir(dir);
+    console.warn = (...a: unknown[]) =>
+      void warned.push(a.map(String).join(" "));
+    assertEquals(readAppDenoImports(join(dir, "src")), null);
+  } finally {
+    console.warn = origWarn;
+    Deno.chdir(cwd);
+    await dropTempDir(dir);
   }
   const all = warned.join("\n");
-  assertEquals(all.includes("deno.jsonc"), true, all);
-  assertEquals(all.includes("Rename it to deno.json"), true, all);
+  assertEquals(all.includes("deno.json"), true, all);
+  assertEquals(all.includes("skips the deno.json import gate"), true, all);
 });
 
 // The boot lint checked a HARDCODED App.tsx, so an app that legitimately named

@@ -314,6 +314,28 @@ export const LEDGER: readonly Mutation[] = [
   },
   {
     what:
+      "the machine root stops being NAME-CONSTRAINED \u2014 a CA the user was asked to install in their trust store can then vouch for ANY site on the internet, which is what made Superfish and eDellRoot catastrophic rather than merely untidy",
+    // The constraints are what make `am trust` a reasonable thing to ask of a
+    // person. Present-but-unenforced would pass every parse-and-compare test;
+    // only verifying a leaf for a PUBLIC name can tell the difference.
+    file: "src/server/x509.ts",
+    find: "      nameConstraints(opts.permittedDns, opts.permittedIpMasks),",
+    replace: "      // mutated: the root is unconstrained",
+    test: "tests/x509.test.ts",
+    filter:
+      "the name constraints BITE: a public name under this root is refused",
+  },
+  {
+    what:
+      "the SAN reader stops reading the certificate and answers from nowhere \u2014 a cached cert is judged against addresses it never carried, so it is either re-issued every boot (breaking every pinned client) or kept while stale (a handshake failure on an app nobody edited)",
+    file: "src/server/tls.ts",
+    find: "  return Deno.readTextFile(certPath).then(certSubjectAltNames);",
+    replace: "  return Deno.readTextFile(certPath).then(() => null);",
+    test: "tests/tls-no-external-binary.test.ts",
+    filter: "a full auto-TLS boot succeeds with an empty PATH",
+  },
+  {
+    what:
       "a control SOCKET is bound in a directory another local user owns \u2014 chmod on someone else's directory fails with EPERM, and whoever can reach the socket can dispatch methods into the app",
     file: "src/server/single-instance-lock.ts",
     find: "  return privateDirRefusal(dir, st.mode, st.uid);",

@@ -68,7 +68,7 @@ export interface VirtualListState<T> {
  *   ),
  * );
  * ```
- */
+ *  @tier Kit */
 export function useVirtualList<T>(
   config: VirtualListConfig<T>,
 ): VirtualListState<T> {

@@ -72,6 +72,12 @@ import {
 import type { KeyModifiers } from "../air/ui-trigger.ts";
 import type { CellDef } from "../state/cell-types.ts";
 import { cellAccessAllowed } from "../server/server-auth.ts";
+import {
+  _installServerOriginScope,
+  isServerOrigin,
+  type ServerOriginScope,
+} from "../state/call-origin.ts";
+import { AsyncLocalStorage } from "node:async_hooks";
 import { createAioError } from "../diagnostics/error.ts";
 import {
   assertOperable,
@@ -770,6 +776,39 @@ export type TestableComponent = (props?: any) => unknown;
  * — disposed at scope end. Options only when you need control:
  * `{ document, cells, persist, settleIterations }`.
  */
+/** The server-origin scope, backed by `AsyncLocalStorage` — a scope that has
+ *  to survive `await` (a method calling a sibling after one is still the
+ *  server calling itself), which is exactly what a counter cannot do and ALS
+ *  does. Built here, in the server-side harness, because `src/state` is in the
+ *  browser bundle and cannot import `node:async_hooks`. */
+const _originAls = new AsyncLocalStorage<true>();
+const _originScope: ServerOriginScope = {
+  run: <T>(fn: () => T): T => _originAls.run(true, fn),
+  active: () => _originAls.getStore() === true,
+  // The door back out, for the framework's deferred work on the CLIENT's
+  // behalf — the renderer's batched flush above all. `exit` leaves the store
+  // behind for everything `fn` starts, which a synchronous flag could not do:
+  // the flush only QUEUES the re-render, and the queued microtask is what
+  // must not inherit the marker.
+  exit: <T>(fn: () => T): T => _originAls.exit(fn),
+};
+/** How many live gates need the scope. ONE scope object for the process and a
+ *  count, not an install per gate: two overlapping `testUI`s each register
+ *  their undo, and a plain "restore to null" from the first would strip the
+ *  marker out from under the second — every cell→cell call in it refused, at a
+ *  distance, in whichever test happened to finish first. */
+let _originUsers = 0;
+
+function _useServerOriginScope(): () => void {
+  if (_originUsers++ === 0) _installServerOriginScope(_originScope);
+  let released = false;
+  return () => {
+    if (released) return; // a restore stack may run twice; the count may not
+    released = true;
+    if (--_originUsers === 0) _installServerOriginScope(null);
+  };
+}
+
 /** Apply each cell's declarative `access` rule to its bound methods, the way
  *  `dispatchNetwork` does for a real client. Returns a restore function.
  *
@@ -789,6 +828,16 @@ function _enforceCellAccess(
   user: AioUser | undefined,
 ): () => void {
   const undo: (() => void)[] = [];
+  // The gate applies to CLIENT callers. A cell→cell call is not one: over a
+  // real socket it never reaches `dispatchNetwork`, so `access: () => false` —
+  // the natural rule for a cell only other cells call, and the case the
+  // feature is most obviously for — must seal the cell against the UI and
+  // leave the app's own code alone. Here both arrive at the same bound
+  // method, so the origin is MARKED by the call path rather than guessed: the
+  // framework runs every method body inside `inServerOrigin`, and that scope
+  // is ambient runtime state, never a field on a frame — there is nothing for
+  // a client to forge (tests/access-server-origin.test.tsx pins both halves).
+  undo.push(_useServerOriginScope());
   for (const def of cells) {
     const rule = def.__aio?.access;
     if (rule === undefined) continue;
@@ -800,7 +849,7 @@ function _enforceCellAccess(
       if (typeof bound !== "function") continue;
       const original = bound as (...a: unknown[]) => unknown;
       target[key] = (...args: unknown[]) => {
-        if (!cellAccessAllowed(rule, user, key, args)) {
+        if (!isServerOrigin() && !cellAccessAllowed(rule, user, key, args)) {
           const denial = Promise.reject(
             createAioError(
               "ACCESS_DENIED",
@@ -1589,6 +1638,20 @@ async function _buildTestUI(
       _resetSelectorAudit();
       _resetUntrackedReadWarnings();
     }
+    // BEFORE the boot, because the boot is what runs `onInit` — and `onInit`
+    // is one of the four things `access` documents as server origin. The GATE
+    // cannot move here (it wraps the bound methods the boot installs, which do
+    // not exist yet), but the SCOPE can, and the two are separable: the scope
+    // is just an AsyncLocalStorage holder, refcounted, so installing it twice
+    // is a no-op with two undos.
+    //
+    // Without this the claim was true by ACCIDENT — nothing refused an
+    // `onInit` call because no gate existed yet, while `isServerOrigin()` read
+    // false inside it. Three places said otherwise (`cell-types.ts`,
+    // docs/auth/auth.md, and the commit that added the marker), and nothing
+    // tested it. A claim with no test is this project's most reliable source
+    // of bugs, so the claim is now the mechanism.
+    partial.restore.push(_useServerOriginScope());
     standaloneApp = await standalone.aio.run({
       appId: "testui",
       cells,

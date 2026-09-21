@@ -90,5 +90,7 @@ Deno.test("tray: the shell bridge is in BOTH preloads, and the WS one never look
     "the presence of __aioIPC selects the IPC transport; a WS window must not carry it",
   );
   assertEquals(parseError(standalone), null);
-  assertStringIncludes(ws(undefined), "__aio_shell_preload_");
+  // …and the WS shell still WRITES one (in its own 0600 file — see
+  // tests/electron-preload-file.test.ts).
+  assertStringIncludes(ws(undefined), "writeFileSync(preloadFile");
 });

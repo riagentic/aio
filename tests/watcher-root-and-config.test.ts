@@ -45,7 +45,7 @@ async function captured(
 }
 
 Deno.test("watcher: deleting the root component is an ERROR, never a 'reloaded' line", async () => {
-  const tmp = await Deno.makeTempDir({ prefix: "aio-watch-root-" });
+  const tmp = await tempDir("aio-watch-root-");
   try {
     const entry = join(tmp, "App.tsx");
     await Deno.writeTextFile(entry, "export default () => <div>hi</div>;\n");
@@ -88,7 +88,7 @@ Deno.test("watcher: a removed (non-root) file is 'removed', not 'reloaded'", {
   sanitizeOps: false, // aio-ok: esbuild's service child — exit not awaitable
   sanitizeResources: false, // aio-ok: same esbuild child
 }, async () => {
-  const tmp = await Deno.makeTempDir({ prefix: "aio-watch-rm-" });
+  const tmp = await tempDir("aio-watch-rm-");
   try {
     await Deno.writeTextFile(
       join(tmp, "App.tsx"),
@@ -123,7 +123,7 @@ Deno.test("watcher: a removed (non-root) file is 'removed', not 'reloaded'", {
 });
 
 Deno.test("watcher: an unparseable deno.json is an ERROR that names the consequence", async () => {
-  const tmp = await Deno.makeTempDir({ prefix: "aio-watch-cfgbad-" });
+  const tmp = await tempDir("aio-watch-cfgbad-");
   try {
     const cfg = join(tmp, "deno.json");
     await Deno.writeTextFile(cfg, '{ "imports": { "a": "b", } ,,, }\n');

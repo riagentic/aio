@@ -727,6 +727,104 @@ export async function sandboxUsable(
   }
 }
 
+/** The Chromium switches `AIO_ELECTRON_ARGS` may carry — an ALLOW-list, by
+ *  switch name (everything left of the `=`).
+ *
+ *  This is the display, GPU, locale and logging vocabulary a headless host, a
+ *  VM or a GPU-less display actually needs, and nothing else. Deny-listing
+ *  Chromium is a game nobody wins: there are hundreds of switches and the set
+ *  changes every release, so the one flag that matters is always the one
+ *  nobody thought to forbid.
+ *
+ *  Every name here is inert with respect to the app's defences: it changes how
+ *  pixels are produced, not who may reach the renderer, what code runs in it,
+ *  or where its traffic goes. `tests/electron-args-env.test.ts` holds that as a
+ *  property (no name may read like an escalation) and pins every switch the
+ *  docs hand out to this set, so a documented remedy the code refuses is a red
+ *  test rather than a person copying a line that does nothing. */
+export const ELECTRON_ARGS_ALLOWED: ReadonlySet<string> = new Set([
+  // GPU / rendering — the documented headless and VM remedies.
+  "disable-gpu",
+  "disable-gpu-compositing",
+  "disable-software-rasterizer",
+  "disable-accelerated-2d-canvas",
+  "disable-accelerated-video-decode",
+  "enable-unsafe-swiftshader",
+  "use-gl",
+  "use-angle",
+  "force-device-scale-factor",
+  "force-color-profile",
+  "disable-lcd-text",
+  "disable-smooth-scrolling",
+  // Shared memory: most container images give /dev/shm 64 MB, and without
+  // this the renderer dies with a bare "Out of memory" that names nothing.
+  "disable-dev-shm-usage",
+  // Which display server this window talks to.
+  "ozone-platform",
+  "ozone-platform-hint",
+  // A window nobody is watching must not be throttled into looking hung.
+  "disable-background-timer-throttling",
+  "disable-backgrounding-occluded-windows",
+  "disable-renderer-backgrounding",
+  // Locale and diagnostics.
+  "lang",
+  "enable-logging",
+  "log-level",
+]);
+
+/** Why a switch is refused, when the reason is worth more than "not in the
+ *  set" — each of these is something an operator might reasonably reach for,
+ *  and each has a supported route that is not this variable. Names only; the
+ *  value is irrelevant to the verdict. */
+const ELECTRON_ARGS_REFUSED: Record<string, string> = {
+  "remote-debugging-port":
+    "it opens an unauthenticated DevTools endpoint against this app's renderer — i.e. arbitrary JavaScript in the page. aio opens one deliberately with --cdp[=N] when you ask for it",
+  "remote-debugging-pipe":
+    "it opens the DevTools protocol on a pipe — i.e. arbitrary JavaScript in the page. aio opens one deliberately with --cdp[=N] when you ask for it",
+  "remote-allow-origins":
+    "it widens who may attach to the DevTools protocol; aio opens one deliberately with --cdp[=N] when you ask for it",
+  "inspect": "it opens a debugger on the MAIN process; use --cdp[=N]",
+  "inspect-brk": "it opens a debugger on the MAIN process; use --cdp[=N]",
+  "disable-web-security":
+    "it switches off the same-origin rules this app's page relies on",
+  "allow-running-insecure-content":
+    "it lets a page mix in content from another, insecure origin",
+  "ignore-certificate-errors":
+    "it trusts any certificate — the origin of everything this app fetches stops meaning anything",
+  "unsafely-treat-insecure-origin-as-secure":
+    "it grants an insecure origin the powers of a secure one",
+  "allow-file-access-from-files":
+    "it lets a file:// document read the local filesystem across origins",
+  "js-flags":
+    "it hands arbitrary V8 flags to the renderer, up to and including turning language-level protections off",
+  "no-sandbox":
+    "aio decides the Chromium sandbox itself, after measuring the kernel and the helper; electron: { requireSandbox: true } is the app's own control over it",
+  "disable-setuid-sandbox":
+    "aio decides the Chromium sandbox itself, after measuring the kernel and the helper; electron: { requireSandbox: true } is the app's own control over it",
+  "disable-gpu-sandbox":
+    "it removes the GPU process's sandbox; electron: { requireSandbox: true } is the app's control over sandbox policy",
+  "single-process":
+    "it collapses the renderer into the browser process, which is the sandbox",
+  "no-zygote":
+    "it disables the zygote the sandbox is built on; electron: { requireSandbox: true } is the app's control over sandbox policy",
+  "disable-features":
+    "it can switch off Chromium's own security mitigations by name (site isolation among them)",
+  "enable-features":
+    "it turns on unreviewed Chromium behaviour; the display switches you are probably after are --ozone-platform and --use-gl",
+  "load-extension": "it loads someone else's code into this app",
+  "disable-extensions-except": "it loads someone else's code into this app",
+  "user-data-dir":
+    "it moves this app's Chromium profile — the cookies, storage and cache aio keys to the app's own identity",
+  "proxy-server": "it redirects this app's traffic through another host",
+  "host-rules": "it redirects this app's traffic to another host",
+  "host-resolver-rules": "it redirects this app's traffic to another host",
+  "gpu-launcher": "it runs an arbitrary program as a child of this app",
+  "renderer-cmd-prefix": "it runs an arbitrary program as a child of this app",
+  "utility-cmd-prefix": "it runs an arbitrary program as a child of this app",
+  "browser-subprocess-path":
+    "it runs an arbitrary program in place of Chromium's own child processes",
+};
+
 /** Chromium switches from `AIO_ELECTRON_ARGS`, validated.
  *
  *  A headless or VM host sometimes needs one to start at all: a field report's
@@ -736,25 +834,136 @@ export async function sandboxUsable(
  *  all. Environment variables already reach Electron (the spawn merges the
  *  inherited environment); switches did not.
  *
- *  VALIDATED, not passed through. This ends up in `argv`, never in a shell, so
- *  the risk is not injection — it is a typo that Chromium ignores in silence,
- *  on the one host where the person cannot see the window to tell. A token
- *  that is not a `--switch` is REFUSED with the value quoted back, rather than
- *  dropped, because "I set the flag and nothing changed" is the failure this
- *  variable exists to end.
+ *  VALIDATED, not passed through, and against TWO questions now. The first was
+ *  always here: this ends up in `argv`, never in a shell, so a token that is
+ *  not a `--switch` is a typo Chromium ignores in silence, on the one host
+ *  where the person cannot see the window to tell — refused with the value
+ *  quoted back, because "I set the flag and nothing changed" is the failure
+ *  this variable exists to end.
+ *
+ *  The second is the one an audit (§7) found missing. These switches are
+ *  appended LAST, so they override aio's own, and the variable took anything
+ *  shaped like a switch: whoever controls the launch environment — a .desktop
+ *  file, a shell profile, a wrapper script — could add
+ *  `--remote-debugging-port=9222` and hold unauthenticated CDP against a
+ *  renderer full of the app's secrets. So the set is an ALLOW-list
+ *  ({@linkcode ELECTRON_ARGS_ALLOWED}), in dev and in prod alike: one
+ *  behaviour, because a variable that works on a developer's machine and is
+ *  ignored in the shipped app is the divergence class this project refuses.
+ *  A switch outside the set is refused with a reason, and the ones an operator
+ *  might reasonably reach for name their supported route instead.
  *
  *  Splitting is on whitespace, so a switch whose value contains a space is not
  *  expressible here. That is a deliberate floor: the alternative is a quoting
  *  grammar of our own, and every switch in the documented sets is a bare flag
  *  or a simple `--key=value`. */
+/** Does this token carry a C0 control character or DEL? Written with char
+ *  codes rather than a regex literal: the class is unreadable as an escape and
+ *  invisible as a literal, and one of those two is what ends up in the file. */
+function hasControlChar(tok: string): boolean {
+  for (const ch of tok) {
+    const c = ch.charCodeAt(0);
+    if (c < 0x20 || c === 0x7f) return true;
+  }
+  return false;
+}
+
+/** Environment variables that turn the app's own Electron into something
+ *  else, and the sentence said when one is present.
+ *
+ *  `AIO_ELECTRON_ARGS` is an allow-list because the environment is not a
+ *  trusted input — a `.desktop` file, a shell profile or a wrapper script
+ *  decides it, not the app. Screening that variable while INHERITING these is
+ *  the same door, wider: measured against the shipped runtime,
+ *  `ELECTRON_RUN_AS_NODE=1` makes the binary report `v24.21.0` and run plain
+ *  Node instead of the app, and `NODE_OPTIONS=--require=…` then loads any
+ *  file into it.
+ *
+ *  Dropping them is a PARTIAL mitigation and says so: whoever writes the
+ *  environment usually also writes `PATH` and `LD_PRELOAD`, which nothing
+ *  here can take away. It is kept anyway because the inconsistency is the
+ *  indefensible part — an allow-list beside an open door reads as protection
+ *  that is not there. Only these keys are removed; the rest of the
+ *  environment is inherited exactly as before, so no app loses a variable it
+ *  set on purpose. */
+export const ELECTRON_ENV_REFUSED: Readonly<Record<string, string>> = {
+  ELECTRON_RUN_AS_NODE:
+    "it makes the Electron binary run as plain Node — the app's window never " +
+    "opens and its main script is replaced by whatever is passed instead",
+  NODE_OPTIONS:
+    "it injects flags (--require=<file>, --inspect) into the runtime before " +
+    "the app's own code runs",
+};
+
+/** The child's environment overrides: the parent-pid watch, plus an empty
+ *  value for each hijacking variable that is actually SET. `Deno.Command`'s
+ *  `env` merges into the inherited environment, so an empty string is how a
+ *  key is taken away there; Electron and Node both treat unset and empty
+ *  alike for these two. Pure — the caller passes what it read. */
+export function electronChildEnv(
+  parentPid: number,
+  read: (k: string) => string | undefined,
+): { env: Record<string, string>; dropped: { key: string; why: string }[] } {
+  const env: Record<string, string> = { AIO_PARENT_PID: String(parentPid) };
+  const dropped: { key: string; why: string }[] = [];
+  for (const [key, why] of Object.entries(ELECTRON_ENV_REFUSED)) {
+    if (!read(key)) continue;
+    env[key] = "";
+    dropped.push({ key, why });
+  }
+  return { env, dropped };
+}
+
 export function electronArgsFromEnv(
   raw: string | undefined,
-): { args: string[]; refused: string[] } {
+): { args: string[]; refused: { tok: string; why: string }[] } {
   const args: string[] = [];
-  const refused: string[] = [];
+  const refused: { tok: string; why: string }[] = [];
   for (const tok of (raw ?? "").split(/\s+/).filter(Boolean)) {
-    if (/^--[A-Za-z0-9][A-Za-z0-9-]*(=[^\s]*)?$/.test(tok)) args.push(tok);
-    else refused.push(tok);
+    // A control character in the VALUE, before anything else is asked about
+    // it. The allow-list screens the NAME, and the value was `[^\s]*`, which
+    // takes every control byte there is — NUL included. Measured: an argv
+    // entry with a NUL makes `Deno.Command` throw `nul byte found in provided
+    // data` out of `spawnElectron`, so the window never opens and the message
+    // names neither this variable nor the token; and everything after the NUL
+    // is a string Chromium is never going to see. Refuse it here, by name,
+    // which is the whole reason this function exists.
+    if (hasControlChar(tok)) {
+      refused.push({
+        tok,
+        why:
+          "it carries a control character — an argv entry with one cannot be " +
+          "spawned at all (a NUL ends the string the kernel copies), so " +
+          "whatever follows it would reach nothing",
+      });
+      continue;
+    }
+    if (!/^--[A-Za-z0-9][A-Za-z0-9-]*(=[^\s]*)?$/.test(tok)) {
+      refused.push({
+        tok,
+        why:
+          "not a Chromium switch — one looks like --disable-gpu or --key=value",
+      });
+      continue;
+    }
+    const name = tok.slice(2).split("=")[0]!;
+    if (ELECTRON_ARGS_ALLOWED.has(name)) {
+      args.push(tok);
+      continue;
+    }
+    // `hasOwn`, not a bare lookup: `REFUSED[name]` also answers for every key
+    // on `Object.prototype`, so `--toString` was refused (correctly) and then
+    // explained by V8 — "function toString() { [native code] } (…)". A reason
+    // nobody wrote is a reason nobody can act on.
+    const why = Object.hasOwn(ELECTRON_ARGS_REFUSED, name)
+      ? ELECTRON_ARGS_REFUSED[name]
+      : undefined;
+    refused.push({
+      tok,
+      why: why
+        ? `${why} (AIO_ELECTRON_ARGS carries display and GPU switches only — docs/clients/electron.md)`
+        : "not one of the switches AIO_ELECTRON_ARGS carries — it is the display, GPU, locale and logging set a headless or VM host needs, listed in docs/clients/electron.md",
+    });
   }
   return { args, refused };
 }
@@ -763,44 +972,111 @@ export function electronArgsFromEnv(
 // it too); re-exported so existing importers keep one name.
 export { isInvalidHandleError } from "../server/no-console.ts";
 
+/** The app refused this launch itself — `electron: { requireSandbox: true }`
+ *  on a host where Chromium's sandbox is not usable.
+ *
+ *  A TYPE rather than a message anyone has to recognise, because the caller
+ *  has to tell it apart from every other reason a window does not open (no
+ *  Electron, a bad binary, no display). Those leave the server running and say
+ *  where it is; this one is the app saying it would rather not run at all, and
+ *  answering it with "open it in a browser instead" is the same downgrade one
+ *  step later. See `electronLaunchFailurePlan` in aio-lifecycle.ts. */
+export class SandboxRefusal extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "SandboxRefusal";
+  }
+}
+
+/** THE decision about Chromium's sandbox for this launch: the switches to add,
+ *  and what to say about them — or a throw, when the app refused the downgrade.
+ *
+ *  aio adds `--no-sandbox` by itself, and only after MEASURING that the kernel
+ *  restricts unprivileged user namespaces and that `chrome-sandbox` is not
+ *  setuid-root — the two conditions under which Chromium aborts rather than
+ *  starts. That default stands: the alternative is a framework whose default
+ *  target does not launch on Ubuntu 24.04 or in any container.
+ *
+ *  What it was missing is the app's side of it. It was log-only, and an audit
+ *  (§6) named the shape: a security downgrade the app cannot refuse. An app
+ *  that holds secrets says `electron: { requireSandbox: true }` and this
+ *  REFUSES the launch instead — with the two lines that make the sandbox usable
+ *  here, because a refusal that does not say how to satisfy it is a wall.
+ *
+ *  The measurement is injected (as in `sandboxUsable`/`usernsAvailable`), so
+ *  the decision table is a unit test rather than a fleet of VMs. */
+export async function sandboxSwitches(
+  bin: string,
+  requireSandbox: boolean,
+  usable: (b: string) => Promise<boolean> = sandboxUsable,
+  realBin: (b: string) => Promise<string> = realElectronBin,
+): Promise<{ args: string[]; warn?: string }> {
+  if (await usable(bin)) return { args: [] };
+  // Name the helper that IS there — through the dev shim that is
+  // `<pkg>/dist/chrome-sandbox`, not a file beside `.bin/electron`.
+  const helper = chromeSandboxPath(await realBin(bin));
+  const measured =
+    "this kernel restricts unprivileged user namespaces (measured: the " +
+    "sysctls / a clone(CLONE_NEWUSER) probe), and chrome-sandbox is not " +
+    "setuid-root (an npm install cannot make it so) — Chromium would abort " +
+    "instead of starting";
+  const remedy = "To use the sandbox instead:\n" +
+    `      sudo chown root:root ${helper} && sudo chmod 4755 ${helper}\n` +
+    "      then set AIO_ELECTRON_SANDBOX=1";
+  if (requireSandbox) {
+    throw new SandboxRefusal(
+      `electron: { requireSandbox: true } — and the sandbox is not usable ` +
+        `here. ${measured}, and aio would normally launch it with ` +
+        `--no-sandbox. This app asked not to run that way, so no window is ` +
+        `opened. ${remedy}\n      …or drop requireSandbox to accept ` +
+        `--no-sandbox on hosts like this one.`,
+    );
+  }
+  return {
+    args: ["--no-sandbox"],
+    warn: `[aio] electron: ${measured}. Launching with --no-sandbox. ` +
+      `${remedy}\n      Set electron: { requireSandbox: true } to refuse ` +
+      `the launch instead of running unsandboxed.`,
+  };
+}
+
 /** Writes script to temp file, spawns Electron, cleans up after exit or process unload */
 async function spawnElectron(
   bin: string,
   script: string,
   extraArgs: string[] = [],
+  opts: { requireSandbox?: boolean } = {},
 ): Promise<Deno.ChildProcess> {
+  // DECIDED BEFORE the temp file exists: a refusal must not leave the script
+  // it would have run behind in /tmp.
+  const sandbox = await sandboxSwitches(bin, !!opts.requireSandbox);
+  if (sandbox.warn) log.warn(sandbox.warn);
+  const sandboxArgs = sandbox.args;
   const tmpFile = await Deno.makeTempFile({ suffix: ".cjs" });
   await Deno.writeTextFile(tmpFile, script);
-  const sandboxArgs: string[] = [];
-  if (!(await sandboxUsable(bin))) {
-    // Name the helper that IS there — through the dev shim that is
-    // `<pkg>/dist/chrome-sandbox`, not a file beside `.bin/electron`.
-    const helper = chromeSandboxPath(await realElectronBin(bin));
-    log.warn(
-      "[aio] electron: this kernel restricts unprivileged user namespaces " +
-        "(measured: the sysctls / a clone(CLONE_NEWUSER) probe), and " +
-        "chrome-sandbox is not setuid-root (an npm install cannot make it " +
-        "so) — Chromium would abort instead of starting. Launching with " +
-        "--no-sandbox. To use the sandbox instead:\n" +
-        `      sudo chown root:root ${helper} && sudo chmod 4755 ${helper}\n` +
-        "      then set AIO_ELECTRON_SANDBOX=1",
-    );
-    sandboxArgs.push("--no-sandbox");
-  }
   // The caller's switches go LAST: Chromium takes the last occurrence of a
   // repeated switch, so an operator who has to override one of aio's own can.
   const envArgs = electronArgsFromEnv(Deno.env.get("AIO_ELECTRON_ARGS"));
   if (envArgs.refused.length) {
+    const n = envArgs.refused.length;
     log.warn(
-      `[aio] electron: AIO_ELECTRON_ARGS has ${envArgs.refused.length} ` +
-        `entr${envArgs.refused.length === 1 ? "y" : "ies"} that ` +
-        `${envArgs.refused.length === 1 ? "is" : "are"} not a Chromium ` +
-        `switch and ${
-          envArgs.refused.length === 1 ? "was" : "were"
-        } NOT passed: ` +
-        envArgs.refused.map((r) => JSON.stringify(r)).join(", ") +
-        "\n      a switch looks like --disable-gpu or --key=value; see " +
-        "docs/clients/electron.md",
+      `[aio] electron: AIO_ELECTRON_ARGS — ${n} ` +
+        `entr${n === 1 ? "y was" : "ies were"} NOT passed to Chromium:\n` +
+        envArgs.refused
+          .map((r) => `      ${JSON.stringify(r.tok)}: ${r.why}`)
+          .join("\n"),
+    );
+  }
+  // The environment is not a trusted input either — the same reason
+  // AIO_ELECTRON_ARGS is an allow-list. Screening that one while inheriting
+  // ELECTRON_RUN_AS_NODE is the same door, wider.
+  const childEnv = electronChildEnv(Deno.pid, (k) => Deno.env.get(k));
+  for (const d of childEnv.dropped) {
+    log.warn(
+      "electron",
+      `${d.key} was set and has been REMOVED for this window — ${d.why}. ` +
+        `(Partial: an environment you do not control can also set PATH or ` +
+        `LD_PRELOAD, which nothing here can take away.)`,
     );
   }
   // stdout is inherited so the app's own console output passes through
@@ -814,7 +1090,7 @@ async function spawnElectron(
       args: [tmpFile, ...sandboxArgs, ...extraArgs, ...envArgs.args],
       // The window dies with this process — see tmplParentWatch. Merged into
       // the inherited environment, so the shim passes it through to Electron.
-      env: { AIO_PARENT_PID: String(Deno.pid) },
+      env: childEnv.env,
       ...(stdio === "inherit"
         ? { stdout: "inherit" as const }
         : { stdin: "null" as const, stdout: "null" as const }),
@@ -928,7 +1204,11 @@ export async function launchElectron(
   const script = uds
     ? electronMainScriptUDS(url, uds.socketPath, { ...udsOpts, meta })
     : electronMainScript(url, meta);
-  return spawnElectron(bin, script, cdpSwitches(cdpPort));
+  // `requireSandbox` rides on the meta this window was described by — the app
+  // said it, and this is where the app's window is actually launched.
+  return spawnElectron(bin, script, cdpSwitches(cdpPort), {
+    requireSandbox: meta?.requireSandbox,
+  });
 }
 
 /** Launches Electron with the client connect-page script (no server needed) */

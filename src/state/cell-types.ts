@@ -85,8 +85,15 @@ export type CellFieldFilter<K extends string = string> =
   | { include: K[] }
   | { exclude: (K | `${K}.${string}`)[] };
 
-/** Cell-level visibility (`visible:` — READ side; `access:` gates CALLS) —
- *  CellFieldFilter + optional per-user transform.
+/** Cell-level visibility (`visible:`) — CellFieldFilter + optional per-user
+ *  transform.
+ *
+ *  `visible` gates READS, `access` gates CALLS, and NEITHER IMPLIES THE OTHER.
+ *  A cell with `visible: "none"` sends no state to any client and still has
+ *  every method callable by any client, with the return value travelling back
+ *  — an audit found a PBKDF2 `decrypt` shipped that way, as a public oracle,
+ *  because one key was read as doing both jobs. Hiding the state is `visible`;
+ *  gating the calls is {@linkcode Access}. Say both.
  *
  *  One callback-bearing shape ON PURPOSE: a union with two `forUser` members
  *  (the old Pick/Omit-precise design) breaks TypeScript's contextual typing —
@@ -367,9 +374,18 @@ export function checkReservedKeys(
  *  custom check per (user, name, ...args). The call args are forwarded so a
  *  predicate can do ROW-LEVEL authz — e.g. `(u, m, id) => isOwner(u, id)` —
  *  instead of re-checking ownership inside every method. Absent = open.
- *  Server-origin dispatches (effects, schedules, server code) always bypass —
- *  the server trusts itself. `access` gates CALLS; `visible` gates READS —
- *  neither derives the other. */
+ *  Server-origin dispatches (effects, schedules, `onInit`, and one cell's
+ *  method body calling another) always bypass — the server trusts itself. That
+ *  origin is MARKED by the call path (`inServerOrigin`, call-origin.ts), never
+ *  inferred from the transport and never carried on an action, so it holds
+ *  where server and client share one isolate and no client frame can forge it.
+ *
+ *  `access` gates CALLS, `visible` gates READS, and NEITHER IMPLIES THE OTHER.
+ *  An `access` rule hides no state (an "admin-only" cell with no `visible`
+ *  broadcasts in full to every socket), and a `visible` filter stops no call
+ *  (a `visible: "none"` cell answers every method any client dispatches).
+ *  Absent = open, which is why boot says so when a cell hides secret-shaped
+ *  state and nothing here answers the call side. */
 export type Access =
   | boolean
   | string

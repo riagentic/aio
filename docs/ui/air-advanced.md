@@ -233,17 +233,20 @@ Deno.serve((req) => {
 Streaming SSR -- yields HTML chunks as an async generator. The route
 (`routePath` / `routeSearch`) is read once, when the stream starts, so a
 response keeps its own request's route even while another request sets the
-signals before this stream has finished:
+signals before this stream has finished. Its `useId` sequence, its `<head>` and
+its `<select>` scopes are its own for the same reason. Pass any object that
+identifies the response -- the `Request` -- and `collectHead(req)` gives you
+that render's head back, whatever else was streaming at the time:
 
 ```tsx
 import { renderToStream } from "aio/air";
 import App from "./App.tsx";
 
-Deno.serve(async () => {
+Deno.serve((req) => {
   const stream = new ReadableStream({
     async start(controller) {
       const enc = new TextEncoder();
-      for await (const chunk of renderToStream(<App />)) {
+      for await (const chunk of renderToStream(<App />, req)) {
         controller.enqueue(enc.encode(chunk));
       }
       controller.close();

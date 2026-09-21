@@ -79,6 +79,15 @@ Behavior depends on **where** it's called:
 | Component body              | Yes               | Yes             |
 | Inside `onMount()` callback | No                | Yes             |
 
+> **Per RENDER, not per component.** A cleanup in the body runs before every
+> re-render. That is right for something the body re-creates each render, and
+> wrong for anything that should outlive one — use [`onUnmount()`](#onunmount)
+> for those. A field report got this wrong four times in four components: a
+> gallery released its place in a download queue from the body, so 85 of 89
+> cards were cancelled on the next repaint and never asked again; a send
+> button's three-second auto-disarm was cleared on every balance patch, so a
+> safety control quietly stopped being one. `aiol` flags the shape.
+
 **Inside onMount()** — cleanup only on unmount (like `useEffect(fn, [])`):
 
 ```tsx
@@ -107,6 +116,46 @@ onMount(() => {
 Throwing inside a cleanup callback does not break subsequent cleanups.
 
 ---
+
+---
+
+## onUnmount()
+
+```ts
+function onUnmount(fn: () => void): void;
+```
+
+Runs **once**, when the component goes away for good — once no matter how many
+times the component re-rendered, and with the callback the LAST render gave it.
+
+Call it in the body, **unconditionally** — never inside an `if` or a loop.
+Unlike `onMount` and `onCleanup`, which just append to a list and are safe to
+call conditionally, `onUnmount` takes a hook slot (that is how it registers once
+rather than once per render), so it follows `useRef`'s rule instead of theirs.
+In dev, calling it conditionally is reported as hook-order drift.
+
+```tsx
+function NftThumb({ id }: { id: string }) {
+  const slot = useRef(queue.take(id));
+  onUnmount(() => slot.current.release()); // NOT onCleanup — see above
+  return <img src={id} />;
+}
+```
+
+Use it for anything a re-render must not touch: a place in a queue, an armed
+safety timer, a debounce, an in-flight request you intend to finish.
+
+It is **not** a shorthand for `onMount(() => onCleanup(fn))`, which is the
+spelling people reach for and is subtly wrong: a render that never commits never
+runs its `onMount`, so a hold released only from there leaks for good.
+`onUnmount` also runs when the body throws, and when a boundary above catches
+before the component ever mounts.
+
+| Want                             | Use                          |
+| -------------------------------- | ---------------------------- |
+| Undo what THIS render set up     | `onCleanup` in the body      |
+| Release what the COMPONENT holds | `onUnmount`                  |
+| Tear down what `onMount` started | `onCleanup` inside `onMount` |
 
 ## useRef()
 

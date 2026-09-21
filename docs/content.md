@@ -29,6 +29,7 @@
 - [App architectures — the two canonical shapes](basics/app-architectures.md) — Almost every aio deployment is one of two shapes.
 - [Architecture](basics/architecture.md) — AIO is a full-stack Deno/TypeScript application framework built around cells
 - [Core Concepts](basics/concepts.md) — Everything you need to understand about how aio works.
+- [Cookbook — twenty recipes, each one tested](basics/cookbook.md) — Twenty things an app needs on its first day, each as a complete file you can
 - [Every option, one page](basics/every-option.md) — cell(name, { … }) — the keys a cell takes.
 - [FAQ](basics/faq.md) — Common questions about what aio does, doesn't do, and why.
 - [AIO Documentation](basics/index.md) — one table: Deno., hidden fields, tracked reads, and what refuses you
@@ -59,7 +60,7 @@
 
 ## UI — AIR renderer — components, signals, routing, forms
 
-- [Rendering & UI](ui/README.md) — AIO uses AIR — a built-in signal-based renderer (88 KB gzipped with the
+- [Rendering & UI](ui/README.md) — AIO uses AIR — a built-in signal-based renderer (90 KB gzipped with the
 - [AIR Advanced Patterns](ui/air-advanced.md) — SSR, portals, islands, code splitting, virtual scrolling, dimensions, deferred
 - [AIR Animation](ui/air-animation.md) — CSS-first declarative transitions for enter/exit animations, imperative spring
 - [AIR vs React vs Best-in-Class — Full Comparison](ui/air-comparison.md) — Reference frameworks: React 19, Solid.js 1.9 (signal pioneer), Svelte
@@ -165,10 +166,10 @@
 
 ## Upgrade guides — version-to-version migration notes
 
-- [Upgrade Guides](upgrade/README.md) — every one, newest first (81 pages)
+- [Upgrade Guides](upgrade/README.md) — every one, newest first (82 pages)
+- [Upgrading from 1.0.6-beta to 1.0.7-beta](upgrade/from-1.0.6-beta-to-1.0.7-beta.md) — changed.
 - [Upgrading from 1.0.5-beta to 1.0.6-beta](upgrade/from-1.0.5-beta-to-1.0.6-beta.md) — Nothing was removed and no signature changed.
 - [Upgrading from 1.0.4-beta to 1.0.5-beta](upgrade/from-1.0.4-beta-to-1.0.5-beta.md) — needed.
-- [Upgrading from 1.0.3-beta to 1.0.4-beta](upgrade/from-1.0.3-beta-to-1.0.4-beta.md) — is no migration step to perform.
 - [The aio restructure — alpha27/alpha28 breaking changes](upgrade/restructure.md) — This guide tracks every breaking change of the restructure
 
 ## Design specs — decision records — background, not manuals

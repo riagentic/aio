@@ -126,6 +126,58 @@ export function _propAttr(
   return _DOM_PROP_ATTR[k] ?? null;
 }
 
+// ── The attribute NAME rule — one decider for every render path ───────
+//
+// `setAttribute` refuses a name that is not an XML `Name`: the client path
+// throws `InvalidCharacterError` on `<div {...{"x onload=alert(1)": 1}}>` and
+// nothing reaches the document. The SSR writers asked nothing and pasted the
+// key straight into the tag, so the SAME vnode that throws in the browser
+// shipped `<div x onload=alert(1)="1">` from the server — markup an HTML
+// parser reads as an `onload` handler. A prop name built from untrusted data
+// (a spread of a parsed query string, a CMS field, a user's own object) was
+// therefore script injection on the server and a hard error on the client.
+//
+// So the rule is written ONCE, here in the module that already owns "this prop
+// becomes this DOM mutation", and both sides call it — the SSR writer before
+// it emits, `_writeProp` before it calls `setAttribute`. A second copy of the
+// predicate beside the DOM's own is how the two paths drift apart again; this
+// regex IS the production `setAttribute` enforces, so they cannot.
+
+/** The XML `Name` production (XML 1.0 5th ed.) — the rule the DOM spec points
+ *  `setAttribute` at, so this predicate and the browser cannot disagree.
+ *  Colons are legal: `xlink:href` and `xml:lang` are namespaced attributes aio
+ *  writes on purpose. Built from the two character sets rather than one long
+ *  literal so the START set is stated once. */
+const _NAME_START = "A-Z_a-z:" +
+  "\\u00C0-\\u00D6\\u00D8-\\u00F6\\u00F8-\\u02FF\\u0370-\\u037D\\u037F-\\u1FFF" +
+  "\\u200C-\\u200D\\u2070-\\u218F\\u2C00-\\u2FEF\\u3001-\\uD7FF" +
+  "\\uF900-\\uFDCF\\uFDF0-\\uFFFD";
+/** What a name may CONTINUE with, on top of {@linkcode _NAME_START}. */
+const _NAME_CHAR = ".0-9\\u00B7\\u0300-\\u036F\\u203F-\\u2040\\-";
+const _VALID_ATTR_NAME = new RegExp(
+  `^[${_NAME_START}][${_NAME_START}${_NAME_CHAR}]*$`,
+);
+
+/** Whether `name` can be an attribute name at all. */
+export function _isAttrName(name: string): boolean {
+  return _VALID_ATTR_NAME.test(name);
+}
+
+/** Refuse an attribute name no document can hold, naming it and the element
+ *  that carried it. Throws on BOTH sides — the server must not be the
+ *  permissive one, because the server is the one that writes raw markup. */
+export function _assertAttrName(name: string, where: string): void {
+  if (_isAttrName(name)) return;
+  throw new Error(
+    `[aio] <${where || "?"}> was given the prop ${JSON.stringify(name)}, ` +
+      `which is not a legal attribute name. An attribute name may not ` +
+      `contain spaces, quotes, "=", "<" or "/", and may not start with a ` +
+      `digit or "-". Emitting it would write raw HTML into the page, so it ` +
+      `is refused on the server exactly as setAttribute refuses it in the ` +
+      `browser. Check the object being spread into this element's props.`,
+  );
+}
+
 /** The namespace an attribute name belongs to, or null for the default one. */
 export function _attrNS(k: string): string | null {
   if (k.startsWith("xlink:")) return _XLINK_NS;
@@ -223,6 +275,11 @@ export function _writeProp(
     return;
   }
   const ns = _attrNS(k);
+  // The name the DOM is about to be asked for — refused here, with the
+  // element and the prop in the message, instead of as a bare
+  // `InvalidCharacterError` from deep inside the patcher. Same rule, same
+  // answer, as the SSR writers: see `_assertAttrName`.
+  _assertAttrName(ns ? k : _attrName(k), el.tagName?.toLowerCase() ?? "");
   if (v === false && _STRING_FALSE_ATTRS(k)) {
     // …but not for the attributes where "false" is a VALUE.
     //

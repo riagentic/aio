@@ -433,8 +433,13 @@ Deno.test("human: bytes an operator can read", () => {
 
 Deno.test("am lab is discoverable in `am help`", async () => {
   const help = async (...args: string[]) => {
+    // `--commands` is the INDEX tier since 1.0.7-beta: bare `am help` is
+    // the 16 everyday verbs on one screen, and one line per command moved
+    // behind this flag. `lab` is not an everyday verb, and asserting it
+    // against the one-screen tier would be asserting that the screen is
+    // the index.
     const p = await new Deno.Command(Deno.execPath(), {
-      args: ["run", "-A", `${REPO}/src/am.ts`, "help", ...args],
+      args: ["run", "-A", `${REPO}/src/am.ts`, "help", "--commands", ...args],
       stdout: "piped",
       stderr: "null",
       env: { ...Deno.env.toObject(), AIO_AM_NO_DELEGATE: "1" },
@@ -1753,7 +1758,14 @@ Deno.test({
     // Records the beta gate's "real Windows pass". Last line, so a partial
     // run cannot claim it.
     const { recordProof } = await import("../scripts/proof.ts");
-    await recordProof("windows", "real", "am lab windows: viewer + share live");
+    // `lab-vm`, not `real`: what this proved is that the LAB boots and
+    // serves. An app running on Windows is a different claim, and the
+    // matrix now carries it separately, with no gate and saying so.
+    await recordProof(
+      "windows",
+      "lab-vm",
+      "am lab windows: viewer + share live",
+    );
   },
 });
 
@@ -1780,7 +1792,7 @@ Deno.test({
     assertEquals(s.share.url, SHARE_URL);
     // The beta gate's "real macOS pass", as far as a machine can check it.
     const { recordProof } = await import("../scripts/proof.ts");
-    await recordProof("macos", "real", "am lab macos: share serving");
+    await recordProof("macos", "lab-vm", "am lab macos: share serving");
   },
 });
 

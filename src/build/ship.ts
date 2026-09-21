@@ -39,6 +39,13 @@ export const UPDATE_TARGETS = [
   "source",
 ] as const;
 
+// NOT a member: `"macos-app"`. It is a shape an install can BE and never a
+// shape a release is PUBLISHED as — no strategy replaces a signed bundle, so
+// there would be nothing for a manifest carrying it to mean. It lives in
+// `server/updates-apply.ts` as `InstalledTarget`, which is that other
+// vocabulary. (It also keeps this array — public, frozen surface — exactly as
+// it was: widening a union is something a caller's exhaustive switch feels.)
+
 /** How a published release installs itself — one of {@linkcode UPDATE_TARGETS}.
  *
  *  Signed into the manifest and matched against what the running install
@@ -694,7 +701,11 @@ export function inferTarget(
         `       Publish the built binary or .AppImage for an app that ` +
         `self-updates; a .dmg is for a user to drag to /Applications by ` +
         `hand. (The .app INSIDE the dmg is the real artifact — see ` +
-        `docs/build/targets.md.)`,
+        `docs/build/targets.md.)\n` +
+        `       A macOS .app that is ALREADY installed reports itself as ` +
+        `"macos-app" and refuses every release with the same reason, ` +
+        `naming the download — it never swaps a file inside its own signed ` +
+        `bundle. See todo.md, "macOS .app self-update".`,
     );
   }
   return "binary";

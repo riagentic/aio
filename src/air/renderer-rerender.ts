@@ -193,7 +193,8 @@ function _firedBy(inst: ComponentInstance, now: number): string {
     : "";
 }
 
-/** Dev tripwire: the state hooks (`useRef`/`useSignal`/`useId`) are matched
+/** Dev tripwire: the state hooks (`useRef`/`useSignal`/`useId`, and
+ *  `onUnmount`, which takes a slot) are matched
  *  across renders BY CALL ORDER — index 0 is index 0 forever.
  *
  *  That makes a CONDITIONAL hook silently swap ref identities: skip one
@@ -215,7 +216,9 @@ function _checkHookOrder(
   if (prev === undefined || prev === count) return;
   console.error(
     `[aio-dev] <${name}> called ${count} state hooks this render but ${prev} ` +
-      `last render. useRef/useSignal/useId are matched by CALL ORDER, so a ` +
+      `last render. useRef/useSignal/useId — and onUnmount, which takes a ` +
+      `slot so it can register once rather than once per render — are ` +
+      `matched by CALL ORDER, so a ` +
       `hook behind an \`if\` (or in a loop whose length changes) shifts every ` +
       `later hook onto a different slot — the component silently starts ` +
       `reading another ref's value. Call them unconditionally at the top of ` +

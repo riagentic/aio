@@ -194,7 +194,7 @@ import {
 } from "./paths.ts";
 import { openSessionStore, type SessionStore } from "./sessions.ts";
 import { openUserStore } from "./auth-users.ts";
-import { resolveAppId } from "./single-instance-lock.ts";
+import { holdFileSizeGuard, resolveAppId } from "./single-instance-lock.ts";
 import { appKeyPath, defaultAppKeyConfig, resolveAppKey } from "./app-key.ts";
 import { assertDenoVersion } from "./deno-version.ts";
 import { removalMessage, removalOf } from "../state/removals.ts";
@@ -1672,6 +1672,15 @@ async function _runPhases<S, A, E>(
     ["keepServer", keepServerOf(cli, config.keepServer)],
   ]);
 
+  // A write past `ulimit -f` must be a refused persist, not a dead process —
+  // and that is true of an app EMBEDDED in someone else's process too. The
+  // guard used to ride on the singleton lock, so `libraryMode` (which takes
+  // no lock, deliberately) inherited the kernel default and died of SIGXFSZ.
+  // Held for every boot, lock or no lock: it is process-wide, costs one no-op
+  // listener, and grants no exclusivity of any kind.
+  const releaseFileSizeGuard = holdFileSizeGuard();
+  bootUndo.push("file-size guard", releaseFileSizeGuard);
+
   // Singleton lock — libraryMode implies no lock (embeddable / testable).
   const singletonMode = config.libraryMode ? false : (config.singleton ?? true);
   // Either one asks for it — an OR, not a precedence.
@@ -2348,8 +2357,13 @@ async function _runPhases<S, A, E>(
     // and so did every boot after it.
     if (!("exclude" in filter)) return now;
     for (const path of filter.exclude) {
-      if (!path.includes(".")) revert(path);
-      else {
+      // BOTH READINGS, as the store's own projection takes them: the key
+      // literally named `path` (a no-op when the cell has none), and the
+      // dotted path under its head. A replay that put back a literal `"a.b"`
+      // the store never wrote is the same divergence this function exists to
+      // close, one spelling over.
+      revert(path);
+      if (path.includes(".")) {
         slice = restoreExcluded(slice, was, path.split(".")) as Record<
           string,
           unknown
@@ -2723,20 +2737,46 @@ async function _runPhases<S, A, E>(
     let seq: number;
     if (journal) {
       const cells: TimeTravelRestore["cells"] = {};
-      const fields = config._cellFields;
       for (
         const [cell, slice] of Object.entries(after as Record<string, unknown>)
       ) {
         // A sync cell recovers from its own op-log, never from the journal.
         if (_syncCellSet.has(cell)) continue;
         if (slice === null || typeof slice !== "object") continue;
-        const flags = fields?.[cell];
-        const kept: Record<string, unknown> = {};
-        for (const [k, v] of Object.entries(slice)) {
-          if (flags?.[k]?.persisted === false) continue;
-          kept[k] = v;
+        // WHAT THE STORE WOULD WRITE for this slice — the store's own getter,
+        // not a second reading of the declaration. `persist` is TWO screens:
+        // the include/exclude filter (dot paths included) and then
+        // `onPersist`, which reshapes what goes to disk. Screening through
+        // the flags map wrote `meta` whole for `exclude: ["meta.cache"]`;
+        // screening through the filter alone still wrote the session token an
+        // `onPersist` strips — the field the store has never once held, put
+        // on disk by pressing undo. The replay side already asks this getter
+        // (`_roundTripShapedCells`); this is the write side asking it too.
+        //
+        // `persist: "none"` ⇒ nothing of this cell is stored, so the line
+        // names it not at all; replay leaves such a cell where it is either
+        // way.
+        let kept: unknown;
+        try {
+          kept = (getDBState({ [cell]: slice } as S) as
+            | Record<string, unknown>
+            | undefined)?.[cell];
+        } catch (e) {
+          // A shape that throws is the same failure the persist path reports
+          // on its next write. Nothing is written for the cell — a journal
+          // line must never carry what the store refused to.
+          log.error(
+            `journal: could not shape the "${cell}" slice the way the store ` +
+              `writes it, so the time-travel line carries none of it — a ` +
+              `replay of this jump leaves the cell where it is: ${
+                e instanceof Error ? e.message : String(e)
+              }`,
+          );
+          continue;
         }
-        cells[cell] = kept;
+        if (kept !== undefined) {
+          cells[cell] = kept as Record<string, unknown>;
+        }
       }
       const restore: TimeTravelRestore = { ...ttPayload, cells };
       seq = _journalAppend({ type: TT_RESTORE_TYPE, payload: restore }, ts);
@@ -3516,6 +3556,7 @@ async function _runPhases<S, A, E>(
     onStopping,
     onStop,
     appLock,
+    releaseFileSizeGuard,
     scheduleManager,
     ownManager,
     dispatch,
@@ -3940,8 +3981,12 @@ async function _runPhases<S, A, E>(
         channel: _updates?.channel,
         getState: () => app.getState() as Record<string, unknown>,
         // The app's own `visible` declaration screens the state a report
-        // carries — see ReportSources.visible. Same map the trojan `fields`
-        // route serves, so there is one answer to "what may leave the server".
+        // carries — see ReportSources.visibleFilters. The FILTER, not the
+        // per-key flags: a report screens values, and a flag map reads
+        // `exclude: ["seeds.encSeed"]` as "the key `seeds` ships", which kept
+        // every row's ciphertext. One answer to "what may leave the server",
+        // and it is the wire's.
+        visibleFilters: config._cellVisible,
         visible: config._cellFields,
         getTimeline: () => timeline.entries(),
       },
@@ -4036,6 +4081,7 @@ async function _runPhases<S, A, E>(
     expose,
     singletonMode,
     childWindows: !!config.childWindows,
+    electron: config.electron,
     client,
     useElectron,
     isHeadless,
@@ -4108,6 +4154,7 @@ async function _runPhases<S, A, E>(
       lang: ui.lang,
       tray: ui.tray,
     },
+    security: config.security,
     keepServer: config.keepServer,
     setElectronProc: (proc) => {
       _electronProc = proc;

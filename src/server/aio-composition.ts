@@ -274,6 +274,166 @@ function warnFieldFilters(composed: ComposedCells): void {
   }
 }
 
+/** The leaf segment of a (possibly dotted) filter path — `seeds.encSeed` is
+ *  hidden because of `encSeed`, and that is the name to judge. */
+function pathLeaf(p: string): string {
+  return p.slice(p.lastIndexOf(".") + 1);
+}
+
+/** A name that says "a secret lives here" — the same two-tier rule the exposure
+ *  heuristic reads, asked of a hidden field or of a method. */
+function secretShaped(name: string): boolean {
+  return looksSecret(name) || isRefusableCredential(name);
+}
+
+/** A METHOD name that turns a hidden cell into an ORACLE: one that performs a
+ *  privileged operation on a caller's behalf and hands the result back.
+ *
+ *  Field names and method names are not the same question, and reading them
+ *  with one rule left the sharp half uncovered: `looksSecret` matched
+ *  `encrypt` (a noun-ish name that also reads as a field) and missed `decrypt`
+ *  and `sign` — the two that make an oracle. Encrypting on request leaks
+ *  little; DECRYPTING on request is the whole attack, and signing on request
+ *  is the wallet version of it.
+ *
+ *  Verbs only, and anchored, because the cry-wolf risk here is entirely about
+ *  ordinary words: `signIn`, `signUp`, `signOut`, `signal`, `assign`,
+ *  `design`, `resign` and `cosign` are all common method names that contain
+ *  "sign" and mean nothing of the sort. This is one condition of three (no
+ *  `access`, at least one callable method, a name that says a secret is
+ *  involved), so a false positive here still needs the other two to speak. */
+function oracleVerb(name: string): boolean {
+  const n = name.toLowerCase();
+  // `sign` only where it is the operation: the whole name, or followed by a
+  // capital in the original (`signTx`, `signMessage`) — never `signIn`,
+  // `signUp`, `signOut`, and never as a fragment of another word.
+  if (/^sign(?:in|up|out|al|ature)?$/.test(n)) return n === "sign";
+  if (/^sign[A-Z]/.test(name)) return true;
+  return /^(?:de|un)(?:crypt|seal|lock|wrap|obfuscate)/.test(n) ||
+    /^(?:derive|reveal|unseal|unlock|unwrap)/.test(n) ||
+    /^export(?:key|secret|seed|mnemonic|private)/.test(n);
+}
+
+/** #3 — this cell HIDES state and gates no CALLS.
+ *
+ *  `visible` gates READS; `access` gates CALLS; neither implies the other. An
+ *  audit of an app that holds keys measured what reading one as both costs: a
+ *  cell with `visible: "none"` still has every method callable by any connected
+ *  client, with the return value travelling back, so a PBKDF2
+ *  `encrypt`/`decrypt` cell shipped as a decryption oracle and an unmetered
+ *  passphrase oracle — sitting next to a carefully maintained `visible.exclude`
+ *  list that existed to prevent exactly that. The author believed one key did
+ *  both jobs, and nothing in the framework said otherwise.
+ *
+ *  A NOTICE, never a refusal: apps boot with this shape today, and "anyone may
+ *  call, nobody may read" is a real design (a worker cell driven from the UI).
+ *  Only the author can say which one this is — so it is said once, at boot, in
+ *  dev and in prod alike (observe-only; a warning that only dev sees is a
+ *  warning a packaged app never gets to print).
+ *
+ *  WHAT KEEPS IT FROM CRYING WOLF. Three conditions, each of which removes a
+ *  whole class of honest cells:
+ *  - `access` unset — declaring ANY rule (including `access: () => true`, "open
+ *    on purpose") answers the question and silences this forever;
+ *  - the cell has at least one callable method — a state-only cell has no door;
+ *  - a NAME in the cell says a secret is involved: a hidden field's name, or a
+ *    method's. The scratch-state pattern the docs recommend
+ *    (`visible: { exclude: ["prevBytes"] }`) and a background worker cell
+ *    (`visible: "none"` over a queue) never trip it, because nothing they hide
+ *    or expose is secret-shaped. It reads the same two-tier name rule as the
+ *    exposure heuristic, so `pubKey`, `seedId` and `lastLatencyMs` are quiet
+ *    there and quiet here. */
+function warnHiddenButCallable(composed: ComposedCells): void {
+  for (const f of composed.cells) {
+    const why = hiddenButCallableReason(f.__aio as HiddenCallableInput);
+    if (why) log.warn("visibility", why);
+  }
+}
+
+/** What a cell must look like for the notice to have an opinion. Structural,
+ *  so a test can state the shape without booting a runtime. @internal */
+export type HiddenCallableInput = {
+  id: string;
+  access?: unknown;
+  ui?: unknown;
+  state?: unknown;
+  actionKeys?: readonly string[];
+};
+
+/** The notice's whole decision, as a string or `null` — PURE.
+ *
+ *  Split out because the condition it turns on could not fire on the shape the
+ *  feature was built for and nothing noticed: the loop above logged directly,
+ *  so the only way to test the rule was to boot an app and read stderr, and
+ *  nobody did. A predicate that returns its own reason is a predicate a test
+ *  can ask. @internal */
+export function hiddenButCallableReason(
+  a: HiddenCallableInput,
+): string | null {
+  {
+    // The call side was answered — whatever the answer is, it was a decision.
+    if (a.access !== undefined) return null;
+    const ui = a.ui as ComposedCells["cells"][number]["__aio"]["ui"];
+    if (!ui || ui === "all") return null; // nothing hidden: a different warning
+    const stateKeys = Object.keys((a.state ?? {}) as Record<string, unknown>);
+    // What this cell's READ side takes away. `include` is an allowlist, so the
+    // hidden set is its complement — the same hazard as an `exclude`, and the
+    // reason it is not left out: `include: ["summary"]` over a state that also
+    // holds `apiKey` hides the credential exactly as `exclude: ["apiKey"]` does.
+    const hidden = ui === "none"
+      ? stateKeys
+      : "exclude" in ui
+      ? ui.exclude.map(pathLeaf)
+      : "include" in ui
+      ? stateKeys.filter((k) => !ui.include.includes(k))
+      : [];
+    // An empty hidden set means "hides nothing" for a FILTER — `exclude: []`,
+    // or an `include` that names every key — and for a bare `forUser`, which
+    // is screened per client rather than structurally. It does NOT mean that
+    // for `"none"`: that is a blanket over the whole cell, present state and
+    // future, so a cell whose state happens to be empty today is still a cell
+    // that hides everything.
+    //
+    // Skipping on `hidden.length === 0` therefore silenced this notice on the
+    // EXACT shape it was written for: the audit's oracle cell — no state,
+    // `visible: "none"`, and public `decrypt`/`sign` methods behind no
+    // `access` rule. A gate that cannot fire on its own origin story is worse
+    // than no gate, because the boot's silence reads as approval.
+    if (ui !== "none" && hidden.length === 0) return null;
+    // `__`-prefixed framework types are refused at every wire entry point
+    // (protocol/action-gate.ts), so they are not a door.
+    const callable = (a.actionKeys ?? []).filter((k) => !k.startsWith("__"));
+    if (callable.length === 0) return null;
+    // Two rules, because they are two questions: what the cell HIDES is a
+    // field name, what it EXPOSES is an operation.
+    const why = [
+      ...hidden.filter(secretShaped),
+      ...callable.filter((k) => secretShaped(k) || oracleVerb(k)),
+    ];
+    if (why.length === 0) return null;
+    const one = callable.length === 1;
+    return (`[${a.id}] this cell hides state (visible: ${
+      ui === "none" ? '"none"' : renderFilter(ui as CellFieldFilter)
+    }) but declares no \`access\` — its ${
+      one ? "method" : `${callable.length} methods`
+    } [${
+      callable.map((k) => `"${k}"`).join(", ")
+    }] stay callable by any connected client, and what they RETURN travels ` +
+      `back. \`visible\` gates READS, \`access\` gates CALLS — neither ` +
+      // Deliberately NOT the words the exposure heuristic uses ("looks
+      // secret"): two different findings that read alike are two findings
+      // nobody can tell apart — in a log, and in the tests that assert on one
+      // of them.
+      `implies the other. Flagged by NAME: ${
+        why.map((k) => `"${k}"`).join(", ")
+      } — a cell that hides nothing secret-shaped is never flagged. ` +
+      `Decide the call side: access: false (server-side only), ` +
+      `access: true (any authenticated caller), access: "admin" (a role), ` +
+      `a predicate for row-level checks — or access: () => true to say ` +
+      `"open on purpose" and silence this.`);
+  }
+}
+
 /** How strong a declarative `access` rule is, as a total order over the shapes
  *  the framework can actually compare. Used ONLY to decide "is this rule at
  *  least as strong as that one" — never to decide a request. */
@@ -402,6 +562,7 @@ export function refuseUnsafeComposition(composed: ComposedCells): void {
   refuseFilteredSyncCells(composed);
   refuseAccessEscalation(composed);
   warnFieldFilters(composed);
+  warnHiddenButCallable(composed);
   refuseUnknownSelectorDeps(composed);
 }
 

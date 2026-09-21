@@ -870,3 +870,116 @@ Deno.test("validateGraph: a remote Worker URL is not a stale build product", asy
     await dropTempDir(dir);
   }
 });
+
+// ── The app's OWN import map (DENO's), not the browser's ────────────────────
+// `buildBrowserImportMap` injects `aio`, `aio/ui`, `aio/jsx-runtime` …
+// unconditionally, so the walk resolves them whatever deno.json says. That is
+// correct for the browser and blind for the server: an app missing `"aio"`
+// from deno.json walked clean while `deno run src/app.ts` refused to start.
+
+Deno.test("validateGraph: an aio entry missing from the APP's deno.json blocks", async () => {
+  const dir = await tempDir("aio-graph-appmap-");
+  try {
+    await Deno.writeTextFile(
+      dir + "/App.tsx",
+      `import { cell } from "aio";\nimport { x } from "./b.ts";\nexport default () => null;`,
+    );
+    // A SECOND file naming the same specifier: one missing key is one edit.
+    await Deno.writeTextFile(
+      dir + "/b.ts",
+      `import { cell } from "aio";\nexport const x = cell;`,
+    );
+    const map = { "aio": "/__aio/ui.js" }; // the browser map — always has it
+    const result = await validateGraph(
+      dir + "/App.tsx",
+      map,
+      mockTranspile,
+      undefined,
+      undefined,
+      { appImports: { "aio/air": "./dep/aio/src/air.ts" } },
+    );
+    assertEquals(result.valid, false, "a graph Deno cannot resolve was valid");
+    const hits = result.errors.filter((e) =>
+      e.category === "missing-import-map" && e.message.includes('"aio" is')
+    );
+    assertEquals(
+      hits.length,
+      1,
+      "one missing key is one finding, not one per file",
+    );
+    assertEquals(hits[0]!.line, 1);
+    // The fix line is derived from the app's OWN aio source, not guessed.
+    assertStringIncludes(hits[0]!.fix, `"aio": "./dep/aio/mod.ts"`);
+    assertEquals(hits[0]!.deferred, undefined, "this is never a warning");
+  } finally {
+    await dropTempDir(dir);
+  }
+});
+
+Deno.test("validateGraph: a DYNAMIC aio import needs the app mapping too", async () => {
+  // The browser-map rules downgrade a dynamic-only chunk ("the server resolves
+  // that one, through deno.json") — which is precisely the map being checked
+  // here, so the downgrade must not reach these.
+  const dir = await tempDir("aio-graph-appmap-dyn-");
+  try {
+    await Deno.writeTextFile(
+      dir + "/App.tsx",
+      `import { c } from "./cell.ts";\nexport default () => c;`,
+    );
+    await Deno.writeTextFile(
+      dir + "/cell.ts",
+      `export const c = { m: async () => (await import("aio/db")).createDB() };`,
+    );
+    const result = await validateGraph(
+      dir + "/App.tsx",
+      {},
+      mockTranspile,
+      undefined,
+      undefined,
+      { appImports: { "aio": "jsr:@riagentic/aio@1.0.0" } },
+    );
+    const hit = result.errors.find((e) => e.message.includes('"aio/db" is'));
+    assert(
+      hit,
+      `a dynamic aio/db import was not checked: ${
+        JSON.stringify(result.errors)
+      }`,
+    );
+    assertEquals(hit!.deferred, undefined);
+    assertEquals(result.valid, false);
+    // Registry pin in, registry pin out.
+    assertStringIncludes(hit!.fix, `"aio/db": "jsr:@riagentic/aio@1.0.0/db"`);
+  } finally {
+    await dropTempDir(dir);
+  }
+});
+
+Deno.test("validateGraph: a complete app map is silent, and no map means no check", async () => {
+  const dir = await tempDir("aio-graph-appmap-ok-");
+  try {
+    await Deno.writeTextFile(
+      dir + "/App.tsx",
+      `import { cell } from "aio";\nexport default () => cell;`,
+    );
+    const map = { "aio": "/__aio/ui.js" };
+    const ok = await validateGraph(
+      dir + "/App.tsx",
+      map,
+      mockTranspile,
+      undefined,
+      undefined,
+      { appImports: { "aio": "./dep/aio/mod.ts" } },
+    );
+    assertEquals(
+      ok.errors.filter((e) => e.message.includes("deno.json")).length,
+      0,
+    );
+    // Omitted ⇒ nothing to say. A caller that cannot know must not be made to
+    // guess, and must not be made loud about a guess.
+    const quiet = await validateGraph(dir + "/App.tsx", map, mockTranspile);
+    assertEquals(quiet.valid, true);
+    assertEquals(quiet.errors.length, 0);
+  } finally {
+    await dropTempDir(dir);
+  }
+});

@@ -5,12 +5,12 @@ plugins {
 
 android {
     namespace = "aio.app"
-    compileSdk = 34
+    compileSdk = 35
 
     defaultConfig {
         applicationId = "{{APPLICATION_ID}}"
         minSdk = 24
-        targetSdk = 34
+        targetSdk = 35
         versionCode = {{VERSION_CODE}}
         versionName = "{{VERSION_NAME}}"
     }

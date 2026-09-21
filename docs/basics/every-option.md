@@ -1,13 +1,13 @@
 # Every option, one page
 
 > Generated from the source by `deno task update:reference` — do not edit by
-> hand; `check:release` fails when it is stale. 183 entries: the signature, what
+> hand; `check:release` fails when it is stale. 185 entries: the signature, what
 > it does, an example when the source has one, and the file it lives in. The
 > guides explain; this page is for looking a name up.
 
 - [cell options](#cell-options) — 24
-- [aio.run options](#aiorun-options) — 78
-- [aio/air](#aioair) — 81
+- [aio.run options](#aiorun-options) — 79
+- [aio/air](#aioair) — 82
 
 ## cell options
 
@@ -22,6 +22,10 @@ state: S;
 The cell's initial state — a plain JSON-shaped object.
 <sub>src/state/cell-config-types.ts</sub>
 
+```ts
+state: { items: [] as Todo[], filter: "all" },
+```
+
 ### `methods`
 
 ```ts
@@ -32,6 +36,13 @@ The cell's methods — `name(s, ...args)` reads and writes the state `s`; call i
 as `cell.name(...args)`, from the UI or the server.
 <sub>src/state/cell-config-types.ts</sub>
 
+```ts
+methods: {
+  add(s, text: string) { s.items.push({ text, done: false }); },
+  async load(s) { s.items = await fetchTodos(); },
+},
+```
+
 ### `scope`
 
 ```ts
@@ -41,6 +52,10 @@ scope?: "client" | "server"
 Cell scope. `"client"` cells live in the browser only — never registered with
 the server, never synced, never server-persisted.
 <sub>src/state/cell-config-types.ts</sub>
+
+```ts
+scope: "client",   // lives in this tab only — never synced, never on disk
+```
 
 ### `cancelOn`
 
@@ -77,6 +92,10 @@ ttl?: { [K in keyof M & string]?: number }
 Milliseconds for which a SUCCESSFUL async call answers an identical one without
 running it. <sub>src/state/cell-config-types.ts</sub>
 
+```ts
+ttl: { fetchUser: 30_000 },   // an identical fetchUser(1) is answered from cache
+```
+
 ### `long`
 
 ```ts
@@ -105,6 +124,10 @@ selectors?: Sel & Record<string, SelectorDef<S>>
 Selectors — derived values, auto-scoped to cell state.
 <sub>src/state/cell-config-types.ts</sub>
 
+```ts
+selectors: { open: (s) => s.items.filter((i) => !i.done) },
+```
+
 ### `listensTo`
 
 ```ts
@@ -116,6 +139,10 @@ this one): `{ myHandler: other.method }` — the named SYNC method runs with the
 foreign action's payload when it dispatches.
 <sub>src/state/cell-config-types.ts</sub>
 
+```ts
+listensTo: { onLogout: auth.logout },   // runs the SYNC method onLogout
+```
+
 ### `validate`
 
 ```ts
@@ -124,6 +151,10 @@ validate?: (state: S) => true | string
 
 Optional state validator — called after every reduce.
 <sub>src/state/cell-config-types.ts</sub>
+
+```ts
+validate: (s) => s.total >= 0 || "total went negative",
+```
 
 ### `args`
 
@@ -148,6 +179,10 @@ Persistence filter — "all" (default) persists everything, "none" persists
 nothing. { include: [...] } or { exclude: [...] } for field-level control.
 <sub>src/state/cell-config-types.ts</sub>
 
+```ts
+persist: { exclude: ["draft", "scrollTop"] },
+```
+
 ### `diagnostics`
 
 ```ts
@@ -164,7 +199,9 @@ Keep this cell's ACTIONS out of the on-disk dev diagnostics — the action journ
 access?: Access
 ```
 
-Network access rule (AUTH-1): who may CALL this cell's methods over the network.
+Who may CALL this cell's methods over the network — and only that: `access`
+gates CALLS, `visible` gates READS, and neither implies the other (an `access`
+rule hides no state; a `visible` filter stops no call).
 <sub>src/state/cell-config-types.ts</sub>
 
 ### `visible`
@@ -173,11 +210,14 @@ Network access rule (AUTH-1): who may CALL this cell's methods over the network.
 visible?: CellVisibility<keyof NoInfer<S> & string, NoInfer<S>>
 ```
 
-Visibility — the READ side (alpha52; renamed from `ui`): what of this cell's
-state the broadcast carries to clients. "all" (default) exposes everything,
-"none" hides the cell from clients. { include: [...] } or { exclude: [...] } for
-field-level control; add forUser for per-user filtering on the already-filtered
-state. <sub>src/state/cell-config-types.ts</sub>
+The READ side — what of this cell's state the broadcast carries to clients — and
+ONLY the read side: `visible` gates READS, `access` gates CALLS, and neither
+implies the other (a `visible: "none"` cell still has every method callable by
+any client, return value included). <sub>src/state/cell-config-types.ts</sub>
+
+```ts
+visible: { exclude: ["passwordHash"] },
+```
 
 ### `sync`
 
@@ -198,6 +238,10 @@ Run this cell's methods in their OWN Deno worker (its own isolate and OS
 thread), so work that blocks — a parse, a crunch, an FFI call — can only stall
 THIS cell. <sub>src/state/cell-config-types.ts</sub>
 
+```ts
+worker: true,   // this cell's methods run off the main thread
+```
+
 ### `transaction`
 
 ```ts
@@ -209,6 +253,10 @@ Transactional async methods: reads see a STABLE snapshot taken at method entry
 batch, all-or-nothing (a throw/cancel discards).
 <sub>src/state/cell-config-types.ts</sub>
 
+```ts
+transaction: true,   // reads pinned at entry, writes commit all-or-nothing
+```
+
 ### `version`
 
 ```ts
@@ -218,6 +266,10 @@ version?: number
 State version — increment when state shape changes.
 <sub>src/state/cell-config-types.ts</sub>
 
+```ts
+version: 2,
+```
+
 ### `onMigrate`
 
 ```ts
@@ -226,6 +278,10 @@ onMigrate?: (state: NoInfer<S>, fromVersion: number) => NoInfer<S>
 
 Migration hook — called when persisted version < current version.
 <sub>src/state/cell-config-types.ts</sub>
+
+```ts
+onMigrate: (s, from) => (from < 2 ? { ...s, tags: [] } : s),
+```
 
 ### `onRestore`
 
@@ -265,6 +321,10 @@ onInit?: (app: ScopedApp<NoInfer<S>>, initState: NoInfer<S>) => void
 Runs once at boot, after the cells it depends on are initialized — open a
 connection, start a watcher. <sub>src/state/cell-config-types.ts</sub>
 
+```ts
+onInit: (app) => { watcher = watch(app); },
+```
+
 ### `onDestroy`
 
 ```ts
@@ -273,6 +333,10 @@ onDestroy?: (app: ScopedApp<NoInfer<S>>) => void
 
 Runs when the app shuts down (cells in reverse order) or the cell is disabled —
 close what `onInit` opened. <sub>src/state/cell-config-types.ts</sub>
+
+```ts
+onDestroy: () => watcher?.close(),
+```
 
 ## aio.run options
 
@@ -287,6 +351,10 @@ appId?: string
 
 Unique app identity — used for lock file, UDS socket, KV/SQLite paths, TLS cert
 dir. <sub>src/server/aio-types.ts</sub>
+
+```ts
+appId: "notes",   // the data dir, the icon hue and the window title follow it
+```
 
 ### `cells`
 
@@ -327,6 +395,10 @@ HTTP/WS port. Order: `--port` > `AIO_PORT` > this > `AIO_DEFAULT_PORT` > a free
 port picked at boot; a local Electron app may bind no TCP port unless one is
 named. <sub>src/server/aio-types.ts</sub>
 
+```ts
+port: 8080,
+```
+
 ### `host`
 
 ```ts
@@ -336,6 +408,10 @@ host?: string
 Bind address. Defaults to `127.0.0.1`, or `0.0.0.0` under `expose`.
 <sub>src/server/aio-types.ts</sub>
 
+```ts
+host: "127.0.0.1",
+```
+
 ### `expose`
 
 ```ts
@@ -344,6 +420,10 @@ expose?: boolean
 
 Serve on 0.0.0.0 with TLS instead of loopback-only — the config twin of
 `--expose`. <sub>src/server/aio-types.ts</sub>
+
+```ts
+expose: true,   // bind 0.0.0.0 instead of 127.0.0.1 — needs auth or a key
+```
 
 ### `tls`
 
@@ -355,6 +435,10 @@ Transport security when exposed — the config twin of `--no-tls` /
 `--tls-cert`/`--tls-key`, so a COMPILED binary (a service unit has no shell
 flags) can declare how it serves. <sub>src/server/aio-types.ts</sub>
 
+```ts
+tls: "auto",   // a cert on first boot — nothing to install, any OS
+```
+
 ### `appDir`
 
 ```ts
@@ -365,6 +449,10 @@ Where this app keeps everything it owns. Default `~/.<appId>` — `data/` inside
 it is the whole backup; `logs/` and `launch.json` are disposable.
 <sub>src/server/aio-types.ts</sub>
 
+```ts
+appDir: "./data",   // everything this app writes lives here
+```
+
 ### `dbPath`
 
 ```ts
@@ -373,6 +461,10 @@ dbPath?: string
 
 Override the SQLite file (":memory:" for hermetic tests).
 <sub>src/server/aio-types.ts</sub>
+
+```ts
+dbPath: "./data/state.db",
+```
 
 ### `dbPragmas`
 
@@ -491,6 +583,10 @@ assets?: Record<string, string>
 Read-only directories this app serves in dev AND prod, `"/urlPrefix" → dir` —
 e.g. <sub>src/server/aio-types.ts</sub>
 
+```ts
+assets: { "/logo.svg": "./brand/logo.svg" },
+```
+
 ### `client`
 
 ```ts
@@ -499,6 +595,10 @@ client?: "electron" | "browser" | "cli" | "server-only"
 
 Which client to launch. Order: `--client` > this > deno.json `client` >
 `"electron"`. <sub>src/server/aio-types.ts</sub>
+
+```ts
+client: "browser",   // open the default browser instead of a desktop window
+```
 
 ### `keepServer`
 
@@ -549,6 +649,10 @@ users?: Record<string, AioUser>
 Static token → user map, compared in constant time.
 <sub>src/server/aio-types.ts</sub>
 
+```ts
+users: { "s3cret-token": { id: "ada", role: "admin" } },
+```
+
 ### `key`
 
 ```ts
@@ -558,6 +662,10 @@ key?: string | boolean
 Shared-key auth under `--expose`: `"secret"` = a fixed key, `true` = one
 generated once and persisted, `false` = no framework auth.
 <sub>src/server/aio-types.ts</sub>
+
+```ts
+key: true,   // generate and persist one shared key; the client pairs by PIN
+```
 
 ### `resolveUser`
 
@@ -586,6 +694,10 @@ auth?: boolean | AuthOptions
 
 Built-in password auth — signup/login/logout, email verify, reset, TOTP 2FA,
 OIDC, HttpOnly session cookie. <sub>src/server/aio-types.ts</sub>
+
+```ts
+auth: true,   // full login flows: sessions, users, TOTP
+```
 
 ### `db`
 
@@ -751,6 +863,22 @@ Allow the electron client to open CHILD windows to arbitrary http(s) URLs via
 `__aioIPC.openWindow(url, { preload, sandbox })`.
 <sub>src/server/aio-types.ts</sub>
 
+### `electron`
+
+```ts
+electron?: ElectronConfig
+```
+
+The Electron process's own security decisions (sandbox policy) — see
+`ElectronConfig`. <sub>src/server/aio-types.ts</sub>
+
+```ts
+aio.run({
+  cells: [wallet],
+  electron: { requireSandbox: true, unsandboxedChildWindows: false },
+});
+```
+
 ### `libraryMode`
 
 ```ts
@@ -787,6 +915,10 @@ routes?: Record<string, …>
 
 Custom HTTP routes — exact path or "/prefix/*" wildcard → handler.
 <sub>src/server/aio-types.ts</sub>
+
+```ts
+routes: { "/health": () => new Response("ok") },
+```
 
 ### `maxConnections`
 
@@ -1046,13 +1178,12 @@ end. <sub>src/state/signal.ts</sub>
 ### `collectHead`
 
 ```ts
-collectHead(): string
+collectHead(key?: object): string
 ```
 
-The `<head>` markup the components rendered by the last top-level
-`renderToString` / `renderToStream` asked for — `<title>`, `<meta>` and `<link>`
-tags, escaped, each marked `data-aio-head` so the client takes them over on
-hydration. <sub>src/air/head.ts</sub>
+The `<head>` markup the components of a server render asked for — `<title>`,
+`<meta>` and `<link>` tags, escaped, each marked `data-aio-head` so the client
+takes them over on hydration. <sub>src/air/head.ts</sub>
 
 ```ts
 const body = renderToString(<App />);
@@ -1320,6 +1451,23 @@ onMount(fn: () => void): void
 Register a callback to run after the component's first render.
 <sub>src/air/renderer-lifecycle.ts</sub>
 
+### `onUnmount`
+
+```ts
+onUnmount(fn: () => void): void
+```
+
+Register a cleanup that runs ONCE, when this component goes away for good.
+<sub>src/air/renderer-lifecycle.ts</sub>
+
+```tsx
+function NftThumb({ id }: { id: string }) {
+  const slot = useRef(queue.take(id));
+  onUnmount(() => slot.current.release());
+  return <img src={id} />;
+}
+```
+
 ### `onWindowEvent`
 
 ```ts
@@ -1401,7 +1549,7 @@ Navigates to `to` on mount. Replace=true by default (no history entry).
 ### `renderToStream`
 
 ```ts
-renderToStream(vnode: VNode | string | number | null): AsyncGenerator<string, void, unknown>
+renderToStream(vnode: VNode | string | number | null, key?: object): AsyncGenerator<string, void, unknown>
 ```
 
 Streaming SSR — async generator yielding HTML chunks.

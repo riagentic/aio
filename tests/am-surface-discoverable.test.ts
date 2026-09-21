@@ -39,9 +39,9 @@ async function amCommands(): Promise<string[]> {
   return [...table.matchAll(/^\s{2}([a-z][\w-]*)\s*:/gm)].map((m) => m[1]!);
 }
 
-async function helpText(): Promise<string> {
+async function helpText(...extra: string[]): Promise<string> {
   const p = await new Deno.Command(Deno.execPath(), {
-    args: ["run", "-A", `${REPO}/src/am.ts`, "help"],
+    args: ["run", "-A", `${REPO}/src/am.ts`, "help", ...extra],
     stdout: "piped",
     stderr: "piped",
   }).output();
@@ -49,8 +49,12 @@ async function helpText(): Promise<string> {
     new TextDecoder().decode(p.stderr);
 }
 
-Deno.test("am: every command appears in `am help`", async () => {
-  const help = stripAnsi(await helpText());
+Deno.test("am: every command appears in `am help --commands`", async () => {
+  // The tier that lists them all. Bare `am help` is 16 everyday verbs on
+  // one screen since 1.0.7-beta; a short default is only safe while the
+  // long one is one flag away, so this test moved to the long one and the
+  // assertion below checks that the short one NAMES it.
+  const help = stripAnsi(await helpText("--commands"));
   const missing: string[] = [];
   for (const cmd of await amCommands()) {
     if (ALIASES.has(cmd)) continue;
@@ -73,7 +77,10 @@ Deno.test("am: help does not advertise commands that do not exist", async () => 
   // The other direction, and the reason this file exists twice over: the first
   // draft of the new help block listed `auth reset` and `auth sessions`, which
   // are not real subcommands. Help that lies is worse than help that is short.
-  const help = stripAnsi(await helpText());
+  // Both tiers: a lie on the one-screen list is the one a reader meets first,
+  // and a lie in the full list is the one that survives longest.
+  const help = stripAnsi(await helpText()) +
+    stripAnsi(await helpText("--commands"));
   const known = new Set(await amCommands());
   const advertised = [...help.matchAll(/^\s{2}([a-z][\w-]*)\b/gm)]
     .map((m) => m[1]!)

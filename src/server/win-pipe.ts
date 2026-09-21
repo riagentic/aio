@@ -49,6 +49,7 @@
 
 import type { LocalConn, LocalListener } from "./local-listen.ts";
 import { log } from "../diagnostics/logger-api.ts";
+import { type HandleSlot, HandleTable } from "./handle-table.ts";
 
 // ── Win32 constants ───────────────────────────────────────────────────────
 
@@ -322,6 +323,59 @@ function closeHandle(h: Handle): void {
   if (h !== null) k32().CloseHandle(h);
 }
 
+/** Who owns which handle VALUE right now — see `handle-table.ts`.
+ *
+ *  Windows recycles a handle value the instant it is closed, so every path
+ *  that captured a value and acts on it LATER is acting on a number that may
+ *  already belong to something else in this process. There are three such
+ *  paths here, and all three are reachable:
+ *
+ *   • `PipeConn#drain`'s timeout — a JS timer that fires up to
+ *     PIPE_DRAIN_TIMEOUT_MS after it was armed, and closes;
+ *   • `#read`'s `GetOverlappedResult`, which runs after awaiting a completion
+ *     packet — and `close()` may have run during that await, because the
+ *     WritableStream's `abort`, the ReadableStream's `cancel` and the
+ *     server's shutdown all call it;
+ *   • `#write`'s, identically.
+ *
+ *  MEASURED, on real Windows 11 / Deno 2.9.6, because the first version of
+ *  this comment claimed the two read paths could return a STRANGER's byte
+ *  count and they cannot: with `bWait=FALSE`, `GetOverlappedResult` ignores
+ *  its handle argument entirely — the count comes from the OVERLAPPED's own
+ *  `InternalHigh`, and each `PipeConn` owns its `#rovl`/`#wovl`, kept alive
+ *  by the frame awaiting it. A closed value, another live handle and
+ *  `0xDEAD` all returned the owning operation's own 11111 bytes.
+ *
+ *  So what the slot gate actually buys, in order of how real it is: a
+ *  deferred `CancelIoEx`/`CloseHandle` never acts on a value the table has
+ *  since handed out; every one of the three paths ends as a clean
+ *  end-of-stream instead of on a number; and the rule is already in place for
+ *  any future deferred path that DOES read through its handle (`bWait=TRUE`,
+ *  a raw `ReadFile`/`WriteFile`), where the hazard is real. A 400-connection
+ *  storm with the FFI pool measured at exactly 32 — so ~368 flushes were
+ *  genuinely queued as their timers fired — produced no corruption and no
+ *  ownership warnings, with this table AND against pre-fix HEAD.
+ *
+ *  The residual that JS cannot reach is documented on `drain` itself. */
+const handles = new HandleTable((msg) => log.warn("pipe", msg));
+
+/** A handle plus the claim that says it is still ours. */
+type Owned = { h: Handle; slot: HandleSlot };
+
+/** Take ownership of a handle the kernel just returned. */
+function own(h: Handle, label: string): Owned {
+  return { h, slot: handles.claim(handleValue(h), label) };
+}
+
+/** Close it — at most once ever, and never a value the table has since
+ *  given to someone else. `false` means this caller did not own it and
+ *  therefore closed nothing, which is the only safe answer. */
+function closeOwned(o: Owned): boolean {
+  if (!handles.release(o.slot)) return false;
+  closeHandle(o.h);
+  return true;
+}
+
 /** THE completion port — one for the process, one parked wait for all of it.
  *
  *  Every pipe handle is bound to it at creation (`attach`), so every
@@ -455,14 +509,25 @@ function pointerOf(buf: Uint8Array): bigint {
  *  connect's is a failure). A failure of the completion PORT is not an
  *  outcome, and has no meaning any caller could act on, so it throws. */
 async function finishOverlapped(
-  h: Handle,
+  o: Owned,
   ovl: Uint8Array,
 ): Promise<{ ok: true; bytes: number } | { ok: false; code: number }> {
   await ioPort.completion(ovl);
+  // The await is the window: `close()` can have run while this frame was
+  // parked (the abort, the cancel and the shutdown paths all call it). The
+  // byte count itself is safe — `bWait=FALSE` reads the OVERLAPPED, not the
+  // handle (measured; see the note on `handles` above) — but a connection
+  // whose handle is gone has no stream left to feed, and continuing to slice
+  // a buffer for it would hand the caller bytes from a torn-down connection.
+  // The operation is over either way, so the honest outcome is the one
+  // `close()` produces anyway.
+  if (!handles.isLive(o.slot)) {
+    return { ok: false, code: ERROR_OPERATION_ABORTED };
+  }
   const bytes = new Uint8Array(4);
   // bWait=FALSE: the port already said it is done, and this runs on the main
   // thread so the GetLastError below is the one that belongs to this call.
-  const ok = k32().GetOverlappedResult(h, ovl, bytes, 0);
+  const ok = k32().GetOverlappedResult(o.h, ovl, bytes, 0);
   if (!ok) return { ok: false, code: k32().GetLastError() };
   return { ok: true, bytes: readU32(bytes) };
 }
@@ -473,7 +538,9 @@ class PipeConn implements LocalConn {
   readonly readable: ReadableStream<Uint8Array>;
   readonly writable: WritableStream<Uint8Array>;
   readonly remoteAddr: Deno.Addr;
-  #h: Handle;
+  /** The handle AND the claim on its value. Never the bare value: see
+   *  {@linkcode handles}. */
+  #o: Owned;
   #closed = false;
   /** One OVERLAPPED per DIRECTION — a read and a write may be in flight at
    *  once, never two of either (the streams serialize each side). The kernel
@@ -484,8 +551,8 @@ class PipeConn implements LocalConn {
   #wovl = overlappedBytes(0n);
   #buf = new Uint8Array(PIPE_BUFFER_BYTES);
 
-  constructor(h: Handle, readonly path: string, readonly server: boolean) {
-    this.#h = h;
+  constructor(o: Owned, readonly path: string, readonly server: boolean) {
+    this.#o = o;
     this.remoteAddr = { transport: "unix", path };
     this.readable = new ReadableStream<Uint8Array>({
       pull: async (ctrl) => {
@@ -512,7 +579,7 @@ class PipeConn implements LocalConn {
     // handle bound to a completion port queues a packet for BOTH, so both
     // are also one wait.
     const ok = k32().ReadFile(
-      this.#h,
+      this.#o.h,
       this.#buf,
       this.#buf.length,
       null,
@@ -525,7 +592,7 @@ class PipeConn implements LocalConn {
         return this.#readFailed(code);
       }
     }
-    const r = await finishOverlapped(this.#h, this.#rovl);
+    const r = await finishOverlapped(this.#o, this.#rovl);
     if (!r.ok) return this.#readFailed(r.code);
     if (r.bytes === 0) return null;
     return this.#buf.slice(0, r.bytes);
@@ -561,10 +628,37 @@ class PipeConn implements LocalConn {
    *  handle releases the flush. Said out loud: a dropped response body is a
    *  fact about the app, not a detail. Nothing on this recovery path needs
    *  the pool — a JS timer and a synchronous `CloseHandle` — so it still runs
-   *  when the pool is the thing that is jammed. */
+   *  when the pool is the thing that is jammed.
+   *
+   *  THE HANDLE VALUE, AND WHAT IS AND IS NOT FIXED HERE. The timeout below
+   *  fires up to PIPE_DRAIN_TIMEOUT_MS after it was armed, and on Windows a
+   *  handle VALUE is recycled the instant it is closed. Two hazards follow,
+   *  and only one of them is JS's to solve:
+   *
+   *   • The timeout closing a value this connection no longer owns —
+   *     `close()` having already run from the abort, cancel or shutdown path
+   *     while this frame was parked, and the number having gone to a handle
+   *     someone else just opened. That is a cancel-and-close of an unrelated
+   *     object, and it is what `closeOwned`/{@linkcode handles} prevent: the
+   *     claim, not the number, decides whether there is anything to close.
+   *
+   *   • The FFI call above binds the raw value at call time and runs on a
+   *     POOL thread. When the pool is saturated — exactly the condition this
+   *     timeout exists for — the call is still QUEUED when the timer fires,
+   *     so it can reach `FlushFileBuffers` after the value has been closed
+   *     and reissued. JS cannot reach that argument, and the obvious remedy
+   *     is worse than the defect: `DuplicateHandle` would give the flush its
+   *     own reference, but a duplicate keeps the pipe INSTANCE alive, so the
+   *     flush the timeout exists to bound would never return and the pool
+   *     thread would be parked for good — field report §13, reintroduced.
+   *     Bounding it the other way (`DisconnectNamedPipe` to release a flush
+   *     blocked on a duplicate) is undocumented for a blocked non-overlapped
+   *     flush and cannot be measured anywhere but on Windows. So it stays,
+   *     stated rather than hidden, until it can be measured on the OS it
+   *     belongs to. */
   async drain(): Promise<void> {
     if (!this.server || this.#closed) return;
-    const flush = k32().FlushFileBuffers(this.#h).catch(() => {
+    const flush = k32().FlushFileBuffers(this.#o.h).catch(() => {
       // aio-ok(silent-catch): FlushFileBuffers fails only when the peer is
       // already gone — the case this drain exists to tolerate, never to report.
     });
@@ -601,7 +695,7 @@ class PipeConn implements LocalConn {
       // completes, and a caller's view may be a subarray of something reused.
       const data = chunk.slice(off);
       const ok = k32().WriteFile(
-        this.#h,
+        this.#o.h,
         data,
         data.length,
         null,
@@ -613,7 +707,7 @@ class PipeConn implements LocalConn {
           throw winError("WriteFile", code, this.path);
         }
       }
-      const r = await finishOverlapped(this.#h, this.#wovl);
+      const r = await finishOverlapped(this.#o, this.#wovl);
       if (!r.ok) throw winError("WriteFile", r.code, this.path);
       if (r.bytes === 0) throw winError("WriteFile", ERROR_NO_DATA, this.path);
       off += r.bytes;
@@ -623,7 +717,12 @@ class PipeConn implements LocalConn {
   close(): void {
     if (this.#closed) return;
     this.#closed = true;
-    const h = this.#h;
+    // Release FIRST, and act only if this connection is the thing that still
+    // owns the value. A close that has already happened — or a value this
+    // connection lost — closes nothing here, because closing a recycled value
+    // would cancel and close whatever the process opened in the meantime.
+    if (!handles.release(this.#o.slot)) return;
+    const h = this.#o.h;
     // Cancel what is in flight, then close: the pending operations complete
     // onto the port with OPERATION_ABORTED, which is end-of-stream, so every
     // waiter is released rather than left parked on a promise. Nothing else
@@ -671,7 +770,7 @@ function withSecurityAttributes<T>(path: string, f: (sa: Uint8Array) => T): T {
   }
 }
 
-function createInstance(path: string, first: boolean): Handle {
+function createInstance(path: string, first: boolean): Owned {
   const name = wstr(path);
   return withSecurityAttributes(path, (sa) => {
     const h = k32().CreateNamedPipeW(
@@ -700,14 +799,18 @@ function createInstance(path: string, first: boolean): Handle {
         path,
       );
     }
+    // Owned from the moment the kernel hands the value over, and BEFORE
+    // anything can close it — a claim taken later is a window in which the
+    // value is untracked.
+    const o = own(h, `pipe instance ${path}`);
     // Bound to the port before the first operation (the connect) starts.
     try {
       ioPort.attach(h, path);
     } catch (e) {
-      closeHandle(h);
+      closeOwned(o);
       throw e;
     }
-    return h;
+    return o;
   });
 }
 
@@ -717,21 +820,25 @@ function createInstance(path: string, first: boolean): Handle {
  *  next instance is created before the current one is yielded, so a client
  *  never meets ERROR_PIPE_BUSY. */
 export function listenPipe(path: string): LocalListener {
-  let next: Handle = createInstance(path, true);
+  let next: Owned | null = createInstance(path, true);
   let closed = false;
 
   async function accept(): Promise<LocalConn | null> {
-    if (closed) return null;
-    const h = next;
+    if (closed || next === null) return null;
+    const o = next;
     // This OVERLAPPED belongs to the pending connect and to nothing else; the
     // frame below keeps it alive until the port reports it.
     const ovl = overlappedBytes(0n);
-    const ok = k32().ConnectNamedPipe(h, ovl);
+    const ok = k32().ConnectNamedPipe(o.h, ovl);
     if (!ok) {
       const code = k32().GetLastError();
       if (code === ERROR_IO_PENDING) {
-        const r = await finishOverlapped(h, ovl);
-        if (closed) return null;
+        // Gated on the CLAIM, not on `closed`: `close()` below releases and
+        // closes this very instance while this frame is parked, and asking a
+        // value that now belongs to someone else for this connect's result
+        // is the same use-after-free the reads have.
+        const r = await finishOverlapped(o, ovl);
+        if (closed || !handles.isLive(o.slot)) return null;
         if (!r.ok && r.code !== ERROR_PIPE_CONNECTED) {
           throw winError("ConnectNamedPipe", r.code, path);
         }
@@ -742,9 +849,10 @@ export function listenPipe(path: string): LocalListener {
       }
     }
     if (closed) return null;
-    // Pre-create the next instance BEFORE handing this one out.
+    // Pre-create the next instance BEFORE handing this one out. Ownership of
+    // `o` passes to the connection, which is now the only thing that closes it.
     next = createInstance(path, false);
-    return new PipeConn(h, path, true);
+    return new PipeConn(o, path, true);
   }
 
   return {
@@ -753,12 +861,13 @@ export function listenPipe(path: string): LocalListener {
       if (closed) return;
       closed = true;
       // Cancel the pending ConnectNamedPipe (its wait returns ABORTED) and
-      // drop the unconnected instance. Accepted connections are untouched.
-      const h = next;
+      // drop the unconnected instance. Accepted connections are untouched —
+      // each one owns its own claim, and this releases only ours.
+      const o = next;
       next = null;
-      if (h !== null) {
-        k32().CancelIoEx(h, null);
-        closeHandle(h);
+      if (o !== null && handles.release(o.slot)) {
+        k32().CancelIoEx(o.h, null);
+        closeHandle(o.h);
       }
     },
     async *[Symbol.asyncIterator]() {
@@ -790,14 +899,15 @@ export async function connectPipe(path: string): Promise<LocalConn> {
       null,
     );
     if (!isInvalidHandle(h)) {
+      const o = own(h, `pipe client ${path}`);
       // Bound to the port before the first read or write starts on it.
       try {
         ioPort.attach(h, path);
       } catch (e) {
-        closeHandle(h);
+        closeOwned(o);
         throw e;
       }
-      return new PipeConn(h, path, false);
+      return new PipeConn(o, path, false);
     }
     const code = k32().GetLastError();
     if (code === ERROR_FILE_NOT_FOUND) {

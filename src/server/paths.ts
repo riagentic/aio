@@ -2,7 +2,11 @@
 // Pure functions for resolving KV, SQLite, UDS, and data directory paths.
 
 import { dirname, fromFileUrl, join, resolve } from "@std/path";
-import { heldLockKey, lockDir } from "./single-instance-lock.ts";
+import {
+  _chooseLockDir,
+  heldLockKey,
+  lockDir,
+} from "./single-instance-lock.ts";
 import { log } from "../diagnostics/logger-api.ts";
 import { isPipePath, PIPE_PREFIX } from "./local-listen.ts";
 
@@ -211,6 +215,10 @@ export function resolveSocketPath(
   appId: string,
   kind?: "http",
   os: typeof Deno.build.os = Deno.build.os,
+  // A seam, because the case that matters cannot be built in a test: the
+  // fallback base is `/tmp` in production, and a test may not make the real
+  // `/tmp/aio` unusable for every other app on the machine. @internal
+  fallbackBase = "/tmp",
 ): string {
   if (os === "windows") {
     // A pipe NAME, not a file: no directory, no length limit, no unlink. The
@@ -226,23 +234,26 @@ export function resolveSocketPath(
   // reaches the instance whose lock it read.
   const sockPath = join(dir, `${heldLockKey(appId)}${suffix}`);
   if (sockPath.length > 100) {
-    log.warn(
-      `UDS path is ${sockPath.length} chars (limit ~108) — using /tmp/aio fallback`,
-    );
     // The fallback used to drop `kind`, which was survivable while there was
     // one socket per app and is not now: both listeners would resolve to the
     // same path and the second would take the first one's door.
-    const fallbackDir = "/tmp/aio";
-    // …and it used to hand back a path in a directory nothing created. With
-    // `$XDG_RUNTIME_DIR` set, `lockDir()` is somewhere else entirely, so
-    // `/tmp/aio` might not exist (bind fails with ENOENT) or might be owned by
-    // ANOTHER user with the default 0755 — the one place the "a socket is
-    // protected by its 0700 directory" guarantee did not hold. Same treatment
-    // as `lockDir()`: create it, and make it ours.
-    try {
-      Deno.mkdirSync(fallbackDir, { recursive: true });
-      if (Deno.build.os !== "windows") Deno.chmodSync(fallbackDir, 0o700);
-    } catch { /* best-effort — the bind below reports what actually failed */ }
+    //
+    // …and it used to hand back a path in a directory it only HOPED was
+    // private. With `$XDG_RUNTIME_DIR` set, `lockDir()` is somewhere else
+    // entirely, so `/tmp/aio` might not exist (bind fails with ENOENT), or
+    // might already belong to ANOTHER local account — and a mkdir + chmod that
+    // swallows its failure cannot tell that apart from success (chmod on a
+    // directory you do not own returns EPERM). A control socket is a door that
+    // lets whoever connects dispatch methods into this app, so it is not
+    // something to place hopefully.
+    //
+    // ONE decider: the same function that chooses the lock directory chooses
+    // this one — create 0700, then LOOK, fall back to a uid-scoped sibling when
+    // the shared path is not ours, and refuse loudly when neither is private.
+    const fallbackDir = _chooseLockDir(fallbackBase, "");
+    log.warn(
+      `UDS path is ${sockPath.length} chars (limit ~108) — using ${fallbackDir} fallback`,
+    );
     return join(fallbackDir, `${appId}${suffix}`);
   }
   return sockPath;

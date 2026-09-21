@@ -13,6 +13,7 @@ import type { VNode } from "./vdom-types.ts";
 import { _SignalText } from "./vdom-types.ts";
 import { _sigText } from "./vdom-helpers.ts";
 import type { Signal } from "../state/signal.ts";
+import { isSubmitControl } from "./ui-trigger.ts";
 
 /** An interactive element (has `on*` handlers) owned by a component.
  *  Named LABEL + ROLE, label by priority: `t` prop > `data-testid` >
@@ -23,7 +24,15 @@ export type UIElementInfo = {
   name: string;
   /** Lowercase tag, e.g. "button" */
   tag: string;
-  /** Event kinds the element handles, e.g. ["click"] */
+  /** Event kinds acting on this element runs a handler for, e.g. ["click"].
+   *
+   *  Its own `on*` handlers, PLUS the one HTML gives it without the author
+   *  writing anything on the element: a form's submit button carries the
+   *  FORM's `submit` (see {@link isSubmitControl}). `<button>Add</button>`
+   *  inside `<form onSubmit>` therefore reads `["submit"]` rather than `[]` —
+   *  it is the most-clicked control on the page, and an empty list said the
+   *  opposite. Drive it the way a person does: `am trigger "<…:AddButton>"
+   *  click` (there is no `submit` action — see `am trigger`'s usage). */
   events: string[];
   /** Visible text content (live at walk time, capped). Always a string: an
    *  element with nothing in it has EMPTY text, not unknown text — so an
@@ -346,6 +355,21 @@ function eventKinds(v: VNode): string[] {
     .map((k) => k.slice(2).toLowerCase());
 }
 
+/** Events the ENCLOSING `<form>` handles, carried down the walk exactly as a
+ *  wrapping `<label>`'s text is — the association is DOM nesting, so it
+ *  crosses component boundaries too (the form is usually a page's component
+ *  and the button a child's). `undefined` outside any form. */
+type FormCtx = readonly string[] | undefined;
+
+/** The events acting on `v` runs a handler for: its own, plus the enclosing
+ *  form's `submit` when `v` is that form's submit control. ONE rule, shared
+ *  with the trigger tier — {@linkcode isSubmitControl}. Pure. */
+function effectiveEvents(v: VNode, own: string[], form: FormCtx): string[] {
+  if (!form?.includes("submit") || own.includes("submit")) return own;
+  const type = typeof v.props.type === "string" ? v.props.type : undefined;
+  return isSubmitControl(String(v.tag), type) ? [...own, "submit"] : own;
+}
+
 /** Walk a component's rendered output, collecting its own interactive elements
  *  and descending into child components. */
 function walkOutput(
@@ -353,12 +377,13 @@ function walkOutput(
   owner: UISurfaceNode,
   taken: Set<string>,
   labelCtx?: LabelCtx,
+  formCtx?: FormCtx,
 ): void {
   if (out == null || typeof out !== "object") return;
   const v = out;
   if (typeof v.tag === "function") {
     owner.children.push(
-      walkComponent(v, owner.path, owner.children, labelCtx),
+      walkComponent(v, owner.path, owner.children, labelCtx, formCtx),
     );
     return;
   }
@@ -391,7 +416,7 @@ function walkOutput(
       owner.elements.push({
         name,
         tag: v.tag,
-        events,
+        events: effectiveEvents(v, events, formCtx),
         text: liveText ? capText(liveText) : staticText(v) ?? "",
         ...(el && typeof el.value === "string" ? { value: el.value } : {}),
         // The four state booleans a test asserts on, serialised WHENEVER the
@@ -429,8 +454,12 @@ function walkOutput(
   const inner = v.tag === "label"
     ? { text: labelSubtreeText(v), used: false }
     : labelCtx;
+  // Entering a <form> makes ITS handlers the effective ones for the submit
+  // control below it — same nesting rule, same crossing of component
+  // boundaries. A nested form is not valid HTML; the innermost one wins.
+  const form = v.tag === "form" ? eventKinds(v) : formCtx;
   for (const c of v.children) {
-    if (isVNode(c)) walkOutput(c, owner, taken, inner);
+    if (isVNode(c)) walkOutput(c, owner, taken, inner, form);
   }
 }
 
@@ -463,6 +492,7 @@ function walkComponent(
   parentPath: string,
   siblings: UISurfaceNode[] = [],
   labelCtx?: LabelCtx,
+  formCtx?: FormCtx,
 ): UISurfaceNode {
   const fn = v.tag as { name?: string; _lazyName?: string };
   // A resolved lazy() wrapper reports the loaded component's name.
@@ -509,7 +539,7 @@ function walkComponent(
     const t = (v._dom as { textContent?: string }).textContent?.trim();
     if (t) node.text = capText(t);
   }
-  walkOutput(v._rendered ?? null, node, new Set(), labelCtx);
+  walkOutput(v._rendered ?? null, node, new Set(), labelCtx, formCtx);
   // The subtree is built: if this component's `t` handle is ALSO the name of
   // something it rendered, the author gave that name to the element and the
   // component merely carried it. Remember it (see _forwardedHandles).

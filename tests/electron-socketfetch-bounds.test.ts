@@ -238,3 +238,129 @@ Deno.test({
     }
   },
 });
+
+Deno.test({
+  name:
+    "socketFetch: a peer that never answers is bounded, and does not wedge the rest",
+  ignore: Deno.build.os === "windows",
+  sanitizeResources: false, // aio-ok: node:http keeps its agent's sockets
+  sanitizeOps: false, // aio-ok: same
+  async fn() {
+    // The agent caps this app at AIO_MAX_SOCKETS (6) — Chromium's own
+    // per-host cap, and the thing that stopped a page of <img> tags opening
+    // 60 connections. That cap is also a queue: a request with no timeout
+    // holds its socket forever, so SIX requests the app never answers are
+    // enough to hang every later request in the window, permanently, with a
+    // blank page and nothing in any log saying why.
+    //
+    // A server that ACCEPTS and never writes a byte is exactly that peer.
+    const dir = await tempDir("aio-sockfetch-hang");
+    const sock = join(dir, "app.sock");
+    const listener = Deno.listen({ transport: "unix", path: sock });
+    const held: Deno.Conn[] = [];
+    const served = (async () => {
+      for await (const conn of listener) {
+        held.push(conn);
+        // Read the request and answer NOTHING, ever.
+        void conn.read(new Uint8Array(4096)).catch(() => {});
+      }
+    })();
+    // Short enough for a test; the knob is what the fix makes configurable.
+    Deno.env.set("AIO_SOCKET_TIMEOUT_MS", "500");
+    const fetchOne = socketFetchOn(sock);
+    try {
+      const t0 = Date.now();
+      const hung = await Promise.all(
+        Array.from({ length: 6 }, (_, i) => fetchOne(`/hang/${i}`)),
+      );
+      const dt = Date.now() - t0;
+      assertEquals(
+        hung.length,
+        6,
+        "six responses, or the assertions below prove nothing",
+      );
+      for (const r of hung) {
+        assertEquals(
+          r.status,
+          504,
+          "a request the app never answered must resolve as a gateway timeout",
+        );
+        const body = await r.text();
+        assert(
+          body.includes("/hang/"),
+          `the timeout must name the request that timed out: ${body}`,
+        );
+        assert(
+          body.includes("500"),
+          `the timeout must say after how long: ${body}`,
+        );
+      }
+      assert(
+        dt < 15_000,
+        `six unanswered requests took ${dt} ms — the bound did not apply`,
+      );
+      // …and the SEVENTH request, on the same capped agent, still gets a
+      // socket. This is the assertion a window with a hung peer fails.
+      const after = await fetchOne("/hang/next");
+      assertEquals(after.status, 504);
+    } finally {
+      Deno.env.delete("AIO_SOCKET_TIMEOUT_MS");
+      for (const c of held) {
+        try {
+          c.close();
+        } catch { /* already gone */ }
+      }
+      listener.close();
+      await served.catch(() => {});
+    }
+  },
+});
+
+Deno.test({
+  name:
+    "socketFetch: the bound is to the FIRST byte — a slow stream is not killed",
+  ignore: Deno.build.os === "windows",
+  sanitizeResources: false, // aio-ok: node:http keeps its agent's sockets
+  sanitizeOps: false, // aio-ok: same
+  async fn() {
+    // The counterpart to the test above, and the reason the deadline is armed
+    // against the RESPONSE rather than against the exchange. SSE, a long poll
+    // and a large download all go quiet for longer than any sane default; a
+    // socket-inactivity timeout would cut every one of them off mid-body and
+    // call it a fix. Once the headers are here the app has answered, and the
+    // renderer owns the stream from that point.
+    const dir = await tempDir("aio-sockfetch-slow");
+    const sock = join(dir, "app.sock");
+    const server = Deno.serve({
+      path: sock,
+      onListen: () => {},
+      handler: () =>
+        new Response(
+          new ReadableStream<Uint8Array>({
+            async pull(c) {
+              // Well past the 300 ms bound set below, with the headers long
+              // since delivered.
+              await new Promise((r) => setTimeout(r, 900));
+              c.enqueue(new TextEncoder().encode("late"));
+              c.close();
+            },
+          }),
+          { headers: { "content-type": "text/event-stream" } },
+        ),
+    });
+    Deno.env.set("AIO_SOCKET_TIMEOUT_MS", "300");
+    const fetchOne = socketFetchOn(sock);
+    try {
+      const res = await fetchOne("/stream");
+      assertEquals(res.status, 200);
+      assertEquals(
+        await res.text(),
+        "late",
+        "a stream that went quiet after its headers must still deliver",
+      );
+    } finally {
+      Deno.env.delete("AIO_SOCKET_TIMEOUT_MS");
+      await server.shutdown();
+    }
+  },
+});

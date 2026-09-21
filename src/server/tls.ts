@@ -1,7 +1,20 @@
-// Auto TLS — generates a self-signed cert via openssl, cached on disk
+// Auto TLS — generates this machine's root and each app's leaf, cached on disk
 // Used by aio.run() when --expose is active (zero-config HTTPS)
+//
+// The certificates are built in `x509.ts`, in Deno, with NO external binary.
+// They used to come from four `openssl` invocations, which made automatic
+// HTTPS impossible on Windows — it ships no openssl — so `--expose` there died
+// with `NotFound: Failed to spawn 'openssl'`. Found by running the suite on a
+// real Windows 11 VM. This file keeps the POLICY (what the root may vouch for,
+// which addresses a leaf must carry, when a cached cert is stale); `x509.ts`
+// is only the encoder.
 
-import { dirname, join } from "@std/path";
+import { join } from "@std/path";
+import {
+  certSubjectAltNames,
+  generateRoot,
+  issueLeaf as mintLeaf,
+} from "./x509.ts";
 import { homedir, hostname } from "node:os";
 import { log } from "../diagnostics/logger-api.ts";
 import { appsDirEnv } from "./app-dirs.ts";
@@ -64,31 +77,21 @@ export function currentSans(): { dns: string[]; ips: string[] } {
   return { dns: ["localhost"], ips: ["127.0.0.1", "::1", ...localIPs()] };
 }
 
-/** The SANs a cert on disk actually carries, or null when they cannot be read.
+/** The SANs a cert on disk actually carries, or null when it carries none.
  *
- *  Read with openssl rather than parsed here: this file already depends on
- *  openssl to WRITE certs, and an ASN.1 parser written to double-check the
- *  thing we just generated is a second implementation of a format neither of
- *  us should be implementing. */
-export async function certSans(
+ *  Parsed here rather than shelled out to `openssl x509 -ext subjectAltName`.
+ *  That call was the subtlest of the four: it caught a missing openssl and
+ *  returned `null`, which the caller reads as "this certificate names no
+ *  addresses" — so on Windows every boot declared the cached cert stale for
+ *  the wrong reason and then died re-issuing. One answer now means one thing.
+ *
+ *  The reader returns IPv6 in the fully expanded spelling openssl printed too
+ *  (`0:0:0:0:0:0:0:1`), so `normIp`/`sansCover` see exactly what they always
+ *  saw and no cached certificate becomes stale on upgrade. */
+export function certSans(
   certPath: string,
 ): Promise<{ dns: string[]; ips: string[] } | null> {
-  try {
-    const r = await new Deno.Command("openssl", {
-      args: ["x509", "-in", certPath, "-noout", "-ext", "subjectAltName"],
-      stdout: "piped",
-      stderr: "null",
-    }).output();
-    if (!r.success) return null;
-    const text = new TextDecoder().decode(r.stdout);
-    const dns: string[] = [];
-    const ips: string[] = [];
-    for (const m of text.matchAll(/DNS:([^,\s]+)/g)) dns.push(m[1]!);
-    for (const m of text.matchAll(/IP Address:([^,\s]+)/g)) ips.push(m[1]!);
-    return dns.length || ips.length ? { dns, ips } : null;
-  } catch {
-    return null; // no openssl — the caller decides what that means
-  }
+  return Deno.readTextFile(certPath).then(certSubjectAltNames);
 }
 
 /** One spelling for one address.
@@ -177,19 +180,17 @@ export function aioRootPaths(): { certPath: string; keyPath: string } {
  *
  *  A name type left unconstrained is UNRESTRICTED, which is why DNS and IP are
  *  both listed rather than just the one that seemed to matter. */
-const ROOT_NAME_CONSTRAINTS = [
-  "permitted;DNS:localhost",
-  "permitted;DNS:.local",
-  "permitted;DNS:.localhost",
-  "permitted;IP:127.0.0.0/255.0.0.0",
-  "permitted;IP:10.0.0.0/255.0.0.0",
-  "permitted;IP:192.168.0.0/255.255.0.0",
-  "permitted;IP:172.16.0.0/255.240.0.0",
-  "permitted;IP:169.254.0.0/255.255.0.0",
-  "permitted;IP:0:0:0:0:0:0:0:1/ffff:ffff:ffff:ffff:ffff:ffff:ffff:ffff",
-  "permitted;IP:fc00:0:0:0:0:0:0:0/fe00:0:0:0:0:0:0:0",
-  "permitted;IP:fe80:0:0:0:0:0:0:0/ffc0:0:0:0:0:0:0:0",
-].join(",");
+export const ROOT_PERMITTED_DNS = ["localhost", ".local", ".localhost"];
+export const ROOT_PERMITTED_IPS: readonly (readonly [string, string])[] = [
+  ["127.0.0.0", "255.0.0.0"],
+  ["10.0.0.0", "255.0.0.0"],
+  ["192.168.0.0", "255.255.0.0"],
+  ["172.16.0.0", "255.240.0.0"],
+  ["169.254.0.0", "255.255.0.0"],
+  ["::1", "ffff:ffff:ffff:ffff:ffff:ffff:ffff:ffff"],
+  ["fc00::", "fe00::"],
+  ["fe80::", "ffc0::"],
+];
 
 /** The machine-wide aio root: generated once, reused by every aio app, and the
  *  ONE certificate a person ever has to install.
@@ -219,59 +220,18 @@ export async function loadOrCreateAioRoot(): Promise<
     return { certPath, keyPath, cert, created: false };
   } catch { /* generate below */ }
 
-  const cfg = join(dir, ".openssl-root.cnf");
-  try {
-    await Deno.writeTextFile(
-      cfg,
-      [
-        "[req]",
-        "distinguished_name = dn",
-        "x509_extensions = v3",
-        "prompt = no",
-        "[dn]",
-        // Names the SOFTWARE, not one app — this is what the user sees in
-        // their browser's certificate manager, and it must be recognisable
-        // enough to remove on purpose later.
-        `CN = aio local root (${hostname()})`,
-        "O = aio",
-        "[v3]",
-        "basicConstraints = critical,CA:TRUE,pathlen:0",
-        "keyUsage = critical,keyCertSign,cRLSign",
-        "subjectKeyIdentifier = hash",
-        `nameConstraints = critical,${ROOT_NAME_CONSTRAINTS}`,
-      ].join("\n"),
-    );
-    const r = await new Deno.Command("openssl", {
-      args: [
-        "req",
-        "-x509",
-        "-newkey",
-        "ec",
-        "-pkeyopt",
-        "ec_paramgen_curve:P-256",
-        "-keyout",
-        keyPath,
-        "-out",
-        certPath,
-        "-days",
-        "3650",
-        "-nodes",
-        "-config",
-        cfg,
-      ],
-      stdout: "null",
-      stderr: "piped",
-    }).output();
-    if (!r.success) {
-      throw new Error(
-        `openssl (aio root) failed: ${
-          new TextDecoder().decode(r.stderr).trim()
-        }`,
-      );
-    }
-  } finally {
-    await Deno.remove(cfg).catch(() => {});
-  }
+  // Names the SOFTWARE, not one app — this is what the user sees in their
+  // browser's certificate manager, and it must be recognisable enough to
+  // remove on purpose later.
+  const { certPem, keyPem } = await generateRoot({
+    commonName: `aio local root (${hostname()})`,
+    org: "aio",
+    days: 3650,
+    permittedDns: ROOT_PERMITTED_DNS,
+    permittedIpMasks: ROOT_PERMITTED_IPS,
+  });
+  await Deno.writeTextFile(certPath, certPem);
+  await Deno.writeTextFile(keyPath, keyPem);
   try {
     if (Deno.build.os !== "windows") await Deno.chmod(keyPath, 0o600);
   } catch { /* best-effort */ }
@@ -294,92 +254,19 @@ async function issueLeaf(
   appId?: string,
 ): Promise<void> {
   const { dns, ips } = currentSans();
-  const sanLines = [
-    ...dns.map((d, i) => `DNS.${i + 1} = ${d}`),
-    ...ips.map((ip, i) => `IP.${i + 1} = ${ip}`),
-  ].join("\n");
-  const dir = dirname(keyPath);
-  const reqCfg = join(dir, ".openssl-leaf.cnf");
-  const csrPath = join(dir, ".leaf.csr");
-  try {
-    await Deno.writeTextFile(
-      reqCfg,
-      [
-        "[req]",
-        "distinguished_name = dn",
-        "req_extensions = v3",
-        "prompt = no",
-        "[dn]",
-        `CN = ${certCommonName(appId)}`,
-        "[v3]",
-        "basicConstraints = critical,CA:FALSE",
-        "keyUsage = critical,digitalSignature,keyEncipherment",
-        "extendedKeyUsage = serverAuth",
-        "subjectAltName = @sans",
-        "[sans]",
-        sanLines,
-      ].join("\n"),
-    );
-    const csr = await new Deno.Command("openssl", {
-      args: [
-        "req",
-        "-new",
-        "-newkey",
-        "ec",
-        "-pkeyopt",
-        "ec_paramgen_curve:P-256",
-        "-keyout",
-        keyPath,
-        "-out",
-        csrPath,
-        "-nodes",
-        "-config",
-        reqCfg,
-      ],
-      stdout: "null",
-      stderr: "piped",
-    }).output();
-    if (!csr.success) {
-      throw new Error(
-        `openssl (leaf csr) failed: ${
-          new TextDecoder().decode(csr.stderr).trim()
-        }`,
-      );
-    }
-    const sign = await new Deno.Command("openssl", {
-      args: [
-        "x509",
-        "-req",
-        "-in",
-        csrPath,
-        "-CA",
-        caCertPath,
-        "-CAkey",
-        caKeyPath,
-        "-CAcreateserial",
-        "-out",
-        certPath,
-        "-days",
-        "825",
-        "-extfile",
-        reqCfg,
-        "-extensions",
-        "v3",
-      ],
-      stdout: "null",
-      stderr: "piped",
-    }).output();
-    if (!sign.success) {
-      throw new Error(
-        `openssl (leaf sign) failed: ${
-          new TextDecoder().decode(sign.stderr).trim()
-        }`,
-      );
-    }
-  } finally {
-    await Deno.remove(reqCfg).catch(() => {});
-    await Deno.remove(csrPath).catch(() => {});
-  }
+  const { certPem, keyPem } = await mintLeaf({
+    commonName: certCommonName(appId),
+    dns,
+    ips,
+    days: 825,
+    // The CA files as they are ON DISK — which on an upgraded machine are the
+    // ones openssl wrote. The issuer DN is copied out of that certificate
+    // verbatim, so a root from either era signs a chain a client can build.
+    caCertPem: await Deno.readTextFile(caCertPath),
+    caKeyPem: await Deno.readTextFile(caKeyPath),
+  });
+  await Deno.writeTextFile(certPath, certPem);
+  await Deno.writeTextFile(keyPath, keyPem);
   try {
     if (Deno.build.os !== "windows") await Deno.chmod(keyPath, 0o600);
   } catch { /* best-effort */ }
@@ -496,8 +383,8 @@ export async function loadOrCreateCert(
   // correct without knowing anything changed: the leaf proves the address, the
   // root is the anchor, and one path still means "trust this".
   //
-  // `certSans` stays honest — openssl reads the FIRST certificate in a file,
-  // which is the leaf.
+  // `certSans` stays honest — the reader takes the FIRST certificate in a
+  // file, which is the leaf.
   const leaf = await Deno.readTextFile(certPath);
   const ca = await Deno.readTextFile(caCertPath);
   const chain = joinChain(leaf, ca);

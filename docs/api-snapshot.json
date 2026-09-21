@@ -87,18 +87,20 @@
         },
         "AioMeta": {
           "kind": "typeAlias",
-          "sig": "a3d4ec7be2c37d70",
+          "sig": "7a58cd322aee2798",
           "members": {
             "title": "opt:2fb40568533c1a6d",
             "width": "opt:f6522636230fa080",
             "height": "opt:f6522636230fa080",
             "childWindows": "opt:0ecca0fe3beba89b",
+            "requireSandbox": "opt:0ecca0fe3beba89b",
+            "unsandboxedChildWindows": "opt:0ecca0fe3beba89b",
             "chrome": "opt:0cb8e5493e58cfb7",
             "tray": "opt:bb7b2f54156b6da6",
             "profileName": "opt:2fb40568533c1a6d"
           },
           "sigs": [
-            "a3d4ec7be2c37d70"
+            "7a58cd322aee2798"
           ]
         },
         "AioUser": {
@@ -362,7 +364,7 @@
         },
         "CellsConfig": {
           "kind": "typeAlias",
-          "sig": "326291dd83527440",
+          "sig": "29dd6426b8fa4b46",
           "members": {
             "appId": "opt:2fb40568533c1a6d",
             "cells": "opt:58dbae2820cab862",
@@ -419,6 +421,7 @@
             "journal": "opt:0ecca0fe3beba89b",
             "redactActions": "opt:1a1f5c423a7cdab2",
             "childWindows": "opt:0ecca0fe3beba89b",
+            "electron": "opt:e2fce43e3ac71e0d",
             "libraryMode": "opt:0ecca0fe3beba89b",
             "_workerEntry": "opt:2fb40568533c1a6d",
             "syncIntervalMs": "opt:f6522636230fa080",
@@ -452,7 +455,7 @@
             "onCheckpointRestore": "opt:bc30aaf8d4dd00e2"
           },
           "sigs": [
-            "326291dd83527440"
+            "29dd6426b8fa4b46"
           ]
         },
         "CellState": {
@@ -783,6 +786,17 @@
           },
           "sigs": [
             "04545042bd0b0b9b"
+          ]
+        },
+        "ElectronConfig": {
+          "kind": "typeAlias",
+          "sig": "4b2a128528d98bb5",
+          "members": {
+            "requireSandbox": "opt:0ecca0fe3beba89b",
+            "unsandboxedChildWindows": "opt:0ecca0fe3beba89b"
+          },
+          "sigs": [
+            "4b2a128528d98bb5"
           ]
         },
         "errorCode": {
@@ -2048,12 +2062,13 @@
         },
         "collectHead": {
           "kind": "function",
-          "sig": "6ef6486f1aff326f",
+          "sig": "7181ceb508794c97",
           "members": {
+            "param0": "opt:b019059a2f930138|3ca36bd054eb18b8~object",
             "return": "req:2fb40568533c1a6d"
           },
           "sigs": [
-            "5f76d1167b9cb1ef"
+            "e228784f83c4412d"
           ]
         },
         "ComponentFn": {
@@ -2594,6 +2609,17 @@
             "ab8dee5e9b6487f0"
           ]
         },
+        "onUnmount": {
+          "kind": "function",
+          "sig": "9cb67902b061b0ee",
+          "members": {
+            "param0": "req:c921f2c8abed9b77|c1d58a2d45e92ab6~fnOrConstructor",
+            "return": "req:b5f6ae1b8a43e31d"
+          },
+          "sigs": [
+            "ab8dee5e9b6487f0"
+          ]
+        },
         "onWindowEvent": {
           "kind": "function",
           "sig": "df3c30ce61846d7c",
@@ -2695,13 +2721,14 @@
         },
         "renderToStream": {
           "kind": "function",
-          "sig": "695ad4d4ebdf800c",
+          "sig": "986230b1b096f5ee",
           "members": {
             "param0": "req:db1f3454b1ecdf8d|336e2b46aff6c271~string+6aa3b7f779609e8d~VNode+b3d9da3d9fc5eb30~number+e47c90b8d1952424~null",
+            "param1": "opt:b019059a2f930138|3ca36bd054eb18b8~object",
             "return": "req:2b09cfd8328d90bf"
           },
           "sigs": [
-            "990c58fd0f2e92a4"
+            "cbf9fab39fc856a8"
           ]
         },
         "renderToString": {
@@ -3607,6 +3634,19 @@
             "6c5503f4276afd96"
           ]
         },
+        "newestSource": {
+          "kind": "function",
+          "sig": "996c6f7b43bc8681",
+          "members": {
+            "param0": "req:f6c2bce213147f9c|336e2b46aff6c271~string",
+            "param1": "req:e3006f4ba80686dd|",
+            "param2": "req:6e8885a34c57ebd3|",
+            "return": "req:05437ff26b0894f8"
+          },
+          "sigs": [
+            "1bfb86ce6b39fd1f"
+          ]
+        },
         "pickApk": {
           "kind": "function",
           "sig": "d041413fb60a5a55",
@@ -3629,6 +3669,18 @@
           },
           "sigs": [
             "ff035c1d21046a5a"
+          ]
+        },
+        "staleApkRefusal": {
+          "kind": "function",
+          "sig": "9bf3ae54e1b98545",
+          "members": {
+            "param0": "req:02e1ba36a738d74a|49049780851be256~typeLiteral",
+            "param1": "req:89ad34d7f4fad17c|033943b6186136b7~typeLiteral+e47c90b8d1952424~null",
+            "return": "req:cb5114588202887c"
+          },
+          "sigs": [
+            "57d9cd7ee151b6b5"
           ]
         }
       }
@@ -4922,7 +4974,7 @@
         },
         "ReportSources": {
           "kind": "typeAlias",
-          "sig": "878f7c73ffb8584c",
+          "sig": "6ce9c5f78cfeb02d",
           "members": {
             "appId": "req:2fb40568533c1a6d",
             "appVersion": "req:2fb40568533c1a6d",
@@ -4937,10 +4989,11 @@
             "getState": "opt:b9ff0dae8888ff90",
             "getTimeline": "opt:6ffb5a87409e1740",
             "redact": "opt:847e053ae93a2268",
-            "visible": "opt:cc62c3e198e8285a"
+            "visible": "opt:cc62c3e198e8285a",
+            "visibleFilters": "opt:5cd01bef957c7370"
           },
           "sigs": [
-            "878f7c73ffb8584c"
+            "6ce9c5f78cfeb02d"
           ]
         },
         "SubmittedReport": {
@@ -8197,6 +8250,10 @@
           "sig": "verb"
         },
         "am profile": {
+          "kind": "verb",
+          "sig": "verb"
+        },
+        "am prune": {
           "kind": "verb",
           "sig": "verb"
         },

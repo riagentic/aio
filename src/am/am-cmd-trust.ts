@@ -102,8 +102,10 @@ export async function cmdTrust(
     root = await loadOrCreateAioRoot();
   } catch (e) {
     fail(
-      `could not read or create this machine's aio root: ${e}. TLS issuance ` +
-        `needs openssl on PATH.`,
+      `could not read or create this machine's aio root: ${e}. Certificates ` +
+        `are generated in-process and need nothing installed, so this is a ` +
+        `filesystem problem — check that the directory is writable and ` +
+        `owned by you.`,
       mode,
     );
     return;

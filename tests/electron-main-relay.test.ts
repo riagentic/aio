@@ -84,7 +84,9 @@ const webContents = {
   print: () => {}, reloadIgnoringCache: () => {}, toggleDevTools: () => {},
 };
 class BrowserWindow {
-  constructor(o) { this.opts = o; this.webContents = webContents; }
+  // Every window main.cjs constructs, with the webPreferences it asked for —
+  // the only way to see what SANDBOX a child window actually got.
+  constructor(o) { this.opts = o; this.webContents = webContents; ev({ ev: 'newWindow', opts: o }); }
   on() {} center() {} setIcon() {} setMenuBarVisibility() {}
   loadURL(u) { _curUrl = u; ev({ ev: 'loadURL', url: u }); }
   isDestroyed() { return false; }
@@ -214,6 +216,8 @@ async function startMain(
     httpSocketPath?: string;
     baseDir?: string;
     childWindows?: boolean;
+    /** `electron: { unsandboxedChildWindows: true }` — the app's opt-in. */
+    childWindowsUnsandboxed?: boolean;
     hidden?: boolean;
   } = {},
 ) {
@@ -237,7 +241,14 @@ async function startMain(
     title: opts.title ?? "harness",
     httpSocketPath: opts.httpSocketPath,
     baseDir: opts.baseDir,
-    ...(opts.childWindows ? { meta: { childWindows: true } } : {}),
+    ...(opts.childWindows || opts.childWindowsUnsandboxed
+      ? {
+        meta: {
+          childWindows: !!opts.childWindows,
+          unsandboxedChildWindows: !!opts.childWindowsUnsandboxed,
+        },
+      }
+      : {}),
   });
   // FAIL LOUD, NEVER HANG. The generated program is a template literal
   // assembled from a dozen fragments, and one stray backslash or backtick in
@@ -457,6 +468,7 @@ async function withHarness(
     httpSocket?: boolean;
     baseDir?: (dir: string) => Promise<string>;
     childWindows?: boolean;
+    childWindowsUnsandboxed?: boolean;
     hidden?: boolean;
   } = {},
 ): Promise<void> {
@@ -467,6 +479,7 @@ async function withHarness(
     httpSocketPath: opts.httpSocket ? join(dir, "http.sock") : undefined,
     baseDir: opts.baseDir ? await opts.baseDir(dir) : undefined,
     childWindows: opts.childWindows,
+    childWindowsUnsandboxed: opts.childWindowsUnsandboxed,
     hidden: opts.hidden,
   });
   try {
@@ -1621,6 +1634,116 @@ Deno.test("electron main: openWindow refusals name the guardrail; a valid reques
     childWindows: true,
     baseDir: async (dir) => {
       app = await Deno.realPath(
+        // aio-ok: inside the harness's own dir, which it removes recursively
+        await Deno.makeTempDir({ dir, prefix: "app-" }),
+      );
+      await Deno.writeTextFile(join(app, "p.js"), "");
+      return app;
+    },
+  });
+});
+
+// ── openWindow: who decides the child window's SANDBOX ────────────────────
+//
+// An audit, §6: `const sandbox = payload.sandbox === false ? false : true` read
+// the RENDERER's IPC payload and nothing else. A compromised page could open a
+// page it controls, with an app preload, in an UNSANDBOXED renderer — with a
+// console.warn as the entire defence. The app it belongs to had no say at all.
+//
+// Now the app decides, in its own source: `electron: { unsandboxedChildWindows:
+// true }`. Without it a `sandbox: false` request is REFUSED with the reason (not
+// quietly upgraded to a sandboxed window — the page asked for something it will
+// not get, and silence there is how the class started).
+//
+// Asserted on the WINDOW the real generated main.cjs constructs, not on the
+// text that constructs it: the stub reports every `new BrowserWindow(opts)`.
+const childWindows = (main: { events: Ev[] }) =>
+  main.events.filter((e) =>
+    e.ev === "newWindow" &&
+    (e.opts as { webPreferences?: Record<string, unknown> })?.webPreferences
+        ?.sandbox !== undefined
+  );
+
+Deno.test("electron main: a renderer cannot turn the child-window sandbox off by itself", async () => {
+  let app = "";
+  await withHarness(async (_srv, main) => {
+    const open = (arg: Record<string, unknown>) =>
+      main.cmd({ cmd: "ipc", channel: "__aio:openWindow", arg });
+    const said = () => main.stderr.join("") + main.stdout.join("");
+
+    // The renderer asks for an unsandboxed window; the app never opted in.
+    await open({
+      url: "https://x.test",
+      preload: join(app, "p.js"),
+      sandbox: false,
+    });
+    await main.waitFor(() => said().includes("unsandboxedChildWindows"));
+    assertEquals(
+      childWindows(main),
+      [],
+      "an unsandboxed child window was opened on the renderer's word alone",
+    );
+    assertEquals(
+      main.events.filter((e) =>
+        e.ev === "loadURL" && e.url === "https://x.test/"
+      ),
+      [],
+      "the refused page was loaded anyway",
+    );
+
+    // …and the ordinary request still opens, sandboxed.
+    await open({ url: "https://x.test", preload: join(app, "p.js") });
+    await main.waitFor(() => childWindows(main).length === 1);
+    assertEquals(
+      (childWindows(main)[0]!.opts as {
+        webPreferences: { sandbox: boolean };
+      }).webPreferences.sandbox,
+      true,
+    );
+  }, {
+    childWindows: true,
+    baseDir: async (dir) => {
+      app = await Deno.realPath(
+        // aio-ok: inside the harness's own dir, which it removes recursively
+        await Deno.makeTempDir({ dir, prefix: "app-" }),
+      );
+      await Deno.writeTextFile(join(app, "p.js"), "");
+      return app;
+    },
+  });
+});
+
+Deno.test("electron main: with the app's opt-in, sandbox:false is honoured", async () => {
+  let app = "";
+  await withHarness(async (_srv, main) => {
+    await main.cmd({
+      cmd: "ipc",
+      channel: "__aio:openWindow",
+      arg: {
+        url: "https://x.test",
+        preload: join(app, "p.js"),
+        sandbox: false,
+      },
+    });
+    await main.waitFor(() => childWindows(main).length === 1);
+    assertEquals(
+      (childWindows(main)[0]!.opts as {
+        webPreferences: { sandbox: boolean };
+      }).webPreferences.sandbox,
+      false,
+    );
+    assert(
+      (main.stderr.join("") + main.stdout.join("")).includes(
+        "sandbox DISABLED",
+      ),
+      "an unsandboxed window is announced every time, opt-in or not",
+    );
+  }, {
+    childWindows: true,
+    childWindowsUnsandboxed: true,
+    baseDir: async (dir) => {
+      app = await Deno.realPath(
+        // aio-ok: inside the harness's own dir, which it removes recursively
         await Deno.makeTempDir({ dir, prefix: "app-" }),
       );
       await Deno.writeTextFile(join(app, "p.js"), "");

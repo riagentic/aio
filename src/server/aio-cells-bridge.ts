@@ -83,7 +83,16 @@ function inAppScope<T>(scope: AppScope | undefined, fn: () => T): T {
 
 /** Whether a top-level state key survives a `persist`/`ui` field filter.
  *  Mirrors the runtime filter semantics ("all"/"none"/include/exclude; default
- *  = "all"). Powers the trojan `fields` route (amui State overview). */
+ *  = "all"). Powers the trojan `fields` route (amui State overview).
+ *
+ *  KEY-LEVEL ONLY, and that is all this answer may ever be used for. A dot
+ *  path flattens to its head here (`exclude: ["seeds.encSeed"]` ⇒ the key
+ *  `seeds` ships), which is the right answer for a badge saying "this key
+ *  reaches the UI" and the WRONG one for anything that screens VALUES: a bug
+ *  report built on this map kept every row's ciphertext. Screening a value
+ *  takes the filter itself (`_cellVisible` / `_cellPersist`) through
+ *  `applyCellFieldFilter` — the walker the wire, the patch path, the client
+ *  read seam and the persistence read-back all share. */
 function fieldIncluded(
   key: string,
   filter: CellFieldFilter | undefined,
@@ -472,6 +481,27 @@ export function buildLegacyConfig(
     _cellPersistShaped: composed.cells
       .filter((c) => c.__aio.persistTransform && c.__aio.persist !== "none")
       .map((c) => c.__aio.id),
+    // Cell id → the `visible` filter a door that screens VALUES with NO CLIENT
+    // in hand must apply. The flags below flatten a dot path to its top-level
+    // key (all the `fields` overview needs), so the bug report takes this one
+    // and runs it through `applyCellFieldFilter`.
+    //
+    // A per-user cell (`visible: { forUser }`) reduces to an EMPTY ALLOWLIST,
+    // and that is the whole point of computing this here rather than at each
+    // door: such a cell is screened TWICE on the wire — the structural filter,
+    // then a callback run once per client (`decideForUser`) — and the second
+    // screen has no answer without a client. Handing out the structural filter
+    // alone put every user's rows in the file `feedback:` writes and POSTs.
+    // This is a SCREEN, not a description: what such a cell really declares is
+    // in the startup visibility report (`buildVisibilityReport`, which prints
+    // `forUser`), because no single filter describes a per-client callback.
+    _cellVisible: Object.fromEntries(
+      composed.cells
+        .filter((c) => c.__aio.ui !== undefined || c.__aio.uiForUser)
+        .map((
+          c,
+        ) => [c.__aio.id, c.__aio.uiForUser ? { include: [] } : c.__aio.ui!]),
+    ),
     _cellFields: Object.fromEntries(
       composed.cells.map((c) => [
         c.__aio.id,

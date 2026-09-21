@@ -4,7 +4,6 @@ import type { VNode } from "./vdom.ts";
 import {
   _enterSsr,
   _exitSsr,
-  _invokeSsrStartHook,
   _SignalText,
   _sigText,
   ErrorBoundary,
@@ -28,6 +27,13 @@ import { isDevMode } from "../state/dev-flag.ts";
 import { resolveSignalProp } from "./signal-binding.ts";
 // The attribute rule and the empty-region rule are shared with renderToString
 // — see _renderPropsHtml and _regionHtml.
+import {
+  _ssrRenderBindKey,
+  _ssrRenderFinish,
+  _ssrRenderNew,
+  _ssrRenderOf,
+  _ssrRenderStart,
+} from "./ssr-render.ts";
 import {
   _fallbackHtml,
   _regionHtml,
@@ -125,11 +131,18 @@ function _renderSync(
   const ownValue = resolveSignalProp(
     vnode.props.value ?? vnode.props.defaultValue,
   );
-  const props = ssrOptionProps(tag, vnode.props, vnode.children, ownValue);
+  const render = _ssrRenderOf(scope);
+  const props = ssrOptionProps(
+    render,
+    tag,
+    vnode.props,
+    vnode.children,
+    ownValue,
+  );
   let html = `<${tag}${_renderProps(props, tag)}>`;
   if (selfClosing) return html;
   const areaText = _ssrTextareaText(vnode);
-  const inSelect = ssrOpenSelect(tag, ownValue);
+  const inSelect = ssrOpenSelect(render, tag, ownValue);
   try {
     if (_hasRawHtml(vnode.props)) {
       html += (vnode.props.dangerouslySetInnerHTML as { __html: string })
@@ -149,7 +162,7 @@ function _renderSync(
       }
     }
   } finally {
-    ssrCloseSelect(inSelect);
+    ssrCloseSelect(render, inSelect);
   }
   html += `</${tag}>`;
   return html;
@@ -172,20 +185,38 @@ function _regionSync(
  * Streaming SSR — async generator yielding HTML chunks.
  * Renders elements by yielding opening tag, then children, then closing tag.
  * Suspense boundaries with lazy children yield fallback content.
+ *
+ * Every top-level stream renders in state of its OWN — its `useId` sequence,
+ * the `<head>` its components ask for, the `<select>` scopes it opens — so two
+ * responses being written at once can neither read nor reset each other's. See
+ * air/ssr-render.ts for what that used to cost.
+ *
+ * @param key Anything that identifies THIS response — the `Request` is the
+ * natural one. Pass the same object to {@linkcode collectHead} and you get
+ * exactly this render's head back, however many other renders overlapped it.
+ * Omitted, nothing changes: the render is still its own, and `collectHead()`
+ * answers for the most recent one.
  */
 export async function* renderToStream(
   vnode: VNode | string | number | null,
+  key?: object,
 ): AsyncGenerator<string, void, unknown> {
-  // AIO-191: reset SSR ID counter so concurrent requests get unique IDs
-  _invokeSsrStartHook();
-  // …and SAY that a server render is in progress, for the whole stream. Every
-  // hook that asks `_isSsrRendering()` took the client branch here, because
-  // only `renderToString` had ever set the flag — see `_enterSsr`.
+  const render = _ssrRenderNew("stream");
+  if (key) _ssrRenderBindKey(key, render);
+  const scope = _ssrRootScope(render);
+  // A stream nested inside a server component call is part of the enclosing
+  // page, so it inherits that render instead of opening one of its own.
+  const isTopLevel = _ssrRenderOf(scope) === render;
+  if (isTopLevel) _ssrRenderStart(render);
+  // SAY that a server render is in progress, for the whole stream. Every hook
+  // that asks `_isSsrRendering()` took the client branch here, because only
+  // `renderToString` had ever set the flag — see `_enterSsr`.
   _enterSsr();
   try {
-    yield* _stream(vnode, _ssrRootScope());
+    yield* _stream(vnode, scope);
   } finally {
     _exitSsr();
+    if (isTopLevel) _ssrRenderFinish(render);
   }
 }
 
@@ -327,15 +358,16 @@ async function* _stream(
   const ownValue = resolveSignalProp(
     vnode.props.value ?? vnode.props.defaultValue,
   );
+  const render = _ssrRenderOf(scope);
   yield `<${tag}${
     _renderProps(
-      ssrOptionProps(tag, vnode.props, vnode.children, ownValue),
+      ssrOptionProps(render, tag, vnode.props, vnode.children, ownValue),
       tag,
     )
   }>`;
   if (selfClosing) return 1;
   const areaText = _ssrTextareaText(vnode);
-  const inSelect = ssrOpenSelect(tag, ownValue);
+  const inSelect = ssrOpenSelect(render, tag, ownValue);
   try {
     if (_hasRawHtml(vnode.props)) {
       yield (vnode.props.dangerouslySetInnerHTML as { __html: string }).__html;
@@ -348,7 +380,7 @@ async function* _stream(
       }
     } else for (const child of vnode.children) yield* _stream(child, scope);
   } finally {
-    ssrCloseSelect(inSelect);
+    ssrCloseSelect(render, inSelect);
   }
   yield `</${tag}>`;
   return 1;

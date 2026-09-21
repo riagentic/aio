@@ -5,7 +5,7 @@
 // This file is the thin orchestrator. Logic lives in:
 //   renderer-types.ts    — shared interfaces and helpers
 //   renderer-state.ts    — global mutable vars (collector, instanceStack, activeRoot)
-//   renderer-lifecycle.ts — onMount, onCleanup, useRef, useSignal, useId, useOptimistic
+//   renderer-lifecycle.ts — onMount, onCleanup, onUnmount, useRef, useSignal, useId, useOptimistic
 //   renderer-context.ts  — createContext, useContext, useContextSelector
 //   renderer-flush.ts    — afterRender, flush scheduler, full root re-render
 //   renderer-rerender.ts — per-component re-render engine, hooks factory
@@ -16,13 +16,10 @@ import {
   _render,
   _setDelegationRoot,
   _setDevA11yCheck,
-  _setSsrStartHook,
   _teardownDelegation,
   h,
   setDevMode as _setDevModeVdom,
 } from "./vdom.ts";
-import { _resetHeadSsr } from "./head.ts";
-import { _resetSsrSelect } from "./ssr-utils.ts";
 import { _detachRef } from "./vdom-create.ts";
 import { _cleanupActions, _unbindSignalText } from "./vdom-helpers.ts";
 import { _componentName } from "./hook-error.ts";
@@ -41,12 +38,7 @@ import {
   _rootStateMap,
   _setActiveRoot,
 } from "./renderer-state.ts";
-import {
-  _resetSsrIdCounter,
-  onCleanup,
-  onMount,
-  useRef,
-} from "./renderer-lifecycle.ts";
+import { onCleanup, onMount, useRef } from "./renderer-lifecycle.ts";
 import {
   _flushAfterRender,
   _flushPending,
@@ -65,11 +57,16 @@ import { _setHydrateDoc } from "./renderer-hydrate.ts";
 
 // -- Re-exports (public API -- all importers use aio-renderer.ts) ------
 export type { MountHandle } from "./renderer-types.ts";
+// Re-exported straight from its module: this file no longer calls it. The SSR
+// start hook it used to serve is gone — a server render owns its own id
+// sequence now (see air/ssr-render.ts), and this is the seam `aio/ui` uses to
+// make control ids predictable in a test.
+export { _resetSsrIdCounter } from "./renderer-lifecycle.ts";
 export {
-  _resetSsrIdCounter,
   onCleanup,
   onGlobalKey,
   onMount,
+  onUnmount,
   onWindowEvent,
   useId,
   useOptimistic,
@@ -311,15 +308,12 @@ _setDevA11yCheck(_devA11yCheck);
 _setLifecycleHooks(onMount, onCleanup, afterRender);
 _setGroupAfterRender(afterRender, useRef);
 
-// Wire the per-render resets into renderToString: the useId counter and the
-// collected <head> (one request's title must never leak into the next).
-_setSsrStartHook(() => {
-  _resetSsrIdCounter();
-  _resetHeadSsr();
-  // …and the <select> scope stack, for the same reason: a render that threw
-  // partway leaves one open, and the next request's options would inherit it.
-  _resetSsrSelect();
-});
+// Nothing to wire at the start of a server render any more. The `useId`
+// counter, the collected <head> and the <select> scope stack used to be
+// module-wide and were RESET here per render — which is the same statement as
+// "every render shares them", and is what let two concurrent `renderToStream`s
+// hand each other's pages the wrong ids and the wrong <title> (see
+// air/ssr-render.ts). Each render owns its own now.
 
 // -- Mount -------------------------------------------------------------
 

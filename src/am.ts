@@ -64,6 +64,7 @@ import { cmdPublish } from "./am/am-cmd-publish.ts";
 import { cmdTrust } from "./am/am-cmd-trust.ts";
 import { cmdLink } from "./am/am-cmd-link.ts";
 import { cmdFix } from "./am/am-cmd-fix.ts";
+import { cmdPrune } from "./am/am-cmd-prune.ts";
 import { cmdDoctor } from "./am/am-cmd-doctor.ts";
 import { cmdAuth } from "./am/am-cmd-auth.ts";
 
@@ -191,6 +192,10 @@ const COMMANDS: Record<string, CmdHandler> = {
   theme: cmdTheme, // adopt aio's stylesheet INTO the app, as a file it owns
   link: cmdLink, // just the dep/aio symlink
   fix: cmdFix, // full clone repair (symlink + env + electron + config + …)
+  // The shared Electron runtime cache, which nothing ever shrank: report
+  // first, delete only with --yes. Machine-wide, so it can never be a
+  // side effect of `fix` — see am-cmd-prune.ts.
+  prune: cmdPrune,
   uninstall: cmdUninstall,
   remove: cmdRemove, // an installed APP; `uninstall` is am itself
   installed: cmdInstalled,

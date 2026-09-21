@@ -147,11 +147,20 @@ host: a failure that appears in production only, silently, at the moment a user
 most needs the update.
 
 `target` is one of `UPDATE_TARGETS`: `"binary"`, `"appimage"`,
-`"electron-appimage"`, `"electron-zip"`, `"android"`, `"source"`. Validate a
-string with `isUpdateTarget(v)` rather than casting — `--target=binry` used to
-sail through as a `UpdateTarget` and produce a perfectly signed manifest that
-every client refused with "target mismatch", days later, on someone else's
-machine.
+`"electron-appimage"`, `"electron-zip"`, `"android"`, `"macos-app"`, `"source"`.
+Validate a string with `isUpdateTarget(v)` rather than casting —
+`--target=binry` used to sail through as a `UpdateTarget` and produce a
+perfectly signed manifest that every client refused with "target mismatch", days
+later, on someone else's machine.
+
+Two of those install NOTHING, because the OS owns the step: `"android"` (an APK
+goes through the system installer) and `"macos-app"` (every file in a `.app` is
+covered by the bundle's code signature, so replacing one from inside leaves an
+app macOS will not open). A running install of either still CHECKS for updates
+and still tells its user a new version exists — it answers `incompatible` with
+the download link and the manual step, never `offer`. Before 1.0.7-beta a macOS
+`.app` reported itself as `"binary"` and would have accepted a plain-binary
+release over `Contents/MacOS/<exe>`, breaking its own seal.
 
 ## What the signature covers — `manifestCore`
 

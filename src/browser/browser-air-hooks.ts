@@ -33,7 +33,8 @@ export function useAio<
  *  threw, on one target only. */
 export { useLocal } from "../adapters/air.ts";
 
-/** AIR useConnected -- signal-based connection status. Calls ensureConnected(). */
+/** AIR useConnected -- signal-based connection status. Calls ensureConnected().
+ *  @tier Advanced */
 export function useConnected(): boolean {
   ensureConnected();
   return _airUseConnected();
@@ -41,7 +42,7 @@ export function useConnected(): boolean {
 
 /** Derives state from a transformation, preserving element-level references.
  *  Signal-based -- reads auto-track in AIR renderer scope.
- */
+ *  @tier Advanced */
 export function useProjection<T>(fn: () => T, _deps?: unknown[]): T {
   // In AIR, fn() reads signals which auto-track (deps ignored).
   // useRef persists prev across renders for reference-stable memo.

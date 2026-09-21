@@ -34,7 +34,13 @@ const React: Any = await import("react");
 const createRoot: Any = ((await import("react-dom/client")) as Any).createRoot;
 delete (globalThis as Any).window;
 delete (globalThis as Any).document;
-addEventListener("unload", () => void closeWindow(importWindow));
+// Closed HERE, not from an `unload` handler. It exists only so `react` and
+// `react-dom/client` see a DOM while they initialise; both have finished
+// above, and `window`/`document` are already off the global. An unload
+// handler cannot await, so it dropped `closeWindow`'s promise and left
+// happy-dom's settle timer armed — the same unawaited-close shape that cost a
+// shard in tests/air-ssr-attr-name.test.ts.
+await closeWindow(importWindow);
 type Kit = {
   h: Any;
   Fragment: Any;

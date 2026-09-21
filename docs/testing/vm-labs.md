@@ -153,7 +153,7 @@ host and the new file is there, no restart, no copy.
 Verified by typing it in: a real Windows 11 desktop and a real macOS Sonoma one
 both fetch the host's `dist/` over that URL.
 
-Two things `am` will tell you rather than let you find out inside the VM:
+Three things `am` will tell you rather than let you find out inside the VM:
 
 - **Nothing this guest can run.** Every lab guest is **x86_64**, so a
   `-macos-arm64` binary or an `-arm64.AppImage` cannot run in it at all. If that
@@ -164,6 +164,16 @@ Two things `am` will tell you rather than let you find out inside the VM:
   installer download, so on a first run there is no share yet. `am lab <os>` on
   a lab that is already running brings it back and re-prints the command — that
   is also the fix after a `docker restart`.
+- **The share is STALE** — the guest's `/shared` does not hold the file the
+  hand-off would name. A bind mount follows the directory it was given at
+  `docker run`, not the path, so a `dist/` that is DELETED and recreated while
+  the lab runs leaves the guest holding the old, orphaned one: empty share, 404
+  on fetch, and every host-side reading still correct. `am lab` asks the guest
+  what it can see and says this instead of printing a command that will 404; the
+  fix is `am lab <os> --stop` and start it again. aio's own build never replaces
+  `dist/` (it empties it), so this only comes from a `rm -rf
+  dist`, a
+  `git clean`, or a build from an older aio.
 
 `am lab <os> --status` reports whether the share is serving **and the last fetch
 the guest made** — the only evidence that `host.lan` really resolves in there.

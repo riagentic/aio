@@ -19,6 +19,7 @@ import {
 import { _resetAioRuntime } from "../state/runtime-reset.ts";
 import { _resetHead } from "../air/head.ts";
 import { routeEffect } from "../state/route-effect.ts";
+import { selfCallSurvivedLine } from "../state/dispatch.ts";
 import { assertionFailure, formatCellState } from "./test-format.ts";
 import { frozenWriteMessage, isFrozenWriteError } from "../state/immutable.ts";
 import {
@@ -609,12 +610,15 @@ export function testCell(
         // changed here; SAID, once, at debug level, so a test that sees the
         // nested write land after the caller failed is not left guessing.
         if (queuedCalls.length > queuedBefore) {
+          // ONE wording with the production loop (`selfCallSurvivedLine`):
+          // the harness and the server must not describe the same behaviour
+          // two ways.
           log.debug(
             "test",
-            `self-call ${
-              queuedCalls.slice(queuedBefore).map((q) => q.method).join(", ")
-            } runs although its caller ${action.type} threw — the caller's ` +
-              `own write is rolled back, the queued self-call commits`,
+            selfCallSurvivedLine(
+              String(action.type),
+              queuedCalls.slice(queuedBefore).map((q) => q.method),
+            ),
           );
         }
         throw e;

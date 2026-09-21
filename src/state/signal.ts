@@ -1,6 +1,7 @@
 import { log } from "../diagnostics/logger-api.ts";
 import { count } from "../diagnostics/fmt.ts";
 import { isDevMode } from "./dev-flag.ts";
+import { outsideServerOrigin } from "./call-origin.ts";
 
 // Reactive signal system for AIO renderer.
 // Provides: signal, computed, effect, batch — auto-tracked dependencies.
@@ -220,6 +221,24 @@ let _flushIterations = 0;
 
 function _flush(): void {
   if (_flushing) return; // re-entrant call — outer _flush will pick up new pending
+  // A subscriber is not its writer's continuation. Effects here are arbitrary
+  // code — above all the RENDERER, which queues a component's re-render from
+  // inside this loop — and the writer may be a cell method body, which the
+  // framework runs inside a continuation-local server-origin scope so that a
+  // sibling called after an `await` still counts as the server calling itself
+  // (call-origin.ts). That scope reaches every continuation opened inside it,
+  // so the queued re-render inherited it and a component body — client code in
+  // every runtime — ran as "the server": a `<div>` calling a sealed cell
+  // straight from a render was ALLOWED what the identical call from a click
+  // handler is refused, and only when an ASYNC body happened to drive the
+  // render. Leaving the scope here is the door back out, for the flush and for
+  // everything it queues; a subscriber that really is server code re-enters
+  // through the front door, because its dispatch runs the method body inside
+  // `inServerOrigin` again. (tests/access-origin-boundaries.test.tsx)
+  outsideServerOrigin(_flushSubscribers);
+}
+
+function _flushSubscribers(): void {
   _flushing = true;
   _flushIterations = 0;
   try {

@@ -42,6 +42,48 @@ export const TARGETS = [
 ] as const;
 export type Target = (typeof TARGETS)[number];
 
+/** What each `am create --template=` GIVES you — one sentence each, and the
+ *  ONE copy of them.
+ *
+ *  `am agent` had these (an agent's first command tells it that `todo` is "a
+ *  list + a client-scoped view cell + an input form") while `am create --help`
+ *  listed the five names bare, so the surface a PERSON reads knew the least
+ *  about the choice it was asking them to make. They live here, beside the
+ *  list they describe, because this file is the leaf both surfaces already
+ *  import — a second hand-kept copy is the "a key in 2 of 3 surfaces" trap
+ *  this repo keeps paying for. `am-agent-text.ts` re-exports them; the record
+ *  is typed by `Template`, so a template added above is a COMPILE ERROR here
+ *  until it is described. */
+export const BRIEF_TEMPLATES: Readonly<Record<Template, string>> = {
+  counter: "(default) one cell + a counter UI",
+  todo: "a list + a client-scoped view cell + an input form",
+  cli: "one binary: `serve` + commands on aio/cli; no UI; target cli",
+  canvas: "a 2D loop whose decisions are pure functions tested without a GPU",
+  assets: "an `assets` mount (aio.run AND deno.json) + a media/ directory",
+};
+
+/** What each `am create --target=` NEEDS — same one-home rule, same
+ *  exhaustiveness. The create help used to spell three of these out in prose
+ *  ("browser needs no toolchain, electron auto-installs Electron…") and leave
+ *  `cli` and `server` unexplained; it now renders this record. */
+export const BRIEF_TARGETS: Readonly<Record<Target, string>> = {
+  browser: "(default) no toolchain",
+  electron: "auto-installs Electron",
+  android: "Android SDK + Java 17 + gradle",
+  cli: "headless binary",
+  server: "headless server + systemd unit",
+};
+
+/** `k — text` lines for a brief record, indented to sit under a help entry. */
+function briefLines(
+  briefs: Readonly<Record<string, string>>,
+  indent: string,
+): string {
+  return Object.entries(briefs)
+    .map(([k, v]) => `${indent}${k.padEnd(8)} ${v}`)
+    .join("\n");
+}
+
 /** What `am create` accepts — ONE list, read by the refusal on an unknown flag
  *  and by the help.
  *
@@ -60,6 +102,43 @@ export const CREATE_FLAGS: readonly string[] = [
   "--force",
 ];
 
+/** The verbs bare `am help` shows — ONE SCREEN, the loop a person or an agent
+ *  actually runs: read the brief, scaffold, run it, watch it, drive it, debug
+ *  it, ship it. Everything else is one flag away (`am help --commands`, one
+ *  line each) or one word away (`am help <verb>`).
+ *
+ *  `am help` printed all 71 commands — 192 lines, past the top of the
+ *  scrollback before the reader found the verb they wanted — while its own
+ *  docstring called itself the short summary. `helpSummary` did compress each
+ *  entry to one line; there were simply too many entries for that to be a
+ *  summary. Compressing further cannot fix a LIST that is too long: the list
+ *  has to get shorter, and picking which verbs is a judgement no derivation
+ *  makes. So it is written here, once, and held honest by
+ *  `tests/am-help-one-screen.test.ts`: every name must be a real command AND
+ *  have an entry in HELP_TEXT, and the rendered result must fit a screen.
+ *
+ *  What earns a slot: you cannot get from nothing to a running, inspected,
+ *  driven app without it. Repair verbs, one-off migrations, and everything
+ *  with a healthy default do not qualify — they are findable, not needed. */
+export const EVERYDAY: readonly string[] = [
+  "agent", // the brief — an agent's first command, so it is the first row
+  "create",
+  "dev",
+  "start",
+  "stop",
+  "restart",
+  "status",
+  "logs",
+  "state",
+  "dispatch",
+  "surface",
+  "trigger",
+  "timeline",
+  "doctor",
+  "build",
+  "publish",
+];
+
 export const HELP_TEXT = `If you are an AI agent, start here:
   agent                   THE BRIEF (Markdown) — how aio works, the verbs, and
                           the seven rules that protect the user (never kill
@@ -76,13 +155,14 @@ Onboard:
                             ${
   CREATE_FLAGS.join("\n                            ")
 }
+                          what each --template= gives you:
+${briefLines(BRIEF_TEMPLATES, "                            ")}
                           --target picks what \`deno task dev\`/\`compile\`
-                          produce by default: browser needs no toolchain,
-                          electron auto-installs Electron, android needs the
-                          Android SDK + Gradle. --aio-version pins the
-                          framework (a release tag, or "main"); --mirror
-                          imports from a local aio checkout; --jsr pins JSR
-                          imports instead of the source default.
+                          produce by default, and what each one needs:
+${briefLines(BRIEF_TARGETS, "                            ")}
+                          --aio-version pins the framework (a release tag, or
+                          "main"); --mirror imports from a local aio checkout;
+                          --jsr pins JSR imports instead of the source default.
   upgrade [<app>|<dir>]   Update am itself to the latest release. One verb,
                           the object says which: "am upgrade <app>" upgrades
                           an installed APP; "am upgrade <checkout-dir>"
@@ -327,6 +407,11 @@ Diagnose / repair / migrate (three different questions — do not conflate):
   link                    Just the dep/aio symlink (fix does this and more)
   migrate [--from=X]      which retired APIs THIS app still uses (CI exits 1).
                           Rewrites: aiol --safe-fix. Not a clone repairer.
+  prune [--yes]           The SHARED Electron runtime cache (~250 MB/version,
+                          never shrank on its own). Report-only by default:
+                          prints every entry, its size and when an app last
+                          started from it. --yes deletes exactly that list.
+                          --days=N (default 30) --keep=44.4.1,43.4.1
 
 Auth (apps running with auth: true) — run "am auth" for all of them:
   auth users              List accounts

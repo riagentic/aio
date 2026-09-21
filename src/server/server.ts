@@ -568,7 +568,7 @@ export function createServer(config: ServerConfig): ServerHandle {
   // The app's deno.json imports feed the browser import map (see
   // readAppDenoImports — the startup linter reads the same thing, through the
   // same function, so the two can never disagree about what resolves).
-  const denoImports = readAppDenoImports(absBaseDir);
+  const denoImports = readAppDenoImports(absBaseDir) ?? {};
   const importMapObj = buildBrowserImportMap(denoImports, {
     // prod serves bundles and the vendor route is dev-only — never point a
     // prod import map at it.

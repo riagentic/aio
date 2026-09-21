@@ -313,6 +313,25 @@ type DispatchFn<A> = ((action: A) => Promise<unknown>) & {
  *  action still commits. Consistent on every door (WS, UDS, trojan, bootCells,
  *  testCell); documented in docs/state/methods.md ("One method calling
  *  another"); `s.$call` is the spelling that shares the caller's commit. */
+
+/** THE sentence for "a self-call outlived its caller's throw".
+ *
+ *  The production loop and `testCell` are two different dispatchers, and only
+ *  the harness said this out loud — so an author who reproduced a bug in a
+ *  test got an explanation, and the same author watching a live app got
+ *  `… rejected: … no state changed` beside a state that HAD changed, with
+ *  nothing anywhere naming the action that changed it. One wording, both
+ *  callers, because a behaviour described two ways is two behaviours to
+ *  whoever is reading. */
+export function selfCallSurvivedLine(
+  callerType: string,
+  queuedTypes: string[],
+): string {
+  return `self-call ${queuedTypes.join(", ")} runs although its caller ` +
+    `${callerType} threw — the caller's own write is rolled back, the queued ` +
+    `self-call commits as its own action. \`s.$call(…)\` is the spelling ` +
+    `that shares the caller's commit (docs/state/methods.md).`;
+}
 /** How many budget violations each cell has produced, and whether it has
  *  crossed into "this is what this cell always does".
  *
@@ -768,6 +787,11 @@ export function createDispatch<S, A, E>(
 
           // Measure reduce time
           const reduceStart = performance.now();
+          // Only a re-entrant dispatch — i.e. a self-call from inside this
+          // very reduce — can grow the queue between these two reads, because
+          // `reduce` is synchronous. One integer, read per action; the
+          // comparison and the message happen only on the throw path.
+          const queuedBefore = queue.length;
           try {
             reduced = reduce(getState(), current);
           } catch (e) {
@@ -782,6 +806,20 @@ export function createDispatch<S, A, E>(
                 : {}),
             }, getState() as Record<string, unknown>);
             reportAioError(err, _reportOpts);
+            // Said right after the rejection, because the rejection's own
+            // words ("no state changed") are true of the CALLER and false of
+            // the app: the queued action below commits. Silence here left the
+            // only visible trace of that write being the write itself.
+            if (queue.length > queuedBefore) {
+              log.warn(
+                selfCallSurvivedLine(
+                  actionType ?? "?",
+                  queue.slice(queuedBefore).map((q) =>
+                    (q.action as { type?: string })?.type ?? "?"
+                  ),
+                ),
+              );
+            }
             // Emit a diag event so the health overlay / diagnostic bus
             // subscribers see reduce failures — previously only EFFECT_ERROR
             // paths emitted, so the blank-screen health card stayed silent

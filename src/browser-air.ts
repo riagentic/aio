@@ -96,6 +96,7 @@ export {
   onCleanup,
   onGlobalKey,
   onMount,
+  onUnmount,
   onWindowEvent,
   setDevMode,
   useContext,

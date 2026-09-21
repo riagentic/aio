@@ -886,16 +886,27 @@ import { initStandalone } from "aio";
 const app = initStandalone(initialState, {
   reduce,
   execute,
-  persist: true, // uses localStorage
+  persist: true, // the durable native store on Android, localStorage elsewhere
   persistKey: "aio_state",
-  persistDebounceMs: 100,
+  persistDebounceMs: 100, // ignored by a durable store — see below
   onRestore: (s) => s,
 });
 ```
 
 **Differences from `aio.run()`:** no server, no WebSocket — dispatch loop runs
-in the browser. Persistence via `localStorage` instead of SQLite.
-`app.mode === 'standalone'`.
+in the browser. Persistence goes to a key/value store instead of SQLite, and
+_which_ store is decided once at boot and printed:
+
+```
+[aio] persistence: native file store at /data/user/0/app.aio.notes/files/aio-store
+  (fsync + atomic rename on every change — a kill right after a change cannot lose it)
+```
+
+Inside an aio APK that is the **native store**
+([below](#state-survives-a-kill)). Anywhere else — the same bundle opened in a
+desktop browser — it is `localStorage`, and the boot line says so and says it is
+lossy. There is one decider (`_pickPersistStore`), so restore and writes can
+never disagree about which store this run is using. `app.mode === 'standalone'`.
 
 ## android (standalone APK)
 
@@ -904,8 +915,8 @@ deno run -A dep/aio/src/build.ts --android
 ```
 
 Standalone Android APK running entirely in a WebView — no server, no Deno
-runtime. Dispatch loop, reducer, and effects all run client-side with
-localStorage.
+runtime. Dispatch loop, reducer, and effects all run client-side, over a durable
+native store ([below](#state-survives-a-kill)).
 
 **Prerequisites:** Android SDK (`$ANDROID_HOME`), Java 17+ (`$JAVA_HOME`),
 Gradle on `PATH`.
@@ -929,6 +940,108 @@ refused rather than wrapped — a truncated `versionCode` is an APK that install
 over a newer one. No `"version"` in deno.json means `0.1.<build>`, and the build
 says so.
 
+### State survives a kill
+
+A standalone APK writes its state through **`AioNativeStore`**, a native
+key/value store the shell injects into the page. Every change goes to a file
+under the app's own `filesDir`, written **temp file → `fsync` → atomic rename**,
+and the write call does not return until that is done. So the change is on the
+disk before the method that made it returns: a swipe-away, an OOM kill or a
+crash in the same instant cannot lose it, and a crash _during_ the write leaves
+the previous value whole rather than a torn one.
+
+This replaces `localStorage`, which a WebView commits to disk on its own
+schedule. Measured on an API 35 emulator with `examples/counter`: a `SIGKILL`
+**122 ms** after a committed change brought the app back without it — the change
+silently gone. (At ~900 ms it survived, which is why it looked fine for so
+long.) `tests/android-emulator-e2e.test.ts` now kills the app as fast as `adb`
+can deliver it and asserts the change came back.
+
+**The window that remains.** None, for state a method has committed:
+`persistDebounceMs` is not used when the store is durable, because a debounce is
+exactly the window this fix removes. What is _not_ covered is a change that was
+never committed — text typed into an input but not yet sent to a method, or a
+change made inside an `async` method that has not reached its next commit. A
+kill there loses it, as it would on any target.
+
+The price is one `fsync` per committed change. If the state written each time
+grows large enough for that to be felt, aio says so once rather than letting the
+app feel mysteriously heavy:
+
+```
+[aio] ⚠ a durable save took 41ms — the state written on every change is large.
+  Mark the parts that need not survive a restart with `persist: false` on their cell.
+```
+
+The bridge is a security surface: `addJavascriptInterface` hands its methods to
+**every** page a WebView loads, so it is installed only in a **standalone** APK
+— the one shape whose WebView can never show anything but its own bundled assets
+(any other URL is handed to an external app). A `--remote` client APK and a
+`dev:android` build open a server's pages and never get the bridge at all; their
+state lives on the server anyway. If a page from any other origin somehow loads,
+the shell removes the bridge and logs it.
+
+In a desktop browser the same bundle finds no such object and falls back to
+`localStorage`, which is all a preview can offer — the boot line names it and
+says it is lossy.
+
+### The system bars
+
+The template targets **API 35** (`compileSdk`/`targetSdk` 35, `minSdk` 24) —
+Play's floor. Android 15 makes every activity of a targetSdk-35 app
+**edge-to-edge**: the page would otherwise draw underneath the status bar and
+the navigation bar, and measured on API 35 it did exactly that — the app's own
+title and the system clock on the same pixels. So the WebView sits in a frame
+that carries the system-bar and display-cutout insets as padding, which gives
+back the same layout the app had before the bump on every API level. The
+emulator test asserts it (`screen.height - innerHeight` must be at least a
+status bar).
+
+Full-bleed is a per-app decision, not a default: take it by overlaying your own
+`MainActivity` under `<app>/android/`
+([below](#adding-native-android-code-android)).
+
+### The camera is opt-in
+
+An APK declares `android.permission.CAMERA` **only when the app asks for it**:
+
+```json
+{
+  "android": { "camera": true }
+}
+```
+
+Default is off. Until 1.0.7-beta the permission was in every generated manifest,
+so a todo list and a dashboard both told their user — on the install screen, and
+on their Play listing — that they could use the camera. Play flags exactly that.
+
+It is a key rather than a silent removal because a page that scans a QR code
+with `getUserMedia` needs the permission, and without it Android refuses with a
+bare `NotAllowedError` that names nothing. So the same flag reaches the WebView,
+which says what is missing in logcat:
+
+```
+E aio: camera DENIED: this page asked for the camera, but the APK does not
+  declare android.permission.CAMERA. It is opt-in: add "android": { "camera":
+  true } to your deno.json and rebuild.
+```
+
+`camera: true` also declares **both** `android.hardware.camera` and
+`android.hardware.camera.any` as `required="false"`, so the app still installs
+on a device without a camera and can explain itself there. Both are needed:
+requesting the permission makes Android imply a **required**
+`android.hardware.camera`, and declaring only `camera.any` does not suppress it
+(`aapt2 dump badging` on a built APK is the check —
+`tests/build-android-camera.test.ts` runs it).
+
+A value that is neither `true` nor `false` is refused by name at build time, on
+**every** build — not only an `--android` one.
+
+Anything beyond the camera (microphone, location, a foreground service) is a
+native concern: overlay your own manifest under `<app>/android/`
+([below](#adding-native-android-code-android)). The WebView logs and denies any
+other permission a page asks it for.
+
 ### Onto a real phone
 
 `dev:android` is the _development_ loop — it boots an emulator when nothing is
@@ -944,6 +1057,19 @@ deno task install:android --apk=my.apk     # a specific artifact
 deno task install:android --device=SERIAL  # when several are attached
 deno task install:android --no-launch      # install without starting it
 ```
+
+Plain `install:android` **installs, it does not build** — and it refuses an APK
+that is older than your `src/`, naming the file that changed:
+
+```
+[install:android] ✗ app-0.1.8.apk is OLDER than your sources — src/cell.ts changed 4min after it was built.
+  Installing it would put the PREVIOUS build on the phone, under the same version number, and report success.
+  fix: `deno task install:android --build` (builds, then installs), or `deno task build --targets=android` first.
+  To install this exact artifact anyway, name it: `--apk=app-0.1.8.apk`.
+```
+
+Without that check the tool printed `✓` and the phone ran the previous build,
+with the same version number on screen — so nothing disagreed.
 
 `--build` builds the **debug** APK, the same build as
 `deno task build --targets=android`: it is signed with the debug key, so it
@@ -999,11 +1125,12 @@ Overlaid files still go through placeholder substitution, and `dev:android`
 rewrites two exact strings in `MainActivity.kt`. So a replacement must keep what
 the build reaches for, or that step quietly does nothing:
 
-| If you replace        | Keep                                                                                                                                                                                                    |
-| --------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `MainActivity.kt`     | `loadUrl("https://appassets.androidplatform.net/assets/index.html")` — rewritten to the dev server's URL                                                                                                |
-| `MainActivity.kt`     | `return !url.startsWith("https://appassets.androidplatform.net/")` — rewritten so dev navigation stays in the WebView                                                                                   |
-| `AndroidManifest.xml` | `{{APPLICATION_ID}}`, `{{APP_NAME}}`, `{{ICON_ATTR}}` and `{{CLEARTEXT_ATTR}}` — the last becomes `android:usesCleartextTraffic="true"` for a dev or `--remote` build, and nothing for a standalone one |
+| If you replace        | Keep                                                                                                                                                                                                                                                                                                                                                               |
+| --------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `MainActivity.kt`     | `loadUrl("https://appassets.androidplatform.net/assets/index.html")` — rewritten to the dev server's URL                                                                                                                                                                                                                                                           |
+| `MainActivity.kt`     | `return !url.startsWith("https://appassets.androidplatform.net/")` — rewritten so dev navigation stays in the WebView                                                                                                                                                                                                                                              |
+| `AndroidManifest.xml` | `{{APPLICATION_ID}}`, `{{APP_NAME}}`, `{{ICON_ATTR}}`, `{{CLEARTEXT_ATTR}}` and `{{CAMERA_PERMISSION}}` — `{{CLEARTEXT_ATTR}}` becomes `android:usesCleartextTraffic="true"` for a dev or `--remote` build and nothing for a standalone one; `{{CAMERA_PERMISSION}}` becomes the CAMERA declaration only with [`android: { camera: true }`](#the-camera-is-opt-in) |
+| `MainActivity.kt`     | `{{CAMERA_DECLARED}}` — the same flag, so the WebView's refusal cannot disagree with the manifest                                                                                                                                                                                                                                                                  |
 
 ### The page is a secure origin, so `ws://` is blocked
 

@@ -29,7 +29,13 @@
 
 import { _inRender, onCleanup, useRef } from "./renderer-lifecycle.ts";
 import { _activeRoot } from "./renderer-state.ts";
-import { _inSsrCall } from "./vdom-ssr.ts";
+import {
+  _resetSsrRenders,
+  _ssrRenderCurrent,
+  _ssrRenderForKey,
+  _ssrRenderLast,
+  type SsrRender,
+} from "./ssr-render.ts";
 import { attrNameOf, escapeAttr, escapeHtml } from "./ssr-utils.ts";
 import { isDevMode } from "../state/dev-flag.ts";
 
@@ -87,8 +93,22 @@ function _liveInOrder(doc: Document): HeadInput[] {
     .sort((a, b) => a[0].seq - b[0].seq)
     .map(([, input]) => input);
 }
-/** Entries of the SSR render in progress. */
-let _ssr: HeadInput[] = [];
+/** The entries collected by each server render, keyed by the render itself.
+ *
+ *  ONE list per module was the shape, and every top-level render CLEARED it on
+ *  the way in. Two `renderToStream`s interleave at every `yield`, so measured,
+ *  a page rendered for one visitor answered `collectHead()` with the other
+ *  visitor's `<title>`, description and canonical URL — a response carrying
+ *  another response's head. Per render, there is nothing to clear and nothing
+ *  to leak; weak, so a render nobody kept is collected with its entries. */
+const _ssrHeads = new WeakMap<SsrRender, HeadInput[]>();
+
+/** The entries of a render, created on first use. */
+function _entriesOf(render: SsrRender): HeadInput[] {
+  let list = _ssrHeads.get(render);
+  if (!list) _ssrHeads.set(render, list = []);
+  return list;
+}
 /** Each document's own title before the first owner set one; restored when
  *  that document's last owner unmounts. Absent = nothing overridden. Per
  *  document, because one process can mount apps into several (Electron child
@@ -274,10 +294,11 @@ function _renderDoc(): Document | undefined {
  *
  * On the server, inside `renderToString`, nothing is written — call
  * {@linkcode collectHead} afterwards and put the result in your `<head>`.
- */
+ *  @tier Kit */
 export function useHead(input: HeadInput): void {
-  // `_inSsrCall()` and not `_isSsrRendering()`, the same question every other
-  // hook asks: the latter is true for the WHOLE span of a `renderToStream`,
+  // The EXECUTING server render, and not `_isSsrRendering()`, the same
+  // question every other hook asks: the latter is true for the WHOLE span of a
+  // `renderToStream`,
   // including the async gaps between chunks, so a `useHead` from a timer, a
   // promise continuation or an event handler was silently accepted and what
   // it asked for went into the head of whatever page happened to be streaming
@@ -285,9 +306,11 @@ export function useHead(input: HeadInput): void {
   // the one hook whose entire job is the head of a page. This is true only
   // for the synchronous span of one server component call, which is exactly
   // when a component body runs (both writers call components through
-  // `_ssrComponent`).
-  if (_inSsrCall()) {
-    _ssr.push(input);
+  // `_ssrComponent`) — and it identifies WHICH render, so two pages being
+  // written at once collect into two lists.
+  const render = _ssrRenderCurrent();
+  if (render) {
+    _entriesOf(render).push(input);
     return;
   }
   if (!_inRender()) {
@@ -316,10 +339,9 @@ export function useHead(input: HeadInput): void {
 }
 
 /**
- * The `<head>` markup the components rendered by the last top-level
- * `renderToString` / `renderToStream` asked for — `<title>`, `<meta>` and
- * `<link>` tags, escaped, each marked `data-aio-head` so the client takes
- * them over on hydration.
+ * The `<head>` markup the components of a server render asked for —
+ * `<title>`, `<meta>` and `<link>` tags, escaped, each marked `data-aio-head`
+ * so the client takes them over on hydration.
  *
  * ```ts
  * const body = renderToString(<App />);
@@ -330,13 +352,30 @@ export function useHead(input: HeadInput): void {
  *   `</head><body>${body}</body></html>`;
  * ```
  *
- * Empty string when no component used {@linkcode useHead}. With
- * `renderToStream` the head is complete only when the stream has ended, so
- * either render the page once with `renderToString` for its head, or write
- * the head after the stream.
+ * With no argument it answers for the most recent top-level render, which is
+ * exactly what the pattern above needs: `renderToString` is synchronous, so
+ * nothing can render in between. A `renderToStream` is not — its head is only
+ * complete once the stream has ended, and another request may have started
+ * rendering in the meantime. Name the render and the answer is exact however
+ * many overlapped it: pass the same object to both calls.
+ *
+ * ```ts
+ * for await (const chunk of renderToStream(<App />, req)) write(chunk);
+ * const head = collectHead(req);   // this response's head, never another's
+ * ```
+ *
+ * Empty string when no component used {@linkcode useHead}.
+ *
+ * @param key The object this render was named with in
+ * {@linkcode renderToStream} — the `Request` is the natural one. Omitted, the
+ * most recent top-level render answers; and if that render is a stream that
+ * overlapped another, there is no honest answer and this THROWS rather than
+ * hand one page's title to another.
  */
-export function collectHead(): string {
-  const { title, tags } = _merge(_ssr);
+export function collectHead(key?: object): string {
+  const render = key === undefined ? _collectTarget() : _ssrRenderForKey(key);
+  const entries = render ? _ssrHeads.get(render) : undefined;
+  const { title, tags } = _merge(entries ?? []);
   const out: string[] = [];
   if (title !== undefined) out.push(`<title>${escapeHtml(title)}</title>`);
   for (const t of tags) {
@@ -350,17 +389,42 @@ export function collectHead(): string {
   return out.join("");
 }
 
-/** @internal Called at the start of every top-level SSR render, so one
- *  request's head never leaks into the next. */
-export function _resetHeadSsr(): void {
-  _ssr = [];
+/** Which render a no-argument {@linkcode collectHead} answers for.
+ *
+ *  A component asking mid-render means its own page. Otherwise it is the most
+ *  recently STARTED top-level render — which is the caller's own whenever the
+ *  render was a `renderToString`, because that call returns before anything
+ *  else can start one.
+ *
+ *  A STREAM that overlapped another render is the one case with no answer: the
+ *  caller's own stream may or may not be the last one started, and guessing
+ *  means
+ *  serving one visitor's title, description and canonical URL inside another
+ *  visitor's page. aio's first rule is to fail loud rather than quietly hand
+ *  back the wrong thing, and the fix fits in the message. */
+function _collectTarget(): SsrRender | null {
+  const current = _ssrRenderCurrent();
+  if (current) return current;
+  const last = _ssrRenderLast();
+  if (last && last.kind === "stream" && last.overlapped) {
+    throw new Error(
+      "[aio] collectHead() cannot tell which page's head you mean: two or " +
+        "more server renders overlapped, so the last one to start is not " +
+        "necessarily yours. Name the render and ask for it by name — " +
+        "`renderToStream(<App/>, req)` … `collectHead(req)`, with any object " +
+        "that identifies this response.",
+    );
+  }
+  return last;
 }
 
 /** @internal Test seam — forget every owner and the remembered base title. */
 // aio-ok: a test-only seam; a page never forgets its own head
 export function _resetHead(): void {
   _live.clear();
-  _ssr = [];
+  // The server half too: the renders themselves, so a `collectHead()` in a
+  // test that rendered nothing cannot answer with the previous test's page.
+  _resetSsrRenders();
   _baseTitles = new WeakMap();
   // The owner sequence too, or it is not a reset: the numbers only have to be
   // relative, but a counter that survives teardown is module state nobody

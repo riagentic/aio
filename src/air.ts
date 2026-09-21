@@ -48,6 +48,7 @@ export {
   onCleanup,
   onGlobalKey,
   onMount,
+  onUnmount,
   onWindowEvent,
   setDevMode,
   type VChild,

@@ -8,6 +8,8 @@ import {
   tmplCrashGuard,
   tmplKeyboardShortcuts,
   tmplParentWatch,
+  tmplPreloadCleanup,
+  tmplPreloadWrite,
   tmplRendererDiagnostics,
   tmplTray,
   tmplWillNavigate,
@@ -37,10 +39,7 @@ const fs = require('fs');
 Menu.setApplicationMenu(null);
 // The shell bridge (focus, tray clicks) — the ONLY preload this window has;
 // it must not carry __aioIPC, whose presence would select the IPC transport.
-const preloadFile = path.join(app.getPath('temp'), '__aio_shell_preload_' + process.pid + '.cjs');
-fs.writeFileSync(preloadFile, ${
-    JSON.stringify(shellBridgePreload({ standalone: true }))
-  });
+${tmplPreloadWrite(JSON.stringify(shellBridgePreload({ standalone: true })))}
 app.name = ${JSON.stringify(slug)};
 ${tmplCrashGuard()}
 ${tmplParentWatch()}
@@ -75,6 +74,6 @@ ${tmplWillNavigate("_appOrigin")}
   });
 ${tmplKeyboardShortcuts()}
 });
-app.on('window-all-closed', () => { try { fs.unlinkSync(preloadFile); } catch {} process.exit(0); });
+app.on('window-all-closed', () => { ${tmplPreloadCleanup()} process.exit(0); });
 `.trim();
 }

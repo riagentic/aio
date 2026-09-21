@@ -35,6 +35,32 @@ const SELF = "happy-dom-window-hygiene.test.ts";
 
 type Offence = { file: string; why: string };
 
+/** Lines where `closeWindow()` is called but its promise is dropped.
+ *
+ *  The third shape, and the one that got past this gate: `closeWindow` is
+ *  `async`, so a bare `closeWindow(win)` in a synchronous `finally` returns a
+ *  promise nobody waits for and happy-dom's settle timer is still armed when
+ *  the test ends. It reads exactly like the correct call, the file passes the
+ *  "closes something" check above, and the leak only appears when the file
+ *  shares a process with others — so it is green in a single-file run and red
+ *  in the sharded suite, blamed on whichever test ran next. Measured here:
+ *  `tests/air-ssr-attr-name.test.ts` did this and cost a shard.
+ *
+ *  `await`, `return` and `=>` (the `cleanup: () => closeWindow(win)` shape,
+ *  whose caller awaits it) all pass. Nothing else does. */
+function unawaitedCloses(text: string): number[] {
+  const bad: number[] = [];
+  text.split("\n").forEach((line, i) => {
+    const code = line.trim();
+    if (code.startsWith("//") || code.startsWith("*")) return;
+    if (!/\bcloseWindow\s*\(/.test(code)) return;
+    if (/\b(?:import|export)\b/.test(code)) return;
+    if (/(?:await|return|=>|\.then\()\s*closeWindow\s*\(/.test(code)) return;
+    bad.push(i + 1);
+  });
+  return bad;
+}
+
 async function scan(): Promise<Offence[]> {
   const out: Offence[] = [];
   for (const dir of DIRS) {
@@ -49,6 +75,16 @@ async function scan(): Promise<Offence[]> {
         out.push({ file: rel, why: "raw happyDOM.close()" });
       } else if (!/\bcloseWindow\s*\(/.test(text)) {
         out.push({ file: rel, why: "constructs a Window and closes nothing" });
+      } else {
+        const bare = unawaitedCloses(text);
+        if (bare.length) {
+          out.push({
+            file: rel,
+            why: `closeWindow() called but not awaited (line ${
+              bare.join(", ")
+            })`,
+          });
+        }
       }
     }
   }
@@ -87,6 +123,14 @@ Deno.test("the gate can actually see both offences", async () => {
   assertEquals(verdict(abandoned), "abandoned");
   assertEquals(verdict(clean), "ok");
   assertEquals(verdict("const d = document;"), "n/a");
+
+  // …and the third shape, the one that actually got through: closed, but the
+  // promise dropped.
+  assertEquals(unawaitedCloses("  closeWindow(win);"), [1]);
+  assertEquals(unawaitedCloses("  await closeWindow(win);"), []);
+  assertEquals(unawaitedCloses("  return closeWindow(win);"), []);
+  assertEquals(unawaitedCloses("  cleanup: () => closeWindow(win),"), []);
+  assertEquals(unawaitedCloses("  // closeWindow(win) is the spelling"), []);
 
   // …and the scan is looking at a real, non-empty population.
   let windows = 0;

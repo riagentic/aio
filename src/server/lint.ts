@@ -182,7 +182,7 @@ export async function lint(
   // advice breaks working code; ignoring it teaches people to ignore the whole
   // check.
   const BROWSER_IMPORTS = new Set(
-    Object.keys(buildBrowserImportMap(readAppDenoImports(baseDir))),
+    Object.keys(buildBrowserImportMap(readAppDenoImports(baseDir) ?? {})),
   );
 
   try {

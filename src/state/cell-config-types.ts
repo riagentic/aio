@@ -80,7 +80,13 @@ export type MethodsCellConfig<
   Sel extends Record<string, SelectorDef<S>> = Record<string, SelectorDef<S>>,
 > = {
   /** The cell's initial state — a plain JSON-shaped object. It is also the
-   *  type every method's `s` gets, and what a reset returns to. */
+   *  type every method's `s` gets, and what a reset returns to.
+   *
+   *  @example
+   *  ```ts
+   *  state: { items: [] as Todo[], filter: "all" },
+   *  ```
+   */
   state: S;
   /** The cell's methods — `name(s, ...args)` reads and writes the state `s`;
    *  call it as `cell.name(...args)`, from the UI or the server.
@@ -88,13 +94,28 @@ export type MethodsCellConfig<
    *  Optional: `cell-create.ts` accepts an empty OR omitted methods map —
    *  state-only cells (thin-client stubs, selectors-only read models) are a
    *  supported shape, and a required `methods` here made the type refuse what
-   *  the runtime runs. */
+   *  the runtime runs.
+   *
+   *  @example
+   *  ```ts
+   *  methods: {
+   *    add(s, text: string) { s.items.push({ text, done: false }); },
+   *    async load(s) { s.items = await fetchTodos(); },
+   *  },
+   *  ```
+   */
   methods?: M;
   /** Cell scope. `"client"` cells live in the browser only — never registered
    *  with the server, never synced, never server-persisted. Methods are bound
    *  locally against a signal-backed slice; each tab has its own copy. Sync
    *  methods only in v1 — async methods throw at `cell()` time.
-   *  `"server"` (the default) may be stated explicitly (alpha52). */
+   *  `"server"` (the default) may be stated explicitly (alpha52).
+   *
+   *  @example
+   *  ```ts
+   *  scope: "client",   // lives in this tab only — never synced, never on disk
+   *  ```
+   */
   scope?: "client" | "server";
   /** Cancellation triggers per ASYNC METHOD — { methodKey: [actionsOrTypes] }.
    *  A trigger action aborts the method's in-flight calls; the method observes
@@ -139,7 +160,13 @@ export type MethodsCellConfig<
   /** Milliseconds for which a SUCCESSFUL async call answers an identical one
    *  without running it. Keyed by the arguments as well as the method, so
    *  `fetchUser(1)` never answers `fetchUser(2)`. Failures are never cached —
-   *  that would make one bad minute last the whole ttl. */
+   *  that would make one bad minute last the whole ttl.
+   *
+   *  @example
+   *  ```ts
+   *  ttl: { fetchUser: 30_000 },   // an identical fetchUser(1) is answered from cache
+   *  ```
+   */
   ttl?: { [K in keyof M & string]?: number };
   /** Async methods that may run as long as they need — no call ceiling, no
    *  effect deadline.
@@ -177,7 +204,13 @@ export type MethodsCellConfig<
    *  aio.run() (composition time); an unknown dep throws with a clear message.
    *  The `& Record<…>` intersection supplies CONTEXTUAL typing for `s` while
    *  `Sel` still infers the literal shape (its default is an EMPTY record so
-   *  selector-less cells carry no index signature — see cell-create.ts). */
+   *  selector-less cells carry no index signature — see cell-create.ts).
+   *
+   *  @example
+   *  ```ts
+   *  selectors: { open: (s) => s.items.filter((i) => !i.done) },
+   *  ```
+   */
   selectors?: Sel & Record<string, SelectorDef<S>>;
   /** React to FOREIGN actions (decoupled pub/sub — the source cell never
    *  knows about this one): `{ myHandler: other.method }` — the named SYNC
@@ -185,12 +218,24 @@ export type MethodsCellConfig<
    *  may be ARRAYS of sources (alpha52): `{ onChange: [a.set, b.set] }`.
    *  Accepts bound methods (.type) or plain type strings. (The bare-array
    *  form, which routed the action without running a handler, went out in
-   *  alpha70 — see src/state/removals.ts.) */
+   *  alpha70 — see src/state/removals.ts.)
+   *
+   *  @example
+   *  ```ts
+   *  listensTo: { onLogout: auth.logout },   // runs the SYNC method onLogout
+   *  ```
+   */
   listensTo?: Record<
     string,
     string | { type: string } | (string | { type: string })[]
   >;
-  /** Optional state validator — called after every reduce. Return true to accept, or a string error message to reject. */
+  /** Optional state validator — called after every reduce. Return true to accept, or a string error message to reject.
+   *
+   *  @example
+   *  ```ts
+   *  validate: (s) => s.total >= 0 || "total went negative",
+   *  ```
+   */
   validate?: (state: S) => true | string;
   /** Optional per-method ARGUMENT rules, positional, keyed by method name.
    *
@@ -214,7 +259,13 @@ export type MethodsCellConfig<
   /** Persistence filter — "all" (default) persists everything, "none" persists
    *  nothing. { include: [...] } or { exclude: [...] } for field-level control.
    *  To SHAPE what is written rather than only filter it, see
-   *  {@linkcode MethodsCellConfig.onPersist}. */
+   *  {@linkcode MethodsCellConfig.onPersist}.
+   *
+   *  @example
+   *  ```ts
+   *  persist: { exclude: ["draft", "scrollTop"] },
+   *  ```
+   */
   persist?: CellFieldFilter<keyof NoInfer<S> & string>;
   /** Keep this cell's ACTIONS out of the on-disk dev diagnostics — the action
    *  journal (`logs/actions.jsonl`) and the dev action timeline.
@@ -231,20 +282,43 @@ export type MethodsCellConfig<
    *  that needs both says both. `redact` remains the tool for hiding one
    *  FIELD while keeping the rest of the record. */
   diagnostics?: false;
-  /** Network access rule (AUTH-1): who may CALL this cell's methods over the
-   *  network. `true` = any authenticated user, `"admin"` = that exact role,
-   *  `(user, method) => boolean` = custom. Absent = open (connection-level
-   *  auth only). Server-side code always bypasses.
-   *  `access` gates calls, `visible` gates reads — declare both on an
-   *  exposed/multi-user app (composition refuses `access` with no `visible`
-   *  there, because the unanswered read side broadcasts the whole cell). */
+  /** Who may CALL this cell's methods over the network — and only that:
+   *  `access` gates CALLS, `visible` gates READS, and neither implies the other
+   *  (an `access` rule hides no state; a `visible` filter stops no call).
+   *
+   *  `true` = any authenticated user, `"admin"` = that exact role,
+   *  `(user, method, ...args) => boolean` = custom. Absent = open
+   *  (connection-level auth only), which is why boot warns when a cell hides
+   *  secret-shaped state and declares no rule here — say `access: false`
+   *  (server-side only) or `access: () => true` ("open on purpose").
+   *  Server-side code always bypasses.
+   *
+   *  Declare BOTH on an exposed/multi-user app — composition refuses `access`
+   *  with no `visible` there, because the unanswered read side broadcasts the
+   *  whole cell. (AUTH-1) */
   access?: Access;
-  /** Visibility — the READ side (alpha52; renamed from `ui`): what of this
-   *  cell's state the broadcast carries to clients. "all" (default) exposes
-   *  everything, "none" hides the cell from clients. { include: [...] } or
-   *  { exclude: [...] } for field-level control; add forUser for per-user
-   *  filtering on the already-filtered state.
-   *  `access` gates calls, `visible` gates reads. */
+  /** The READ side — what of this cell's state the broadcast carries to
+   *  clients — and ONLY the read side: `visible` gates READS, `access` gates
+   *  CALLS, and neither implies the other (a `visible: "none"` cell still has
+   *  every method callable by any client, return value included).
+   *
+   *  That last sentence is the whole warning. An audit of an app holding keys
+   *  found a PBKDF2 `encrypt`/`decrypt` cell shipped behind `visible: "none"`
+   *  as a public decryption oracle, because the key read as "this cell is not
+   *  exposed". It gates the state broadcast; nothing else. To decide who may
+   *  CALL, declare `access` — boot says so when a cell hides something
+   *  secret-shaped and no `access` rule answers the call side.
+   *
+   *  "all" (default) exposes everything, "none" hides the cell from clients.
+   *  { include: [...] } or { exclude: [...] } for field-level control; add
+   *  forUser for per-user filtering on the already-filtered state.
+   *  (alpha52; renamed from `ui`.)
+   *
+   *  @example
+   *  ```ts
+   *  visible: { exclude: ["passwordHash"] },
+   *  ```
+   */
   visible?: CellVisibility<keyof NoInfer<S> & string, NoInfer<S>>;
   /** CRDT sync — true for defaults, or partial config to override merge
    *  strategies, identity keys, retention.
@@ -266,7 +340,13 @@ export type MethodsCellConfig<
    *  heavy work, ~10× a direct call for a trivial one), module singletons are
    *  per-worker, and args/returns must be structured-cloneable. Flag the cell
    *  that does dangerous work — never a counter.
-   *  See docs/state/cell-workers.md. */
+   *  See docs/state/cell-workers.md.
+   *
+   *  @example
+   *  ```ts
+   *  worker: true,   // this cell's methods run off the main thread
+   *  ```
+   */
   worker?: boolean;
   /** Transactional async methods: reads see a STABLE snapshot taken
    *  at method entry (an `await` never changes them), and writes commit
@@ -295,11 +375,23 @@ export type MethodsCellConfig<
    *  commit validates the method's read-set against live state, and
    *  `conflict` decides the outcome — `"abort"` (default: reject the call,
    *  commit nothing) or `"warn"` (report loudly, commit anyway).
-   *  See docs/state/transactional-methods.md. */
+   *  See docs/state/transactional-methods.md.
+   *
+   *  @example
+   *  ```ts
+   *  transaction: true,   // reads pinned at entry, writes commit all-or-nothing
+   *  ```
+   */
   transaction?:
     | boolean
     | { serialize?: boolean; conflict?: "abort" | "warn" };
-  /** State version — increment when state shape changes. Default: 0. */
+  /** State version — increment when state shape changes. Default: 0.
+   *
+   *  @example
+   *  ```ts
+   *  version: 2,
+   *  ```
+   */
   version?: number;
   /** Migration hook — called when persisted version < current version.
    *  Receives old state (after deepMerge with defaults) and old version number.
@@ -312,7 +404,13 @@ export type MethodsCellConfig<
    *  from the hook's annotation and every method body lost its typing, with
    *  the error reported ten lines away in the methods and nothing pointing at
    *  ordering. A field report lost an afternoon to it and "fixed" it by
-   *  widening the annotation, which silently widens `S` for the whole cell. */
+   *  widening the annotation, which silently widens `S` for the whole cell.
+   *
+   *  @example
+   *  ```ts
+   *  onMigrate: (s, from) => (from < 2 ? { ...s, tags: [] } : s),
+   *  ```
+   */
   onMigrate?: (state: NoInfer<S>, fromVersion: number) => NoInfer<S>;
   /** Repair this cell's restored state, once, at boot.
    *
@@ -372,10 +470,22 @@ export type MethodsCellConfig<
    *  (`cell-compose-registry.ts`) because `app.getState()` may not yet reflect
    *  `__init` when the hook runs. It was passed at runtime and missing from
    *  this type, so `onInit(app, initState)` — the shape the docs teach — was a
-   *  compile error for every app that wrote it. */
+   *  compile error for every app that wrote it.
+   *
+   *  @example
+   *  ```ts
+   *  onInit: (app) => { watcher = watch(app); },
+   *  ```
+   */
   onInit?: (app: ScopedApp<NoInfer<S>>, initState: NoInfer<S>) => void;
   /** Runs when the app shuts down (cells in reverse order) or the cell is
    *  disabled — close what `onInit` opened. Errors are reported, never
-   *  thrown: one cell's cleanup cannot stop another's. */
+   *  thrown: one cell's cleanup cannot stop another's.
+   *
+   *  @example
+   *  ```ts
+   *  onDestroy: () => watcher?.close(),
+   *  ```
+   */
   onDestroy?: (app: ScopedApp<NoInfer<S>>) => void;
 };

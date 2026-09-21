@@ -62,7 +62,8 @@ export function observeAction(
 
   // ── Async method error ────────────────────────────────────────
   if (type.endsWith(":__error")) {
-    ctx.stats.errors++;
+    // NOT counted here any more: `emit` counts every error-level line, so an
+    // increment here too made an async method failure worth two.
     ctx.emit(
       "error",
       `cell:${prefix}`,

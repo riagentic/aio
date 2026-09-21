@@ -284,16 +284,12 @@ Deno.test({
           );
           const log = (await adb("logcat", "-d")).out;
           assert(!log.includes("REDUCE_ERROR"), "a tap threw in the reducer");
-          // Saved, then give the WebView time to commit localStorage to disk: it
-          // writes lazily, and a kill within ~1s of a change loses it (todo.md).
-          await until(
-            "the state to be stored",
-            async () =>
-              String(await ev("localStorage.getItem('aio:app')")).includes(
-                  '"count":2',
-                )
-                ? true
-                : null,
+          // The state is in the NATIVE store — a standalone APK persists
+          // through `AioNativeStore` (fsync + atomic rename), not through the
+          // WebView's localStorage, which commits to disk lazily.
+          assertStringIncludes(
+            String(await ev("AioNativeStore.get('aio:app')")),
+            '"count":2',
           );
           await sleep(3000);
           await launch(pkg);
@@ -304,6 +300,76 @@ Deno.test({
             ),
             "2",
             "the count did not survive the app being killed",
+          );
+        },
+      );
+
+      await t.step(
+        "standalone: a change survives a kill in the same instant it was made",
+        async () => {
+          // THE regression this step exists for. A standalone APK used to
+          // persist through the WebView's localStorage, which commits to disk
+          // on its own lazy schedule: measured here, a SIGKILL 122 ms after a
+          // committed change restored the state from BEFORE it — the change
+          // gone, nothing said. (At ~900 ms it survived, which is why the step
+          // above, which waits 3 s, was green throughout.) A swipe-away, an
+          // OOM kill and a crash are all exactly that kill.
+          //
+          // No sleep here on purpose: the kill goes in as fast as adb can
+          // deliver it after the count is confirmed on screen. The native
+          // store (fsync + atomic rename before its method returns) is what
+          // makes that survivable — see AioNativeStore in MainActivity.kt.
+          const pkg = standalone;
+          const ev = (e: string) => onPage(pkg, e);
+          await launch(pkg, true);
+          await until(
+            "a fresh counter",
+            async () => (await ev(COUNT)) === "0" ? true : null,
+          );
+          await ev(PLUS);
+          await ev(PLUS);
+          await until(
+            "the count to reach 2",
+            async () => (await ev(COUNT)) === "2" ? 2 : null,
+          );
+          const t0 = Date.now();
+          await adb("shell", "am", "force-stop", pkg); // SIGKILL, no flush
+          const killedAfter = Date.now() - t0;
+          await launch(pkg);
+          assertEquals(
+            await until(
+              "the restored counter",
+              async () => (await ev(COUNT)) ?? null,
+            ),
+            "2",
+            `the change was lost to a kill ${killedAfter}ms after it was made ` +
+              `— the app is not writing through the durable native store`,
+          );
+          assert(
+            killedAfter < 1000,
+            `this step only proves anything if the kill is FAST; it took ` +
+              `${killedAfter}ms, which the lazy localStorage path survived too`,
+          );
+        },
+      );
+
+      await t.step(
+        "standalone: the page is not drawn under the system bars",
+        async () => {
+          // targetSdk 35 makes every activity edge-to-edge by default, and
+          // measured on API 35 before the frame was inset, the page drew
+          // UNDER the status bar: an app's own title and the clock on the
+          // same pixels. The viewport must therefore be shorter than the
+          // screen by at least a status bar (24dp is Android's minimum;
+          // measured here: 915 - 838 = 77 CSS px of status + navigation bar).
+          const ev = (e: string) => onPage(standalone, e);
+          const gap = Number(
+            await ev("screen.height - innerHeight"),
+          );
+          assert(
+            gap >= 24,
+            `the page fills the whole screen (${gap} CSS px of system bars) ` +
+              `— it is drawing under the status/navigation bar`,
           );
         },
       );
@@ -415,7 +481,7 @@ Deno.test({
       await recordProof(
         "android",
         "emulator",
-        `API ${api}: standalone (dispatch, persistence, rotation) + client (connect, server dispatch, Back, unreachable)`,
+        `API ${api}: standalone (dispatch, durable native store — survives an instant kill, rotation) + client (connect, server dispatch, Back, unreachable)`,
       );
     } finally {
       if (server) {

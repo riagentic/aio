@@ -174,12 +174,18 @@ export const VERB_FLAGS: Readonly<Record<string, readonly string[]>> = {
   pin: ["--latest", "--major", "--aio"],
   theme: [],
   link: ["--aio"],
+  // The shared Electron runtime cache. `--yes` is the ONLY flag that
+  // deletes, and it still prints the plan first; `--days`/`--keep` widen
+  // or narrow what the plan offers.
+  prune: ["--yes", "-y", "--days", "--keep"],
   uninstall: [],
   remove: ["--no-run"],
   installed: [],
   version: [],
   trust: [],
-  help: [],
+  // `--commands` is the middle tier: one line for every command. (`--all`, the
+  // full prose, is a GLOBAL flag — see the `--all` entry below.)
+  help: ["--commands"],
   // `--task=<slug>` one section, `--list` the section index. Gated (not
   // passthrough) so a mistyped slug is refused with the real list rather
   // than silently printing the whole brief.

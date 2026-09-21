@@ -399,6 +399,13 @@ the surface — `toggle-negative` and `negative` are two unrelated handles.
 > matches nothing, in a test and in the app. Address it by name (`ui.save`,
 > `am trigger "App:save"`), or reach for `data-testid` when you genuinely need
 > an attribute that survives into the markup.
+>
+> **Driving the app from OUTSIDE the process** — a script, CI, Chrome DevTools
+> Protocol against a phone's WebView — does not change this. `am surface --json`
+> and `am trigger` read and drive the same handles over the wire, on a device
+> exactly as on your desktop, so an out-of-process e2e never needs a selector at
+> all. Falling back to CSS classes there is the sign you wanted `am surface`; a
+> field report scraping an APK's WebView over CDP did exactly that.
 
 ### `t` on a COMPONENT names the component
 
@@ -772,7 +779,11 @@ Spec: `docs/specs/2026-07-10-semantic-ui-testing.md`. Cell-level testing:
 - Handles are **lazy** — `ui.find("Row", 3)` resolves on use. There is no
   `.style` on a handle; read `.text`, `.value`, `.checked`, or assert on state.
 - `type("x")` **appends** to the current value (a user typing); `setValue("x")`
-  **replaces** it.
+  **replaces** it — but still one character at a time, firing the same events a
+  user would and letting the component re-render between them. It is "clear,
+  then type", not an assignment. A field report was surprised by this after
+  `setValue` on a search box ran its handler once per character; if you need the
+  value set in one step without those renders, drive the cell directly.
 - A list key is matched by its string form: `find("Row", 5)` and
   `find("Row", "5")` both find `key={5}`.
 

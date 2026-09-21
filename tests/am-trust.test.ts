@@ -74,6 +74,25 @@ async function tempHome(): Promise<string> {
   return await Deno.makeTempDir({ prefix: "am-trust-" });
 }
 
+/** Is there an openssl to ask? These two cases read the generated root back
+ *  with `openssl x509 -text`, which is a fine second opinion on Linux and
+ *  macOS and simply absent on Windows. The PRODUCT needs no openssl at all now
+ *  (src/server/x509.ts), so a test that does must SAY so rather than fail on
+ *  the one OS this change was for — and the same name-constraint property is
+ *  proven OS-independently in tests/x509.test.ts. */
+const OPENSSL = await (async () => {
+  try {
+    const r = await new Deno.Command("openssl", {
+      args: ["version"],
+      stdout: "null",
+      stderr: "null",
+    }).output();
+    return r.success;
+  } catch {
+    return false;
+  }
+})();
+
 async function opensslText(certPath: string): Promise<string> {
   const { code, stdout } = await new Deno.Command("openssl", {
     args: ["x509", "-in", certPath, "-noout", "-text"],
@@ -86,96 +105,105 @@ async function opensslText(certPath: string): Promise<string> {
 
 // ── the promise ──────────────────────────────────────────────
 
-Deno.test("am trust: the root it asks you to install cannot vouch for the public internet", async () => {
-  const home = await tempHome();
-  const prev = Deno.env.get("AIO_APPS_DIR");
-  Deno.env.set("AIO_APPS_DIR", home);
-  try {
-    const root = await loadOrCreateAioRoot();
-    assert(root.created, "a fresh home should have produced a new root");
-    const text = await opensslText(root.certPath);
-
-    // CRITICAL, or a client is free to ignore it — which would make the
-    // constraint decorative and the command's argument false.
-    assertStringIncludes(text, "X509v3 Name Constraints: critical");
-
-    const permitted = text
-      .slice(text.indexOf("X509v3 Name Constraints"))
-      .split("Signature Algorithm")[0]!;
-
-    // Exactly the reach the command claims, and both name types a server
-    // certificate can carry (a DNS-only constraint leaves IP SANs unbounded).
-    for (
-      const name of [
-        "DNS:localhost",
-        "DNS:.local",
-        "DNS:.localhost",
-        "IP:127.0.0.0/255.0.0.0",
-        "IP:10.0.0.0/255.0.0.0",
-        "IP:192.168.0.0/255.255.0.0",
-        "IP:172.16.0.0/255.240.0.0",
-        "IP:169.254.0.0/255.255.0.0",
-      ]
-    ) {
-      assertStringIncludes(permitted, name);
-    }
-    // IPv6 loopback and the private ranges, case-insensitively (openssl prints
-    // the mask uppercase).
-    const upper = permitted.toUpperCase();
-    assertStringIncludes(upper, "IP:0:0:0:0:0:0:0:1/");
-    assertStringIncludes(upper, "IP:FC00:");
-    assertStringIncludes(upper, "IP:FE80:");
-
-    // And NOTHING that reaches a public name. A bare `DNS:` (the empty prefix)
-    // permits every domain that exists; `.com`, `.org` and a naked TLD are the
-    // shapes a careless widening would take.
-    for (const forbidden of ["DNS:.com", "DNS:.org", "DNS:.net", "DNS:\n"]) {
-      assert(
-        !permitted.includes(forbidden),
-        `the root permits ${
-          JSON.stringify(forbidden)
-        } — it can vouch for a public site`,
-      );
-    }
-    // It is a CA, and it is the only thing in here that is.
-    assertStringIncludes(text, "CA:TRUE");
-  } finally {
-    if (prev === undefined) Deno.env.delete("AIO_APPS_DIR");
-    else Deno.env.set("AIO_APPS_DIR", prev);
-    await Deno.remove(home, { recursive: true });
-  }
-});
-
-Deno.test("am trust: the terminal claim and the certificate agree", async () => {
-  const home = await tempHome();
-  try {
-    const { logs } = await run(() => cmdTrust([], FLAGS()), home, {
-      tty: true,
-    });
-    const said = logs.join("\n");
-
-    // The argument the user is asked to accept.
-    assertStringIncludes(said, "name-constrained");
-    assertStringIncludes(said, "cryptographically incapable");
-    // …and the names it says it is limited to are the ones in the cert.
+Deno.test({
+  name:
+    "am trust: the root it asks you to install cannot vouch for the public internet",
+  ignore: !OPENSSL,
+  fn: async () => {
+    const home = await tempHome();
     const prev = Deno.env.get("AIO_APPS_DIR");
     Deno.env.set("AIO_APPS_DIR", home);
-    let text: string;
     try {
-      text = await opensslText(aioRootPaths().certPath);
+      const root = await loadOrCreateAioRoot();
+      assert(root.created, "a fresh home should have produced a new root");
+      const text = await opensslText(root.certPath);
+
+      // CRITICAL, or a client is free to ignore it — which would make the
+      // constraint decorative and the command's argument false.
+      assertStringIncludes(text, "X509v3 Name Constraints: critical");
+
+      const permitted = text
+        .slice(text.indexOf("X509v3 Name Constraints"))
+        .split("Signature Algorithm")[0]!;
+
+      // Exactly the reach the command claims, and both name types a server
+      // certificate can carry (a DNS-only constraint leaves IP SANs unbounded).
+      for (
+        const name of [
+          "DNS:localhost",
+          "DNS:.local",
+          "DNS:.localhost",
+          "IP:127.0.0.0/255.0.0.0",
+          "IP:10.0.0.0/255.0.0.0",
+          "IP:192.168.0.0/255.255.0.0",
+          "IP:172.16.0.0/255.240.0.0",
+          "IP:169.254.0.0/255.255.0.0",
+        ]
+      ) {
+        assertStringIncludes(permitted, name);
+      }
+      // IPv6 loopback and the private ranges, case-insensitively (openssl prints
+      // the mask uppercase).
+      const upper = permitted.toUpperCase();
+      assertStringIncludes(upper, "IP:0:0:0:0:0:0:0:1/");
+      assertStringIncludes(upper, "IP:FC00:");
+      assertStringIncludes(upper, "IP:FE80:");
+
+      // And NOTHING that reaches a public name. A bare `DNS:` (the empty prefix)
+      // permits every domain that exists; `.com`, `.org` and a naked TLD are the
+      // shapes a careless widening would take.
+      for (const forbidden of ["DNS:.com", "DNS:.org", "DNS:.net", "DNS:\n"]) {
+        assert(
+          !permitted.includes(forbidden),
+          `the root permits ${
+            JSON.stringify(forbidden)
+          } — it can vouch for a public site`,
+        );
+      }
+      // It is a CA, and it is the only thing in here that is.
+      assertStringIncludes(text, "CA:TRUE");
     } finally {
       if (prev === undefined) Deno.env.delete("AIO_APPS_DIR");
       else Deno.env.set("AIO_APPS_DIR", prev);
+      await Deno.remove(home, { recursive: true });
     }
-    for (const claimed of ["localhost", ".local"]) {
-      assertStringIncludes(said, claimed);
-      assertStringIncludes(text, `DNS:${claimed}`);
+  },
+});
+
+Deno.test({
+  name: "am trust: the terminal claim and the certificate agree",
+  ignore: !OPENSSL,
+  fn: async () => {
+    const home = await tempHome();
+    try {
+      const { logs } = await run(() => cmdTrust([], FLAGS()), home, {
+        tty: true,
+      });
+      const said = logs.join("\n");
+
+      // The argument the user is asked to accept.
+      assertStringIncludes(said, "name-constrained");
+      assertStringIncludes(said, "cryptographically incapable");
+      // …and the names it says it is limited to are the ones in the cert.
+      const prev = Deno.env.get("AIO_APPS_DIR");
+      Deno.env.set("AIO_APPS_DIR", home);
+      let text: string;
+      try {
+        text = await opensslText(aioRootPaths().certPath);
+      } finally {
+        if (prev === undefined) Deno.env.delete("AIO_APPS_DIR");
+        else Deno.env.set("AIO_APPS_DIR", prev);
+      }
+      for (const claimed of ["localhost", ".local"]) {
+        assertStringIncludes(said, claimed);
+        assertStringIncludes(text, `DNS:${claimed}`);
+      }
+      // It never tells you to trust it without saying how to untrust it.
+      assertStringIncludes(said, "To undo");
+    } finally {
+      await Deno.remove(home, { recursive: true });
     }
-    // It never tells you to trust it without saying how to untrust it.
-    assertStringIncludes(said, "To undo");
-  } finally {
-    await Deno.remove(home, { recursive: true });
-  }
+  },
 });
 
 Deno.test("am trust: it explains, and never installs anything itself", async () => {

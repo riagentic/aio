@@ -7,15 +7,16 @@
 // was intended rather than what is true is worse than no report at all.
 //
 // Nothing here has side effects, so the whole report is testable as data.
-import type { UpdateTarget } from "../build/ship.ts";
-import { detectTarget } from "./updates-apply.ts";
+import { detectTarget, type InstalledTarget } from "./updates-apply.ts";
 
 /** Facts about the artifact and the machine, derived from the process. */
 export type BuildFacts = {
   /** `source` = running through `deno`; `compiled` = a self-contained artifact. */
   build: "source" | "compiled";
-  /** How this install would be updated — the same vocabulary `aio ship` uses. */
-  target: UpdateTarget;
+  /** How this install would be updated — `aio ship`'s vocabulary plus the one
+   *  shape that is only ever installed by hand (`"macos-app"`). A boot report
+   *  that called a macOS bundle a `"binary"` was not reporting a fact. */
+  target: InstalledTarget;
   /** The file on disk that IS this app (inside an AppImage, the .AppImage). */
   artifact: string;
   /** `linux/x86_64` */

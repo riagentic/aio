@@ -124,10 +124,38 @@ export type ProcessFacts = {
 /** What kind of install this process is, decided from the process itself
  *  rather than from configuration — configuration can be copied between
  *  machines, the runtime facts cannot. */
-export function classifyTarget(f: ProcessFacts): UpdateTarget {
+/** What a RUNNING install is — every shape a release can be published as
+ *  (`UpdateTarget`), plus the one that can only be installed BY HAND.
+ *
+ *  Two vocabularies, deliberately: `UpdateTarget` is what a signed manifest
+ *  declares, and a manifest can never say `"macos-app"` because no strategy
+ *  installs one. Folding them would either widen the frozen shipping union
+ *  for a value nothing ships, or leave a `.app` classified as `"binary"` —
+ *  which is the bug this exists to close. */
+export type InstalledTarget = UpdateTarget | "macos-app";
+
+export function classifyTarget(f: ProcessFacts): InstalledTarget {
   // Running from source: the executable is the `deno` binary itself, and there
   // is no artifact to swap. Detect works; apply refuses.
   if (/(^|[\\/])deno(\.exe)?$/i.test(f.execPath)) return "source";
+  // A macOS `.app`, BEFORE anything else can claim it.
+  //
+  // Measured on this exact code before the branch existed:
+  // `classifyTarget({execPath: "/Applications/Counter.app/Contents/MacOS/
+  // Counter"})` answered `"binary"`, and `installableTargets` answered
+  // `["binary"]`. So a macOS bundle would accept a plain-binary release and
+  // run the `binary` strategy, which renames the new executable over
+  // `Contents/MacOS/<exe>` — a file INSIDE a signed bundle. Every byte of a
+  // bundle is covered by its seal, so the result is an app macOS refuses to
+  // launch at all, produced by the update mechanism itself, on the user's
+  // machine, with no way back but a fresh download. A silent, remote,
+  // unrecoverable break: the worst shape this repo has a name for.
+  //
+  // There IS no in-place strategy for a bundle yet (see `installableTargets`
+  // and the note in todo.md), so the honest answer is a target of its own
+  // that installs nothing and says what to do instead. Matched on the path
+  // rather than on `Deno.build.os`, so the rule is a pure test on any host.
+  if (isMacAppBundle(f.execPath)) return "macos-app";
   if (f.appImage) {
     // `ELECTRON_PATH`, not `AIO_ELECTRON`: the AppRun an Electron AppImage
     // ships exports the former, and nothing in this repo has ever set the
@@ -141,7 +169,7 @@ export function classifyTarget(f: ProcessFacts): UpdateTarget {
   return "binary";
 }
 
-export function detectTarget(): UpdateTarget {
+export function detectTarget(): InstalledTarget {
   const execPath = Deno.execPath();
   const appImage = Deno.env.get("APPIMAGE") ?? null;
   return classifyTarget({
@@ -185,8 +213,15 @@ function existsSync(p: string): boolean {
 
 /** The targets this process can actually install. Everything else is reported
  *  to the user with the reason, never silently ignored. */
+/** Is `execPath` the executable of a macOS `.app` bundle
+ *  (`…/Foo.app/Contents/MacOS/<exe>`)? Pure — the shape of the path IS the
+ *  fact, and a pure rule is one that a Linux CI can hold. */
+export function isMacAppBundle(execPath: string): boolean {
+  return /\.app\/Contents\/MacOS\/[^/]+$/.test(execPath);
+}
+
 export function installableTargets(
-  t: UpdateTarget = detectTarget(),
+  t: InstalledTarget = detectTarget(),
 ): UpdateTarget[] {
   // Running from source, DETECTION is universal — the update UI has to be
   // developable against a real source, and dev must not take a different code
@@ -201,6 +236,12 @@ export function installableTargets(
     return ["appimage", "electron-appimage"];
   }
   if (t === "electron-zip") return ["electron-zip"];
+  // A `.app` can install NOTHING over itself — not even a `macos-app`
+  // release, because there is no strategy that can replace a signed bundle
+  // from inside it. Detection still runs, so the app tells its user a new
+  // version exists and how to take it (`decide`, `updates-core.ts`); what it
+  // must never do is accept a `binary` release and break its own seal.
+  if (t === "macos-app") return [];
   return ["binary"];
 }
 

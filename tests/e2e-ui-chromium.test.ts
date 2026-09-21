@@ -197,6 +197,15 @@ Deno.test({
         async () => (await serverCount()) === 1 ? true : null,
       );
       assertEquals(await serverCount(), 1);
+      // The physical-proof row for the web target. Last line, so a partial
+      // run cannot claim it — and written by the gate rather than by hand,
+      // because a hand-kept matrix is a claim and a generated one is evidence.
+      const { recordProof } = await import("../scripts/proof.ts");
+      await recordProof(
+        "web",
+        "real-browser",
+        "chromium: surface → trigger → server state converged",
+      );
     } finally {
       if (browser) await kill(browser);
       await kill(app);

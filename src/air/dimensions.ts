@@ -17,6 +17,7 @@ let warnedNoRO = false;
 /**
  * Track an element's dimensions reactively via ResizeObserver.
  * Must be called inside a component function body during render.
+ * @tier Advanced
  */
 // The `let` above used to sit BETWEEN this block and the function, so the
 // doc documented the flag: `useDimensions` was public and undocumented, and

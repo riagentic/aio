@@ -51,6 +51,13 @@ import { _setRouterBoot } from "./air/router.ts";
 import { _installRouterListeners } from "./air/router-core.ts";
 import { _setRouteBase } from "./air/router-core.ts";
 import type { SignInProps } from "./browser/browser-auth-ui.ts";
+import type {
+  serverAuth as ServerAuth,
+  serverRequest as ServerRequest,
+  serverUser as ServerUser,
+} from "./server/auth-context.ts";
+import type { blocking as ServerBlocking } from "./state/blocking.ts";
+import { blockingServerOnly } from "./state/blocking-reason.ts";
 import { showDesktopNotification } from "./browser/desktop-notify.ts";
 import { notifyPayload } from "./state/notify.ts";
 import type { AioUser } from "./protocol/protocol-types.ts";
@@ -87,6 +94,7 @@ export {
   // already carries two notes about (useLocal, useAio).
   onGlobalKey,
   onMount,
+  onUnmount,
   onWindowEvent,
   // aio-renderer's setDevMode is the one `aio/air` exports — it turns on the
   // renderer's dev checks AND forwards to vdom's flag.
@@ -290,7 +298,8 @@ export { reactIsland, type ReactIslandConfig } from "./air/react-island.ts";
 
 let _signInHinted = false;
 
-/** The current user — always `null` on a standalone build (no server session). */
+/** The current user — always `null` on a standalone build (no server session).
+ *  @tier Kit */
 export function useUser(): AioUser | null | undefined {
   return null;
 }
@@ -314,6 +323,60 @@ export function SignIn(_props: SignInProps = {}): null {
   }
   return null;
 }
+
+// ── Server-only names, as standalone facades that refuse when CALLED ──
+//
+// The SAME gap the browser entry closed (src/browser-air.ts, and
+// tests/browser-server-only-stubs.test.ts), on the target that had it left:
+// docs/auth/auth.md's `serverUser` example and docs/debugging/performance.md's
+// `blocking` example import the name into a CELL MODULE, and the UI imports
+// that module — so on android, where `aio` resolves to THIS file, the name has
+// to resolve here or the whole APK bundle is refused:
+//
+//   ✘ [ERROR] No matching export in "src/standalone-air.ts" for import
+//     "serverUser"
+//
+// …an esbuild error naming a framework internal, which reads as a broken
+// install rather than as "this call needs a server". Exactly the shape
+// tests/android-air-surface.test.ts exists to stop.
+//
+// None can be a re-export: auth-context.ts needs node:async_hooks, and
+// blocking.ts's facade assignments (`blocking.cancel = …`) are statements
+// esbuild keeps, which would pin the whole Deno worker pool inside the APK.
+// Each facade is a pure-annotated const — 0 bytes unless the app uses it — and
+// a CALL throws, naming the runtime it actually ran on. Never a silent
+// `undefined`: a method replayed here that reads `serverUser()` as "anonymous"
+// is an authorization check that passed because there was nobody to check.
+// tests/android-server-only-stubs.test.ts pins both halves.
+const serverOnly = (name: string) => (): never => {
+  throw new Error(
+    `[aio] ${name}() is server-only — it ran in a standalone build (the ` +
+      `Android WebView), which has no server: nothing authenticated this ` +
+      `call and no request is behind it. Move the check to a server the app ` +
+      `talks to (build with \`--android --remote\`), or drop the call.`,
+  );
+};
+export const serverUser: typeof ServerUser = /* @__PURE__ */ serverOnly(
+  "serverUser",
+);
+export const serverRequest: typeof ServerRequest = /* @__PURE__ */ serverOnly(
+  "serverRequest",
+);
+export const serverAuth: typeof ServerAuth = /* @__PURE__ */ serverOnly(
+  "serverAuth",
+);
+/** `blocking` in a standalone build: the same refusal blocking.ts gives any
+ *  runtime without Deno (blocking-reason.ts — it already names the WebView),
+ *  with an inert cancel/dispose. There is never a pool here to cancel. */
+export const blocking: typeof ServerBlocking = /* @__PURE__ */ Object.assign(
+  (id: string): Promise<never> =>
+    Promise.reject(new Error(blockingServerOnly(id))),
+  {
+    cancel: (_id: string): boolean => false,
+    disposeIdle: (): boolean => true,
+    dispose: (): Promise<void> => Promise.resolve(),
+  },
+);
 
 /** Makes the packaged shell's document the app's route root. The android
  *  asset loader serves `…/assets/index.html`, so `location.pathname` starts
@@ -545,6 +608,158 @@ type StandaloneConfig<S, A, E> = {
 
 const STORAGE_KEY = "aio_state";
 
+/** The global an aio Android APK injects (`addJavascriptInterface`, see
+ *  `AioNativeStore` in android-template's MainActivity.kt). Named once, here,
+ *  so the Kotlin side and this side cannot drift apart silently. */
+const NATIVE_STORE_GLOBAL = "AioNativeStore";
+
+/** The shape the Kotlin bridge exposes. `set` answers whether the bytes
+ *  reached the disk — a native store that could not write must not look like
+ *  one that did. */
+type NativeStoreBridge = {
+  get(key: string): string | null;
+  set(key: string, value: string): boolean;
+  describe(): string;
+};
+
+/** Where a standalone app's state is kept, and whether that store is done
+ *  writing by the time `write` returns. */
+/** Underscored deliberately: this type is reachable as `aio` INSIDE a
+ *  standalone/Android bundle, but `check:api` snapshots only the public
+ *  entries — so a bare name here would be public-looking surface with no
+ *  instrument guarding it. The underscore says "internal" in the one place
+ *  the gate cannot. */
+export type _PersistStore = {
+  /** `"native"` = the Android file store (durable), `"localStorage"` = the
+   *  browser's (lazy), `"none"` = neither exists. */
+  readonly kind: "native" | "localStorage" | "none";
+  /** True when `write` returning means the bytes are on disk. */
+  readonly durable: boolean;
+  /** One line for the boot log — it names the store AND its durability, so a
+   *  developer reading devtools/logcat can see which one this run picked. */
+  readonly describe: string;
+  read(key: string): string | null;
+  write(key: string, value: string): void;
+};
+
+/** THE decider for "which store does this standalone runtime persist to".
+ *
+ *  Measured on an API 35 emulator (standalone APK, examples/counter): the
+ *  WebView commits localStorage to disk lazily, so a SIGKILL 122 ms after a
+ *  committed change restored the state from BEFORE it — the change was gone,
+ *  with nothing said. At 933 ms the same change survived. Silent data loss,
+ *  which is the one thing this project refuses outright.
+ *
+ *  So an APK ships a native store: a file written temp → fsync → atomic
+ *  rename, durable before `set` returns (MainActivity.kt). The same bundle
+ *  opened in a desktop browser has no such object and falls back to
+ *  localStorage, which is all a preview can offer.
+ *
+ *  Pure: everything it inspects arrives in `g`, and the choice is RETURNED,
+ *  never stashed — `initStandalone` holds the one instance and both the
+ *  restore and the writes go through it, so no second copy of this decision
+ *  can exist to disagree with the first. */
+export function _pickPersistStore(g: {
+  [NATIVE_STORE_GLOBAL]?: unknown;
+  localStorage?: {
+    getItem(k: string): string | null;
+    setItem(k: string, v: string): void;
+  };
+}): _PersistStore {
+  const native = g[NATIVE_STORE_GLOBAL] as NativeStoreBridge | undefined;
+  if (
+    native && typeof native.get === "function" &&
+    typeof native.set === "function"
+  ) {
+    let where = "";
+    try {
+      where = ` at ${native.describe()}`;
+    } catch {
+      // aio-ok: describe() only decorates the boot line with a path. An
+      // overlaid bridge that omits it must not stop the app from booting on
+      // the store that does work — and the line still names the store.
+    }
+    return {
+      kind: "native",
+      durable: true,
+      describe: `native file store${where} (fsync + atomic rename on every ` +
+        `change — a kill right after a change cannot lose it)`,
+      read: (k) => {
+        const v = native.get(k);
+        if (typeof v === "string") return v;
+        // ADOPT what the previous build wrote.
+        //
+        // Every standalone APK before this one persisted through
+        // `localStorage`. Android keeps an app's data across an upgrade, so
+        // after the user installs the new build their state is still on the
+        // device — in the store this one no longer reads. Without this the
+        // app would come up EMPTY on first launch after an upgrade: the
+        // silent data loss this whole change exists to end, reintroduced by
+        // the change itself.
+        //
+        // One-way and one-time: the value is copied into the durable store,
+        // so the next boot is a plain native read. The old copy is left where
+        // it is — it costs nothing and it is the only thing a downgrade could
+        // fall back to. If the copy fails, the value is still RETURNED and
+        // the failure is loud: running on the data beats losing it, and the
+        // next boot simply tries again.
+        const old = g.localStorage?.getItem?.(k);
+        if (typeof old !== "string") return null;
+        try {
+          if (native.set(k, old) === false) {
+            throw new Error(`the native store refused the write`);
+          }
+          console.info(
+            `[aio] persistence: adopted "${k}" from localStorage into the ` +
+              `native store — this app was upgraded from a build that used ` +
+              `localStorage, and its state has been moved to durable storage.`,
+          );
+        } catch (e) {
+          console.error(
+            `[aio] ⚠ persistence: found "${k}" in localStorage but could NOT ` +
+              `copy it into the native store (${e}). Running on the ` +
+              `localStorage copy for now — nothing is lost, but until this ` +
+              `succeeds a kill right after a change can still lose it.`,
+          );
+        }
+        return old;
+      },
+      write: (k, v) => {
+        // `false` = the native side caught an IO error and already logged it.
+        // Throwing here puts it in front of the developer twice rather than
+        // letting a failed save look like a save.
+        if (native.set(k, v) === false) {
+          throw new Error(
+            `the native store refused the write (see logcat, tag "aio")`,
+          );
+        }
+      },
+    };
+  }
+  const ls = g.localStorage;
+  if (ls && typeof ls.getItem === "function") {
+    return {
+      kind: "localStorage",
+      durable: false,
+      describe: "localStorage (the host commits it to disk on its own " +
+        "schedule — a crash within a second of a change can lose it)",
+      read: (k) => ls.getItem(k),
+      write: (k, v) => ls.setItem(k, v),
+    };
+  }
+  return {
+    kind: "none",
+    durable: false,
+    describe: "NONE — no native store and no localStorage on this host",
+    read: () => null,
+    write: () => {
+      throw new Error(
+        "no storage on this host (no native store, no localStorage)",
+      );
+    },
+  };
+}
+
 /** Initializes standalone runtime — call before AIR mounts */
 export function initStandalone<S, A, E>(
   initialState: S,
@@ -556,11 +771,23 @@ export function initStandalone<S, A, E>(
   const getUIState = (s: S) => s;
   const persistKey = config.persistKey ?? STORAGE_KEY;
 
-  // Restore from localStorage
+  // ONE store for this runtime — chosen once, used by the restore below and
+  // by every write. See _pickPersistStore.
+  const store = _pickPersistStore(
+    globalThis as unknown as Parameters<typeof _pickPersistStore>[0],
+  );
+  if (shouldPersist) {
+    // Observable at boot: which store, and whether it is durable. A developer
+    // who cannot see which one a run picked cannot reason about what a crash
+    // costs. Reaches Android logcat too (chromium relays page console lines).
+    console.info(`[aio] persistence: ${store.describe}`);
+  }
+
+  // Restore
   let state = initialState;
   if (shouldPersist) {
     try {
-      const raw = localStorage.getItem(persistKey);
+      const raw = store.read(persistKey);
       if (raw) {
         const persisted = JSON.parse(raw);
         state = deepMerge(
@@ -569,7 +796,7 @@ export function initStandalone<S, A, E>(
         ) as S;
       }
     } catch (e) {
-      console.warn("[aio] localStorage restore failed:", e);
+      console.warn(`[aio] restore from ${store.kind} failed:`, e);
     }
   }
 
@@ -591,18 +818,46 @@ export function initStandalone<S, A, E>(
   _state = getUIState(state);
   _stateSignal.set(_state);
 
-  // Debounced localStorage persistence
+  // Persistence. A DURABLE store writes on the spot; a lazy one is debounced.
   const persistMs = config.persistDebounceMs ?? 100;
   let persistTimer: ReturnType<typeof setTimeout> | null = null;
+  let slowWriteWarned = false;
+
+  function writeNow(what: string): void {
+    try {
+      const t0 = Date.now();
+      store.write(persistKey, JSON.stringify(getDBState(state)));
+      // An fsync per change is the price of "a kill cannot lose it". If it
+      // ever costs more than two frames, say so ONCE rather than let the app
+      // feel mysteriously heavy: that is a state big enough to want
+      // `persist: "none"` on a cell, not a store to give up on.
+      const ms = Date.now() - t0;
+      if (store.durable && ms > 32 && !slowWriteWarned) {
+        slowWriteWarned = true;
+        console.warn(
+          `[aio] ⚠ a durable save took ${ms}ms — the state written on ` +
+            `every change is large. Mark the parts that need not survive a ` +
+            `restart with \`persist: false\` on their cell.`,
+        );
+      }
+    } catch (e) {
+      console.warn(`[aio] ${what} to ${store.kind} failed:`, e);
+    }
+  }
+
   function schedulePersist(): void {
-    if (!shouldPersist || persistTimer) return;
+    if (!shouldPersist) return;
+    // Durable store: write here, synchronously, so the change is on disk
+    // before the dispatch that made it returns — there is no window left for
+    // a kill to land in. Debouncing it would put one back.
+    if (store.durable) {
+      writeNow("persist");
+      return;
+    }
+    if (persistTimer) return;
     persistTimer = setTimeout(() => {
       persistTimer = null;
-      try {
-        localStorage.setItem(persistKey, JSON.stringify(getDBState(state)));
-      } catch (e) {
-        console.warn("[aio] persist failed:", e);
-      }
+      writeNow("persist");
     }, persistMs);
   }
 
@@ -612,11 +867,7 @@ export function initStandalone<S, A, E>(
       clearTimeout(persistTimer);
       persistTimer = null;
     }
-    try {
-      localStorage.setItem(persistKey, JSON.stringify(getDBState(state)));
-    } catch (e) {
-      console.warn("[aio] flush failed:", e);
-    }
+    writeNow("flush");
   }
   _cancelPersist = () => {
     if (persistTimer) {
@@ -624,6 +875,18 @@ export function initStandalone<S, A, E>(
       persistTimer = null;
     }
   };
+
+  // Belt and braces for the LAZY store only: the app going to the background
+  // (Android pauses the WebView, a browser tab is hidden or closed) is the
+  // last moment before a kill, so spend it flushing the pending debounce. A
+  // durable store has nothing pending — every change was already written.
+  //
+  // The listeners are installed ONCE per process and dispatch through
+  // `_flushPersist`, the same shape as `_cancelPersist` above: a page runs
+  // initStandalone once, but a test file runs it dozens of times, and a
+  // listener added per call would pile up stale closures writing stale state.
+  _flushPersist = shouldPersist && !store.durable ? flushPersist : null;
+  _installBackgroundFlush();
 
   const standaloneLog = {
     debug: (_: string) => {},
@@ -745,7 +1008,8 @@ export function initStandalone<S, A, E>(
 
 // ── AIR hooks (signal-based) ──
 
-/** Connects to standalone dispatch loop. Signal-based — auto-tracked by AIR. */
+/** Connects to standalone dispatch loop. Signal-based — auto-tracked by AIR.
+ *  @tier Core */
 export function useAio<S = unknown>(): {
   state: S | null;
   send: (action: { type: string; payload?: unknown }) => void;
@@ -804,6 +1068,9 @@ export function _resetState(): void {
   const cancelPersist = _cancelPersist;
   _cancelPersist = null;
   cancelPersist?.();
+  // …and the background-flush hook, for the same reason: the process-wide
+  // listeners stay, but they must not reach a torn-down app's writer.
+  _flushPersist = null;
   _state = null;
   _app = null;
   _cellApp = null;
@@ -857,6 +1124,39 @@ let _destroyCells: (() => void) | null = null;
  *  is the flush) instead of leaving the timer to fire into a runtime that no
  *  longer exists. Set per boot, cleared by `_resetState`. */
 let _cancelPersist: (() => void) | null = null;
+/** The current runtime's pending-write flush, or null when its store is
+ *  durable (nothing can be pending) or persistence is off. */
+let _flushPersist: (() => void) | null = null;
+let _backgroundFlushInstalled = false;
+/** One pair of listeners for the whole process — see the call site.
+ *
+ *  Registered on the objects that actually EMIT these events: a document for
+ *  `visibilitychange`, a window for `pagehide`. Never on the bare global: Deno
+ *  has `globalThis.addEventListener`, so sniffing for that method alone
+ *  attaches two listeners to a server/CLI/test process that can never fire —
+ *  a flush that looks installed and saves nothing, which is the same silent
+ *  loss this whole file exists to remove. No document means no DOM means
+ *  nothing to install. */
+function _installBackgroundFlush(): void {
+  if (_backgroundFlushInstalled) return;
+  const g = globalThis as unknown as {
+    window?: { addEventListener?: (t: string, f: () => void) => void };
+    document?: {
+      visibilityState?: string;
+      addEventListener?: (t: string, f: () => void) => void;
+    };
+  };
+  const doc = g.document;
+  if (!doc || typeof doc.addEventListener !== "function") return;
+  _backgroundFlushInstalled = true;
+  doc.addEventListener("visibilitychange", () => {
+    if (doc.visibilityState === "hidden") _flushPersist?.();
+  });
+  const win = g.window;
+  if (win && typeof win.addEventListener === "function") {
+    win.addEventListener("pagehide", () => _flushPersist?.());
+  }
+}
 
 /** Install a starting state for the booted cells — harness only.
  *

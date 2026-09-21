@@ -12,6 +12,7 @@ import {
   _setCurrentCollector,
 } from "./renderer-state.ts";
 import { _inSsrCall } from "./vdom-ssr.ts";
+import { _ssrRenderCurrent } from "./ssr-render.ts";
 
 /** Is the hook that is running part of a SERVER render of a component?
  *
@@ -108,6 +109,77 @@ export function onCleanup(fn: () => void): void {
   } else {
     _currentCollector.cleanupCallbacks.push(fn);
   }
+}
+
+/**
+ * Register a cleanup that runs ONCE, when this component goes away for good.
+ *
+ * The counterpart to `onCleanup`, and the reason it exists: `onCleanup` in a
+ * component BODY runs on unmount **and before every re-render**, which is
+ * right for a cleanup the body re-creates each render and wrong for anything
+ * that should outlive one. A field report lost an afternoon to the difference,
+ * four times in four components — a gallery released its place in a download
+ * queue from the body, so 85 of 89 cards were cancelled on the next repaint
+ * and never asked again; a send button's three-second auto-disarm was cleared
+ * on every balance patch, so a safety control quietly stopped being one. Every
+ * other framework ties a cleanup to an effect rather than to a repaint, so the
+ * body is where people reach for it.
+ *
+ *     onMount(() => { const t = setInterval(poll, 400); onCleanup(() => clearInterval(t)); });
+ *     onUnmount(() => queue.release(slot));   // …the same thing, said once
+ *
+ * NOT a wrapper for `onMount(() => onCleanup(fn))`, which is the spelling
+ * people write and is subtly wrong: a render that never commits never runs its
+ * `onMount`, so a hold released only from there is leaked for good. This runs
+ * at the unmount, at once if the body threw, and at once if a boundary above
+ * caught before the instance mounted.
+ *
+ * `aiol` flags a body-level `onCleanup` that tears down something the body did
+ * not create, and names this.
+ *
+ * @example
+ * ```tsx
+ * function NftThumb({ id }: { id: string }) {
+ *   const slot = useRef(queue.take(id));
+ *   onUnmount(() => slot.current.release());
+ *   return <img src={id} />;
+ * }
+ * ```
+ *
+ *  @tier Core
+ */
+export function onUnmount(fn: () => void): void {
+  if (!_currentCollector) {
+    _warnOutsideRender("onUnmount");
+    return;
+  }
+  // Registered inside an `onMount` callback, which runs once — there is no
+  // re-registration to guard against, and taking a ref slot there would move
+  // the hook cursor at a moment no other render reaches.
+  if (_insideMount) {
+    _onUnmount(fn);
+    return;
+  }
+  // ONE hold per call site, not one per render.
+  //
+  // `_onUnmount` appends, and a component body runs again on every render, so
+  // a bare `onUnmount(() => queue.release(slot))` in a body that rendered
+  // three times released the slot THREE times at unmount — a double-free
+  // dressed up as the fix for a leak. `useResource` never hit it because its
+  // own `_onUnmount` sits behind a ref that is filled once; nobody should
+  // have to know that to use this.
+  //
+  // The box is re-pointed at the newest closure each render, so the callback
+  // that eventually runs reads the LAST render's values, not the first's —
+  // pinning the first would be the same staleness bug from the other side.
+  const slot = useRef<{ fn: () => void } | null>(null);
+  if (slot.current) {
+    slot.current.fn = fn;
+    return;
+  }
+  const box = { fn };
+  slot.current = box;
+  _onUnmount(() => box.fn());
 }
 
 /** @internal Run `fn` when the component rendering right now goes away for
@@ -279,7 +351,7 @@ export function onWindowEvent(
 /**
  * Persist a mutable ref across renders. Does not trigger re-render on mutation.
  * Must be called inside a component function body during render.
- */
+ *  @tier Core */
 export function useRef<T>(initial: T): { current: T } {
   if (!_currentCollector) {
     if (isDevMode() && !_inServerRender()) {
@@ -317,7 +389,7 @@ export function useRef<T>(initial: T): { current: T } {
  *   return <TreeRow collapsed={ui.value.collapsed} />
  * }
  * ```
- */
+ *  @tier Core */
 export function useSignal<T>(initial: T): Signal<T> {
   if (!_currentCollector) {
     if (isDevMode() && !_inServerRender()) {
@@ -364,7 +436,23 @@ let _ssrIdCounter = 0;
  *  sequences are kept from ever meeting instead. */
 let _clientIdCounter = 0;
 
-/** Reset SSR ID counter. Called at the start of each renderToString. */
+/** The id sequence of the server render executing right now, or the module
+ *  fallback for a `useId()` that is not inside any server component call.
+ *
+ *  A top-level `renderToString`/`renderToStream` carries its own counter (see
+ *  ssr-render.ts): one module counter, reset per render, meant that two
+ *  streams pulled in turn handed each other's fields the numbers — measured
+ *  `:r0: :r2:` for one page and `:r1: :r3:` for the other, where hydration
+ *  (whose per-root counter restarts at 0) reproduces `:r0: :r1:`. Every id
+ *  after the first was a hydration mismatch, so every `<label for>` /
+ *  `aria-controls` pair the server wrote pointed at the wrong element. */
+function _nextSsrId(): number {
+  const render = _ssrRenderCurrent();
+  return render ? render.ids++ : _ssrIdCounter++;
+}
+
+/** Reset the FALLBACK SSR ID counter — the one a `useId()` outside any server
+ *  component call draws from. Called at the start of each renderToString. */
 export function _resetSsrIdCounter(): void {
   _ssrIdCounter = 0;
 }
@@ -375,10 +463,10 @@ export function _resetSsrIdCounter(): void {
  * per render tree traversal order); `:rc{N}:` for ids a client root generates
  * itself, one sequence per document, so the two can never collide.
  * Must be called inside a component function body during render.
- */
+ *  @tier Advanced */
 export function useId(): string {
   if (!_currentCollector) {
-    return `:r${_ssrIdCounter++}:`;
+    return `:r${_nextSsrId()}:`;
   }
   const collector = _currentCollector;
   if (!collector.refs) collector.refs = [];
@@ -389,7 +477,7 @@ export function useId(): string {
     // Hydrating: continue the per-root sequence renderToString used (it
     // restarts at 0 too), so the id matches the server's markup.
     const id = !root
-      ? `:r${_ssrIdCounter++}:`
+      ? `:r${_nextSsrId()}:`
       : root._ssrIds
       ? `:r${root._idCounter++}:`
       : `:rc${_clientIdCounter++}:`;
@@ -405,7 +493,7 @@ export function useId(): string {
 /**
  * Optimistic UI hook. Shows an immediate update while an async action runs,
  * then reverts to the real state when it completes (success or failure).
- */
+ *  @tier Advanced */
 export function useOptimistic<T, A = T>(
   passthrough: T,
   updateFn: (current: T, optimistic: A) => T,

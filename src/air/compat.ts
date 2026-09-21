@@ -21,7 +21,7 @@ export const useRef = rendererUseRef;
  * React's `useState`, signal-backed: `const [v, setV] = useState(0)`.
  * Same job as `useLocal` (aio's spelling, which also offers `.patch` for
  * objects); either is correct.
- */
+ *  @tier Core */
 export function useState<T>(
   initial: T | (() => T),
 ): [T, (next: T | ((prev: T) => T)) => void] {
@@ -53,7 +53,7 @@ export function useState<T>(
  * React's `useEffect`: runs after mount, re-runs when a dep changes
  * (`Object.is`), cleanup before each re-run and on unmount. `onMount()` is the
  * same job for the run-once case; `effect()` auto-tracks signals.
- */
+ *  @tier Core */
 export function useEffect(
   fn: () => void | (() => void),
   deps?: unknown[],
@@ -176,7 +176,7 @@ export function useEffect(
  * `check:api` reads the signature verbatim, so renaming it — even to the same
  * type in the same position — is a refused change. It is read now; the
  * underscore is history, not a claim.
- */
+ *  @tier Core */
 export function useCallback<T>(fn: T, _deps?: unknown[]): T {
   return useMemo(() => fn, _deps);
 }
@@ -186,7 +186,7 @@ export function useCallback<T>(fn: T, _deps?: unknown[]): T {
 /**
  * React's `useMemo`: recomputes when a dep changes (`Object.is`, length
  * first). `computed()` is the signal-native way for derived values.
- */
+ *  @tier Core */
 export function useMemo<T>(fn: () => T, _deps?: unknown[]): T {
   const ref = useRef<{ deps: unknown[] | undefined; value: T } | null>(null);
   // LENGTH first. An element-wise compare judges a SHRINKING deps array

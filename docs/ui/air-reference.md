@@ -175,7 +175,7 @@ h("ul", null, items.map((i) => h("li", { key: i.id }, i.name)));
 | `lazy`           | `lazy(loader): ComponentFn`             | Code-split component       |
 | `Defer`          | `<Defer trigger="viewport" load={fn}>`  | Trigger-based lazy loading |
 | `renderToString` | `renderToString(vnode): string`         | Sync SSR                   |
-| `renderToStream` | `renderToStream(vnode): AsyncGen`       | Streaming SSR              |
+| `renderToStream` | `renderToStream(vnode, key?): AsyncGen` | Streaming SSR              |
 
 `ErrorBoundary`, `Portal` and `Suspense` are markers (symbols), not functions,
 so `<ErrorBoundary …>` in TSX fails `deno check` with TS2604 — write them with
@@ -214,7 +214,7 @@ so `<ErrorBoundary …>` in TSX fails `deno check` with TS2604 — write them wi
 | ------------- | ----------------------------------- | ----------------------- |
 | `useRoute`    | `useRoute(pattern?): RouteState`    | Current route state     |
 | `useHead`     | `useHead({ title?, meta?, link? })` | This page's `<head>`    |
-| `collectHead` | `collectHead(): string`             | SSR: the collected head |
+| `collectHead` | `collectHead(key?): string`         | SSR: that render's head |
 | `useNavigate` | `useNavigate(): NavigateFn`         | Programmatic navigation |
 | `Route`       | `<Route path="..." element={...}>`  | Route render            |
 | `Outlet`      | `<Outlet />`                        | Nested route content    |

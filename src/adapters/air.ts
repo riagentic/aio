@@ -115,7 +115,8 @@ export type UseLocalResult<T> =
 /** Component-local reactive state — the signal you would otherwise create by
  *  hand, scoped to this instance and disposed with it. One call returns both
  *  the tuple form `[value, set]` and the object form (`.local`/`.set`/
- *  `.patch`); see {@linkcode UseLocalResult} for which to reach for. */
+ *  `.patch`); see {@linkcode UseLocalResult} for which to reach for.
+ *  @tier Core */
 export function useLocal<T>(
   initial: T,
 ): UseLocalResult<T> {

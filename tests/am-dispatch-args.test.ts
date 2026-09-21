@@ -200,7 +200,12 @@ Deno.test("am help documents the forms that actually work", () => {
   const realLog = console.log;
   console.log = (...a: unknown[]) => lines.push(a.map(String).join(" "));
   try {
-    cmdHelp([], {} as GlobalFlags, []);
+    // `--commands` since 1.0.7-beta: bare `am help` is the 16 everyday
+    // verbs (one screen), and the tier that still lists every command is
+    // `am help --commands`. The contract this test pins — every dispatch form is documented —
+    // belongs to that tier now; tests/am-help-one-screen.test.ts pins that
+    // the two tiers stay a real cut of each other.
+    cmdHelp(["--commands"], {} as GlobalFlags, []);
   } finally {
     console.log = realLog;
   }
@@ -329,4 +334,37 @@ Deno.test("readFlagPayload: `-` reads stdin, `@path` a file, anything else is th
   const missing = await readFlagPayload("@/no/such/file.json", "--args", stdin);
   assert(!missing.ok);
   assertStringIncludes(missing.error, "--args=@/no/such/file.json");
+});
+
+// …and the feature is DISCOVERABLE. `--args=@file` / `--args=-` shipped with
+// tests and a usage line and nothing in the guide, so the one spelling that
+// carries a payload a command line cannot hold existed only for whoever read
+// the source. A feature nobody can find is a feature that is not there.
+Deno.test("docs: the app-manager guide documents --args=@file / - ", async () => {
+  const doc = await Deno.readTextFile(
+    new URL("../docs/clients/app-manager.md", import.meta.url),
+  );
+  for (const spelling of ["--args=@", "--args=-", "--body=@"]) {
+    // Not assertStringIncludes: its failure prints the whole guide, and the
+    // one fact worth reading is which spelling went missing.
+    assert(
+      doc.includes(spelling),
+      `docs/clients/app-manager.md does not document \`${spelling}\``,
+    );
+  }
+  // The guide quotes the refusal a reader will actually see. Quoting an error
+  // message is a claim about code, so it is checked against the code: the
+  // wording here and in `readFlagPayload` cannot drift apart silently.
+  const missing = await readFlagPayload(
+    "@rows.json",
+    "--args",
+    () => Promise.resolve(""),
+  );
+  assert(!missing.ok);
+  const quoted = "--args=@rows.json: cannot read that file (";
+  assertStringIncludes(missing.error, quoted);
+  // Prose wraps at 80 columns, so the quote is matched on collapsed
+  // whitespace — the words have to be the code's, the line breaks need not.
+  const flat = doc.replace(/\s+/g, " ");
+  assert(flat.includes(quoted), `the guide no longer quotes: ${quoted}`);
 });

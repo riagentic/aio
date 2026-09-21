@@ -152,9 +152,31 @@ const CEILING_GZ = {
   //     feed, which is only drained while a DevTools handle is attached, so
   //     with nobody looking it named every dependency that had ever fired
   //     that instance. The clause now reads the burst's own signals.
-  air: 88,
+  //
+  // Raised 88 → 90 on 2026-09-21 (measured 90; app 92), +2 KB gz. Each half
+  // measured on its own, by building the bundle with that change reverted:
+  //   · prop-write (+~1 KB gz) — attribute NAMES are validated in the page
+  //     writer against the same predicate the SSR writer now uses. The server
+  //     wrote names the client already refused, so a prop name built from
+  //     untrusted input (`{"x onload=alert(1)": 1}`) reached the document as
+  //     raw HTML, where escaping the value does nothing. A script-injection
+  //     fix, and one decider shared across both writers is what keeps it from
+  //     drifting back apart.
+  //   · console-intercept + dev-overlay + upstream-noise (+~1 KB gz) — two
+  //     things a page has to carry because the Electron renderer IS this
+  //     bundle (a separate renderer build would be per-target duplication,
+  //     which D6 calls a bug). Electron throws `Invalid guestInstanceId`
+  //     inside its own isolated bundle on every `<webview>` close, so the dev
+  //     error badge was lit from the first panel close until the window shut
+  //     — fail-loud inverted, and the one indicator that means "act" trained
+  //     to mean nothing. And aio's CSP now withholds `'unsafe-eval'`, whose
+  //     refusal names neither aio nor the opt-out; the page says it once, in
+  //     aio's voice. Both are prose, and prose is what makes them worth
+  //     anything; the dev-only chunk (todo.md, 9.3 KB gz measured) is where
+  //     this half comes back.
+  air: 90,
   /** The same, plus one cell — measured 2 KB, which is what a cell costs. */
-  app: 91,
+  app: 92,
 };
 
 const RUN = Deno.env.get("AIO_BUNDLE_SIZE") === "1";

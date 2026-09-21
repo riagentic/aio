@@ -15,6 +15,8 @@ import type {
   ShipManifest,
   UpdateTarget,
 } from "../build/ship.ts";
+import type { InstalledTarget } from "./updates-apply.ts";
+import { versionStage } from "./app-version.ts";
 
 // ── config ──────────────────────────────────────────────────────────────────
 
@@ -423,6 +425,30 @@ export function compareVersions(a: string, b: string): number {
   return comparePre(pa.pre, pb.pre);
 }
 
+/** Does this install follow prereleases?
+ *
+ *  The app's own word when it gave one. When it did not, a release channel
+ *  does not offer prereleases — EXCEPT to an install that is already on a
+ *  staged line. `"version": "1.2-beta"` makes every build of that app a
+ *  prerelease, so the "a prerelease is an accident here" rule would have
+ *  switched the app's own updates off the moment it said how finished it was,
+ *  and reported that as `kind: "current"`: the quiet arm, on the default
+ *  channel, for exactly the apps that asked for the feature.
+ *
+ *  A `-dirty` / `-nogit` mark does NOT count. It says a build is not
+ *  reproducible, not that it is on a prerelease line, and an unreproducible
+ *  build is one nobody published. Pure. */
+export function followsPrereleases(
+  resolved: { prerelease: boolean; declared?: { prerelease?: boolean } },
+  current: string,
+): boolean {
+  // An absent `declared` means nothing was said — the same as a `declared`
+  // that carries no `prerelease`.
+  const said = resolved.declared?.prerelease;
+  if (said !== undefined) return said;
+  return resolved.prerelease || versionStage(current) !== null;
+}
+
 /** Is `candidate` a prerelease (`1.2.0-rc.1`)? Build metadata is not a
  *  prerelease: `1.2.3+build-1` is the release `1.2.3`. */
 export function isPrerelease(v: string): boolean {
@@ -726,6 +752,12 @@ export function decide(opts: {
   /** The resolved URL of THIS release's artifact, for the targets a running app
    *  cannot install for itself. */
   artifactUrl?: string;
+  /** What the RUNNING install is. `canInstall` says what it can take; this
+   *  says what it IS, which is a different fact and the one that decides
+   *  whether a refusal can name a remedy. A macOS `.app` can install nothing
+   *  at all, and "it can apply: nothing" is not an answer anybody can act
+   *  on. Optional, so every existing caller keeps its exact behaviour. */
+  installedTarget?: InstalledTarget;
 }): UpdateDecision {
   const { manifest: m, current } = opts;
 
@@ -803,6 +835,31 @@ export function decide(opts: {
   }
 
   if (!opts.canInstall.includes(m.target)) {
+    if (opts.installedTarget === "macos-app") {
+      // Information, not an error — the same shape as Android, and for the
+      // same reason: the OS owns the install step. Every file in a `.app` is
+      // covered by its code signature, so there is no way for the app to
+      // replace itself in place and still be launchable; the user replaces
+      // the bundle. What makes that actionable is the LINK, so it is here.
+      const where = opts.artifactUrl ?? opts.source;
+      return {
+        kind: "incompatible",
+        version: m.version,
+        blockers: [
+          `${m.version} is available, and a macOS app cannot install it ` +
+          `over itself: every file inside a .app is covered by the bundle's ` +
+          `code signature, so replacing one leaves an app macOS will not ` +
+          `open. ` +
+          (where
+            ? `Download ${where}, then drag the new app into /Applications, ` +
+              `replacing this one. Your data is kept — it lives in ` +
+              `~/Library/Application Support, not in the bundle.`
+            : `Download the new release for macOS, then drag the new app ` +
+              `into /Applications, replacing this one. Your data is kept — ` +
+              `it lives in ~/Library/Application Support, not in the bundle.`),
+        ],
+      };
+    }
     if (m.target === "android") {
       // Information, not an error. An APK is installed by the OS package
       // installer, and the one thing that makes that actionable is the LINK —

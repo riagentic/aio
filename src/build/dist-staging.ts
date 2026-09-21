@@ -31,3 +31,82 @@ export function keepInDistStaging(name: string): boolean {
     // the author's file instead of `app.js:1:22073`.
     name === BUNDLE_MAP;
 }
+
+// ── the directory itself ────────────────────────────────────────────────────
+
+/** Empty `dir` — remove everything INSIDE it and leave the directory itself,
+ *  with its inode, exactly where it was. A missing `dir` is not an error.
+ *
+ *  Why the inode matters, from a field report that cost an afternoon: a lab VM
+ *  bind-mounts the app's `dist/` and serves it to the guest. The build used to
+ *  `rename` that directory aside and `mkdir` a fresh one — and a bind mount
+ *  follows the INODE, not the path, so from the next rebuild on the guest saw
+ *  an EMPTY share, for the life of the lab, while every host-side reading
+ *  (`am lab`'s hand-off, the share server, `ls dist/`) was correct. A 404 from
+ *  a server that was just shown serving that exact file reads as "the build is
+ *  broken", and both halves of that are wrong.
+ *
+ *  A bind mount is only the loudest victim. An open `cd dist`, a file watcher,
+ *  an editor's tree and a `docker run -v` all hold the inode, and replacing it
+ *  silently strands every one of them. Nothing wants the directory replaced;
+ *  what the build wants is for it to be empty, and that is what this does. */
+export async function emptyDir(dir: string): Promise<void> {
+  try {
+    for await (const e of Deno.readDir(dir)) {
+      await Deno.remove(`${dir}/${e.name}`, { recursive: true });
+    }
+  } catch (e) {
+    if (!(e instanceof Deno.errors.NotFound)) throw e;
+  }
+}
+
+/** Move every entry of `from` into `to`, leaving both directories themselves
+ *  in place (`to` is created). Same filesystem: each entry is a rename, so
+ *  nothing is copied and a 700 MB artifact costs what a rename costs.
+ *
+ *  Returns false when `from` does not exist — the caller's "there was no
+ *  previous release to protect", said once rather than inferred from a catch.
+ *
+ *  ALL OR NOTHING. What this replaced was a single `rename(dir, aside)`, which
+ *  the filesystem made atomic for free; N renames are not, and the caller
+ *  treats a throw as "there was nothing to protect" and carries on. Half a
+ *  release left in the directory and the other half discarded with the staging
+ *  tree is worse than either outcome, and it is reachable: `.aio/` on a
+ *  different mount from `dist/` makes even the first rename throw EXDEV (the
+ *  build's own `moveFile` exists for exactly that). So a failure rolls every
+ *  moved entry back before rethrowing, and the caller's catch then means what
+ *  it always meant.
+ *
+ *  This is the inode-preserving half of what the rename used to do; see
+ *  {@link emptyDir} for why the directory must not move. */
+export async function moveDirContents(
+  from: string,
+  to: string,
+): Promise<boolean> {
+  let names: string[];
+  try {
+    names = [];
+    for await (const e of Deno.readDir(from)) names.push(e.name);
+  } catch (e) {
+    if (e instanceof Deno.errors.NotFound) return false;
+    throw e;
+  }
+  await Deno.mkdir(to, { recursive: true });
+  const moved: string[] = [];
+  try {
+    for (const n of names) {
+      await Deno.rename(`${from}/${n}`, `${to}/${n}`);
+      moved.push(n);
+    }
+  } catch (e) {
+    // Back, one by one, in the order they went. A rollback that itself fails
+    // must not replace the original error — that one says what went wrong.
+    for (const n of moved) {
+      try {
+        await Deno.rename(`${to}/${n}`, `${from}/${n}`);
+      } catch { /* aio-ok: the original error below is the one to report */ }
+    }
+    throw e;
+  }
+  return true;
+}

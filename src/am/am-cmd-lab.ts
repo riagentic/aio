@@ -1798,6 +1798,77 @@ export function mountedShareArgv(container: string): string[] {
   ];
 }
 
+/** The first line the share probe must print. Its whole job is to make the
+ *  probe's own success VISIBLE: `docker exec` returning 0 and nothing is
+ *  otherwise indistinguishable from "the share is genuinely empty", and one of
+ *  those two is an accusation. An answer that does not open with this did not
+ *  come from this command, so it says nothing. */
+const SHARE_PROBE = "__aio_share__";
+
+/** `docker exec` argv that asks the GUEST what it has in `/shared`. Pure —
+ *  the test pins the argv, the reader below runs it. */
+export function guestShareArgv(container: string): string[] {
+  return ["exec", container, "sh", "-c", `echo ${SHARE_PROBE}; ls -A /shared`];
+}
+
+/** The probe's answer, or null when the question was not actually answered:
+ *  a non-zero exit (no docker, container down, no `/shared` to list) or an
+ *  answer that does not open with {@linkcode SHARE_PROBE}. Pure. */
+export function parseGuestShare(code: number, out: string): string[] | null {
+  if (code !== 0) return null;
+  // Only a trailing CR is stripped, never whitespace: `ls -A` prints one entry
+  // per line, and a name's own leading or trailing space is part of the name.
+  // Trimming would compare a mangled name against the real one and cry wolf
+  // about a share that is perfectly fine.
+  const lines = out.split("\n").map((l) => l.replace(/\r$/, ""))
+    .filter((l) => l.length > 0);
+  if (lines[0] !== SHARE_PROBE) return null;
+  return lines.slice(1);
+}
+
+/** Why the hand-off must not print a fetch command, or null when it may.
+ *
+ *  A field report, and an afternoon: the lab bind-mounts the app's `dist/` and
+ *  serves it to the guest. Delete and recreate `dist/` on the host — which is
+ *  what any build that replaces the directory does — and the mount keeps the
+ *  ORPHANED inode. The guest's `/shared` is empty from that moment on, for the
+ *  life of the lab, while every host-side reading stays correct: the hand-off
+ *  names the right file, `shareServing` is true, the share server really is
+ *  running. Only the guest disagrees, with a 404 for a file it was just told
+ *  to fetch, and "the lab is broken" and "the build is broken" are both wrong.
+ *
+ *  aio's own build no longer replaces `dist/` (src/build/dist-staging.ts), so
+ *  this is now the hand it cannot see: a `rm -rf dist`, a `git clean`, or a
+ *  build from an older aio. The answer is the same either way — SAY it, rather
+ *  than print a command that will 404.
+ *
+ *  `guest === null` means the question could not be asked (no docker, a
+ *  container that is not up). Unknown is never an accusation: it says nothing.
+ *  Pure. */
+export function staleShareReason(
+  os: string,
+  file: string,
+  guest: readonly string[] | null,
+): string | null {
+  if (guest === null || guest.includes(file)) return null;
+  return `the guest cannot see ${file}: its /shared holds ${
+    guest.length === 0
+      ? "nothing"
+      : `${guest.length} other entr${guest.length === 1 ? "y" : "ies"}`
+  }, so fetching from the share would 404. The usual cause is a dist/ that ` +
+    `was DELETED and recreated since the lab started: a bind mount follows ` +
+    `the directory it was given at \`docker run\`, not the path, so the guest ` +
+    `keeps the old one. Either way the mount is fixed at \`docker run\` — ` +
+    `\`am lab ${os} --stop\` and start it again.`;
+}
+
+/** What the guest has in `/shared`, or null when the question could not be
+ *  asked. Never an exception: a hand-off must still print. */
+async function guestShareNames(container: string): Promise<string[] | null> {
+  const r = await docker(guestShareArgv(container));
+  return parseGuestShare(r.code, r.out);
+}
+
 async function mountedShare(container: string): Promise<string | null> {
   const r = await docker(mountedShareArgv(container));
   const p = r.out.trim();
@@ -1827,7 +1898,16 @@ async function handoff(
       }`,
     );
   }
-  const usable = artifact.kind === "one" && (state.serving || local);
+  // The guest's own view, asked rather than assumed — see `staleShareReason`.
+  const stale = artifact.kind === "one"
+    ? staleShareReason(
+      spec.os,
+      artifact.file,
+      await guestShareNames(spec.container),
+    )
+    : null;
+  if (stale) lines.push(`✗ share: ${stale}`);
+  const usable = artifact.kind === "one" && (state.serving || local) && !stale;
   const install = spec.installs && artifact.kind === "one"
     ? await installApk(spec, artifact.file)
     : null;
@@ -1841,6 +1921,8 @@ async function handoff(
       shareServing: state.serving,
       shareReason: state.reason,
       artifact,
+      shareStale: stale !== null,
+      ...(stale ? { shareStaleReason: stale } : {}),
       fetchCommand: usable ? fetchCommand(spec.os, artifact.file) : null,
       ...(install
         ? { installed: install.ok, installResult: install.message }
