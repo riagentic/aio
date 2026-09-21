@@ -43,7 +43,7 @@ export interface SpringConfig {
  * x.to(100); // animates to 100
  * // In component: h("div", { style: { transform: `translateX(${x.value}px)` } })
  * ```
- */
+ *  @tier Kit */
 export function useSpring(config: SpringConfig = {}): SpringValue {
   const stiffness = config.stiffness ?? 170;
   const damping = config.damping ?? 26;

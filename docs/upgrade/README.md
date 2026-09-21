@@ -20,6 +20,12 @@ app, that is a bug in aio, not a step you missed.
 - **[The aio restructure (alpha27+)](restructure.md)** — every restructure
   breaking change with before → after recipes (methods-only cells, instances,
   SQLite-only persistence, `aio/extras`, wire catalog)
+- [1.0.6-beta → **1.0.7-beta**](from-1.0.6-beta-to-1.0.7-beta.md) — nothing
+  breaks. A security audit of the packaged desktop app (three doors shut, two
+  new `electron` keys), `access` stops treating one cell calling another as a
+  client, bug reports are screened through the real `visible` filter,
+  `install:android` refuses an APK older than your sources, and a version may
+  carry a release stage (`"1.2-beta"` → `1.2.345-beta`)
 - [1.0.5-beta → **1.0.6-beta**](from-1.0.5-beta-to-1.0.6-beta.md) — nothing
   breaks. A Windows desktop app cannot freeze on its own pipe, two loops that
   crawled are fast, and the mistakes that used to pass in silence (a boolean

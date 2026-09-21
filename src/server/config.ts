@@ -6,6 +6,8 @@ import {
   hasBothFilterModes,
   namesNoFilterMode,
   nearestOf,
+  unusableFilterConsequence,
+  unusableFilterList,
 } from "../state/cell-helpers.ts";
 import { classifySource } from "./updates-core.ts";
 import { type Removal, removalsInDenoJson } from "../state/removals.ts";
@@ -247,6 +249,7 @@ export const VALID_AIO_CONFIG_KEYS = new Set<string>([
   "refusalsReject",
   "redactActions",
   "childWindows",
+  "electron",
   "onAction",
   "onEffect",
   "onConnect",
@@ -280,6 +283,7 @@ export const VALID_AIO_CONFIG_KEYS = new Set<string>([
   "_cellAsyncMethods",
   "_cellMethodArity",
   "_cellFields",
+  "_cellVisible",
   "_cellPersist",
   "_cellPersistShaped",
   "_cellMigrations",
@@ -337,6 +341,7 @@ export const VALID_FEATURES_CONFIG_KEYS = new Set<string>([
   "refusalsReject",
   "redactActions",
   "childWindows",
+  "electron",
   "libraryMode",
   "_workerEntry", // internal: testServer({ workers: "real" })
   "syncIntervalMs",
@@ -521,6 +526,10 @@ export const CONFIG_DOCS: Record<string, [string, string]> = {
     "false",
     "allow Electron child windows via __aioIPC.openWindow (off — real attack surface)",
   ],
+  electron: [
+    "{}",
+    "the Electron process's own security decisions — { requireSandbox } refuses to launch rather than fall back to --no-sandbox, { unsandboxedChildWindows } lets openWindow ask for sandbox:false; both default to what aio has always done",
+  ],
   libraryMode: [
     "false",
     "no exit/signals/instance lock; app.close() leaves the process alive (embedding, tests)",
@@ -666,6 +675,7 @@ export const CONFIG_GROUPS: [string, string[]][] = [
     "strictOrigin",
     "trustProxyHeader",
     "childWindows",
+    "electron",
     "ui",
   ]],
   ["Auth", [
@@ -1121,11 +1131,20 @@ export const NESTED_CONFIGS: Record<string, () => Set<string>> = {
   // a union type (`auth: true`, `tls: "auto"`, `updates: "https://…"`), and
   // the walk below enters only the object spelling — which is exactly when
   // the keys exist to be misspelled.
+  // The Electron block: two SECURITY switches, and a misspelling of either is
+  // an app that thinks it is protected and is not.
+  electron: () => VALID_ELECTRON_KEYS,
   auth: () => VALID_AUTH_KEYS,
   sessions: () => VALID_SESSIONS_KEYS,
   tls: () => VALID_TLS_KEYS,
   updates: () => VALID_UPDATES_KEYS,
 };
+
+/** Every key of `ElectronConfig` (aio-types.ts). */
+export const VALID_ELECTRON_KEYS: Set<string> = new Set([
+  "requireSandbox",
+  "unsandboxedChildWindows",
+]);
 
 /** Every key of `WsLimits` (aio-types.ts). */
 export const VALID_WS_LIMITS_KEYS: Set<string> = new Set([
@@ -1237,6 +1256,7 @@ export const SHAPE_VALUES: Record<string, ConfigShape> = {
   memory: "object",
   circuitBreaker: "object",
   security: "object",
+  electron: "object",
   cellDefaults: "object",
 };
 
@@ -1485,6 +1505,23 @@ export function configConflicts(
         doc: "docs/state/cells.md",
       });
     }
+  }
+
+  // ── 3a. include/exclude that is not a list — see `unusableFilterList` ──
+  for (const kind of ["visible", "ui", "persist"] as const) {
+    const unusable = unusableFilterList(defaults?.[kind]);
+    if (!unusable) continue;
+    out.push({
+      level: "error",
+      keys: [`cellDefaults.${kind}.${unusable.mode}`],
+      what:
+        `cellDefaults.${kind}.${unusable.mode} is ${unusable.got}, not a list of ` +
+        `field names, so ${unusableFilterConsequence(kind)} — for every cell ` +
+        `this default applies to`,
+      fix:
+        `${kind}: { ${unusable.mode}: ${unusable.suggest} } — an array, one string per field`,
+      doc: "docs/state/cells.md",
+    });
   }
 
   // ── 3b. a persist filter that names neither list — see `namesNoFilterMode` ──

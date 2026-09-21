@@ -385,9 +385,24 @@ const html = `<!doctype html><html><head>${collectHead()}` +
   `<body><div id="app">${body}</div></body></html>`;
 ```
 
-The tags carry `data-aio-head`, so on hydration the client takes them over. With
-`renderToStream` the head is complete only when the stream ends — render the
-page once with `renderToString` for its head, or write the head after.
+The tags carry `data-aio-head`, so on hydration the client takes them over.
+
+Every top-level render — `renderToString` or `renderToStream` — collects into a
+head of its own, so two responses written at the same time never share one.
+`renderToString` is synchronous, so `collectHead()` right after it is always
+yours. With `renderToStream` the head is complete only when the stream ends, and
+another request may have started rendering by then — so NAME the render and ask
+for it by name:
+
+```ts
+// any object that identifies this response; the Request is the natural one
+for await (const chunk of renderToStream(<App />, req)) write(chunk);
+const head = collectHead(req); // this response's head, never another's
+```
+
+Unnamed, `collectHead()` answers for the most recent top-level render — and if
+that render is a stream that overlapped another, it THROWS rather than hand one
+page's title, description and canonical URL to another.
 
 ## page() — State-Based Routing
 

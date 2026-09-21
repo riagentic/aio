@@ -46,17 +46,38 @@ export const CLAIMS: {
     how: "AIO_WINE_E2E=1 deno task test:wine",
     auto: true,
   },
+  // These two say `lab`, not `real`, because that is what their gate checks:
+  // `am lab windows` boots the VM and its viewer and artifact share answer.
+  // A row reading "windows (real) ✓" for that would claim an APP had run on
+  // Windows — broader than the evidence, which is the one mistake this file
+  // exists to prevent. The app-level claims are the two below, and they are
+  // honest about having no gate.
   {
     target: "windows",
-    env: "real",
-    how: "AIO_VM_LAB=1 (a real Windows VM/host)",
+    env: "lab-vm",
+    how: "AIO_VM_LAB=1 — a real Windows VM boots; its viewer + share answer",
     auto: true,
   },
   {
     target: "macos",
-    env: "real",
-    how: "AIO_VM_LAB=macos (a real Mac)",
+    env: "lab-vm",
+    how: "AIO_VM_LAB=macos — a real Mac's artifact share is serving",
     auto: true,
+  },
+  {
+    target: "windows",
+    env: "app-on-real",
+    how: "NO GATE — 1.0.3/1.0.4 were fixed by launching the artifact on the " +
+      "Windows VM BY HAND (double-click, then read the DOM over --cdp). " +
+      "Nothing automates that, so nothing can write this row",
+    auto: false,
+  },
+  {
+    target: "macos",
+    env: "app-on-real",
+    how: "NO GATE — same: driven by hand over ssh (app.log + lsappinfo, no " +
+      "screencapture). A killed Gatekeeper-held launch poisons that copy",
+    auto: false,
   },
   { target: "soak", env: "72h", how: "deno task soak:72h", auto: true },
   {
@@ -77,6 +98,23 @@ export const CLAIMS: {
     env: "off-box",
     how: "NO GATE — needs a second machine",
     auto: false,
+  },
+  // The two surfaces a release ships on EVERY time and the matrix never named,
+  // so it read as a list of exotica rather than as the physical record. Both
+  // already run as release gates; they simply were not writing their row.
+  {
+    target: "cli",
+    env: "binary",
+    how: "deno task test:build — a compiled cli-client talks to a compiled " +
+      "server, both from a foreign cwd",
+    auto: true,
+  },
+  {
+    target: "web",
+    env: "real-browser",
+    how: "deno task test:e2e — real Chromium: surface → trigger → server " +
+      "state converges",
+    auto: true,
   },
 ];
 

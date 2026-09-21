@@ -129,6 +129,13 @@ await aio.run({
 The CLI flags win over `tls` when both are given — the operator running the
 binary overrides the author, the same rule `expose` follows.
 
+> **`tls: "auto"` needs nothing installed.** Both certificates — this machine's
+> root and each app's leaf — are built in-process (`src/server/x509.ts`): ECDSA
+> P-256, a name-constrained root, and a leaf carrying every address this machine
+> answers on. Earlier versions shelled out to `openssl` four times, which made
+> automatic HTTPS impossible on Windows (it ships none); nothing on `PATH` is
+> consulted now, on any OS.
+
 > **Machine-to-machine.** The self-signed default is what a _browser_ can click
 > through; a program cannot. Deno's `WebSocket` has no API to pass a CA, so an
 > aio client dialing an aio server over `wss://` must be launched with
@@ -301,8 +308,33 @@ A denied network action is refused before dispatch, audit-logged
 `cell "name.method" — access denied`, exactly as a denied serverFn answers its
 caller. (It used to resolve like a success, which made a mis-written predicate
 look like a working button that does nothing.) Server-side code (effects,
-schedules, your own calls) always bypasses `access` — the server trusts its own
-code.
+schedules, `onInit`, your own calls) always bypasses `access` — the server
+trusts its own code.
+
+That includes **one cell calling another**: a method body is server code, so
+`access: false` seals a cell against clients and leaves the app's own cells free
+to use it — the shape an internal crypto (or worker) cell wants. It holds
+wherever the gate runs: on a real socket, and under `testUI`, which applies the
+same rule to interactions. The origin is marked by the call path (the framework
+runs each method body inside a server-origin scope), never read off an action,
+so no client frame can claim it.
+
+A **standalone / compiled single-process** target has no network door, so it
+runs no `access` gate at all — the rule is not bypassed there, it is simply
+never consulted, and a cell only reachable in-process was never exposed. Do not
+read `access` as a second lock on a target that has no clients. A call made
+straight from a component is still refused, in the harness exactly as on a
+socket.
+
+The boundary is the **method body**, not the turn it started. A call made from a
+component's render — or from anything a render schedules, a `setTimeout` it
+starts, a promise it chains — is CLIENT origin and is refused exactly as a click
+is. That matters because a write inside an async method commits synchronously
+and can queue the batched re-render from inside that commit: for a while the
+component body really did run as "the server", so a `<div>` calling a cell with
+`access: () => false` straight from its render was allowed, while the same code
+in a sync method was not. The scope is left behind at the signal flush now, so
+the two agree and neither one is the server.
 
 > **`access` gates calls. `visible` gates reads.** These are two different facts
 > and neither implies the other. `access` decides who may CALL a cell's methods
@@ -327,6 +359,17 @@ code.
 > there the unanswered read side ships. Any explicit `visible` — including
 > `visible: "all"` ("yes, everyone may read this") — is an answer and silences
 > it.
+>
+> **And the other direction, which costs more.** `visible` without `access`
+> hides the state and leaves every method of that cell **callable by any
+> connected client**, with what it RETURNS travelling back — an audit of an app
+> holding wallet keys found a PBKDF2 `decrypt` shipped behind `visible: "none"`
+> as a public decryption oracle, and `seedOf(id)` handing out the very
+> ciphertext a `visible.exclude` list was maintained to hide. A cell that hides
+> secret-shaped state and declares no `access` gets one boot warning naming the
+> methods that stay callable; declaring any rule — `false`, `true`, a role, a
+> predicate, or `() => true` for "open on purpose" — answers it. See
+> [cell visibility](../state/cell-visibility.md).
 
 **Row-level access.** The predicate also receives the method's call args, so
 "edit only your own row" is one line — no per-method owner re-check:
@@ -869,14 +912,14 @@ Every response carries a small, deliberate header set. The defaults are chosen
 so an app that never writes a `security` block behaves exactly as it did before:
 **a header is on by default only when it cannot break an app that works today.**
 
-| Header                      | Default                                                                     | Why it is safe to default                                                                                                 |
-| --------------------------- | --------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------- |
-| `X-Content-Type-Options`    | `nosniff`                                                                   | A declared type is the type.                                                                                              |
-| `Referrer-Policy`           | `strict-origin-when-cross-origin`                                           | Already the modern browser default; stating it makes an older browser behave like a current one.                          |
-| `X-Frame-Options`           | `SAMEORIGIN` (only when no `allowedOrigins`)                                | An aio page in a cross-origin iframe already cannot work — the WS upgrade carries the embedder's `Origin` and is refused. |
-| `Content-Security-Policy`   | `base-uri 'self'; object-src 'none'; frame-ancestors …; form-action 'self'` | **No `default-src`** — every off-origin stylesheet, font, image and script still loads.                                   |
-| `Strict-Transport-Security` | only behind `--tls-cert`                                                    | aio's own `--expose` certificate is a self-signed local CA; pinning HTTPS on the strength of it would outlive the app.    |
-| `Permissions-Policy`        | none                                                                        | Restricting camera/mic/geolocation by guess breaks the app that uses them.                                                |
+| Header                      | Default                                                                                                                                  | Why it is safe to default                                                                                                                                                                           |
+| --------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `X-Content-Type-Options`    | `nosniff`                                                                                                                                | A declared type is the type.                                                                                                                                                                        |
+| `Referrer-Policy`           | `strict-origin-when-cross-origin`                                                                                                        | Already the modern browser default; stating it makes an older browser behave like a current one.                                                                                                    |
+| `X-Frame-Options`           | `SAMEORIGIN` (only when no `allowedOrigins`)                                                                                             | An aio page in a cross-origin iframe already cannot work — the WS upgrade carries the embedder's `Origin` and is refused.                                                                           |
+| `Content-Security-Policy`   | `base-uri 'self'; object-src 'none'; frame-ancestors …; form-action 'self'; script-src * data: blob: 'unsafe-inline' 'wasm-unsafe-eval'` | **No `default-src`** — every off-origin stylesheet, font, image and script still loads. The `script-src` names every source a page could already use and withholds one capability: `'unsafe-eval'`. |
+| `Strict-Transport-Security` | only behind `--tls-cert`                                                                                                                 | aio's own `--expose` certificate is a self-signed local CA; pinning HTTPS on the strength of it would outlive the app.                                                                              |
+| `Permissions-Policy`        | none                                                                                                                                     | Restricting camera/mic/geolocation by guess breaks the app that uses them.                                                                                                                          |
 
 The frame policy is **derived from `allowedOrigins`**, never declared twice: the
 same list that decides whether an embedder may open a socket decides whether it
@@ -906,8 +949,10 @@ what the app said.
 `base-uri 'self'` is in `"basic"` because it cannot break _your_ pages. It can
 break a page your app **serves** that is not about your app — an archived
 document, a mirrored page, a print preview — where the original `<base href>` is
-load-bearing. Losing one directive should not mean hand-writing the policy and
-re-deriving `frame-ancestors` from `allowedOrigins` forever:
+load-bearing. Same story for `script-src`: it withholds only `'unsafe-eval'`,
+and an app that evaluates strings on purpose needs it back. Losing one directive
+should not mean hand-writing the policy and re-deriving `frame-ancestors` from
+`allowedOrigins` forever:
 
 ```ts
 security: {
@@ -915,6 +960,7 @@ security: {
     "base-uri": false,              // drop it
     "img-src": "'self' https:",     // widen it
     "worker-src": "'self' blob:",   // add one aio never sends
+    "script-src": false,            // give `eval` back
   },
 }
 ```

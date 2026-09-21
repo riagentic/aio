@@ -172,8 +172,8 @@ function dedupe(xs: string[]): string[] {
  *  `"basic"` (the default) is the set of directives that cannot break a page:
  *  no `default-src`, so every off-origin stylesheet, font, image, script and
  *  API call still loads exactly as before. What it does close is real —
- *  `<base>` hijacking, plugin objects, cross-origin framing, and a form that
- *  posts your inputs somewhere else.
+ *  `<base>` hijacking, plugin objects, cross-origin framing, a form that
+ *  posts your inputs somewhere else, and `eval`.
  *
  *  `"strict"` adds `default-src 'self'` and is opt-in, because an app that
  *  loads a Google Font or a CDN script needs to say so first. */
@@ -197,6 +197,42 @@ export function contentSecurityPolicy(
     ["object-src", `'none'`],
     ["frame-ancestors", ancestors],
     ["form-action", `'self'`],
+    // A `script-src` that names EVERY source a page could already use, and
+    // withholds exactly one capability: `'unsafe-eval'`. So `eval`,
+    // `new Function` and `setTimeout("…")` stop working, and nothing else
+    // changes — which keeps `"basic"`'s promise ("cannot break a page")
+    // while closing the hole that `"basic"` was otherwise silent about.
+    //
+    //   `*`                  every http(s) URL, AND — per CSP3's special case
+    //                        for the bare `*` — any URL on the document's own
+    //                        scheme. That second half is what keeps
+    //                        `aio://app/app.js` loading inside the packaged
+    //                        Electron window, where the document's scheme is
+    //                        not a network scheme.
+    //   `data:` `blob:`      generated scripts and blob-URL Workers (`*` is
+    //                        defined not to match either).
+    //   `'unsafe-inline'`    the shell's own bootstrap, `ui.head` scripts and
+    //                        `on…=` handlers. Deliberately NOT combined with
+    //                        the nonce: a nonce switches `'unsafe-inline'`
+    //                        off, which would refuse every inline script an
+    //                        app wrote. `"strict"` is where nonces belong.
+    //   `'wasm-unsafe-eval'` WebAssembly, which any `script-src` would
+    //                        otherwise take away from an app that had it.
+    //
+    // WHY it is here and not only on the Electron shell: without a
+    // `script-src`, Chromium's `_isEvalAllowed()` is true, and Electron logs
+    // "Electron Security Warning (Insecure Content-Security-Policy)" in the
+    // renderer of every packaged app at every launch. Measured on a real
+    // Electron 44.4.1 window over `aio://`: warning present before, absent
+    // after, with the module, WASM, inline scripts and http/https/data/blob/
+    // same-scheme script sources all still loading. Electron also has an env
+    // switch that hides the message — it would have left the eval in place,
+    // and `tests/electron-csp-eval.test.ts` keeps it out of this repo. Dev
+    // and prod get the identical policy on purpose — an app
+    // that needs `eval` must fail in `deno task dev` first, not only once
+    // packaged. That app opts out by name:
+    // `security: { cspDirectives: { "script-src": false } }`.
+    ["script-src", `* data: blob: 'unsafe-inline' 'wasm-unsafe-eval'`],
   ]);
   if (mode === "strict") {
     // `default-src 'self'` buys the whole off-origin surface — an injected
@@ -254,6 +290,42 @@ export function contentSecurityPolicy(
   }
   if (directives.size === 0) return null;
   return [...directives].map(([k, v]) => `${k} ${v}`).join("; ");
+}
+
+/** The directives a policy delivered by `<meta http-equiv>` cannot carry.
+ *
+ *  Not a style rule — the spec says a document-delivered policy ignores these,
+ *  and Chromium says it OUT LOUD, once per document:
+ *
+ *    The Content Security Policy directive 'frame-ancestors' is ignored when
+ *    delivered via a <meta> element.
+ *
+ *  Every aio policy carries `frame-ancestors` (it is in the "basic" default),
+ *  so the packaged Electron shell — which is returned from the main process
+ *  and therefore has the meta as its ONLY delivery — logged that error at
+ *  every launch, and read as if the window were frame-protected by its own
+ *  document. The header keeps all three wherever the shell is served over
+ *  HTTP, which is the one place they can work. */
+export const CSP_META_IGNORES: readonly string[] = [
+  "frame-ancestors",
+  "report-uri",
+  "sandbox",
+];
+
+/** The part of `policy` a `<meta http-equiv>` can actually deliver — or null
+ *  when nothing of it is left, because `content=""` is a policy that denies
+ *  nothing while looking like one that denies everything.
+ *
+ *  ONE decider: the generator emits what this returns, and nothing else
+ *  decides what a document may carry. */
+export function metaDeliverableCsp(policy: string): string | null {
+  const kept = policy
+    .split(";")
+    .map((d) => d.trim())
+    .filter((d) =>
+      d && !CSP_META_IGNORES.includes(d.split(/\s+/)[0]!.toLowerCase())
+    );
+  return kept.length ? kept.join("; ") : null;
 }
 
 /** A fresh CSP nonce: 128 bits, base64. Per RESPONSE — a nonce reused across

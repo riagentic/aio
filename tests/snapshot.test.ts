@@ -3,6 +3,7 @@ import { createDispatch } from "../src/state/dispatch.ts";
 import { createServer } from "../src/server/server.ts";
 import { join } from "@std/path";
 import { freePort } from "../src/testing/server-test.ts";
+import { dropTempDir, tempDir } from "../src/testing/temp-dir.ts";
 
 const noop = { debug: () => {}, warn: () => {}, error: () => {} };
 
@@ -95,7 +96,11 @@ Deno.test("snapshot HTTP: GET /__aio/snapshot returns state JSON", async () => {
     loadSnapshot: () => {},
     baseDir: dir,
     debug: () => {},
-    prod: true,
+    // Dev, because the snapshot route is dev-only since the state-leak fix
+    // (it serves the RAW, unfiltered state tree). `prod: true` here was
+    // scaffolding for the static server, never an assertion about which mode
+    // the route belongs in — see tests/prod-leaks-no-state.test.ts.
+    prod: false,
     distDir: join(dir, "dist"),
   });
 
@@ -138,7 +143,11 @@ Deno.test("snapshot HTTP: POST /__aio/snapshot loads state", async () => {
     },
     baseDir: dir,
     debug: () => {},
-    prod: true,
+    // Dev, because the snapshot route is dev-only since the state-leak fix
+    // (it serves the RAW, unfiltered state tree). `prod: true` here was
+    // scaffolding for the static server, never an assertion about which mode
+    // the route belongs in — see tests/prod-leaks-no-state.test.ts.
+    prod: false,
     distDir: join(dir, "dist"),
   });
 
@@ -179,7 +188,11 @@ Deno.test("snapshot HTTP: POST /__aio/snapshot rejects invalid JSON", async () =
     loadSnapshot: () => {},
     baseDir: dir,
     debug: () => {},
-    prod: true,
+    // Dev, because the snapshot route is dev-only since the state-leak fix
+    // (it serves the RAW, unfiltered state tree). `prod: true` here was
+    // scaffolding for the static server, never an assertion about which mode
+    // the route belongs in — see tests/prod-leaks-no-state.test.ts.
+    prod: false,
     distDir: join(dir, "dist"),
   });
 
@@ -223,7 +236,11 @@ Deno.test("snapshot HTTP: clients receive broadcast after POST", async () => {
     },
     baseDir: dir,
     debug: () => {},
-    prod: true,
+    // Dev, because the snapshot route is dev-only since the state-leak fix
+    // (it serves the RAW, unfiltered state tree). `prod: true` here was
+    // scaffolding for the static server, never an assertion about which mode
+    // the route belongs in — see tests/prod-leaks-no-state.test.ts.
+    prod: false,
     distDir: join(dir, "dist"),
   });
   broadcast = server.broadcast;
@@ -267,5 +284,75 @@ Deno.test("snapshot HTTP: clients receive broadcast after POST", async () => {
   } finally {
     await server.shutdown();
     await Deno.remove(dir, { recursive: true });
+  }
+});
+
+// ── the gate itself, end to end ──────────────────────────────────────────────
+
+const PROD_PORT = freePort();
+
+Deno.test("snapshot HTTP: a PROD server does not serve the route at all", async () => {
+  // 🔓 The regression this exists for. `getSnapshot` returns the RAW state
+  // tree — no `ui`/`visible` filter, no `forUser` pass — and the route used to
+  // be mounted in every mode, so every field an app excluded from its client
+  // projection was served in prod, unauthenticated. In a packaged Electron app
+  // that includes the page itself, because the `aio://` handler proxies
+  // unknown paths to the app socket.
+  //
+  // Verified this way because the mount is the thing that was wrong: the
+  // handler cannot tell you which modes it is reachable in.
+  const dir = await tempDir("aio-prod-snapshot-");
+  await Deno.mkdir(join(dir, "dist"), { recursive: true });
+  await Deno.writeTextFile(
+    join(dir, "dist", "app.js"),
+    "export function mount(){}",
+  );
+  const secret = { encSecKey: "v3:MUST-NOT-LEAK" };
+  const server = createServer({
+    port: PROD_PORT,
+    title: "ProdSnapshotTest",
+    getUIState: () => secret,
+    dispatch: () => {},
+    getSnapshot: () => JSON.stringify(secret),
+    loadSnapshot: () => {
+      throw new Error("a prod server must never load a snapshot over HTTP");
+    },
+    baseDir: dir,
+    debug: () => {},
+    prod: true,
+    distDir: join(dir, "dist"),
+  });
+  await new Promise((r) => setTimeout(r, 50));
+  try {
+    const get = await fetch(`http://127.0.0.1:${PROD_PORT}/__aio/snapshot`);
+    const body = await get.text();
+    assertEquals(get.status, 404);
+    assertEquals(
+      body.includes("MUST-NOT-LEAK"),
+      false,
+      "a 404 body must not carry the state it refused to serve",
+    );
+    // The WRITE half matters as much: `?force=1` replaces whole state, and
+    // for a wallet that is an address substitution needing no passphrase.
+    const post = await fetch(
+      `http://127.0.0.1:${PROD_PORT}/__aio/snapshot?force=1`,
+      {
+        method: "POST",
+        body: '{"x":{"y":1}}',
+        headers: { "Content-Type": "application/json", "x-aio": "1" },
+      },
+    );
+    // Consumed, not just status-checked: an unread body is a leaked stream,
+    // and the sanitizer fails the test for it.
+    await post.text();
+    assertEquals(post.status, 404);
+    // That this is a gate on STATE and not a blanket shutdown of /__aio/* is
+    // asserted where it belongs — against the route table, in
+    // tests/prod-leaks-no-state.test.ts. Re-checking it here would need this
+    // fixture to wire every diagnostics dep just to prove a negative it does
+    // not own.
+  } finally {
+    await server.shutdown();
+    await dropTempDir(dir);
   }
 });

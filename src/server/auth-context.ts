@@ -1,5 +1,6 @@
-// auth-context.ts — ONE ambient caller context for everything server-side:
-// WHO is calling (`serverUser`) and WHERE FROM (`serverRequest`).
+// auth-context.ts — ONE ambient context for everything server-side: WHO is
+// calling (`serverUser`), WHERE FROM (`serverRequest`), and the running app's
+// own user store (`serverAuth`, at the bottom of this file).
 // The server resolves a connection's user once (server-auth.ts); dispatch and
 // serverFn invocation run inside `runWithUser`, so `serverUser()` answers
 // "who is calling?" anywhere downstream — cell methods, serverFns, effects —
@@ -12,8 +13,25 @@
 // write path through the ambient would be two models for one job.
 //
 // AsyncLocalStorage survives `await`, so async methods/fns keep their caller.
-// In the browser bundle node:async_hooks is stubbed (esbuild-plugin) — the
-// guards below make serverUser()/serverRequest() a harmless `undefined` there.
+//
+// This module is SERVER-ONLY and reaches NO client bundle. `aio` never
+// resolves to mod.ts in a bundle: it is aliased to src/browser-air.ts
+// (browser/electron) or src/standalone-air.ts (android/standalone) —
+// bundleFrameworkEntries() — and both import these names as TYPES ONLY and
+// export facades of their own that THROW when called, naming the runtime the
+// call landed on.
+//
+// The note that used to stand here said the opposite: that node:async_hooks is
+// stubbed for the browser bundle and "the guards below make
+// serverUser()/serverRequest() a harmless `undefined` there". Both halves were
+// untrue — nothing of this file is in a client bundle at all (the metafile
+// check in tests/android-server-only-stubs.test.ts) — and the second half was
+// the dangerous one: a client reading `serverUser()` as `undefined` is an
+// authorization check that passed because there was nobody to check. A
+// server-only name in a client fails loud; it never answers "anonymous".
+//
+// The `_als`/`_reqAls` guards below are therefore only about a host whose
+// `node:async_hooks` exposes no AsyncLocalStorage; on Deno it always does.
 
 import { AsyncLocalStorage } from "node:async_hooks";
 import type { AioUser } from "./aio-types.ts";

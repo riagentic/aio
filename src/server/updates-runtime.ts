@@ -56,6 +56,7 @@ import {
   detectTarget,
   installableTargets,
   installDir,
+  type InstalledTarget,
   type PendingMark,
   pruneKeepingNewest,
   pruneOld,
@@ -66,7 +67,7 @@ import {
   unpackArchive,
   zipLauncher,
 } from "./updates-apply.ts";
-import { dataCompatibility } from "./updates-core.ts";
+import { dataCompatibility, followsPrereleases } from "./updates-core.ts";
 import { rebuildFromGit } from "./updates-rebuild.ts";
 import { retireProfile } from "./updates-retire.ts";
 import { isServiceSupervised } from "./aio-lifecycle.ts";
@@ -108,6 +109,9 @@ export type UpdatesRuntimeDeps = {
   /** Install strategies this process can perform. Defaults to what the running
    *  artifact supports. */
   canInstall?: UpdateTarget[];
+  /** What this install IS, as opposed to what it can take. Defaults to the
+   *  detected target; injected so a test can be a macOS `.app` on Linux. */
+  installedTarget?: InstalledTarget;
   /** Start the successor. Injected so a test can assert the handover without
    *  actually launching anything. */
   relaunch?: (opts: { artifact: string; args: string[] }) => void;
@@ -139,6 +143,7 @@ export function createUpdatesRuntime(deps: UpdatesRuntimeDeps): UpdatesRuntime {
   const platform = { os: Deno.build.os, arch: Deno.build.arch };
   const targetOf = () => deps.artifact ?? artifactPath();
   const canInstall = () => deps.canInstall ?? installableTargets();
+  const installedTarget = () => deps.installedTarget ?? detectTarget();
 
   function expectations(): ShipExpectations {
     const trust = readTrust(deps.dataDir);
@@ -272,7 +277,14 @@ export function createUpdatesRuntime(deps: UpdatesRuntimeDeps): UpdatesRuntime {
       // right now) and it is what makes a same-version rebuild detectable.
       local: { ...deps.local, installedSha256: await installedDigest(m) },
       canInstall: canInstall(),
-      prerelease: config.prerelease,
+      // What this install IS — so a refusal it cannot act on can still name
+      // the thing the user should do instead (a macOS bundle is replaced by
+      // hand; nothing can replace it from inside).
+      installedTarget: installedTarget(),
+      // Not `config.prerelease`: an install whose OWN version carries a stage
+      // is already on a prerelease line, and the release-channel rule would
+      // otherwise switch its updates off the moment it said so.
+      prerelease: followsPrereleases(config, deps.appVersion),
       source: config.source,
       artifactUrl: artifactUrl(url, m),
       // Without this the cell's "Not now" lasted exactly one poll: the cell
@@ -875,6 +887,21 @@ export function createUpdatesRuntime(deps: UpdatesRuntimeDeps): UpdatesRuntime {
     check: (opts) =>
       config.kind === "git" ? checkGit(opts) : checkManifest(opts),
     apply: async (opts: ApplyOpts = {}) => {
+      if (!deps.canInstall && installedTarget() === "macos-app") {
+        // Belt AND braces: `decide` already refuses every release for a
+        // bundle, so the button is never offered. This is the other door —
+        // `apply` called directly, or by `updates.auto`. A macOS bundle that
+        // swapped a file inside itself would break its own code signature and
+        // never launch again, so the last thing between here and that is a
+        // throw, not a strategy.
+        throw new Error(
+          "this is a macOS .app, and an app cannot replace itself inside a " +
+            "signed bundle — every file in it is covered by the signature. " +
+            "Download the new release and drag it into /Applications, " +
+            "replacing this one; your data lives in ~/Library/Application " +
+            "Support and is kept.",
+        );
+      }
       if (!deps.canInstall && detectTarget() === "source") {
         // Dev and prod run the SAME detect path — this is the only divergence,
         // and it is a refusal rather than a silent no-op so the update UI can

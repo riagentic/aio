@@ -599,6 +599,11 @@ deno task am dispatch BulkUpdate items='[1,2]'               # payload { items: 
 # Raw envelope
 deno task am dispatch --body='{"type":"conn:setHost","payload":{"args":["192.168.1.9"]}}'
 
+# A payload too big for a command line: read it from a FILE (@path) or stdin (-)
+deno task am dispatch todo:add --args=@args.json             # args.json holds ["buy milk"]
+echo '["buy milk"]' | deno task am dispatch todo:add --args=-
+deno task am dispatch --body=@envelope.json                  # --body takes both too
+
 deno task am actions                       # the time-travel history (the whole window)
 deno task am actions 50                    # the newest 50 (= --lines=50; adds shown/total)
 ```
@@ -627,6 +632,20 @@ therefore has no `key=value` spelling — that is what `--args` is for.
 
 `--body` is the whole envelope (`{type, payload}`) when it stands alone, and the
 PAYLOAD of the action when a type is given positionally.
+
+**`--args` and `--body` can read their value from a file or from stdin.** A
+value that starts with `@` is a PATH: `--args=@rows.json` reads the argument
+list from that file (relative to the directory you run in). A value that is
+exactly `-` reads it from stdin, so a pipe works. Both flags take both forms,
+and the content is the same JSON you would have typed by hand — `["buy milk"]`
+for `--args`, a whole `{type, payload}` envelope for a bare `--body`.
+
+That is the spelling for a payload too big for a command line: the kernel
+refuses an argv entry of a few hundred KB, so a 300 KB `--args='…'` cannot be
+spawned at all. It is additive — neither `@…` nor `-` is valid JSON, so no
+command that worked before changes meaning. A file that cannot be read is
+refused by name, with nothing dispatched and exit 1:
+`--args=@rows.json: cannot read that file (No such file or directory …)`.
 
 **`dispatched` / `ok: true` means APPLIED, not on disk.** The method ran and its
 commit is broadcast to every client; the write reaches SQLite with the next
@@ -1237,6 +1256,45 @@ person has to remember.
 Detection is deliberately generous — a false positive costs a warning you can
 overrule, a miss costs an app that boots and then explodes — so it shows you the
 line and lets you judge.
+
+## The Electron runtime cache (`am prune`)
+
+```sh
+deno task am prune                 # REPORT: every entry, its size, its verdict
+deno task am prune --yes           # delete exactly what that report named
+deno task am prune --days=90       # only what nothing has opened in 90 days
+deno task am prune --keep=43.4.1   # …and never this version, whatever its age
+deno task am prune --json          # the same plan as data
+```
+
+`~/.cache/aio/tools/electron/` holds one directory per Electron version and
+platform — 250–370 MB each, plus the cross-build `.zip` downloads at ~150 MB —
+and nothing ever removed one. A working machine reached **7.7 GB across 32
+entries**, Electron 41.2.1 through 44.4.2.
+
+It is also shared by **every aio app on the machine**, which is why this is a
+verb you run and never something that happens to you. The app you are standing
+in cannot know which Electron the app next door starts from, and deleting that
+one turns its next launch into a 250 MB download — which an offline machine
+cannot make. So:
+
+- **`am prune` deletes nothing.** It prints every entry with its size and the
+  sentence that decided it, then the exact command that would act on it. `--yes`
+  re-prints the same plan and removes exactly those paths.
+- **Age comes from use, not from version order.** Every launch stamps the
+  runtime it started from (`.aio-last-used`). An entry with no stamp yet falls
+  back to its directory mtime, which is older than the truth and therefore only
+  ever makes the plan more cautious, and the report says which of the two it
+  used.
+- **The Electron this aio ships is never offered**, at any age, on any platform
+  — `am pin` and `am fix` are moving every app on the machine onto it.
+- **Unknown is not unused.** An entry whose age cannot be established is kept.
+- **A `.lock` is never touched** — another process may be downloading into it.
+
+What it deliberately does NOT do: keep the N newest (an app pinned to an older
+Electron loses its runtime), keep only this host's platform (cross-build
+runtimes for Windows and macOS are build inputs, not leftovers), or run as part
+of `am fix` (silent, remote, and unrecoverable without a network).
 
 ## A private copy: `--instance=<name>`
 

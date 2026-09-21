@@ -62,6 +62,14 @@ covers `accounts: [{encSecKey}]` and `accounts: { alice: { encSecKey } }`
 alike), `forUser`, or `visible: "none"`. Boot warnings flag secret-looking
 exposed fields — don't ignore them.
 
+**`visible` gates READS; `access` gates CALLS; neither implies the other.**
+`visible: "none"` stops the broadcast and leaves every method of that cell
+callable by any connected client, with what it RETURNS going straight back — a
+hidden cell whose method decrypts, or hands out a hidden field, is a public
+oracle. Hiding state is `visible`; gating calls is `access` (`false` =
+server-side only). Boot warns when a cell hides secret-shaped state and declares
+no `access`. See [cell visibility](../state/cell-visibility.md).
+
 **`include` is top-level only.** `include: ["a.b"]` warns and matches nothing.
 Deep paths are for `exclude`.
 

@@ -1417,7 +1417,7 @@ Deno.test("writeServiceFile: a title cannot inject systemd directives", async ()
 
 // Cleartext is ONE decision, and the client APK is on the wrong side of it.
 //
-// Android blocks cleartext from targetSdk 28; this template is 34. The
+// Android blocks cleartext from targetSdk 28; this template is 35. The
 // attribute that permits it used to be injected by the `dev:android` rewrite
 // and nowhere else, so the dev loop reached a plain-http server and the
 // `--android --remote` client APK that loop exists to produce could not reach

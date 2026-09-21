@@ -1,15 +1,29 @@
 // Browser import map generation — npm packages → esm.sh CDN URLs.
 
-import { parseDenoJson } from "./deno-json.ts";
-import { join, resolve } from "@std/path";
+import { readDenoJsonSync } from "./deno-json.ts";
+import { dirname, join, resolve } from "@std/path";
 import { CDN } from "./server-html-constants.ts";
 import { log } from "../diagnostics/logger-api.ts";
 
-/** Read the app's `deno.json` imports — THE input to the browser import map.
+/** How far up from a workspace member to look for the workspace root that
+ *  holds the shared import map. A member two levels down is the documented
+ *  layout (`packages/app`); the bound only stops a walk to `/`. */
+const WORKSPACE_MAX_DEPTH = 8;
+
+/** Read the app's `deno.json`/`deno.jsonc` imports — THE input to the browser
+ *  import map, and (for `am check`) THE statement of what DENO can resolve.
  *
  *  Scaffolded apps keep the config at the project root (`baseDir/..`); flat
- *  apps (entry next to deno.json) and repo examples run from cwd. First
- *  readable config wins.
+ *  apps (entry next to the config) and repo examples run from cwd. First
+ *  readable config wins, and in a Deno workspace the root's imports are merged
+ *  under the member's — exactly what Deno itself resolves with.
+ *
+ *  `null` means NOTHING was readable — a different fact from `{}` ("read it,
+ *  it declares no imports"), and the two collapsed into one value is how
+ *  `am check` reported three fabricated blocking errors ("`aio` is missing
+ *  from this app's deno.json imports") against an app `deno check` accepts.
+ *  Callers that only need a map for the browser coalesce with `?? {}`; the
+ *  caller that GATES on the map must skip its gate on `null`.
  *
  *  This lives beside the map builder because "which specifiers exist in the
  *  browser" is one fact with two askers: the dev server (which SERVES the map)
@@ -18,57 +32,99 @@ import { log } from "../diagnostics/logger-api.ts";
  *  not see npm packages at all, so every app that added an npm UI dependency
  *  got a confident "import 'x' won't work in browser — move it to a
  *  server-side .ts file" about an import the import map resolves fine. */
-export function readAppDenoImports(baseDir: string): Record<string, string> {
+export function readAppDenoImports(
+  baseDir: string,
+): Record<string, string> | null {
   const absBaseDir = resolve(baseDir);
   const candidates = [
-    join(absBaseDir, "..", "deno.json"),
-    join(absBaseDir, "deno.json"),
-    join(Deno.cwd(), "deno.json"),
+    join(absBaseDir, ".."),
+    absBaseDir,
+    Deno.cwd(),
   ];
-  for (const candidate of candidates) {
-    try {
-      const imports = parseDenoJson(
-        Deno.readTextFileSync(candidate),
-        candidate,
-      ).imports as Record<string, string> | undefined;
-      if (imports && typeof imports === "object") {
-        return imports as Record<string, string>;
-      }
-      return {};
-    } catch {
-      /* try next — missing/invalid config falls through to defaults */
-    }
+  for (const dir of candidates) {
+    const found = readConfigDir(dir);
+    if (!found) continue;
+    return withWorkspaceImports(dir, ownImports(found.config));
   }
-  // Nothing readable. A `deno.jsonc` sitting right there is the likely reason,
-  // and it is a SILENT one: the map is built without the app's npm packages, so
-  // the browser fails to resolve a specifier that Deno resolves fine on the
-  // server — a blank screen whose cause is a file extension. (`am` and the file
-  // watcher both accept .jsonc, so an app can plausibly be using it.) Say it
-  // once per path instead.
-  for (const c of candidates) {
-    const jsonc = c + "c";
-    if (_warnedJsonc.has(jsonc)) continue;
-    try {
-      Deno.statSync(jsonc);
-    } catch {
-      continue;
-    }
-    _warnedJsonc.add(jsonc);
-    log.warn(
-      `[aio] ${jsonc} found but no readable deno.json — the browser import ` +
-        `map is built from deno.json ONLY, so this app's npm imports will NOT ` +
-        `resolve in the browser ("Failed to resolve module specifier"). ` +
-        `Rename it to deno.json (JSON, no comments).`,
-    );
-  }
-  return {};
+  return null;
 }
 
-const _warnedJsonc = new Set<string>();
+/** The config in `dir` — BOTH names Deno accepts, read the way Deno reads
+ *  them (JSONC). A file that exists and does not parse is not silence: it is
+ *  said once, then treated as unreadable so the next candidate still gets a
+ *  chance. */
+function readConfigDir(
+  dir: string,
+): { config: Record<string, unknown>; path: string } | null {
+  try {
+    return readDenoJsonSync(dir);
+  } catch (e) {
+    const key = `parse:${dir}`;
+    if (!_warned.has(key)) {
+      _warned.add(key);
+      log.warn(
+        `[aio] ${e instanceof Error ? e.message : String(e)}\n` +
+          `  Until it parses, aio cannot see this app's "imports": the ` +
+          `browser import map is built from the framework defaults alone, ` +
+          `and \`am check\` skips the deno.json import gate.`,
+      );
+    }
+    return null;
+  }
+}
 
-/** Test isolation — re-arm the one-shot deno.jsonc warning. @internal */
+/** The config's own `imports`, or `{}` when it declares none. */
+function ownImports(config: Record<string, unknown>): Record<string, string> {
+  const imports = config.imports;
+  return imports && typeof imports === "object" && !Array.isArray(imports)
+    ? imports as Record<string, string>
+    : {};
+}
+
+/** The member paths a workspace-root config lists, or null when it is not a
+ *  workspace root. Deno spells it as an array; the object form carries the
+ *  same list under `members`. */
+function workspaceMembers(config: Record<string, unknown>): string[] | null {
+  const ws = config.workspace;
+  const nested = ws && typeof ws === "object" && !Array.isArray(ws)
+    ? (ws as Record<string, unknown>).members
+    : undefined;
+  const list = Array.isArray(ws) ? ws : Array.isArray(nested) ? nested : null;
+  return list ? list.filter((m): m is string => typeof m === "string") : null;
+}
+
+/** Deno workspaces: the ROOT's import map applies to every member, and the
+ *  member's own entries override it. A member whose config declares no
+ *  `imports` of its own therefore resolves `aio` perfectly well — `deno check`
+ *  in it exits 0 — while reading the member config ALONE says "this app
+ *  declares no aio imports" and fabricates a blocking `am check` error. So the
+ *  root is found (walking up until an ancestor config lists this directory as
+ *  a member) and merged underneath. */
+function withWorkspaceImports(
+  memberDir: string,
+  memberImports: Record<string, string>,
+): Record<string, string> {
+  let dir = resolve(memberDir);
+  const member = dir;
+  for (let i = 0; i < WORKSPACE_MAX_DEPTH; i++) {
+    const parent = dirname(dir);
+    if (parent === dir) break;
+    dir = parent;
+    const found = readConfigDir(dir);
+    if (!found) continue;
+    const members = workspaceMembers(found.config);
+    if (!members) continue;
+    if (!members.some((m) => resolve(dir, m) === member)) continue;
+    return { ...ownImports(found.config), ...memberImports };
+  }
+  return memberImports;
+}
+
+const _warned = new Set<string>();
+
+/** Test isolation — re-arm the one-shot config warnings. @internal */
 export function _resetImportMapWarnings(): void {
-  _warnedJsonc.clear();
+  _warned.clear();
 }
 
 /** Generates browser import map from framework defaults + deno.json npm packages.

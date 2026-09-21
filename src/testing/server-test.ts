@@ -162,21 +162,48 @@ function portSlice(v: string | undefined): [number, number] | null {
 }
 
 let _sliceNext = -1;
+/** Every port this process has already handed out. */
+const _issued = new Set<number>();
+
+/** Test-only: forget what has been issued, so a test can drive the allocator
+ *  through slice exhaustion without a 12,000-port loop. */
+// aio-ok: a test seam — nothing in the product may forget an issued port.
+export function _resetPortSlice(): void {
+  _issued.clear();
+  _sliceNext = -1;
+}
 
 /** The next port of `slice` that is free right now (bind-checked — another
  *  program may own one), round-robin so a just-closed port is not reused at
- *  once. Throws when the whole slice is taken. */
+ *  once.
+ *
+ *  A port this process ALREADY HANDED OUT is skipped while any unissued one
+ *  remains. "Free right now" is not the same question as "free for the caller
+ *  to keep": a test file that takes a port at module load, then starts and
+ *  stops its server per test, leaves that port genuinely free in between — so
+ *  the cursor, having wrapped, handed the same port to a second file, and the
+ *  first file's next `listen` failed with "port N already in use". That reads
+ *  as a product bug and is a harness one, it needs a full shard to reproduce,
+ *  and it is exactly as likely as the run being long enough to wrap: a shard
+ *  of ~2,100 ports and ~270 test files is right at the boundary.
+ *
+ *  Exhausting the slice DEGRADES to the old behaviour rather than throwing —
+ *  a reused port is a rare flake, and a suite that cannot start is not. */
 function fromSlice([first, last]: [number, number]): number {
   const n = last - first + 1;
   if (_sliceNext < first || _sliceNext > last) _sliceNext = first;
-  for (let i = 0; i < n; i++) {
-    const port = _sliceNext;
-    _sliceNext = port >= last ? first : port + 1;
-    try {
-      Deno.listen({ port, hostname: "127.0.0.1" }).close();
-      return port;
-    } catch {
-      // aio-ok: taken by something else — the next port in the slice
+  for (let pass = 0; pass < 2; pass++) {
+    for (let i = 0; i < n; i++) {
+      const port = _sliceNext;
+      _sliceNext = port >= last ? first : port + 1;
+      if (pass === 0 && _issued.has(port)) continue;
+      try {
+        Deno.listen({ port, hostname: "127.0.0.1" }).close();
+        _issued.add(port);
+        return port;
+      } catch {
+        // aio-ok: taken by something else — the next port in the slice
+      }
     }
   }
   throw new Error(

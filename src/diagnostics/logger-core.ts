@@ -319,6 +319,15 @@ export class AioLogger {
       ...(data ? { data } : {}),
       ...(dur !== undefined ? { dur } : {}),
     };
+    // COUNTED HERE, above the level gate, because `errors=N` on the stopped
+    // line answers "did anything go wrong in this run" — and that answer must
+    // not depend on how verbose the app asked the log to be. It used to count
+    // only async METHOD failures (`:__error` actions), so the one line that
+    // must be believed the day it is real — "the database file is GONE … NONE
+    // of them are on disk" — was printed as an ERROR and the app still exited
+    // `errors=0`. A summary that disagrees with the log above it teaches the
+    // reader to trust neither.
+    if (lvl === "error") this.stats.errors++;
     // ONE gate, every sink. `level` gated debug.log ALONE, so an app that
     // asked for `level: "warn"` still had every info line printed to the
     // console and appended to app.log — a setting that visibly did nothing,

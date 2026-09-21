@@ -27,6 +27,78 @@ export const STARTUP_GRACE_MS = 10_000;
  *  the app's own stdout log still moving; see `bootStalled` in am. */
 export const STUCK_STARTING_MS = 5 * STARTUP_GRACE_MS;
 
+// ── File-size guard (SIGXFSZ) ────────────────────────────────
+
+/** Holders of the process-wide SIGXFSZ listener, and the listener itself.
+ *  Refcounted because the holders are independent: every boot takes one, and
+ *  so does every `AppLock`, and two apps in one process (D2) must not
+ *  un-protect each other on the way out. */
+let _xfszHolders = 0;
+let _xfszHandler: (() => void) | undefined;
+
+/** Hold the process-wide guard against `RLIMIT_FSIZE`; the returned function
+ *  releases this holder's claim (idempotent).
+ *
+ *  SIGXFSZ is raised by a write past `RLIMIT_FSIZE` (`ulimit -f`, a container
+ *  limit). Its default action is terminate + core dump, so the first persist
+ *  that grew `state.db` or the journal past the limit killed the app outright
+ *  — no PERSIST_ERROR, no shutdown phases, no final persist, the lock left
+ *  behind. Listening (a no-op) turns it into EFBIG ("File too large") on the
+ *  write itself, which the persist path already reports, and the app stays
+ *  up. POSIX only — Windows has no such signal.
+ *
+ *  It USED to be installed by `AppLock._registerCleanupHandlers`, i.e. it
+ *  rode on the single-instance lock. `libraryMode` takes no lock (an embedded
+ *  app must not claim the app's single-instance slot), so an embedded app got
+ *  none of this and died of the signal exactly as a normal boot did before
+ *  the listener existed — measured, `tests/sigxfsz-library-mode.test.ts`.
+ *  The guard is a property of the PROCESS and grants no exclusivity, so it is
+ *  its own holdable thing: the boot path holds one for every app, lock or no
+ *  lock, and `AppLock` holds another. One code path, no `libraryMode`
+ *  branch. */
+export function holdFileSizeGuard(): () => void {
+  if (Deno.build.os === "windows") return () => {};
+  if (_xfszHolders === 0) {
+    try {
+      _xfszHandler = () => {};
+      Deno.addSignalListener("SIGXFSZ", _xfszHandler);
+    } catch {
+      // aio-ok: a runtime that refuses the listener keeps the kernel default
+      // — the behaviour before this existed, nothing worse. Holders are still
+      // counted so release stays balanced.
+      _xfszHandler = undefined;
+    }
+  }
+  _xfszHolders++;
+  let released = false;
+  return () => {
+    if (released) return;
+    released = true;
+    if (--_xfszHolders > 0) return;
+    // The LISTENER belongs to the process: it comes off only when the last
+    // holder lets go, or a second app in this one would be silently
+    // un-protected by the first one's shutdown.
+    try {
+      if (_xfszHandler) Deno.removeSignalListener("SIGXFSZ", _xfszHandler);
+    } catch {
+      // aio-ok: already gone, or never installable — either way nothing is
+      // left registered, which is all this wants.
+    }
+    _xfszHandler = undefined;
+  };
+}
+
+/** How many holders the process-wide SIGXFSZ guard has right now.
+ *
+ *  Counting them is the only way to prove the D2 invariant — two apps in one
+ *  process, and the first one's shutdown must not un-protect the second. The
+ *  product must never branch on this; a boot that asks "is the guard already
+ *  held?" is a second decider for something the refcount already decides. */
+// aio-ok: a test-only seam — nothing in the product may read the refcount.
+export function _fileSizeGuardHeld(): number {
+  return _xfszHolders;
+}
+
 // ── Types ────────────────────────────────────────────────────
 
 /** Unified lock file — replaces both .aio.lock and .aio.pid */
@@ -341,10 +413,15 @@ export function _prepareLockDir(
   ops: {
     chmod?: (path: string, mode: number) => void;
     stat?: (path: string) => Deno.FileInfo;
+    /** The same seam, for the OTHER account's half of the symlink case: a
+     *  link this process planted is its own, and a test has one uid.
+     *  @internal */
+    lstat?: (path: string) => Deno.FileInfo;
   } = {},
 ): string | null {
   const chmod = ops.chmod ?? Deno.chmodSync;
   const stat = ops.stat ?? Deno.statSync;
+  const lstat = ops.lstat ?? Deno.lstatSync;
   try {
     Deno.mkdirSync(dir, { recursive: true });
   } catch { /* already exists — the stat below is the real check */ }
@@ -352,6 +429,38 @@ export function _prepareLockDir(
     if (Deno.build.os !== "windows") chmod(dir, 0o700);
   } catch { /* not ours to chmod — precisely what the stat is for */ }
   if (Deno.build.os === "windows") return null; // no POSIX mode to read
+  // The LOOK must not be pointed somewhere else. `stat` FOLLOWS a symlink, so
+  // on the host this rule exists for — no `$XDG_RUNTIME_DIR`, base `/tmp`, a
+  // predictable path any local account can pre-create — another user can make
+  // `/tmp/aio` a link to a directory of OURS that is already 0700 (`~/.ssh`,
+  // `~/.config/…`) and every check below passes: the target's mode is 0700
+  // and its owner is us. The app's lock files and its control socket then sit
+  // where somebody else decided.
+  //
+  // The link's OWN owner is the question, because that is the part they have
+  // to forge: a link they planted is theirs, and a link we (or the user) made
+  // is ours and its target is still judged below. An uid we cannot read is
+  // "cannot tell", which must not refuse — the same rule as everywhere else
+  // here.
+  try {
+    const link = lstat(dir);
+    const me = selfUid();
+    if (
+      link.isSymlink && me !== null && link.uid !== null &&
+      link.uid !== undefined && link.uid !== me
+    ) {
+      return `${dir} is a symbolic link owned by uid ${link.uid}, not by you ` +
+        `(uid ${me}) — whoever owns the link chooses where this app's lock ` +
+        `and control socket actually go`;
+    }
+  } catch {
+    // aio-ok: the symlink question is an EXTRA screen, not the decision. If
+    // lstat cannot answer — the path vanished between the mkdir above and
+    // here, or the parent directory is unreadable — the `stat` below is the
+    // real check and it refuses loudly with the reason. Swallowing here
+    // cannot make a bad directory look good; it can only defer to the gate
+    // that was always the one saying yes.
+  }
   let st: Deno.FileInfo;
   try {
     st = stat(dir);
@@ -375,8 +484,12 @@ export function _prepareLockDir(
  *  got an unexplained bind failure.
  *
  *  If the fallback is unusable too, that is not a configuration this can paper
- *  over, and a control socket is not something to place hopefully. */
-function _chooseLockDir(base: string, scope: string): string {
+ *  over, and a control socket is not something to place hopefully.
+ *
+ *  Exported because `resolveSocketPath`'s long-path fallback places a control
+ *  socket in a shared `/tmp` too and must ask the SAME question — it used to
+ *  mkdir + chmod and hope, which is the half that does not hold. @internal */
+export function _chooseLockDir(base: string, scope: string): string {
   const preferred = join(base, "aio" + scope);
   const first = _prepareLockDir(preferred);
   if (first === null) return preferred;
@@ -855,23 +968,10 @@ export class AppLock {
       AppLock._sigtermHandler = onTerm;
       Deno.addSignalListener("SIGTERM", onTerm);
     } catch { /* unsupported on windows */ }
-    // SIGXFSZ: a write past RLIMIT_FSIZE (`ulimit -f`, a container limit).
-    // Its default action is terminate + core dump, so the first persist that
-    // grew state.db or the journal past the limit killed the app outright —
-    // no PERSIST_ERROR, no shutdown phases, no final persist, the lock left
-    // behind. Listening (a no-op) turns it into EFBIG ("File too large") on
-    // the write itself, which the persist path already reports, and the app
-    // stays up. POSIX only — Windows has no such signal.
-    if (Deno.build.os !== "windows") {
-      try {
-        AppLock._sigxfszHandler = () => {};
-        Deno.addSignalListener("SIGXFSZ", AppLock._sigxfszHandler);
-      } catch {
-        // aio-ok: a runtime that refuses the listener keeps the kernel
-        // default — the behaviour before this existed, nothing worse.
-        AppLock._sigxfszHandler = undefined;
-      }
-    }
+    // The file-size guard rode on the LOCK until alpha; it is a property of
+    // the PROCESS, so it is held here as one holder among others and released
+    // with this lock. See {@linkcode holdFileSizeGuard}.
+    AppLock._xfszRelease = holdFileSizeGuard();
   }
 
   /** Unregister signal handlers to prevent listener leaks (e.g. in tests). */
@@ -889,16 +989,10 @@ export class AppLock {
       AppLock._sigtermHandler &&
         Deno.removeSignalListener("SIGTERM", AppLock._sigtermHandler);
     } catch { /* already removed or unsupported */ }
-    try {
-      AppLock._sigxfszHandler &&
-        Deno.removeSignalListener("SIGXFSZ", AppLock._sigxfszHandler);
-    } catch {
-      // aio-ok: the listener is already gone or was never installable —
-      // either way nothing is left registered, which is all this wants.
-    }
+    AppLock._xfszRelease?.();
     AppLock._sigintHandler = undefined;
     AppLock._sigtermHandler = undefined;
-    AppLock._sigxfszHandler = undefined;
+    AppLock._xfszRelease = undefined;
     AppLock._cleanupRegistered = false;
   }
 
@@ -910,7 +1004,8 @@ export class AppLock {
   private static _cleanupRegistered = false;
   private static _sigintHandler?: () => void;
   private static _sigtermHandler?: () => void;
-  private static _sigxfszHandler?: () => void;
+  /** This lock's hold on the process-wide file-size guard. */
+  private static _xfszRelease?: () => void;
 
   /** Acquire the lock for this app.
    *  - Cleans stale locks (dead PID)

@@ -1239,10 +1239,19 @@ export async function cmdFix(
       /* aio-ok: no deno.json — the checks above already reported it */
     }
     let pinnedBase: string | null = null;
+    let pinnedStage = "";
     let refusal: string | null = null;
     try {
       const d = parseDeclaredVersion(declared);
-      if (d.kind === "pinned") pinnedBase = d.base;
+      // The base AND its release stage: advising `"1.0"` for a `"1.0.7-beta"`
+      // pin tells the author to delete the `-beta`, which is not what the
+      // advice is about. `buildVersionNotes` says the same thing the same way
+      // (src/server/app-version.ts) — one fact, one spelling, in both mouths
+      // that speak it.
+      if (d.kind === "pinned") {
+        pinnedBase = d.base;
+        pinnedStage = d.stage ? `-${d.stage}` : "";
+      }
     } catch (e) {
       refusal = e instanceof Error ? e.message : String(e);
     }
@@ -1263,8 +1272,8 @@ export async function cmdFix(
         `version ${String(declared)} is a PIN — used verbatim, and every ` +
           `build reports it. That is a supported choice and nothing is ` +
           `wrong with it. If you would rather aio number builds from ` +
-          `commits (${pinnedBase}.<commit count>), change it yourself: ` +
-          `"version": "${pinnedBase}" in deno.json ` +
+          `commits (${pinnedBase}.<commit count>${pinnedStage}), change it ` +
+          `yourself: "version": "${pinnedBase}${pinnedStage}" in deno.json ` +
           `(docs/build/versioning.md)`,
       );
     } else add("app version", "ok");

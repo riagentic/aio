@@ -1,5 +1,7 @@
 // Shared SSR/HTML utilities — used by vdom.ts (renderToString) and ssr-stream.ts (renderToStream).
 
+import type { SsrRender } from "./ssr-render.ts";
+
 export const VOID_ELEMENTS = new Set([
   "area",
   "base",
@@ -76,25 +78,34 @@ export function escapeAttr(s: string): string {
 //
 // A stack, because SSR is a synchronous depth-first walk and `<optgroup>`
 // nests: the innermost open `<select>` is the one an `<option>` belongs to.
-const _selectValues: unknown[] = [];
+//
+// PER RENDER, not per module. The stack is held open across the children of
+// the select, and in `renderToStream` those children are yielded — so a second
+// stream pulled in between pushed ITS select onto the same stack. Measured:
+// two interleaved streams of `<select value>` with two options marked BOTH
+// options `selected` in the first response. The stack belongs to the render
+// that opened it, and {@linkcode SsrRender} is what the writers already carry.
+const _stack = (r: SsrRender | null): unknown[] | null => r?.selects ?? null;
 
 /** Open a `<select>` scope if this element is one. Returns whether it did,
  *  which the caller passes back to {@linkcode ssrCloseSelect}. */
-export function ssrOpenSelect(tag: string, value: unknown): boolean {
-  if (tag !== "select") return false;
-  _selectValues.push(value);
+export function ssrOpenSelect(
+  render: SsrRender | null,
+  tag: string,
+  value: unknown,
+): boolean {
+  const stack = _stack(render);
+  if (tag !== "select" || !stack) return false;
+  stack.push(value);
   return true;
 }
 
 /** Close the scope {@linkcode ssrOpenSelect} opened. */
-export function ssrCloseSelect(opened: boolean): void {
-  if (opened) _selectValues.pop();
-}
-
-/** @internal Test seam — a render that threw could otherwise leave a scope
- *  open and mark options in the NEXT render. */
-export function _resetSsrSelect(): void {
-  _selectValues.length = 0;
+export function ssrCloseSelect(
+  render: SsrRender | null,
+  opened: boolean,
+): void {
+  if (opened) _stack(render)?.pop();
 }
 
 /** The props to render this element with: an `<option>` inside a `<select>`
@@ -107,14 +118,16 @@ export function _resetSsrSelect(): void {
  *  this one), and `String(aSignal)` would stringify the function and match
  *  nothing. */
 export function ssrOptionProps(
+  render: SsrRender | null,
   tag: string,
   props: Record<string, unknown>,
   children: readonly unknown[],
   own: unknown,
 ): Record<string, unknown> {
-  if (tag !== "option" || _selectValues.length === 0) return props;
+  const stack = _stack(render);
+  if (tag !== "option" || !stack || stack.length === 0) return props;
   if (props.selected !== undefined) return props;
-  const want = _selectValues[_selectValues.length - 1];
+  const want = stack[stack.length - 1];
   if (want === undefined || want === null) return props;
   const text = own !== undefined ? String(own) : children
     .filter((c) => typeof c === "string" || typeof c === "number")

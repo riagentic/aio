@@ -11,8 +11,10 @@
 /** A Content-Security-Policy choice.
  *
  *  - `"basic"` (default) — the directives that cannot break a page:
- *    `base-uri`, `object-src`, `frame-ancestors`, `form-action`. No
- *    `default-src`, so off-origin assets still load.
+ *    `base-uri`, `object-src`, `frame-ancestors`, `form-action`, and a
+ *    `script-src` that names every source a page could already use while
+ *    withholding `'unsafe-eval'`. No `default-src`, so off-origin assets
+ *    still load.
  *  - `"strict"` — adds `default-src 'self'` and the per-type sources. Opt-in:
  *    an app that loads a CDN font or script must widen it first.
  *  - `false` / `"off"` — send no CSP.

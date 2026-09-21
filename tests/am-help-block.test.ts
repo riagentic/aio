@@ -46,7 +46,10 @@ Deno.test("helpBlock: one command's entries with their continuation lines", () =
 
 Deno.test("cmdHelp(['logs']) prints the block, not the whole text", () => {
   const one = capture(() => cmdHelp(["logs"], {} as GlobalFlags, ["logs"]));
-  const all = capture(() => cmdHelp([], {} as GlobalFlags, ["logs"]));
+  // The FULL list, not the one-screen tier — see am-help-one-screen.
+  const all = capture(() =>
+    cmdHelp(["--commands"], {} as GlobalFlags, ["logs"])
+  );
   const oneLines = one.out.join("\n").split("\n").length;
   const allLines = all.out.join("\n").split("\n").length;
   assert(oneLines < 10, `one command: ${oneLines} lines`);
@@ -57,7 +60,10 @@ Deno.test("cmdHelp(['logs']) prints the block, not the whole text", () => {
   // one mapped command without a help entry.)
   const alias = capture(() => cmdHelp(["zzz"], {} as GlobalFlags, ["zzz"]));
   assertStringIncludes(alias.err.join(), "no help entry of its own");
-  assert(alias.out.join("\n").split("\n").length > 100);
+  // An unknown word falls through to the DEFAULT help, which is one screen
+  // since 1.0.7-beta — the point is that it prints the list and says why,
+  // not that it prints 100 lines.
+  assert(alias.out.join("\n").split("\n").length > 30);
   const bad = capture(() => cmdHelp(["nonesuch"], {} as GlobalFlags, []));
   assertStringIncludes(bad.err.join(), 'unknown command "nonesuch"');
 });

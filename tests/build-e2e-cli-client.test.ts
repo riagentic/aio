@@ -101,6 +101,15 @@ Deno.test({
         "count",
         `the client's state has no counter slice:\n${out}`,
       );
+      // The physical-proof row for the CLI target. Last line, so a partial
+      // run cannot claim it — and written by the gate rather than by hand,
+      // because a hand-kept matrix is a claim and a generated one is evidence.
+      const { recordProof } = await import("../scripts/proof.ts");
+      await recordProof(
+        "cli",
+        "binary",
+        "compiled cli-client ↔ compiled server, state printed",
+      );
     } finally {
       try {
         server?.kill("SIGKILL");

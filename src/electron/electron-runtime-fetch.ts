@@ -261,6 +261,65 @@ const STAMP = ".aio-complete";
  *  long; the holder's liveness is what actually decides. */
 const LOCK_WAIT_MS = 15 * 60_000;
 
+/** Touched every time an app starts from this runtime — the only record of
+ *  "somebody still needs this" that a MACHINE-WIDE cache can have.
+ *
+ *  The cache is shared by every aio app on the box, and nothing in it says
+ *  which app wants which Electron: a version that looks abandoned to the app
+ *  you are standing in is the one an offline app next door starts from. So
+ *  `am prune` judges by USE, not by version order, and this is the fact it
+ *  reads. A directory that predates this stamp falls back to its mtime, which
+ *  is older — never newer — than the truth, so the fallback can only make
+ *  `am prune` more cautious. */
+export const RUNTIME_USE_STAMP = ".aio-last-used";
+
+/** Record that something just launched from `dir`. Best-effort on purpose: a
+ *  read-only cache, a full disk or a racing writer must never be able to stop
+ *  an app from opening. The cost of a missing stamp is that `am prune` judges
+ *  that runtime by mtime instead. */
+export async function touchRuntimeUse(dir: string): Promise<void> {
+  try {
+    await Deno.writeTextFile(
+      join(dir, RUNTIME_USE_STAMP),
+      `${new Date().toISOString()}\n`,
+    );
+  } catch {
+    // aio-ok: a stamp is bookkeeping for `am prune`, and this runs on every
+    // launch. A read-only cache, a full disk or a racing writer must cost the
+    // stamp, never the app opening. The only consequence is that `am prune`
+    // judges this runtime by its mtime instead, and says so.
+  }
+}
+
+/** When something last launched from `dir`, and how we know.
+ *
+ *  `"stamp"` — this aio wrote it at a launch. `"mtime"` — no stamp yet (a
+ *  cache filled by an older aio, or a runtime only ever unpacked), so the
+ *  directory's own timestamp stands in. Never a guess: a caller that has to
+ *  decide whether to delete 250 MB is told which of the two it is. */
+export async function runtimeLastUsed(
+  dir: string,
+): Promise<{ at: Date; source: "stamp" | "mtime" } | null> {
+  try {
+    const text = await Deno.readTextFile(join(dir, RUNTIME_USE_STAMP));
+    const at = new Date(text.trim());
+    if (!Number.isNaN(at.getTime())) return { at, source: "stamp" };
+  } catch {
+    // aio-ok: no stamp yet (a cache an older aio filled), or it is
+    // unreadable. Either way the mtime below is the answer, and the caller is
+    // told which of the two it got.
+  }
+  try {
+    const st = await Deno.stat(dir);
+    if (st.mtime) return { at: st.mtime, source: "mtime" };
+  } catch {
+    // aio-ok: the directory is gone — another process pruned it between the
+    // listing and this stat. "We do not know when it was used" is the honest
+    // answer, and it is the one that keeps it.
+  }
+  return null;
+}
+
 /** True when `dir` holds a runtime that is complete AND still has its
  *  executable. "The stamp exists" alone was the whole check, and the stamp was
  *  written even when the tree underneath had been deleted out from under the
@@ -613,6 +672,7 @@ export async function ensureElectronRuntime(
   const dir = electronRuntimeDir(version, slug);
   if (await runtimeUsable(dir, slug)) {
     log(`${OK} runtime ${version} (${slug}) — cached`);
+    await touchRuntimeUse(dir);
     return dir;
   }
 
@@ -620,6 +680,7 @@ export async function ensureElectronRuntime(
     // Whoever we waited for may have finished it for us.
     if (await runtimeUsable(dir, slug)) {
       log(`${OK} runtime ${version} (${slug}) — cached`);
+      await touchRuntimeUse(dir);
       return dir;
     }
     if (!held) {
@@ -688,11 +749,13 @@ export async function ensureElectronRuntime(
       // stamp still says "good".
       if (await runtimeUsable(dir, slug)) {
         log(`${OK} runtime ${version} (${slug}) — cached`);
+        await touchRuntimeUse(dir);
         return dir;
       }
       await Deno.remove(dir, { recursive: true }).catch(() => {});
       await renameWithRetry(stage, dir);
       log(`${OK} runtime ${version} (${slug}) ready`);
+      await touchRuntimeUse(dir);
       return dir;
     } finally {
       await Deno.remove(stage, { recursive: true }).catch(() => {});

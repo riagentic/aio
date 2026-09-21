@@ -29,14 +29,26 @@
 //     with another.
 
 import { isDevMode } from "../state/dev-flag.ts";
+import { upstreamRendererNoise } from "../diagnostics/upstream-noise.ts";
 
 type Entry = {
-  severity: "error" | "warning" | "info";
+  /** `"notice"` is a problem that is NOT this app's — see `_report`. */
+  severity: "error" | "warning" | "info" | "notice";
   title: string;
   detail: string;
   count: number;
   ts: number;
 };
+
+/** Does this entry count as a problem with the app? A `"notice"` does not:
+ *  it is something the RUNTIME did that the page cannot prevent, listed so
+ *  nobody has to wonder where it went, and deliberately not counted — see
+ *  `diagnostics/upstream-noise.ts` for why an always-lit badge is the same
+ *  defect as a silent one. ONE decider, read by the badge, the colour and the
+ *  auto-open. */
+function _isProblem(e: Entry): boolean {
+  return e.severity !== "notice";
+}
 
 const MAX_ENTRIES = 20;
 const ID = "aio-dev-overlay";
@@ -123,7 +135,11 @@ function _render(): void {
   if (!root || !_badge || !_list) return;
   const doc = _doc();
   if (!doc) return;
-  const total = _entries.reduce((n, e) => n + e.count, 0);
+  // NOTICES DO NOT COUNT. The badge answers "how much is wrong with this
+  // app", and an upstream throw the page cannot prevent is not an answer to
+  // that question — a badge permanently reading "aio: 1 problem" because
+  // Electron logs on every <webview> detach is a signal nobody reads any more.
+  const total = _entries.reduce((n, e) => n + (_isProblem(e) ? e.count : 0), 0);
   if (total === 0) {
     // EMPTIED, not merely hidden. This returned before touching the badge, so
     // after "clear" a hidden overlay still read "aio: 1 problem" — and anything
@@ -140,6 +156,7 @@ function _render(): void {
   const worst = _entries.some((e) => e.severity === "error")
     ? "#b3261e"
     : "#7a5900";
+  // (`worst` reads `severity === "error"` directly: a notice is never that.)
   _style(_badge, { background: worst });
   _badge.textContent = `${_open ? "[-]" : "[+]"} aio: ${total} ${
     total === 1 ? "problem" : "problems"
@@ -161,8 +178,12 @@ function _render(): void {
     });
     const head = doc.createElement("div");
     _style(head, {
-      color: e.severity === "error" ? "#f2b8b5" : "#ffd8a8",
-      "font-weight": "600",
+      color: e.severity === "error" ? "#f2b8b5" : e.severity === "notice"
+        // Muted, and visibly a different KIND of row: it is listed so it can
+        // be found, not so it can be worried about.
+        ? "#9a94a0"
+        : "#ffd8a8",
+      "font-weight": e.severity === "notice" ? "400" : "600",
     });
     head.textContent = e.count > 1 ? `${e.title}  x${e.count}` : e.title;
     row.append(head);
@@ -218,8 +239,9 @@ export function _report(
     if (_entries.length > MAX_ENTRIES) _entries.length = MAX_ENTRIES;
     // A NEW kind of problem opens the panel; a repeat of one already listed
     // does not, or the page becomes unusable under the very condition this
-    // exists to report.
-    _open = true;
+    // exists to report. A NOTICE never opens it — it is not the app's problem
+    // and must not interrupt the work.
+    if (severity !== "notice") _open = true;
   }
   _render();
 }
@@ -262,6 +284,21 @@ export function installDevOverlay(): void {
 
   w.addEventListener?.("error", (e: ErrorEvent) => {
     const where = e.filename ? ` (${e.filename}:${e.lineno}:${e.colno})` : "";
+    // An error the RUNTIME threw, recognised by message AND source (both, so
+    // an app error that merely reads like a known one is never reclassified).
+    // It is LISTED — annotated, with the upstream issue — and not counted:
+    // `<webview>` detach throws one of these every time, and a badge that is
+    // red from the first panel close until the window is shut has stopped
+    // meaning anything.
+    const known = upstreamRendererNoise(e.message, e.filename);
+    if (known) {
+      // `label`, not the message, and no location: the guest id and the column
+      // both change on every detach, so keying on them would open a new row
+      // per close and push the app's real errors off a 20-entry list. The
+      // verbatim line is in the log; this is the row that collapses.
+      _report("notice", known.label, "");
+      return;
+    }
     _report("error", `${e.message}${where}`, e.error?.stack ?? "");
   });
   w.addEventListener?.("unhandledrejection", (e: PromiseRejectionEvent) => {

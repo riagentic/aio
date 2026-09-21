@@ -168,10 +168,18 @@ Deno.test("am help: the compact form still documents the global flags", () => {
     !helpRow.includes("machine-readable"),
     `the help entry swallowed the --json footnote: ${helpRow}`,
   );
+  // Bare help keeps what applies to EVERY command — the `--json` contract
+  // and the `Flags:` line that names them all — and drops the paragraphs
+  // about one flag each (`--app:`, `--home:`, …), which are eight lines of
+  // a one-screen tier and are what `am help <command>` and `--all` are
+  // for. Both tiers are asserted, so neither can quietly lose the flags.
   const printed = capture(() => cmdHelp([], {} as GlobalFlags, ["help"]));
   const text = printed.out.join("\n");
   assertStringIncludes(text, "Flags: --app=X");
-  assertStringIncludes(text, "--home: target the instance");
+  const full = capture(() =>
+    cmdHelp(["--commands"], {} as GlobalFlags, ["help"])
+  );
+  assertStringIncludes(full.out.join("\n"), "--home: target the instance");
 });
 
 // `am help` advertised `--template=counter|todo` while `--template=cli` worked

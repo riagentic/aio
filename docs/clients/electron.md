@@ -131,7 +131,7 @@ off as a fresh capture — see [`am shot`](app-manager.md#screenshots-am-shot).
 
 ## The Content-Security-Policy warning
 
-Every Electron run — dev **and** packaged — prints this:
+Every Electron run — dev **and** packaged — used to print this:
 
 ```
 Electron Security Warning (Insecure Content-Security-Policy)
@@ -139,34 +139,90 @@ This renderer process has either no Content Security Policy set or a policy with
 "unsafe-eval" enabled. … This warning will not show up once the app is packaged.
 ```
 
-Two things are worth knowing, because both are easy to misread:
+**That last sentence is not true for aio's Electron target**, which is why the
+warning had to be fixed rather than waited out. Electron only suppresses the
+warning when its own executable has been renamed out of the way; an aio app runs
+the stock `electron` binary from the shared runtime cache, so the check is armed
+in a packaged app exactly as it is in dev.
 
-**The last sentence is not true for aio's Electron target.** Electron suppresses
-the warning when `app.isPackaged` is true, and an aio AppImage runs a copied
-Electron runtime against `main.cjs` rather than an asar bundle — so `isPackaged`
-is false and the warning follows the app into production.
+**It is gone since 1.0.7-beta, by removing its cause.** Electron's check is
+literally "does `eval` still run in this renderer", so nothing but a
+`script-src` can answer it. The default policy (`"basic"`) now sends one that
+names every source a page could already use and withholds exactly one
+capability:
 
-**aio's default CSP does not silence it, by design.** The default (`"basic"`)
-sends `base-uri`, `object-src`, `frame-ancestors` and `form-action` — the
-directives that cannot break a page — and deliberately says nothing about
-scripts, so an app that loads a font, a CDN script or an off-origin image keeps
-working. Electron's check probes whether `eval` runs; a policy with no
-`script-src` does not stop it, so the warning fires.
+```
+script-src * data: blob: 'unsafe-inline' 'wasm-unsafe-eval'
+```
 
-To satisfy the check, restrict scripts:
+`*` covers every http(s) URL and — per CSP3's special case for the bare `*` —
+any URL on the document's own scheme, which is what keeps `aio://app/app.js`
+loading inside the packaged window. `data:`/`blob:` keep generated scripts and
+blob-URL Workers, `'unsafe-inline'` keeps the shell's bootstrap and your own
+inline scripts and `on…=` handlers, and `'wasm-unsafe-eval'` keeps WebAssembly.
+The only thing that stops working is `eval`, `new Function` and
+`setTimeout("…")` — in dev and in the packaged app identically, so an app that
+needs them finds out under `deno task dev`, not after shipping.
+
+An app that genuinely evaluates strings says so by name:
 
 ```ts
 await aio.run({
   cells: [app],
-  security: { csp: "strict" }, // adds default-src 'self' + script-src without 'unsafe-eval'
+  // Drop the directive entirely…
+  security: { cspDirectives: { "script-src": false } },
+  // …or keep it and re-add the capability:
+  // security: { cspDirectives: { "script-src": "* data: blob: 'unsafe-inline' 'unsafe-eval'" } },
 });
 ```
 
-Read [`csp: "strict"`](../auth/auth.md#response-security-headers) first: it is
-opt-in precisely because it **can** break a page that reaches off-origin. If
-your renderer displays peer-controlled text or images — a chat, a feed, anything
-with someone else's content in it — that trade is usually worth making, and
+To go further than the default, `security: { csp: "strict" }` adds
+`default-src 'self'` and per-type sources. Read
+[`csp: "strict"`](../auth/auth.md#response-security-headers) first: it is opt-in
+precisely because it **can** break a page that reaches off-origin. If your
+renderer displays peer-controlled text or images — a chat, a feed, anything with
+someone else's content in it — that trade is usually worth making, and
 `img-src 'self' data: blob:` plus an explicit host is the usual adjustment.
+
+## The `Invalid guestInstanceId` line after closing a `<webview>`
+
+Closing an embedded page (a [`<Browser>`](webview.md) panel, or a bare
+`<webview>` you removed yourself) makes Electron throw inside its own
+isolated-world bundle. Measured on Electron 44.4.1:
+
+```
+window.onerror  message  Uncaught Error: Invalid guestInstanceId: 2
+window.onerror  filename node:electron/js2c/isolated_bundle:1:7012
+                stack    Error: Invalid guestInstanceId: 2      ← no app frames
+```
+
+It happens on **every** detach, the guest is already gone, nothing is retried,
+and the page cannot prevent it — the throw is in an isolated world your code
+cannot reach
+([electron#53989](https://github.com/electron/electron/issues/53989)).
+
+aio **annotates** it rather than hiding it:
+
+- the log line stays, at **info** instead of error, reading
+  `Uncaught Error: Invalid guestInstanceId: 2 — known upstream issue
+  (electron#53989), not this app: …`.
+  It is in `am logs` and in the app log like any other line.
+- it does **not** count toward `errors=N`, and it does not light the dev
+  overlay's problem badge or open its panel. It is listed there as a muted
+  _notice_ whenever the panel is open for a real reason.
+
+Why it is not simply filtered: an error indicator that is permanently lit for
+something your app did not do is the same failure as one that never fires — both
+teach you to ignore it. And why it is not a message filter either: the line is
+recognised by its message **and** by its source file, both anchored. An app that
+throws `Invalid guestInstanceId: 4` from its own bundle is a real error and
+stays loud, and an Electron that renames the bundle or changes the wording stops
+matching, so the line goes back to being ordinary and noisy rather than quietly
+swallowed under a stale label.
+
+The rule, its measurement and the reasoning live in
+`src/diagnostics/upstream-noise.ts`; adding another one means adding both halves
+and an issue number, which a test enforces.
 
 ## UDS transport
 
@@ -431,6 +487,53 @@ directory, so dev and a packaged app agree. Every refusal is logged with its
 reason (`[aio:electron] openWindow refused — …`). See [webview](webview.md) for
 the inline alternative.
 
+The child window is **sandboxed**. `openWindow(url, { sandbox: false })` — the
+page-world injection escape hatch — is refused unless the app itself asked for
+it:
+
+```ts
+await aio.run({
+  childWindows: true,
+  electron: { unsandboxedChildWindows: true },
+});
+```
+
+The page asks, the app decides. Without the opt-in the request is refused with
+its reason rather than quietly downgraded to a sandboxed window, because a
+window that differs from the one requested is the silence this rule exists to
+end. With it, every unsandboxed window is still announced in the log.
+
+## The Chromium sandbox (`electron: { requireSandbox }`)
+
+On a kernel that restricts unprivileged user namespaces (Ubuntu 24.04+ and every
+container) with a `chrome-sandbox` that is not setuid-root — which an npm
+install cannot make it — Chromium **aborts instead of starting**. aio measures
+both conditions and launches with `--no-sandbox`, saying so every time. That is
+the default, and it is why a desktop app starts on those hosts at all.
+
+An app that would rather not open than open unsandboxed says so:
+
+```ts
+await aio.run({ electron: { requireSandbox: true } });
+```
+
+Then that host gets no window and a refusal naming the two commands that make
+the sandbox usable (`chown root:root` + `chmod 4755` on the helper, then
+`AIO_ELECTRON_SANDBOX=1`). Nothing changes on a host where the sandbox already
+works — which is every stock Debian, Fedora, Arch and macOS or Windows machine.
+
+**The process STOPS, exit code 1 — it does not keep serving.** Every other
+Electron launch failure leaves the server up and tells you to open the page in a
+browser, which is the right answer when a window simply could not be drawn. It
+is the wrong answer here: an app that said it would rather not open than open
+unsandboxed would have had its UI reachable anyway, in a client nothing
+verified. Same downgrade, one step later. (Found by the verify round that
+attacked this feature's own first version.)
+
+One launch path cannot honour the key: `--client=electron` in CONNECT mode,
+where the window belongs to no app config and there is nothing to read it from.
+Declare `requireSandbox` in the app that opens its own window.
+
 ## Headless and VM hosts (`AIO_ELECTRON_ARGS`)
 
 Electron on a real desktop needs nothing. On a VM, a container or a box with no
@@ -438,8 +541,23 @@ GPU it sometimes will not start at all — and the failure is a crash loop, not 
 message: one console aborted on a GPU fault every ~90 seconds until the machine
 got `LIBGL_ALWAYS_SOFTWARE=1`.
 
-Environment variables reach Electron already (the spawn inherits them). Chromium
-**switches** go in `AIO_ELECTRON_ARGS`, space separated:
+Environment variables reach Electron already (the spawn inherits them) — with
+**two exceptions**, both removed before the window is spawned and each named in
+the log when it was set:
+
+| variable               | why it is removed                                                                                                                |
+| ---------------------- | -------------------------------------------------------------------------------------------------------------------------------- |
+| `ELECTRON_RUN_AS_NODE` | it makes the Electron binary run as plain Node — measured: the app's window never opens and the script it is handed runs instead |
+| `NODE_OPTIONS`         | it injects `--require=<file>` / `--inspect` into the runtime before the app's own code runs                                      |
+
+This is the same reasoning as the `AIO_ELECTRON_ARGS` allow-list below: the
+launch environment is written by a `.desktop` file, a shell profile or a wrapper
+script, which is not the app. It is a **partial** mitigation and the warning
+says so — an environment you do not control can also set `PATH` or `LD_PRELOAD`,
+which nothing here can take away. Screening one variable while inheriting a
+wider one was the part worth fixing.
+
+Chromium **switches** go in `AIO_ELECTRON_ARGS`, space separated:
 
 ```sh
 # A VM or container with no GPU — the common case.
@@ -460,18 +578,55 @@ export AIO_ELECTRON_ARGS="--disable-gpu --disable-software-rasterizer --use-gl=s
 xvfb-run -a deno task dev --client=electron
 ```
 
+### What it carries
+
+An **allow-list**: the display, GPU, locale and logging vocabulary a headless
+host or a VM needs, and nothing else.
+
+| Group           | Switches                                                                                                                                                                                                                  |
+| --------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| GPU / rendering | `--disable-gpu` · `--disable-gpu-compositing` · `--disable-software-rasterizer` · `--disable-accelerated-2d-canvas` · `--disable-accelerated-video-decode` · `--enable-unsafe-swiftshader` · `--use-gl=` · `--use-angle=` |
+| Display         | `--ozone-platform=` · `--ozone-platform-hint=` · `--force-device-scale-factor=` · `--force-color-profile=` · `--disable-lcd-text` · `--disable-smooth-scrolling`                                                          |
+| Memory          | `--disable-dev-shm-usage`                                                                                                                                                                                                 |
+| Background work | `--disable-background-timer-throttling` · `--disable-backgrounding-occluded-windows` · `--disable-renderer-backgrounding`                                                                                                 |
+| Locale / logs   | `--lang=` · `--enable-logging` · `--log-level=`                                                                                                                                                                           |
+
+These switches are appended **last**, so they override aio's own — which is also
+why the list is closed. Whoever controls the launch environment (a `.desktop`
+file, a shell profile, a wrapper script) would otherwise add
+`--remote-debugging-port=9222` and hold unauthenticated DevTools against the
+renderer: arbitrary JavaScript in the page of a shipped app, with nothing in the
+app's config able to refuse it. `--disable-web-security` and `--js-flags` were
+the same door.
+
+Anything outside the list is **refused and named in the log** with the reason,
+and the ones you might reasonably reach for name their supported route instead:
+
+| Instead of                                 | Use                                                                          |
+| ------------------------------------------ | ---------------------------------------------------------------------------- |
+| `--remote-debugging-port=N`, `--inspect`   | `--cdp[=N]` — aio binds it deliberately, on loopback                         |
+| `--no-sandbox`, `--disable-setuid-sandbox` | nothing: aio decides (below), `electron: { requireSandbox }` is your control |
+| `--user-data-dir=…`                        | nothing: the profile is keyed to the app's own identity                      |
+| `--enable-features=UseOzonePlatform`       | `--ozone-platform=…`                                                         |
+
+The rule is the same in dev and in a shipped app: a variable that works on a
+developer's machine and is ignored in production is exactly the divergence this
+project refuses.
+
 `--no-sandbox` is **not** in these sets. aio adds it by itself, and only after
 MEASURING that the kernel restricts unprivileged user namespaces and that
 `chrome-sandbox` is not setuid-root — the two conditions under which Chromium
-aborts rather than starts. It says so in the log when it does, and
-`AIO_ELECTRON_SANDBOX=1` forces the strict behaviour back. Adding it by hand
-gives away isolation on every host, including the ones that did not need it.
+aborts rather than starts. It says so in the log when it does,
+`AIO_ELECTRON_SANDBOX=1` forces the strict behaviour back, and
+`electron: { requireSandbox: true }` refuses the launch outright (above). Adding
+it by hand gives away isolation on every host, including the ones that did not
+need it.
 
-A token in `AIO_ELECTRON_ARGS` that is not a `--switch` is **refused and named
-in the log**, not silently dropped: "I set the flag and nothing changed" is
-precisely the failure this variable exists to end. Splitting is on whitespace,
-so a switch whose value contains a space is not expressible — every switch above
-is a bare flag or a simple `--key=value`.
+A token that is not a `--switch` at all is refused the same way, not silently
+dropped: "I set the flag and nothing changed" is precisely the failure this
+variable exists to end. Splitting is on whitespace, so a switch whose value
+contains a space is not expressible — every switch above is a bare flag or a
+simple `--key=value`.
 
 ## Window chrome (`ui.chrome`)
 

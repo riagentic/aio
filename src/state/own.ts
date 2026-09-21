@@ -1,4 +1,5 @@
 import { log } from "../diagnostics/logger-api.ts";
+import { inServerOrigin } from "./call-origin.ts";
 
 // own.ts — keyed disposer slots for cell-owned native resources (AIO-382)
 //
@@ -267,7 +268,8 @@ export function createOwnManager(log: Log): {
     if (!dispose) return;
     disposers.delete(id);
     try {
-      const r = dispose();
+      // The app's OWN code, exactly as the factory is — see the note there.
+      const r = inServerOrigin(dispose);
       if (r && typeof (r as Promise<void>).catch === "function") {
         (r as Promise<void>).catch((e) =>
           log.error(`own: async disposer '${id}' failed: ${e}`)
@@ -323,7 +325,14 @@ export function createOwnManager(log: Log): {
     }
     runDisposer(effect.id); // same id ⇒ replace
     try {
-      const disposer = toDisposer(factory());
+      // A cell's resource factory is SERVER code — the whole reason `own`
+      // exists is that the cell owns the resource — so it may use the app's
+      // internal cells exactly as a method body may, and `access: false` must
+      // not seal a cell against it. The factory is called from the effect
+      // manager, well outside the body that emitted it, so the marker has to
+      // be put back on here. (call-origin.ts,
+      // tests/access-origin-boundaries.test.tsx)
+      const disposer = toDisposer(inServerOrigin(factory));
       if (disposer) disposers.set(effect.id, disposer);
       log.debug(`own: acquired '${effect.id}'`);
     } catch (e) {

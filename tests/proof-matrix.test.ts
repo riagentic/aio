@@ -45,6 +45,18 @@ Deno.test("proof matrix: a claim with no gate says so", () => {
   // That is different from "has a gate, never run", and the matrix has to keep
   // saying which — otherwise the honest answer ("nobody can prove this yet")
   // reads like ordinary backlog.
+  //
+  // `windows`/`macos` joined them in 1.0.7-beta, and the reason is the point
+  // of this whole file: the row that read `windows (real) ✓` was written by a
+  // gate that checks the LAB's viewer and artifact share, not an app. A ✓
+  // there claimed an aio app had run on Windows. The lab rows are
+  // `windows (lab-vm)` / `macos (lab-vm)` now, and the app-level claims are
+  // separate rows with NO GATE — the releases that WERE fixed on a real
+  // Windows VM and a real Mac were driven by hand, and nothing automates that.
+  //
+  // A spelled-out ledger, not a derived set, so adding a NO-GATE claim stays a
+  // conscious act: "we are shipping a claim nobody can prove" should cost a
+  // line in a test.
   const noGate = CLAIMS.filter((c) => !c.auto).map((c) => c.target);
-  assertEquals(noGate.sort(), ["android", "remote"]);
+  assertEquals(noGate.sort(), ["android", "macos", "remote", "windows"]);
 });

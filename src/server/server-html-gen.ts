@@ -18,6 +18,7 @@ export type UiDir = NonNullable<UiConfig["dir"]>;
  *  aio-types (ONE spelling), re-exported here where the shells reach for it. */
 export type { UiTheme };
 import { DEFAULT_LANG, escHtml } from "./server-html-constants.ts";
+import { metaDeliverableCsp } from "./security-headers.ts";
 import { devWsScript } from "./server-html-scripts.ts";
 
 /** Validate a UI entry filename before interpolating into the dev HTML shell's
@@ -191,6 +192,23 @@ function headContent(
    *  page container and the six classes) from whichever visual sheet this
    *  shell would have emitted. See `UiConfig.layout`. */
   layout?: boolean,
+  /** The Content-Security-Policy to emit as a `<meta http-equiv>`.
+   *
+   *  🔓 Why the shell carries it at all: the policy an app configures is
+   *  attached as an HTTP RESPONSE HEADER, and the packaged Electron shell
+   *  never passes through the handler that does it — Electron returns the
+   *  HTML straight from the main process with one `Content-Type` header
+   *  (electron/electron-uds.ts). So a packaged app ran with NO CSP while its
+   *  config said it had one, which is worse than having none: it removes the
+   *  reason to look. Reported by a crypto wallet built on aio, which sets
+   *  `csp: "basic"` + a nonce + `script-src 'self'` and shipped with nothing.
+   *
+   *  A `<meta>` travels with the document, so it covers every way the shell
+   *  can be delivered. Browsers honour it for everything except
+   *  `frame-ancestors`, `report-uri` and `sandbox` — those stay
+   *  header-only, which is why this is an ADDITION to the header and not a
+   *  replacement for it. */
+  csp?: string,
 ): string {
   // THE baseline, on every target, always — before the app's stylesheet so
   // any of it can be overridden by a single rule.
@@ -332,7 +350,17 @@ function headContent(
   const iconLink = assetBase === "/"
     ? `\n  <link rel="icon" href="/__aio/icon">`
     : "";
-  return `  <meta charset="UTF-8">
+  // FIRST in `<head>`, because a policy is only honoured for what follows it
+  // — and only the directives a DOCUMENT can deliver (`metaDeliverableCsp`:
+  // `frame-ancestors`, `report-uri` and `sandbox` are ignored here, and
+  // Chromium reports each one as a renderer error in every launch).
+  const metaPolicy = csp ? metaDeliverableCsp(csp) : null;
+  const metaCsp = metaPolicy
+    ? `\n  <meta http-equiv="Content-Security-Policy" content="${
+      escHtml(metaPolicy)
+    }">`
+    : "";
+  return `  <meta charset="UTF-8">${metaCsp}
   <meta name="referrer" content="no-referrer">${metaViewport}
   <title>${
     escHtml(title)
@@ -387,6 +415,10 @@ export interface HtmlShellOptions {
   /** The app's identity — injected into `window.__aioConfig` so the browser's
    *  offline sync queue can scope its (per-origin) `localStorage` key. */
   appId?: string;
+  /** Content-Security-Policy, emitted as a `<meta http-equiv>` so it reaches
+   *  a shell that is not served through the HTTP handler — see
+   *  `headContent`'s `csp` parameter. */
+  csp?: string;
 }
 
 export function generateHTML(o: HtmlShellOptions): string {
@@ -409,6 +441,7 @@ export function generateHTML(o: HtmlShellOptions): string {
     false, // deferTheme — a server-served shell always knows its ui.theme
     o.appId,
     o.layout,
+    o.csp,
   );
 
   // `o.dir` was DECLARED on this options type, PASSED by `server-static.ts`,

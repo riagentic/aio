@@ -10,13 +10,14 @@ by hand and no two builds of the same code disagree about what they are.
 { "title": "notes", "version": "1.2" }
 ```
 
-| Tree state                    | Version                  | How the build number is made                                         |
-| ----------------------------- | ------------------------ | -------------------------------------------------------------------- |
-| clean checkout                | `1.2.345`                | `git rev-list --count HEAD` — monotonic, one number per commit       |
-| uncommitted changes           | `1.2.345-dirty.9f3ac2b1` | `345` + sha256 over the sorted dirty paths **and their contents**    |
-| no git repository             | `1.2.0-nogit.4e1d0c77`   | build `0` + sha256 of the project tree; the build prints a loud note |
-| pinned (`"version": "1.0.0"`) | `1.0.0`                  | not derived — used verbatim, and every build says so, once           |
-| no `version` at all           | `0.1.345`                | `0.1` is the default; the build names the key to add                 |
+| Tree state                       | Version                  | How the build number is made                                         |
+| -------------------------------- | ------------------------ | -------------------------------------------------------------------- |
+| clean checkout                   | `1.2.345`                | `git rev-list --count HEAD` — monotonic, one number per commit       |
+| uncommitted changes              | `1.2.345-dirty.9f3ac2b1` | `345` + sha256 over the sorted dirty paths **and their contents**    |
+| no git repository                | `1.2.0-nogit.4e1d0c77`   | build `0` + sha256 of the project tree; the build prints a loud note |
+| pinned (`"version": "1.0.0"`)    | `1.0.0`                  | not derived — used verbatim, and every build says so, once           |
+| no `version` at all              | `0.1.345`                | `0.1` is the default; the build names the key to add                 |
+| staged (`"version": "1.2-beta"`) | `1.2.345-beta`           | the stage rides the same string; builds are still derived            |
 
 Two builds of the same commit produce the **same** version and the same artifact
 names. A new commit bumps the build number. The same uncommitted edit built
@@ -27,6 +28,49 @@ clean build of the same count (`1.2.345-dirty.… < 1.2.345`). That is the point
 a dirty build is not a release, and the update check never offers one over a
 clean build.
 
+## Release stage — `-alpha`, `-beta`, `-rc`
+
+Add one of three words to say how finished the app is. The build number is still
+derived:
+
+```jsonc
+{ "title": "notes", "version": "1.2-beta" } // → 1.2.345-beta
+```
+
+It rides the **same string** everywhere — `--version`, the boot line, the status
+bar, `/__aio/health`, artifact names, the ship manifest, the update check. That
+is the whole feature: an app that shows `0.1.377-beta` in its own UI and ships
+`0.1.377` on its download page has two versions, and an update check ordering by
+build number alone would offer an **alpha** over the beta that replaced it.
+
+| Ordering                                                    | Why                           |
+| ----------------------------------------------------------- | ----------------------------- |
+| `1.2.345-alpha` < `1.2.345-beta` < `1.2.345-rc` < `1.2.345` | plain SemVer prerelease order |
+| `1.2.345-rc` < `1.2.346-alpha`                              | the build number wins first   |
+
+**Your own updates keep working.** A release channel does not offer prereleases
+— `updates: { prerelease: true }` is the opt-in — and every build of a staged
+app IS a prerelease. So an install whose own version carries a stage follows its
+own line by default: a `1.2.345-beta` is offered `1.2.346-beta`. Saying
+`prerelease: false` still means no. A `-dirty` mark does not count: it says a
+build is not reproducible, not that it is on a prerelease line.
+
+Only those three words, only lower case, and never a number after them
+(`"1.2-rc1"` is still refused): the build count already numbers the build, and
+`rc1` would be a second counter to disagree with it. A pinned version may carry
+one too (`"1.0.0-rc"`).
+
+**Android:** `versionName` carries the full string, and `versionCode` is
+computed from `major.minor.build` alone — so `1.2.345-rc` and `1.2.345` have the
+SAME code. Android refuses to install an update whose code is not greater, so
+promote an rc to a release on a later commit (which every real promotion is),
+never on the same one. A dirty staged build is `1.2.345-beta.dirty.<hash8>` —
+one prerelease tail, since two `-` groups would not be SemVer. That one string
+ranks _above_ plain `1.2.345-beta` (SemVer ranks a longer prerelease higher),
+which is the single build it is: that commit, plus your uncommitted edits. It is
+below every other clean build, and it cannot reach a channel anyway — publishing
+a dirty build is refused outright.
+
 The build's own outputs (`.aio/`, `dist/` or `build.out`, `node_modules/`,
 `dep/`) are never counted as dirty — the stamp a build writes cannot dirty the
 next build. An **untracked** `deno.lock` is the toolchain's (the first
@@ -35,10 +79,12 @@ is a real change.
 
 ## What is refused, what is noted
 
-- A `version` that is neither `M.m` nor `M.m.p` (`"1"`, `"v1.2"`, `"1.2-rc1"`,
-  `"1.2.3.4"`) is **refused by name** at build time.
-- A three-part version is **pinned**: accepted verbatim, with exactly one line
-  per build —
+- A `version` that is neither `M.m` nor `M.m.p`, with or without a stage (`"1"`,
+  `"v1.2"`, `"1.2-rc1"`, `"1.2-dev"`, `"1.2.3.4"`) is **refused by name** at
+  build time, and the refusal spells out both accepted forms.
+- A three-part version is **pinned**: used as written (normalised — `" 01.0.0 "`
+  is the version `1.0.0`, because one version has one spelling), with exactly
+  one line per build —
   `version 1.0.0 is pinned by deno.json — the build number is not derived; write "1.0" to let aio number builds from commits`.
   `am fix` offers the rewrite.
 - No repository: one line —

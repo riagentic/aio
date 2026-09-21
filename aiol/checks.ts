@@ -6700,6 +6700,176 @@ export const checkCellStateInterface: Checker = (ctx) => {
   }
 };
 
+// ══════════════════════════════════════════════════════════════════════
+// 41. A BODY-LEVEL `onCleanup` THAT TEARS DOWN WHAT THE BODY DID NOT MAKE
+// ══════════════════════════════════════════════════════════════════════
+//
+// `onCleanup` in a component BODY runs on unmount AND before every re-render.
+// Documented, correct, and the single easiest thing in aio to hold wrong: it
+// is where `useLocal` and `useRef` live, and every other framework ties a
+// cleanup to an effect's dependencies rather than to a repaint.
+//
+// A field report got it wrong four times in four components, each time
+// silently, each time shipping — and the cost is the OPPOSITE of a leak. A
+// resource that should live as long as the component is destroyed on the next
+// repaint, and the re-render does not re-arm it, because the component's own
+// bookkeeping still says the work is in flight:
+//
+//   - a gallery released its place in the art download queue from the body:
+//     89 cards asked, 4 started, 85 cancelled and never asked again;
+//   - a send button cleared its armed-state auto-disarm timer, and a dialog
+//     re-renders on every balance patch, so a three-second safety window
+//     silently stopped existing;
+//   - a 300 ms debounce was cancelled and nothing re-armed it, so a price read
+//     "pricing…" for ever.
+//
+// It is invisible in tests, because a test renders ONCE and rendering once is
+// exactly the case that works.
+//
+// THE DISCRIMINATOR, and the reason this can be a rule rather than a guess:
+// per-render teardown is CORRECT when the body re-creates the thing each
+// render (`const t = setTimeout(…)` in the body, cleared on the way out) and
+// WRONG when it does not (the handle came from a ref, a local, a closure, or
+// was armed inside `onMount`). So the rule only fires when the identifier
+// being torn down has no `const`/`let`/`var` binding inside the same render
+// body — which is precisely the four shapes above and none of the correct one.
+// `?.` is part of every one of these: the four shipped bugs were written
+// `retry.current?.abort()`, and a rule that a single question mark walks past
+// is a rule that did not fire on the case it was written for.
+const _MEMBER = "\\b([$\\w]+(?:\\??\\.[$\\w]+)*)\\s*\\??\\.\\s*";
+const _TEARDOWN = [
+  /\bclear(?:Timeout|Interval)\s*\(\s*([$\w.?]+)/g,
+  new RegExp(
+    `${_MEMBER}(?:abort|cancel|dispose|unsubscribe|release|destroy|revoke|teardown)\\s*\\(`,
+    "g",
+  ),
+  new RegExp(`${_MEMBER}removeEventListener\\s*\\(`, "g"),
+];
+
+export const checkBodyCleanupTeardown: Checker = (ctx) => {
+  const { tsFiles, tsxFiles, report, pass } = ctx;
+  let found = 0, checked = 0;
+  for (const file of [...tsFiles, ...tsxFiles]) {
+    if (/\.test\.tsx?$/.test(file.name)) continue;
+    const raw = file.content;
+    const code = codeText(raw);
+    for (const m of codeMatches(raw, /\bonCleanup\s*\(/g)) {
+      const open = m.index! + m[0].length - 1;
+      const close = _balancedParen(code, open);
+      if (close === -1) continue;
+      // Registered INSIDE `onMount` already means unmount-only — the shape
+      // this rule tells people to write. Not a finding.
+      const fn = _enclosingFn(code, m.index!);
+      if (_insideOnMount(code, m.index!)) continue;
+      checked++;
+      const body = code.slice(open + 1, close);
+      // The component's own render body, so "was this made here?" is asked of
+      // the right scope. Without one (a helper hook in a .ts file) the whole
+      // file is the scope — a wider net, and it only ever removes findings.
+      const scope = fn
+        ? code.slice(fn.open, _balancedClose(code, fn.open) + 1)
+        : code;
+      for (const re of _TEARDOWN) {
+        for (const t of body.matchAll(re)) {
+          // `?` is stripped, not tolerated: the root is interpolated into a
+          // RegExp below, where `a?` would silently mean "an optional a" and
+          // match the wrong declaration. Identifier characters only.
+          const root = t[1]!.split(/[.?]/)[0]!;
+          if (!root || root === "this" || !/^[$\w]+$/.test(root)) continue;
+          // Made in this body, re-made on the next render: clearing it per
+          // render is not just fine, it is required.
+          //
+          // A `const` is NOT enough to say so, and this is where the first
+          // draft of the rule was wrong in both directions. `const slot =
+          // useRef(queue.take(id))` is a binding declared in the body whose
+          // VALUE survives every render — which is the exact shape of all four
+          // bugs. What makes a thing body-created is its initialiser being a
+          // fresh expression, not a hook: `const t = setTimeout(…)` is new each
+          // render, `const x = useRef(…)` / `useLocal` / `useSignal` is the
+          // same object as last time.
+          const decl = new RegExp(
+            `\\b(?:const|let|var)\\s+${root}\\s*(?::[^=;]+)?=\\s*([\\s\\S]{0,40})`,
+          ).exec(scope) ??
+            // …including when the body destructured it. `const { ctrl } =
+            // makeThing()` creates `ctrl` here exactly as `const ctrl = …`
+            // does; reading only the plain form flagged a correct per-render
+            // cleanup, which is the false-alarm direction that gets a rule
+            // switched off.
+            new RegExp(
+              `\\b(?:const|let|var)\\s*[{\\[][^}\\]]*\\b${root}\\b[^}\\]]*[}\\]]\\s*(?::[^=;]+)?=\\s*([\\s\\S]{0,40})`,
+            ).exec(scope);
+          if (decl && !/^\s*use[A-Z]/.test(decl[1]!)) continue;
+          // Assigned a fresh timer in the body itself, without a declaration.
+          if (
+            new RegExp(`\\b${root}\\s*=\\s*set(?:Timeout|Interval)\\b`)
+              .test(scope)
+          ) continue;
+          const line = code.slice(0, m.index!).split("\n").length;
+          if (isSuppressed(file.lines, line - 1)) continue;
+          found++;
+          report(
+            "warn",
+            "ui",
+            `${file.relative}:${line} — this \`onCleanup\` is in a component ` +
+              `BODY, so it runs before EVERY re-render, not just at unmount ` +
+              `— and \`${root}\` is not created in this body, so nothing ` +
+              `re-arms it. The next repaint tears down work that was meant to ` +
+              `outlive it, and the component's own bookkeeping still says it ` +
+              `is in flight.\n` +
+              `      fix: \`onUnmount(…)\` — same callback, runs once, when ` +
+              `the component actually goes away. (A cleanup for something the ` +
+              `body DOES create each render belongs exactly where it is.) ` +
+              `See docs/ui/air-lifecycle.md.`,
+            {
+              file: file.relative,
+              line,
+              fix: `onUnmount(() => …)`,
+              manual: "only the author knows whether this teardown is meant " +
+                "to survive a re-render",
+            },
+          );
+          break;
+        }
+      }
+    }
+  }
+  if (checked > 0 && found === 0) {
+    pass("no body-level onCleanup tears down work it did not create");
+  }
+};
+
+/** Is the offset inside an `onMount(...)` call?
+ *
+ *  Asked by SPAN, not by pattern-matching the text before the callback. The
+ *  first version walked out through enclosing BLOCK bodies and tested what
+ *  preceded each `{`, which missed the two shapes that matter most — and both
+ *  of them are code this rule tells people to write:
+ *
+ *      onMount(() => onCleanup(() => clearTimeout(t.current)));  // no block
+ *      onMount(async () => { … onCleanup(…) … });                // `async`
+ *
+ *  An expression-bodied arrow has no `{` to be enclosed by, so the walk found
+ *  the COMPONENT's body and the test failed; `async` simply was not in the
+ *  pattern. Measured on a real app: the rule fired on the first shape, under a
+ *  ten-line comment explaining why that shape is correct, and told its author
+ *  the opposite of the truth. A rule that contradicts its own recommended fix
+ *  is how a linter gets muted — and forty other rules ride on this one.
+ *
+ *  Containment answers all of it at once: any `onMount(` whose balanced
+ *  parentheses enclose the offset means the offset runs inside that call,
+ *  whatever the callback is spelled like, however deeply it nests. */
+function _insideOnMount(code: string, at: number): boolean {
+  const re = /\bonMount\s*\(/g;
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(code)) !== null) {
+    const open = m.index + m[0].length - 1;
+    if (open >= at) break;
+    const close = _balancedParen(code, open);
+    if (close > at) return true;
+  }
+  return false;
+}
+
 export const ALL_CHECKS: Checker[] = [
   checkScanCoverage,
   checkCellStateInterface,
@@ -6740,4 +6910,5 @@ export const ALL_CHECKS: Checker[] = [
   checkOwnKeyIdentity,
   checkClientOnlyInCell,
   checkStyles,
+  checkBodyCleanupTeardown,
 ];

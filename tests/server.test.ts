@@ -557,7 +557,10 @@ Deno.test("server: POST /__aio/snapshot without X-AIO header returns 403", async
     loadSnapshot: () => {},
     baseDir: dir,
     debug: () => {},
-    prod: true,
+    // Dev: the snapshot route is dev-only since the state-leak fix (it serves
+    // the RAW, unfiltered state tree). `prod: true` was scaffolding for the
+    // static server — the CSRF gate this test is about is unchanged.
+    prod: false,
     distDir: join(dir, "dist"),
   });
   await new Promise((r) => setTimeout(r, 50));

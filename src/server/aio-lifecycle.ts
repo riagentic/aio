@@ -2,14 +2,21 @@
 // Extracted from aio.ts _run() to keep the orchestrator lean.
 
 import { keepServerOf, windowSizeOf } from "./config-sources.ts";
+import {
+  contentSecurityPolicy,
+  cspNonce,
+  frameAncestors,
+} from "./security-headers.ts";
 import type { UiConfig } from "./aio-types.ts";
 import { join } from "@std/path";
 import { isPipePath } from "./local-listen.ts";
 import { hasDesktopSession, openExternalBestEffort } from "./open-external.ts";
 import {
   type AioMeta,
+  electronMetaPolicy,
   electronProfileName,
   launchElectron,
+  SandboxRefusal,
 } from "../electron/electron.ts";
 import { appDirs } from "./app-dirs.ts";
 import type { ServerHandle } from "./server-types.ts";
@@ -78,6 +85,47 @@ export function electronClosedPlan(
     };
   }
   return { line: `electron closed (${how}) — shutting down`, stop: true };
+}
+
+/** What a LAUNCH that never produced a window means for this process — pure,
+ *  for the same reason as {@linkcode electronClosedPlan}.
+ *
+ *  Almost every failure here is about the environment (no Electron, a binary
+ *  that will not run, no display), and the answer has always been the right
+ *  one: keep serving and say where the app is, because nothing about the app's
+ *  own decisions failed.
+ *
+ *  `electron: { requireSandbox: true }` is the exception, and it was reaching
+ *  the same answer. The app said it would rather not open than open
+ *  unsandboxed; leaving its server up and telling its author to "open it in a
+ *  browser, or run with --client=browser" hands the app's UI — and whatever
+ *  the renderer holds — to an uncontrolled client, which is the downgrade the
+ *  key exists to refuse, arriving one step later. So that one STOPS the
+ *  process, with the reason. */
+export function electronLaunchFailurePlan(
+  e: unknown,
+  url: string,
+): { stop: boolean; lines: string[] } {
+  if (e instanceof SandboxRefusal) {
+    return {
+      stop: true,
+      lines: [
+        `electron: ${e.message}`,
+        `electron: this app runs its UI in a window it trusts — stopping ` +
+        `instead of leaving the server up for something else to open. ` +
+        `Drop electron: { requireSandbox: true } to accept --no-sandbox on ` +
+        `hosts like this one.`,
+      ],
+    };
+  }
+  return {
+    stop: false,
+    lines: [
+      `electron: the desktop window could not be started — ${e}. The server ` +
+      `is still running at ${url}; open it in a browser, or run with ` +
+      `--client=browser. \`am fix\` installs a missing Electron.`,
+    ],
+  };
 }
 
 /** One parent watch per process — see `AIO_PARENT_PID` in startLifecycle. */
@@ -188,6 +236,8 @@ export interface LifecycleDeps<S, A> {
   singletonMode: boolean;
   /** Gate for electron child windows (openWindow) — see AioRunOptions. */
   childWindows: boolean;
+  /** The Electron process's own security decisions — see ElectronConfig. */
+  electron?: import("./aio-types.ts").ElectronConfig;
   // Client / transport
   client: string;
   useElectron: boolean;
@@ -286,6 +336,12 @@ export interface LifecycleDeps<S, A> {
     | "lang"
     | "dir"
   >;
+  /** The app's `security` config — needed here, not only by the HTTP layer,
+   *  because the packaged Electron shell is returned straight from the main
+   *  process and never passes through the handler that attaches the policy as
+   *  a response header. Without it a packaged app shipped with NO CSP while
+   *  its config said it had one. See `headContent`'s `csp`. */
+  security?: import("./security-config.ts").SecurityConfig;
   keepServer: boolean | undefined;
   /** Library/test mode — no process-wide signal handlers (the same contract
    *  aio-server honours for SIGINT/SIGTERM): an embedding host or test runner
@@ -359,6 +415,7 @@ export function startLifecycle<S, A>(deps: LifecycleDeps<S, A>): void {
     expose,
     singletonMode,
     childWindows,
+    electron: electronConfig,
     client,
     useElectron,
     isHeadless,
@@ -789,6 +846,11 @@ export function startLifecycle<S, A>(deps: LifecycleDeps<S, A>): void {
       width: windowSizeOf(cli, ui).width?.value,
       height: windowSizeOf(cli, ui).height?.value,
       childWindows,
+      // The app's own sandbox policy, carried to the window it describes —
+      // through the ONE mapping, never re-listed here. A security key declared
+      // and then not copied is the config-bridge bug class, and this repo has
+      // paid for it six times already.
+      ...electronMetaPolicy(electronConfig),
       chrome: ui.chrome,
       tray: ui.tray,
       // WHICH Chromium profile this window opens. Two homes of one app are
@@ -810,6 +872,17 @@ export function startLifecycle<S, A>(deps: LifecycleDeps<S, A>): void {
         udsHasCSS = true;
       } catch { /* no CSS */ }
     }
+    // The policy and its nonce, computed once for this launch. The packaged
+    // shell is returned from the Electron main process and never meets the
+    // response-header path that would attach a CSP, so it has to travel
+    // inside the document — see `headContent`'s `csp`. An app with
+    // `csp: false` gets null here and the shell emits no meta tag at all.
+    const _shellNonce = cspNonce();
+    const _shellCsp = contentSecurityPolicy(
+      deps.security,
+      frameAncestors(),
+      _shellNonce,
+    ) ?? undefined;
     const udsConfig = udsHandle
       ? {
         socketPath: udsHandle.socketPath,
@@ -850,6 +923,14 @@ export function startLifecycle<S, A>(deps: LifecycleDeps<S, A>): void {
           dir: ui.dir,
           lang: ui.lang,
           themeName: appId,
+          // The policy travels WITH the document, because this shell is
+          // returned from the Electron main process and never meets the
+          // response-header path that would otherwise attach it. The nonce
+          // comes along so the shell's own inline boot script is not blocked
+          // by the `script-src` it carries — one per launch, since the HTML is
+          // templated once.
+          csp: _shellCsp,
+          nonce: _shellNonce,
         },
       }
       : undefined;
@@ -913,13 +994,14 @@ export function startLifecycle<S, A>(deps: LifecycleDeps<S, A>): void {
           })
           .catch((e) => log.error(`electron status: ${e}`));
       })
-      .catch((e) =>
-        log.error(
-          `electron: the desktop window could not be started — ${e}. The ` +
-            `server is still running at ${url}; open it in a browser, or run ` +
-            `with --client=browser. \`am fix\` installs a missing Electron.`,
-        )
-      );
+      .catch((e) => {
+        // ONE decider for "the window never opened": an app that refused an
+        // unsandboxed launch must not be left serving, with its own log
+        // pointing at a browser.
+        const plan = electronLaunchFailurePlan(e, url);
+        for (const line of plan.lines) log.error(line);
+        if (plan.stop) stopProcess(1);
+      });
   } else {
     // A browser client is a URL, printed. It is NOT a tab opened for you.
     //

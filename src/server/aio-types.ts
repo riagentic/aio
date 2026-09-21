@@ -96,6 +96,46 @@ export type ResolveUserFn<S = unknown> = (
  *  type rather than re-typing the union. See {@linkcode UiConfig.theme}. */
 export type UiTheme = "tokens" | "auto" | "full" | "none";
 
+/** The Electron process's own security decisions — the two an app cannot make
+ *  any other way. Both default to the behaviour aio has always had, so an app
+ *  that omits the block is unchanged.
+ *
+ *  Found by an audit (§6): each of these was decided by something that is not
+ *  the app — the kernel in one case, the RENDERER in the other — with a log
+ *  line as the whole defence. An app that holds secrets gets a say.
+ *
+ *  @example A wallet: never open a window Chromium cannot sandbox, and let no
+ *  child window ask for an unsandboxed one.
+ *  ```ts
+ *  aio.run({
+ *    cells: [wallet],
+ *    electron: { requireSandbox: true, unsandboxedChildWindows: false },
+ *  });
+ *  ```
+ *  Omitting the block keeps the behaviour aio has always had: a kernel that
+ *  cannot sandbox gets `--no-sandbox` and a warning, because the alternative
+ *  is an app that does not start at all. */
+export type ElectronConfig = {
+  /** Refuse to open the window at all when Chromium's sandbox is unusable
+   *  here, instead of falling back to `--no-sandbox`.
+   *
+   *  aio adds `--no-sandbox` itself on a kernel that restricts unprivileged
+   *  user namespaces (Ubuntu 24.04+, every container) when `chrome-sandbox` is
+   *  not setuid-root — otherwise Chromium ABORTS and the app simply does not
+   *  start. That stays the default. `true` says this app would rather not open
+   *  than open unsandboxed; the refusal names the two commands that make the
+   *  sandbox usable. Default: false. */
+  requireSandbox?: boolean;
+  /** Honour `__aioIPC.openWindow(url, { sandbox: false })` — an UNSANDBOXED
+   *  child window, needed only for page-world injection past a strict CSP.
+   *
+   *  Off by default, and off means the request is REFUSED with its reason: the
+   *  sandbox a window of this app runs with is the app's decision, never the
+   *  page's, and the page is the part an attacker gets first. Requires
+   *  `childWindows: true` like every other child window. Default: false. */
+  unsandboxedChildWindows?: boolean;
+};
+
 /** Window + UI sync options — applies to both Electron and browser clients */
 export type UiConfig = {
   title?: string; // default: 'AIO App'
@@ -381,7 +421,10 @@ export type AioConfig<S, A, E> = {
    *  `--tls-cert`/`--tls-key`, so a COMPILED binary (a service unit has no
    *  shell flags) can declare how it serves.
    *
-   *  - `"auto"` (default) — self-signed cert generated and reused per app.
+   *  - `"auto"` (default) — a cert generated and reused per app, issued from
+   *    a name-constrained root this machine owns. Built in-process (ECDSA
+   *    P-256), so it needs NOTHING on PATH and behaves identically on Linux,
+   *    macOS and Windows.
    *  - `false` — plain HTTP/WS. Sound only behind a TLS-terminating proxy or
    *    when the payload is already end-to-end encrypted; it warns loudly.
    *  - `{ cert, key }` — your own PEM files (a real CA cert: the one shape
@@ -567,6 +610,19 @@ export type AioConfig<S, A, E> = {
    *  child-window-to-arbitrary-URL is real attack surface no app should carry
    *  unless it asked for it (maintainer decision, a field report openWindow thread). */
   childWindows?: boolean;
+  /** The Electron process's own security decisions (sandbox policy) — see
+   *  {@linkcode ElectronConfig}.
+   *
+   *  @example A wallet: never open a window Chromium cannot sandbox, and let
+   *  no child window ask for an unsandboxed one.
+   *  ```ts
+   *  aio.run({
+   *    cells: [wallet],
+   *    electron: { requireSandbox: true, unsandboxedChildWindows: false },
+   *  });
+   *  ```
+   */
+  electron?: ElectronConfig;
   /** Internal: checkpoint restore callback passed from CellsConfig */
   _onCheckpointRestore?: (
     checkpoint: CheckpointData,
@@ -648,6 +704,18 @@ export type AioConfig<S, A, E> = {
   _cellMethodArity?: Record<string, Record<string, number>>;
   /** Internal: per-cell, per-field { persisted, ui } flags — trojan `fields`. */
   _cellFields?: CellFieldFlags;
+  /** @internal Cell id → the `visible` filter a door that screens VALUES with
+   *  no client in hand must apply, dot paths included. The flags above answer
+   *  per top-level key, which flattens `exclude: ["seeds.encSeed"]` into "the
+   *  key `seeds` ships" — so anything that screens VALUES (the bug report)
+   *  reads this instead. A per-user cell is an EMPTY ALLOWLIST here: its
+   *  second screen is a callback the wire runs per client, and a door with no
+   *  client cannot reproduce it — what such a cell declares is in the startup
+   *  visibility report, which prints `forUser`. */
+  _cellVisible?: Record<
+    string,
+    import("../state/cell-types.ts").CellFieldFilter
+  >;
   /** @internal Cell id → its `persist` filter as the store applies it, dot
    *  paths included — journal replay keeps the same fields out of recovered
    *  state (`_cellFields` flags only the top level). */
@@ -729,7 +797,13 @@ export type AioApp<S = unknown, A = unknown> = {
 export type CellsConfig = {
   /** Unique app identity — used for lock file, UDS socket, KV/SQLite paths,
    *  TLS cert dir. Default: deno.json `appId` > slug(`title`) > slug(`name`)
-   *  > the main module's directory name. */
+   *  > the main module's directory name.
+   *
+   *  @example
+   *  ```ts
+   *  appId: "notes",   // the data dir, the icon hue and the window title follow it
+   *  ```
+   */
   appId?: string;
   /** Cells to run. Default: every `cell()` the entry (transitively) imported
    *  — they self-register, exactly like the standalone/android runtime. */
@@ -760,7 +834,13 @@ export type CellsConfig = {
   };
   /** HTTP/WS port. Order: `--port` > `AIO_PORT` > this > `AIO_DEFAULT_PORT` >
    *  a free port picked at boot; a local Electron app may bind no TCP port
-   *  unless one is named. */
+   *  unless one is named.
+   *
+   *  @example
+   *  ```ts
+   *  port: 8080,
+   *  ```
+   */
   port?: number;
   /** Bind address. Defaults to `127.0.0.1`, or `0.0.0.0` under `expose`.
    *
@@ -769,35 +849,68 @@ export type CellsConfig = {
    *  `docs/auth/auth.md` gives — but it was missing from THIS type, the one
    *  surface an app must compile against, so following the docs failed
    *  `deno task check`. Present in 2 of 3 surfaces is the trap this project
-   *  keeps a gate for. */
+   *  keeps a gate for.
+   *
+   *  @example
+   *  ```ts
+   *  host: "127.0.0.1",
+   *  ```
+   */
   host?: string;
   /** Serve on 0.0.0.0 with TLS instead of loopback-only — the config twin of
    *  `--expose`. A compiled binary run by a service manager has no flags to
    *  pass, so "this app is a LAN server" has to be expressible in code.
    *  `--expose` on the command line still wins. Everything that keys off
    *  exposure (auth key, the `ui:"all"` privacy warning, TLS, the share URL)
-   *  reads the SAME resolved value — see `_exposeOf` in aio.ts. */
+   *  reads the SAME resolved value — see `_exposeOf` in aio.ts.
+   *
+   *  @example
+   *  ```ts
+   *  expose: true,   // bind 0.0.0.0 instead of 127.0.0.1 — needs auth or a key
+   *  ```
+   */
   expose?: boolean;
   /** Transport security when exposed — the config twin of `--no-tls` /
    *  `--tls-cert`/`--tls-key`, so a COMPILED binary (a service unit has no
    *  shell flags) can declare how it serves.
    *
-   *  - `"auto"` (default) — self-signed cert generated and reused per app.
+   *  - `"auto"` (default) — a cert generated and reused per app, issued from
+   *    a name-constrained root this machine owns. Built in-process (ECDSA
+   *    P-256), so it needs NOTHING on PATH and behaves identically on Linux,
+   *    macOS and Windows.
    *  - `false` — plain HTTP/WS. Sound only behind a TLS-terminating proxy or
    *    when the payload is already end-to-end encrypted; it warns loudly.
    *  - `{ cert, key }` — your own PEM files (a real CA cert: the one shape
    *    every non-browser client accepts without extra trust configuration).
    *
    *  The CLI flags still win when both are given. Loopback is plain HTTP
-   *  regardless — this only decides how an EXPOSED server serves. */
+   *  regardless — this only decides how an EXPOSED server serves.
+   *
+   *  @example
+   *  ```ts
+   *  tls: "auto",   // a cert on first boot — nothing to install, any OS
+   *  ```
+   */
   tls?: "auto" | false | { cert: string; key: string };
   /** Where this app keeps everything it owns. Default `~/.<appId>` — `data/`
    *  inside it is the whole backup; `logs/` and `launch.json` are disposable.
    *  This is the AUTHOR's choice; whoever runs the app can move every app at
    *  once with `AIO_APPS_DIR=<root>` (→ `<root>/<appId>`).
-   *  See docs/persistence/where-files-live.md. */
+   *  See docs/persistence/where-files-live.md.
+   *
+   *  @example
+   *  ```ts
+   *  appDir: "./data",   // everything this app writes lives here
+   *  ```
+   */
   appDir?: string;
-  /** Override the SQLite file (":memory:" for hermetic tests). */
+  /** Override the SQLite file (":memory:" for hermetic tests).
+   *
+   *  @example
+   *  ```ts
+   *  dbPath: "./data/state.db",
+   *  ```
+   */
   dbPath?: string;
   /** PRAGMAs for the app db, MERGED over the defaults by pragma name (WAL,
    *  synchronous=NORMAL, busy_timeout, cache_size, foreign_keys) — naming one
@@ -861,10 +974,22 @@ export type CellsConfig = {
   serveDirs?: Record<string, string>;
   /** Read-only directories this app serves in dev AND prod, `"/urlPrefix" →
    *  dir` — e.g. `{ "/media": "media" }`; a compiled build embeds them. Full
-   *  rules on `AioConfig.assets`. */
+   *  rules on `AioConfig.assets`.
+   *
+   *  @example
+   *  ```ts
+   *  assets: { "/logo.svg": "./brand/logo.svg" },
+   *  ```
+   */
   assets?: Record<string, string>;
   /** Which client to launch. Order: `--client` > this > deno.json `client` >
-   *  `"electron"`. */
+   *  `"electron"`.
+   *
+   *  @example
+   *  ```ts
+   *  client: "browser",   // open the default browser instead of a desktop window
+   *  ```
+   */
   client?: "electron" | "browser" | "cli" | "server-only";
   /** Electron only: keep the server running after the window closes (also
    *  `--keep-server`); with any other client, boot is refused. */
@@ -881,11 +1006,23 @@ export type CellsConfig = {
    *  its own (`""` opens the connect page); exits when the window closes. */
   serverUrl?: string;
   /** Static token → user map, compared in constant time. `resolveUser` wins
-   *  when both are set. See docs/auth/auth.md. */
+   *  when both are set. See docs/auth/auth.md.
+   *
+   *  @example
+   *  ```ts
+   *  users: { "s3cret-token": { id: "ada", role: "admin" } },
+   *  ```
+   */
   users?: Record<string, AioUser>;
   /** Shared-key auth under `--expose`: `"secret"` = a fixed key, `true` = one
    *  generated once and persisted, `false` = no framework auth. Omitted, an
-   *  exposed app with no other auth gets a persisted key. See docs/auth/auth.md. */
+   *  exposed app with no other auth gets a persisted key. See docs/auth/auth.md.
+   *
+   *  @example
+   *  ```ts
+   *  key: true,   // generate and persist one shared key; the client pairs by PIN
+   *  ```
+   */
   key?: string | boolean;
   /** `(token, state) => user | null` — authenticate each connection's token
    *  against current state. Overrides `users`. */
@@ -894,7 +1031,13 @@ export type CellsConfig = {
    *  bearer token with TTL and revocation (`true` = 30-day TTL). */
   sessions?: boolean | { ttlMs?: number };
   /** Built-in password auth — signup/login/logout, email verify, reset,
-   *  TOTP 2FA, OIDC, HttpOnly session cookie. Implies `sessions`. */
+   *  TOTP 2FA, OIDC, HttpOnly session cookie. Implies `sessions`.
+   *
+   *  @example
+   *  ```ts
+   *  auth: true,   // full login flows: sessions, users, TOTP
+   *  ```
+   */
   auth?: boolean | AuthOptions;
   /** SQLite tables by name: a `table()` bound to a state array mirrors that
    *  array; an unbound table is reached through `app.db`. See
@@ -1000,6 +1143,19 @@ export type CellsConfig = {
    *  child-window-to-arbitrary-URL is real attack surface no app should carry
    *  unless it asked for it (maintainer decision, a field report openWindow thread). */
   childWindows?: boolean;
+  /** The Electron process's own security decisions (sandbox policy) — see
+   *  {@linkcode ElectronConfig}.
+   *
+   *  @example A wallet: never open a window Chromium cannot sandbox, and let
+   *  no child window ask for an unsandboxed one.
+   *  ```ts
+   *  aio.run({
+   *    cells: [wallet],
+   *    electron: { requireSandbox: true, unsandboxedChildWindows: false },
+   *  });
+   *  ```
+   */
+  electron?: ElectronConfig;
   /** Embed aio in a bigger program or a test: no `Deno.exit`, no signal
    *  handlers, no instance lock; `app.close()` leaves the process alive. */
   libraryMode?: boolean;
@@ -1015,7 +1171,13 @@ export type CellsConfig = {
   fullStateThreshold?: number;
   /** Custom HTTP routes — exact path or "/prefix/*" wildcard → handler. The
    *  escape hatch for uploads, webhooks, and API endpoints that don't belong
-   *  in the state channel. Reserved: /__aio and /ws. */
+   *  in the state channel. Reserved: /__aio and /ws.
+   *
+   *  @example
+   *  ```ts
+   *  routes: { "/health": () => new Response("ok") },
+   *  ```
+   */
   routes?: Record<string, import("./route.ts").RawRouteHandler>;
   /** Maximum concurrent WebSocket clients; further upgrades are refused.
    *  Default 100. */

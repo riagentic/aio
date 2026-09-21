@@ -62,7 +62,8 @@ export function createContext<T>(defaultValue: T): Context<T> {
 
 // ── useContext ────────────────────────────────────────────────────────
 
-/** Read the current value of a context. Must be called inside a component. */
+/** Read the current value of a context. Must be called inside a component.
+ *  @tier Advanced */
 export function useContext<T>(ctx: Context<T>): T {
   // On the server the RAW provided value is the answer — the client wraps it
   // in a signal and reads `.value`, which is the same value.
@@ -92,7 +93,7 @@ export function useContext<T>(ctx: Context<T>): T {
  * Select a slice of context. The component re-renders only when the selected
  * value changes (`Object.is`), not when an unselected field of the context does.
  * Outside a component render it reads the selection once and subscribes nothing.
- */
+ *  @tier Advanced */
 export function useContextSelector<T, R>(
   ctx: Context<T>,
   selector: (value: T) => R,

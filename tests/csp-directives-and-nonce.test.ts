@@ -31,13 +31,16 @@ const parse = (policy: string) =>
     }),
   );
 
-Deno.test("the default policy is unchanged", () => {
+Deno.test("the default policy is exactly this, byte for byte", () => {
   // Everything below is opt-in; an app that writes no `security` block must
-  // get byte-identical output.
+  // get this and nothing else. The `script-src` is the whole of 1.0.7-beta's
+  // Electron fix — see tests/electron-csp-eval.test.ts for why each source is
+  // in it and what happens to a real renderer when it is not.
   assertEquals(
     contentSecurityPolicy(undefined, "'self'"),
     "base-uri 'self'; object-src 'none'; frame-ancestors 'self'; " +
-      "form-action 'self'",
+      "form-action 'self'; " +
+      "script-src * data: blob: 'unsafe-inline' 'wasm-unsafe-eval'",
   );
 });
 
@@ -95,6 +98,7 @@ Deno.test("dropping every directive sends no header at all", () => {
         "object-src": false,
         "frame-ancestors": false,
         "form-action": false,
+        "script-src": false,
       },
     }, "'self'"),
     null,

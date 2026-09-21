@@ -105,10 +105,17 @@ Deno.test("control key: minted 0600 in the 0700 data dir, fresh at every boot", 
 Deno.test("control key: refuses a data dir other users can read", () => {
   // The pure rule, pinned. Reachable when the 0700 cannot be applied — a dir
   // owned by another uid, a read-only or permission-less mount.
-  assertEquals(_controlDirRefusal("/d", 0o40700), null);
-  assertEquals(_controlDirRefusal("/d", null), null, "Windows: no POSIX mode");
+  // POSIX is NAMED, never left to `Deno.build.os`: these cases are about what
+  // permission bits mean, and on Windows the bit test abstains, so an implicit
+  // default made them assert the opposite of the rule there.
+  assertEquals(_controlDirRefusal("/d", 0o40700, "linux"), null);
+  // Windows reports 0o40666 for EVERY directory, so the bit test abstains
+  // there and the PLATFORM is what says so — not a null mode, which is what
+  // this case used to assume and which made the credential unmintable on
+  // Windows (tests/dir-permissions-platform.test.ts has the measurement).
+  assertEquals(_controlDirRefusal("/d", 0o40666, "windows"), null);
   for (const mode of [0o40750, 0o40755, 0o40777, 0o40701]) {
-    const r = _controlDirRefusal("/d", mode);
+    const r = _controlDirRefusal("/d", mode, "linux");
     assert(r, `mode ${mode.toString(8)} must be refused`);
     assertStringIncludes(r, "not owner-only");
     assertStringIncludes(r, "chmod 700");

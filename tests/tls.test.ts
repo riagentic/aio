@@ -134,6 +134,25 @@ test("missing custom cert file throws", async () => {
 // cause. The DN must be per-app, and the leaf must be usable as its own
 // pinned anchor.
 
+/** Is there an openssl to ask? These three cases read a certificate back with
+ *  `openssl x509 -text`, which is a fine second opinion on Linux and macOS and
+ *  simply absent on Windows. The PRODUCT no longer needs openssl at all
+ *  (src/server/x509.ts), so a test that does must say so rather than fail on
+ *  the one OS this whole change was for. What openssl checks here is covered
+ *  OS-independently in tests/x509.test.ts. */
+const OPENSSL = await (async () => {
+  try {
+    const r = await new Deno.Command("openssl", {
+      args: ["version"],
+      stdout: "null",
+      stderr: "null",
+    }).output();
+    return r.success;
+  } catch {
+    return false;
+  }
+})();
+
 /** `openssl x509 -text` for a PEM on disk. */
 async function certText(path: string): Promise<string> {
   const r = await new Deno.Command("openssl", {
@@ -154,38 +173,42 @@ test("certCommonName: per-app, sanitized, with a fallback", () => {
   assertNotEquals(certCommonName("app-a"), certCommonName("app-b"));
 });
 
-test("generated cert carries the appId in its subject, CA:FALSE, and SANs", async () => {
-  await withTempDir(async (dir) => {
-    const appId = "notes-probe";
-    const { certPath } = await loadOrCreateCert(
-      dir,
-      undefined,
-      undefined,
-      appId,
-    );
-    const text = await certText(certPath);
-    // Identity: the app's own name, not the shared constant.
-    assert(
-      text.includes(`CN = aio-${appId}`) || text.includes(`CN=aio-${appId}`),
-      `subject must name the app:\n${text}`,
-    );
-    assert(!text.includes("aio-local"), `still the shared DN:\n${text}`);
-    // CA:FALSE is load-bearing: rustls rejects a self-signed leaf with
-    // CA:TRUE as `CaUsedAsEndEntity`, so CA:TRUE would break the pinned-anchor
-    // path this cert exists for.
-    assert(text.includes("CA:FALSE"), `basicConstraints missing:\n${text}`);
-    assert(
-      !text.includes("CA:TRUE"),
-      `CA:TRUE is unusable as a leaf:\n${text}`,
-    );
-    assert(
-      /X509v3 Authority Key Identifier/.test(text),
-      `authorityKeyIdentifier missing:\n${text}`,
-    );
-    // Hostname verification runs off the SANs — unchanged by the DN.
-    assert(text.includes("DNS:localhost"), `SANs missing:\n${text}`);
-    assert(text.includes("IP Address:127.0.0.1"), `SANs missing:\n${text}`);
-  });
+test({
+  name: "generated cert carries the appId in its subject, CA:FALSE, and SANs",
+  ignore: !OPENSSL,
+  fn: async () => {
+    await withTempDir(async (dir) => {
+      const appId = "notes-probe";
+      const { certPath } = await loadOrCreateCert(
+        dir,
+        undefined,
+        undefined,
+        appId,
+      );
+      const text = await certText(certPath);
+      // Identity: the app's own name, not the shared constant.
+      assert(
+        text.includes(`CN = aio-${appId}`) || text.includes(`CN=aio-${appId}`),
+        `subject must name the app:\n${text}`,
+      );
+      assert(!text.includes("aio-local"), `still the shared DN:\n${text}`);
+      // CA:FALSE is load-bearing: rustls rejects a self-signed leaf with
+      // CA:TRUE as `CaUsedAsEndEntity`, so CA:TRUE would break the pinned-anchor
+      // path this cert exists for.
+      assert(text.includes("CA:FALSE"), `basicConstraints missing:\n${text}`);
+      assert(
+        !text.includes("CA:TRUE"),
+        `CA:TRUE is unusable as a leaf:\n${text}`,
+      );
+      assert(
+        /X509v3 Authority Key Identifier/.test(text),
+        `authorityKeyIdentifier missing:\n${text}`,
+      );
+      // Hostname verification runs off the SANs — unchanged by the DN.
+      assert(text.includes("DNS:localhost"), `SANs missing:\n${text}`);
+      assert(text.includes("IP Address:127.0.0.1"), `SANs missing:\n${text}`);
+    });
+  },
 });
 
 // This used to assert the OPPOSITE — that two apps get different ISSUER DNs —
@@ -202,40 +225,48 @@ test("generated cert carries the appId in its subject, CA:FALSE, and SANs", asyn
 //
 // What must still hold is that the two apps remain TELLABLE APART, and that
 // they really do hang off the same root rather than quietly minting their own.
-test("two apps share ONE issuer and stay distinguishable", async () => {
-  await withTempDir(async (a) => {
-    await withTempDir(async (b) => {
-      const one = await loadOrCreateCert(a, undefined, undefined, "app-one");
-      const two = await loadOrCreateCert(b, undefined, undefined, "app-two");
-      const line = (t: string, k: string) =>
-        t.split("\n").find((l) => l.trim().startsWith(k))!.trim();
-      const t1 = await certText(one.certPath);
-      const t2 = await certText(two.certPath);
+test({
+  name: "two apps share ONE issuer and stay distinguishable",
+  ignore: !OPENSSL,
+  fn: async () => {
+    await withTempDir(async (a) => {
+      await withTempDir(async (b) => {
+        const one = await loadOrCreateCert(a, undefined, undefined, "app-one");
+        const two = await loadOrCreateCert(b, undefined, undefined, "app-two");
+        const line = (t: string, k: string) =>
+          t.split("\n").find((l) => l.trim().startsWith(k))!.trim();
+        const t1 = await certText(one.certPath);
+        const t2 = await certText(two.certPath);
 
-      // ① one anchor, shared — the whole reason `am trust` is a one-time act
-      assertEquals(line(t1, "Issuer:"), line(t2, "Issuer:"));
-      assertEquals(one.caPath, two.caPath);
+        // ① one anchor, shared — the whole reason `am trust` is a one-time act
+        assertEquals(line(t1, "Issuer:"), line(t2, "Issuer:"));
+        assertEquals(one.caPath, two.caPath);
 
-      // ② still two different apps, named as themselves
-      assertNotEquals(line(t1, "Subject:"), line(t2, "Subject:"));
-      assert(line(t1, "Subject:").includes("app-one"), line(t1, "Subject:"));
-      assert(line(t2, "Subject:").includes("app-two"), line(t2, "Subject:"));
+        // ② still two different apps, named as themselves
+        assertNotEquals(line(t1, "Subject:"), line(t2, "Subject:"));
+        assert(line(t1, "Subject:").includes("app-one"), line(t1, "Subject:"));
+        assert(line(t2, "Subject:").includes("app-two"), line(t2, "Subject:"));
+      });
     });
-  });
+  },
 });
 
-test("compat: a cert already on disk is reused VERBATIM, old DN and all", async () => {
-  await withTempDir(async (dir) => {
-    // Simulate a pre-upgrade cert: generated under the legacy shared name.
-    const legacy = await loadOrCreateCert(dir);
-    assert(
-      (await certText(legacy.certPath)).includes("aio-local"),
-      "no-appId generation must keep the legacy DN",
-    );
-    // Same directory, now with an appId: an existing keypair is never
-    // re-issued, so a client that pinned it keeps working.
-    const after = await loadOrCreateCert(dir, undefined, undefined, "notes");
-    assertEquals(after.cert, legacy.cert);
-    assertEquals(after.key, legacy.key);
-  });
+test({
+  name: "compat: a cert already on disk is reused VERBATIM, old DN and all",
+  ignore: !OPENSSL,
+  fn: async () => {
+    await withTempDir(async (dir) => {
+      // Simulate a pre-upgrade cert: generated under the legacy shared name.
+      const legacy = await loadOrCreateCert(dir);
+      assert(
+        (await certText(legacy.certPath)).includes("aio-local"),
+        "no-appId generation must keep the legacy DN",
+      );
+      // Same directory, now with an appId: an existing keypair is never
+      // re-issued, so a client that pinned it keeps working.
+      const after = await loadOrCreateCert(dir, undefined, undefined, "notes");
+      assertEquals(after.cert, legacy.cert);
+      assertEquals(after.key, legacy.key);
+    });
+  },
 });

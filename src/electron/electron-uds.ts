@@ -16,6 +16,8 @@ import {
   tmplCrashGuard,
   tmplKeyboardShortcuts,
   tmplParentWatch,
+  tmplPreloadCleanup,
+  tmplPreloadWrite,
   tmplRendererDiagnostics,
   tmplSocketFetch,
   tmplTray,
@@ -150,8 +152,7 @@ ${tmplBounds(true)}
 
 // ── Preload script (written to temp) ──
 const preloadCode = ${JSON.stringify(udsPreloadScript())};
-const preloadFile = path.join(app.getPath('temp'), '__aio_preload_' + process.pid + '.cjs');
-fs.writeFileSync(preloadFile, preloadCode);
+${tmplPreloadWrite("preloadCode")}
 
 let reconnectTimer = null;
 let sock = null;
@@ -668,10 +669,20 @@ ${tmplRendererDiagnostics(true)}
   //   • http/https only;
   //   • the preload must resolve INSIDE the app dir, and its REALPATH must
   //     too (a symlink escaping the dir is rejected);
-  //   • Chromium sandbox stays ON unless the caller EXPLICITLY passes
-  //     sandbox:false (needed only for page-world injection past strict CSPs)
-  //     — logged loudly per window either way.
+  //   • the Chromium sandbox stays ON unless the APP opted out in its own
+  //     config (electron: { unsandboxedChildWindows: true }) AND the caller
+  //     explicitly passes sandbox:false — needed only for page-world injection
+  //     past strict CSPs, and logged loudly per window when it happens.
+  //
+  //     The opt-in is the fix for an audit's §6: this read payload.sandbox
+  //     and nothing else, so a compromised RENDERER could open a page it
+  //     controls, with an app preload, in an unsandboxed renderer — with a
+  //     console.warn as the whole defence. Which sandbox a window of this app
+  //     runs with is the app's decision, never the page's.
   const CHILD_WINDOWS = ${JSON.stringify(!!opts.meta?.childWindows)};
+  const CHILD_WINDOWS_UNSANDBOXED = ${
+    JSON.stringify(!!opts.meta?.unsandboxedChildWindows)
+  };
   const dappWindows = new Set();
   // Every refusal SAYS which guardrail fired: a request that silently did
   // nothing left the app author with a click that opened no window and no
@@ -705,6 +716,12 @@ ${tmplRendererDiagnostics(true)}
       // Symlink escape: judge the REAL file, not the link's address.
       if (!fs.realpathSync(p).startsWith(pfx)) {
         return refuseWindow('preload ' + p + ' is a link that resolves outside the app directory');
+      }
+      // REFUSED, not quietly upgraded: the page asked for something it is not
+      // getting, and a window that silently differs from the one requested is
+      // how this class starts.
+      if (payload.sandbox === false && !CHILD_WINDOWS_UNSANDBOXED) {
+        return refuseWindow('sandbox: false — this app has not opted in. The APP decides the Chromium sandbox of a window it opens, not the page: add aio.run({ electron: { unsandboxedChildWindows: true } }) if this page really must run unsandboxed.');
       }
       const sandbox = payload.sandbox === false ? false: true;
       console.warn('[aio:electron] openWindow → ' + u.href + (sandbox ? '': ' (sandbox DISABLED by app request)'));
@@ -768,7 +785,7 @@ ${tmplWillNavigate("_appOrigin", "_onInAppNavVetoed")}
 app.on('window-all-closed', () => {
   if (reconnectTimer) clearTimeout(reconnectTimer);
   if (sock) sock.destroy();
-  try { fs.unlinkSync(preloadFile); } catch {}
+  ${tmplPreloadCleanup()}
   process.exit(0);
 });
 `.trim();

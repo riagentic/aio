@@ -38,22 +38,49 @@ async function amCheck(
   };
 }
 
-/** A minimal app in the layout the scaffold produces. */
-async function makeApp(dir: string, appTsx: string, extra = ""): Promise<void> {
+const AIO_IMPORTS = (): Record<string, string> => ({
+  "aio": `${REPO}mod.ts`,
+  "aio/air": `${REPO}src/air.ts`,
+  "aio/server": `${REPO}src/server-entry.ts`,
+  "aio/jsx-runtime": `${REPO}src/jsx-runtime.ts`,
+});
+
+// What the scaffold writes. `lib` matters here: without it `deno check` on a
+// .tsx entry reports hundreds of DOM errors, so a "premise, measured" assertion
+// below would pass for the wrong reason.
+const JSX_OPTS = {
+  jsx: "react-jsx",
+  jsxImportSource: "aio",
+  lib: ["deno.ns", "deno.unstable", "dom", "dom.iterable"],
+};
+
+/** A minimal app in the layout the scaffold produces. `drop` removes keys from
+ *  the import map, which is how an app that Deno itself cannot start is made.
+ *  `configName` is the config FILENAME — Deno accepts `deno.jsonc` too, so
+ *  every gate that reads the config must accept it as well. */
+async function makeApp(
+  dir: string,
+  appTsx: string,
+  extra = "",
+  drop: string[] = [],
+  configName = "deno.json",
+): Promise<void> {
   await Deno.mkdir(`${dir}/src`, { recursive: true });
+  const imports = AIO_IMPORTS();
+  for (const k of drop) delete imports[k];
+  const body = JSON.stringify({
+    title: "checkapp",
+    version: "0.1",
+    imports,
+    compilerOptions: JSX_OPTS,
+  });
   await Deno.writeTextFile(
-    `${dir}/deno.json`,
-    JSON.stringify({
-      title: "checkapp",
-      version: "0.1",
-      imports: {
-        "aio": `${REPO}mod.ts`,
-        "aio/air": `${REPO}src/air.ts`,
-        "aio/server": `${REPO}src/server-entry.ts`,
-        "aio/jsx-runtime": `${REPO}src/jsx-runtime.ts`,
-      },
-      compilerOptions: { jsx: "react-jsx", jsxImportSource: "aio" },
-    }),
+    `${dir}/${configName}`,
+    // A real .jsonc: the comment is the whole reason the extension exists, and
+    // a reader that only tolerates the NAME still breaks on the content.
+    configName.endsWith(".jsonc")
+      ? `// the app's config\n${body.replace("{", "{\n  // title below\n")}\n`
+      : body,
   );
   await Deno.writeTextFile(`${dir}/src/App.tsx`, appTsx);
   await Deno.writeTextFile(`${dir}/src/app.ts`, "export const x = 1;\n");
@@ -179,6 +206,250 @@ Deno.test('am check: a name "aio" exports but the browser bundle lacks FAILS the
       `a graph esbuild refuses exited 0:\n${r.out}${r.err}`,
     );
     assertStringIncludes(r.out, "VERSION");
+  } finally {
+    await dropTempDir(dir);
+  }
+});
+
+Deno.test("am check: the `aio` mapping missing from deno.json FAILS the check", async () => {
+  // THE gate that could not fire. `buildBrowserImportMap` injects `aio`,
+  // `aio/ui`, `aio/jsx-runtime` … unconditionally (aio serves them from
+  // `/__aio/*`), so the graph walk resolved every specifier and `am check`
+  // printed "client graph OK" for an app whose very first command —
+  // `deno run src/app.ts` — dies with
+  // `Import "aio" not a dependency and not in import map`. Every later
+  // "check passed" from this command was worth nothing while that held.
+  const dir = await tempDir("am-check-no-aio-map-");
+  try {
+    await makeApp(
+      dir,
+      `import { v } from "./cell.ts";\n` +
+        `export default function App() { return <div class="root">{v}</div>; }\n`,
+      `import { cell } from "aio";\nexport const v = typeof cell;\n`,
+      ["aio"],
+    );
+    // The app really is unstartable — the premise, measured, not assumed.
+    const run = await new Deno.Command(Deno.execPath(), {
+      args: ["check", `${dir}/src/cell.ts`],
+      cwd: dir,
+      stdout: "piped",
+      stderr: "piped",
+    }).output();
+    assertEquals(run.code, 1, "premise broken: Deno resolved `aio` without it");
+
+    const r = await amCheck(dir, ["--json"]);
+    assertEquals(
+      r.code,
+      1,
+      `am check was GREEN for an app Deno cannot resolve:\n${r.out}${r.err}`,
+    );
+    const j = JSON.parse(r.out) as {
+      errors: { message: string; fix: string; line?: number }[];
+    };
+    const e = j.errors.find((e) => e.message.includes('"aio" is missing'));
+    assert(e, `the missing mapping was not named: ${r.out}`);
+    assertEquals(e!.line, 1, "the import's own line");
+    // Named BY NAME, with the line that fixes it — inferred from the app's own
+    // aio source, never a guess.
+    assertStringIncludes(e!.fix, `"aio": "${REPO}mod.ts"`);
+  } finally {
+    await dropTempDir(dir);
+  }
+});
+
+// ── "I could not read the config" is not "the config declares nothing" ───────
+//
+// `readAppDenoImports` answered `{}` to both questions, and `{}` is — by the
+// contract in `GraphValidateOptions.appImports` — a REAL, CHECKED answer. So
+// an app whose config Deno reads perfectly well got three fabricated BLOCKING
+// errors ("`aio` is missing from this app's deno.json `imports`") naming
+// imports that are right there in the file, from a command an agent runs to
+// decide whether an app is healthy. `deno check` on the same tree exits 0.
+//
+// The framework does not log artificial, false or unreal errors
+// (`.katana/principle.md`). These three cases pin that.
+
+Deno.test("am check: a deno.jsonc app passes — Deno reads it, so aio must too", async () => {
+  const dir = await tempDir("am-check-jsonc-");
+  try {
+    await makeApp(
+      dir,
+      `import { useLocal } from "aio/air";\n` +
+        `import { v } from "./cell.ts";\n` +
+        `export default function App() {\n` +
+        `  return <div class="root">{typeof useLocal}{v}</div>;\n` +
+        `}\n`,
+      `import { cell } from "aio";\nexport const v = typeof cell;\n`,
+      [],
+      "deno.jsonc",
+    );
+    // The premise, measured: Deno itself resolves this app.
+    const run = await new Deno.Command(Deno.execPath(), {
+      args: ["check", `${dir}/src/App.tsx`],
+      cwd: dir,
+      stdout: "piped",
+      stderr: "piped",
+    }).output();
+    assertEquals(
+      run.code,
+      0,
+      `premise broken: deno check failed on the .jsonc app:\n${
+        new TextDecoder().decode(run.stderr)
+      }`,
+    );
+
+    const r = await amCheck(dir, ["--json"]);
+    const j = JSON.parse(r.out) as {
+      checked: boolean;
+      errors: { message: string }[];
+    };
+    assertEquals(
+      j.errors.filter((e) => e.message.includes("is missing from this app")),
+      [],
+      `fabricated "missing from deno.json" errors for imports the config ` +
+        `declares — the config is a .jsonc and was not read:\n${r.out}`,
+    );
+    assertEquals(r.code, 0, `${r.out}${r.err}`);
+    assertEquals(j.checked, true, "the check must actually have run");
+  } finally {
+    await dropTempDir(dir);
+  }
+});
+
+Deno.test("am check: a deno.jsonc app with a REALLY missing import still FAILS", async () => {
+  // The other half, and the one that matters more: reading .jsonc must not be
+  // a way to make the gate vacuous. Same app, same extension, `aio/air`
+  // deleted from the map — and it is still named.
+  const dir = await tempDir("am-check-jsonc-gap-");
+  try {
+    await makeApp(
+      dir,
+      `import { useLocal } from "aio/air";\n` +
+        `export default function App() {\n` +
+        `  return <div class="root">{typeof useLocal}</div>;\n` +
+        `}\n`,
+      "",
+      ["aio/air"],
+      "deno.jsonc",
+    );
+    // The app really is unstartable — measured, not assumed.
+    const run = await new Deno.Command(Deno.execPath(), {
+      args: ["check", `${dir}/src/App.tsx`],
+      cwd: dir,
+      stdout: "piped",
+      stderr: "piped",
+    }).output();
+    assertEquals(
+      run.code,
+      1,
+      "premise broken: Deno resolved `aio/air` without a mapping",
+    );
+
+    const r = await amCheck(dir, ["--json"]);
+    assertEquals(
+      r.code,
+      1,
+      `am check was GREEN for a .jsonc app Deno cannot resolve:\n${r.out}${r.err}`,
+    );
+    const j = JSON.parse(r.out) as {
+      errors: { message: string; fix: string }[];
+    };
+    const e = j.errors.find((e) => e.message.includes('"aio/air" is missing'));
+    assert(e, `the missing mapping was not named: ${r.out}`);
+    // Inferred from the app's OWN aio source, read out of the .jsonc.
+    assertStringIncludes(e!.fix, `"aio/air": "${REPO}src/air.ts"`);
+  } finally {
+    await dropTempDir(dir);
+  }
+});
+
+Deno.test("am check: a workspace member inherits the root's import map", async () => {
+  // Deno workspaces: the ROOT's import map applies to every member. A member
+  // two levels down whose own config declares no `imports` resolves `aio`
+  // perfectly well — and got three blocking errors saying it does not, because
+  // only the member's config was read.
+  const root = await tempDir("am-check-ws-");
+  try {
+    const app = `${root}/packages/app`;
+    await Deno.mkdir(`${app}/src`, { recursive: true });
+    await Deno.writeTextFile(
+      `${root}/deno.json`,
+      JSON.stringify({
+        workspace: ["./packages/app"],
+        imports: AIO_IMPORTS(),
+        compilerOptions: JSX_OPTS,
+      }),
+    );
+    await Deno.writeTextFile(
+      `${app}/deno.json`,
+      JSON.stringify({
+        name: "@ws/app",
+        version: "0.1.0",
+        compilerOptions: JSX_OPTS,
+      }),
+    );
+    await Deno.writeTextFile(
+      `${app}/src/cell.ts`,
+      `import { cell } from "aio";\nexport const v = typeof cell;\n`,
+    );
+    await Deno.writeTextFile(
+      `${app}/src/App.tsx`,
+      `import { useLocal } from "aio/air";\n` +
+        `import { v } from "./cell.ts";\n` +
+        `export default function App() {\n` +
+        `  return <div class="root">{typeof useLocal}{v}</div>;\n` +
+        `}\n`,
+    );
+    await Deno.writeTextFile(`${app}/src/app.ts`, "export const x = 1;\n");
+
+    const run = await new Deno.Command(Deno.execPath(), {
+      args: ["check", `${app}/src/App.tsx`],
+      cwd: app,
+      stdout: "piped",
+      stderr: "piped",
+    }).output();
+    assertEquals(
+      run.code,
+      0,
+      `premise broken: deno check failed in the workspace member:\n${
+        new TextDecoder().decode(run.stderr)
+      }`,
+    );
+
+    const r = await amCheck(app, ["--json"]);
+    const j = JSON.parse(r.out) as { errors: { message: string }[] };
+    assertEquals(
+      j.errors.filter((e) => e.message.includes("is missing from this app")),
+      [],
+      `fabricated "missing from deno.json" errors for a workspace member ` +
+        `whose root declares them:\n${r.out}`,
+    );
+    assertEquals(r.code, 0, `${r.out}${r.err}`);
+  } finally {
+    await dropTempDir(root);
+  }
+});
+
+Deno.test("am check: an unreadable config SKIPS the import gate and SAYS so", async () => {
+  // The remaining honest case: no config anywhere. Silence here would be the
+  // same bug one layer down — the gate looked at nothing, so it says it looked
+  // at nothing instead of inventing three findings or quietly passing.
+  const dir = await tempDir("am-check-no-config-");
+  try {
+    await Deno.mkdir(`${dir}/src`, { recursive: true });
+    await Deno.writeTextFile(
+      `${dir}/src/App.tsx`,
+      `export default function App() { return <div class="root">hi</div>; }\n`,
+    );
+    const r = await amCheck(dir, ["--json"]);
+    const fabricated = r.out.includes("is missing from this app");
+    assertEquals(
+      fabricated,
+      false,
+      `"could not read the config" was reported as "the config is empty":\n${r.out}`,
+    );
+    assertStringIncludes(r.err, "SKIPPED");
+    assertStringIncludes(r.err, "deno.jsonc");
   } finally {
     await dropTempDir(dir);
   }

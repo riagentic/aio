@@ -202,7 +202,8 @@ function runFormSchema(
  *
  *  Each field declares its `initial` value and, optionally, `rules` (sync),
  *  `asyncRules` (with `debounceMs`), and the whole form can carry a Standard
- *  Schema — see {@linkcode FormOptions.schema}. */
+ *  Schema — see {@linkcode FormOptions.schema}.
+ *  @tier Kit */
 export function useForm<T extends Record<string, unknown>>(
   config: {
     [K in keyof T]: {
@@ -523,7 +524,7 @@ export function useForm<T extends Record<string, unknown>>(
  *   ...items.items.map((item, i) => h("li", { key: i }, item.name)),
  * );
  * ```
- */
+ *  @tier Kit */
 export function useFieldArray<T>(initial: T[] = []): FieldArrayState<T> {
   const sig = signal<T[]>([...initial]);
 

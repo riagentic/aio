@@ -131,7 +131,11 @@ Deno.test("build-version: a three-part version is PINNED — verbatim, with the 
 });
 
 Deno.test("build-version: anything that is neither M.m nor M.m.p is refused by name", () => {
-  for (const bad of ["1", "1.2.3.4", "v1.2", "1.2-rc1", "1.2.3-alpha", "abc"]) {
+  // `1.2-rc1` stays refused and `1.2-rc` is now accepted (tests/app-version-
+  // stage.test.ts): a release stage is one of three words, and the build count
+  // already numbers the build — `rc1` would be a second counter disagreeing
+  // with the first.
+  for (const bad of ["1", "1.2.3.4", "v1.2", "1.2-rc1", "1.2.3-dev", "abc"]) {
     assertThrows(
       () => parseDeclaredVersion(bad),
       Error,

@@ -109,7 +109,9 @@ Deno.test("am help: lists the launcher AND the moved projection", () => {
   const orig = console.log;
   console.log = (...a: unknown[]) => lines.push(a.map(String).join(" "));
   try {
-    cmdHelp([], {} as GlobalFlags, []);
+    // `--commands`: `ui` and `state --ui` are not everyday verbs, and the
+    // one-screen tier does not carry a verb's flag variants at all.
+    cmdHelp(["--commands"], {} as GlobalFlags, []);
   } finally {
     console.log = orig;
   }

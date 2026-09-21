@@ -114,7 +114,7 @@ function useActiveLoop(active: boolean, start: () => () => void): void {
  *   return <canvas ref={ref} />;
  * }
  * ```
- */
+ *  @tier Advanced */
 export function useRaf(
   cb: (time: number, delta: number) => void,
   active = true,
@@ -187,7 +187,7 @@ export function useRaf(
  *   return null;
  * }
  * ```
- */
+ *  @tier Advanced */
 export function useInterval(
   cb: () => void,
   ms: number,

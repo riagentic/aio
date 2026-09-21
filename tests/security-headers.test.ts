@@ -45,8 +45,43 @@ Deno.test("security: the default CSP has NO default-src — nothing off-origin b
     "a `default-src 'self'` default would break every app that loads a CDN " +
       "font, script or image — that is opt-in, not a default",
   );
-  for (const off of ["script-src", "style-src", "img-src", "connect-src"]) {
+  for (const off of ["style-src", "img-src", "connect-src", "font-src"]) {
     assert(!csp.includes(off), `"${off}" must not appear in the basic policy`);
+  }
+  // `script-src` IS in the basic policy, and is the one directive here that
+  // could break a page if it were written carelessly. It may only ever
+  // WITHHOLD `'unsafe-eval'` — every source a page could already reach has to
+  // stay named, or "basic" stops being the policy that cannot break an app.
+  assertStringIncludes(csp, "script-src ");
+  const scriptSrc = csp.split(";").map((d) => d.trim())
+    .find((d) => d.startsWith("script-src "))!.slice("script-src ".length);
+  assert(
+    !scriptSrc.includes("'unsafe-eval'"),
+    "the point of the directive is that `eval` does not run: with " +
+      "'unsafe-eval' Electron logs its Insecure-CSP warning in every " +
+      "packaged app, which is the bug this closed",
+  );
+  for (
+    const src of [
+      "*",
+      "data:",
+      "blob:",
+      "'unsafe-inline'",
+      "'wasm-unsafe-eval'",
+    ]
+  ) {
+    assert(
+      scriptSrc.split(/\s+/).includes(src),
+      `"${src}" must stay in the basic script-src — dropping it takes a ` +
+        `capability away from an app that already had it (${
+          src === "*"
+            ? "every http(s) URL AND the document's own scheme, which is how " +
+              "aio://app/app.js loads in a packaged window"
+            : src === "'wasm-unsafe-eval'"
+            ? "WebAssembly, which any script-src otherwise removes"
+            : "a source a working app may already use"
+        })`,
+    );
   }
 });
 

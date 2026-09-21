@@ -20,6 +20,8 @@ import { _redactCheckpointState } from "../diagnostics/checkpoint.ts";
 import { diagRecent } from "../diagnostics/diagnostic-bus.ts";
 import { noRedaction, REDACTED, type Redactor } from "../diagnostics/redact.ts";
 import type { CellFieldFlags } from "./aio-types.ts";
+import type { CellFieldFilter } from "../state/cell-types.ts";
+import { applyCellFieldFilter, visibleValueAt } from "../state/state-filter.ts";
 import type { TimelineEntry } from "./timeline.ts";
 import { type BuildFacts, buildFacts } from "./boot-facts.ts";
 
@@ -138,20 +140,69 @@ export type ReportSources = {
    *  disk and POSTed in full, which is the one thing declaring it prevents.
    *
    *  Absent ⇒ nothing is screened, and a report carrying state SAYS SO in
-   *  `truncated` rather than looking as if it had been. */
+   *  `truncated` rather than looking as if it had been.
+   *
+   *  A flags map answers per TOP-LEVEL KEY, which is all the trojan `fields`
+   *  overview needs and one spelling short of what a secret uses: see
+   *  {@linkcode ReportSources.visibleFilters}, which the app's own boot
+   *  passes and which wins when both are given. */
   visible?: CellFieldFlags;
+  /** Cell id → the cell's `visible` filter ITSELF, dot paths included.
+   *
+   *  The flags above flatten `exclude: ["seeds.encSeed"]` to "the key `seeds`
+   *  is included", so the report kept every row's ciphertext — while the wire,
+   *  the patch path, the client read seam and the persistence read-back all
+   *  read the same declaration correctly. Handed the filter, this screens
+   *  through `applyCellFieldFilter`, the walker those seams call, so there is
+   *  no second reading of one rule. */
+  visibleFilters?: Record<string, CellFieldFilter>;
 };
 
-/** Project raw state through each cell's declared `visible` flags. A field the
- *  app hides from clients is not in the report either; a cell that hides every
- *  field is withheld whole and named. Cells with no entry (nothing declared)
- *  pass through — that IS the declaration. */
+/** The head of a dot path — the top-level state key it starts at. */
+const key0 = (path: string): string => path.split(".")[0]!;
+
+/** The ONE screen this file applies, from whichever form the caller had.
+ *
+ *  A flags map is exactly a top-level `exclude` list, so it converts rather
+ *  than forking the code below: two inputs, one rule. */
+function _filtersOf(
+  src: Pick<ReportSources, "visible" | "visibleFilters">,
+): Record<string, CellFieldFilter> | undefined {
+  if (src.visibleFilters && Object.keys(src.visibleFilters).length > 0) {
+    return src.visibleFilters;
+  }
+  if (!src.visible || Object.keys(src.visible).length === 0) return undefined;
+  const out: Record<string, CellFieldFilter> = {};
+  for (const [cell, flags] of Object.entries(src.visible)) {
+    const hidden = Object.entries(flags)
+      .filter(([, f]) => f.ui === false)
+      .map(([k]) => k);
+    out[cell] = hidden.length > 0 ? { exclude: hidden } : "all";
+  }
+  return out;
+}
+
+/** Does this cell hide ANYTHING? Used where no value is in hand (an async
+ *  call's arguments), so an `include` filter — which cannot be judged without
+ *  the slice — counts as hiding: withholding more is the safe direction. */
+function _hidesAnything(filter: CellFieldFilter | undefined): boolean {
+  if (!filter || filter === "all") return false;
+  if (filter === "none") return true;
+  if ("include" in filter) return true;
+  return filter.exclude.length > 0;
+}
+
+/** Project raw state through each cell's declared `visible` filter — the same
+ *  projection a browser receives, dot paths included. A field the app hides
+ *  from clients is not in the report either; a cell that hides every field is
+ *  withheld whole and named. Cells with no entry (nothing declared) pass
+ *  through — that IS the declaration. */
 function _applyDeclaredVisibility(
   raw: Record<string, unknown>,
-  visible: CellFieldFlags | undefined,
+  filters: Record<string, CellFieldFilter> | undefined,
   truncated: string[],
 ): Record<string, unknown> {
-  if (!visible || Object.keys(visible).length === 0) {
+  if (!filters || Object.keys(filters).length === 0) {
     truncated.push(
       "state was NOT screened by cell `visible` declarations — this report " +
         "carries every field, including any the app hides from clients",
@@ -160,34 +211,62 @@ function _applyDeclaredVisibility(
   }
   const out: Record<string, unknown> = {};
   const withheld: string[] = [];
+  /** Withheld because nothing may be shown WITHOUT A CLIENT — see below. */
+  const noClient: string[] = [];
   const dropped: string[] = [];
   for (const [cell, slice] of Object.entries(raw)) {
-    const flags = visible[cell];
-    if (!flags || slice === null || typeof slice !== "object") {
+    const filter = filters[cell];
+    if (
+      !filter || filter === "all" || slice === null || typeof slice !== "object"
+    ) {
       out[cell] = slice;
       continue;
     }
-    const kept: Record<string, unknown> = {};
-    let any = false;
-    for (
-      const [key, value] of Object.entries(slice as Record<string, unknown>)
-    ) {
-      const flag = flags[key];
-      if (flag && flag.ui === false) {
-        dropped.push(`${cell}.${key}`);
-        continue;
-      }
-      kept[key] = value;
-      any = true;
+    const kept = applyCellFieldFilter(
+      filter,
+      slice as Record<string, unknown>,
+    );
+    const keys = Object.keys(slice as object);
+    if (kept === undefined || (Object.keys(kept).length === 0 && keys.length)) {
+      // An EMPTY ALLOWLIST is its own note. It is what a per-user
+      // (`visible.forUser`) cell reduces to for a report — the callback is
+      // run per client and a report has none — and "every field is hidden
+      // from clients" would be a wrong answer for one: those fields DO reach
+      // clients, a different set each. (An app that writes `include: []`
+      // itself lands here too, and the note is true of it as well.)
+      (typeof filter === "object" && "include" in filter &&
+          filter.include.length === 0
+        ? noClient
+        : withheld).push(cell);
+      continue;
     }
-    if (!any && Object.keys(slice as object).length > 0) withheld.push(cell);
-    else out[cell] = kept;
+    // Name what went, by the app's own spelling: a key that is gone, and every
+    // dot path the filter removed from INSIDE a key that stayed (the report
+    // must not read as if the row it shows were whole).
+    for (const key of keys) if (!(key in kept)) dropped.push(`${cell}.${key}`);
+    if (typeof filter === "object" && "exclude" in filter) {
+      for (const path of filter.exclude) {
+        if (path.includes(".") && key0(path) in kept) {
+          dropped.push(`${cell}.${path}`);
+        }
+      }
+    }
+    out[cell] = kept;
   }
   if (withheld.length) {
     truncated.push(
       `cells withheld whole — every field is hidden from clients: ${
         withheld.join(", ")
       }`,
+    );
+  }
+  if (noClient.length) {
+    truncated.push(
+      `cells withheld whole — their \`visible\` filter names no field a ` +
+        `report may show, and a report has no client to filter for (a ` +
+        `per-user \`visible.forUser\` view is the usual reason): ${
+          noClient.join(", ")
+        }`,
     );
   }
   if (dropped.length) {
@@ -216,7 +295,7 @@ function _applyDeclaredVisibility(
  *  {@link _withholdAsyncCallPayloads}. */
 function _screenTimelineEntry(
   e: TimelineEntry,
-  visible: CellFieldFlags,
+  filters: Record<string, CellFieldFilter>,
   anyHidden: boolean,
 ): {
   entry: TimelineEntry;
@@ -225,17 +304,16 @@ function _screenTimelineEntry(
   /** The entry wrote (or may have written) a hidden field. */
   touched: boolean;
 } {
-  const hidden = (cell: string, key: string): boolean =>
-    visible[cell]?.[key]?.ui === false;
-  const project = (cell: string, v: unknown): unknown => {
-    if (v === null || typeof v !== "object" || Array.isArray(v)) return v;
-    const flags = visible[cell];
-    if (!flags) return v;
-    const out: Record<string, unknown> = {};
-    for (const [k, x] of Object.entries(v as Record<string, unknown>)) {
-      if (flags[k]?.ui !== false) out[k] = x;
-    }
-    return out;
+  /** What the cell's filter leaves of a value at `segs` inside its slice —
+   *  the walker the wire uses, so a dot-path exclude ("seeds.encSeed") is read
+   *  here exactly as it is read there. */
+  const screen = (
+    cell: string,
+    segs: readonly string[],
+    v: unknown,
+  ): unknown => {
+    const seen = visibleValueAt(filters[cell], segs, v);
+    return seen.hidden ? REDACTED : seen.value;
   };
   let leaves = 0;
   let touched = false;
@@ -252,7 +330,7 @@ function _screenTimelineEntry(
           ? Object.fromEntries(
             Object.entries(v as Record<string, unknown>).map((
               [c, x],
-            ) => [c, project(c, x)]),
+            ) => [c, screen(c, [], x)]),
           )
           : v;
       if (!anyHidden) return d;
@@ -261,18 +339,13 @@ function _screenTimelineEntry(
       return { ...d, before: whole(d.before), after: whole(d.after) };
     }
     const cell = segs[0]!;
-    if (segs.length === 1) {
-      const before = project(cell, d.before);
-      const after = project(cell, d.after);
-      if (before === d.before && after === d.after) return d;
-      touched = true;
-      leaves++;
-      return { ...d, before, after };
-    }
-    if (!hidden(cell, segs[1]!)) return d;
+    const rest = segs.slice(1);
+    const before = screen(cell, rest, d.before);
+    const after = screen(cell, rest, d.after);
+    if (before === d.before && after === d.after) return d;
     touched = true;
     leaves++;
-    return { ...d, before: REDACTED, after: REDACTED };
+    return { ...d, before, after };
   });
   if (!touched) return { entry: e, leaves: 0, payload: false, touched };
   const dropPayload = e.payload !== undefined && e.payload !== REDACTED;
@@ -313,12 +386,11 @@ function _callIdOf(e: TimelineEntry): string | undefined {
 function _withholdAsyncCallPayloads(
   entries: TimelineEntry[],
   touchedCalls: ReadonlySet<string>,
-  visible: CellFieldFlags,
+  filters: Record<string, CellFieldFilter>,
 ): { entries: TimelineEntry[]; payloads: number } {
   const hiddenCell = (type: string): boolean => {
     const at = type.indexOf(":");
-    const flags = at > 0 ? visible[type.slice(0, at)] : undefined;
-    return !!flags && Object.values(flags).some((f) => f.ui === false);
+    return at > 0 && _hidesAnything(filters[type.slice(0, at)]);
   };
   let payloads = 0;
   const out = entries.map((e) => {
@@ -390,6 +462,9 @@ export async function buildReport(
     }`;
   const facts = buildFacts();
   const redact = src.redact ?? noRedaction;
+  // ONE screen for the state and the timeline — whichever form the caller
+  // declared it in. See `_filtersOf`.
+  const filters = _filtersOf(src);
   const truncated: string[] = [];
 
   const report: Report = {
@@ -437,7 +512,7 @@ export async function buildReport(
       // action payloads) knows nothing about it. A cell with `visible: "none"`
       // contributes nothing; `include`/`exclude` are applied field by field,
       // exactly as they are for a browser.
-      const screened = _applyDeclaredVisibility(raw, src.visible, truncated);
+      const screened = _applyDeclaredVisibility(raw, filters, truncated);
       const safe = _redactCheckpointState(screened, redact);
       if (redact.redactsAnyCell()) {
         const withheld = src.cells.filter((c) => redact.redactsCell(c));
@@ -469,15 +544,12 @@ export async function buildReport(
     // The same `visible` declaration the state went through — see
     // `_screenTimelineEntry`. Absent ⇒ the state note above already says
     // nothing was screened.
-    const visible = src.visible;
-    if (visible && Object.keys(visible).length > 0 && kept.length) {
-      const anyHidden = Object.values(visible).some((f) =>
-        Object.values(f).some((x) => x.ui === false)
-      );
+    if (filters && kept.length) {
+      const anyHidden = Object.values(filters).some(_hidesAnything);
       let leaves = 0, payloads = 0;
       const touchedCalls = new Set<string>();
       kept = kept.map((e) => {
-        const r = _screenTimelineEntry(e, visible, anyHidden);
+        const r = _screenTimelineEntry(e, filters, anyHidden);
         leaves += r.leaves;
         if (r.payload) payloads++;
         if (r.touched) {
@@ -488,7 +560,7 @@ export async function buildReport(
         return r.entry;
       });
       if (anyHidden) {
-        const r = _withholdAsyncCallPayloads(kept, touchedCalls, visible);
+        const r = _withholdAsyncCallPayloads(kept, touchedCalls, filters);
         kept = r.entries;
         payloads += r.payloads;
       }

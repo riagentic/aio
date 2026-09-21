@@ -148,7 +148,8 @@ export type RouteParams<S extends string> = string extends S
  *  with the params spelled by hand. The second infers them from the pattern
  *  when it is a literal, which is what a router user checks first. Overload
  *  resolution tries them in order, so the explicit form always wins where it
- *  was used; the inferring one is reachable only where nothing was passed. */
+ *  was used; the inferring one is reachable only where nothing was passed.
+ *  @tier Kit */
 export function useRoute<
   P extends Record<string, string> = Record<string, string>,
 >(pattern?: string): RouteState<P>;
@@ -172,7 +173,8 @@ export function useRoute<
   };
 }
 
-/** Returns the navigate function. */
+/** Returns the navigate function.
+ *  @tier Kit */
 export function useNavigate(): (
   to: string | number,
   opts?: { replace?: boolean },

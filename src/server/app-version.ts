@@ -10,10 +10,31 @@
  *   dirty tree      1.2.345-dirty.9f3ac2b1     hash8 = sha256(dirty paths + contents)
  *   no git repo     1.2.0-nogit.4e1d0c77       hash8 = sha256(project tree)
  *   pinned          1.0.0                      three-part deno.json version, verbatim
+ *   staged          1.2.345-beta               deno.json "1.2-beta"
  *
  * `-dirty.*` / `-nogit.*` are SemVer prereleases, so they order BELOW the clean
  * build of the same count — a dirty build is not a release, and an update
  * check never offers one over a clean one. See docs/build/versioning.md.
+ *
+ * A STAGE (`-alpha`, `-beta`, `-rc` on the declared version) is the same
+ * mechanism pointed at the other question: how finished the app says it is.
+ * It rides the SAME string, because an app that says `0.1.377-beta` in its
+ * status bar and ships `0.1.377` on its download page has two versions, and
+ * an update check ordering by build count alone would offer an alpha over the
+ * beta that replaced it. Stages rank alpha < beta < rc < (none), and a dirty
+ * staged build is `1.2.345-beta.dirty.<hash8>` — one prerelease tail, because
+ * two `-` groups would not be SemVer at all.
+ *
+ * ONE ordering consequence, written down because it is the opposite of what
+ * the line above leads you to expect: SemVer ranks a LONGER prerelease higher
+ * when the leading identifiers match, so `1.2.345-beta.dirty.9f3ac2b1` ranks
+ * ABOVE `1.2.345-beta` — its one exception to "a dirty build ranks below the
+ * clean one". It is below every other clean build (a later stage, a later
+ * count, the release), and above only the single build it literally is: that
+ * commit, plus your uncommitted edits. Nothing can be spelled to avoid this —
+ * any tail added to `-beta` outranks `-beta` — and nothing needs to be: what
+ * keeps a dirty build out of a channel is `unpublishableReason`, which refuses
+ * to publish it at all, not its position in a sort.
  *
  * The build stamps the resolved version into the artifact
  * (`.aio/build-version.json`, embedded by `deno compile`; `versionName` in an
@@ -43,6 +64,13 @@ export const BUILD_VERSION_ENV = "AIO_BUILD_VERSION";
 
 export type VersionSource = "derived" | "pinned" | "default" | "nogit";
 
+/** How finished a build says it is. Ordered: alpha < beta < rc < (none).
+ *
+ *  Only these three, only lower-case, and never a number after them — the
+ *  build count already numbers the build, and `alpha2` would be a second
+ *  counter disagreeing with the first. */
+export type ReleaseStage = "alpha" | "beta" | "rc";
+
 export type BuildVersion = {
   /** The full string — what every artifact name, `--version` and manifest carry. */
   version: string;
@@ -54,15 +82,27 @@ export type BuildVersion = {
   commit: string | null;
   dirty: boolean;
   source: VersionSource;
+  /** The declared stage, when there is one. ABSENT, not `null`, when the app
+   *  declares none: `BuildVersion` is an output type a caller may also build
+   *  by hand (the fleet build passes one through `AIO_BUILD_VERSION`), and an
+   *  optional field is the only kind that can be added to a frozen surface. */
+  stage?: ReleaseStage;
 };
 
 export type DeclaredVersion =
-  | { kind: "base"; base: string }
-  | { kind: "pinned"; version: string; base: string; build: number }
+  | { kind: "base"; base: string; stage?: ReleaseStage }
+  | {
+    kind: "pinned";
+    version: string;
+    base: string;
+    build: number;
+    stage?: ReleaseStage;
+  }
   | { kind: "default"; base: typeof DEFAULT_BASE };
 
-const BASE_RE = /^(\d+)\.(\d+)$/;
-const PINNED_RE = /^(\d+)\.(\d+)\.(\d+)$/;
+const STAGE = "(?:-(alpha|beta|rc))?";
+const BASE_RE = new RegExp(`^(\\d+)\\.(\\d+)${STAGE}$`);
+const PINNED_RE = new RegExp(`^(\\d+)\\.(\\d+)\\.(\\d+)${STAGE}$`);
 
 /** Read deno.json's `version` STRICTLY: `M.m` (aio numbers the builds),
  *  `M.m.p` (pinned, verbatim), absent (→ {@link DEFAULT_BASE}). Anything else
@@ -77,24 +117,59 @@ export function parseDeclaredVersion(declared: unknown): DeclaredVersion {
   const raw = declared.trim();
   if (!raw) return { kind: "default", base: DEFAULT_BASE };
   const b = BASE_RE.exec(raw);
-  if (b) return { kind: "base", base: `${+b[1]!}.${+b[2]!}` };
+  if (b) {
+    return {
+      kind: "base",
+      base: `${+b[1]!}.${+b[2]!}`,
+      ...stageOf(b[3]),
+    };
+  }
   const p = PINNED_RE.exec(raw);
   if (p) {
     return {
       kind: "pinned",
-      version: raw,
+      // Normalised, not verbatim: " 01.0.0-rc " declares the same version as
+      // "1.0.0-rc", and two spellings of one version is how an update check
+      // starts disagreeing with a download page.
+      version: `${+p[1]!}.${+p[2]!}.${+p[3]!}${p[4] ? `-${p[4]}` : ""}`,
       base: `${+p[1]!}.${+p[2]!}`,
       build: +p[3]!,
+      ...stageOf(p[4]),
     };
   }
   throw new Error(refusal(JSON.stringify(raw)));
 }
 
+/** The release stage a version STRING carries, or null — the read-back twin of
+ *  the stage {@linkcode resolveBuildVersion} writes.
+ *
+ *  It reads only the FIRST prerelease identifier, which is where the resolver
+ *  puts it: `1.2.345-beta` and `1.2.345-beta.dirty.9f3ac2b1` both answer
+ *  "beta", and `1.2.345-dirty.9f3ac2b1` answers null — a dirty mark is about
+ *  whether a build is reproducible, never about how finished it is.
+ *
+ *  Who needs it: an install that is ITSELF on a staged line follows that line
+ *  by default (src/server/updates-core.ts). Without this, declaring
+ *  `"version": "1.2-beta"` silently switched the app's own updates off — every
+ *  later beta is a prerelease, and a release channel does not offer those. */
+export function versionStage(version: string): ReleaseStage | null {
+  const m = /^\d+\.\d+\.\d+-(alpha|beta|rc)(?:[.+]|$)/.exec(version.trim());
+  return m ? m[1] as ReleaseStage : null;
+}
+
+/** `{ stage }` or `{}` — never `{ stage: undefined }`, which `assertEquals`
+ *  and `JSON.stringify` treat as two different objects from one fact. */
+function stageOf(m: string | undefined): { stage?: ReleaseStage } {
+  return m ? { stage: m as ReleaseStage } : {};
+}
+
 function refusal(shown: string): string {
   return `[version] ✗ deno.json "version" is ${shown} — an app's version ` +
     `is "major.minor" (write "1.2"; aio numbers builds from commits: ` +
-    `1.2.<commit count>) or a pinned "major.minor.patch" (used verbatim). ` +
-    `Nothing else is a version.`;
+    `1.2.<commit count>) or a pinned "major.minor.patch" (used verbatim), ` +
+    `either one optionally followed by a release stage: "-alpha", "-beta" ` +
+    `or "-rc" (write "1.2-beta" → 1.2.345-beta, which every update check ` +
+    `ranks below 1.2.345). Nothing else is a version.`;
 }
 
 /** What the resolver needs to know about the working tree — injected, so the
@@ -118,6 +193,7 @@ export function resolveBuildVersion(
 ): BuildVersion {
   const d = parseDeclaredVersion(declared);
   const dirty = tree.repo && tree.hash !== null;
+  const stage = d.kind === "default" ? undefined : d.stage;
   if (d.kind === "pinned") {
     return {
       version: d.version,
@@ -126,28 +202,47 @@ export function resolveBuildVersion(
       commit: tree.commit,
       dirty,
       source: "pinned",
+      ...stageOf(stage),
     };
   }
   if (!tree.repo) {
     const hash = tree.hash ?? "00000000";
     return {
-      version: `${d.base}.0-nogit.${hash}`,
+      version: `${d.base}.0${pre(stage, `nogit.${hash}`)}`,
       base: d.base,
       build: 0,
       commit: null,
       dirty: false,
       source: "nogit",
+      ...stageOf(stage),
     };
   }
   const core = `${d.base}.${tree.count}`;
   return {
-    version: dirty ? `${core}-dirty.${tree.hash}` : core,
+    version: core + (dirty ? pre(stage, `dirty.${tree.hash}`) : pre(stage)),
     base: d.base,
     build: tree.count,
     commit: tree.commit,
     dirty,
     source: d.kind === "default" ? "default" : "derived",
+    ...stageOf(stage),
   };
+}
+
+/** The SemVer prerelease tail: the stage, then the unreproducible-build mark,
+ *  in that order and separated by dots.
+ *
+ *    —              · alpha        → `-alpha`
+ *    dirty.9f3ac2b1 · —            → `-dirty.9f3ac2b1`
+ *    dirty.9f3ac2b1 · alpha        → `-alpha.dirty.9f3ac2b1`
+ *
+ *  One tail, so the ordering stays the one a human expects all the way down:
+ *  a dirty alpha is below a clean alpha, which is below the release, and the
+ *  stages rank alpha < beta < rc among themselves. Two separate `-` groups
+ *  would not be SemVer at all. */
+function pre(stage: ReleaseStage | undefined, mark?: string): string {
+  const ids = [stage, mark].filter(Boolean);
+  return ids.length ? `-${ids.join(".")}` : "";
 }
 
 /** The one-line notes a build prints EXACTLY ONCE for a version that was not
@@ -157,7 +252,9 @@ export function buildVersionNotes(bv: BuildVersion): string[] {
   if (bv.source === "pinned") {
     notes.push(
       `version ${bv.version} is pinned by deno.json — the build number is ` +
-        `not derived; write "${bv.base}" to let aio number builds from commits`,
+        `not derived; write "${bv.base}${
+          bv.stage ? `-${bv.stage}` : ""
+        }" to let aio number builds from commits`,
     );
   }
   if (bv.source === "default") {
@@ -190,7 +287,11 @@ export function unpublishableReason(
    *  remedy its READER can perform, or it is not a remedy. */
   escape: string = "--allow-dirty",
 ): string | null {
-  const m = /-(dirty|nogit)\.[0-9a-f]{8}$/.exec(version);
+  // `[-.]`, not `-`: with a release stage the mark is the SECOND prerelease
+  // identifier (`1.2.345-alpha.dirty.9f3ac2b1`), and a `-`-only pattern would
+  // have made this gate silently unable to fire for every staged app — the
+  // exact shape of bug the stage was added to remove.
+  const m = /[-.](dirty|nogit)\.[0-9a-f]{8}$/.exec(version);
   if (!m) return null;
   return `version ${version} is a ${
     m[1] === "dirty" ? "dirty-tree" : "no-repository"
@@ -524,10 +625,25 @@ export function resolveRuntimeVersion(opts: {
 
 // ── artifact naming ─────────────────────────────────────────────────────────
 
-/** The version token as it appears in a FILE NAME: the full string, dirty /
- *  nogit suffix included, so a dirty artifact is visibly dirty. */
-export const VERSION_TOKEN_RE =
-  /\d+\.\d+\.\d+(?:-(?:dirty|nogit)\.[0-9a-f]{8})?/;
+/** The version token as it appears in a FILE NAME: the full string, stage and
+ *  dirty / nogit suffix included, so a dirty artifact is visibly dirty and a
+ *  beta is visibly a beta.
+ *
+ *  The stage arm is not decoration. `notes-1.2.345-beta.exe` with a token that
+ *  stopped at `1.2.345` still MATCHES (the lookahead is happy with the `-`),
+ *  and the splitter would have handed the installer the version `1.2.345` and
+ *  the app name `notes-beta` — an app installed under half its name, silently,
+ *  for every staged build. A token regex that does not know every shape the
+ *  resolver can emit is a parser for a different program. */
+export const VERSION_TOKEN_RE = (() => {
+  const mark = `(?:dirty|nogit)\\.[0-9a-f]{8}`;
+  // After a stage the mark is the second prerelease identifier (`.`); with no
+  // stage it opens the prerelease itself (`-`). Exactly those two, so the
+  // token never matches a string the resolver cannot produce.
+  return new RegExp(
+    `\\d+\\.\\d+\\.\\d+(?:-(?:alpha|beta|rc)(?:\\.${mark})?|-${mark})?`,
+  );
+})();
 
 /** The prefix every artifact name starts with: the app's binary name, or the
  *  standalone `aio-client` connect-page AppImage. Null when `name` is neither. */

@@ -119,3 +119,65 @@ testCell(
     assertStringIncludes(line, "self-call-survives:addThenThrow threw");
   },
 );
+
+// ── …and the PRODUCTION loop says the same thing ────────────────────────────
+//
+// The harness named it and the server did not, which is the wrong way round:
+// the person who needs the sentence is the one watching a live app, where the
+// only other trace of the surviving write is the write itself — beside an
+// ERROR that says "no state changed". Two dispatchers, one wording
+// (`selfCallSurvivedLine`).
+import { assertRejects } from "@std/assert";
+
+const prodSurvivor = cell("self-call-survives-prod", {
+  state: { items: [] as string[] },
+  methods: {
+    add(s, t: string) {
+      s.items.push(t);
+    },
+    addThenThrow(s) {
+      s.items.push("caller");
+      prodSurvivor.add("queued");
+      throw new Error("caller failed");
+    },
+  },
+});
+
+Deno.test("production dispatch: a self-call that outlives its caller's throw is WARNED", async () => {
+  await using srv = await testServer({ cells: [prodSurvivor] });
+  const lines: string[] = [];
+  setLogger({
+    logDir: "",
+    pub: (lvl: string, _cat: string, msg: string) =>
+      lines.push(`${lvl} ${msg}`),
+    perf: () => {},
+    flush: () => Promise.resolve(),
+  } as unknown as LogSink);
+  try {
+    // deno-lint-ignore no-explicit-any
+    await assertRejects(() => (prodSurvivor as any).addThenThrow());
+    await new Promise((r) => setTimeout(r, 20));
+  } finally {
+    setLogger(null);
+  }
+  assertEquals(
+    // deno-lint-ignore no-explicit-any
+    (srv.state() as any)["self-call-survives-prod"].items,
+    ["queued"],
+    "premise: the caller rolled back and the self-call committed",
+  );
+  // Not just "some line mentions the cell" — the REJECTION line does that, and
+  // it is the one that says "no state changed" about a state that changed.
+  const line = lines.find((l) => l.includes("runs although its caller"));
+  assert(
+    line,
+    `production was SILENT about the write that landed:\n${lines.join("\n")}`,
+  );
+  // Both actions by name — a line that names only one is a line you cannot act
+  // on — and at warn, not debug: nobody turns debug on for a bug they have not
+  // noticed yet.
+  assertStringIncludes(line, "self-call-survives-prod:add");
+  assertStringIncludes(line, "self-call-survives-prod:addThenThrow threw");
+  assertStringIncludes(line, "warn");
+  assertStringIncludes(line, "$call");
+});

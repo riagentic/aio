@@ -71,7 +71,7 @@ export type BriefSnippet = {
   readonly run?: boolean;
 };
 
-import type { Target, Template } from "./am-help-text.ts";
+import { BRIEF_TARGETS, BRIEF_TEMPLATES } from "./am-help-text.ts";
 import { DEFAULT_ENTRY, UI_ENTRY } from "../server/app-files.ts";
 
 /** A snippet as a fenced block headed by its path. */
@@ -481,24 +481,12 @@ export const BRIEF_API: readonly { entry: string; names: readonly string[] }[] =
 
 // ── structured facts (rendered below; the gate checks each against source) ─
 
-/** What each `am create --template=` gives. Typed by the scaffolder's own
- *  union, so a template added there is a compile error here until described. */
-export const BRIEF_TEMPLATES: Readonly<Record<Template, string>> = {
-  counter: "(default) one cell + a counter UI",
-  todo: "a list + a client-scoped view cell + an input form",
-  cli: "one binary: `serve` + commands on aio/cli; no UI; target cli",
-  canvas: "a 2D loop whose decisions are pure functions tested without a GPU",
-  assets: "an `assets` mount (aio.run AND deno.json) + a media/ directory",
-};
-
-/** What each `am create --target=` needs — same exhaustiveness as above. */
-export const BRIEF_TARGETS: Readonly<Record<Target, string>> = {
-  browser: "(default) no toolchain",
-  electron: "auto-installs Electron",
-  android: "Android SDK + Java 17 + gradle",
-  cli: "headless binary",
-  server: "headless server + systemd unit",
-};
+/** What each `am create --template=` gives, and what each `--target=` needs —
+ *  RE-EXPORTED from `am-help-text.ts`, where they live beside the lists they
+ *  describe. The brief and `am create --help` answer the same question, so one
+ *  of them holding its own copy is a drift waiting to happen: the help used to
+ *  print the five template names bare while this page explained them. */
+export { BRIEF_TARGETS, BRIEF_TEMPLATES };
 
 /** Every `cell()` option. `keys` are real `MethodsCellConfig` keys — the gate
  *  type-checks them AND fails when a key exists that no row covers. */
@@ -529,14 +517,17 @@ export const BRIEF_CELL_OPTIONS: readonly {
   {
     keys: ["visible"],
     text:
-      'READ side: "all" (default) | "none" | { include | exclude, forUser: (s, u) => view,\n' +
-      "publicFields: [...] } — hidden fields never reach clients; reading one there THROWS",
+      'READ side ONLY: "all" (default) | "none" | { include | exclude, forUser: (s, u) => view,\n' +
+      "publicFields: [...] } — hidden fields never reach clients; reading one there THROWS.\n" +
+      'gates NO calls: a visible:"none" cell still answers every method any client dispatches —\n' +
+      "that is `access`",
   },
   {
     keys: ["access"],
     text:
-      'CALL side: true (any authed user) | "role" | (user, method, ...args) => bool\n' +
-      'absent = open; server-origin calls bypass; denied → errorCode(e) === "ACCESS_DENIED"',
+      'CALL side ONLY: true (any authed user) | "role" | (user, method, ...args) => bool\n' +
+      'absent = open; server-origin calls bypass; denied → errorCode(e) === "ACCESS_DENIED".\n' +
+      "hides NO state: that is `visible` — neither key implies the other, declare both",
   },
   {
     keys: ["args"],
@@ -664,6 +655,7 @@ export const BRIEF_RUN_KEYS: readonly {
       "wsLimits",
       "maxConnections",
       "childWindows",
+      "electron { requireSandbox, unsandboxedChildWindows }",
     ],
   },
   { group: "ui", keys: ["ui (below)"] },
@@ -807,7 +799,8 @@ Break one = damage, or an hour lost.
 6. **State = \`type\` alias, NEVER \`interface\`** (aiol names the fix). The cell IS its state:
    notes.items, notes.open() — NO: notes.state.items · notes.selectors.open().
 7. **Repair verbs:** am doctor = running vs disk (→ am restart) · deno task doctor = config ·
-   am fix = clone repair · am link = symlink · am migrate = retired APIs (aiol --safe-fix).`;
+   am fix = clone repair · am link = symlink · am migrate = retired APIs (aiol --safe-fix) ·
+   am prune = Electron runtimes no app has launched in N days (reports; --yes deletes).`;
 
 const MODEL = `## MODEL — one cell drives everything
 
@@ -1179,7 +1172,8 @@ inspect  am logs [substr] [--level=warn] [--tag=cell:notes] [--since=15m] [--lin
          am testgen [entry] [--out=F]
 project  am create <name> · am add cell <n> · am add server <n> · am build [targets…] [--list] ·
          am compile [target] · am publish [--channel=C] [--notes=…] · am pin [<v>|latest|main] ·
-         am fix (repair a clone) · am link · am theme adopt [--force] · am upgrade · am feedback
+         am fix (repair a clone) · am link · am prune [--days=N] [--keep=<v>] [--yes] ·
+         am theme adopt [--force] · am upgrade · am feedback
          [app] [--create] · am report · am agent [--task=<slug>] [--list] [--min] [--max]
 net/auth am auth users|create <id> --role=admin|passwd|unlock|totp <id> off|role|verify|revoke|rm ·
          am pair · am profile [--out=F] · am trust · am discover [--timeout=ms]
@@ -1455,7 +1449,8 @@ ${
   }
 
 - **also** aio/log (log as a leaf) · aio/db (DB types only) · aio/updates (updates cell) ·
-  aio/feedback · aio/build · aio/air/compat (useState/useEffect for React migration only)
+  aio/feedback · aio/build · aio/air/compat (the SAME hooks as aio/air — a second
+  spelling of the path, for a codebase already importing them from one place)
 - **rule** server-only VALUES (createDB, connectCli, openBlobStore…) never from a module the UI
   imports; types are fine anywhere (erased)`;
 

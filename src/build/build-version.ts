@@ -24,6 +24,7 @@ export {
   parseDeclaredVersion,
   readBuildStamp,
   readTreeFacts,
+  type ReleaseStage,
   resolveBuildVersion,
   resolveRuntimeVersion,
   stripVersionToken,

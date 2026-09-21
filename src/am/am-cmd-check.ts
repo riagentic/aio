@@ -93,11 +93,34 @@ export async function cmdCheck(
     return;
   }
 
+  // The app's OWN map, read once and used TWICE: as the input the browser map
+  // is derived from, and — passed through to the walk — as the map DENO uses.
+  // They differ (the browser map injects `aio`, `aio/ui`, … unconditionally),
+  // and that difference is how this command printed "client graph OK" for an
+  // app whose `deno run src/app.ts` dies on `Import "aio" not a dependency`.
+  //
+  // `null` — no `deno.json`/`deno.jsonc` readable anywhere — is NOT `{}`. The
+  // two were the same value, so "I could not read the config" was reported as
+  // "this app declares no aio imports" and `am check` exited 1 with three
+  // fabricated blocking errors against an app `deno check` exits 0 on. The
+  // gate is skipped in that case (`appImports` is omittable by design) and the
+  // skip is SAID, in every mode and on stderr: a gate that looked at nothing
+  // must never be indistinguishable from a gate that looked and was happy.
+  const appImports = readAppDenoImports(baseDir);
+  if (appImports === null) {
+    console.error(
+      `warning: am check: no deno.json or deno.jsonc readable for ${baseDir} —\n` +
+        `  the deno.json import check was SKIPPED (the client graph below was\n` +
+        `  still walked). Deno resolves this app through some config; run\n` +
+        `  \`am check\` from the directory that holds it to gate on it too.`,
+    );
+  }
+
   let graph;
   try {
     graph = await validateGraph(
       entry,
-      buildBrowserImportMap(readAppDenoImports(baseDir), {
+      buildBrowserImportMap(appImports ?? {}, {
         vendorImmer: hasVendorImmer(),
       }),
       (s, f) => transpile(s, f),
@@ -109,6 +132,8 @@ export async function cmdCheck(
         absBaseDir: baseDir,
         uiEntry: relative(baseDir, entry),
       }),
+      // Omitted ⇒ the deno-import gate does not run. See above.
+      appImports === null ? undefined : { appImports },
     );
   } catch (e) {
     outError(

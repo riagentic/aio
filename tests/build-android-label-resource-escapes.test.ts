@@ -76,6 +76,10 @@ async function aapt2Label(title: string, dir: string): Promise<string | null> {
       "{{CLEARTEXT_ATTR}}": _cleartextAttr(
         { remote: false } as Parameters<typeof _cleartextAttr>[0],
       ),
+      // The camera declaration is opt-in (build-android.ts `_cameraPermission`)
+      // — filled here so no placeholder reaches aapt2 verbatim. The camera's
+      // own two shapes are linked in tests/build-android-camera.test.ts.
+      "{{CAMERA_PERMISSION}}": "",
     },
   )
     // The AppCompat theme lives in a library this link does not have; the

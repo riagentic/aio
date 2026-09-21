@@ -23,7 +23,7 @@ function _ensureTTSub(): void {
 /**
  * Signal-based hook exposing the time-travel debugger: action history plus
  * undo/redo/goto/pause controls. Returns `null` until time travel is active.
- */
+ *  @tier Advanced */
 export function useTimeTravel(): {
   entries: { id: number; type: string; ts: number }[];
   index: number;

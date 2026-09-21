@@ -348,6 +348,10 @@ export interface ShutdownRefs {
   onStopping: (() => void | Promise<void>) | undefined;
   onStop: (() => void | Promise<void>) | undefined;
   appLock: { release: () => void } | null;
+  /** This app's hold on the process-wide SIGXFSZ guard (`holdFileSizeGuard`).
+   *  Refcounted, so releasing it here cannot un-protect a sibling app (D2)
+   *  that is still running in this process. */
+  releaseFileSizeGuard?: () => void;
   scheduleManager: { cancelAll: () => void };
   ownManager: { disposeAll: () => void };
   dispatch: { close: () => void; drain: (timeoutMs?: number) => Promise<void> };
@@ -511,6 +515,10 @@ export function createShutdownOrchestrator(
     }
 
     // Phase 7: Subsystem cleanup
+    // The file-size guard goes AFTER the final persist (phase 4) — a write
+    // past `ulimit -f` during shutdown must still be EFBIG, not a signal that
+    // kills the process mid-flush.
+    refs.releaseFileSizeGuard?.();
     await phase(
       log,
       "schedules",

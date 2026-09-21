@@ -7,8 +7,9 @@
 // now watch the launcher's pid (handed over as AIO_PARENT_PID) and quit when
 // it is gone; the launcher passes it. Pinned here on the generated source, so
 // no window has to open on anybody's desktop to prove it.
-import { assert, assertStringIncludes } from "@std/assert";
+import { assert, assertEquals } from "@std/assert";
 import { electronMainScript } from "../src/electron/electron-scripts.ts";
+import { electronChildEnv } from "../src/electron/electron-spawn.ts";
 import { electronMainScriptUDS } from "../src/electron/electron-uds.ts";
 
 const WATCH =
@@ -32,11 +33,19 @@ Deno.test("electron: the UDS shell watches its parent and quits when it is gone"
   assert(WATCH.test(src), "parent watch missing from the UDS main script");
 });
 
-Deno.test("electron: the launcher hands its pid to the window", async () => {
-  // A source gate, like the other window-hygiene gates: the spawn site must
-  // set AIO_PARENT_PID, or the watch above is armed with nothing.
-  const src = await Deno.readTextFile(
-    new URL("../src/electron/electron-spawn.ts", import.meta.url),
+Deno.test("electron: the launcher hands its pid to the window", () => {
+  // This used to grep electron-spawn.ts for the literal
+  // `AIO_PARENT_PID: String(Deno.pid)`, which broke the moment the child's
+  // environment moved into a function — while the behaviour it cares about
+  // was unchanged. A source grep pins the SPELLING, not the fact. The fact is
+  // now a pure function, so ask it: whatever else the environment carries, the
+  // parent pid is in it, or the watch above is armed with nothing.
+  const { env } = electronChildEnv(31337, () => undefined);
+  assertEquals(env.AIO_PARENT_PID, "31337");
+  // …and it survives beside the variables that DO get stripped.
+  const hijacked = electronChildEnv(
+    31337,
+    (k) => k === "ELECTRON_RUN_AS_NODE" ? "1" : undefined,
   );
-  assertStringIncludes(src, "AIO_PARENT_PID: String(Deno.pid)");
+  assertEquals(hijacked.env.AIO_PARENT_PID, "31337");
 });

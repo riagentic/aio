@@ -159,6 +159,26 @@ const cellFile = (name: string, body: string) =>
 type Case = { name: string; files: Record<string, string>; expect: string };
 
 const VIOLATIONS: Case[] = [
+  // A body-level `onCleanup` tearing down something the body did NOT make.
+  // The gallery case from the field report: `slot` comes from a ref, so the
+  // next repaint hands the queue place back and nothing takes another — 85 of
+  // 89 cards cancelled, silently. `tests/aiol-body-cleanup-teardown.test.ts`
+  // holds the full set, including the shapes the rule must stay quiet about;
+  // this one is here because THIS gate is what proves the rule can fire at
+  // all.
+  {
+    name: "a body onCleanup releasing what the body did not create",
+    files: app({
+      "src/NftThumb.tsx": `import { onCleanup, useRef } from "aio/air";
+export function NftThumb({ id }: { id: string }) {
+  const slot = useRef(queue.take(id));
+  onCleanup(() => slot.current.release());
+  return <img src={id} />;
+}
+`,
+    }),
+    expect: "EVERY re-render",
+  },
   // The class-name collision: `.track` in two stylesheets, disagreeing about
   // `overflow`. The reported bug clipped every music row to one line with no
   // error, a correct DOM and a correct component tree — the later rule simply

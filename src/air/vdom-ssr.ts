@@ -18,11 +18,21 @@ import {
 } from "./ssr-utils.ts";
 import { isDevMode } from "../state/dev-flag.ts";
 import {
+  _assertAttrName,
   _classProp,
   _propAttr,
   _RESERVED_PROPS,
   _STRING_FALSE_ATTRS,
 } from "./prop-write.ts";
+import {
+  _ssrRenderEnter,
+  _ssrRenderFinish,
+  _ssrRenderNew,
+  _ssrRenderOf,
+  _ssrRenderStart,
+  SSR_RENDER_KEY,
+  type SsrRender,
+} from "./ssr-render.ts";
 import type { Signal } from "../state/signal.ts";
 import type { ComponentFn, VNode } from "./vdom-types.ts";
 import {
@@ -38,19 +48,12 @@ import {
 import { _notANode } from "./vdom-create.ts";
 import { _sigText } from "./vdom-helpers.ts";
 
-// ── SSR start hook ─────────────────────────────────────────────────
-
-/** Hook called at the start of top-level renderToString/renderToStream (for resetting useId counter etc). */
-let _onSsrStart: (() => void) | null = null;
-
-export function _setSsrStartHook(fn: (() => void) | null): void {
-  _onSsrStart = fn;
-}
-
-/** Invoke the SSR start hook (AIO-191: used by renderToStream). */
-export function _invokeSsrStartHook(): void {
-  if (_onSsrStart) _onSsrStart();
-}
+// The SSR start hook that used to live here is gone. It existed to RESET the
+// module-level id counter, `<head>` list and `<select>` stack at the start of
+// every top-level render — which is the same thing as saying those three were
+// shared by every render at once, and resetting them is what made two
+// concurrent streams corrupt each other (see ssr-render.ts). Each render owns
+// them now, so there is nothing to reset and nothing to forget.
 
 // ── Attribute serialization — the ONE decider both SSR writers use ────
 
@@ -128,6 +131,12 @@ export function _renderPropsHtml(
     const mapped = _propAttr(tag ?? "", k);
     if (mapped === null) continue;
     const name = mapped ?? k;
+    // A name the DOM would refuse. `setAttribute` throws
+    // `InvalidCharacterError` for it on the client, while SSR used to paste it
+    // into the tag verbatim — so `{...{"x onload=alert(1)": 1}}` shipped
+    // `<div x onload=alert(1)="1">`, an event handler an HTML parser reads and
+    // runs. ONE decider, shared with `_writeProp`: see `_assertAttrName`.
+    _assertAttrName(attrNameOf(name), tag ?? "");
     // AIO-109: resolve signals to current value for SSR
     const v = resolveSignalProp(rawV);
 
@@ -308,11 +317,17 @@ export function _ssrScoped<T>(
   const prev = _ssrCall;
   const call = { visible, provided: null as Map<symbol, unknown> | null };
   _ssrCall = call;
+  // …and say WHICH render is executing, for the same synchronous span. The
+  // hooks (`useId`, `useHead`) run in a component body and nowhere else, so
+  // this is the only moment they need an answer — and no `yield` can happen
+  // inside it, which is what keeps one global honest under concurrency.
+  const prevRender = _ssrRenderEnter(_ssrRenderOf(visible));
   let out: T;
   try {
     out = fn();
   } finally {
     _ssrCall = prev;
+    _ssrRenderEnter(prevRender);
   }
   const provided = call.provided;
   if (provided === null) return { out, scope: visible };
@@ -355,13 +370,19 @@ export function _registerSsrCapture(id: symbol, read: () => unknown): void {
 }
 
 /** @internal The scope a top-level writer starts in: the request snapshots
- *  (see `_ssrCaptures`) — or, for a render nested inside a server component
- *  call, what that call sees. */
-export function _ssrRootScope(): SsrContexts {
+ *  (see `_ssrCaptures`) plus `render`, the state this render owns — or, for a
+ *  render nested inside a server component call, what that call sees, WITH the
+ *  enclosing render's state. A `renderToString` inside a streamed component is
+ *  part of that page: one id sequence, one `<head>`.
+ *
+ *  The caller can therefore tell top-level from nested by asking whether the
+ *  scope came back carrying the render it offered — one question, one answer,
+ *  instead of a second depth counter that could disagree with this one. */
+export function _ssrRootScope(render: SsrRender): SsrContexts {
   if (_ssrCall) return _ssrCall.visible;
-  if (_ssrCaptures.size === 0) return null;
   const scope = new Map<symbol, unknown>();
   for (const [id, read] of _ssrCaptures) scope.set(id, read());
+  scope.set(SSR_RENDER_KEY, render);
   return scope;
 }
 
@@ -369,15 +390,20 @@ export function _ssrRootScope(): SsrContexts {
 export function renderToString(
   vnode: VNode | string | number | null,
 ): string {
-  // Use local depth tracking instead of module-level global.
-  // Each top-level call resets state — safe for concurrent SSR requests.
-  const isTopLevel = _ssrDepth === 0;
-  if (isTopLevel && _onSsrStart) _onSsrStart();
+  // Every top-level call renders into state of its OWN — the id sequence, the
+  // <head> and the <select> stack — so a render that overlaps another (this
+  // one called from inside a streamed component, or from a request handler
+  // while a stream is mid-flight) can neither read nor reset the other's.
+  const render = _ssrRenderNew("string");
+  const scope = _ssrRootScope(render);
+  const isTopLevel = _ssrRenderOf(scope) === render;
+  if (isTopLevel) _ssrRenderStart(render);
   _ssrDepth++;
   try {
-    return _rts(vnode, { n: 0 }, _ssrRootScope());
+    return _rts(vnode, { n: 0 }, scope);
   } finally {
     _ssrDepth--;
+    if (isTopLevel) _ssrRenderFinish(render);
   }
 }
 
@@ -478,7 +504,14 @@ function _rts(
   const ownValue = resolveSignalProp(
     vnode.props.value ?? vnode.props.defaultValue,
   );
-  const props = ssrOptionProps(tag, vnode.props, vnode.children, ownValue);
+  const render = _ssrRenderOf(scope);
+  const props = ssrOptionProps(
+    render,
+    tag,
+    vnode.props,
+    vnode.children,
+    ownValue,
+  );
   let html = `<${tag}${_renderPropsHtml(props, tag)}`;
 
   html += ">";
@@ -486,7 +519,7 @@ function _rts(
 
   // Raw html owns the content (see _hasRawHtml); the children are not emitted.
   const areaText = _ssrTextareaText(vnode);
-  const inSelect = ssrOpenSelect(tag, ownValue);
+  const inSelect = ssrOpenSelect(render, tag, ownValue);
   try {
     if (_hasRawHtml(vnode.props)) {
       html += (vnode.props.dangerouslySetInnerHTML as { __html: string })
@@ -514,7 +547,7 @@ function _rts(
     // A Suspense boundary inside a <select> throws to signal "pending", and
     // that throw is caught ABOVE this frame — without the finally the scope
     // would stay open and mark options in a later, unrelated element.
-    ssrCloseSelect(inSelect);
+    ssrCloseSelect(render, inSelect);
   }
 
   html += `</${tag}>`;

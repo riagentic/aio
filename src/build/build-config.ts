@@ -130,6 +130,12 @@ export interface BuildConfig {
    *  identity. Undefined means "derive it" (`app.aio.<name>`), which is aio's
    *  namespace and therefore unpublishable under someone else's name. */
   androidApplicationId: string | undefined;
+  /** deno.json `android.camera` — does this APK declare CAMERA? Opt-in,
+   *  default off: the permission used to be in every manifest, so every aio
+   *  app asked its user for the camera and Play flagged it. See
+   *  `_cameraPermission` in build-android.ts for the other half (the WebView
+   *  says which key to add when a page asks for a camera it cannot have). */
+  androidCamera: boolean;
   /** True when `configEntry` came from `--entry=` rather than deno.json — so an
    *  error can blame the place the value ACTUALLY came from. */
   entryFromFlag: boolean;
@@ -237,6 +243,21 @@ function assertKnownFlags(args: readonly string[]): void {
  *  unknown flag, two shell targets at once, a `--service` with nothing to
  *  serve. A worse message for the same mistake is a regression even when the
  *  exit code is identical. */
+/** deno.json `android.camera`, validated.
+ *
+ *  Absent → `false` (the CAMERA permission is OPT-IN since 1.0.7-beta; it used
+ *  to be in every manifest). A boolean → itself. Anything else → `null`, which
+ *  the caller refuses BY NAME rather than coercing — the two coercions that
+ *  matter here both ship a wrong APK silently: `"false"` is truthy (an app
+ *  asking for a camera it said no to) and `"yes"` is not a boolean at all (a
+ *  QR scanner that is simply dead on the phone). Checked on EVERY build, not
+ *  only an android one, so a typo cannot wait for the target that reads it.
+ *  Pure. */
+export function _androidCamera(raw: unknown): boolean | null {
+  if (raw === undefined) return false;
+  return typeof raw === "boolean" ? raw : null;
+}
+
 export function refuseBadBuildArgs(args: readonly string[]): void {
   assertKnownFlags(args);
   // Two shell targets in one build: the second would silently win.
@@ -404,9 +425,25 @@ export async function loadBuildConfig(): Promise<BuildConfig> {
   // made them two, and an app that set `appId` changed data directories the
   // moment it was compiled.
 
-  const androidApplicationId =
-    (mainConfig.android as { applicationId?: string } | undefined)
-      ?.applicationId;
+  const androidCfg = mainConfig.android as
+    | { applicationId?: string; camera?: unknown }
+    | undefined;
+  const androidApplicationId = androidCfg?.applicationId;
+  // `android.camera` — opt-in, and CHECKED ON EVERY BUILD, not only an android
+  // one: a key validated only when it fires is a typo that ships. A
+  // non-boolean is refused rather than coerced, because the coercion that
+  // matters here is `"false"` → true (an APK asking for the camera it was told
+  // not to) and `"yes"` → false (a QR scanner that is simply dead on the
+  // phone, with the deny arriving as a bare NotAllowedError in the page).
+  const androidCamera = _androidCamera(androidCfg?.camera);
+  if (androidCamera === null) {
+    console.error(
+      `${NO} deno.json android.camera must be true or false, not ${
+        JSON.stringify(androidCfg?.camera)
+      } — it decides whether the APK declares android.permission.CAMERA`,
+    );
+    Deno.exit(1);
+  }
   const androidDevUrl = Deno.args.find((a) =>
     a.startsWith("--android-dev-url=")
   )?.slice("--android-dev-url=".length);
@@ -474,6 +511,7 @@ export async function loadBuildConfig(): Promise<BuildConfig> {
     doHeadless,
     androidDevUrl,
     androidApplicationId,
+    androidCamera,
     allowServerOnly: Deno.args.includes("--allow-server-only"),
     entryFromFlag: entryArg !== undefined,
     bakedServer: bakedServerUrl(

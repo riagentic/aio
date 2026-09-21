@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "purpose": "Lane A (fast) = seconds on every edit. Lane B (seam) = harness≠wire, prod-parity, hunter seeds. Lane C = full/nightly. Full `deno task test` stays the release gate.",
+  "purpose": "Lane A (fast) = seconds on every edit. Lane B (seam) = harness\u2260wire, prod-parity, hunter seeds. Lane C = full/nightly. Full `deno task test` stays the release gate.",
   "fast": [
     "tests/no-vacuous-tests.test.ts",
     "tests/no-dead-wiring.test.ts",
@@ -52,6 +52,7 @@
     "tests/prod-parity-worker-boundary.test.ts",
     "tests/proxy-differential.test.ts",
     "tests/renderer-differential.test.ts",
+    "tests/report-visible-differential.test.ts",
     "tests/return-value-transport.test.ts",
     "tests/seam-method-differential.test.ts",
     "tests/seam-paths.test.ts",
@@ -70,22 +71,22 @@
     {
       "file": "tests/db-state-differential.test.ts",
       "lane": "full",
-      "why": "~28s randomized SQL/array differential — seam-capable but too slow for test:fast; keep in full + optional FUZZ sweep"
+      "why": "~28s randomized SQL/array differential \u2014 seam-capable but too slow for test:fast; keep in full + optional FUZZ sweep"
     },
     {
       "file": "tests/install-deno-version.test.ts",
       "lane": "nightly",
-      "why": "~51s network/version install — not a seam pin"
+      "why": "~51s network/version install \u2014 not a seam pin"
     },
     {
       "file": "tests/cli-client-burst-no-lost-writes.test.ts",
       "lane": "full",
-      "why": "~51s load/burst — Lane B under load, not every edit"
+      "why": "~51s load/burst \u2014 Lane B under load, not every edit"
     },
     {
       "file": "tests/examples.test.ts",
       "lane": "full",
-      "why": "example matrix boots — Lane C-ish; covered by test:build/onboard paths"
+      "why": "example matrix boots \u2014 Lane C-ish; covered by test:build/onboard paths"
     },
     {
       "file": "tests/examples-boot.test.ts",
@@ -100,7 +101,7 @@
     {
       "file": "tests/e2e-bundle-smoke.test.ts",
       "lane": "nightly",
-      "why": "bundle smoke — test:e2e / matrix"
+      "why": "bundle smoke \u2014 test:e2e / matrix"
     },
     {
       "file": "tests/onboarding-e2e.test.ts",
@@ -120,7 +121,7 @@
     {
       "file": "tests/cron-differential-fuzz.test.ts",
       "lane": "full",
-      "why": "randomized cron differential — keep in full; not required on every edit"
+      "why": "randomized cron differential \u2014 keep in full; not required on every edit"
     }
   ],
   "budget": {

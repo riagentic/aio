@@ -5,6 +5,7 @@ import type { AioError } from "../diagnostics/error.ts";
 import { createAioError } from "../diagnostics/error.ts";
 import type { CellDef, Msg, ScopedApp } from "./cell-types.ts";
 import { tagSource } from "./cell-types.ts";
+import { inServerOrigin } from "./call-origin.ts";
 import type { CellStatus, CircuitBreakerConfig } from "./cell-compose-types.ts";
 
 export type Registry = {
@@ -136,7 +137,9 @@ export function buildRegistry(
         if (f.__aio.onInit) {
           const scopedApp = makeScopedApp(f, app, reportError);
           try {
-            f.__aio.onInit(scopedApp, f.__aio.state);
+            // `onInit` is server code (it runs at boot, before any client
+            // exists) — see call-origin.ts.
+            inServerOrigin(() => f.__aio.onInit!(scopedApp, f.__aio.state));
           } catch (e) {
             if (reportError) {
               reportError(
@@ -258,7 +261,8 @@ export function initAll(
         getFullState: () => app.getState() as Record<string, unknown>,
       };
       try {
-        f.__aio.onInit(scopedApp, f.__aio.state);
+        // Server code, exactly as above — see call-origin.ts.
+        inServerOrigin(() => f.__aio.onInit!(scopedApp, f.__aio.state));
       } catch (e) {
         if (reportError) {
           reportError(

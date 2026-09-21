@@ -26,6 +26,7 @@ import {
   SEPARATOR,
 } from "@std/path";
 import { slugify } from "./build/build-helpers.ts";
+import { emptyDir, moveDirContents } from "./build/dist-staging.ts";
 import {
   flagVocabulary,
   FLEET_BOOL_FLAGS,
@@ -1134,11 +1135,29 @@ export async function buildAll(): Promise<number> {
   // fleet run reported "no artifacts produced — leaving dist/ untouched".
   // Preserved here, restored on that path, discarded with `staging` otherwise.
   const preservedOut = join(staging, "previous-out");
+  // Its CONTENTS move, never the directory: `out` is typically `dist/`, which
+  // a lab VM bind-mounts and serves to its guest, and a bind mount follows the
+  // inode. Renaming the directory aside gave the guest an empty share for the
+  // life of the lab while every host-side reading stayed correct — see
+  // `emptyDir` in src/build/dist-staging.ts.
   let preserved = false;
   try {
-    await Deno.rename(outDir, preservedOut);
-    preserved = true;
-  } catch { /* nothing there yet, or not movable — nothing to protect */ }
+    preserved = await moveDirContents(outDir, preservedOut);
+  } catch (e) {
+    // SAID, not swallowed. The previous release stays where it is (the move
+    // rolls itself back), but the per-target builds treat `out` as scratch and
+    // will empty it — so this is the moment the last good release stops being
+    // recoverable, and a build that fails after it used to report "the
+    // previous dist/ is intact" when it no longer was.
+    console.warn(
+      `${C.yellow}! could not move the previous ${
+        outDir.replace(root + SEPARATOR, "")
+      }/ aside${C.r} — ${
+        e instanceof Error ? e.message : String(e)
+      }. It is still there and still intact, but this build will overwrite it: ` +
+        `if it fails, there is no release to put back.`,
+    );
+  }
 
   console.log(
     `${C.b}Building ${
@@ -1325,8 +1344,8 @@ export async function buildAll(): Promise<number> {
       // have been scribbling in `out` (that is why it was moved aside), so the
       // directory standing there now is intermediate rubbish, not a release.
       if (preserved) {
-        await Deno.remove(outDir, { recursive: true }).catch(() => {});
-        await Deno.rename(preservedOut, outDir);
+        await emptyDir(outDir);
+        await moveDirContents(preservedOut, outDir);
       }
       // Distinguish "everything was refused" from "everything failed" — a
       // build that skipped every combination is a REQUEST problem (asking for
@@ -1365,7 +1384,7 @@ export async function buildAll(): Promise<number> {
     const previousTargets = preserved
       ? await manifestTargetNames(join(preservedOut, "manifest.json"))
       : [];
-    await Deno.remove(outDir, { recursive: true }).catch(() => {});
+    await emptyDir(outDir);
     await Deno.mkdir(outDir, { recursive: true });
     // Same rule the build itself used for `targetBin` — a per-target `name`,
     // else the project's title.

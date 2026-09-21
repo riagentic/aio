@@ -188,9 +188,12 @@ Deno.test("bundle refusal: no exit inside the rebuild window skips the discard",
     "the rebuild window moved — re-anchor this gate",
   );
   const before = src.slice(start, from);
-  const cleaned = before.indexOf(
-    "await Deno.remove(dist, { recursive: true })",
-  );
+  // The clean itself, by the call that performs it. It is `emptyDir(dist)`
+  // since 1.0.7-beta — the directory is EMPTIED rather than replaced, so a
+  // bind mount or a watcher holding it survives a rebuild — and this gate is
+  // about WHERE the clean happens, never about how it is spelled. Anchoring
+  // on the old spelling is how a gate stops being able to fire.
+  const cleaned = before.indexOf("await emptyDir(dist)");
   const firstExit = before.search(/Deno\.exit\(/);
   assert(
     cleaned > 0 && (firstExit < 0 || firstExit > cleaned),

@@ -70,7 +70,7 @@ export async function smoke(
       `smoke: no UI entry at ${entry} — pass { baseDir, ui: { entry } } pointing at the app's client entry`,
     );
   }
-  const importMap = buildBrowserImportMap(readAppDenoImports(baseDir), {
+  const importMap = buildBrowserImportMap(readAppDenoImports(baseDir) ?? {}, {
     vendorImmer: hasVendorImmer(),
   });
   const graph = await validateGraph(

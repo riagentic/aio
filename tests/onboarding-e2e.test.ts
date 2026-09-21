@@ -11,6 +11,7 @@
 
 import { assert, assertEquals, assertStringIncludes } from "@std/assert";
 import { join } from "@std/path";
+import { TEMPLATES } from "../src/am/am-help-text.ts";
 import {
   findGradle,
   findJdk,
@@ -102,17 +103,32 @@ Deno.test({
 
 // ── 2. am create → check + starter test (per template) ───────────────────────
 
-for (const tpl of ["counter", "todo"] as const) {
+// TEMPLATES, not a hand-kept pair. The pair was written when there were two;
+// `cli`, `canvas` and `assets` arrived later and each scaffolded a starter
+// test that NOTHING ever ran — a template can ship broken and the gate that
+// exists to catch exactly that stays green. Reading the one list means the
+// next template is covered by existing, not by remembering.
+for (const tpl of TEMPLATES) {
   Deno.test({
     name: `create: ${tpl} type-checks + starter test passes`,
     ignore: !GATE,
     fn: async () => {
       const dir = await makeApp(tpl);
       try {
+        // `cli` has no UI: its app.ts IS the client, so there is no App.tsx to
+        // check. Asked of the scaffolded tree rather than of a list of which
+        // templates have one — the tree is the fact.
+        const hasUI = await Deno.stat(join(dir, "src/App.tsx"))
+          .then(() => true, () => false);
         const chk = await new Deno.Command("deno", {
           // `tests/`, at the project root — the alpha61 one-answer for where
           // tests go (the scaffold moved with the docs and the quickstart).
-          args: ["check", "src/app.ts", "src/App.tsx", "tests/cell.test.ts"],
+          args: [
+            "check",
+            "src/app.ts",
+            ...(hasUI ? ["src/App.tsx"] : []),
+            "tests/cell.test.ts",
+          ],
           cwd: dir,
           stdout: "null",
           stderr: "piped",

@@ -35,7 +35,7 @@
  *
  *  To lower it: delete a bare `[aio] ` (the column already says it), or move a
  *  `[aio:<tag>] ` into the category argument — `log.warn("<tag>", "…")`. */
-const CEILING = 55;
+const CEILING = 54;
 
 const ROOT = new URL("../src/", import.meta.url).pathname;
 

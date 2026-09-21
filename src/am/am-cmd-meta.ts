@@ -5,7 +5,7 @@
 
 import { VERSION } from "../server/aio.ts";
 import { DEFAULT_ENTRY } from "../server/app-files.ts";
-import { HELP_TEXT } from "./am-help-text.ts";
+import { EVERYDAY, HELP_TEXT } from "./am-help-text.ts";
 import type { GlobalFlags } from "./am-types.ts";
 import {
   detectMode,
@@ -477,7 +477,11 @@ export function helpBlock(text: string, cmd: string): string | null {
  *  the reader had found the verb they wanted. The full entry is one keystroke
  *  away (`am help <cmd>`) and the whole text is still one flag away
  *  (`am help --all`); what the bare command owes you is the LIST. */
-export function helpSummary(text: string, st: Style = style): string {
+export function helpSummary(
+  text: string,
+  st: Style = style,
+  only?: readonly string[],
+): string {
   const out: string[] = [];
   const entries: { head: string; sig: string; desc: string }[] = [];
   let head = "";
@@ -527,6 +531,24 @@ export function helpSummary(text: string, st: Style = style): string {
       // reads as a truncation bug rather than as a summary.
       entries.at(-1)!.desc += " " + line.trim();
     }
+  }
+  // The one-screen tier: the named verbs, and for each of them only its BASE
+  // row. A verb's flag variants (`dev --cdp`, `stop --all`, four `dispatch`
+  // forms) are entries of their own in the text — right for `am help <verb>`,
+  // and the reason one line per command still came to 120 rows. First row per
+  // verb wins because the text lists the plain form first.
+  if (only) {
+    const want = new Set(only);
+    const seen = new Set<string>();
+    const kept: typeof entries = [];
+    for (const e of entries) {
+      const verb = /^\S+/.exec(e.sig)?.[0] ?? "";
+      if (!want.has(verb) || seen.has(verb)) continue;
+      seen.add(verb);
+      kept.push(e);
+    }
+    entries.length = 0;
+    entries.push(...kept);
   }
   // First sentence, then a hard cap: a one-line row is a label, not the prose.
   for (const e of entries) {
@@ -615,10 +637,22 @@ export function helpCommandText(text: string): string {
 }
 
 /** The FLAGS half: the `--json` contract and the global flags, which every
- *  verb takes and which the summary therefore has to keep. Pure. */
-export function helpTail(text: string): string {
+ *  verb takes and which the summary therefore has to keep.
+ *
+ *  `brief` drops the paragraphs that EXPLAIN one flag (`--app:`, `--home:`,
+ *  `--timeout:` …) and keeps the ones that apply to everything: the agent
+ *  note, the `--json` contract, and the `Flags:` line that names them all.
+ *  Those paragraphs are eight lines of the one-screen tier and each is about a
+ *  single flag, which is what `am help <command>` and `--all` are for. Pure. */
+export function helpTail(text: string, brief = false): string {
   const i = tailIndex(text);
-  return i < 0 ? "" : text.split("\n").slice(i).join("\n").trim();
+  if (i < 0) return "";
+  const tail = text.split("\n").slice(i).join("\n").trim();
+  if (!brief) return tail;
+  return tail
+    .split("\n\n")
+    .filter((p) => !/^--(?!json\b)[a-z-]+:/.test(p))
+    .join("\n\n");
 }
 
 export function cmdHelp(
@@ -649,10 +683,18 @@ export function cmdHelp(
       );
       Deno.exit(1);
     }
+    // `everyday` is ADDITIVE and always present: `commands` stays the full 71
+    // (a script asking "does this verb exist?" must not start getting "no"),
+    // and the tier a reader is shown is named rather than left to be guessed
+    // from a line count.
     out(
       flags.all === true
-        ? { commands: commandKeys, help: HELP_TEXT }
-        : { commands: commandKeys, flags: helpTail(HELP_TEXT) },
+        ? { commands: commandKeys, everyday: EVERYDAY, help: HELP_TEXT }
+        : {
+          commands: commandKeys,
+          everyday: EVERYDAY,
+          flags: helpTail(HELP_TEXT),
+        },
       "json",
     );
     return;
@@ -682,14 +724,27 @@ export function cmdHelp(
   // here made `am help --all` silently print the summary — the one form whose
   // entire job is to print the opposite.
   const full = flags.all === true;
+  // Three tiers, one text. Bare: the everyday verbs, one screen. `--commands`:
+  // one line for all 71 — the tier the old bare output WAS, kept because a
+  // flat list is how you find the verb whose name you half-remember. `--all`:
+  // the prose, every flag of every command.
+  const listAll = !full && args.includes("--commands");
   console.log(stack(
     heading("am", VERSION, "the aio app manager"),
-    full ? HELP_TEXT : helpSummary(HELP_TEXT),
-    full ? "" : helpTail(HELP_TEXT),
-    hints([
-      ["am help <command>", "everything that command accepts"],
-      ["am help --all", "every command, in full"],
-    ]),
+    full
+      ? HELP_TEXT
+      : helpSummary(HELP_TEXT, style, listAll ? undefined : EVERYDAY),
+    full ? "" : helpTail(HELP_TEXT, !listAll),
+    hints(
+      full ? [["am help <command>", "everything that command accepts"]] : [
+        ["am help <command>", "everything that command accepts"],
+        ...(listAll ? [] : [[
+          "am help --commands",
+          `all ${commandKeys.length} commands, one line each`,
+        ] as [string, string]]),
+        ["am help --all", "every command, in full"],
+      ],
+    ),
   ));
 }
 

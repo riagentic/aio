@@ -25,6 +25,7 @@ import {
   type ScopedApp,
 } from "./cell-types.ts";
 import { resolveSelfAction } from "./self.ts";
+import { inServerOrigin } from "./call-origin.ts";
 import { materializeValue, withDraftDo } from "./cell-impl.ts";
 import { current, type Draft, isDraft } from "immer";
 import { type AioError, createAioError } from "../diagnostics/error.ts";
@@ -595,9 +596,14 @@ export function buildMethodsReducer(
     box.draft = s !== null && typeof s === "object"
       ? withDraftDo(s, doFn, callFns)
       : s;
-    let result: unknown = fn(
-      box.draft as Parameters<SyncMethod<Record<string, unknown>>>[0],
-      ...args,
+    // A method body IS server code: what it calls on another cell bypasses
+    // `access:` exactly as it does over a socket, where a cell→cell call never
+    // reaches the network gate. See call-origin.ts.
+    let result: unknown = inServerOrigin(() =>
+      fn(
+        box.draft as Parameters<SyncMethod<Record<string, unknown>>>[0],
+        ...args,
+      )
     );
     // `return s` must hand back the real draft, not the wrapper (snapshotReturn
     // relies on isDraft) — also when `s` came back from a sibling, which was
@@ -1156,9 +1162,14 @@ export function buildMethodsExecutor(
           callTable,
         );
         ref.proxy = proxy;
-        return (method as AsyncMethod<Record<string, unknown>>)(
-          proxy as Parameters<AsyncMethod<Record<string, unknown>>>[0],
-          ..._args,
+        // Server origin, continuation-local: a sibling called AFTER an await
+        // inside this body is still the server calling itself. See
+        // call-origin.ts.
+        return inServerOrigin(() =>
+          (method as AsyncMethod<Record<string, unknown>>)(
+            proxy as Parameters<AsyncMethod<Record<string, unknown>>>[0],
+            ..._args,
+          )
         )
           .then(async (value) => {
             // Cancelled ⇒ the transaction ABORTS. The spec is explicit

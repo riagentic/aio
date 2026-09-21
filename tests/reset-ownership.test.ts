@@ -44,19 +44,19 @@ const OWNERS: Record<string, [Owner, string]> = {
     "reset clears them beside _resetAioRuntime; a page left mounted by one " +
     "test must not title the next test's document.",
   ],
-  _resetHeadSsr: [
-    "LIFECYCLE",
-    "the entries one top-level renderToString/renderToStream collected; the " +
-    "SSR start hook clears them so one request's head never leaks into the " +
-    "next.",
-  ],
-  _resetSsrSelect: [
-    "LIFECYCLE",
-    "the stack of open <select> scopes, so an option knows which select's " +
-    "value it is being compared against. The SSR start hook clears it for " +
-    "the same reason it clears the head: a render that threw partway (a " +
-    "Suspense boundary signals pending BY throwing) would otherwise leave a " +
-    "scope open and mark options in the next request.",
+  // `_resetHeadSsr` and `_resetSsrSelect` used to be here. They cleared the
+  // collected <head> and the open-<select> stack at the start of every
+  // top-level server render — which is what a module-wide scope shared by
+  // every render needs, and what made two concurrent `renderToStream`s
+  // corrupt each other. Both are per-render state now (air/ssr-render.ts), so
+  // there is nothing to forget and no reset to own.
+  _resetSsrRenders: [
+    "HARNESS",
+    "the server renders themselves — which one a no-argument collectHead() " +
+    "answers for, and which are still live. `_resetHead` calls it, so the " +
+    "harness's head reset covers the server half too: without it a test " +
+    "that rendered nothing could read the PREVIOUS test's page out of " +
+    "collectHead().",
   ],
   _resetCss: [
     "MANUAL",
@@ -182,6 +182,19 @@ const OWNERS: Record<string, [Owner, string]> = {
     "CellsConfig on the way in and the composed AioConfig on the way through, " +
     "so one boot sees every conflict twice. Only a test that asserts the " +
     "reporting half needs to forget it",
+  ],
+  _resetPortSlice: [
+    "MANUAL",
+    "the set of ports freePort() has already issued, plus the round-robin " +
+    "cursor. It must NOT be reset per test — the whole point is that no port " +
+    "is handed to two callers in one PROCESS, and a per-test clear would " +
+    "restore exactly the bug it exists to remove (a shard's slice wraps, and " +
+    "a file that stops its server between tests gets its port handed to " +
+    "another file, which keeps it: `port 20000 already in use`, reading as a " +
+    "product failure). Cross-test bleed is the FEATURE. Only " +
+    "tests/free-port-no-reissue.test.ts calls it, to drive the allocator " +
+    "through slice exhaustion without a 12,000-port loop, and it restores " +
+    "the env it borrowed.",
   ],
   _resetTargetGuess: [
     "MANUAL",

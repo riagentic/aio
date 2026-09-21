@@ -188,6 +188,10 @@ export async function buildAndroid(cfg: BuildConfig): Promise<void> {
         "{{CLEARTEXT_ATTR}}": _cleartextAttr(serverOpts),
         "{{TALKS_TO_SERVER}}": String(talksToServer(serverOpts)),
         "{{IS_CLIENT}}": String(doRemote && !cfg.androidDevUrl),
+        // ONE decider for the camera, spent in both places it has to agree:
+        // the manifest's declaration and the WebView's refusal message.
+        "{{CAMERA_PERMISSION}}": _cameraPermission(cfg.androidCamera),
+        "{{CAMERA_DECLARED}}": String(cfg.androidCamera === true),
       }),
     );
   }
@@ -249,7 +253,7 @@ export async function buildAndroid(cfg: BuildConfig): Promise<void> {
 
 /** Does this APK need to talk to a plaintext `http://` / `ws://` server?
  *
- *  Android blocks cleartext by default from targetSdk 28 (this template is 34),
+ *  Android blocks cleartext by default from targetSdk 28 (this template is 35),
  *  so an APK without this attribute reaches a plain-http server not at all —
  *  `net::ERR_CLEARTEXT_NOT_PERMITTED`, on a target whose whole purpose is
  *  "enter your server's URL". It used to be added by the dev rewrite ALONE, so
@@ -269,6 +273,43 @@ export function _cleartextAttr(
   opts: { devUrl?: string | null; remote?: boolean },
 ): string {
   return talksToServer(opts) ? 'android:usesCleartextTraffic="true"' : "";
+}
+
+/** The manifest's camera declaration — deno.json `android: { "camera": true }`,
+ *  and nothing otherwise.
+ *
+ *  It used to be unconditional, with a comment about QR scanning: EVERY aio
+ *  APK told its user it could use the camera, the install dialog and the app's
+ *  Play listing said so, and the overwhelming majority never opened one. An
+ *  over-permission is not a cosmetic issue — it is the single line a reviewer
+ *  reads before deciding what an app is allowed to do.
+ *
+ *  Deleting it outright would have broken the apps that DO scan a code, in the
+ *  worst available way: `getUserMedia` denied by the OS, the page seeing a bare
+ *  `NotAllowedError`, nothing anywhere saying which permission was missing. So
+ *  the declaration is opt-in and the SAME flag reaches MainActivity.kt
+ *  (`CAMERA_DECLARED`), which logs the exact key to add when a page asks for a
+ *  camera this APK cannot give it. One decider, both halves. Pure.
+ *
+ *  BOTH camera features are declared `required="false"`, and that is measured,
+ *  not assumed: requesting CAMERA makes Android IMPLY
+ *  `uses-feature android.hardware.camera`, REQUIRED, and declaring only
+ *  `camera.any` does not suppress it — `aapt2 dump badging` on a real APK built
+ *  from this template said so
+ *  (`uses-implied-feature … reason='requested android.permission.CAMERA
+ *  permission'`). The template had carried the one-line form with a comment
+ *  promising that "install stays possible on camera-less devices"; it did not.
+ *  tests/build-android-camera.test.ts links both shapes with aapt2. */
+export function _cameraPermission(camera: boolean | undefined): string {
+  if (camera !== true) return "";
+  return '<!-- Camera: opt-in, from deno.json `android: { "camera": true }` —\n' +
+    "       a page that scans QR codes (getUserMedia in the WebView).\n" +
+    "       BOTH features are optional, so the app still installs on a\n" +
+    "       device without a camera: requesting the permission implies a\n" +
+    "       REQUIRED android.hardware.camera unless it is declared here. -->\n" +
+    '  <uses-permission android:name="android.permission.CAMERA" />\n' +
+    '  <uses-feature android:name="android.hardware.camera" android:required="false" />\n' +
+    '  <uses-feature android:name="android.hardware.camera.any" android:required="false" />';
 }
 
 /** THE decider for "this APK's app lives on a server" — a dev build or a

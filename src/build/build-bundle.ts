@@ -14,6 +14,7 @@ import { DENO_JSON_NAMES } from "../server/deno-json.ts";
 import { resolveShare, type ShareRoot } from "../server/app-dirs.ts";
 import { basename, dirname, join, relative, resolve } from "@std/path";
 import { serverOnlyDynamic } from "./esbuild-plugin.ts";
+import { emptyDir } from "./dist-staging.ts";
 import type { BuildConfig } from "./build-config.ts";
 import { VERSION } from "../server/aio-cli.ts";
 import { VERSION_STAMP } from "../protocol/protocol-version.ts";
@@ -485,10 +486,10 @@ export async function runBundle(
     const s = await Deno.stat(out);
     staged("dist/app.js", `cached, ${bytes(s.size)} — --force rebuilds it`);
   } else {
-    // Clean dist/ and rebuild
-    try {
-      await Deno.remove(dist, { recursive: true });
-    } catch { /* no dist — skip */ }
+    // Clean dist/ and rebuild — EMPTIED, never replaced: a bind mount, a
+    // watcher or an open shell holds the directory's inode, and swapping it
+    // strands every one of them silently (see `emptyDir`).
+    await emptyDir(dist);
     await Deno.mkdir(dist, { recursive: true });
 
     // The workspace share — the SAME declaration the dev server serves from

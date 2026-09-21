@@ -392,7 +392,8 @@ export const AIO_ROUTE_METHODS: Readonly<
   "/__aio/metrics": { methods: ["GET", "HEAD"] },
   "/__aio/vitals": { methods: ["GET", "HEAD"] },
   "/__aio/icon": { methods: ["GET", "HEAD"] },
-  "/__aio/snapshot": { methods: ["GET", "HEAD", "POST"] },
+  // devOnly since the state-leak fix — see the mount in `serveStatic`.
+  "/__aio/snapshot": { methods: ["GET", "HEAD", "POST"], devOnly: true },
   "/__aio/error": { methods: ["GET", "HEAD"], devOnly: true },
   "/__aio/client-error": { methods: ["POST"], devOnly: true },
 };
@@ -1078,9 +1079,38 @@ export function createStaticHandler(deps: StaticDeps): {
     // is this?" problem the icon exists to answer.
     if (pathname === "/__aio/icon") return handleIcon();
 
-    // ── Snapshot endpoint ──
+    // ── Snapshot endpoint — DEV-ONLY, never mounted in prod ──
+    //
+    // 🔓 It used to be mounted in every mode, and that was a state leak with
+    // no floor under it. `getSnapshot` is `JSON.stringify(getState())`: the
+    // RAW state, with no `ui`/`visible` filter and no `forUser` pass — by
+    // design, because an operator restoring a snapshot needs the whole tree.
+    // Which means every field an app carefully excluded from its client
+    // projection was served, unauthenticated, to anything that could reach
+    // the runtime.
+    //
+    // And in a packaged Electron app that includes the PAGE: the `aio://`
+    // protocol handler proxies anything it cannot find on disk to the app
+    // socket, path intact, so `fetch("/__aio/snapshot")` from any script in
+    // the renderer is same-origin and answers 200. A `ctl` frame over the UDS
+    // is the same door. Measured against `examples/counter --prod`: 200 with
+    // the full state, while `/__aio/error` and the trojan correctly 404'd in
+    // the same process.
+    //
+    // The app could not defend itself either: `/__aio/*` is a reserved
+    // namespace, so a custom route matching it is warned about at boot and
+    // aio keeps serving this handler. Reported by a crypto wallet built on aio, where
+    // the excluded fields are the encrypted seeds, the encrypted account keys
+    // and the passphrase verifier — i.e. the whole vault, copyable while the
+    // wallet was LOCKED, and crackable offline from then on.
+    //
+    // So it is gated here, the same way and in the same place as the trojan
+    // below, which reads full state for the same reasons and has always been
+    // dev-only. Nothing in an app uses this at runtime: `app.snapshot()` and
+    // `am snapshot` call the same helper directly and are unaffected.
     if (
-      pathname === "/__aio/snapshot" && deps.getSnapshot && deps.loadSnapshot
+      !prod && pathname === "/__aio/snapshot" && deps.getSnapshot &&
+      deps.loadSnapshot
     ) {
       return handleSnapshot(req);
     }

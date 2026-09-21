@@ -184,21 +184,28 @@ export type ControlKeyResult =
 /** THE rule for "may a control credential live in this directory", as one pure
  *  function so it can be pinned by a test rather than inferred from plumbing.
  *  Returns the refusal, or null when the directory keeps a secret.
- *  A `null` mode is Windows (no POSIX bits) — there the ACLs of the user's own
- *  profile directory are the boundary, and the trojan is still dev-only and
- *  same-machine-only.
+ *  On Windows the mode carries no permission bits at all (it is the same
+ *  number for every directory — `dir-permissions.ts` has the measurement), so
+ *  the bit test abstains there: the ACLs of the user's own profile directory
+ *  are the boundary, and the trojan is still dev-only and same-machine-only.
+ *  Not a `null` mode — Windows reports `0o40666`, and reading that as
+ *  "world-readable" is what made this refuse every directory on Windows.
  *  @internal */
 export function _controlDirRefusal(
   dir: string,
   mode: number | null,
+  os: typeof Deno.build.os = Deno.build.os,
 ): string | null {
-  // The generic rule lives in dir-permissions.ts; this adds what to DO.
-  if (privateDirRefusal(dir, mode) === null) return null;
-  return `app data dir ${dir} is mode ${
-    octal(mode)
-  } (not owner-only) — refusing to write a control-plane credential where ` +
-    `another local user could read it; chmod 700 it (or unset AIO_APPS_DIR ` +
-    `if it points at a shared directory) and restart`;
+  // The generic rule lives in dir-permissions.ts; this adds what to DO. The
+  // rule's OWN words are carried through rather than restated: it knows
+  // whether the refusal is "these bits are shared", "this is someone else's"
+  // or "modes are real here and I got none", and the old restatement said
+  // "is mode ? (not owner-only)" for all three.
+  const why = privateDirRefusal(dir, mode, undefined, undefined, os);
+  if (why === null) return null;
+  return `app data dir: ${why} — refusing to write a control-plane ` +
+    `credential where another local user could read it; chmod 700 it (or ` +
+    `unset AIO_APPS_DIR if it points at a shared directory) and restart`;
 }
 
 /** Mint (or replace) this app's local control credential. Server side, boot.

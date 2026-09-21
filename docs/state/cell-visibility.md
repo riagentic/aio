@@ -8,6 +8,53 @@ Control what state each cell exposes to clients (`visible`) and persists to disk
 (`persist`). Default for both: `"all"` — zero-config persists and exposes
 everything. Opt out per cell (or via `cellDefaults`) for privacy or size tuning.
 
+> ## `visible` gates READS. `access` gates CALLS. Neither implies the other.
+>
+> `visible: "none"` does **not** make a cell private. It stops the state
+> broadcast — and every method of that cell stays **callable by any connected
+> client**, with whatever it **returns** travelling straight back to the caller:
+>
+> ```ts
+> const heavy = cell("heavy", {
+>   state: { busy: false },
+>   visible: "none", // reads: nothing…
+>   methods: {
+>     // …calls: everything. Any client may dispatch `heavy:decrypt` and read
+>     // what it RETURNS — a decryption oracle on a public door.
+>     decrypt(_s, cipher: string, passphrase: string) {
+>       return atob(cipher).startsWith(passphrase) ? atob(cipher) : "";
+>     },
+>   },
+> });
+> ```
+>
+> An audit of an app holding wallet keys found exactly this shipped — a
+> decryption oracle and an unmetered passphrase oracle — sitting beside a
+> carefully maintained `visible.exclude` list that existed to prevent it,
+> because `visible: "none"` read as "this cell is not exposed". Methods that
+> **hand out** a hidden field (`seedOf(id)` returning `rows[id].encSeed`) leak
+> it just as completely as broadcasting it would.
+>
+> The other direction is equally untrue:
+> [`access`](../auth/auth.md#declarative-cell-access-access) gates calls and
+> hides **nothing** — an `access: "admin"` cell with no `visible` filter ships
+> its whole state to every socket, authenticated or not.
+>
+> Two keys, two questions, both worth answering:
+>
+> ```ts
+> access: false,     // who may CALL   — false = server-side only
+> visible: "none",   // what is READ   — none = nothing is broadcast
+> ```
+>
+> **Boot says so.** A cell that hides secret-shaped state (or has a
+> secret-shaped method name) and declares no `access` rule gets one warning at
+> startup — in dev and in prod — naming the cell, every method that stays
+> callable, and the fix. Declaring any rule answers it: `access: false`
+> (server-side only), `access: true` (any authenticated caller), a role, a
+> predicate, or `access: () => true` to say "open on purpose". A cell that hides
+> nothing secret-shaped is never flagged.
+
 > **Renamed in alpha52, removed in alpha70**: the cell key is `visible:` (READ
 > side; `access:` gates CALLS). The old spelling `cell({ ui })` throws in a dev
 > boot or a test (`cell({ ui }) was removed in alpha70`); a production build
@@ -246,8 +293,14 @@ const sync = cell("sync", {
   methods: {/* ... */},
   persist: "all",
   visible: "none", // invisible to clients — say so: unset means "all"
+  access: false, // …and not callable from one either. Two keys, two questions.
 });
 ```
+
+`visible: "none"` alone would leave every method of this cell callable from any
+client — see the box at the top. A background worker driven by the server says
+`access: false`; one the UI drives says the rule that fits (`true`, a role, a
+predicate, or `() => true` for "open on purpose").
 
 ### Admin-Only Cell
 

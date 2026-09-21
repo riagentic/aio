@@ -166,9 +166,6 @@ const SERVER_ONLY: Record<string, string> = {
   route: "HTTP route handlers",
   serverFn: "server function boundary",
   serverFns: "server function boundary",
-  serverRequest: "the server's request context",
-  serverUser: "the server's request context",
-  serverAuth: "the server's request context",
   authClient: "talks to /__aio/auth/* on a server",
   createAuthClient: "talks to /__aio/auth/* on a server",
   generateTotpSecret: "server-side TOTP enrolment",
@@ -181,7 +178,6 @@ const SERVER_ONLY: Record<string, string> = {
   integer: "SQLite schema builder",
   real: "SQLite schema builder",
   isCellWorker: "Deno worker-thread cells",
-  blocking: "Deno worker pool (see tests/bundle-load-time-throw.test.ts)",
   definePlugin:
     "plugins are resolved by aio.run() at boot — a WebView bundle has no " +
     "`plugins:` to resolve, and the module lives under src/server/ where a " +

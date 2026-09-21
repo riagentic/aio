@@ -320,7 +320,7 @@ rather than a variable.
 
 | Bundle                                                      | gzip      | brotli |
 | ----------------------------------------------------------- | --------- | ------ |
-| aio: render a component                                     | 88 KB     | 76 KB  |
+| aio: render a component                                     | 90 KB     | 76 KB  |
 | aio: + one cell (the counter app)                           | 90 KB     | 78 KB  |
 | React + Redux Toolkit + Router + a WS client + a sync layer | ~75-90 KB | —      |
 
@@ -328,10 +328,10 @@ rather than a variable.
 
 If you want a renderer, AIR is the wrong size — Solid is 8x smaller and does
 that job. If you want state that is persisted, synced, offline-queued and
-reactive in the browser without assembling five libraries, 88 KB gzipped is the
+reactive in the browser without assembling five libraries, 90 KB gzipped is the
 whole thing. Judge it against the second list, not the first.
 
-Since alpha72 the server compresses and revalidates, so the counter app is 83 KB
+Since alpha72 the server compresses and revalidates, so the counter app is 85 KB
 on the wire and a 304 on every reload after that. That sits above the 76 KB in
 the brotli column because aio compresses each response as it serves it, at
 quality 5 — quality 11 belongs to a build step that pays for it once, which aio
@@ -435,7 +435,7 @@ React implementation.
 | Routing                          | ✅    | Built-in, server-integrated                                  |
 | SSR — hydration cost             | ❌    | Full hydration (Qwik has resumability)                       |
 | SSR — mismatch safety            | ✅    | Safe fallback vs React's patch-in-place                      |
-| Bundle size                      | ⚠️    | 88 KB gzipped — the whole client, not a view layer (see §14) |
+| Bundle size                      | ⚠️    | 90 KB gzipped — the whole client, not a view layer (see §14) |
 | React compat layer               | ✅    | Full coverage incl. useId, onChange compat                   |
 | Batteries included               | ✅    | Forms, animation, virtual list, async data                   |
 | Concurrent rendering             | ❌    | No priority scheduling                                       |

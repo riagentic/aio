@@ -249,7 +249,7 @@ export async function cmdWhere(
     try {
       graph = await validateGraph(
         entry,
-        buildBrowserImportMap(readAppDenoImports(baseDir), {
+        buildBrowserImportMap(readAppDenoImports(baseDir) ?? {}, {
           vendorImmer: hasVendorImmer(),
         }),
         (s, f) => transpile(s, f),
