@@ -154,6 +154,32 @@ Deno.test("shutdown: a server close that never resolves cannot hold the process 
   }
 });
 
+Deno.test("shutdown: a server that never came up does not abandon the tail", async () => {
+  // A boot that throws while BINDING (a taken port) runs `bootUndo.unwind()`
+  // through this orchestrator BEFORE `server` is ever assigned — so
+  // `getServer()` is `undefined`. The refs type used to claim non-null, no
+  // guard was written, and teardown died on "Cannot read properties of
+  // undefined (reading 'shutdown')", taking every phase after "server" with
+  // it: the SQLite worker, the session/user stores, `setRunning(false)` and
+  // the lock-dir prune all never ran. The guard is what this pins.
+  const { refs, done } = stubRefs({ getServer: () => undefined });
+  const { shutdown } = createShutdownOrchestrator(refs);
+  assertEquals(await within(shutdown(), BOUND_MS), undefined);
+  for (
+    const step of ["lock", "sqlite", "kv", "sessions", "users", "running:false"]
+  ) {
+    assert(
+      done.includes(step),
+      `'${step}' must still run when the server never bound — got ${done}`,
+    );
+  }
+  assertEquals(
+    done.includes("server"),
+    false,
+    "nothing to close, nothing to run",
+  );
+});
+
 Deno.test("shutdown: a stuck phase is REPORTED, never silently skipped", async () => {
   // Fail loud: "the window took 3 extra seconds to close" is the only symptom
   // a bounded-but-silent phase produces, and it is not one anybody can debug.
