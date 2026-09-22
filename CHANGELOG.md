@@ -107,6 +107,29 @@ failure. Spawn fixtures left a bare `sleep 300 &` inheriting pipes; the
 grandchild redirects now, post-kill sleeps became `until(!alive)`, and failures
 keep the exit code.
 
+### A failed boot leaves nothing behind, and a lost port race is retried
+
+A boot that throws while **binding** (a taken port) runs teardown before the
+transport exists, and `getServer()` was typed non-null with no guard — so
+shutdown died on `Cannot read properties of undefined (reading 'shutdown')`,
+taking every phase after it with it: the SQLite worker, the session/user stores,
+`setRunning(false)` and the lock-dir prune never ran. The reference is honest
+about being `undefined` now and the phase is skipped, not fatal
+(`src/server/shutdown.ts`; pinned by `tests/shutdown-orchestrator.test.ts` "a
+server that never came up does not abandon the tail"). The same path also leaked
+the dev file watcher, its FsEvents read and its health-check interval, because
+the handle that owns `watcher.shutdown()` was never returned — it is shut down
+on the spot now (`src/server/server.ts`).
+
+`freePort()` binds, closes and hands back a number, so between that close and
+the server's real `listen` another shard can win the port. The harness chose the
+port, so it retries with a fresh one instead of failing the test; a caller who
+passed an explicit `port:` still gets the refusal, first time, unchanged
+(`_bootOnAFreePort` / `_isPortTakenError`, pinned by
+`tests/test-server-port-race.test.ts`). The transport differential's BigInt test
+now resets at the end as every sibling does, so its 16ms subscription-sync timer
+is no longer pending at teardown (`tests/transport-differential.test.ts`).
+
 ### Ratchets and stubs made honest
 
 Silent-catch ceiling 322 → 319 after justifying the remaining swallows in

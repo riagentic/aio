@@ -234,6 +234,73 @@ function fromSlice([first, last]: [number, number]): number {
   );
 }
 
+/** Is this the server's "that port is taken" refusal?
+ *
+ *  It has to be read off the MESSAGE: `createServer` catches
+ *  `Deno.errors.AddrInUse` and rethrows a teachable plain `Error`, so the type
+ *  is gone by the time a caller sees it. That makes the wording a second
+ *  decider, which is why `tests/test-server-port-race.test.ts` matches this
+ *  against an error a real doubled bind actually threw rather than against a
+ *  copy of the sentence.
+ *
+ *  Pure. @internal harness wiring — not public API. */
+export function _isPortTakenError(e: unknown): boolean {
+  return /^port \d+ already in use/.test(
+    e instanceof Error ? e.message : String(e),
+  );
+}
+
+/** How many ports to try before giving up. Small on purpose: at three
+ *  consecutive losses the slice is genuinely full and a fourth is noise. */
+const PORT_RETRIES = 3;
+
+/** Boot on a port nobody else grabbed first.
+ *
+ *  `freePort()` binds, closes, and hands back the number — so between that
+ *  close and the server's real `listen` there is a window, and every sibling
+ *  process drawing from the same inherited slice can win it. `sliceStart`
+ *  spread the siblings so they stop walking in lockstep, and its own comment
+ *  says what it could not do: "the OS can hand the same port to two `listen`
+ *  calls between the check and the real bind". That residual race is what
+ *  failed cookbook recipe 14 with `port 24325 already in use` in the v1.0.9
+ *  release check — the second time the same recipe has been the one to lose.
+ *
+ *  A race that cannot be designed away is retried instead: the loser asks for
+ *  another port. Only when the HARNESS chose the port — a caller who passed
+ *  `port:` asked a question about that port, and quietly answering it on a
+ *  different one would turn their fixed-port test green without testing
+ *  anything. They get the refusal, first time, unchanged.
+ *
+ *  @internal harness wiring — not public API. */
+export async function _bootOnAFreePort<S>(
+  chosen: number | undefined,
+  boot: (port: number) => Promise<AioApp<S>>,
+): Promise<{ app: AioApp<S>; port: number }> {
+  if (chosen !== undefined) return { app: await boot(chosen), port: chosen };
+  let last: unknown;
+  for (let i = 0; i < PORT_RETRIES; i++) {
+    const port = freePort();
+    try {
+      return { app: await boot(port), port };
+    } catch (e) {
+      // Anything that is not "someone beat me to that port" is the test's
+      // real failure and must surface NOW, undelayed and unretried.
+      if (!_isPortTakenError(e)) throw e;
+      last = e;
+    }
+  }
+  throw new Error(
+    `testServer: lost the port race ${PORT_RETRIES} times in a row. That is ` +
+      `no longer a race — the slice (${
+        Deno.env.get(PORT_SLICE_ENV) ?? "OS ephemeral"
+      }) is full, or something outside the suite is taking ports as fast as ` +
+      `they are offered. Last refusal: ${
+        last instanceof Error ? last.message : String(last)
+      }`,
+    { cause: last },
+  );
+}
+
 /** Boot an aio app for a test — libraryMode (never exits the process), a free
  *  port, a throwaway data dir, and `persist: false` by default. Everything is
  *  overridable via `config` (pass `persist: true`, a fixed `port`, `routes`,
@@ -259,25 +326,29 @@ export async function testServer<S = unknown>(
   // Harness-only keys: they must not reach aio.run(), which rejects an unknown
   // config key by design.
   const { workers: _w, workerEntry: _we, ...runConfig } = config;
-  const port = config.port ?? freePort();
   const madeDir = !config.baseDir;
   const baseDir = config.baseDir ?? await tempDir("aio-test-srv-");
   // A boot that THROWS never reaches close(), so the directory it made would
   // outlive the run — the leak class `scripts/check-orphans.ts` counts.
   let app: AioApp<S>;
+  let port: number;
   try {
-    app = await aio.run({
-      client: "server-only",
-      persist: false,
-      appId: `test-${crypto.randomUUID().slice(0, 8)}`,
-      ...runConfig,
-      ...(workerEntryUrl ? { _workerEntry: workerEntryUrl } : {}),
-      // Forced — a test must never let aio.run() call Deno.exit(), and the
-      // port / dir are ours to manage.
-      libraryMode: true,
-      port,
-      baseDir,
-    }) as AioApp<S>;
+    ({ app, port } = await _bootOnAFreePort<S>(
+      config.port,
+      (port) =>
+        aio.run({
+          client: "server-only",
+          persist: false,
+          appId: `test-${crypto.randomUUID().slice(0, 8)}`,
+          ...runConfig,
+          ...(workerEntryUrl ? { _workerEntry: workerEntryUrl } : {}),
+          // Forced — a test must never let aio.run() call Deno.exit(), and the
+          // port / dir are ours to manage.
+          libraryMode: true,
+          port,
+          baseDir,
+        }) as Promise<AioApp<S>>,
+    ));
   } catch (e) {
     if (madeDir) await dropTempDir(baseDir);
     throw e;

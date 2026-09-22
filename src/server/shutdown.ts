@@ -365,7 +365,12 @@ export interface ShutdownRefs {
   clearElectronProc: () => void;
   disposeUds: () => void;
   getUdsHandle: () => { shutdown: () => void } | null;
-  getServer: () => { shutdown: () => Promise<void> };
+  /** `undefined` until the transport is up — a boot that throws while binding
+   *  (a taken port) is shut down too, and this said it could not be. The type
+   *  claimed non-null, so the guard its neighbours all have was never written
+   *  and teardown died on `Cannot read properties of undefined (reading
+   *  'shutdown')`, taking the phases AFTER it with it. */
+  getServer: () => { shutdown: () => Promise<void> } | undefined;
   /** Late-bound LAN-discovery responder stopper (null when not exposed). */
   getDiscoveryStop?: () => (() => void) | null;
   asyncDb: { close: () => Promise<void> } | null;
@@ -592,7 +597,8 @@ export function createShutdownOrchestrator(
     if (udsH) await phase(log, "uds", tLeft, () => udsH.shutdown());
 
     // Phase 7: Server + DB
-    await phase(log, "server", tLeft, () => refs.getServer().shutdown());
+    const srv = refs.getServer();
+    if (srv) await phase(log, "server", tLeft, () => srv.shutdown());
     await phase(log, "sqlite", tLeft, () => refs.asyncDb?.close());
     await phase(log, "kv", tLeft, () => refs.kvDb?.close());
     await phase(log, "sessions", tLeft, () => refs.sessionStore?.close());

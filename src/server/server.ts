@@ -1747,6 +1747,16 @@ export function createServer(config: ServerConfig): ServerHandle {
         ...tlsOpts,
       }, handleRequest);
     } catch (e) {
+      // EVERY path below throws, so this call never returns the handle that
+      // owns `watcher.shutdown()` — and the dev file watcher, its FsEvents
+      // read and its health-check interval go on running with nobody left to
+      // stop them. Measured, not guessed: a second `testServer` on a taken
+      // port reported "Leaks detected: a file system watcher ... an interval"
+      // instead of the port refusal
+      // (tests/test-server-port-race.test.ts). It has always been the shape of
+      // a failed boot; the harness retrying a lost port race is what made it
+      // land in tests that then PASS, dragging the leak into an unrelated one.
+      watcher?.shutdown();
       if (e instanceof Deno.errors.AddrInUse) {
         // Loud + fatal: refuse to start rather than run a second cell runtime
         // that could write to the same DB/journal.

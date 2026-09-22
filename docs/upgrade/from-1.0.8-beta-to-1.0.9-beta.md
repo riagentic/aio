@@ -83,6 +83,11 @@ Nothing else — no API was removed, so no call site has to move.
   `BigInt` (refused), plus a real-Chromium sync-method replay differential.
 - Flaky `am` / `spawn` suites rooted in harness fixtures (esbuild child,
   inherited pipes), not product — closed under load with sanitizers on.
+- A boot that throws while binding a taken port tears down fully (the server
+  phase is skipped when the transport never came up, and the dev watcher is
+  stopped), and the test harness retries a lost `freePort()` race instead of
+  failing the test. No app-visible behavior change — this is the boot-failure
+  path and the test harness.
 
 ### Ratchets
 

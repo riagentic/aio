@@ -666,6 +666,12 @@ Deno.test("transport differential: BigInt payload lands in-process; enc refuses 
     true,
     `enc must refuse a BigInt payload, got: ${threw || "(no throw)"}`,
   );
+  // Every other test in this file resets at the END as well as the start, and
+  // this one did not. Reading `a.got` above is a tracked read, which arms the
+  // 16ms subscription-sync timer; the test then does only sync work, so the
+  // timer was still pending at teardown and the leak sanitizer failed the
+  // test — under the shard runner only, where the sanitizers are on.
+  _resetAioRuntime();
 });
 
 // ── client-context replay of a sync method ──────────────────────────────────
