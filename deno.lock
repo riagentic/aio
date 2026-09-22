@@ -442,6 +442,11 @@
       "npm:immer@10.2.0",
       "npm:react-dom@19.1.0",
       "npm:react@19.1.0"
-    ]
+    ],
+    "packageJson": {
+      "dependencies": [
+        "npm:electron@44.4.1"
+      ]
+    }
   }
 }

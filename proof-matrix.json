@@ -2,8 +2,8 @@
   {
     "target": "android",
     "env": "emulator",
-    "commit": "be34df61a",
-    "date": "2026-09-21",
+    "commit": "9b428ee2",
+    "date": "2026-09-22",
     "detail": "API 35: standalone (dispatch, durable native store — survives an instant kill, rotation) + client (connect, server dispatch, Back, unreachable)"
   },
   {
