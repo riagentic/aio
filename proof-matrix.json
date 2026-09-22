@@ -9,7 +9,7 @@
   {
     "target": "cli",
     "env": "binary",
-    "commit": "1210cffa",
+    "commit": "76944487",
     "date": "2026-09-22",
     "detail": "compiled cli-client ↔ compiled server, state printed"
   },
@@ -23,7 +23,7 @@
   {
     "target": "web",
     "env": "real-browser",
-    "commit": "1210cffa",
+    "commit": "76944487",
     "date": "2026-09-22",
     "detail": "chromium: surface → trigger → server state converged"
   },
