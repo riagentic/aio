@@ -189,9 +189,32 @@ export function _resetPortSlice(): void {
  *
  *  Exhausting the slice DEGRADES to the old behaviour rather than throwing —
  *  a reused port is a rare flake, and a suite that cannot start is not. */
+/** Where THIS process starts walking the slice.
+ *
+ *  Not `first`. A slice is per-RUNNER, and a runner's process is not the only
+ *  one drawing from it: the env var is inherited, so every child a test
+ *  spawns shares the slice — and `tests/cookbook-recipes.test.ts` spawns a
+ *  `deno test --parallel` whose four workers are four sibling processes, each
+ *  with its own empty `_issued` set and its own cursor. Starting all of them
+ *  at `first` makes them hand out THE SAME ports in THE SAME ORDER, so the
+ *  collision is not a rare race: it is the design. Measured as `port 24256
+ *  already in use` failing recipe 14 while recipe 15 held the port.
+ *
+ *  The pid is what distinguishes two live processes, so it is what spreads
+ *  them. Siblings then walk different regions, and the bind check plus the
+ *  round-robin handle the rest. This cannot make a cross-process bind race
+ *  impossible — the OS can hand the same port to two `listen` calls between
+ *  the check and the real bind — but it stops the case where they are walking
+ *  in lockstep. */
+function sliceStart(first: number, n: number): number {
+  return first + (Deno.pid % n);
+}
+
 function fromSlice([first, last]: [number, number]): number {
   const n = last - first + 1;
-  if (_sliceNext < first || _sliceNext > last) _sliceNext = first;
+  if (_sliceNext < first || _sliceNext > last) {
+    _sliceNext = sliceStart(first, n);
+  }
   for (let pass = 0; pass < 2; pass++) {
     for (let i = 0; i < n; i++) {
       const port = _sliceNext;

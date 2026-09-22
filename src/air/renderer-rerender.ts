@@ -84,7 +84,7 @@ export function _scheduleComponentRender(inst: ComponentInstance): void {
   // What asked for this render, for the dev burst tripwire below. A write made
   // by an event handler is INPUT and is allowed to be fast: typing 95 chars
   // (testUI / `am trigger … type`) is 95 handler→render steps in under a
-  // second, and none of them is a render writing what it read (wallet report §3).
+  // second, and none of them is a render writing what it read (field report §3).
   // The old `root.flushing || _currentCollector` clause punched through that
   // exemption — schedules queued while the event's flush ran were still
   // counted, so a fast typist got "move the write into an event handler" for

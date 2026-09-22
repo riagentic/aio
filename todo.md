@@ -14,6 +14,237 @@ is frozen — additive only, bugfix-only through beta; 1.0.0 = boring.
 
 ---
 
+## RESUME HERE — post-1.0.7-beta verify round (2026-09-21, HELD, NOT RELEASED)
+
+**Status: fixed in the working tree, deliberately NOT released.** 1.0.7-beta is
+pushed as `b0369cb71`. A verify round run AFTER that push found real defects in
+what shipped. The user's call was **fix but hold** — so everything below is in
+the tree, uncommitted, and the next release carries it. This is not a violation
+of the never-release-with-known-issues rule: the rule binds what is PUSHED as a
+release, and nothing is being pushed. It does mean 1.0.7-beta as tagged has
+known defects, which is exactly why there is no 1.0.8 tag yet.
+
+### Fixed here, each mutation-checked
+
+- [x] **`persist: "none"` was ignored by the standalone/Android runtime.** A
+      cell marked not-to-persist had its state written AND read back, and
+      `exclude`/`onPersist` were no-ops too. Since 1.0.7-beta that slice is
+      `fsync`'d on EVERY dispatch, so it was also the expensive path. The
+      release's own new warning told people to write `persist: false`, which is
+      not a valid `CellFieldFilter` and would not have worked either. Cause:
+      `getDBState = (s) => s` in `initStandalone`. The rule now lives once, in
+      `src/state/cell-persist-filter.ts` — moved, not copied.
+- [x] **The localStorage→native adoption path could destroy good data.**
+      `AioNativeStore.get` returned `null` for both "nothing saved" and "the
+      read failed", so a failed read looked like a fresh install: adoption wrote
+      the stale pre-upgrade copy over intact state and LOGGED IT AS SUCCESS,
+      then re-armed on every boot. Fixed with a real `has(key)` stat on the
+      bridge.
+- [x] **The SSR head leak was only half closed in 1.0.7-beta.** `collectHead()`
+      answered with the most recently STARTED render, so request B starting
+      inside A's gap was served A's `<title>`. It now tracks the most recently
+      FINISHED render.
+- [x] **One abandoned SSR stream permanently 500'd every later `collectHead()`**
+      — the liveness set was never cleared. The set is gone.
+- [x] **Attribute-name validation threw in PRODUCTION on names Chromium
+      accepts.** `_isAttrName` omitted `[#x10000-#xEFFFF]`, so `data-🎉` threw.
+      Astral range added, `u` flag on.
+- [x] **`onUnmount` wrote into a hook slot it did not own.** A conditional call
+      landed on a neighbour's `useRef` slot and SILENTLY LEAKED THE HOLD in
+      production — the exact bug `onUnmount` exists to prevent, and the dev
+      tripwire did not catch it. Fixed with a module-private sentinel plus a
+      symbol brand.
+- [x] **`collectHead(key)` with an unknown key returned `""` in silence** — now
+      a dev warn.
+- [x] **X.509: a Tailscale/CGNAT (`100.64/10`) address produced a cert rejected
+      for EVERY name, including `localhost`.**
+- [x] **X.509: `"999.888.777.666"` was minted as `231.120.9.154`** — a
+      certificate for a different host than the one asked for.
+- [x] **X.509: a stolen root key could sign email/UPN/URI/code-signing certs**
+      (the eDellRoot class). `serverAuth` EKU on the root. The
+      `excludedSubtrees` alternative was rejected after measuring that Go and
+      openssl disagree on empty bases.
+- [x] **X.509: the upgrade-path test could never fail** (openssl compares DNs
+      canonically). Replaced with a PrintableString root and a real handshake.
+- [x] **X.509: private keys were written `0644`, then chmod'd.** `mode: 0o600`
+      at open.
+- [x] **12 KB gz off every page load.** The `am surface` / `am trigger` engine,
+      the dev overlay and the contrast/selector audits now live behind a dynamic
+      import that production never takes
+      (`src/browser/dev-diagnostics
+      .ts`, `src/air/dev-hooks.ts`). Counter
+      app 91.9 → 79.9 KB gz; ceilings 90 → 79 (AIR) and 92 → 82 (app). Six
+      modules were deliberately NOT moved because production DOES reach them
+      (`am logs`, `useTimeTravel()`, the profiler). New gate
+      `tests/bundle-dev-chunk.test.ts` — whose own test 2 was vacuous at first
+      (it matched the URL inside its failure message) and the mutation check
+      caught it.
+- [x] **`bench:bundle`'s "AIR alone" figure measured a bundle nobody ships** —
+      it ran a bare esbuild instead of the real client bundler.
+- [x] Ratchets reconciled after the concurrent agents: temp dirs back to 776
+      (both new calls go through `src/testing/temp-dir.ts`), silent catches 324
+      → 322, promise handlers held at 84 (the dev-chunk loader now names which
+      audits are not running instead of discarding the reason).
+
+### Found by the suite itself, after the fixes above
+
+- [x] **Four sibling processes walked the port slice in LOCKSTEP.**
+      `AIO_TEST_PORT_SLICE` is inherited through the environment, and
+      `tests/cookbook-recipes.test.ts` spawns `deno test --parallel` whose
+      workers are four sibling processes — each with its own empty `_issued` set
+      and its own cursor, all starting at `first`. They therefore handed out THE
+      SAME ports in THE SAME ORDER: not a race that sometimes fires, the
+      arrangement. It surfaced as recipe 14 dying on
+      `port 24256 already
+      in use` while recipe 15 held it, and it reads as
+      a product bug (the message is aio's own singleton guard) while being a
+      harness one. The cursor now starts at `first + (pid % n)`. Pinned by a
+      test that runs four real child processes; with the fix reverted all four
+      return the same port and it fails naming them.
+- [x] **`tests/on-unmount.test.ts` leaked a timer in a shard** — one `cleanup()`
+      among five was not awaited, and `cleanup` is `() => closeWindow(win)`,
+      which is async. Green alone, red in a shard. This is the THIRD instance of
+      this exact class.
+- [x] **So the hygiene gate was widened to see it.** It matched the literal
+      `closeWindow(` only, and every one of these files reaches the closer
+      through an alias a helper returned, so it was blind to the shape that
+      keeps shipping. It now resolves aliases. The first version of the widening
+      fired on eight correct lines (a method named `cleanup()`, and
+      `await b.cleanup()` reached through an object) — caught before it landed,
+      because a gate that fires on correct code gets muted, which costs more
+      than it saves.
+
+### The CA decision — MEASURED AND DECIDED: no intermediate, two locks instead
+
+RFC 5280 §6.1 begins path validation AFTER the trust anchor, so a self-signed
+root's own extensions are, by the letter, advisory. The question was which
+verifiers actually behave that way. All of them have now been asked from their
+own OS, each against a control, and the answer is that Java is an outlier rather
+than the rule:
+
+| verifier                        | anchor name constraints | anchor EKU  |
+| ------------------------------- | ----------------------- | ----------- |
+| openssl                         | enforces                | enforces    |
+| rustls / NSS / Go               | enforces                | —           |
+| Windows CryptoAPI (Win11 26200) | enforces                | enforces    |
+| macOS Security.framework 14.8.9 | enforces                | **IGNORES** |
+| Java `CertPathValidator`        | **IGNORES**             | **IGNORES** |
+
+The verdict, and the reasoning, so it is not re-litigated:
+
+- **No intermediate, for now.** It would close the Java row and nothing else. It
+  is not free: existing roots are `CA:TRUE, pathlen:0`, which FORBIDS them
+  signing an intermediate, so it needs a NEW root and every developer who ran
+  `am trust` has to re-trust. That is a migration for one outlier verifier,
+  against an attacker who must already be able to read `~/.aio/ca` — which means
+  they can already read the home directory. The cost is certain and the benefit
+  is narrow. Revisit if a real aio client turns out to verify through Java (an
+  Android app using `HttpsURLConnection` is the plausible one, and
+  Android/Conscrypt is the one stack still unmeasured).
+- **Two locks instead, because no single one covers every verifier.** The
+  `serverAuth` EKU carries Windows and openssl; the rfc822Name/URI bases carry
+  macOS, which ignores the EKU entirely. Either alone leaves a real gap.
+- **Do not let the EKU read as bigger than it is.** A forged website certificate
+  needs exactly `serverAuth`, so the EKU is no obstacle to the one case that
+  matters most on a verifier that skips the anchor. `tls.ts` and `x509.ts` both
+  say so in place.
+- **`otherName` (the Windows UPN form) stays unconstrained** — RFC 5280 offers
+  no way to constrain it. It is covered by the EKU on Windows and openssl, and
+  NOT on macOS; macOS has no smartcard-logon path that consumes a UPN, so the
+  residual there is theoretical rather than exploitable. Written down rather
+  than argued away.
+
+What was measured, in order:
+
+- [x] **macOS MEASURED (14.8.9, `security verify-cert`, with controls).** Two
+      answers, one of them a defect: - Security.framework **does** honour an
+      anchor's name constraints. A forged `login.acmebank.com` leaf under the
+      aio root was refused; the same name under a root with no constraints was
+      accepted (so it was the constraints, not the name and not CT); a permitted
+      `localhost` leaf under the constrained root was accepted (so it was not
+      the chain or the dates). - Security.framework does **NOT** apply an
+      anchor's extendedKeyUsage. With the `serverAuth` EKU alone it ACCEPTED an
+      S/MIME certificate for `ceo@bigbank.com` signed by the aio root —
+      identically to a control root carrying no EKU at all, so the extension was
+      doing nothing there. The comment in `x509.ts` claimed Windows and macOS
+      "enforce the same nesting"; that was written from documentation and is
+      FALSE for macOS.
+- [x] **FIXED: the root now constrains `rfc822Name` and
+      `uniformResourceIdentifier` too**, permitted to `.invalid` (RFC 2606 —
+      never a real address or host), which is the narrowest legal way to say
+      "none", since a name type left out of permittedSubtrees is UNRESTRICTED.
+      Measured: macOS now refuses the S/MIME forgery while the legitimate
+      `localhost` leaf still verifies; openssl refuses it at depth 0 for the
+      base and at depth 1 for the EKU. Two independent locks, because the
+      verifiers that ship disagree about which one they check. `generateRoot`
+      with no DNS or IP base now THROWS rather than writing an empty (malformed)
+      permittedSubtrees that some verifiers ignore — "ignored" means the root is
+      unconstrained while looking safe.
+- [x] **FIXED (D10): an existing root is reused VERBATIM forever**, so every
+      machine that already ran aio keeps a root with no email/URI bases and
+      nothing would ever have noticed. `loadOrCreateAioRoot` now reads the
+      constraints off the root it loads and warns, once per root, naming what is
+      unrestricted and the exact fix (delete it, re-run `am trust`). It does NOT
+      regenerate — that would break every browser that trusted the old root
+      without asking. Tested in both directions, fires on the old shape and
+      silent on a current one, because a warning with no silence test is one
+      that eventually fires on every boot for everyone.
+- [x] **Windows CryptoAPI MEASURED (Win11 26200, `X509Chain`, with controls AND
+      an instrument check).** It enforces BOTH: the forged `login.acmebank.com`
+      under the constrained aio root is `HasNotPermittedNameConstraint`, the
+      same name under an unconstrained root is accepted, the legitimate
+      `localhost` leaf is accepted, and the S/MIME leaf is `NotValidForUsage`
+      where a no-EKU control root accepts it. So Windows is the safest of the
+      three and macOS is the odd one out.
+- [x] **A false result was nearly recorded here, and the lesson is the reusable
+      part.** The first Windows run put the root in .NET's
+      `ChainPolicy.ExtraStore` instead of a trust store, so nothing had to be
+      installed. It reported NO objection to the forged name — which read as
+      "CryptoAPI ignores anchor name constraints" and would have been written
+      down as a measurement. It was a blind instrument: with an untrusted root,
+      CryptoAPI does not evaluate name constraints AT ALL, not even on an
+      intermediate. EKU violations ARE still reported, which is exactly what
+      made the setup look like it worked. The positive control that caught it —
+      the same violation moved down onto an intermediate — is now the first line
+      of the probe. A null result is not a result until the instrument has
+      produced a positive one.
+- [ ] **ALSO UNMEASURED: Android/Conscrypt**, same three-way test.
+- [ ] **`otherName` (the Windows UPN form) is STILL unconstrained**, and RFC
+      5280 gives no way to constrain it. Only the EKU covers it and macOS
+      ignores the EKU, so on macOS a stolen key can still mint a UPN client
+      certificate. The intermediate is the fix for this one too.
+- [ ] **THEN decide the intermediate**, with the migration written first: new
+      root, `am trust` re-run, chain file layout, and what an app that still has
+      the old root on disk does. The EKU measurement above lowers the value of
+      the "EKU bounds the rest" argument — on a verifier that skips the anchor
+      the EKU may buy nothing at all, and the name-constraint bases are what
+      carry the property.
+
+### Residuals recorded, deliberately not fixed
+
+- **`_isAttrName` is still stricter than browsers for `1abc` and `-a`.** Those
+  are legal HTML attribute names and aio refuses them. Refusing is the safe
+  direction and no app has asked; left as a known narrowing, not a silent one.
+- **`SsrRender.ended` is a dead field** — nothing reads it since the liveness
+  set was removed.
+- **`<button form="other-form">` click behaviour cannot be tested in
+  happy-dom**, so `am surface` gets `form="id"` wrong in BOTH directions and the
+  fix cannot be proven in-process. Needs the real-browser lane.
+- **Android: no directory `fsync` after `renameTo`.** The file contents are
+  durable; the directory entry is not, so a power cut in the window can lose the
+  rename. Needs a JNI or `FileChannel` path.
+- **Android: `addJavascriptInterface` injects into iframes**, while
+  `onPageStarted` is main-frame only, so a third-party iframe sees the bridge.
+  `removeJavascriptInterface` only takes effect on the NEXT page load.
+- **Android: a failed native read at boot can still overwrite good state** in
+  paths the `has(key)` fix does not cover.
+- **Write-burst cost, measured:** at 1.08 MB of state, the per-dispatch fsync
+  path costs 0.710 ms/key and wrote 211 MB over 200 dispatches — 35.9× the
+  debounced path. The `persist` filter fix removes it for excluded slices; it
+  does not make the included path cheap.
+
+---
+
 ## RESUME HERE — round of 2026-09-21 (re-opening 1.0.7-beta)
 
 **Why this round exists.** 1.0.7-beta was pushed green, and then a standing rule
@@ -187,8 +418,8 @@ On main since the v1.0.6-beta tag: the twelve wallet-audit commits, then
 help` in three tiers, the stale-APK refusal, the proof matrix's honesty, the
 `@tier` tags, the out-of-process `t=` note, a verify round attacking the audit
 fixes (14 bugs found INSIDE the fixes), a release stage in the derived version
-(wallet report §17), `dist/` emptied rather than replaced so a lab's bind mount
-survives a rebuild (that report §11), and one more bug found INSIDE this
+(field report §17), `dist/` emptied rather than replaced so a lab's bind mount
+survives a rebuild (a field report §11), and one more bug found INSIDE this
 round's own preload sweep: it armed its signal handler after creating the
 directory, so a SIGTERM in that window still leaked one. The suite caught it
 under load, which is the second time this release that running the thing beat
@@ -200,15 +431,15 @@ field reports was re-checked against the tree and bucketed into
 dir is gitignored, so this is permanent — a backup was taken first). Four
 reports had been badly stale: `cc.md` had every box unticked with 16 of 18 asks
 shipped or refused, `mdview.md` §10 ended "confirmed, unfixed" after shipping in
-1.0.6-beta and being verified on the real Windows 11 machine, and `that report`
-§8–§18f all read as open with every one of them shipped. Nothing a report marked
-fixed was actually broken — the drift runs one way, and the fix is to re-audit
-against the TREE, never against a status line.
+1.0.6-beta and being verified on the real Windows 11 machine, and the wallet's
+report §8–§18f all read as open with every one of them shipped. Nothing a report
+marked fixed was actually broken — the drift runs one way, and the fix is to
+re-audit against the TREE, never against a status line.
 
 Everything those reports still asked for is below. What is genuinely open, in
 the order worth doing:
 
-- **wallet report §15 — the demo driver has no supported door.** Three parts:
+- **field report §15 — the demo driver has no supported door.** Three parts:
   `src/media/{cdp,screencast,encoder}.ts` are reachable only by a
   `dep/aio/src/...` path (one refactor breaks every demo repo);
   `am shot
@@ -456,25 +687,26 @@ in the CHANGELOG ("Review round"). Open items it found and left:
       of `src/`. Opt out by name: `cspDirectives: { "script-src": false }`.
       tests/electron-csp-eval.test.ts (pure + a real window under
       `test:electron`).
-- [x] wallet report §11 — Electron's `Invalid guestInstanceId` on every `<webview>`
-      detach lit the dev overlay's error badge permanently. **Annotated, not
-      filtered, in 1.0.7-beta.** Reproduced on Electron 44.4.1 with aio's own
-      window preferences and `will-attach-webview` hook: `window.onerror`
-      message `Uncaught Error: Invalid guestInstanceId: 2`, filename
-      `node:electron/js2c/isolated_bundle:1:7012`, and a stack with no app frame
-      at all — so the SOURCE is the only discriminator there is. Fires on every
-      removal, settled guest or mid-attach. `src/diagnostics/upstream-noise.ts`
-      recognises it by message AND source, both anchored (a test enforces the
-      anchoring and that every rule names a tracker item), so an app that throws
-      the same words from its own bundle stays loud and an Electron that renames
-      the bundle goes back to noisy rather than quietly swallowed. The line
-      still reaches the log, at info, reading "…— known upstream issue
-      (electron#53989), not this app: …"; it never reaches `errors=N`, never
-      colours the overlay badge and never opens the panel, and is listed there
-      as a muted `notice`. ONE decider: the Electron main script's copy is
-      STRINGIFIED from the same array (`upstreamNoiseMatcherSource`) and a test
-      pins that the two agree. Verified end to end — aio's real generated
-      diagnostics block against a real `<webview>` detach now writes
+- [x] field report §11 — Electron's `Invalid guestInstanceId` on every
+      `<webview>` detach lit the dev overlay's error badge permanently.
+      **Annotated, not filtered, in 1.0.7-beta.** Reproduced on Electron 44.4.1
+      with aio's own window preferences and `will-attach-webview` hook:
+      `window.onerror` message `Uncaught Error: Invalid guestInstanceId: 2`,
+      filename `node:electron/js2c/isolated_bundle:1:7012`, and a stack with no
+      app frame at all — so the SOURCE is the only discriminator there is. Fires
+      on every removal, settled guest or mid-attach.
+      `src/diagnostics/upstream-noise.ts` recognises it by message AND source,
+      both anchored (a test enforces the anchoring and that every rule names a
+      tracker item), so an app that throws the same words from its own bundle
+      stays loud and an Electron that renames the bundle goes back to noisy
+      rather than quietly swallowed. The line still reaches the log, at info,
+      reading "…— known upstream issue (electron#53989), not this app: …"; it
+      never reaches `errors=N`, never colours the overlay badge and never opens
+      the panel, and is listed there as a muted `notice`. ONE decider: the
+      Electron main script's copy is STRINGIFIED from the same array
+      (`upstreamNoiseMatcherSource`) and a test pins that the two agree.
+      Verified end to end — aio's real generated diagnostics block against a
+      real `<webview>` detach now writes
       `[aio:renderer:info] … electron#53989
       …` where it used to write
       `[aio:renderer:error]`. tests/upstream-renderer-noise.test.ts,
@@ -589,18 +821,42 @@ They are temporary; the findings are summarised above.
       `src/state/blocking.ts:175` and `src/sync/browser-storage.ts:81` are
       justified or made loud. `tests/browser-server-only-stubs.test.ts:118` is
       still vacuous.
-- [ ] Dev-only chunk — MEASURED 9.3 KB gz of dev-only code on the page, plus the
-      `am trigger` engine (+2.4 KB gz) that production never runs. The ceiling
-      was raised 83 → 86 on 2026-09-16 on that promise; build the chunk and
-      lower it again.
+- [x] **Dev-only chunk — done (2026-09-21). MEASURED 12.0 KB gz off every page
+      load**; the ceilings came down with it, 90 → 79 (AIR) and 92 → 82 (app).
+      `src/browser/dev-diagnostics.ts` holds the lot, reached through the one
+      dynamic import in the tree (`browser-air-commands.ts`) that
+      `esbuild-plugin.ts` marks external at `/__aio/browser/dev-diagnostics.ts`
+      — the dev server's own live-transpile route, so the specifier is real
+      wherever dev is real and 404s exactly where prod closes that namespace.
+      Counter app, esbuild metafile: 250,996 → 218,118 raw, 94,065 → 81,765 gz.
+      What left: `ui-trigger` + `ui-surface` + `ui-remote` (the `am surface` /
+      `am trigger` executor — driven only by trojan frames, and the trojan is
+      never mounted in prod), `dev-overlay`, `contrast-audit`, `selector-audit`,
+      `dev-readonly-hint`. Every one category (a): observe-only, or a channel
+      prod does not open. Verified end to end — `am surface` and `am trigger`
+      drive a live dev app through the chunk; the prod server serves the page
+      and 404s the chunk. Gate: `tests/bundle-dev-chunk.test.ts` (greps a real
+      build's metafile, both directions), mutation-checked. · What could NOT
+      move, so nobody re-litigates it from the size alone: `console-intercept`
+      (2.6 KB — forwards the page's console to the server log in PRODUCTION,
+      which is what `am logs` reads), `component-profile` (1.4 —
+      `am eval '__aioProfile()'` on a live prod app), `time-travel-panel` (4.5 —
+      public `useTimeTravel()`), `untracked-read` (1.5 — half of it is the prod
+      render path), `devtools-tree` (0.6 — public `connectReduxDevTools()`).
+      Moving any of them would make prod LESS capable than dev, which is the
+      forbidden direction. · Found on the way, and fixed in the same change:
+      `bench:bundle`'s "AIR alone" figure was measured with a bare esbuild
+      rather than the build's own plugin, so it reported a bundle nobody ships
+      (90 KB gz against the 80 a page downloaded). It runs `aioBrowserPlugin()`
+      now.
 - [ ] Sync-method browser-replay differential (known gap, bottom of file).
 - [ ] Flaky-test remainder: `tests/am.test.ts`, `tests/spawn.test.ts` onto
       `stopChild` with stderr + exit code kept.
 - [ ] Clear-out: move the DONE items below to `feedback/resolved.md`, the policy
       sections (beta gate, alpha70 decisions, standing policy, facts) to
-      `.katana/` / docs, then delete them here; delete `feedback/cc.md`,
-      `that report`, `that report` once each item is in resolved/refused (back
-      them up first — `feedback/` is gitignored).
+      `.katana/` / docs, then delete them here; delete the per-app reports left
+      in `feedback/` once each item is in resolved/refused (back them up first —
+      `feedback/` is gitignored, and `check:report-dirs` keeps it that way).
 - [ ] Release 1.0.3-beta: surfaces are prepared (version triple, CHANGELOG,
       upgrade guide, `update:api`, `update:docs`, `check:release --fast` green).
       Remaining before a tag: the heavy `check:release` (`test:onboard`,

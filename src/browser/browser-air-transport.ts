@@ -5,7 +5,8 @@
 
 import { diagEmit } from "../diagnostics/diagnostic-bus.ts";
 import { _registerSfnTransport, handleSfnResult } from "./server-fns-client.ts";
-import { installDevOverlay } from "./dev-overlay.ts";
+import { loadDevChunk } from "../air/dev-hooks.ts";
+import { isDevMode } from "../state/dev-flag.ts";
 import { bindShellTray } from "./tray-actions.ts";
 import { installProfileGlobal } from "../air/component-profile.ts";
 import { installConsoleIntercept } from "./console-intercept.ts";
@@ -1106,11 +1107,14 @@ installConsoleIntercept(
   _sendRaw,
   () => (_ws?.readyState === WebSocket.OPEN) || (!!_ipc && _ipcConnected),
 );
-// …and in dev, the same problems ON THE PAGE. The console and client.log both
-// require you to be looking somewhere other than the thing you are looking at;
-// a per-frame failure was invisible for exactly that reason. Dev-only and
-// observe-only — see dev-overlay.ts.
-installDevOverlay();
+// …and in dev, the same problems ON THE PAGE, plus the two DOM audits and the
+// `am surface` / `am trigger` executor. All of it is in ONE dynamically
+// imported module (browser/dev-diagnostics.ts) that the browser bundler marks
+// external, so a production page carries none of it — 32,878 bytes raw,
+// 12.0 KB gz measured. The specifier is the dev server's own live-transpile
+// route, which is why it resolves in dev and 404s (loudly, once) in prod. See
+// air/dev-hooks.ts for the dev==prod argument, module by module.
+if (isDevMode()) void loadDevChunk();
 // …and `__aioProfile()`, so `am eval '__aioProfile()'` answers "what is
 // rendering most, and what is each render costing" without anyone having to
 // add up `_dtRenders` by hand. Counts are always collected; only the clock is

@@ -5,10 +5,11 @@
 
 import { handleTTMessage } from "../air/time-travel-panel.ts";
 import {
-  getMeasuredSurfaces,
-  getSerializedSurfaces,
-  runUITrigger,
-} from "../air/ui-remote.ts";
+  _setDevChunkLoader,
+  devHooks,
+  loadDevChunk,
+  type UiRemoteApi,
+} from "../air/dev-hooks.ts";
 import { _vitalsTransportProbe, _w } from "./browser-protocol.ts";
 import { _rejectAck, _resolveAck } from "./browser-ack.ts";
 import { _deliverDiag } from "../protocol/protocol-diagnostics.ts";
@@ -48,6 +49,34 @@ export function blankScreenError(): string | null {
     `${capped || "(no details)"}${chain}`;
 }
 
+// THE ONE `import()` of the dev-only chunk (air/dev-hooks.ts explains what is
+// in it and why none of it can run on a production page). It is registered
+// HERE rather than in the transport because this is the module every browser
+// path already reaches — the transport imports it for `routeCommand`, and so
+// does anything driving the command router on its own — while `air/` may not
+// import `browser/` and so cannot hold the import itself.
+_setDevChunkLoader(() => import("./dev-diagnostics.ts"));
+
+/** The surface/trigger executor, loading the dev-only chunk it lives in if it
+ *  is not here yet.
+ *
+ *  Both frames arrive from ONE sender — the trojan REST API — which
+ *  `server-static.ts` never mounts in production, so on a production page this
+ *  path is unreachable and `ui-remote.ts` + its two engines (24 KB raw) are
+ *  not in the bundle at all. Asking for the chunk here rather than assuming it
+ *  keeps the tool working in every case where the frame CAN arrive, and
+ *  `loadDevChunk` says so out loud if it cannot be fetched. */
+async function uiRemote(): Promise<UiRemoteApi | null> {
+  if (!devHooks.uiRemote) await loadDevChunk();
+  return devHooks.uiRemote;
+}
+
+/** What a surface/trigger reply says when the engine is not on this page.
+ *  Never silence: a caller that gets `[]` reads it as "the UI is empty". */
+const NO_ENGINE = "the aio dev tooling engine is not on this page — " +
+  "`am surface` / `am trigger` need the dev-only chunk, which a production " +
+  "bundle does not carry (run the app with `aio dev`)";
+
 /** Route server-initiated command frames. Returns true if consumed. */
 export function routeCommand(
   f: Frame,
@@ -55,34 +84,49 @@ export function routeCommand(
 ): boolean {
   switch (f.t) {
     case "ui-surface":
-      try {
-        // `full` lifts the text cap (`am surface --full`); `rects` attaches
-        // layout geometry (`am surface --rects`). The rects reply is an
-        // OBJECT, not an array, because the measurement counts travel with it
-        // — see getMeasuredSurfaces.
-        const d = f.d as { full?: boolean; rects?: boolean } | undefined;
-        const result = d?.rects === true
-          ? getMeasuredSurfaces(d.full === true)
-          : getSerializedSurfaces(d?.full === true);
-        const roots = Array.isArray(result) ? result : result.roots;
-        // Nothing mounted AND a boot failure on the page: the error is the
-        // answer, in the `{ error }` shape this reply already uses for a throw.
-        const crashed = roots.length === 0 ? blankScreenError() : null;
-        sendRaw(enc(
-          "ui-surface-result",
-          crashed ? { error: crashed } : result,
-        ));
-      } catch (e) {
-        sendRaw(enc("ui-surface-result", { error: String(e) }));
-      }
+      // Reply async — the executor lives in the dev-only chunk, which is
+      // fetched on demand (it is not in a production bundle).
+      (async () => {
+        try {
+          const engine = await uiRemote();
+          if (!engine) {
+            sendRaw(enc("ui-surface-result", { error: NO_ENGINE }));
+            return;
+          }
+          // `full` lifts the text cap (`am surface --full`); `rects` attaches
+          // layout geometry (`am surface --rects`). The rects reply is an
+          // OBJECT, not an array, because the measurement counts travel with
+          // it — see getMeasuredSurfaces.
+          const d = f.d as { full?: boolean; rects?: boolean } | undefined;
+          const result = d?.rects === true
+            ? engine.getMeasuredSurfaces(d.full === true)
+            : engine.getSerializedSurfaces(d?.full === true);
+          const roots = Array.isArray(result) ? result : result.roots;
+          // Nothing mounted AND a boot failure on the page: the error is the
+          // answer, in the `{ error }` shape this reply already uses for a
+          // throw.
+          const crashed = roots.length === 0 ? blankScreenError() : null;
+          sendRaw(enc(
+            "ui-surface-result",
+            crashed ? { error: crashed } : result,
+          ));
+        } catch (e) {
+          sendRaw(enc("ui-surface-result", { error: String(e) }));
+        }
+      })();
       return true;
 
     case "ui-trigger":
       // Reply async — the trigger settles the app before responding.
       (async () => {
         try {
-          const result = await runUITrigger(
-            f.d as Parameters<typeof runUITrigger>[0],
+          const engine = await uiRemote();
+          if (!engine) {
+            sendRaw(enc("ui-trigger-result", { ok: false, error: NO_ENGINE }));
+            return;
+          }
+          const result = await engine.runUITrigger(
+            f.d as Parameters<UiRemoteApi["runUITrigger"]>[0],
           );
           // A miss on a page that never mounted is not a typo'd path — say
           // what happened to the page, and keep `available` beside it.

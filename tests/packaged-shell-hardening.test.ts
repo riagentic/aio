@@ -189,3 +189,109 @@ Deno.test("the generated main script is still valid JavaScript", () => {
   assert(src.length > 2000, `fragment suspiciously short: ${src.length}`);
   assertStringIncludes(src, "will-attach-webview");
 });
+
+// ── the refusal has to SAY so ──────────────────────────────────────────
+//
+// The guard above is right, and its silence cost a day. A refused preload
+// does NOT fail the attach: the guest loads, renders, and simply has no
+// bridge — so the symptom is "the embedded page works but cannot see the
+// app", with no line anywhere, on either side, naming a rule. There is
+// nothing to grep for. The `catch {}` made it worse by discarding the ENOENT
+// that would have explained it.
+//
+// These RUN the fragment rather than grepping it. A source-text assertion
+// cannot tell a warning that fires from one that is written down: the
+// generated script is evaluated with the scope the real main script has,
+// exactly as the parse test above does it.
+
+type Handler = (...a: unknown[]) => unknown;
+
+function attachHandlers(
+  baseDir: string,
+  realpath: (p: string) => string,
+): { handlers: Record<string, Handler>; warnings: string[] } {
+  const handlers: Record<string, Handler> = {};
+  const warnings: string[] = [];
+  const win = {
+    webContents: {
+      on(ev: string, fn: Handler) {
+        handlers[ev] = fn;
+      },
+      setWindowOpenHandler() {},
+    },
+  };
+  new Function(
+    "win",
+    "fs",
+    "path",
+    "console",
+    "BASE_DIR",
+    "_appOrigin",
+    "require",
+    tmplWillNavigate("_appOrigin"),
+  )(
+    win,
+    { realpathSync: realpath, existsSync: () => true },
+    { sep: "/" },
+    { warn: (m: unknown) => warnings.push(String(m)), error() {}, log() {} },
+    baseDir,
+    "aio://app",
+    () => ({ shell: { openExternal() {} } }),
+  );
+  return { handlers, warnings };
+}
+
+const ENOENT = (p: string) => {
+  throw new Error("ENOENT: no such file or directory, lstat '" + p + "'");
+};
+
+Deno.test("a refused webview preload says so, and names the reason", () => {
+  const { handlers, warnings } = attachHandlers(
+    "/app",
+    (p) => p === "/app" ? "/app" : ENOENT(p),
+  );
+  const webPreferences: Record<string, unknown> = {
+    preload: "/elsewhere/bridge.js",
+  };
+  const params: Record<string, unknown> = {};
+  handlers["will-attach-webview"]!(null, webPreferences, params);
+
+  // Still refused — the warning is additional, never a replacement.
+  assertEquals(webPreferences.preload, undefined);
+  assertEquals(params.preload, undefined);
+
+  assertEquals(warnings.length, 1);
+  const w = warnings[0]!;
+  assertStringIncludes(w, "/elsewhere/bridge.js"); // WHAT was refused
+  assertStringIncludes(w, "/app"); // the root it had to resolve inside
+  assertStringIncludes(w, "ENOENT"); // the reason, not a discarded catch
+  assertStringIncludes(w, "NO bridge"); // and what the guest will do instead
+});
+
+Deno.test("a preload resolving OUTSIDE the app directory names where it went", () => {
+  const { handlers, warnings } = attachHandlers(
+    "/app",
+    (p) => p === "/app/link.js" ? "/etc/evil.js" : p,
+  );
+  const webPreferences: Record<string, unknown> = { preload: "/app/link.js" };
+  handlers["will-attach-webview"]!(null, webPreferences, {});
+
+  assertEquals(webPreferences.preload, undefined);
+  assertEquals(warnings.length, 1);
+  assertStringIncludes(warnings[0]!, "/etc/evil.js"); // the symlink's target
+  assertStringIncludes(warnings[0]!, "outside");
+});
+
+Deno.test("an ACCEPTED preload, and a guest asking for none, say NOTHING", () => {
+  // A warning that fires on the correct case is the same defect as one that
+  // never fires: it teaches the reader to skip the line.
+  const good = attachHandlers("/app", (p) => p);
+  const wp: Record<string, unknown> = { preload: "/app/bridge.js" };
+  good.handlers["will-attach-webview"]!(null, wp, {});
+  assertEquals(wp.preload, "/app/bridge.js"); // accepted, realpath'd
+  assertEquals(good.warnings, []);
+
+  const none = attachHandlers("/app", (p) => p);
+  none.handlers["will-attach-webview"]!(null, {}, {});
+  assertEquals(none.warnings, []);
+});

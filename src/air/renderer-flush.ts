@@ -22,8 +22,7 @@ import {
 import { _rerenderComponent } from "./renderer-rerender.ts";
 import { _reportHookError } from "./hook-error.ts";
 import { onCleanup } from "./renderer-lifecycle.ts";
-import { auditContrast } from "./contrast-audit.ts";
-import { auditIdSelectors } from "./selector-audit.ts";
+import { devHooks, loadDevChunk } from "./dev-hooks.ts";
 import { runTrackedLifecycle } from "./untracked-read.ts";
 import { isDevMode } from "../state/dev-flag.ts";
 import { _inSsrCall } from "./vdom-ssr.ts";
@@ -175,16 +174,25 @@ export function _flushAfterRender(root: RootState): void {
   // silent wherever it cannot compute a colour (see contrast-audit.ts). Runs
   // last because it reads what everything above has just painted.
   if (isDevMode()) {
+    // Both audits live in the dev-only chunk (see air/dev-hooks.ts). The
+    // browser runtime asks for it at transport boot; this asks again, so a
+    // page that mounts AIR without the transport still gets them. The load is
+    // idempotent and the hooks are null until it lands, so at most the first
+    // frames go un-audited — every finding is made on the COMMITTED tree and
+    // both audits de-duplicate, so nothing is lost, only deferred.
+    if (!devHooks.auditContrast) void loadDevChunk();
     try {
       const el = root.root as unknown as Element;
-      auditContrast(el);
+      devHooks.auditContrast?.(el);
       // …and that the app's own CSS is aimed at elements that exist. The
       // `#root` contract is silent and its failure is invisible: one field
       // report styled `#app`, broke the height chain at the top, and spent
       // hours believing correct geometry code was wrong while every `am`
       // command reported perfect health.
       const doc = (el as unknown as { ownerDocument?: Document }).ownerDocument;
-      if (doc) auditIdSelectors(doc, (el as { id?: string }).id || "root");
+      if (doc) {
+        devHooks.auditIdSelectors?.(doc, (el as { id?: string }).id || "root");
+      }
     } catch {
       // aio-ok: a dev-only OBSERVATION must never be able to break a render.
       // These two audits read the committed DOM through APIs a hostile or

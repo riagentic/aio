@@ -16,6 +16,7 @@
 import { runBundle } from "../src/build/build-bundle.ts";
 import { resolveAppDir } from "../src/build/build-config.ts";
 import { ESBUILD_JSX, ESBUILD_SPEC } from "../src/build/esbuild-shared.ts";
+import { aioBrowserPlugin } from "../src/build/esbuild-plugin.ts";
 import { BROTLI_QUALITY } from "../src/server/http-encoding.ts";
 
 const ROOT = new URL("..", import.meta.url).pathname;
@@ -199,6 +200,13 @@ async function bundleAirAlone(): Promise<Uint8Array<ArrayBuffer>> {
       // resolve without the app's import map. One alias, pointing at the same
       // file the map does.
       alias: { "aio/jsx-runtime": `${ROOT}src/jsx-runtime.ts` },
+      // THE SAME PLUGIN THE BUILD USES. Without it this "AIR alone" figure
+      // measured a bundle nobody ships: the browser plugin is what stubs the
+      // server-only specifiers and what cuts the dev-only chunk
+      // (`browser/dev-diagnostics.ts`) out of the graph. A measurement whose
+      // bundler is not the product's bundler answers a different question —
+      // measured 90 KB gz here against the 80 KB a page actually downloaded.
+      plugins: [aioBrowserPlugin()],
     });
     return r.outputFiles![0]!.contents as Uint8Array<ArrayBuffer>;
   } finally {

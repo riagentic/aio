@@ -3,7 +3,7 @@
 // happy-dom's HTMLFormElement is a Proxy (named/indexed controls). Registration
 // used to key handlers by WeakMap identity; composedPath() returns a twin
 // identity, so form handlers were silently dead while a wrapping <div> worked.
-// the wallet moved shortcuts off the form to work around it — this pins the fix.
+// The reporting app moved shortcuts off the form to work around it — this pins the fix.
 import { assertEquals } from "@std/assert";
 import { testUI } from "aio/testing";
 

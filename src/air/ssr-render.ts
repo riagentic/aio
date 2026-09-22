@@ -40,10 +40,20 @@ export interface SsrRender {
   /** The values of the `<select>` elements open around the cursor, innermost
    *  last, so an `<option>` knows which select it is being compared against. */
   readonly selects: unknown[];
-  /** Set once another top-level render was live at the same time as this one. */
-  overlapped: boolean;
   /** Set when the render finishes (normally or by throwing). */
   ended: boolean;
+  /** Set once a component of this render asked for anything in `<head>`. A
+   *  render that asked for none can neither leak a head nor miss one, which
+   *  is what keeps the refusal below off pages that do not use `useHead`. */
+  hasHead: boolean;
+  /** Set once this render's head has been handed to somebody — by key, or as
+   *  the no-argument answer. An uncollected render is one whose caller may
+   *  still be about to ask. */
+  collected: boolean;
+  /** Set when this render FINISHED while an earlier stream was still waiting
+   *  to be asked for its head: from that moment the no-argument answer is
+   *  this render for BOTH callers, so there is no honest one. */
+  superseded: boolean;
 }
 
 /** The key the render travels under inside an SSR context scope. Not a context
@@ -57,13 +67,32 @@ export function _ssrRenderOf(
   return (scope?.get(SSR_RENDER_KEY) as SsrRender | undefined) ?? null;
 }
 
-/** The renders that have started and not yet finished. Only ever holds a
- *  render for the span of its own writer, so nothing accumulates: a stream
- *  that is created and never pulled never enters it. */
-const _live = new Set<SsrRender>();
-/** The most recently STARTED top-level render — the one a no-argument
- *  `collectHead()` answers for. */
+/** The most recently STARTED top-level render. Only the FALLBACK answer for a
+ *  no-argument `collectHead()` — see {@linkcode _ssrRenderLastEnded} for why
+ *  start order is the wrong question, and `_collectTarget` for the one case
+ *  that still needs it (a collect while the first render is still open). */
 let _last: SsrRender | null = null;
+/** The most recently FINISHED top-level render — the one a no-argument
+ *  `collectHead()` answers for.
+ *
+ *  START ORDER IS THE WRONG QUESTION, and this is the bug that hid behind the
+ *  first version of this module. A caller always asks for its head AFTER its
+ *  own render has ended; a render that STARTED after mine ended is therefore
+ *  never mine, and pointing at it hands one response another's `<title>`,
+ *  description and canonical URL — the exact defect per-render state was
+ *  added to close, one window further along. Measured, two requests one after
+ *  the other with an await between the body and the head:
+ *
+ *    for await (…renderToStream(<Page name="alice"/>)) …   // ends
+ *    …request B starts streaming…
+ *    collectHead()  →  <title>bob</title>     // alice's response
+ *
+ *  Nothing flagged it: the two renders never overlapped in time, so the
+ *  "another render was live when this one started" test — which is all the
+ *  first version had — was false for both. End order gets both callers right
+ *  with no refusal at all, and {@linkcode SsrRender.superseded} covers what
+ *  is left. */
+let _lastEnded: SsrRender | null = null;
 /** The render whose component body is executing RIGHT NOW. Set for the
  *  SYNCHRONOUS span of one component call only (see `_ssrScoped`), which is
  *  exactly when a hook body runs — no `yield` can happen inside it, so this
@@ -79,30 +108,56 @@ const _byKey = new WeakMap<object, SsrRender>();
 
 /** Create a render. It is not live until {@linkcode _ssrRenderStart}. */
 export function _ssrRenderNew(kind: SsrRender["kind"]): SsrRender {
-  return { kind, ids: 0, selects: [], overlapped: false, ended: false };
+  return {
+    kind,
+    ids: 0,
+    selects: [],
+    ended: false,
+    hasHead: false,
+    collected: false,
+    superseded: false,
+  };
 }
 
-/** Mark a top-level render as in progress. Any render already live and this
- *  one are flagged as having overlapped — the fact a no-argument
- *  `collectHead()` needs to know it cannot answer. */
+/** Mark a top-level render as in progress. */
 export function _ssrRenderStart(r: SsrRender): void {
-  if (_live.size > 0) {
-    r.overlapped = true;
-    for (const other of _live) other.overlapped = true;
-  }
-  _live.add(r);
   _last = r;
 }
 
-/** End the span {@linkcode _ssrRenderStart} opened. */
+/** End the span {@linkcode _ssrRenderStart} opened.
+ *
+ *  NOT a liveness set. The first version kept one, and a stream the consumer
+ *  pulled once and then dropped — a `Promise.race` that timed out, a manual
+ *  `next()` loop that broke — never ran its `finally`, so it stayed "live"
+ *  for the life of the process and every later render was flagged as having
+ *  overlapped it: one abandoned generator turned every subsequent no-argument
+ *  `collectHead()` into a permanent throw, for an app serving one request at
+ *  a time. Nothing here now depends on a render ever ending, so a render that
+ *  never does costs exactly one object. */
 export function _ssrRenderFinish(r: SsrRender): void {
   r.ended = true;
-  _live.delete(r);
+  const prev = _lastEnded;
+  // The one case end order cannot separate: an earlier STREAM finished, its
+  // caller has not asked yet (only a stream's caller can be separated from
+  // its own render by an await), and now this render is the answer for both
+  // of them. Only when both actually carry a head — a render that asked for
+  // none can neither be robbed nor do the robbing, and a page with no head is
+  // most apps.
+  if (
+    prev && prev !== r && prev.kind === "stream" && !prev.collected &&
+    prev.hasHead && r.hasHead
+  ) r.superseded = true;
+  _lastEnded = r;
 }
 
 /** The most recently started top-level render. */
 export function _ssrRenderLast(): SsrRender | null {
   return _last;
+}
+
+/** The most recently FINISHED top-level render — see {@linkcode _lastEnded}. */
+export function _ssrRenderLastEnded(): SsrRender | null {
+  return _lastEnded;
 }
 
 /** The render whose component body is executing, or null outside one. */
@@ -137,7 +192,7 @@ export function _ssrRenderForKey(key: object): SsrRender | null {
  */
 // aio-ok: a test-only seam; a live render never forgets itself
 export function _resetSsrRenders(): void {
-  _live.clear();
   _last = null;
+  _lastEnded = null;
   _current = null;
 }

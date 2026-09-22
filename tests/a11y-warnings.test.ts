@@ -354,7 +354,7 @@ Deno.test({
   },
 });
 
-// wallet report §10 — the keyboard already lives elsewhere by WAI-ARIA design, so
+// field report §10 — the keyboard already lives elsewhere by WAI-ARIA design, so
 // "add onKeyDown" cannot be followed; `role="presentation"` would erase the
 // semantics. A composite OWNER is the one place the advice CAN be followed:
 // WAI-ARIA puts the arrows and Enter on the focusable owner, so a focusable

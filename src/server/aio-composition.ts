@@ -6,6 +6,7 @@ import {
   type ComposedCells,
 } from "../state/cell.ts";
 import { isRefusableCredential, looksSecret } from "../state/secret-names.ts";
+import { buildDBStateGetter } from "../state/cell-persist-filter.ts";
 import { forUserView } from "../state/cell-reactive.ts";
 import {
   applyCellFieldFilter,
@@ -631,75 +632,6 @@ export function composeCellsWiring(
     onRestore,
     cellReportOpts,
     visibilityReport,
-  };
-}
-
-/** Build getDBState from per-cell persist filters.
- *  Default resolution: cell.persist > cellDefaults.persist > "all".
- *  Every cell always gets an entry; "all" persists the full slice, "none" is filtered out. */
-function buildDBStateGetter(composed: ComposedCells): (s: unknown) => unknown {
-  const cellPersistFilters = new Map<string, CellFieldFilter>();
-  const cellPersistTransforms = new Map<
-    string,
-    (state: Record<string, unknown>) => Record<string, unknown>
-  >();
-  for (const f of composed.cells) {
-    const resolved: CellFieldFilter = f.__aio.persist ?? "all";
-    if (resolved !== "none") {
-      cellPersistFilters.set(f.__aio.id, resolved);
-      const t = f.__aio.persistTransform;
-      if (t) cellPersistTransforms.set(f.__aio.id, t);
-    }
-  }
-  return (s: unknown) => {
-    const full = s as Record<string, unknown>;
-    const result: Record<string, unknown> = {};
-    for (const [cellName, filter] of cellPersistFilters) {
-      const cellState = full[cellName];
-      if (!cellState || typeof cellState !== "object") continue;
-      const filtered = applyCellFieldFilter(
-        filter,
-        cellState as Record<string, unknown>,
-      );
-      if (!filtered) continue;
-      // `persist: { transform }` — the app SHAPES what goes to disk (report 9 §8.4).
-      // AFTER include/exclude, so the two compose in the order they read.
-      //
-      // A THROW HERE IS NOT SWALLOWED. This runs on the persist path, and
-      // "the write quietly stopped happening" is the worst outcome aio has:
-      // the app keeps running on state that is not on disk. So the error is
-      // re-thrown with the cell named, and the persistence layer's own
-      // PERSIST_ERROR reporting carries it — the same treatment a failed
-      // write gets, because it is the same failure.
-      const transform = cellPersistTransforms.get(cellName);
-      if (!transform) {
-        result[cellName] = filtered;
-        continue;
-      }
-      let shaped: Record<string, unknown>;
-      try {
-        shaped = transform(filtered);
-      } catch (e) {
-        throw new Error(
-          `[cell:${cellName}] persist.transform threw — nothing was written ` +
-            `for this cell. It runs on every persist cycle, so this will not ` +
-            `resolve on its own.\n  cause: ${
-              e instanceof Error ? e.message : String(e)
-            }`,
-          { cause: e },
-        );
-      }
-      if (shaped === null || typeof shaped !== "object") {
-        throw new Error(
-          `[cell:${cellName}] persist.transform returned ${
-            shaped === null ? "null" : typeof shaped
-          } — it must return the OBJECT to write. Returning nothing would ` +
-            `persist an empty cell, which restores as one.`,
-        );
-      }
-      result[cellName] = shaped;
-    }
-    return result;
   };
 }
 

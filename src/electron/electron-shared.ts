@@ -484,10 +484,22 @@ ${
     webPreferences.contextIsolation = true;
     webPreferences.webSecurity = true;
     delete webPreferences.preloadURL;
+    const want = params.preload || webPreferences.preload;
     let ok = false;
-    try {
-      const want = params.preload || webPreferences.preload;
-      if (want) {
+    let root = '';
+    let why = '';
+    if (want) {
+      try {
+        // The same root the openWindow handler uses. typeof guarded because
+        // this template is shared with the WebSocket window, whose generated
+        // script does not declare BASE_DIR — and a throw here would be a
+        // refusal anyway, which is the right direction to fail. Resolved
+        // FIRST so the refusal can name it even when the preload itself is
+        // what fails to resolve: the whole failure is a mismatch between two
+        // roots the app author cannot see.
+        root = fs.realpathSync(
+          (typeof BASE_DIR === 'string' && BASE_DIR) || process.cwd(),
+        );
         // No regex on purpose. A /^file:\\/\\// literal here emits
         // /^file:/// into the generated script, where the trailing // is a
         // LINE COMMENT that swallows the closing paren — a syntax error in a
@@ -495,17 +507,31 @@ ${
         // by the parse test; kept as prose so it is not reintroduced.
         const wantPath = want.startsWith('file://') ? want.slice(7) : want;
         const real = fs.realpathSync(wantPath);
-        // The same root the openWindow handler uses. typeof guarded because
-        // this template is shared with the WebSocket window, whose generated
-        // script does not declare BASE_DIR — and a throw here would be a
-        // refusal anyway, which is the right direction to fail.
-        const root = fs.realpathSync(
-          (typeof BASE_DIR === 'string' && BASE_DIR) || process.cwd(),
-        );
         ok = real === root || real.startsWith(root + path.sep);
         if (ok) webPreferences.preload = real;
+        else why = 'it resolves to ' + real + ', which is outside that directory';
+      } catch (e) {
+        // The REASON, not a discarded exception. ENOENT here — the file is
+        // simply not there, the likeliest cause in a packaged build — is the
+        // line that explains the whole thing, and it used to be thrown away.
+        why = String((e && e.message) || e);
       }
-    } catch {}
+      if (!ok) {
+        // Every refusal SAYS which guardrail fired. A refused preload does
+        // NOT fail the attach: the guest loads, renders, and simply has no
+        // bridge. Reported from the field as "the embedded page renders but
+        // cannot see the app" — found by reading aio's source, because there
+        // was no line anywhere, on either side, naming a rule.
+        console.warn(
+          '[aio:electron] <webview> preload REFUSED: ' + want +
+            ' — a guest preload must resolve (realpath) inside the app directory ' +
+            (root || '(which could not be resolved either)') +
+            (why ? ' — ' + why : '') +
+            '. The guest will load with NO preload and NO bridge: it will not ' +
+            'crash, and nothing else will be logged about it.',
+        );
+      }
+    }
     if (!ok) {
       delete webPreferences.preload;
       delete params.preload;
@@ -951,7 +977,23 @@ contextBridge.exposeInMainWorld('__aioIPC', {
   // Gated by aio.run({ childWindows: true }); the main process validates the
   // URL and the preload path. opts: { preload, sandbox } — sandbox stays ON
   // unless the app EXPLICITLY passes sandbox: false (logged).
-  openWindow: (url, opts) => ipcRenderer.send('__aio:openWindow', { url, ...(opts || {}) }),
+  //
+  // invoke, NOT send: this one ANSWERS. The main process writes an excellent
+  // refusal — it even names the config key to add — and send is one-way, so
+  // the renderer that asked got undefined back, and every refusal was audible
+  // only to whoever was reading the main-process console. A field report
+  // measured the cost: their caller was openWindow(...).catch(fallBack), and
+  // undefined has no .catch, so the TypeError took the fallback path and the
+  // page opened in the user's system browser instead — forever, silently, for
+  // a rule nobody was told about. Additive: undefined becomes a Promise, so a
+  // fire-and-forget caller is unchanged and an awaiting one now REJECTS with
+  // the reason. The main process keeps an ipcMain.on + event.reply leg for
+  // any preload still speaking the old way.
+  //
+  // No backticks in this comment ON PURPOSE — it lives inside a template
+  // literal, and one would close the string. See the will-attach-webview note
+  // above: a syntax error here is a window that never opens.
+  openWindow: (url, opts) => ipcRenderer.invoke('__aio:openWindow', { url, ...(opts || {}) }),
 });
 ${shellBridgePreload()}
 // Window controls for ui.chrome "themed"/"none": a frameless window loses

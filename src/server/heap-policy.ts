@@ -105,6 +105,16 @@ export function parseMaxHeap(
     }
     return Math.floor(declared);
   }
+  // Anything that is not a string by now is not a size. Reaching `.trim()` on
+  // it threw a TypeError with no teaching in it — `memory: { maxHeap: {} }` is
+  // a config mistake, and it deserves the same sentence every other one gets.
+  if (typeof declared !== "string") {
+    throw new Error(
+      `[aio] memory.maxHeap is ${
+        JSON.stringify(declared)
+      } — expected "25%", "12GB", "512MB", a number of MB, or "default".`,
+    );
+  }
   const s = declared.trim().toLowerCase();
   if (s === "default") return null;
   const pct = s.match(/^(\d+(?:\.\d+)?)\s*%$/);
@@ -187,6 +197,26 @@ export function overAdvisedShare(
   // `am start` sized the ceiling to exactly the advised share and then warned
   // that the result exceeded it.
   return share > HEAP_FRACTION * 1.1 ? share : null;
+}
+
+/** WHERE `memory.maxHeap` lives: the `memory` block of the app's own
+ *  deno.json, and nowhere else.
+ *
+ *  One decider, because the alternative already happened — the build read it
+ *  from there, the launcher never read it at all, and the boot hint about
+ *  top-level deno.json keys called it inert. Three surfaces, three answers,
+ *  and the key that looked live was not. Pure: the caller supplies the parsed
+ *  config (`appDenoJson()`, `readDenoJson(root)`), so this never touches disk
+ *  and can be tested with an object. */
+export function declaredMaxHeapOf(
+  denoJsonConfig: Record<string, unknown> | undefined,
+): string | number | undefined {
+  const memory = denoJsonConfig?.memory;
+  if (typeof memory !== "object" || memory === null) return undefined;
+  const value = (memory as { maxHeap?: unknown }).maxHeap;
+  return typeof value === "string" || typeof value === "number"
+    ? value
+    : undefined;
 }
 
 /** The `--v8-flags=…` argument for a resolved ceiling, or `[]` when there is
@@ -316,12 +346,24 @@ export async function currentHeapLimitBytes(): Promise<number | null> {
  *
  *  Silent when the ceiling already meets policy, when the machine cannot be
  *  measured, or when `node:v8` is unavailable — a warning nobody can act on is
- *  noise, and noise is how real warnings get ignored. */
+ *  noise, and noise is how real warnings get ignored.
+ *
+ *  `declaredMaxHeap` is the app's `memory.maxHeap`, and it is here because a
+ *  declared ceiling this process did not get is INVISIBLE otherwise. The key
+ *  only ever reaches V8 through the LAUNCH (`am start`, `deno compile`); a bare
+ *  `deno run` gets the automatic share and the declared number does nothing —
+ *  and, on a machine where the automatic share is the floor, did nothing
+ *  silently, because the gap below was measured against the automatic share
+ *  the process already had. A field report hit exactly that: `maxHeap: "12GB"`
+ *  set, 4 GB in effect, and three surfaces that each said something different.
+ *  Stated only when it is actually declared AND actually not in effect. */
 export async function reportHeapCeiling(
   log: { warn: (msg: string) => void } = console,
   deps: {
     limitBytes?: () => Promise<number | null>;
     totalBytes?: () => number | null;
+    /** The app's declared `memory.maxHeap` (deno.json), when it has one. */
+    declaredMaxHeap?: string | number | null;
     /** Where to remember that this warning was already given. Omit for the old
      *  every-boot behaviour (tests, and any caller with nowhere to write). */
     stampPath?: string;
@@ -331,7 +373,28 @@ export async function reportHeapCeiling(
 ): Promise<void> {
   const limit = await (deps.limitBytes ?? currentHeapLimitBytes)();
   const total = (deps.totalBytes ?? physicalMemoryBytes)();
-  const want = resolveMaxHeapMB(total);
+  const auto = resolveMaxHeapMB(total);
+  // The DECLARED ceiling — `parseMaxHeap`, not `resolveMaxHeapMB`, because the
+  // question here is "did the author state one?" and only the parser answers
+  // it: `resolveMaxHeapMB` returns the AUTOMATIC share for `"default"`, `""`
+  // and an undeclared key alike, which would make this warning claim a number
+  // nobody wrote. A typo throws (by design — a memory setting that silently
+  // means "default" is found only under load), but this reporter is
+  // observe-only and awaited on the boot path, so it says it and carries on;
+  // the build refuses the same value outright.
+  let declaredMB: number | null = null;
+  try {
+    const parsed = parseMaxHeap(deps.declaredMaxHeap, total);
+    declaredMB = parsed === null ? null : Math.max(HEAP_FLOOR_MB, parsed);
+  } catch (e) {
+    log.warn(`${(e as Error)?.message ?? e} (ignored for this run)`);
+  }
+  // WHICH ceiling this app should have — one yardstick, never two. An author
+  // who wrote `memory.maxHeap` has decided; the automatic share is then not
+  // the measure, and telling them the machine "allows" a different number is
+  // the framework arguing with the only person who knows the workload. An app
+  // that declared nothing is measured against the share, exactly as before.
+  const want = declaredMB ?? auto;
   if (limit === null || want === null) return;
   const haveMB = Math.floor(limit / (1024 * 1024));
   const totalMB = total === null ? null : Math.floor(total / (1024 * 1024));
@@ -408,6 +471,30 @@ export async function reportHeapCeiling(
       /* unwritable data dir — warn every boot rather than not at all */
     }
   }
+  const stampNote = deps.stampPath && !deps.always
+    ? ` (said once per machine — --verbose repeats it)`
+    : ``;
+  // The declared ceiling that did not arrive — named in THE place its author
+  // is already looking. Three surfaces used to disagree about this key (the
+  // build honours it, the top-level-deno.json hint calls it inert, and this
+  // warning never mentioned it), and none of them named the one thing that
+  // applies it. It is the whole message when it applies, not a footnote on a
+  // paragraph about a share the author already overrode.
+  if (declaredMB !== null) {
+    log.warn(
+      `heap ceiling is ${
+        (haveMB / 1024).toFixed(1)
+      } GB, but this app declares "memory": { "maxHeap": ... } = ${
+        (declaredMB / 1024).toFixed(1)
+      } GB — and this process did NOT get it. V8 fixes the ceiling when the ` +
+        `isolate starts, before any config is read, so only the LAUNCH can ` +
+        `apply it: \`am start\` reads memory.maxHeap, \`deno run ` +
+        `--v8-flags=--max-old-space-size=${declaredMB}\` sets it by hand, and ` +
+        `a \`deno compile\` build bakes it into the binary. Until then this ` +
+        `app is capped at ${(haveMB / 1024).toFixed(1)} GB.` + stampNote,
+    );
+    return;
+  }
   log.warn(
     `heap ceiling is ${
       (haveMB / 1024).toFixed(1)
@@ -421,9 +508,6 @@ export async function reportHeapCeiling(
       `deno run. A COMPILED binary cannot be raised at all from here — it ` +
       `carries what the build baked, so set "memory": { "maxHeap": "${
         (want / 1024).toFixed(0)
-      }GB" } in deno.json and rebuild.` +
-      (deps.stampPath && !deps.always
-        ? ` (said once per machine — --verbose repeats it)`
-        : ``),
+      }GB" } in deno.json and rebuild.` + stampNote,
   );
 }

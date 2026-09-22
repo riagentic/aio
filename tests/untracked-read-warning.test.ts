@@ -165,7 +165,7 @@ Deno.test("untracked read: production is untouched", async () => {
 });
 
 Deno.test("afterRender: a listener it DISPATCHES to is not the callback — its reads are not blamed", async () => {
-  // wallet report §8: `<PanelDivider>`'s afterRender fired `resize`; every other
+  // field report §8: `<PanelDivider>`'s afterRender fired `resize`; every other
   // component's resize listener ran inside that hook's frame, and their reads
   // were reported as `<PanelDivider>`'s — advice that cannot be followed.
   const { win, root, close } = dom();

@@ -49,7 +49,11 @@ testUI(Palette, "am: an input would have swallowed it", async (ui) => {
   // window-level key at the most obvious path on the surface silently does
   // nothing — and reports ok.
   closed.set(0);
-  await ui.field.press("Escape"); // the request succeeds — that is the trap
+  // The request succeeds — that WAS the trap, and it is now named at the
+  // press: `triggerPress` warns when a binding was listening and the field
+  // swallowed the key (see ui-press-input-swallow-warning.test.tsx, which
+  // pins the message and, just as hard, every case that must stay silent).
+  await ui.field.press("Escape");
   assertEquals(ui.count.text, "0", "…and the binding did not fire");
 
   const viaWindow = await runUITrigger({

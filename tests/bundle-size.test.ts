@@ -174,9 +174,50 @@ const CEILING_GZ = {
   //     aio's voice. Both are prose, and prose is what makes them worth
   //     anything; the dev-only chunk (todo.md, 9.3 KB gz measured) is where
   //     this half comes back.
-  air: 90,
+  //
+  // LOWERED 90 → 79 and 92 → 82 on 2026-09-21. The dev-only chunk that the
+  // last four entries kept promising exists: `browser/dev-diagnostics.ts`,
+  // reached through a dynamic import that `esbuild-plugin.ts` marks external,
+  // so `dist/app.js` does not contain it and a production page never fetches
+  // it. Measured on the counter app, before → after, from the esbuild
+  // metafile: 250,996 → 218,118 raw, 94,065 → 81,765 gzipped. **12.0 KB gz
+  // off every page load**, itemised by what left:
+  //   · ui-trigger (16.6 KB raw) + ui-surface (5.4) + ui-remote (2.4) — the
+  //     `am surface` / `am trigger` executor. Driven by exactly two frames,
+  //     sent by exactly one sender (`server-trojan.ts`), and the trojan is
+  //     never mounted in prod (`server-static.ts`: "control REST API —
+  //     DEV-ONLY"). Unreachable on a production page, not merely unused.
+  //   · dev-overlay (3.4 KB raw) — returns on `!isDevMode()` at its first line.
+  //   · selector-audit (0.9) + contrast-audit (4.7, now tree-shaken to a
+  //     5-byte module record) + dev-readonly-hint (0.6) — the three
+  //     observe-only audits, all called inside `if (isDevMode())`.
+  // `isDevMode()` reads `globalThis.__aioDev`, which only `aioDevHTML` sets —
+  // and that shell serves the dev import map, never this bundle. So no page
+  // that loads `app.js` could switch any of it on; the bundler simply could
+  // not prove a runtime flag false. What it cost: `air/dev-hooks.ts`, +596
+  // bytes raw of seam and one loud failure message.
+  //
+  // NOT moved, and the reason, so nobody re-litigates it from the size alone:
+  // `console-intercept.ts` (2.6 KB) forwards the page's console to the server
+  // log in PRODUCTION too — `am logs` reads it; `component-profile.ts` (1.4)
+  // keeps counts a live `am eval '__aioProfile()'` reads off a production app;
+  // `time-travel-panel.ts` (4.5) is reachable from the public
+  // `useTimeTravel()`; `untracked-read.ts` (1.5) is half prod render path;
+  // `devtools-tree.ts` (0.6) is behind the public `connectReduxDevTools()`.
+  // Each of those would make production LESS capable than dev, which is not
+  // the allowed direction.
+  //
+  // `bundle-dev-chunk.test.ts` is the gate that keeps them out: it greps the
+  // metafile of a real build, so a static import that drags one back in is
+  // red, not a slow 12 KB drift nobody notices.
+  //
+  // The `air` figure moved for a second reason in the same change: "AIR alone"
+  // was measured with a bare esbuild, not the build's own plugin, so it was
+  // bundling a graph nobody ships (90 KB gz against the 80 a page downloaded).
+  // It now runs `aioBrowserPlugin()` like every other bundle here.
+  air: 79,
   /** The same, plus one cell — measured 2 KB, which is what a cell costs. */
-  app: 92,
+  app: 82,
 };
 
 const RUN = Deno.env.get("AIO_BUNDLE_SIZE") === "1";

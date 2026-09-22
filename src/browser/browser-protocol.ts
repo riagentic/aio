@@ -338,7 +338,6 @@ import {
   bindAllCellsReactive,
   getRegisteredCells,
 } from "../state/cell-reactive.ts";
-import { _installReadOnlyHint } from "../air/dev-readonly-hint.ts";
 
 let _ensured = false;
 export function ensureConnected(): void {
@@ -356,8 +355,10 @@ export function ensureConnected(): void {
   // disappearing with the socket.
   _ensured = true;
   try {
-    // AIO-4.4: install the read-only dev hint on first connect.
-    _installReadOnlyHint();
+    // AIO-4.4's read-only dev hint used to be installed here, on first
+    // connect. It now rides the dev-only chunk (browser/dev-diagnostics.ts),
+    // which loads at transport boot — earlier than this, and off a production
+    // page entirely. Nothing uninstalls it, so there was nothing to re-arm.
     // Sync cells route method calls through the CRDT engine (HLC op + offline
     // queue) instead of the plain action path; everything else is unchanged.
     // The engine boots lazily (dynamic import) below. A sync-cell method called

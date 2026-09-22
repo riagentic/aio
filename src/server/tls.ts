@@ -11,8 +11,11 @@
 
 import { join } from "@std/path";
 import {
+  certConstrainedNameTypes,
   certSubjectAltNames,
+  dnsWithinSubtree,
   generateRoot,
+  ipWithinSubtree,
   issueLeaf as mintLeaf,
 } from "./x509.ts";
 import { homedir, hostname } from "node:os";
@@ -36,13 +39,27 @@ export type TlsCert = {
   caPath?: string;
 };
 
-/** Returns all non-loopback IPv4 addresses on this machine for SAN entries */
+/** All non-loopback IPv4 addresses on this machine, for SAN entries.
+ *
+ *  A failure here is not cosmetic: the answer decides which addresses the
+ *  certificate names, and an empty list produces a loopback-only certificate
+ *  that fails the handshake for every LAN client with a hostname mismatch and
+ *  nothing anywhere saying why. `Deno.networkInterfaces` throws without
+ *  `--allow-sys=networkInterfaces`, which is exactly the misconfiguration that
+ *  must not be silent. */
 function localIPs(): string[] {
   try {
     return Deno.networkInterfaces()
       .filter((i) => i.family === "IPv4" && !i.address.startsWith("127."))
       .map((i) => i.address);
-  } catch {
+  } catch (e) {
+    log.warn(
+      `tls: could not read this machine's network interfaces (${
+        e instanceof Error ? e.message : String(e)
+      }). The certificate will name loopback only, so clients reaching this ` +
+        `app by its LAN address will fail the handshake. Grant ` +
+        `--allow-sys=networkInterfaces, or pass --cert/--key.`,
+    );
     return [];
   }
 }
@@ -70,11 +87,57 @@ export function certCommonName(appId?: string): string {
   return slug ? `aio-${slug}` : DEFAULT_CERT_CN;
 }
 
-/** Every name and address this machine can be reached at TODAY — the SAN set a
- *  leaf must carry to be usable. Loopback first: it is the one entry that is
- *  true on every machine forever, and the rest are a snapshot of a moment. */
-export function currentSans(): { dns: string[]; ips: string[] } {
+/** Every name and address this machine answers on today, before anything asks
+ *  whether the local root is allowed to vouch for them. */
+function machineSans(): { dns: string[]; ips: string[] } {
   return { dns: ["localhost"], ips: ["127.0.0.1", "::1", ...localIPs()] };
+}
+
+/** Split what this machine answers on into what the root MAY name and what it
+ *  may not.
+ *
+ *  This is not a tidiness filter, it is the difference between a working app
+ *  and a dead one. A SAN outside the root's permittedSubtrees does not fail
+ *  only for that address: RFC 5280 path validation rejects the WHOLE
+ *  certificate, so one address the root cannot speak for takes `localhost`
+ *  down with it. Measured — a leaf carrying `localhost, 127.0.0.1,
+ *  100.64.7.9`:
+ *
+ *      error 47 at 0 depth lookup: permitted subtree violation
+ *
+ *  `localIPs()` hands over every non-loopback IPv4 this machine has, and the
+ *  permitted set is loopback plus RFC1918 plus link-local. A Tailscale address
+ *  (100.64/10 — the canonical reason to run `--expose` at all), a CGNAT lease,
+ *  a cloud VM's public address: each of them silently produced a certificate
+ *  no correct client would accept for ANY name, on an app nobody had touched.
+ *  Four instruments passed it because all four only ever fed it addresses the
+ *  root was already allowed to name. */
+export function splitByRootSubtrees(
+  s: { dns: string[]; ips: string[] },
+): { sans: { dns: string[]; ips: string[] }; dropped: string[] } {
+  const okDns = (d: string) =>
+    ROOT_PERMITTED_DNS.some((b) => dnsWithinSubtree(d, b));
+  const okIp = (i: string) =>
+    ROOT_PERMITTED_IPS.some((sub) => ipWithinSubtree(i, sub));
+  return {
+    sans: { dns: s.dns.filter(okDns), ips: s.ips.filter(okIp) },
+    dropped: [
+      ...s.dns.filter((d) => !okDns(d)),
+      ...s.ips.filter((i) => !okIp(i)),
+    ],
+  };
+}
+
+/** Every name and address this machine can be reached at TODAY *and* the local
+ *  root is permitted to name — the SAN set a leaf must carry to be usable.
+ *  Loopback first: it is the one entry that is true on every machine forever,
+ *  and the rest are a snapshot of a moment.
+ *
+ *  Pure, and filtered: the warning about what was dropped belongs to the one
+ *  caller that issues a certificate, not to every caller that asks a
+ *  question. */
+export function currentSans(): { dns: string[]; ips: string[] } {
+  return splitByRootSubtrees(machineSans()).sans;
 }
 
 /** The SANs a cert on disk actually carries, or null when it carries none.
@@ -139,6 +202,30 @@ export function sansCover(
     want.ips.every((i) => hIps.has(normIp(i)));
 }
 
+/** A private key hits the disk owner-only on the FIRST write, never
+ *  world-readable-then-fixed.
+ *
+ *  `writeTextFile` + `chmod` leaves the key at 0644 (umask permitting) for the
+ *  whole interval between the two calls — small, but it is the framework's
+ *  most sensitive file and the window is free to close. `mode` is applied when
+ *  the file is opened, and it also applies on a rewrite, so a key left loose by
+ *  an older version is tightened the next time it is reissued. Windows has no
+ *  mode bits; the chmod stays as the belt to this pair of braces, and its
+ *  failure is reported rather than swallowed. */
+async function writePrivateKey(path: string, pem: string): Promise<void> {
+  await Deno.writeTextFile(path, pem, { mode: 0o600 });
+  if (Deno.build.os === "windows") return;
+  try {
+    await Deno.chmod(path, 0o600);
+  } catch (e) {
+    log.warn(
+      `tls: could not restrict ${path} to owner-only (${
+        e instanceof Error ? e.message : String(e)
+      }). Anyone who can read that file can impersonate this app.`,
+    );
+  }
+}
+
 /** Leaf then issuer, in that order — the chain a TLS server presents. ONE
  *  spelling, because a chain assembled two ways is two chains. */
 function joinChain(leaf: string, ca: string): string {
@@ -175,11 +262,45 @@ export function aioRootPaths(): { certPath: string; keyPath: string } {
  *  untidy. These constraints are marked CRITICAL and cover both name types a
  *  server certificate can carry, so this root can only ever speak for loopback,
  *  `.local`, and the RFC1918 ranges an aio app is actually reachable on. Steal
- *  the key and you still cannot forge a public website with it — that is a
- *  verified property, not a hope (`tests/tls-anchor-stability.test.ts`).
+ *  the key and openssl, rustls, NSS and Go all refuse the forgery — measured,
+ *  not hoped (`tests/tls-anchor-stability.test.ts`, `tests/x509.test.ts`).
+ *
+ *  KNOWN LIMIT, measured with a verifier none of those tests used: RFC 5280
+ *  §6.1 starts path validation AFTER the trust anchor and does not process the
+ *  anchor's own extensions, so a validator that follows it to the letter never
+ *  sees these constraints. Java's `CertPathValidator` is one — it accepts a
+ *  `DNS:www.google.com` leaf issued under this root and rejects the same leaf
+ *  the moment the constraints sit on an intermediate instead. Closing that
+ *  needs a name-constrained issuing intermediate between the root and the
+ *  leaves.
+ *
+ *  Be precise about what the root's extendedKeyUsage does and does not buy
+ *  here, because it reads as more than it is. On an anchor-skipping verifier
+ *  it bounds a stolen key to TLS SERVER certificates — no S/MIME, no UPN, no
+ *  code signing, which is the eDellRoot class. It does NOT stop the case that
+ *  matters most: a forged `www.google.com` server certificate needs exactly
+ *  `serverAuth`, so the EKU is no obstacle to it at all. For that one the
+ *  intermediate is the only fix, and the residual until then is real — an
+ *  attacker who can read `~/.aio/ca` can MITM a Java-based client on a machine
+ *  that installed this root. That they can read that directory already means
+ *  they can read the home directory, which is the larger problem; that is why
+ *  the intermediate is scheduled rather than rushed (`todo.md`), not why it is
+ *  unnecessary. Every other verifier is now measured from its own OS, each
+ *  against a control: openssl, rustls, NSS and Go, macOS Security.framework
+ *  14.8.9, and Windows CryptoAPI on Win11 26200 all refuse a forged public
+ *  name under this root and all accept the legitimate `localhost` leaf. Java
+ *  is the outlier, not the rule. Android/Conscrypt is the one still untested.
+ *
+ *  macOS differs in the other half: it does NOT apply a trust anchor's
+ *  extendedKeyUsage (Windows and openssl do), which is why the root also
+ *  carries rfc822Name and URI bases in its permittedSubtrees — see
+ *  `nameConstraints` in `x509.ts`. Two locks, because the verifiers that ship
+ *  disagree about which one they read.
  *
  *  A name type left unconstrained is UNRESTRICTED, which is why DNS and IP are
- *  both listed rather than just the one that seemed to matter. */
+ *  both listed rather than just the one that seemed to matter — and why the
+ *  root carries an extendedKeyUsage as well, since name constraints say
+ *  nothing about what a certificate may be USED for. */
 export const ROOT_PERMITTED_DNS = ["localhost", ".local", ".localhost"];
 export const ROOT_PERMITTED_IPS: readonly (readonly [string, string])[] = [
   ["127.0.0.0", "255.0.0.0"],
@@ -204,6 +325,76 @@ export const ROOT_PERMITTED_IPS: readonly (readonly [string, string])[] = [
  *  shipped inside the framework would give every attacker on the planet the
  *  ability to mint a green padlock for your apps; a root you generated is worth
  *  exactly as much as your own filesystem. */
+/** Said once per ROOT, not once per process and not once per app boot.
+ *
+ *  Per root rather than a single flag because two different roots are two
+ *  different facts, and a single flag would mean the second one is never
+ *  reported. Several cells in one process share one root, so this still
+ *  collapses the four boots of a four-cell app into one line. Bounded by how
+ *  many CA directories a process touches, which is one. */
+const _saidUnderConstrained = new Set<string>();
+
+/** A root already on disk may be older than the constraints it should carry,
+ *  and `loadOrCreateAioRoot` reuses one VERBATIM forever — there is no "the
+ *  root looks out of date" path, deliberately, because regenerating it would
+ *  break every browser that trusted the old one without asking first.
+ *
+ *  So the machine cannot fix itself here; it can only refuse to be quiet. A
+ *  root written before the rfc822Name/URI bases existed constrains DNS and IP
+ *  only, and every other name type is therefore UNRESTRICTED: with that key a
+ *  thief mints an S/MIME certificate for any address on any verifier that
+ *  skips the anchor's extendedKeyUsage, which macOS does (measured, 14.8.9).
+ *
+ *  The person is told exactly what to delete and what to re-run, because the
+ *  fix costs them a `am trust` and nothing else. */
+function warnIfRootUnderConstrained(certPem: string, certPath: string): void {
+  if (_saidUnderConstrained.has(certPath)) return;
+  let types: ReturnType<typeof certConstrainedNameTypes>;
+  try {
+    types = certConstrainedNameTypes(certPem);
+  } catch (e) {
+    // A root this cannot parse is a root whose constraints are UNKNOWN, and
+    // unknown is reported, never assumed fine.
+    _saidUnderConstrained.add(certPath);
+    log.warn(
+      `tls: could not read the name constraints on the aio root at ` +
+        `${certPath} (${e instanceof Error ? e.message : String(e)}), so ` +
+        `what a thief with its key could mint is unknown. Delete it and ` +
+        `re-run \`am trust\` to get a root this version wrote.`,
+    );
+    return;
+  }
+  if (types === null) {
+    _saidUnderConstrained.add(certPath);
+    log.warn(
+      `tls: ⚠ the aio root at ${certPath} carries NO name constraints. It ` +
+        `is installed machine-wide, so with its private key an attacker can ` +
+        `mint a trusted certificate for ANY site — this is the Superfish ` +
+        `shape. Delete ${certPath} and its key, then re-run \`am trust\`; ` +
+        `the replacement can only speak for loopback, .local and private ` +
+        `addresses.`,
+    );
+    return;
+  }
+  const missing = [
+    !types.email ? "email addresses (rfc822Name)" : null,
+    !types.uri ? "URIs" : null,
+  ].filter((x): x is string => x !== null);
+  if (missing.length === 0) return;
+  _saidUnderConstrained.add(certPath);
+  log.warn(
+    `tls: ⚠ the aio root at ${certPath} predates this version and does not ` +
+      `constrain ${missing.join(" or ")}. A name type left out of ` +
+      `permittedSubtrees is UNRESTRICTED, so with this root's private key a ` +
+      `thief can mint certificates for those names — and macOS does not ` +
+      `apply a trust anchor's extendedKeyUsage, so that is the only thing ` +
+      `stopping them there (measured, macOS 14.8.9). Your apps keep working ` +
+      `either way. To close it: delete ${certPath} and its key, then re-run ` +
+      `\`am trust\` — every aio app re-issues its leaf automatically, and ` +
+      `you re-trust one new root.`,
+  );
+}
+
 export async function loadOrCreateAioRoot(): Promise<
   { certPath: string; keyPath: string; cert: string; created: boolean }
 > {
@@ -217,6 +408,7 @@ export async function loadOrCreateAioRoot(): Promise<
   try {
     const cert = await Deno.readTextFile(certPath);
     await Deno.stat(keyPath);
+    warnIfRootUnderConstrained(cert, certPath);
     return { certPath, keyPath, cert, created: false };
   } catch { /* generate below */ }
 
@@ -231,10 +423,7 @@ export async function loadOrCreateAioRoot(): Promise<
     permittedIpMasks: ROOT_PERMITTED_IPS,
   });
   await Deno.writeTextFile(certPath, certPem);
-  await Deno.writeTextFile(keyPath, keyPem);
-  try {
-    if (Deno.build.os !== "windows") await Deno.chmod(keyPath, 0o600);
-  } catch { /* best-effort */ }
+  await writePrivateKey(keyPath, keyPem);
   return {
     certPath,
     keyPath,
@@ -266,10 +455,7 @@ async function issueLeaf(
     caKeyPem: await Deno.readTextFile(caKeyPath),
   });
   await Deno.writeTextFile(certPath, certPem);
-  await Deno.writeTextFile(keyPath, keyPem);
-  try {
-    if (Deno.build.os !== "windows") await Deno.chmod(keyPath, 0o600);
-  } catch { /* best-effort */ }
+  await writePrivateKey(keyPath, keyPem);
 }
 
 /** Load existing cert from dir or generate a new self-signed one.
@@ -312,7 +498,22 @@ export async function loadOrCreateCert(
   // friction this design exists to remove. One root, one install, every app.
   const { certPath: caCertPath, keyPath: caKeyPath } = aioRootPaths();
 
-  const want = currentSans();
+  const { sans: want, dropped } = splitByRootSubtrees(machineSans());
+  if (dropped.length) {
+    // LOUD, once per boot, at the only place that decides what a certificate
+    // will say. Silently dropping the address the user is actually dialling is
+    // the same failure as silently poisoning the certificate — this names what
+    // was left out, why, and the one thing that fixes it.
+    log.warn(
+      `tls: this machine answers on ${dropped.join(", ")}, which the local ` +
+        `aio root is NOT permitted to vouch for (it may only name localhost, ` +
+        `.local and private addresses — that restriction is what makes ` +
+        `installing it safe). Those addresses are left out of the ` +
+        `certificate: including even one of them would make the certificate ` +
+        `invalid for EVERY name in it, localhost included. To serve HTTPS on ` +
+        `${dropped[0]}, pass a certificate for it with --cert/--key.`,
+    );
+  }
   const haveCA = await Deno.stat(caCertPath).then(() => true).catch(() =>
     false
   );

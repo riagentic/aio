@@ -48,14 +48,60 @@ type Offence = { file: string; why: string };
  *
  *  `await`, `return` and `=>` (the `cleanup: () => closeWindow(win)` shape,
  *  whose caller awaits it) all pass. Nothing else does. */
+/** Every name in this file that holds `closeWindow` — the function itself and
+ *  anything a local helper hands back under another name.
+ *
+ *  The alias is why this exists. A file whose `createDOM()` returns
+ *  `{ cleanup: () => closeWindow(win) }` calls `cleanup()`, so a check that
+ *  only looks for the literal `closeWindow(` sees a clean file. That is not a
+ *  hypothetical: `tests/on-unmount.test.ts` shipped one un-awaited `cleanup()`
+ *  among four awaited ones, and it passed alone and leaked a timer in a shard
+ *  — the same failure shape, and the same hour lost, as the two literal ones
+ *  this gate already caught. */
+function closerNames(text: string): string[] {
+  const names = new Set(["closeWindow"]);
+  // `cleanup: () => closeWindow(win)` / `const cleanup = () => closeWindow(w)`
+  // / `{ cleanup }` destructured from a helper that returns one.
+  for (
+    const m of text.matchAll(
+      /([$\w]+)\s*[:=]\s*(?:\(\s*\)\s*=>|async\s*\(\s*\)\s*=>)\s*closeWindow\s*\(/g,
+    )
+  ) names.add(m[1]!);
+  for (
+    const m of text.matchAll(/([$\w]+)\s*[:=]\s*closeWindow\b(?!\s*\()/g)
+  ) names.add(m[1]!);
+  return [...names];
+}
+
 function unawaitedCloses(text: string): number[] {
   const bad: number[] = [];
+  const names = closerNames(text);
+  const alt = names.join("|");
+  // A CALL of one of those names. `[\w$.]*` lets the call be reached through
+  // an object (`await b.cleanup()`), which is how most of these helpers are
+  // used, and the lookbehind-free shape keeps it readable.
+  const call = new RegExp(`\\b(?:${alt})\\s*\\(`);
+  // Awaited, returned, handed to .then, or the body of an arrow — reached
+  // through a member chain or not.
+  const ok = new RegExp(
+    `(?:await|return|=>|\\.then\\()\\s*[\\w$.]*\\b(?:${alt})\\s*\\(`,
+  );
+  // `cleanup() { … }` is a method DEFINITION, not a call of the closer. Two
+  // test files define an unrelated `cleanup()` on an action's return value,
+  // and an earlier version of this gate reported all eight of them — a gate
+  // that fires on correct code gets muted, which costs more than it saves.
+  const methodDef = new RegExp(
+    `^(?:async\\s+)?(?:${alt})\\s*\\([^)]*\\)\\s*\\{`,
+  );
   text.split("\n").forEach((line, i) => {
     const code = line.trim();
     if (code.startsWith("//") || code.startsWith("*")) return;
-    if (!/\bcloseWindow\s*\(/.test(code)) return;
+    if (!call.test(code)) return;
     if (/\b(?:import|export)\b/.test(code)) return;
-    if (/(?:await|return|=>|\.then\()\s*closeWindow\s*\(/.test(code)) return;
+    if (methodDef.test(code)) return;
+    // The line that DEFINES the alias is not a call of it.
+    if (/[$\w]+\s*[:=][^=]*closeWindow\s*\(/.test(code)) return;
+    if (ok.test(code)) return;
     bad.push(i + 1);
   });
   return bad;
@@ -131,6 +177,33 @@ Deno.test("the gate can actually see both offences", async () => {
   assertEquals(unawaitedCloses("  return closeWindow(win);"), []);
   assertEquals(unawaitedCloses("  cleanup: () => closeWindow(win),"), []);
   assertEquals(unawaitedCloses("  // closeWindow(win) is the spelling"), []);
+
+  // …and the FOURTH shape, which the literal-only version of this gate could
+  // not see at all: the closer reached through an alias a helper returned.
+  // `tests/on-unmount.test.ts` had exactly this — four awaited `cleanup()`
+  // calls and one bare one, green alone, a leaked timer in a shard.
+  const aliased = [
+    "const { cleanup } = createDOM();",
+    "cleanup: () => closeWindow(win),",
+    "  cleanup();",
+  ].join("\n");
+  assertEquals(unawaitedCloses(aliased), [3], "an aliased closer must count");
+  assertEquals(
+    unawaitedCloses(aliased.replace("  cleanup();", "  await cleanup();")),
+    [],
+  );
+  // Reached through an object, which is how most of these helpers are used.
+  assertEquals(
+    unawaitedCloses("cleanup: () => closeWindow(w),\nawait b.cleanup();"),
+    [],
+  );
+  // A METHOD named `cleanup` is not a call of the closer. Two test files
+  // define one on an action's return value; reporting those would have made
+  // this gate noise.
+  assertEquals(
+    unawaitedCloses("cleanup: () => closeWindow(w),\ncleanup() {"),
+    [],
+  );
 
   // …and the scan is looking at a real, non-empty population.
   let windows = 0;

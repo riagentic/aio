@@ -1,6 +1,6 @@
 // A release STAGE in the derived version: `1.2.345-beta`.
 //
-// The field report (wallet report §17): an app wanted its version to say how finished
+// The field report (field report §17): an app wanted its version to say how finished
 // it was. aio refused every prerelease in deno.json's `version`, so the app
 // appended the stage on DISPLAY only — and then `appVersion()`, the artifact
 // names and the update check all said `0.1.377` while the status bar said

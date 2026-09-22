@@ -41,7 +41,11 @@ import { justified as okMarker } from "../src/diagnostics/ok-marker.ts";
 // (`sync/server-handler.ts`) became one `sendTo` that names the frame it could
 // not deliver, and the five harness swallows in `src/testing/` were either
 // made loud or justified in place.
-const CEILING = 324;
+// 324 → 322 when the dev-only browser chunk moved behind a dynamic import:
+// the two swallows in the moved modules now sit in `dev-diagnostics.ts`,
+// which a production page never loads, and the loader itself SAYS which
+// audits are therefore not running rather than discarding the reason.
+const CEILING = 322;
 
 /** The budget for the PROMISE spelling, counted separately.
  *

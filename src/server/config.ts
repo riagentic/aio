@@ -10,6 +10,7 @@ import {
   unusableFilterList,
 } from "../state/cell-helpers.ts";
 import { classifySource } from "./updates-core.ts";
+import { declaredMaxHeapOf } from "./heap-policy.ts";
 import { type Removal, removalsInDenoJson } from "../state/removals.ts";
 
 // Runtime config validation & documentation — extracted from aio.ts (AIO-52)
@@ -98,7 +99,17 @@ export function misplacedDenoJsonKeys(
   denoJson: Record<string, unknown> | undefined,
 ): string[] {
   if (!denoJson) return [];
+  // `memory: { maxHeap }` is the one exception, and it is not a special case:
+  // it is a LAUNCH fact, like `build` and `assets`. `build-compile.ts` reads it
+  // from exactly here to bake a compiled binary's V8 ceiling, and `am start`
+  // reads it from here to size a `deno run`. Calling it inert was false — and
+  // worse than false: the advice it gave ("move it into aio.run({ memory })")
+  // leads to `validateMemoryConfig` THROWING on `maxHeap`, because that block
+  // is the pressure monitor. A field report met both halves at once. The rest
+  // of `memory: {}` is still the monitor's and is still reported here.
+  const readsMaxHeap = declaredMaxHeapOf(denoJson) !== undefined;
   return Object.keys(denoJson).filter((k) =>
+    !(k === "memory" && readsMaxHeap) &&
     !DENO_JSON_READ_KEYS.has(k) &&
     // …including a `ui` key written FLAT at the top level (`"theme": "auto"`,
     // `"chrome": "themed"`, `"width": 900`). The reported case was the whole

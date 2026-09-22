@@ -90,11 +90,14 @@ Deno.test("SSR and the client agree on which attribute names are legal", async (
   try {
     for (const bad of INJECTIONS) {
       // Never more permissive than the DOM: whatever `setAttribute` refuses,
-      // the predicate refuses. Not the converse — happy-dom accepts a few
-      // names a real browser rejects (`1leading-digit`, which is not an XML
-      // `Name`), and the predicate is the SPEC. Being stricter than the test
-      // environment is the allowed direction; being laxer than the browser is
-      // how a server ships markup no client can reproduce.
+      // the predicate refuses. Not the converse — the predicate is the XML
+      // `Name` production, and a browser is looser than that: measured in
+      // Chromium, `setAttribute` accepts `1leading-digit`, `-leading-dash`,
+      // `a"b` and `a<b`. The last two would end the attribute if the SSR
+      // writer pasted them into a tag, so the server cannot follow the
+      // browser all the way. Being stricter is the allowed direction; being
+      // laxer than the browser is how a server ships markup no client can
+      // reproduce.
       let domRefused = false;
       try {
         doc.createElement("div").setAttribute(bad, "1");
@@ -155,4 +158,48 @@ Deno.test("the attribute-name rule still accepts every spelling aio writes", asy
     renderToString(h("stop", { stopColor: "red" })),
     `<stop stop-color="red"></stop>`,
   );
+});
+
+// The other direction, which is the one that breaks a working app: a name the
+// BROWSER accepts and the predicate refused. A refusal throws in dev AND in
+// prod on both paths, so being stricter than the document is not a safe
+// default — it turns markup that shipped yesterday into a 500.
+//
+// `[#x10000-#xEFFFF]` is part of the XML `Name` production the predicate names
+// and was missing from its character sets, so every name carrying a character
+// outside the BMP was refused. MEASURED in Chromium
+// (`--headless --dump-dom`, `document.createElement("div").setAttribute(n,"1")`):
+//
+//   data-🎉   -> OK      data-𠀋 -> OK      data-x🎉 -> OK
+//   a=b       -> InvalidCharacterError      a/b, "x onload=…", "" -> the same
+//
+// so aio threw on the first row while the browser wrote it. A `data-${label}`
+// built from content in an emoji or a CJK-extension script is the everyday
+// shape of it.
+Deno.test("the rule accepts the non-BMP names a browser accepts", async () => {
+  const astral: Record<string, string> = {
+    "data-🎉": "party",
+    "data-𠀋": "cjk-ext-b",
+    "data-x🎉": "trailing",
+  };
+  for (const [k, v] of Object.entries(astral)) {
+    assert(_isAttrName(k), `${k} is an XML Name and Chromium accepts it`);
+    const html = renderToString(h("div", { [k]: v }));
+    assertEquals(html, `<div ${k}="${v}"></div>`);
+    assertEquals(await streamed(h("div", { [k]: v }) as VNode), html);
+  }
+  // …and the client writer agrees, which is the whole point of one predicate.
+  const win = new Window({ url: "https://localhost" });
+  const doc = win.document as unknown as Document;
+  try {
+    const el = doc.createElement("div") as unknown as HTMLElement;
+    for (const [k, v] of Object.entries(astral)) {
+      _writeProp(el, k, v);
+      assertEquals(el.getAttribute(k), v);
+    }
+  } finally {
+    await closeWindow(win);
+  }
+  // A lone surrogate is not a character, and neither writer may emit one.
+  assertEquals(_isAttrName("data-\uD83C"), false);
 });

@@ -15,6 +15,7 @@ import {
   wipeFile,
 } from "../diagnostics/logger-rotate.ts";
 import {
+  declaredMaxHeapOf,
   maxHeapFlagArgs,
   physicalMemoryBytes,
   resolveMaxHeapMB,
@@ -156,18 +157,31 @@ export function entryTaskWords(
 
 /** Assemble the `deno run` argv: runtime flags (--env-file, …) BEFORE the entry
  *  script, app flags (--port, …) after it — placement Deno requires. Exported
- *  so the ordering contract is unit-tested. */
-export function buildDenoArgs(entry: string, passthrough: string[]): string[] {
+ *  so the ordering contract is unit-tested.
+ *
+ *  `declaredMaxHeap` is the app's `memory.maxHeap` from its deno.json. It has
+ *  to be applied HERE or nowhere: V8 freezes the ceiling at isolate creation,
+ *  so the process that reads the config can no longer act on it. Before this
+ *  the launcher ignored the key and every `am start` got the automatic share —
+ *  a config line that the build honoured and the launcher silently did not. */
+export function buildDenoArgs(
+  entry: string,
+  passthrough: string[],
+  declaredMaxHeap?: string | number | null,
+): string[] {
   const denoFlags = passthrough.filter(isDenoRuntimeFlag);
   const appFlags = passthrough.filter((a) => !isDenoRuntimeFlag(a));
-  // The heap ceiling, resolved for THIS machine (25% of RAM, floor 4 GB).
+  // The heap ceiling, resolved for THIS machine (25% of RAM, floor 4 GB) or
+  // from the app's declared `memory.maxHeap`, which wins when it states one.
   // A launcher is the only place that can size it correctly: V8 freezes the
   // ceiling at isolate creation, so by the time the app runs it is far too
   // late. Skipped when the caller already passed `--v8-flags` — an explicit
   // choice at the command line outranks a computed default.
   const heap = denoFlags.some((f) => f.startsWith("--v8-flags"))
     ? []
-    : maxHeapFlagArgs(resolveMaxHeapMB(physicalMemoryBytes()));
+    : maxHeapFlagArgs(
+      resolveMaxHeapMB(physicalMemoryBytes(), declaredMaxHeap),
+    );
   return [
     "run",
     "-A",
@@ -814,13 +828,21 @@ export async function cmdStart(
   // FRONT of the flags — the cli scaffold routes on `Deno.args[0]`. Derived at
   // every launch rather than recorded: the launch info is REPLAYED by
   // `am restart`, where a positional would be read as a component label.
-  const devTasks = ((await readDenoJson(cwd))?.config ?? {}) as {
-    tasks?: Record<string, string>;
-  };
-  const words = entryTaskWords(devTasks.tasks?.dev, entry, cwd);
+  const appCfg = ((await readDenoJson(cwd))?.config ?? {}) as
+    & Record<
+      string,
+      unknown
+    >
+    & { tasks?: Record<string, string> };
+  const words = entryTaskWords(appCfg.tasks?.dev, entry, cwd);
   // Deno-runtime flags before the entry script; app flags after it (see
-  // buildDenoArgs) — a misplaced --env-file is silently ignored by Deno.
-  const denoArgs = buildDenoArgs(entry, [...words, ...passthrough]);
+  // buildDenoArgs) — a misplaced --env-file is silently ignored by Deno. The
+  // declared heap ceiling rides along: only the launch can apply it.
+  const denoArgs = buildDenoArgs(
+    entry,
+    [...words, ...passthrough],
+    declaredMaxHeapOf(appCfg),
+  );
 
   // Detached background spawn — the child must survive am's exit, its output
   // must land in the log file, and its real PID must come back on stdout. The

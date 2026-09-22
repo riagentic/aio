@@ -684,15 +684,30 @@ ${tmplRendererDiagnostics(true)}
     JSON.stringify(!!opts.meta?.unsandboxedChildWindows)
   };
   const dappWindows = new Set();
-  // Every refusal SAYS which guardrail fired: a request that silently did
-  // nothing left the app author with a click that opened no window and no
-  // line anywhere naming the rule it broke.
-  const refuseWindow = (why) => console.warn('[aio:electron] openWindow refused — ' + why);
-  ipcMain.on('__aio:openWindow', (_event, payload) => {
+  // Every refusal SAYS which guardrail fired — and says it TO THE CALLER.
+  // A request that silently did nothing left the app author with a click that
+  // opened no window and no line anywhere naming the rule it broke; a field
+  // report then found the other half of the same bug: the reasons were all
+  // written, and all written to the MAIN process console, while the only
+  // person who can act on one is the app author — on the RENDERER side of
+  // this channel. Their fall-back path opened the page in the system browser
+  // instead, forever, with nothing anywhere saying why.
+  //
+  // So every outcome is now a VALUE — { ok: false, reason } / { ok: true, url }
+  // — carried back over the SAME channel, in whichever shape the caller used
+  // (see the registrations below). console.warn stays: an operator reading the
+  // main-process log wants it too.
+  const refuseWindow = (why) => {
+    const reason = 'openWindow refused — ' + why;
+    console.warn('[aio:electron] ' + reason);
+    return { ok: false, reason };
+  };
+  const _openWindow = (payload) => {
     try {
       if (!CHILD_WINDOWS) {
-        console.warn('[aio:electron] openWindow denied — enable with aio.run({ childWindows: true })');
-        return;
+        const reason = 'openWindow denied — enable with aio.run({ childWindows: true })';
+        console.warn('[aio:electron] ' + reason);
+        return { ok: false, reason };
       }
       const { url, preload } = payload || {};
       let u;
@@ -739,7 +754,23 @@ ${tmplRendererDiagnostics(true)}
       child.on('closed', () => dappWindows.delete(child));
       child.setMenuBarVisibility(false);
       child.loadURL(u.href);
-    } catch (e) { refuseWindow(String(e && e.message || e)); }
+      return { ok: true, url: u.href };
+    } catch (e) { return refuseWindow(String(e && e.message || e)); }
+  };
+  // The two call shapes a renderer can use, both answered on the SAME channel:
+  //   • ipcRenderer.send   → event.reply('__aio:openWindow', result);
+  //   • ipcRenderer.invoke → resolves the result, or REJECTS with the reason
+  //     as the Error message, so an awaited openWindow throws it verbatim.
+  // Unguarded on purpose: event.reply and ipcMain.handle exist in every
+  // Electron this shell runs on, and a missing one must be loud, not a shrug
+  // that puts the refusal back in the dark.
+  ipcMain.on('__aio:openWindow', (event, payload) => {
+    event.reply('__aio:openWindow', _openWindow(payload));
+  });
+  ipcMain.handle('__aio:openWindow', (_event, payload) => {
+    const r = _openWindow(payload);
+    if (!r.ok) throw new Error(r.reason);
+    return r;
   });
 
   ipcMain.on('__aio:send', (_event, json) => {

@@ -10,6 +10,8 @@
  */
 
 import { count } from "../diagnostics/fmt.ts";
+import { isDevMode } from "../state/dev-flag.ts";
+import { _globalKeyProbe } from "./renderer-lifecycle.ts";
 
 // deno-lint-ignore no-explicit-any
 type AnyEl = any;
@@ -1039,10 +1041,14 @@ export function triggerPress(
 ): void {
   assertOperable(el, "press a key on");
   trackModals(view(el));
+  const probe = {
+    ran: _globalKeyProbe.ran,
+    swallowed: _globalKeyProbe.swallowed,
+  };
   // Keep the keydown Event — a browser skips implicit form submit when the
   // keydown was preventDefault'd (combobox: Enter picks an option). The
   // harness used to dispatch submit unconditionally after keyup, so testUI
-  // submitted while the real window did not (wallet report §2).
+  // submitted while the real window did not (field report §2).
   let go = el.dispatchEvent(keyEv(el, "keydown", key, mods));
   const code = pressCode(key, mods);
   if (go && code) go = el.dispatchEvent(keyEv(el, "keypress", key, mods, code));
@@ -1055,6 +1061,43 @@ export function triggerPress(
   }
   el.dispatchEvent(keyEv(el, "keyup", key, mods));
   if (go && !modified && key === " " && keyClicks(el, true)) el.click?.();
+  warnKeySwallowedByInput(el, "press", key, probe);
+}
+
+/** A press that a window-level binding WOULD have heard, aimed at a field that
+ *  `ignoreInInput` makes it deaf to.
+ *
+ *  The event dispatches, `bubbles: true` carries it to the document, the call
+ *  returns ok — and the handler ran ZERO times, so every assertion after it
+ *  passes without testing anything. `tests/ui-window-key.test.tsx` called this
+ *  "the trap" and left it armed; this is the disarm. Deciding from
+ *  {@link _globalKeyProbe}'s delta rather than from the element's tag is what
+ *  keeps it quiet on correct code: a binding that RAN (any of them — one with
+ *  `ignoreInInput: false`, or a second component's), or no matching binding at
+ *  all (the press belongs to the element, not to a shortcut), says nothing.
+ *
+ *  Observe-only, so dev and prod behave identically — and the harness runs
+ *  dev-strict, so it fires in tests, which is where this bug is written. */
+function warnKeySwallowedByInput(
+  el: AnyEl,
+  action: "press" | "keyDown",
+  key: string,
+  probe: { ran: number; swallowed: number },
+): void {
+  if (_globalKeyProbe.swallowed === probe.swallowed) return; // nobody listening
+  if (_globalKeyProbe.ran !== probe.ran) return; // something ran — correct code
+  if (!isDevMode()) return;
+  const tag = String(el?.tagName ?? "").toLowerCase();
+  const what = tag ? `<${tag}>` : "element";
+  const article = /^[aeiou]/.test(tag) ? "an" : "a";
+  const editable = el?.isContentEditable ? " (contenteditable)" : "";
+  console.warn(
+    `[aio-dev] ${action}(${JSON.stringify(key)}) on ${article} ${what}` +
+      `${editable} — window key handlers skip inputs by design ` +
+      `(ignoreInInput), so nothing ran. Press on a non-input, or address the ` +
+      `window (testUI: \`ui.window.${action}(${JSON.stringify(key)})\`; am: ` +
+      `\`am trigger window ${action} ${key}\`).`,
+  );
 }
 
 /** Hold a key DOWN (no keyup) — games, drag interactions, held modifiers,
@@ -1067,7 +1110,14 @@ export function triggerKeyDown(
   mods?: KeyModifiers,
 ): void {
   assertOperable(el, "hold a key on");
+  // Same keydown, same listener, same trap as `press` — a hold aimed at a
+  // field is as silent as a tap, so it is named the same way.
+  const probe = {
+    ran: _globalKeyProbe.ran,
+    swallowed: _globalKeyProbe.swallowed,
+  };
   el.dispatchEvent(keyEv(el, "keydown", key, mods));
+  warnKeySwallowedByInput(el, "keyDown", key, probe);
 }
 
 /** Release a key held by {@linkcode triggerKeyDown}. */

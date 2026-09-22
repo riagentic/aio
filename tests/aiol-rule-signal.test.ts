@@ -982,7 +982,7 @@ await aio.run({ perfBudget: { methods: { "models:scan": { timeout: 0 } } } });
   },
   {
     // …and when a public COMMAND already does the internal's whole job, the
-    // hint names it instead of inviting a duplicate entry (wallet report §6: an app's
+    // hint names it instead of inviting a duplicate entry (field report §6: an app's
     // copy of the browser-graph checker, which is `am check`).
     name: "deep import of an internal a command already wraps",
     files: app({

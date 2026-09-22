@@ -5,6 +5,7 @@
 import { assert, assertEquals } from "@std/assert";
 import { buildDenoArgs } from "../src/am/am-cmd-process.ts";
 import {
+  declaredMaxHeapOf,
   physicalMemoryBytes,
   resolveMaxHeapMB,
 } from "../src/server/heap-policy.ts";
@@ -60,6 +61,59 @@ Deno.test("buildDenoArgs: an explicit --v8-flags outranks the computed one", () 
     argv.filter((a) => a.startsWith("--v8-flags")),
     ["--v8-flags=--max-old-space-size=2048"],
   );
+});
+
+Deno.test("buildDenoArgs: a declared memory.maxHeap is what am start launches with", () => {
+  // A field report: `memory.maxHeap` in deno.json was honoured by the BUILD and
+  // by nothing else, so every `am start` silently got the automatic share and
+  // the config line did nothing. The launcher is the only place that can apply
+  // it — V8 freezes the ceiling at isolate creation — so this is where it has
+  // to land.
+  assertEquals(
+    buildDenoArgs("src/app.ts", [], "12GB"),
+    [
+      "run",
+      "-A",
+      "--unstable-kv",
+      "--v8-flags=--max-old-space-size=12288",
+      "src/app.ts",
+    ],
+  );
+  // A declaration below the FLOOR is floored, never a regression.
+  assert(
+    buildDenoArgs("src/app.ts", [], "512MB").includes(
+      "--v8-flags=--max-old-space-size=4096",
+    ),
+  );
+  // …and an app that declares nothing is byte-for-byte the launch it had.
+  assertEquals(
+    buildDenoArgs("src/app.ts", [], undefined),
+    buildDenoArgs("src/app.ts", []),
+  );
+  // An explicit --v8-flags still outranks the declaration.
+  assertEquals(
+    buildDenoArgs(
+      "src/app.ts",
+      ["--v8-flags=--max-old-space-size=2048"],
+      "12GB",
+    )
+      .filter((a) => a.startsWith("--v8-flags")),
+    ["--v8-flags=--max-old-space-size=2048"],
+  );
+});
+
+Deno.test("buildDenoArgs: where maxHeap lives is decided ONCE", () => {
+  // The launcher and the boot warning must read the key from the same place
+  // the build does, or the three of them go on disagreeing. `declaredMaxHeapOf`
+  // is that one place; a `memory` block that is not an object, or a maxHeap of
+  // some other type, is not a declaration.
+  assertEquals(declaredMaxHeapOf({ memory: { maxHeap: "12GB" } }), "12GB");
+  assertEquals(declaredMaxHeapOf({ memory: { maxHeap: 8192 } }), 8192);
+  assertEquals(declaredMaxHeapOf({ memory: {} }), undefined);
+  assertEquals(declaredMaxHeapOf({ memory: true }), undefined);
+  assertEquals(declaredMaxHeapOf({ memory: { maxHeap: {} } }), undefined);
+  assertEquals(declaredMaxHeapOf({}), undefined);
+  assertEquals(declaredMaxHeapOf(undefined), undefined);
 });
 
 Deno.test("buildDenoArgs: the ceiling precedes the entry, like every runtime flag", () => {

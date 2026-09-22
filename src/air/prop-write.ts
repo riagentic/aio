@@ -140,22 +140,38 @@ export function _propAttr(
 // So the rule is written ONCE, here in the module that already owns "this prop
 // becomes this DOM mutation", and both sides call it — the SSR writer before
 // it emits, `_writeProp` before it calls `setAttribute`. A second copy of the
-// predicate beside the DOM's own is how the two paths drift apart again; this
-// regex IS the production `setAttribute` enforces, so they cannot.
+// predicate beside the DOM's own is how the two paths drift apart again.
+//
+// It is a strict SUBSET of what a browser accepts, not a copy of it. Measured
+// in Chromium (`--headless --dump-dom`, `setAttribute(name, "1")`), the DOM
+// also takes `1abc`, `-a`, `a"b` and `a<b` — and the last two, pasted into a
+// tag by the SSR writer, end the attribute and start another, so the server
+// cannot be as permissive as the client here. What the subset must never do is
+// refuse a name the browser takes AND raw markup can carry, because a refusal
+// throws in dev and in prod and turns working markup into a 500. It did:
+// see the astral range below.
 
 /** The XML `Name` production (XML 1.0 5th ed.) — the rule the DOM spec points
- *  `setAttribute` at, so this predicate and the browser cannot disagree.
- *  Colons are legal: `xlink:href` and `xml:lang` are namespaced attributes aio
- *  writes on purpose. Built from the two character sets rather than one long
- *  literal so the START set is stated once. */
+ *  `setAttribute` at. Colons are legal: `xlink:href` and `xml:lang` are
+ *  namespaced attributes aio writes on purpose. Built from the two character
+ *  sets rather than one long literal so the START set is stated once.
+ *
+ *  `[#x10000-#xEFFFF]` is part of that production and was missing, so every
+ *  name with a character outside the BMP — `data-🎉`, `data-𠀋` (CJK ext. B,
+ *  a character in real names), any `data-${label}` built from content in one
+ *  of those scripts — was refused. Verified in Chromium:
+ *  `setAttribute("data-🎉", "1")` is accepted, so aio threw, in dev and in
+ *  prod, on markup that works. The range needs the `u` flag to be a range at
+ *  all rather than four surrogate halves. */
 const _NAME_START = "A-Z_a-z:" +
   "\\u00C0-\\u00D6\\u00D8-\\u00F6\\u00F8-\\u02FF\\u0370-\\u037D\\u037F-\\u1FFF" +
   "\\u200C-\\u200D\\u2070-\\u218F\\u2C00-\\u2FEF\\u3001-\\uD7FF" +
-  "\\uF900-\\uFDCF\\uFDF0-\\uFFFD";
+  "\\uF900-\\uFDCF\\uFDF0-\\uFFFD\\u{10000}-\\u{EFFFF}";
 /** What a name may CONTINUE with, on top of {@linkcode _NAME_START}. */
 const _NAME_CHAR = ".0-9\\u00B7\\u0300-\\u036F\\u203F-\\u2040\\-";
 const _VALID_ATTR_NAME = new RegExp(
   `^[${_NAME_START}][${_NAME_START}${_NAME_CHAR}]*$`,
+  "u",
 );
 
 /** Whether `name` can be an attribute name at all. */

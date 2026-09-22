@@ -964,14 +964,26 @@ never committed — text typed into an input but not yet sent to a method, or a
 change made inside an `async` method that has not reached its next commit. A
 kill there loses it, as it would on any target.
 
-The price is one `fsync` per committed change. If the state written each time
-grows large enough for that to be felt, aio says so once rather than letting the
-app feel mysteriously heavy:
+The price is one `fsync` of the **whole persisted state** per committed change,
+so the cost is paid per keystroke. Measured on a desktop CPU, JS side only (the
+`fsync` is on top, and a phone is slower): a 21 KB state costs 0.02 ms per
+dispatch, 214 KB costs 0.13 ms, and a 1 MB state costs 0.71 ms — and writes 1 MB
+each time. If it grows large enough to be felt, aio says so once rather than
+letting the app feel mysteriously heavy:
 
 ```
-[aio] ⚠ a durable save took 41ms — the state written on every change is large.
-  Mark the parts that need not survive a restart with `persist: false` on their cell.
+[aio] ⚠ a durable save took 41ms — the whole state is written and fsync'd on
+  every change, so this cost is paid per keystroke. Keep less of it:
+  `persist: "none"` on a cell whose state need not survive a restart, or
+  `persist: { exclude: ["big"] }` on the fields that need not.
 ```
+
+Those are the same [`persist` filters](../persistence/auto-persist.md) the
+server honours, and a standalone build honours them identically — one decider,
+`state/cell-persist-filter.ts`. It did not always: this runtime used to write
+the whole composed state, so a cell that declared `persist: "none"` was fsync'd
+to `filesDir` on every change and restored on the next launch, while
+`deno task dev` dropped it.
 
 The bridge is a security surface: `addJavascriptInterface` hands its methods to
 **every** page a WebView loads, so it is installed only in a **standalone** APK

@@ -343,11 +343,37 @@ onGlobalKey("Escape", () => lightbox.close());
 onGlobalKey("k", () => palette.open(), { mod: true }); //  Ctrl/⌘+K
 ```
 
-It resolves the right document, removes itself on unmount, ignores the chord
-while focus is in an input (`ignoreInInput: false` to opt out), and is driven by
-an ordinary `ui.<anything>.press("Escape")`.
+It resolves the right document, removes itself on unmount, and ignores the chord
+while focus is in an input (`ignoreInInput: false` to opt out).
 
-From `am`, where every path names an element, the binding has its own address:
+Drive it from the window's own address, which both tiers have:
+
+```tsx
+await ui.window.press("Escape"); // …and keyDown / keyUp, with the same modifiers
+```
+
+`ui.<some element>.press("Escape")` also works, because the event bubbles — with
+**one exception that used to pass silently**. Press a key on an `<input>` or
+`<textarea>` and `ignoreInInput` skips the handler on purpose, so the assertion
+is green and the handler ran zero times:
+
+```tsx
+await ui.AmountField.press("Enter"); // the shortcut does NOT run — by design
+```
+
+That is a test proving nothing, so it now says so in dev:
+
+```
+[aio-dev] press("Enter") on an <input> — window key handlers skip inputs by
+  design (ignoreInInput), so nothing ran. Press on a non-input, or address the
+  window (testUI: `ui.window.press("Enter")`; am: `am trigger window press Enter`).
+```
+
+It fires only when a binding was actually skipped **and** none ran — a press a
+handler heard, a chord that did not match, and a binding with
+`ignoreInInput: false` all stay silent.
+
+From `am`, where every path names an element, the binding has the same address:
 
 ```sh
 am trigger window press "Escape"
@@ -357,8 +383,8 @@ am trigger window press "ctrl+k"
 `window` accepts `press` / `keyDown` / `keyUp` and nothing else — a click on the
 window is not a gesture a user can make, and reporting `ok` for one would be the
 silent no-op this address exists to remove. It is not a substitute for pressing
-on an element: aiming a window-level key at an `<input>` on the surface does
-nothing at all, because `ignoreInInput` correctly skips it.
+on an element: a window-level key is what a shortcut listens for, and a press on
+a button is what a button listens for.
 
 ## How names are derived (deterministic)
 

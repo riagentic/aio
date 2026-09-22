@@ -169,6 +169,40 @@ async function withBrowser(
   }
 }
 
+/** Stop a recording when it has both LASTED long enough and CAPTURED enough,
+ *  by watching the frames land on disk.
+ *
+ *  A fixed wall-clock window was a race against the machine rather than a
+ *  measurement of the code: under `check:release`, where several suites and a
+ *  real Chromium share the box, the page repainting every 40 ms delivered
+ *  ONE frame in 1.2 s and the test failed for the machine being busy. The
+ *  question it asks — does a repainting page produce a decodable video — is
+ *  answered by the frames, so it waits for the frames. The deadline is a
+ *  backstop: reaching it hands the original assertion a real count to
+ *  complain about, rather than hanging. */
+async function recordedEnough(
+  dir: string,
+  minFrames: number,
+  minMs: number,
+): Promise<void> {
+  const until = Date.now() + minMs;
+  const deadline = Date.now() + 30_000;
+  for (;;) {
+    let n = 0;
+    try {
+      for await (const e of Deno.readDir(dir)) {
+        if (e.name.endsWith(".jpg")) n++;
+      }
+    } catch {
+      // aio-ok: the recorder is writing into this directory as we count; a
+      // half-written listing is answered by the next poll, 50 ms later.
+    }
+    if (Date.now() >= until && n >= minFrames) return;
+    if (Date.now() >= deadline) return;
+    await new Promise((r) => setTimeout(r, 50));
+  }
+}
+
 Deno.test({
   name:
     "recordScreencast + encodeRecording: a repainting page becomes a decodable MP4 and WebM",
@@ -178,7 +212,7 @@ Deno.test({
       const rec = await recordScreencast(
         cdp,
         dir,
-        new Promise((r) => setTimeout(r, 1200)),
+        recordedEnough(dir, 5, 1200),
       );
       assertEquals(rec.lost, false);
       assert(

@@ -91,9 +91,33 @@ private class AioNativeStore(private val dir: File) {
         if (f.isFile) f.readText(Charsets.UTF_8) else null
     } catch (e: Exception) {
         // Loud: state that exists on disk and did not come back is the same
-        // loss as state that was never written.
+        // loss as state that was never written. The RETURN is still null, and
+        // null also means "nothing written yet" — `has` below is what keeps
+        // the page from reading one as the other.
         android.util.Log.e("aio", "native store READ failed for $key: $e")
         null
+    }
+
+    /** Is a value for this key ON DISK? — regardless of whether it could be
+     *  read back.
+     *
+     *  `get` answers null for BOTH "never written" and "written, and this read
+     *  threw" (an IO error, an OOM on a large state). The page's upgrade path
+     *  adopts the previous build's `localStorage` copy on a null, and writes
+     *  it in: on the second meaning that silently replaces the app's real
+     *  state with a snapshot from before the upgrade, and reports it as a
+     *  successful adoption. One nullable return cannot separate the two, so
+     *  this does — `isFile` is a stat, it does not read the bytes, and it
+     *  cannot fail the way the read did.
+     *
+     *  Answering TRUE is the safe side (the page then refuses to overwrite),
+     *  so a throw here answers true rather than "no". */
+    @JavascriptInterface
+    fun has(key: String): Boolean = try {
+        fileFor(key).isFile
+    } catch (e: Exception) {
+        android.util.Log.e("aio", "native store HAS failed for $key: $e")
+        true
     }
 
     /** True when the value is on disk. False is a REAL failure — the page

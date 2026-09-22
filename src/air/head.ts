@@ -34,6 +34,7 @@ import {
   _ssrRenderCurrent,
   _ssrRenderForKey,
   _ssrRenderLast,
+  _ssrRenderLastEnded,
   type SsrRender,
 } from "./ssr-render.ts";
 import { attrNameOf, escapeAttr, escapeHtml } from "./ssr-utils.ts";
@@ -311,6 +312,10 @@ export function useHead(input: HeadInput): void {
   const render = _ssrRenderCurrent();
   if (render) {
     _entriesOf(render).push(input);
+    // Said on the render itself, so the no-argument answer can tell a page
+    // that owns a head from one that never asked for one — see
+    // `_ssrRenderFinish`.
+    render.hasHead = true;
     return;
   }
   if (!_inRender()) {
@@ -374,6 +379,26 @@ export function useHead(input: HeadInput): void {
  */
 export function collectHead(key?: object): string {
   const render = key === undefined ? _collectTarget() : _ssrRenderForKey(key);
+  // A KEY THAT NAMES NOTHING is the mistake this form invites, and its result
+  // is indistinguishable from success: an empty string, which is also what a
+  // page with no `useHead` answers. So `collectHead(res)` instead of
+  // `collectHead(req)`, a `Request` that was cloned between the two calls, or
+  // a key passed to `collectHead` but never to `renderToStream`, shipped every
+  // page with no title, no description and no canonical — in silence, which is
+  // the one thing this module may not do. Observe-only: prod returns the same
+  // empty head it always did.
+  if (key !== undefined && render === null && isDevMode()) {
+    console.warn(
+      "[aio-dev] collectHead(key) was given an object that names no server " +
+        "render, so the head came back EMPTY. Pass the SAME object to both " +
+        "calls — `renderToStream(<App/>, req)` … `collectHead(req)` — or call " +
+        "collectHead() with no argument.",
+    );
+  }
+  // Asked for and answered: this render's caller is no longer one that might
+  // still be about to ask, so the render that finishes next is not taking its
+  // answer away (see `_ssrRenderFinish`).
+  if (render) render.collected = true;
   const entries = render ? _ssrHeads.get(render) : undefined;
   const { title, tags } = _merge(entries ?? []);
   const out: string[] = [];
@@ -392,27 +417,38 @@ export function collectHead(key?: object): string {
 /** Which render a no-argument {@linkcode collectHead} answers for.
  *
  *  A component asking mid-render means its own page. Otherwise it is the most
- *  recently STARTED top-level render — which is the caller's own whenever the
- *  render was a `renderToString`, because that call returns before anything
- *  else can start one.
+ *  recently FINISHED top-level render, because a caller always asks after its
+ *  own render has ended — start order answers with a render that began after
+ *  the caller's had already finished, which is never the caller's (see
+ *  `_lastEnded` in ssr-render.ts, where that measured leak is written down).
+ *  The fallback to the most recently started one covers the only case with
+ *  nothing finished yet: a collect from inside the first render still open.
  *
- *  A STREAM that overlapped another render is the one case with no answer: the
- *  caller's own stream may or may not be the last one started, and guessing
- *  means
- *  serving one visitor's title, description and canonical URL inside another
- *  visitor's page. aio's first rule is to fail loud rather than quietly hand
- *  back the wrong thing, and the fix fits in the message. */
+ *  The one case end order cannot separate is a stream that finished and whose
+ *  caller had not asked yet when the next render finished: from then on the
+ *  same answer belongs to two callers, so there is no honest one. Guessing
+ *  means serving one visitor's title, description and canonical URL inside
+ *  another visitor's page. aio's first rule is to fail loud rather than
+ *  quietly hand back the wrong thing, and the fix fits in the message.
+ *
+ *  The refusal is limited to a STREAM's answer for the same reason the whole
+ *  ambiguity is: `renderToString` returns before anything else can run, so
+ *  its caller's next statement is still its own render's. */
 function _collectTarget(): SsrRender | null {
   const current = _ssrRenderCurrent();
   if (current) return current;
-  const last = _ssrRenderLast();
-  if (last && last.kind === "stream" && last.overlapped) {
+  const last = _ssrRenderLastEnded() ?? _ssrRenderLast();
+  if (last && last.kind === "stream" && last.superseded) {
+    // Reported once for this render, not cascaded onto the next one: the
+    // answer has been refused, so the render that finishes after this is
+    // taking nothing away from anybody.
+    last.collected = true;
     throw new Error(
-      "[aio] collectHead() cannot tell which page's head you mean: two or " +
-        "more server renders overlapped, so the last one to start is not " +
-        "necessarily yours. Name the render and ask for it by name — " +
-        "`renderToStream(<App/>, req)` … `collectHead(req)`, with any object " +
-        "that identifies this response.",
+      "[aio] collectHead() cannot tell which page's head you mean: another " +
+        "server render finished while this one's head had not been asked " +
+        "for, so the same answer belongs to two responses. Name the render " +
+        "and ask for it by name — `renderToStream(<App/>, req)` … " +
+        "`collectHead(req)`, with any object that identifies this response.",
     );
   }
   return last;

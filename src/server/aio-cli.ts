@@ -24,7 +24,7 @@ import { BUILD_BOOL_FLAGS, BUILD_VALUE_FLAGS } from "../build/build-flags.ts";
  *  annotation is a WIDENING for every consumer — with the literal type,
  *  `VERSION === "1.0.0-alpha76"` was a compile error for having no overlap;
  *  now it is an ordinary comparison. */
-export const VERSION: string = "1.0.7-beta";
+export const VERSION: string = "1.0.8-beta";
 
 /** What `--version` prints: what this artifact IS, and what it was built with.
  *

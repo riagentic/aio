@@ -185,7 +185,7 @@ This is the file it writes for `am create my-app` (browser target):
 }
 ```
 
-- `"jsxImportSource": "aio"` — uses air, the built-in renderer (90 KB gzipped
+- `"jsxImportSource": "aio"` — uses air, the built-in renderer (77 KB gzipped
   with the client runtime, zero deps)
 - `"aio/jsx-runtime"` entry is required so the JSX compiler can resolve the
   runtime when it rewrites `<div/>` into `jsx()` calls

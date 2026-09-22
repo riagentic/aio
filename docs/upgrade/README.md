@@ -20,6 +20,19 @@ app, that is a bug in aio, not a step you missed.
 - **[The aio restructure (alpha27+)](restructure.md)** — every restructure
   breaking change with before → after recipes (methods-only cells, instances,
   SQLite-only persistence, `aio/extras`, wire catalog)
+- [1.0.7-beta → **1.0.8-beta**](from-1.0.7-beta-to-1.0.8-beta.md) — nothing
+  breaks, and the public surface does not move at all. Replace your local
+  `am trust` root (boot tells you when yours is the older shape): measured on
+  macOS, a trust anchor's `extendedKeyUsage` is ignored, so the root now
+  constrains email addresses and URIs too. `persist: "none"` is honoured by
+  standalone and Android builds, `collectHead()` answers for the render that
+  finished rather than the one that started last, and a page is 77 KB gzipped
+  instead of 90. Two Electron gates that refused in silence now say which rule
+  fired — `openWindow` answers the renderer that asked, so a `.catch` fallback
+  finally learns why; a `press()` into a text field no longer asserts nothing
+  while staying green (`ui.window.press` is the address that works); and
+  `memory.maxHeap` applies when `am start` runs the app, not only when
+  `deno compile` builds it
 - [1.0.6-beta → **1.0.7-beta**](from-1.0.6-beta-to-1.0.7-beta.md) — nothing
   breaks. A security audit of the packaged desktop app (three doors shut, two
   new `electron` keys), `access` stops treating one cell calling another as a
