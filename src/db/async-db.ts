@@ -517,7 +517,10 @@ export function createDB(path: string, opts: DBOpts = {}): DB {
       if (!w) continue;
       try {
         w.terminate();
-      } catch { /* already gone */ }
+      } catch {
+        // aio-ok: worker may already be gone — pool teardown terminates
+        // best-effort and its absence is the outcome we want.
+      }
     }
     writerWorker = null;
     readerWorkers = [];

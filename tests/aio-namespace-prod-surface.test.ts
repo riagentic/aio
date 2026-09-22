@@ -13,7 +13,29 @@ import { createServer } from "../src/server/server.ts";
 import { freePort } from "../src/testing/server-test.ts";
 import { join } from "@std/path";
 
-/** Boot a server in the given mode and run `fn` against its base URL. */
+/** Wait until the fixture answers HTTP — not a duration.
+ *
+ *  `createServer` returns once Deno.serve has bound, but under a loaded suite
+ *  the first request can still lose a race against accept. Sleeping 50 ms
+ *  measured the machine; fetching until we get a response measures the
+ *  server. */
+async function waitUntilAnswering(url: string, what: string): Promise<void> {
+  const deadline = Date.now() + 10_000;
+  let last = "";
+  while (Date.now() < deadline) {
+    try {
+      const resp = await fetch(url, { redirect: "manual" });
+      await resp.body?.cancel().catch(() => {});
+      if (resp.status > 0) return;
+      last = `status ${resp.status}`;
+    } catch (e) {
+      last = e instanceof Error ? e.message : String(e);
+    }
+    await new Promise((r) => setTimeout(r, 20));
+  }
+  throw new Error(`${what} never answered at ${url} — last: ${last}`);
+}
+
 async function withServer(
   prod: boolean,
   fn: (url: string) => Promise<void>,
@@ -25,11 +47,9 @@ async function withServer(
     join(dir, "dist", "app.js"),
     "export function mount(){}",
   );
-  // A minimal App so the dev shell has something to point at.
-  await Deno.writeTextFile(
-    join(dir, "App.tsx"),
-    "export default function App() { return null }\n",
-  );
+  // No App.tsx — these tests assert framework-source routes / the prod shell,
+  // not a client graph. A stub would start graph validation + esbuild in the
+  // prod:false case for no assertion benefit.
   const server = createServer({
     port,
     title: "T",
@@ -40,9 +60,10 @@ async function withServer(
     prod,
     distDir: join(dir, "dist"),
   });
-  await new Promise((r) => setTimeout(r, 50));
+  const url = `http://127.0.0.1:${port}`;
+  await waitUntilAnswering(url, "aio-namespace fixture");
   try {
-    await fn(`http://127.0.0.1:${port}`);
+    await fn(url);
   } finally {
     await server.shutdown();
     await Deno.remove(dir, { recursive: true }).catch(() => {});

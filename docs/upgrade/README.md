@@ -20,6 +20,15 @@ app, that is a bug in aio, not a step you missed.
 - **[The aio restructure (alpha27+)](restructure.md)** — every restructure
   breaking change with before → after recipes (methods-only cells, instances,
   SQLite-only persistence, `aio/extras`, wire catalog)
+- [1.0.8-beta → **1.0.9-beta**](from-1.0.8-beta-to-1.0.9-beta.md) — nothing
+  breaks; the public surface grows only on the testing side (`.pressed` /
+  `.expanded`, richer `.checked`). `am prune` / `lab` / `doctor` /
+  `restart --json` can no longer claim success after a failure or emit two JSON
+  documents; `am shot --video --json` announces recording started on stderr; a
+  mistyped update channel names the channel; Android/ Conscrypt is measured
+  (joins Java — still no intermediate); transport differentials cover browser
+  replay and the JSON losses that used to surprise you; harness flakes in `am` /
+  `spawn` were fixture bugs, closed under load
 - [1.0.7-beta → **1.0.8-beta**](from-1.0.7-beta-to-1.0.8-beta.md) — nothing
   breaks, and the public surface does not move at all. Replace your local
   `am trust` root (boot tells you when yours is the older shape): measured on

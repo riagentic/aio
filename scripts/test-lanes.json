@@ -60,6 +60,7 @@
     "tests/timeline-diff-differential.test.ts",
     "tests/transaction-differential.test.ts",
     "tests/transport-chaos-fuzz.test.ts",
+    "tests/transport-differential-browser.test.ts",
     "tests/transport-differential.test.ts",
     "tests/transport-exactly-once.test.ts",
     "tests/wire-patch-differential.test.ts",

@@ -454,7 +454,16 @@ Deno.test("updates e2e: a missing channel reports the reason, not silence", asyn
       dismissed: null,
     });
     assertEquals(got.kind, "error");
-    if (got.kind === "error") assert(got.error.length > 0);
+    if (got.kind === "error") {
+      // Must name the missing release AND the channel path — `length > 0` is
+      // true of every non-empty string and proves nothing about the reason
+      // (same vacuous shape updates-apply pinned against).
+      assert(
+        got.error.includes("no release manifest") &&
+          got.error.includes("/nope/"),
+        `names the missing channel: ${got.error}`,
+      );
+    }
   } finally {
     await Deno.remove(r.root, { recursive: true });
   }

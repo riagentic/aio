@@ -88,3 +88,6 @@ skills-lock.json
 .openclaude-profile.json
 .aio-test-home/
 .aio-test-shards/
+
+# Conscrypt uber jar for tests/x509-conscrypt.test.ts — fetched, not shipped.
+tests/x509-conscrypt/*.jar

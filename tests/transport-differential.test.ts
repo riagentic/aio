@@ -18,6 +18,37 @@ import { enc } from "../src/protocol/envelope.ts";
 import { freePort } from "../src/testing/server-test.ts";
 import { dropTempDir, tempDir } from "../src/testing/temp-dir.ts";
 
+/** Render a value so JSON's losses stay visible on BOTH sides of a differential.
+ *
+ *  A bare `JSON.stringify` hides the seams this file exists to catch (`undefined`
+ *  members vanish identically either way; a `Date`'s `toJSON` makes in-process
+ *  and wire look the same). Top-level BigInt/undefined/Date/RegExp/Map/Set are
+ *  named before stringify — BigInt throws, `Date.toJSON` would otherwise erase
+ *  the instanceof seam, and RegExp/Map/Set collapse to `{}`. */
+function show(v: unknown): string {
+  if (v === undefined) return '"<undefined>"';
+  if (typeof v === "bigint") return JSON.stringify(`<bigint:${v}>`);
+  if (v instanceof Date) return JSON.stringify(`<Date:${v.toISOString()}>`);
+  if (v instanceof RegExp) return JSON.stringify(`<RegExp:${v}>`);
+  if (v instanceof Map) {
+    return JSON.stringify(`<Map:${JSON.stringify([...v])}>`);
+  }
+  if (v instanceof Set) {
+    return JSON.stringify(`<Set:${JSON.stringify([...v])}>`);
+  }
+  return JSON.stringify(v, (_k, val) => {
+    if (val === undefined) return "<undefined>";
+    if (typeof val === "number" && Object.is(val, -0)) return "<-0>";
+    if (typeof val === "bigint") return `<bigint:${val}>`;
+    if (val instanceof Map) return `<Map:${JSON.stringify([...val])}>`;
+    if (val instanceof Set) return `<Set:${JSON.stringify([...val])}>`;
+    if (typeof val === "number" && !Number.isFinite(val)) {
+      return `<${String(val)}>`;
+    }
+    return val;
+  });
+}
+
 /** One scenario: a payload, dispatched both ways. */
 type Case = {
   name: string;
@@ -55,29 +86,33 @@ const CASES: Case[] = [
     payload: { z: -0, big: 9007199254740991 },
     wireBecomes: '{"z":0,"big":9007199254740991}',
   },
+  // Array slots keep their place: `undefined` becomes `null`, so `xs[1] ===
+  // undefined` is true in-process and false over the wire. Distinct from the
+  // object-member case above (key vanishes entirely).
+  {
+    name: "undefined in array",
+    payload: { xs: [1, undefined, 3] },
+    wireBecomes: '{"xs":[1,null,3]}',
+  },
+  // NaN / ±Infinity all become null. A harness test that branches on
+  // Number.isNaN(state.n) is green-test-broken-prod.
+  {
+    name: "NaN and ±Infinity",
+    payload: { n: NaN, i: Infinity, ni: -Infinity },
+    wireBecomes: '{"n":null,"i":null,"ni":null}',
+  },
+  // Set (and Map) stringify as {}. Contents are gone; `got.s instanceof Set`
+  // is true in-process and false on the wire.
+  {
+    name: "a Set",
+    payload: { s: new Set([1, 2]) },
+    wireBecomes: '{"s":{}}',
+  },
 ];
 
 async function bothWays(c: Case): Promise<{ direct: string; wire: string }> {
   const { aio, cell } = await import("../mod.ts");
   const { _resetAioRuntime } = await import("../src/state/runtime-reset.ts");
-  // The comparison has to SEE what JSON does, or it hides the very thing it
-  // exists to detect: the first version of this used a bare JSON.stringify on
-  // both sides, so `{ gone: undefined }` rendered identically either way and
-  // every case passed. A replacer keeps the lossy shapes visible.
-  const show = (v: unknown) =>
-    JSON.stringify(v ?? null, (_k, val) => {
-      if (val === undefined) return "<undefined>";
-      if (typeof val === "number" && Object.is(val, -0)) return "<-0>";
-      if (typeof val === "bigint") return `<bigint:${val}>`;
-      if (val instanceof Map) return `<Map:${JSON.stringify([...val])}>`;
-      if (val instanceof Set) return `<Set:${JSON.stringify([...val])}>`;
-      if (val instanceof Date) return `<Date:${val.toISOString()}>`;
-      if (typeof val === "number" && !Number.isFinite(val)) {
-        return `<${String(val)}>`;
-      }
-      return val;
-    });
-
   const mk = (id: string) =>
     cell(id, {
       state: { got: null as unknown },
@@ -263,6 +298,36 @@ const RETURN_CASES: ReturnCase[] = [
     wireBecomes: "{}",
     warns: true,
   },
+  {
+    name: "a Set",
+    returns: new Set([1, 2]),
+    wireBecomes: "{}",
+    warns: true,
+  },
+  // Date → ISO string (lossy, warned). show() names the in-process Date so the
+  // seam is not hidden by Date.toJSON agreeing with the wire.
+  {
+    name: "a Date",
+    returns: new Date("2026-09-15T10:00:00.000Z"),
+    wireBecomes: '"2026-09-15T10:00:00.000Z"',
+    warns: true,
+  },
+  // NaN → null (lossy, warned). Number.isNaN(ret) is true in-process, false
+  // over the wire.
+  {
+    name: "NaN",
+    returns: NaN,
+    wireBecomes: "null",
+    warns: true,
+  },
+  // BigInt cannot cross at all — serializeReturn drops to undefined and warns
+  // "AT ALL" (not "intact"). An unwarned undefined would look like a void method.
+  {
+    name: "BigInt",
+    returns: 42n,
+    wireBecomes: '"<undefined>"',
+    warns: true,
+  },
 ];
 
 async function returnBothWays(
@@ -271,12 +336,6 @@ async function returnBothWays(
   const { aio, cell } = await import("../mod.ts");
   const { _resetAioRuntime } = await import("../src/state/runtime-reset.ts");
   const { bootCells } = await import("../src/testing/cell-test.ts");
-  const show = (v: unknown) =>
-    JSON.stringify(v ?? null, (_k, val) => {
-      if (val === undefined) return "<undefined>";
-      if (val instanceof Map) return `<Map:${JSON.stringify([...val])}>`;
-      return val;
-    });
   const mk = (id: string, v: unknown) =>
     cell(id, {
       state: { n: 0 },
@@ -354,8 +413,10 @@ for (const c of RETURN_CASES) {
     const { direct, wire, warnings } = await returnBothWays(c);
     if (c.warns) {
       // The value changing silently is the bug; changing LOUDLY is the design.
+      // "intact" (lossy) and "AT ALL" (dropped) are both the loud contract;
+      // either substring means the change was named rather than silent.
       assertEquals(
-        warnings.some((w) => w.includes("JSON cannot carry intact")),
+        warnings.some((w) => w.includes("JSON cannot carry")),
         true,
         `the return was altered without a word:\n${
           warnings.join("\n") || "(no warnings)"
@@ -564,3 +625,53 @@ Deno.test("async differential: a throw reaches both callers, by their own means"
     `the socket caller got no usable reason: ${acked.error}`,
   );
 });
+
+// BigInt is not a JSON *loss* — JSON.stringify THROWS. So `enc()` cannot even
+// build the frame: in-process the payload lands as a bigint; over the wire the
+// send never happens. Distinct from the return path (serializeReturn drops to
+// undefined and warns "AT ALL"). Carrying BigInt on the wire would be a
+// contract break → v2; this pin documents the refusal.
+Deno.test("transport differential: BigInt payload lands in-process; enc refuses to send", async () => {
+  const { cell } = await import("../mod.ts");
+  const { _resetAioRuntime } = await import("../src/state/runtime-reset.ts");
+  const { bootCells } = await import("../src/testing/cell-test.ts");
+
+  _resetAioRuntime();
+  const a = cell("xbigi", {
+    state: { got: null as unknown },
+    methods: {
+      take(s: { got: unknown }, v: unknown) {
+        s.got = v;
+      },
+    },
+  });
+  await bootCells([a] as never);
+  (a as unknown as { take: (v: unknown) => void }).take({ b: 1n });
+  await new Promise((r) => setTimeout(r, 20));
+  const direct = (a as unknown as { got: { b: unknown } }).got?.b;
+  assertEquals(typeof direct, "bigint", "in-process must keep BigInt");
+  assertEquals(direct, 1n);
+
+  let threw = "";
+  try {
+    enc("action", {
+      type: "xbigw:take",
+      payload: { args: [{ b: 1n }] },
+    });
+  } catch (e) {
+    threw = (e as Error).message;
+  }
+  assertEquals(
+    /bigint/i.test(threw),
+    true,
+    `enc must refuse a BigInt payload, got: ${threw || "(no throw)"}`,
+  );
+});
+
+// ── client-context replay of a sync method ──────────────────────────────────
+//
+// Closed in `tests/transport-differential-browser.test.ts`: the same sync
+// method invoked from a real browser UI vs in-process, state + return compared,
+// JSON losses pinned with `wireBecomes`, via existing `withE2E` (skips when no
+// Chromium). Kept as its own file so an ignored empty Deno.test here cannot
+// break check:vacuous, and so the e2e dependency stays optional.

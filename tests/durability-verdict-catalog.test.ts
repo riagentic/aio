@@ -411,6 +411,29 @@ Deno.test("durability verdict catalog: every door consults the verdict", async (
 
 // ── behaviour: the trojan snapshot door ──────────────────────────────────────
 
+/** Wait until the fixture answers HTTP — not a duration.
+ *
+ *  `createServer` returns once Deno.serve has bound, but under a loaded suite
+ *  the first request can still lose a race against accept. Sleeping 50 ms
+ *  measured the machine; fetching until we get a response measures the
+ *  server. */
+async function waitUntilAnswering(url: string, what: string): Promise<void> {
+  const deadline = Date.now() + 10_000;
+  let last = "";
+  while (Date.now() < deadline) {
+    try {
+      const resp = await fetch(url, { redirect: "manual" });
+      await resp.body?.cancel().catch(() => {});
+      if (resp.status > 0) return;
+      last = `status ${resp.status}`;
+    } catch (e) {
+      last = e instanceof Error ? e.message : String(e);
+    }
+    await new Promise((r) => setTimeout(r, 20));
+  }
+  throw new Error(`${what} never answered at ${url} — last: ${last}`);
+}
+
 async function withTrojan(
   cfg: {
     forcePersist?: () => Promise<void>;
@@ -419,7 +442,8 @@ async function withTrojan(
   fn: (url: string) => Promise<void>,
 ): Promise<void> {
   const dir = await tempDir("dvc-trojan-");
-  await Deno.writeTextFile(join(dir, "App.tsx"), "export default () => null");
+  // No App.tsx on purpose — trojan-only. Stub App.tsx used to start graph
+  // validation + an esbuild child that could outlive stopEsbuild under load.
   const port = freePort();
   const server = createServer({
     port,
@@ -430,7 +454,7 @@ async function withTrojan(
     loadSnapshot: cfg.loadSnapshot ?? (() => {}),
     baseDir: dir,
     debug: () => {},
-    prod: false,
+    prod: false, // trojan is refused in prod — keep it mounted
     trojan: {
       getState: () => ({}),
       getSchedules: () => [],
@@ -438,9 +462,10 @@ async function withTrojan(
       startedAt: Date.now(),
     },
   });
-  await new Promise((r) => setTimeout(r, 50));
+  const url = `http://127.0.0.1:${port}`;
+  await waitUntilAnswering(url, "dvc trojan fixture");
   try {
-    await fn(`http://127.0.0.1:${port}`);
+    await fn(url);
   } finally {
     await server.shutdown();
     await dropTempDir(dir);

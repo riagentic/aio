@@ -152,6 +152,33 @@ function stopSignal(durationMs: number | null) {
 
 const mb = (n: number) => `${(n / 1024 / 1024).toFixed(1)} MB`;
 
+/** Progress for `am shot --video` — said BEFORE the recording ends.
+ *
+ *  Pretty and `--json` both print on stderr: stdout must stay the ONE final
+ *  document (`{file, bytes, …}`), the contract every other verb keeps. `--json`
+ *  used to stay silent until that document, so a script driving a scene into
+ *  the recorder could not tell whether recording had started — and drove a
+ *  whole demo into a dead one (field report §15). Quiet stays quiet.
+ *
+ *  Same channel rule as `restartNote` in am-cmd-process.ts. */
+export function shotVideoProgress(mode: OutputMode, line: string): void {
+  if (mode === "quiet") return;
+  console.error(line);
+}
+
+/** The line that means "recording has started". Greppable; `--json` scripts
+ *  watch stderr for it while awaiting the final stdout document. */
+export function shotVideoRecordingLine(
+  url: string,
+  opts: Pick<ShotVideo, "path" | "durationMs">,
+): string {
+  return `recording ${url} → ${opts.path} — ${
+    opts.durationMs === null
+      ? "Ctrl-C to stop"
+      : `for ${opts.durationMs / 1000}s (Ctrl-C stops early)`
+  }`;
+}
+
 /** Record the window behind `cdp` and write the video. Exits 1 on failure. */
 export async function recordShotVideo(
   cdp: CdpSession,
@@ -159,9 +186,6 @@ export async function recordShotVideo(
   opts: ShotVideo,
   mode: OutputMode,
 ): Promise<void> {
-  const say = (line: string) => {
-    if (mode === "pretty") console.error(line);
-  };
   // Before recording, not after: a path that cannot be written must fail
   // before someone performs a two-minute demo into it.
   await Deno.mkdir(dirname(opts.path) || ".", { recursive: true });
@@ -169,13 +193,9 @@ export async function recordShotVideo(
   let keepFrames = false;
   const signal = stopSignal(opts.durationMs);
   try {
-    say(
-      `recording ${url} → ${opts.path} — ${
-        opts.durationMs === null
-          ? "Ctrl-C to stop"
-          : `for ${opts.durationMs / 1000}s (Ctrl-C stops early)`
-      }`,
-    );
+    // Said NOW, on stderr in every non-quiet mode — including `--json` — so a
+    // script knows the recorder is alive before it drives a scene into it.
+    shotVideoProgress(mode, shotVideoRecordingLine(url, opts));
     const rec = await recordScreencast(cdp, frameDir, signal.stop);
     signal.dispose();
     if (rec.lost) {
@@ -190,7 +210,14 @@ export async function recordShotVideo(
     }
     const seconds = rec.endUs / 1e6;
     const still = isStillRecording(rec.frames, rec.endUs);
-    say(`encoding ${rec.frames.length} frame(s), ${seconds.toFixed(1)}s…`);
+    // Encoding chatter: pretty-only. `--json` already knows recording started
+    // and only wants the final document; progress mid-encode is noise there.
+    if (mode === "pretty") {
+      shotVideoProgress(
+        mode,
+        `encoding ${rec.frames.length} frame(s), ${seconds.toFixed(1)}s…`,
+      );
+    }
     const started = Date.now();
     const done = await encodeRecording(cdp, rec, opts.format);
     await Deno.writeFile(opts.path, done.bytes);

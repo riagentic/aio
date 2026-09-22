@@ -31,6 +31,21 @@ function alive(pid: number): boolean {
   }
 }
 
+/** Wait until `pred` is true, or throw naming `what`. An observable wait — not
+ *  a duration hope. */
+async function until(
+  pred: () => boolean | Promise<boolean>,
+  what: string,
+  ms = 5_000,
+): Promise<void> {
+  const end = Date.now() + ms;
+  while (Date.now() < end) {
+    if (await pred()) return;
+    await sleep(20);
+  }
+  throw new Error(`timeout waiting for ${what} after ${ms}ms`);
+}
+
 /** The process state letter (`S` sleeping, `T` stopped) — the measurement the
  *  field report used to prove its kill was a no-op. */
 async function state(pid: number): Promise<string> {
@@ -42,20 +57,66 @@ async function state(pid: number): Promise<string> {
   return new TextDecoder().decode(out.stdout).trim().charAt(0);
 }
 
-/** A shell that starts a background grandchild, prints both pids, and waits. */
-const TREE = `sleep 300 & echo "child:$$"; echo "grandchild:$!"; wait`;
+/** A shell that starts a background grandchild, prints both pids, and waits.
+ *
+ *  The grandchild's stdout/stderr are redirected to /dev/null ON PURPOSE. A
+ *  bare `sleep 300 &` inherits the pipes; under load the product's drain bound
+ *  (`DRAIN_BOUND_MS` in spawn.ts) can expire while that sleep still holds them
+ *  open, and the sanitizer reports "child stdout/stderr not closed" against
+ *  this file — never a wrong kill, always a pipe that outlived the test. The
+ *  kill-the-tree assertion still measures the grandchild via `alive(pid)`,
+ *  which does not need shared pipes. */
+const TREE =
+  `sleep 300 >/dev/null 2>&1 & echo "child:$$"; echo "grandchild:$!"; wait`;
 
+/** Spawn the tree and wait until the grandchild pid LINE arrives — not a
+ *  duration. Lines are kept so a failure can name what the child said. */
 async function spawnTree() {
   const pids: Record<string, number> = {};
+  const lines: string[] = [];
   const h = await spawn("sh", {
     args: ["-c", TREE],
-    onLine: (l) => {
+    onLine: (l, which) => {
+      lines.push(`${which}:${l}`);
       const m = l.match(/^(child|grandchild):(\d+)$/);
       if (m) pids[m[1]!] = Number(m[2]);
     },
   });
-  for (let i = 0; i < 100 && !pids.grandchild; i++) await sleep(20);
-  return { h, pids };
+  try {
+    await until(() => pids.grandchild !== undefined, "grandchild pid line");
+  } catch (e) {
+    const st = await h.kill().catch(() => null);
+    throw new Error(
+      `${(e as Error).message}\n── spawn tree said ──\n${
+        lines.join("\n") || "(nothing)"
+      }\n── kill status ──\n${
+        st ? `code ${st.code} success=${st.success}` : "(kill failed)"
+      }`,
+    );
+  }
+  return { h, pids, lines };
+}
+
+/** Tear down a SpawnHandle the way `stopChild` tears down a raw ChildProcess:
+ *  ask, wait on an observable, keep the exit. The product `kill()` already
+ *  escalates SIGTERM→SIGKILL; we do not re-implement that. We DO wait until the
+ *  grandchild is gone (not "sleep 100 and hope") and surface the exit code. */
+async function stopSpawn(
+  h: Awaited<ReturnType<typeof spawn>>,
+  opts: { grandchild?: number; label?: string } = {},
+): Promise<void> {
+  const label = opts.label ?? `spawn pid ${h.pid}`;
+  const st = await h.kill();
+  if (opts.grandchild !== undefined) {
+    try {
+      await until(() => !alive(opts.grandchild!), `${label} grandchild gone`);
+    } catch (e) {
+      throw new Error(
+        `${(e as Error).message}\n── ${label} exit ── code ${st.code}` +
+          ` success=${st.success} signal=${st.signal ?? "none"}`,
+      );
+    }
+  }
 }
 
 Deno.test({
@@ -63,18 +124,23 @@ Deno.test({
   ignore: !posix,
   fn: async () => {
     const { h, pids } = await spawnTree();
-    assertEquals(typeof pids.grandchild, "number", "grandchild never started");
-    assertEquals(alive(pids.grandchild!), true);
-
-    await h.kill();
-    await sleep(100);
-
-    assertEquals(
-      alive(pids.grandchild!),
-      false,
-      "the grandchild outlived kill() — this is the orphaned-GPU-worker bug: " +
-        "signalling the child alone leaves the tree running",
-    );
+    try {
+      assertEquals(
+        typeof pids.grandchild,
+        "number",
+        "grandchild never started",
+      );
+      assertEquals(alive(pids.grandchild!), true);
+      await stopSpawn(h, { grandchild: pids.grandchild, label: "kill-tree" });
+      assertEquals(
+        alive(pids.grandchild!),
+        false,
+        "the grandchild outlived kill() — this is the orphaned-GPU-worker bug: " +
+          "signalling the child alone leaves the tree running",
+      );
+    } finally {
+      await h.kill().catch(() => {});
+    }
   },
 });
 
@@ -85,7 +151,10 @@ Deno.test({
     const { h, pids } = await spawnTree();
     try {
       h.pause();
-      await sleep(100);
+      await until(
+        async () => (await state(pids.grandchild!)) === "T",
+        "grandchild state T after pause",
+      );
       assertEquals(
         await state(pids.grandchild!),
         "T",
@@ -96,11 +165,17 @@ Deno.test({
       assertEquals(h.paused, true);
 
       h.resume();
-      await sleep(100);
-      assertEquals(await state(pids.grandchild!), "S");
+      // `ps` may report `S` or `S<` / `Ss` — the first letter is the state.
+      await until(
+        async () => (await state(pids.grandchild!)).startsWith("S"),
+        "grandchild state S after resume",
+      );
       assertEquals(h.paused, false);
     } finally {
-      await h.kill();
+      await stopSpawn(h, {
+        grandchild: pids.grandchild,
+        label: "pause-resume",
+      });
     }
   },
 });
@@ -113,13 +188,30 @@ Deno.test({
     // until the grace timer's SIGKILL — or forever, in a hand-rolled version
     // that has no grace timer.
     const { h, pids } = await spawnTree();
-    h.pause();
-    await sleep(50);
+    try {
+      h.pause();
+      // pause() is synchronous for the flag; SIGSTOP is in flight. Do NOT wait
+      // on `ps` state letters here — this test runs on all POSIX, and those
+      // letters are Linux-specific (the pause/resume test below is the one
+      // that measures T/S, and it is linux-only).
+      assertEquals(h.paused, true);
 
-    const status = await within(h.kill(), 5000, "TIMED OUT" as const);
-    assertEquals(status === "TIMED OUT", false, "kill() hung on a paused tree");
-    await sleep(100);
-    assertEquals(alive(pids.grandchild!), false);
+      const status = await within(h.kill(), 5000, "TIMED OUT" as const);
+      assertEquals(
+        status === "TIMED OUT",
+        false,
+        "kill() hung on a paused tree",
+      );
+      if (status !== "TIMED OUT") {
+        await until(
+          () => !alive(pids.grandchild!),
+          `paused-kill grandchild gone (exit code ${status.code})`,
+        );
+      }
+      assertEquals(alive(pids.grandchild!), false);
+    } finally {
+      await h.kill().catch(() => {});
+    }
   },
 });
 
@@ -129,20 +221,30 @@ Deno.test({
   fn: async () => {
     const ac = new AbortController();
     const pids: Record<string, number> = {};
+    const lines: string[] = [];
     const h = await spawn("sh", {
       args: ["-c", TREE],
       signal: ac.signal,
-      onLine: (l) => {
+      onLine: (l, which) => {
+        lines.push(`${which}:${l}`);
         const m = l.match(/^(child|grandchild):(\d+)$/);
         if (m) pids[m[1]!] = Number(m[2]);
       },
     });
-    for (let i = 0; i < 100 && !pids.grandchild; i++) await sleep(20);
-
-    ac.abort(); // this is what `s.$signal` does when cancelOn fires
-    await h.status;
-    await sleep(100);
-    assertEquals(alive(pids.grandchild!), false);
+    try {
+      await until(() => pids.grandchild !== undefined, "abort-test grandchild");
+      ac.abort(); // this is what `s.$signal` does when cancelOn fires
+      const st = await h.status;
+      await until(
+        () => !alive(pids.grandchild!),
+        `abort grandchild gone (exit code ${st.code}; lines: ${
+          lines.join("|")
+        })`,
+      );
+      assertEquals(alive(pids.grandchild!), false);
+    } finally {
+      await h.kill().catch(() => {});
+    }
   },
 });
 
@@ -206,7 +308,7 @@ Deno.test({
         "the child shares OUR process group — kill() would signal the app",
       );
     } finally {
-      await h.kill();
+      await stopSpawn(h, { label: "group-id check" });
     }
   },
 });
@@ -368,7 +470,7 @@ Deno.test({
     await h.stdin!.close();
     await h.stdin!.close(); // idempotent
     assertEquals((await h.status).code, 0);
-    for (let i = 0; i < 100 && lines.length < 2; i++) await sleep(10);
+    await until(() => lines.length >= 2, "cat echoed both stdin lines");
     assertEquals(lines, ["one", "two"]);
     await assertRejects(
       () => h.stdin!.write("three\n"),

@@ -16,6 +16,29 @@ const TEST_PORT_7 = freePort();
 const TEST_PORT_8 = freePort();
 
 // Use prod: true to skip file watcher (avoids resource leaks in tests)
+/** Wait until the fixture answers HTTP — not a duration.
+ *
+ *  `createServer` returns once Deno.serve has bound, but under a loaded suite
+ *  the first request can still lose a race against accept. Sleeping 50 ms
+ *  measured the machine; fetching until we get a response measures the
+ *  server. */
+async function waitUntilAnswering(url: string, what: string): Promise<void> {
+  const deadline = Date.now() + 10_000;
+  let last = "";
+  while (Date.now() < deadline) {
+    try {
+      const resp = await fetch(url, { redirect: "manual" });
+      await resp.body?.cancel().catch(() => {});
+      if (resp.status > 0) return;
+      last = `status ${resp.status}`;
+    } catch (e) {
+      last = e instanceof Error ? e.message : String(e);
+    }
+    await new Promise((r) => setTimeout(r, 20));
+  }
+  throw new Error(`${what} never answered at ${url} — last: ${last}`);
+}
+
 async function withServer(fn: (url: string) => Promise<void>): Promise<void> {
   const dir = await tempDir("aio-server-");
   await Deno.writeTextFile(join(dir, "hello.txt"), "world");
@@ -560,13 +583,15 @@ Deno.test("server: POST /__aio/snapshot without X-AIO header returns 403", async
     // Dev: the snapshot route is dev-only since the state-leak fix (it serves
     // the RAW, unfiltered state tree). `prod: true` was scaffolding for the
     // static server — the CSRF gate this test is about is unchanged.
+    // No App.tsx — CSRF gate only; graph validation would just spawn esbuild.
     prod: false,
     distDir: join(dir, "dist"),
   });
-  await new Promise((r) => setTimeout(r, 50));
+  const csrfUrl = `http://127.0.0.1:${CSRF_PORT}`;
+  await waitUntilAnswering(csrfUrl, "CSRF fixture");
   try {
     // POST without X-AIO header → 403
-    const resp = await fetch(`http://127.0.0.1:${CSRF_PORT}/__aio/snapshot`, {
+    const resp = await fetch(`${csrfUrl}/__aio/snapshot`, {
       method: "POST",
       body: '{"count":{"n":1}}',
       headers: { "Content-Type": "application/json" },
@@ -576,7 +601,7 @@ Deno.test("server: POST /__aio/snapshot without X-AIO header returns 403", async
     assertEquals(text, "Missing X-AIO header");
 
     // POST with X-AIO header → 200
-    const resp2 = await fetch(`http://127.0.0.1:${CSRF_PORT}/__aio/snapshot`, {
+    const resp2 = await fetch(`${csrfUrl}/__aio/snapshot`, {
       method: "POST",
       body: '{"count":{"n":1}}',
       headers: { "Content-Type": "application/json", "X-AIO": "1" },
@@ -709,7 +734,13 @@ async function withTrojanServer(
   fn: (url: string) => Promise<void>,
 ): Promise<void> {
   const dir = await tempDir("aio-server-");
-  await Deno.writeTextFile(join(dir, "App.tsx"), "export default () => null");
+  // No App.tsx on purpose. `startGraphValidation` short-circuits when the UI
+  // entry is missing; writing a stub used to kick off a real esbuild native
+  // child on EVERY trojan fixture. Under suite load that child sometimes
+  // outlived `server.shutdown()`'s 2 s esbuild-stop bound, and the sanitizer
+  // reported "a child process was started during the test, but not closed"
+  // against whichever test ran next — never a wrong answer, always a harness
+  // leak. These fixtures only need the trojan HTTP surface.
   let appState = { count: 42, name: "test" };
   const dispatched: unknown[] = [];
   const server = createServer({
@@ -725,7 +756,7 @@ async function withTrojanServer(
     },
     baseDir: dir,
     debug: () => {},
-    prod: false,
+    prod: false, // trojan is refused in prod — keep it mounted
     trojan: {
       getState: () => appState,
       getSchedules: () => ["heartbeat", "cleanup"],
@@ -738,9 +769,10 @@ async function withTrojanServer(
       startedAt: Date.now() - 5000,
     },
   });
-  await new Promise((r) => setTimeout(r, 50));
+  const url = `http://127.0.0.1:${TROJAN_PORT}`;
+  await waitUntilAnswering(url, "trojan fixture");
   try {
-    await fn(`http://127.0.0.1:${TROJAN_PORT}`);
+    await fn(url);
   } finally {
     await server.shutdown();
     await dropTempDir(dir);
@@ -1024,7 +1056,7 @@ const TT_PORT_5 = freePort();
 
 Deno.test("trojan: POST /tt routes undo command to onTTCommand", async () => {
   const dir = await tempDir("aio-server-");
-  await Deno.writeTextFile(join(dir, "App.tsx"), "export default () => null");
+  // No App.tsx — trojan-only; see withTrojanServer.
   const ttCmds: { cmd: string; arg?: number }[] = [];
   const server = createServer({
     port: TT_PORT,
@@ -1043,9 +1075,10 @@ Deno.test("trojan: POST /tt routes undo command to onTTCommand", async () => {
       startedAt: Date.now(),
     },
   });
-  await new Promise((r) => setTimeout(r, 50));
+  const url = `http://127.0.0.1:${TT_PORT}`;
+  await waitUntilAnswering(url, "tt fixture");
   try {
-    const resp = await fetch(`http://127.0.0.1:${TT_PORT}/__aio/trojan/tt`, {
+    const resp = await fetch(`${url}/__aio/trojan/tt`, {
       method: "POST",
       headers: { "Content-Type": "application/json", "X-AIO": "1" },
       body: JSON.stringify({ cmd: "undo" }),
@@ -1057,7 +1090,7 @@ Deno.test("trojan: POST /tt routes undo command to onTTCommand", async () => {
     assertEquals(ttCmds[0]!.cmd, "undo");
 
     // Test goto with arg
-    const resp2 = await fetch(`http://127.0.0.1:${TT_PORT}/__aio/trojan/tt`, {
+    const resp2 = await fetch(`${url}/__aio/trojan/tt`, {
       method: "POST",
       headers: { "Content-Type": "application/json", "X-AIO": "1" },
       body: JSON.stringify({ cmd: "goto", arg: 3 }),
@@ -1089,7 +1122,7 @@ Deno.test("trojan: POST /tt without onTTCommand returns 501", async () => {
 
 Deno.test("trojan: POST /sql blocks INSERT", async () => {
   const dir = await tempDir("aio-server-");
-  await Deno.writeTextFile(join(dir, "App.tsx"), "export default () => null");
+  // No App.tsx — trojan-only; see withTrojanServer.
   const server = createServer({
     port: TT_PORT_1,
     title: "SQLTest",
@@ -1105,11 +1138,12 @@ Deno.test("trojan: POST /sql blocks INSERT", async () => {
       startedAt: Date.now(),
     },
   });
-  await new Promise((r) => setTimeout(r, 50));
+  const url = `http://127.0.0.1:${TT_PORT_1}`;
+  await waitUntilAnswering(url, "sql fixture");
   try {
     // INSERT should be blocked
     const resp = await fetch(
-      `http://127.0.0.1:${TT_PORT_1}/__aio/trojan/sql`,
+      `${url}/__aio/trojan/sql`,
       {
         method: "POST",
         headers: { "Content-Type": "application/json", "X-AIO": "1" },
@@ -1302,7 +1336,7 @@ Deno.test("security: a network action cannot spoof the _user identity", async ()
 
 Deno.test("trojan: POST /shutdown returns ok and triggers callback", async () => {
   const dir = await tempDir("aio-server-");
-  await Deno.writeTextFile(join(dir, "App.tsx"), "export default () => null");
+  // No App.tsx — trojan-only; see withTrojanServer.
   let shutdownCalled = false;
   const server = createServer({
     port: TT_PORT_2,
@@ -1321,10 +1355,11 @@ Deno.test("trojan: POST /shutdown returns ok and triggers callback", async () =>
       startedAt: Date.now(),
     },
   });
-  await new Promise((r) => setTimeout(r, 50));
+  const url = `http://127.0.0.1:${TT_PORT_2}`;
+  await waitUntilAnswering(url, "shutdown fixture");
   try {
     const resp = await fetch(
-      `http://127.0.0.1:${TT_PORT_2}/__aio/trojan/shutdown`,
+      `${url}/__aio/trojan/shutdown`,
       { method: "POST", headers: { "X-AIO": "1" } },
     );
     assertEquals(resp.status, 200);

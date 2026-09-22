@@ -217,7 +217,8 @@ export async function cmdDoctor(
     })),
   );
   const bad = findings.filter((f) => !f.ok);
-  out({ ok: bad.length === 0, findings }, mode, () =>
+  const payload = { ok: bad.length === 0, findings };
+  const pretty = () =>
     stack(
       heading("doctor", count(findings.length, "instance")),
       statusList(
@@ -233,15 +234,24 @@ export async function cmdDoctor(
         [bad.length, "failed", "bad"],
       ])),
       ...findings.map((f) => indent(settingsBlock(f.appId, f.settings))),
-    ));
-  if (bad.length > 0) {
-    outError(
-      `${
-        count(bad.length, "running instance")
-      } serve a framework the disk no longer has.`,
-      mode,
-      bad.map((f) => f.fix).filter(Boolean).join("  ·  ") || "am fix",
     );
+  if (bad.length > 0) {
+    // ONE act: findings + refusal. A preceding `out` then `outError` in
+    // `--json` printed TWO documents (`{ok:false,…}` then `{error:…}`), so
+    // `JSON.parse(stdout)` — the contract every other verb keeps — failed on
+    // a command that had already told the truth in the first one.
+    const msg = `${
+      count(bad.length, "running instance")
+    } serve a framework the disk no longer has.`;
+    const fix = bad.map((f) => f.fix).filter(Boolean).join("  ·  ") ||
+      "am fix";
+    if (mode === "json") {
+      out({ ...payload, error: msg, fix }, mode);
+    } else {
+      out(payload, mode, pretty);
+      outError(msg, mode, fix);
+    }
     Deno.exit(1);
   }
+  out(payload, mode, pretty);
 }

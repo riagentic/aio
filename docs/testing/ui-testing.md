@@ -91,8 +91,10 @@ testUI(App, "add a todo end-to-end", async (ui) => {
   - driving a `disabled` control, or typing into / clearing a `readonly` one;
   - `select()`ing a value with no option, a disabled option, or on something
     that is not a `<select>`;
-  - `check()`/`uncheck()` on something with no checked state (a `<button>` is
-    not a checkbox — this used to CLICK it and report success on the `am` tier);
+  - `check()`/`uncheck()` on something with no checked state (a plain `<button>`
+    is not a checkbox — this used to CLICK it and report success on the `am`
+    tier; `role="radio|checkbox|switch"` + `aria-checked` IS checkable, matching
+    `.checked` on the surface);
   - clicking, typing or dragging something the user cannot see —
     `display: none`, `visibility: hidden`, the `hidden` attribute, on the
     element or on any ancestor, and `<input type="hidden">`;
@@ -108,12 +110,19 @@ testUI(App, "add a todo end-to-end", async (ui) => {
   click (`click({ ctrlKey: true })`) lets the control's own activation behaviour
   toggle a checkbox/radio, exactly as an unmodified click does; `mouseenter`
   does not bubble.
-- Reads: `.text`, `.value`, `.checked`, `.disabled`, `.readonly`, `.required`,
-  `ui.surface()`, `ui.html()`; waits: `ui.waitFor(pred)`. The four booleans
-  **always answer with a boolean**, `false` included:
+- Reads: `.text`, `.value`, `.checked`, `.pressed`, `.expanded`, `.disabled`,
+  `.readonly`, `.required`, `.attr("…")` (live DOM attribute, `null` when absent
+  — for `aria-*` / `data-*` / `role` the surface does not promote, except the
+  three ARIA booleans below), `ui.surface()`, `ui.html()`; waits:
+  `ui.waitFor(pred)`. The state booleans **always answer with a boolean**,
+  `false` included (`checked` also follows `aria-checked` on
+  `role="radio|checkbox|switch"`; `pressed` / `expanded` follow `aria-pressed` /
+  `aria-expanded`):
 
   ```ts
   assertEquals(ui.OneLanToggle.checked, false); // an unchecked box
+  assertEquals(ui.Mute.pressed, false); // aria-pressed="false"
+  assertEquals(ui.Menu.expanded, false); // aria-expanded="false"
   assertEquals(ui.SubmitButton.disabled, true);
   ```
 
@@ -408,9 +417,11 @@ Label priority: `t` prop > `data-testid` > `aria-label` > visible text >
 the first labelable element inside it and only that one — HTML's own implicit
 association, so the surface name matches the accessible name a user hears. Role
 comes from an explicit `role` first, then the tag/type (a clickable `div.button`
-is a Button). The `t` prop also puts **non-interactive** elements on the surface
-(assertion targets) and is the stable handle to use where visible copy may
-change — it's typed and stripped from the DOM.
+is a Button). An explicit `role` wins over the tag when deriving an element's
+name (`role="radio"` on a `<button>` → `…Radio`); pass `t=` to pin a name
+against role changes. The `t` prop also puts **non-interactive** elements on the
+surface (assertion targets) and is the stable handle to use where visible copy
+may change — it's typed and stripped from the DOM.
 
 "Visible text" is the element's OWN text: `<button><span>Save</span></button>`
 and `<input type="submit" value="Send">` get the bare numbered role (`Button2`).

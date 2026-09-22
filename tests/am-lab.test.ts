@@ -16,6 +16,7 @@ import {
   assertStringIncludes,
   assertThrows,
 } from "@std/assert";
+import { dropTempDir, tempDir } from "../src/testing/temp-dir.ts";
 import {
   adbBootArgv,
   adbInstallArgv,
@@ -1262,6 +1263,91 @@ esac`);
   await Deno.remove(home, { recursive: true });
 });
 
+Deno.test("am lab --stop: a failed docker stop exits 1 — no success, one JSON doc", async () => {
+  // A stop that printed `{error}` then fell through into `docker rm --force`
+  // and `{stopped:true}` with exit 0 left `am lab … --stop && …` claiming
+  // success while a VM mid-write was force-killed — dual JSON, and a lie.
+  const home = await tempDir("aio-lab-home-");
+  const log = `${home}/calls`;
+  const dir = await fakeDocker(`
+echo "$@" >> ${log}
+case "$1" in
+  inspect) echo "true|2026-08-27T00:00:00Z|running";;
+  stop) echo "cannot stop" >&2; exit 1;;
+  rm) echo "rm should not run after a failed stop" >&2; exit 0;;
+  *) exit 0;;
+esac`);
+  const r = await am(["lab", "windows", "--stop", "--json"], {
+    PATH: `${dir}:${Deno.env.get("PATH")}`,
+    XDG_CACHE_HOME: home,
+  });
+  assertEquals(
+    r.code,
+    1,
+    `expected exit 1 after a failed stop, got ${r.code}\n${r.out}\n${r.err}`,
+  );
+  const text = r.out.trim();
+  // WHOLE of stdout is ONE document — the failure, not a success after it.
+  const doc = amJson(r, "am lab --stop");
+  assertEquals("error" in doc, true, text);
+  assertEquals(
+    "stopped" in doc && doc.stopped === true,
+    false,
+    `must not claim stopped:true after a failed stop — got ${text}`,
+  );
+  const calls = (await Deno.readTextFile(log)).trim().split("\n").filter(
+    Boolean,
+  );
+  assertEquals(
+    calls.some((c) => c.startsWith("rm ")),
+    false,
+    `rm must not run after a failed stop: ${calls.join(" / ")}`,
+  );
+  await Deno.remove(dir, { recursive: true });
+  await dropTempDir(home);
+});
+
+Deno.test("am lab --reset: a failed docker rm exits 1 — no reset:true", async () => {
+  // An ignored rm left the container listed and still printed `{reset:true}`
+  // with exit 0, so `am lab … --reset && …` claimed the lab was gone.
+  const home = await tempDir("aio-lab-home-");
+  const dir = await fakeDocker(`
+case "$1" in
+  inspect) echo "false|2026-08-27T00:00:00Z|exited";;
+  rm) echo "busy" >&2; exit 1;;
+  *) exit 0;;
+esac`);
+  await Deno.mkdir(`${home}/aio/labs/windows/storage`, { recursive: true });
+  await Deno.writeTextFile(
+    `${home}/aio/labs/windows/storage/data.img`,
+    "x".repeat(64),
+  );
+  const r = await am(["lab", "windows", "--reset", "--json"], {
+    PATH: `${dir}:${Deno.env.get("PATH")}`,
+    XDG_CACHE_HOME: home,
+  });
+  assertEquals(
+    r.code,
+    1,
+    `expected exit 1 after a failed rm, got ${r.code}\n${r.out}\n${r.err}`,
+  );
+  const doc = amJson(r, "am lab --reset");
+  assertEquals("error" in doc, true, r.out);
+  assertEquals(
+    "reset" in doc && doc.reset === true,
+    false,
+    `must not claim reset:true after a failed rm — got ${r.out}`,
+  );
+  // Disk must still be there — we never reached the delete.
+  assertEquals(
+    (await Deno.stat(`${home}/aio/labs/windows/storage/data.img`)).isFile,
+    true,
+    "a failed rm must not delete the disk",
+  );
+  await Deno.remove(dir, { recursive: true });
+  await dropTempDir(home);
+});
+
 Deno.test("am lab --stop: nothing to stop is not an error", async () => {
   const dir = await fakeDocker(`exit 1`);
   const home = await Deno.makeTempDir({ prefix: "aio-lab-home-" });
@@ -1408,7 +1494,11 @@ esac`);
       bound = true;
     } catch { /* not yet */ }
   }
-  child.kill("SIGKILL");
+  try {
+    child.kill("SIGKILL");
+  } catch {
+    // Already exited — the assert below names that as the real failure.
+  }
   await child.status;
   assert(bound, `--tunnel exited without binding ${port}`);
   await Deno.remove(dir, { recursive: true });

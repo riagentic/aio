@@ -59,11 +59,14 @@
 // Every other verifier aio ships against DOES read the anchor, measured with
 // controls: openssl, rustls, NSS, Go, macOS Security.framework 14.8.9 and
 // Windows CryptoAPI (Win11 26200) all refuse a forged public name under this
-// root and all accept the legitimate `localhost` leaf. Java is the outlier,
-// not the rule. Do NOT read the extendedKeyUsage as covering Java anyway: a
-// forged SERVER certificate for a public name needs exactly serverAuth, so on
-// a verifier that skips the anchor the EKU is no obstacle to the case that
-// matters most.
+// root and all accept the legitimate `localhost` leaf. Java's CertPathValidator
+// and Android/Conscrypt 2.5.2 (TrustManagerImpl — what HttpsURLConnection
+// uses) are the outliers: both ignore anchor name constraints and anchor EKU,
+// both enforce the same constraints the moment they sit on an intermediate
+// (`tests/x509-conscrypt.test.ts`). Do NOT read the extendedKeyUsage as
+// covering those two anyway: a forged SERVER certificate for a public name
+// needs exactly serverAuth, so on a verifier that skips the anchor the EKU is
+// no obstacle to the case that matters most.
 //
 // A WARNING ABOUT MEASURING THIS, which cost an hour and nearly shipped a
 // false claim in the other direction: a chain built with the root in .NET's

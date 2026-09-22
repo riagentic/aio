@@ -40,11 +40,13 @@ export type UIElementInfo = {
   text: string;
   /** Current input value (live at walk time) */
   value?: string;
-  /** Current checked state of a checkbox/radio (live at walk time). ALWAYS
-   *  present for one — `false` included — because "this box starts unchecked"
-   *  is the most common assertion there is, and an omitted `false` made it
-   *  unwritable (a field report: the natural assertion read back a lazy
-   *  callable). Absent only for elements that have no checked state at all. */
+  /** Current checked state of a checkbox/radio/switch (live at walk time).
+   *  ALWAYS present for one — `false` included — because "this box starts
+   *  unchecked" is the most common assertion there is, and an omitted `false`
+   *  made it unwritable (a field report: the natural assertion read back a lazy
+   *  callable). Covers native `<input type=checkbox|radio>` (`el.checked`) and
+   *  the ARIA pattern (`role="radio|checkbox|switch"` + `aria-checked`). Absent
+   *  only for elements that have no checked state at all. */
   checked?: boolean;
   /** Whether the element is disabled. Always present for a control that HAS a
    *  disabled state (button/input/select/textarea/…), `false` included. */
@@ -55,6 +57,16 @@ export type UIElementInfo = {
   /** Whether the element is required. Always present for a control that HAS a
    *  required state (input/select/textarea), `false` included. */
   required?: boolean;
+  /** Current pressed state of a toggle button (live at walk time). ALWAYS
+   *  present when `aria-pressed` is set — `false` included — for the same
+   *  reason as {@linkcode UIElementInfo.checked}: an omitted `false` made
+   *  `assertEquals(ui.Mute.pressed, false)` read back a lazy callable.
+   *  Absent only when the element is not a toggle (`aria-pressed` not set). */
+  pressed?: boolean;
+  /** Current expanded state of a disclosure / menu / accordion trigger (live
+   *  at walk time). ALWAYS present when `aria-expanded` is set — `false`
+   *  included. Absent only when the element is not expandable. */
+  expanded?: boolean;
   /** Address: `<componentPath>:<name>` */
   path: string;
   /** Layout geometry in CSS pixels, viewport-relative — present only when the
@@ -422,6 +434,71 @@ function effectiveEvents(v: VNode, own: string[], form: FormCtx): string[] {
   return isSubmitControl(String(v.tag), type) ? [...own, "submit"] : own;
 }
 
+/** Checked state for {@linkcode UIElementInfo}, next to the surface walk.
+ *
+ * Native `<input type=checkbox|radio>` own a boolean `el.checked` — that MUST
+ * win when both exist (an input that also carries `aria-checked` still reports
+ * the DOM property). For the ARIA picker pattern a field report hit —
+ *
+ *   <button role="radio" aria-checked="true">Yes</button>
+ *
+ * — `el.checked` is not a boolean on a button, so without this `ui.…Radio.checked`
+ * stayed false while the screen said selected. When native checked is not
+ * applicable, roles `radio` | `checkbox` | `switch` (from `v.props.role` or
+ * `el.getAttribute("role")`) read `aria-checked`:
+ *   - `"true"` → true
+ *   - `"false"` or `"mixed"` → false (boolean field stays boolean; authors
+ *     assert `.checked === true`)
+ *   - attribute absent → omit (do not invent state)
+ */
+function surfaceChecked(
+  v: VNode,
+  el:
+    | (Element & {
+      checked?: boolean;
+    })
+    | undefined,
+): boolean | undefined {
+  if (
+    el && typeof el.checked === "boolean" &&
+    (v.props.type === "checkbox" || v.props.type === "radio")
+  ) {
+    return el.checked;
+  }
+  const roleRaw = typeof v.props.role === "string"
+    ? v.props.role
+    : el?.getAttribute?.("role") ?? null;
+  const role = typeof roleRaw === "string"
+    ? roleRaw.trim().toLowerCase().split(/\s+/)[0] ?? ""
+    : "";
+  if (role !== "radio" && role !== "checkbox" && role !== "switch") {
+    return undefined;
+  }
+  const aria = el?.getAttribute?.("aria-checked");
+  if (aria == null) return undefined;
+  if (aria === "true") return true;
+  if (aria === "false" || aria === "mixed") return false;
+  return undefined;
+}
+
+/** `aria-pressed` / `aria-expanded` boolean, for {@linkcode UIElementInfo}.
+ *
+ *  Presence of the attribute is the marker (an absent `aria-pressed` means
+ *  "not a toggle", absent `aria-expanded` means "not expandable" — see
+ *  docs/ui/air-components.md). `"true"` → true; `"false"` / `"mixed"` → false;
+ *  anything else → omit. Same collapse {@linkcode surfaceChecked} uses for
+ *  `aria-checked`, so `.pressed` / `.expanded` stay booleans authors assert. */
+function surfaceAriaBool(
+  el: (Element & { getAttribute?: (n: string) => string | null }) | undefined,
+  attr: "aria-pressed" | "aria-expanded",
+): boolean | undefined {
+  const aria = el?.getAttribute?.(attr);
+  if (aria == null) return undefined;
+  if (aria === "true") return true;
+  if (aria === "false" || aria === "mixed") return false;
+  return undefined;
+}
+
 /** Walk a component's rendered output, collecting its own interactive elements
  *  and descending into child components. */
 function walkOutput(
@@ -479,14 +556,16 @@ function walkOutput(
         // `checked` used to appear only when true, so `assertEquals(box.checked,
         // false)` read back the handle proxy's lazy callable instead: the
         // natural assertion for "off" was unwritable, and the failure message
-        // pointed at neither cause (a field report). Presence is decided by the
-        // DOM element's own property, so a plain <div> on the surface stays
-        // clean while every real control answers honestly — and `am surface`
-        // (same walk) shows a live app exactly what a test sees.
-        ...(el && typeof el.checked === "boolean" &&
-            (v.props.type === "checkbox" || v.props.type === "radio")
-          ? { checked: el.checked }
-          : {}),
+        // pointed at neither cause (a field report). Presence is decided by
+        // {@linkcode surfaceChecked} (native `el.checked` for checkbox/radio,
+        // else `aria-checked` for ARIA radio/checkbox/switch), so a plain <div>
+        // on the surface stays clean while every real control answers honestly
+        // — and `am surface` (same walk) shows a live app exactly what a test
+        // sees.
+        ...(() => {
+          const checked = surfaceChecked(v, el);
+          return checked === undefined ? {} : { checked };
+        })(),
         ...(el && typeof el.disabled === "boolean"
           ? { disabled: el.disabled }
           : {}),
@@ -496,6 +575,14 @@ function walkOutput(
         ...(el && typeof el.required === "boolean"
           ? { required: el.required }
           : {}),
+        ...(() => {
+          const pressed = surfaceAriaBool(el, "aria-pressed");
+          return pressed === undefined ? {} : { pressed };
+        })(),
+        ...(() => {
+          const expanded = surfaceAriaBool(el, "aria-expanded");
+          return expanded === undefined ? {} : { expanded };
+        })(),
         path: `${owner.path}:${name}`,
         _vnode: v,
         _el: el,

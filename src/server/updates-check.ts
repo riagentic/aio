@@ -402,6 +402,18 @@ async function readCapped(
   return { ok: true, text: new TextDecoder().decode(all) };
 }
 
+/** The ordinary "this channel has nothing" refusal — shared by HTTP 404 and
+ *  a file:// ENOENT so both mouths say the same thing.
+ *
+ *  Raw status / OS wording reads as a transport fault; naming the missing
+ *  release is what the operator can act on, and what keeps a mistyped channel
+ *  from looking like "you are up to date". */
+function missingManifestError(url: string, detail: string): string {
+  return `no release manifest at ${url} — ${detail}. Publish to this ` +
+    `channel (aio ship), or point updates.source / the channel name at one ` +
+    `that has a release.`;
+}
+
 /** Fetch and parse a manifest. `file:` URLs skip conditional requests — there
  *  is no ETag on a filesystem, and re-reading a local file costs nothing. */
 export async function fetchManifest(
@@ -422,8 +434,8 @@ export async function fetchManifest(
     allowCrossOrigin?: boolean;
   },
 ): Promise<ManifestFetch> {
+  const isFile = url.startsWith("file:");
   try {
-    const isFile = url.startsWith("file:");
     const res = await fetch(url, {
       headers: !isFile && etag ? { "if-none-match": etag } : undefined,
       redirect: "follow",
@@ -434,6 +446,17 @@ export async function fetchManifest(
     }
     if (!res.ok) {
       await res.body?.cancel();
+      // A missing channel (or a mistyped source) is the ordinary failure mode
+      // of `updates.check()`, and `404 … from <url>` reads as a transport
+      // fault. Name the fact: there is no release at this channel path. That
+      // is also what keeps "no update available" from looking the same as
+      // "your release URL is wrong".
+      if (res.status === 404) {
+        return {
+          kind: "error",
+          error: missingManifestError(url, "HTTP 404"),
+        };
+      }
       return {
         kind: "error",
         error: `${res.status} ${res.statusText} from ${url}`,
@@ -467,9 +490,19 @@ export async function fetchManifest(
       pinnable: transportAuthenticatesHost(url),
     };
   } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e);
+    // Same rule as unpackArchive / gitLsRemote: a raw ENOENT is the least
+    // obvious form of "this path does not exist". A file:// channel that was
+    // never published used to surface Deno's fetch wording and nothing else.
+    if (isFile && /No such file|not found|os error 2/i.test(msg)) {
+      return {
+        kind: "error",
+        error: missingManifestError(url, "the file does not exist"),
+      };
+    }
     return {
       kind: "error",
-      error: `${url}: ${e instanceof Error ? e.message : e}`,
+      error: `${url}: ${msg}`,
     };
   }
 }

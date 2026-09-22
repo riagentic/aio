@@ -49,7 +49,7 @@
 import { join, resolve } from "@std/path";
 import { stripVersionToken } from "../server/app-version.ts";
 import type { GlobalFlags } from "./am-types.ts";
-import { detectMode, fail, out, outError } from "./am-output.ts";
+import { detectMode, fail, out } from "./am-output.ts";
 
 // ── The four labs ──────────────────────────────────────────
 
@@ -1503,7 +1503,12 @@ async function labStop(
     );
     const r = await docker(stopArgv(spec.container));
     if (r.code !== 0) {
-      outError(
+      // `fail`, not `outError` then fall through: a stop that failed used to
+      // print `{error:…}`, continue into `docker rm --force`, and then claim
+      // `{stopped:true}` with exit 0 — dual JSON and a success that a VM
+      // mid-write cannot survive quietly. The message already names the
+      // force-rm the operator must choose; am does not choose it for them.
+      fail(
         `docker stop failed: ${r.err.trim() || r.out.trim()} — ` +
           `force it with \`docker rm -f ${spec.container}\` (the VM disk is ` +
           `in the volume and survives).`,
@@ -1542,7 +1547,19 @@ async function labReset(
       mode,
     );
   }
-  if (st) await docker(rmArgv(spec.container));
+  if (st) {
+    const rm = await docker(rmArgv(spec.container));
+    if (rm.code !== 0) {
+      // Same class as labStop: an ignored rm left the container on disk and
+      // still printed `{reset:true}` / exit 0, so `am lab … --reset && …`
+      // claimed the lab was gone while docker still listed it.
+      fail(
+        `docker rm failed: ${rm.err.trim() || rm.out.trim()} — ` +
+          `retry with \`docker rm -f ${spec.container}\`.`,
+        mode,
+      );
+    }
+  }
   const size = await diskSize(dirs.storage);
   try {
     await Deno.remove(dirs.root, { recursive: true });

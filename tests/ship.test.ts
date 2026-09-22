@@ -562,12 +562,17 @@ Deno.test("manifestCore: cell insertion order cannot change the signed core", ()
   backwards.cells.gamma = { version: 3, migratesFrom: 2 };
   backwards.cells.beta = { version: 2, migratesFrom: 1 };
   backwards.cells.alpha = { version: 1, migratesFrom: 1 };
+  const a = manifestCore({ ...base, data: forwards });
+  const b = manifestCore({ ...base, data: backwards });
+  assertEquals(a, b);
+  // Canonical cell order is alphabetical, not insertion — prove it against a
+  // FIXED shape, not against itself (a self-comparison passes for any
+  // deterministic function, including one that drops `data` entirely).
+  // `data` is itself a JSON string inside the core (double-encoded).
   assertEquals(
-    manifestCore({ ...base, data: forwards }),
-    manifestCore({ ...base, data: backwards }),
+    JSON.parse(JSON.parse(a).data).cells,
+    [["alpha", 1, 1], ["beta", 2, 1], ["gamma", 3, 2]],
   );
-  // …and the core is stable across calls (no Date.now / no Map iteration luck).
-  assertEquals(manifestCore(base), manifestCore(base));
 });
 
 // ── the app-name binding ────────────────────────────────────────────────────

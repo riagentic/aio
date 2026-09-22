@@ -363,6 +363,40 @@ Deno.test("updates: a relative artifact url is same-origin, and loopback is pinn
   }
 });
 
+Deno.test("updates: a missing channel (HTTP 404) names the release, not the status alone", async () => {
+  const h = host(() =>
+    new Response("gone", { status: 404, statusText: "Not Found" })
+  );
+  try {
+    const url = `${h.base}/nope/linux-x86_64.json`;
+    const got = await fetchManifest(url);
+    assertEquals(got.kind, "error");
+    assert(got.kind === "error");
+    assertMatch(got.error, /no release manifest/);
+    assertMatch(got.error, /HTTP 404/);
+    assert(got.error.includes(url), `names the URL: ${got.error}`);
+    assertMatch(got.error, /aio ship|updates\.source/, "the fix is named");
+  } finally {
+    await h.stop();
+  }
+});
+
+Deno.test("updates: a missing file:// channel names the release, not a raw ENOENT", async () => {
+  const dir = await tmp("miss-chan");
+  const url = `file://${dir}/nope/linux-x86_64.json`;
+  const got = await fetchManifest(url);
+  assertEquals(got.kind, "error");
+  assert(got.kind === "error");
+  assertMatch(got.error, /no release manifest/);
+  assertMatch(got.error, /does not exist/);
+  assert(got.error.includes(url), `names the URL: ${got.error}`);
+  // Must NOT be the raw Deno fetch wording alone — that was the opaque form.
+  assert(
+    !/^file:.*: Error fetching/.test(got.error),
+    `still the raw Deno wording: ${got.error}`,
+  );
+});
+
 // ── downloading ─────────────────────────────────────────────────────────────
 
 const BODY = new TextEncoder().encode("ARTIFACT-BYTES-".repeat(1000));

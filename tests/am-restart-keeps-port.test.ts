@@ -42,7 +42,16 @@ Deno.test({
       pids.push(a.pid);
       const r = await am("restart", "--json");
       assertEquals(r.code, 0, r.out + r.err);
-      const b = JSON.parse(r.out.trim().split("\n").at(-1)!);
+      // ONE document: a preceding note (`replaying original flags`, …) used
+      // to print a second JSON object on stdout before the start result, so
+      // `JSON.parse(stdout)` failed on a command that had already started.
+      const docs = r.out.trim().split("\n").filter((l) => l.trim());
+      assertEquals(
+        docs.length,
+        1,
+        `one invocation, one document — got:\n${r.out}`,
+      );
+      const b = JSON.parse(docs[0]!);
       pids.push(b.pid);
       assertEquals(b.status, "started", r.out);
       assertEquals(b.port, a.port, "the restart moved the app to a new port");

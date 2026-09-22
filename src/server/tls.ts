@@ -289,7 +289,10 @@ export function aioRootPaths(): { certPath: string; keyPath: string } {
  *  against a control: openssl, rustls, NSS and Go, macOS Security.framework
  *  14.8.9, and Windows CryptoAPI on Win11 26200 all refuse a forged public
  *  name under this root and all accept the legitimate `localhost` leaf. Java
- *  is the outlier, not the rule. Android/Conscrypt is the one still untested.
+ *  is the outlier, not the rule. Android/Conscrypt 2.5.2 was measured the
+ *  same way (TrustManagerImpl, with an intermediate control): it joins the
+ *  Java row — ignores anchor name constraints and anchor EKU, enforces both
+ *  on an intermediate. See `tests/x509-conscrypt.test.ts`.
  *
  *  macOS differs in the other half: it does NOT apply a trust anchor's
  *  extendedKeyUsage (Windows and openssl do), which is why the root also
