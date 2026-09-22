@@ -141,27 +141,39 @@ export async function cmdPrune(
     now,
   });
 
-  const asJson = (removed: string[] | null) => ({
-    root: electronCacheRoot(),
-    total: plan.total,
-    freed: plan.freed,
-    minAgeDays: plan.minAgeDays,
-    protectedVersions: plan.protectedVersions,
-    applied: removed !== null,
-    removed: removed ?? [],
-    plan: [...plan.remove, ...plan.keep].map((d) => ({
-      name: d.entry.name,
-      path: d.entry.path,
-      kind: d.entry.kind,
-      version: d.entry.version,
-      slug: d.entry.slug,
-      bytes: d.entry.bytes,
-      lastUsed: d.entry.lastUsed,
-      lastUsedSource: d.entry.lastUsedSource,
-      keep: d.keep,
-      why: d.why,
-    })),
-  });
+  /** ONE document for `--json`: plan + outcome. `freed` is what the plan
+   *  would reclaim when `removed === null` (report-only), and what actually
+   *  went when applied — never the planned total after a half-prune. */
+  const asJson = (
+    removed: string[] | null,
+    failed: { path: string; error: string }[] = [],
+  ) => {
+    const freed = removed === null ? plan.freed : plan.remove
+      .filter((d) => removed.includes(d.entry.path))
+      .reduce((n, d) => n + d.entry.bytes, 0);
+    return {
+      root: electronCacheRoot(),
+      total: plan.total,
+      freed,
+      minAgeDays: plan.minAgeDays,
+      protectedVersions: plan.protectedVersions,
+      applied: removed !== null,
+      removed: removed ?? [],
+      failed,
+      plan: [...plan.remove, ...plan.keep].map((d) => ({
+        name: d.entry.name,
+        path: d.entry.path,
+        kind: d.entry.kind,
+        version: d.entry.version,
+        slug: d.entry.slug,
+        bytes: d.entry.bytes,
+        lastUsed: d.entry.lastUsed,
+        lastUsedSource: d.entry.lastUsedSource,
+        keep: d.keep,
+        why: d.why,
+      })),
+    };
+  };
 
   const empty = entries.length === 0;
   const willApply = parsed.apply && plan.remove.length > 0;
@@ -186,16 +198,40 @@ export async function cmdPrune(
   }
 
   const result = await applyElectronPrune(plan);
-  for (const f of result.failed) {
-    outError(`could not remove ${f.path}: ${f.error}`, mode);
+  const doc = asJson(result.removed, result.failed);
+  if (result.failed.length > 0) {
+    // Same shape as `am remove`: say what went and what did not, then exit 1.
+    // In `--json` the failures ride INSIDE the one document — a preceding
+    // `outError` would print a second `{error:…}` and break the contract this
+    // verb's own comment cites. Exit 0 after printing failures used to leave
+    // `am prune --yes && …` claiming success while runtimes stayed put, and
+    // `freed` used to be the planned total even when nothing was removed.
+    const summary =
+      `removed ${result.removed.length} entr${
+        result.removed.length === 1 ? "y" : "ies"
+      }, freed ${
+        humanBytes(doc.freed)
+      }; could NOT remove ${result.failed.length}:\n` +
+      result.failed.map((f) => `  ${f.path} — ${f.error}`).join("\n");
+    if (mode === "json") {
+      out({ ...doc, error: summary }, mode);
+    } else {
+      outError(summary, mode);
+      if (result.removed.length) {
+        console.error(
+          result.removed.map((p) => `  removed: ${p}`).join("\n"),
+        );
+      }
+    }
+    Deno.exit(1);
   }
   out(
-    asJson(result.removed),
+    doc,
     mode,
     () =>
       `\nRemoved ${result.removed.length} entr${
         result.removed.length === 1 ? "y" : "ies"
-      }, freed ${humanBytes(plan.freed)}:\n` +
+      }, freed ${humanBytes(doc.freed)}:\n` +
       result.removed.map((p) => `  ${p}`).join("\n"),
   );
 }

@@ -78,7 +78,9 @@ function adoptLegacyQueue(prefix: string): void {
           `belonged to the other one — check before they flush. Happens once.`,
       );
     }
-  } catch { /* storage unavailable (private mode) — nothing to adopt */ }
+  } catch {
+    // aio-ok: storage unavailable (private mode) — nothing to adopt.
+  }
 }
 
 /** `mine` — a tab's copy of a cell document that localStorage refused, built

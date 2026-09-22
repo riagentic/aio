@@ -302,6 +302,19 @@ export interface UIElementHandle {
   readonly readonly: boolean;
   /** True while an input/select/textarea is required. Always a boolean. */
   readonly required: boolean;
+  /** True while a toggle button's `aria-pressed` is `"true"`. ALWAYS a
+   *  boolean — same contract as {@linkcode UIElementHandle.checked} — so
+   *  `assertEquals(ui.Mute.pressed, false)` is writable. `false` when the
+   *  element has no `aria-pressed`. */
+  readonly pressed: boolean;
+  /** True while a disclosure/menu trigger's `aria-expanded` is `"true"`.
+   *  ALWAYS a boolean. `false` when the element has no `aria-expanded`. */
+  readonly expanded: boolean;
+  /** Read a live DOM attribute (`getAttribute`). Returns `null` when absent —
+   *  same contract as the DOM. For asserting `aria-*` / `data-*` / `role` state
+   *  the surface does not promote to first-class fields (except `pressed` /
+   *  `expanded` / `checked`, which are assertable booleans). */
+  attr(name: string): string | null;
   /** Structured info (tag, events, path) from the surface. */
   readonly info: UIElementInfo;
 }
@@ -675,6 +688,31 @@ function harnessSpelling(
   const unique = hits.length === 1;
   const spelled = unique ? uiSpelling(name) : `ui[${JSON.stringify(path)}]`;
   return { spelled, tNamed: typeof t === "string" && t === name };
+}
+
+/** DOM / test antipattern names authors reach for instead of testUI readers.
+ *  Caught in the proxy get traps BEFORE treating the name as a missing child,
+ *  so the error aims at the right question (same family as the
+ *  component-action-miss fix — a field report reached for `.getAttribute` on a
+ *  handle and got "no element named getAttribute"). */
+const DOM_ANTIPATTERN_PROPS = new Set([
+  "getAttribute",
+  "setAttribute",
+  "hasAttribute",
+  "querySelector",
+  "querySelectorAll",
+  "closest",
+  "matches",
+]);
+
+function refuseDomAntipattern(prop: string): never {
+  return fail(
+    `testUI: "${prop}" is not a testUI action or child. On an element use ` +
+      `.attr("…"), or the state readers .checked/.pressed/.expanded/` +
+      `.value/.text/.disabled/.readonly/.required. For CSS queries use ` +
+      `ui.document.`,
+    [],
+  );
 }
 
 function fail(msg: string, available: string[], target?: string): never {
@@ -2317,6 +2355,15 @@ async function _buildTestUI(
       get required() {
         return resolveInfo().required === true;
       },
+      get pressed() {
+        return resolveInfo().pressed === true;
+      },
+      get expanded() {
+        return resolveInfo().expanded === true;
+      },
+      attr(name: string) {
+        return el().getAttribute?.(name) ?? null;
+      },
     };
   }
 
@@ -2474,13 +2521,17 @@ async function _buildTestUI(
     // The lazy callable itself is load-bearing (un-awaited sequences target UI a
     // queued action will create), so it stays — it just stops being anonymous.
     const label = `aio testUI: "${name}" is unresolved — a pending element/` +
-      `component reference, not a value. For state use .checked/.disabled/` +
-      `.readonly/.required/.value/.text on an element that exists.`;
+      `component reference, not a value. For state use .checked/.pressed/` +
+      `.expanded/.disabled/.readonly/.required/.value/.text on an element ` +
+      `that exists.`;
     const callable = { [label]: function () {} }[label] as unknown as AnyDoc;
     return new Proxy(callable, {
       get(_target, prop: string | symbol) {
         if (typeof prop === "symbol" || prop in eh) {
           return (eh as AnyDoc)[prop];
+        }
+        if (typeof prop === "string" && DOM_ANTIPATTERN_PROPS.has(prop)) {
+          refuseDomAntipattern(prop);
         }
         // Treated as a component that will exist by the time it's used:
         // ui.Modal.ConfirmButton — resolve "Modal" lazily, then chain.
@@ -2537,6 +2588,9 @@ async function _buildTestUI(
         if (typeof prop !== "symbol" && prop in (target as object)) {
           return (target as AnyDoc)[prop];
         }
+        if (typeof prop === "string" && DOM_ANTIPATTERN_PROPS.has(prop)) {
+          refuseDomAntipattern(prop);
+        }
         return (comp as AnyDoc)[prop];
       },
       has(target, prop) {
@@ -2582,6 +2636,9 @@ async function _buildTestUI(
         if (typeof prop !== "symbol" && prop in (target as object)) {
           return (target as AnyDoc)[prop];
         }
+        if (typeof prop === "string" && DOM_ANTIPATTERN_PROPS.has(prop)) {
+          refuseDomAntipattern(prop);
+        }
         return (comp as AnyDoc)[prop];
       },
       has(target, prop) {
@@ -2608,6 +2665,9 @@ async function _buildTestUI(
       get(target, prop: string | symbol) {
         if (typeof prop === "symbol" || prop in target) {
           return (target as AnyDoc)[prop];
+        }
+        if (typeof prop === "string" && DOM_ANTIPATTERN_PROPS.has(prop)) {
+          refuseDomAntipattern(prop);
         }
         let node: UISurfaceNode;
         try {

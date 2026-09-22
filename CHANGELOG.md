@@ -1,5 +1,121 @@
 # Changelog
 
+## v1.0.9-beta — a CLI that cannot claim success after a failed removal, a Mute whose pressed is a boolean, and Conscrypt measured (2026-09-22)
+
+> **The public surface is additive only** — `pressed` / `expanded` (and a richer
+> `checked`) on the testing surface, plus `.attr()`. No removals and no changed
+> signatures elsewhere. The three new **required** members on `UIElementHandle`
+> went through `update:api --allow-break` because the freeze gate classifies any
+> required member as a break; no app constructs that handle. Nothing here is a
+> migration. See
+> [what you may notice](docs/upgrade/from-1.0.8-beta-to-1.0.9-beta.md).
+
+This release is the polish round that closed the remaining honesty gaps in `am`,
+finished the TLS verifier matrix, and made the UI harness tell the truth about
+ARIA toggles. Nothing in the app runtime API moved; what changed is how commands
+report, how tests read a screen, and what we now know about Android's
+certificate stack.
+
+### `am` that cannot report success after a failure
+
+Several `am` verbs printed an error and then claimed victory — exit 0, a
+success-shaped document, or a second JSON document that made `JSON.parse`
+impossible. The same class, four places:
+
+- **`am prune --yes`** printed `outError` per failed removal, then "Removed N,
+  freed <planned>" and exited 0 — so `am prune --yes && …` claimed success while
+  runtimes stayed, and `--json` emitted `{error}` then the result. One document
+  now, with `failed` and the bytes actually freed, exit 1 when anything failed.
+- **`am doctor --json`** had the same dual-document shape (findings, then an
+  error). Findings and error live in one object.
+- **`am lab --stop` / `--reset`** force-rm'd after a failed `docker stop` /
+  ignored a failed `rm`, and claimed `{stopped:true}` / `{reset:true}` exit 0.
+  They `fail` on the first real failure and do not fall through.
+- **`am restart --json`** emitted note documents (replay / defaults / unsaved /
+  switch-checkout) on stdout before the start result, so `JSON.parse(stdout)`
+  failed. Notes ride on stderr in `--json`, same channel rule as everything else
+  that must stay out of the one document.
+
+### A recording that says when it started
+
+`am shot --video --json` stayed silent until the final `{file,…}` document. A
+script drove a whole scene into a recorder that had not started (field report
+§15). Progress announces on stderr in `--json` — "recording started" — while
+stdout stays the one final document.
+
+### A missing update channel names the channel
+
+`fetchManifest` rewrote HTTP 404 and a missing `file://` as a raw transport
+fault, so a mistyped channel looked like "you are up to date" or like a network
+glitch. Both mouths now say `no release manifest at <url> — …`, naming the
+channel path.
+
+### testUI: `.pressed`, `.expanded`, and ARIA `.checked`
+
+`aria-pressed` and `aria-expanded` are the documented meaningful-false
+attributes. They were not on the surface, so
+`assertEquals(ui.Mute.pressed, false)` read back a lazy callable — the same
+callable-lie `checked` fixed earlier for native checkboxes. Both are first-class
+booleans now (`false` included when the attribute is present and false; absent
+when the element is not a toggle / not expandable). `.checked` also follows
+`aria-checked` on `role="radio|checkbox|switch"`, so an ARIA picker is
+assertable the same way a native checkbox is. `.attr("…")` remains for
+everything else.
+
+`check()` / `uncheck()` honour the same ARIA pattern: a
+`role="radio|checkbox|switch"` with `aria-checked` is checkable; a plain
+`<button>` still is not.
+
+### The last TLS verifier, measured
+
+Android/Conscrypt 2.5.2 (`TrustManagerImpl.checkServerTrusted` /
+`checkClientTrusted`) was the one stack still unmeasured after 1.0.8-beta. Same
+three-way as macOS and Windows, with controls and an instrument check:
+
+| verifier                | anchor name constraints | anchor EKU  |
+| ----------------------- | ----------------------- | ----------- |
+| Android/Conscrypt 2.5.2 | **IGNORES**             | **IGNORES** |
+
+It joins the Java row. A forged `login.acmebank.com` under the constrained aio
+root is accepted; the same forgery under an intermediate that carries the name
+constraint is refused — the instrument is not blind. No cert shape change: an
+intermediate still closes only these two outliers and still costs a new root
+plus `am trust` everywhere. Probe + pin: `tests/x509-conscrypt.test.ts` (skips
+cleanly without a JDK and the uber jar).
+
+### Transport: what JSON really does, including from a browser
+
+The in-process vs WebSocket differential grew: `undefined` in an array becomes
+`null` (slot kept); `NaN` / `±Infinity` arrive as `null`; a `Set` arrives as
+`{}`; a `Date` is an instance in-process and an ISO string on the wire; a
+`BigInt` lands in-process and `enc()` refuses to send. All are JSON facts (or
+JSON refusals), pinned with `wireBecomes`.
+
+The client-context replay of a sync method is covered too:
+`tests/transport-differential-browser.test.ts` runs the same sync `take`
+in-process and from a real Chromium tab via `withE2E`, comparing state and
+return. Skips when no browser is available.
+
+### Harness flakes that were not product bugs
+
+`tests/am.test.ts` and `tests/spawn.test.ts` went red under load with no product
+defect. The am fixtures wrote a stub `App.tsx` that started a real esbuild child
+on every trojan server; under load that child outlived `stopEsbuild`'s bound and
+the sanitizer blamed the next test. Fixtures no longer write `App.tsx`, wait for
+the port to answer instead of `sleep(50)`, and keep stdout/stderr/exit on
+failure. Spawn fixtures left a bare `sleep 300 &` inheriting pipes; the
+grandchild redirects now, post-kill sleeps became `until(!alive)`, and failures
+keep the exit code.
+
+### Ratchets and stubs made honest
+
+Silent-catch ceiling 322 → 319 after justifying the remaining swallows in
+blocking / async-db terminate and browser-storage adopt. The browser server-only
+stub test no longer a mere `!==` reference check — it proves the Deno export
+stays callable (silent `undefined`) while the browser stub throws the teachable
+line. `blocking` on the browser bundle is a facade over `blocking-reason.ts` (no
+worker pool on the page).
+
 ## v1.0.8-beta — a root key that cannot be turned against you, a page that cannot keep what you told it to forget, 13 KB off every page (2026-09-21)
 
 > **The public surface is unchanged** — `check:api` reports no additions, no

@@ -1956,6 +1956,18 @@ export function mergeLaunchFlags(
   return { launch: [...replayed, ...appTyped], replayed, overridden };
 }
 
+/** A restart NOTE — said before the start that follows.
+ *
+ *  Pretty mode prints it on stdout (the operator is watching). `--json` must
+ *  NOT: a preceding `out({restart:…})` then the start's `{status:"started"}`
+ *  made TWO documents, so `JSON.parse(stdout)` — the contract every other
+ *  verb keeps — failed on a command that had already started the app. Notes
+ *  ride on stderr in `--json`; the one document is the start result. */
+function restartNote(mode: ReturnType<typeof detectMode>, line: string): void {
+  if (mode === "json") console.error(line);
+  else out(line, mode);
+}
+
 async function restartApp(
   args: string[],
   flags: GlobalFlags,
@@ -2009,11 +2021,9 @@ async function restartApp(
     Deno.exit(1);
   }
   if (elsewhere) {
-    out(
-      mode === "pretty"
-        ? `restart --force: switching checkouts — ${elsewhere} → ${projectRoot()}`
-        : { restart: "switch-checkout", from: elsewhere, to: projectRoot() },
+    restartNote(
       mode,
+      `restart --force: switching checkouts — ${elsewhere} → ${projectRoot()}`,
     );
   }
 
@@ -2027,36 +2037,28 @@ async function restartApp(
     const merged = mergeLaunchFlags(recorded.flags, explicit);
     launchArgs = [...args.filter((a) => !a.startsWith("--")), ...merged.launch];
     if (merged.replayed.length > 0) {
-      out(
-        mode === "pretty"
-          ? `restart: replaying original flags — ${merged.replayed.join(" ")}` +
-            (merged.overridden.length
-              ? ` (overridden here: ${merged.overridden.join(" ")})`
-              : "")
-          : {
-            restart: "replay",
-            flags: merged.replayed,
-            overridden: merged.overridden,
-          },
+      restartNote(
         mode,
+        `restart: replaying original flags — ${merged.replayed.join(" ")}` +
+          (merged.overridden.length
+            ? ` (overridden here: ${merged.overridden.join(" ")})`
+            : ""),
       );
     }
   } else if (explicit.length === 0) {
     if (!recorded && running) {
       // Started outside am (e.g. `deno task dev`) → we never captured its
-      // flags. A NOTE, on the same channel as the replay note above it — not
-      // `{error}`: nothing has failed, and this used to print an error
-      // document AND then the real one, so `am restart --json` on a stopped
-      // app emitted two JSON documents. It is also said only when there IS an
-      // instance: with nothing running there is no launch to have missed.
-      out(
-        mode === "pretty"
-          ? `restart: can't recover the original launch flags (e.g. ` +
-            `--env-file) — this instance wasn't started by \`am start\`. ` +
-            `Relaunching with defaults; pass the flags to \`am restart …\` ` +
-            `to record them.`
-          : { restart: "defaults", why: "not started by am start" },
+      // flags. Said only when there IS an instance: with nothing running there
+      // is no launch to have missed. Used to be an `{error}` document (two
+      // documents, one of them a lie); then a note document on stdout (still
+      // two documents next to the start result). `restartNote` keeps the
+      // sentence without a second JSON document.
+      restartNote(
         mode,
+        `restart: can't recover the original launch flags (e.g. ` +
+          `--env-file) — this instance wasn't started by \`am start\`. ` +
+          `Relaunching with defaults; pass the flags to \`am restart …\` ` +
+          `to record them.`,
       );
     }
   }
@@ -2086,15 +2088,13 @@ async function restartApp(
       Deno.exit(1);
     }
     unsaved = stopped.unsaved;
-    // Said NOW, in every mode that prints, and then the restart proceeds —
-    // the new process boots from the state that IS on disk, and the operator
-    // has to hear that it is not the state they were just looking at.
+    // Said NOW, then the restart proceeds — the new process boots from the
+    // state that IS on disk. Pretty prints on stdout; `--json` on stderr so
+    // the start's one document stays alone (exit 1 still carries the verdict).
     if (unsaved) {
-      out(
-        mode === "pretty"
-          ? `stopped ${appId}\n  ⚠ NOT SAVED — ${unsaved}`
-          : { appId, status: "stopped", unsaved },
+      restartNote(
         mode,
+        `stopped ${appId}\n  ⚠ NOT SAVED — ${unsaved}`,
       );
     }
     // Wait until port is free

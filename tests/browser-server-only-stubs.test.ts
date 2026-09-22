@@ -113,12 +113,43 @@ export const probe = cell("probe", {
 });
 
 Deno.test("browser stubs: calling a server-only name in the browser throws a teachable error", () => {
+  // A mere `stub !== real` reference check is vacuous here: the REAL
+  // `serverUser`/`serverRequest` return `undefined` outside a request — the
+  // exact silent reading ("anonymous") the stubs exist to forbid. A stub that
+  // did the same would pass `!==` and teach nothing. Prove the CONTRAST: the
+  // Deno export stays callable (or throws its OWN sentence for serverAuth);
+  // the browser export throws the teachable "ran in the browser" line.
   for (const name of ["serverUser", "serverRequest", "serverAuth"] as const) {
     const stub = (browser as Record<string, unknown>)[name];
-    assert(
-      stub !== (mod as Record<string, unknown>)[name],
-      `${name} is no stub`,
+    const real = (mod as Record<string, unknown>)[name];
+    assertEquals(
+      typeof stub,
+      "function",
+      `${name}: browser must export a stub`,
     );
+    assertEquals(
+      typeof real,
+      "function",
+      `${name}: mod must export the real one`,
+    );
+    if (name === "serverAuth") {
+      // Off-request the real one names the missing user store — a DIFFERENT
+      // sentence from the stub. Same-throw would mean the stub was replaced
+      // by the server export.
+      assertThrows(
+        () => (real as () => unknown)(),
+        Error,
+        "no user store",
+      );
+    } else {
+      const got = (real as () => unknown)();
+      assertEquals(
+        got,
+        undefined,
+        `${name}: server export must stay callable on Deno (got ${got}) — ` +
+          `a silent undefined is what the browser stub exists to forbid`,
+      );
+    }
     assertThrows(
       () => (stub as () => unknown)(),
       Error,

@@ -10,6 +10,8 @@ import { join } from "@std/path";
 import {
   isStillRecording,
   shotVideoOptions,
+  shotVideoProgress,
+  shotVideoRecordingLine,
 } from "../src/am/am-cmd-shot-video.ts";
 import { unknownFlags } from "../src/am/am-flags.ts";
 import {
@@ -74,6 +76,54 @@ Deno.test("isStillRecording: the screencast's own first frame is not a paint", (
   assertEquals(isStillRecording(f(0, 900_000), 2_500_000), false);
   // Too short to call it still.
   assertEquals(isStillRecording(f(0, 33_000), 1_000_000), false);
+});
+
+// `--json` used to stay silent until the final `{file,…}` document, so a
+// script driving a scene into the recorder could not tell whether recording
+// had started (field report §15). Progress rides on stderr — same channel
+// rule as `restartNote` — and quiet stays quiet. Stdout stays one document.
+Deno.test("shotVideoProgress: --json announces on stderr, never stdout", () => {
+  const err: string[] = [];
+  const out: string[] = [];
+  const [e, l] = [console.error, console.log];
+  console.error = (...a: unknown[]) => err.push(a.map(String).join(" "));
+  console.log = (...a: unknown[]) => out.push(a.map(String).join(" "));
+  try {
+    shotVideoProgress("json", "recording http://x → demo.mp4 — Ctrl-C to stop");
+    shotVideoProgress(
+      "pretty",
+      "recording http://x → demo.mp4 — Ctrl-C to stop",
+    );
+    shotVideoProgress(
+      "quiet",
+      "recording http://x → demo.mp4 — Ctrl-C to stop",
+    );
+  } finally {
+    console.error = e;
+    console.log = l;
+  }
+  assertEquals(
+    out,
+    [],
+    "progress must never touch stdout (the final document lives there)",
+  );
+  assertEquals(err.length, 2, "json + pretty announce; quiet is silent");
+  assertStringIncludes(err[0]!, "recording http://x → demo.mp4");
+  assertStringIncludes(err[1]!, "recording http://x → demo.mp4");
+});
+
+Deno.test("shotVideoRecordingLine: the greppable start signal a script watches", () => {
+  assertEquals(
+    shotVideoRecordingLine("http://127.0.0.1:9/", {
+      path: "demo.mp4",
+      durationMs: null,
+    }),
+    "recording http://127.0.0.1:9/ → demo.mp4 — Ctrl-C to stop",
+  );
+  assertEquals(
+    shotVideoRecordingLine("http://x", { path: "a.webm", durationMs: 2500 }),
+    "recording http://x → a.webm — for 2.5s (Ctrl-C stops early)",
+  );
 });
 
 Deno.test("am shot's flag gate lets --video and --duration through", () => {

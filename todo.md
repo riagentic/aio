@@ -119,8 +119,8 @@ known defects, which is exactly why there is no 1.0.8 tag yet.
 RFC 5280 §6.1 begins path validation AFTER the trust anchor, so a self-signed
 root's own extensions are, by the letter, advisory. The question was which
 verifiers actually behave that way. All of them have now been asked from their
-own OS, each against a control, and the answer is that Java is an outlier rather
-than the rule:
+own OS, each against a control, and the answer is that Java and Conscrypt are
+the outliers rather than the rule:
 
 | verifier                        | anchor name constraints | anchor EKU  |
 | ------------------------------- | ----------------------- | ----------- |
@@ -129,18 +129,19 @@ than the rule:
 | Windows CryptoAPI (Win11 26200) | enforces                | enforces    |
 | macOS Security.framework 14.8.9 | enforces                | **IGNORES** |
 | Java `CertPathValidator`        | **IGNORES**             | **IGNORES** |
+| Android/Conscrypt 2.5.2         | **IGNORES**             | **IGNORES** |
 
 The verdict, and the reasoning, so it is not re-litigated:
 
-- **No intermediate, for now.** It would close the Java row and nothing else. It
-  is not free: existing roots are `CA:TRUE, pathlen:0`, which FORBIDS them
-  signing an intermediate, so it needs a NEW root and every developer who ran
-  `am trust` has to re-trust. That is a migration for one outlier verifier,
-  against an attacker who must already be able to read `~/.aio/ca` — which means
-  they can already read the home directory. The cost is certain and the benefit
-  is narrow. Revisit if a real aio client turns out to verify through Java (an
-  Android app using `HttpsURLConnection` is the plausible one, and
-  Android/Conscrypt is the one stack still unmeasured).
+- **No intermediate, for now.** It would close the Java and Conscrypt rows and
+  nothing else. It is not free: existing roots are `CA:TRUE, pathlen:0`, which
+  FORBIDS them signing an intermediate, so it needs a NEW root and every
+  developer who ran `am trust` has to re-trust. That is a migration for two
+  outlier verifiers that behave alike, against an attacker who must already be
+  able to read `~/.aio/ca` — which means they can already read the home
+  directory. The cost is certain and the benefit is still narrow. Conscrypt is
+  measured (below): an Android app using `HttpsURLConnection` is exactly this
+  row, and it does not change the verdict.
 - **Two locks instead, because no single one covers every verifier.** The
   `serverAuth` EKU carries Windows and openssl; the rfc822Name/URI bases carry
   macOS, which ignores the EKU entirely. Either alone leaves a real gap.
@@ -208,7 +209,23 @@ What was measured, in order:
       the same violation moved down onto an intermediate — is now the first line
       of the probe. A null result is not a result until the instrument has
       produced a positive one.
-- [ ] **ALSO UNMEASURED: Android/Conscrypt**, same three-way test.
+- [x] **Android/Conscrypt MEASURED (2.5.2 openjdk-uber / OpenJDK 21,
+      `TrustManagerImpl.checkServerTrusted` / `checkClientTrusted`, with
+      controls AND an instrument check).** Same three-way as macOS/Windows.
+      Anchor name constraints: **IGNORES** — forged `login.acmebank.com` under
+      the constrained aio root is ACCEPTED; the unconstrained control accepts it
+      too; `localhost` under the aio root is accepted. The instrument is not
+      blind: the same forgery under an intermediate that carries the NC is
+      refused with `name constraints check failed` (stock PKIX under Conscrypt's
+      TrustManager — the Windows ExtraStore lesson, applied here). Anchor EKU:
+      **IGNORES** — `checkClientTrusted` ACCEPTs a `clientAuth` leaf under the
+      `serverAuth`-only aio root, identically to a no-EKU control. (Do not read
+      `checkServerTrusted` on an `emailProtection` leaf as an EKU answer:
+      Conscrypt refuses that leaf for lacking `serverAuth` before any anchor
+      check.) So Conscrypt joins the Java row, not Windows. Probe + pinned test:
+      `tests/x509-conscrypt.test.ts` (skips cleanly without a JDK + the uber
+      jar; fetch URL in the file header). No cert shape change; `otherName`
+      still unconstrained.
 - [ ] **`otherName` (the Windows UPN form) is STILL unconstrained**, and RFC
       5280 gives no way to constrain it. Only the EKU covers it and macOS
       ignores the EKU, so on macOS a stolen key can still mint a UPN client
@@ -442,10 +459,11 @@ the order worth doing:
 - **field report §15 — the demo driver has no supported door.** Three parts:
   `src/media/{cdp,screencast,encoder}.ts` are reachable only by a
   `dep/aio/src/...` path (one refactor breaks every demo repo);
-  `am shot
-  --video --json` prints nothing until the end, so a script cannot
-  know recording started and the reporter drove a whole scene into a dead
-  recorder; and no Xephyr/WebGL line (a 3D scene records blank without
+  ~~`am shot --video --json` prints nothing until the end~~ **DONE
+  (2026-09-22):** `shotVideoProgress` announces on stderr in `--json` (same
+  channel rule as `restartNote`), so a script can know recording started while
+  stdout stays the one final document — pinned by `tests/am-shot-video.test.ts`;
+  and no Xephyr/WebGL line (a 3D scene records blank without
   `--enable-unsafe-swiftshader`).
 - **mdview A1 — no Electron main-process extension point** (already listed below
   as designed-not-built): `dialog`, dock/app menus, `webUtils.getPathForFile`,
@@ -786,8 +804,10 @@ Small follow-ups from the fixers:
       no longer claims the browser gets a harmless `undefined` —
       `tests/android-server-only-stubs.test.ts` pins the bundle, the call and
       (by metafile) that no client bundle holds that module at all.
-- [ ] Count the shutdown "database file is GONE" ERROR in `errors=`
-      (`src/diagnostics/logger-core.ts` hook).
+- [x] Count the shutdown "database file is GONE" ERROR in `errors=`
+      (`src/diagnostics/logger-core.ts` hook). DONE earlier: counted above the
+      level gate; pinned by `tests/logger-errors-counted.test.ts` and
+      `tests/db-vanished-at-shutdown.test.ts`.
 - [x] `am check` is green with the `aio` import mapping removed
       (`src/server/graph-validator.ts`). FIXED: the browser map injects `aio`,
       `aio/ui`, … unconditionally, so the walk never saw the app's own
@@ -816,11 +836,15 @@ They are temporary; the findings are summarised above.
 
 **Still open after that** (from the full triage of this file):
 
-- [ ] Ratchet tightening left over: the silent-catch ceiling is at its exact
+- [x] Ratchet tightening left over: the silent-catch ceiling is at its exact
       count (330 blocks / 91 handlers); lower it as the remaining swallows in
       `src/state/blocking.ts:175` and `src/sync/browser-storage.ts:81` are
       justified or made loud. `tests/browser-server-only-stubs.test.ts:118` is
-      still vacuous.
+      still vacuous. **DONE (2026-09-22):** blocking/async-db terminate +
+      browser-storage adopt justified in place (`aio-ok:`); ceiling 322 → 319.
+      Stub test no longer a mere `!==` reference check — proves the Deno export
+      stays callable (silent `undefined`) while the browser stub throws the
+      teachable line.
 - [x] **Dev-only chunk — done (2026-09-21). MEASURED 12.0 KB gz off every page
       load**; the ceilings came down with it, 90 → 79 (AIR) and 92 → 82 (app).
       `src/browser/dev-diagnostics.ts` holds the lot, reached through the one
@@ -849,9 +873,57 @@ They are temporary; the findings are summarised above.
       rather than the build's own plugin, so it reported a bundle nobody ships
       (90 KB gz against the 80 a page downloaded). It runs `aioBrowserPlugin()`
       now.
-- [ ] Sync-method browser-replay differential (known gap, bottom of file).
-- [ ] Flaky-test remainder: `tests/am.test.ts`, `tests/spawn.test.ts` onto
-      `stopChild` with stderr + exit code kept.
+- [x] **Missing update channel named the release, not a raw ENOENT/404**
+      (2026-09-22). `fetchManifest` rewrote HTTP 404 and file:// missing as
+      `no release manifest at <url> — …` (same mouth for both), so a mistyped
+      channel no longer looks like a transport fault or like "you are up to
+      date". Vacuous `error.length > 0` in the e2e pin replaced with the channel
+      path. Pins: `tests/updates-fetch.test.ts`, `tests/updates-e2e.test.ts`.
+- [x] **`.pressed` / `.expanded` were the checked callable-lie again**
+      (2026-09-22). `aria-pressed` / `aria-expanded` (the documented
+      meaningful-false attributes) were not on the surface, so
+      `assertEquals(ui.Mute.pressed, false)` read back a lazy callable. Promoted
+      next to `checked`; `.attr` remains for everything else. Pins:
+      `tests/ui-surface-aria-pressed.test.tsx`.
+- [x] **Sync-method browser-replay differential** (2026-09-22). Same sync method
+      in-process vs real Chromium via `withE2E`; state + return compared; JSON
+      losses pinned with `wireBecomes`. Skips cleanly when no browser. Pin:
+      `tests/transport-differential-browser.test.ts`.
+- [x] Flaky-test remainder: `tests/am.test.ts`, `tests/spawn.test.ts` onto
+      `stopChild` with stderr + exit code kept. (2026-09-22) Root causes were
+      harness, not product: am fixtures wrote a stub `App.tsx` that started a
+      real esbuild child via graph validation on every trojan server — under
+      load that child outlived `stopEsbuild`'s 2 s bound and the sanitizer
+      blamed the next test. Fix: no `App.tsx` (validation short-circuits), wait
+      for the port to answer instead of `sleep(50)`, `assertAmCode` keeps
+      stdout/stderr/exit. spawn fixtures left a bare `sleep 300 &` inheriting
+      pipes so the drain bound could expire with reads still open; redirected
+      the grandchild, replaced post-kill sleeps with `until(!alive)`, and
+      `stopSpawn` (product `kill()` already escalates — no ChildProcess for
+      `stopChild` without a surface break) keeps the exit code on failure.
+      Verified: spawn 16/16 ×3, am 87/87 ×2, sanitizers on.
+- [x] **`am prune --yes` reported success after a failed removal** (2026-09-22).
+      Printed `outError` per failure, then "Removed N, freed <planned>" and
+      exited 0 — so `am prune --yes && …` claimed success while runtimes stayed,
+      and `--json` emitted two documents (`{error}` then the result). Now: one
+      document with `failed` + actual `freed`, exit 1. Same dual-doc class fixed
+      on `am doctor --json` (findings + error in one object). Pinned by
+      `tests/electron-cache-prune.test.ts`.
+- [x] **`am lab --stop` / `--reset` and `am restart --json` honesty**
+      (2026-09-22). Same dual-doc / false-success class as prune/doctor:
+      `labStop` printed `outError` on a failed `docker stop`, then force-rm'd
+      and claimed `{stopped:true}` exit 0; `labReset` ignored a failed `rm` and
+      claimed `{reset:true}`; `am restart --json` emitted note documents
+      (replay/defaults/unsaved/switch-checkout) before the start result so
+      `JSON.parse(stdout)` failed. Now: `fail` on stop/rm failure (no fall-
+      through), and restart notes ride on stderr in `--json`. Pins:
+      `tests/am-lab.test.ts`, `tests/am-restart-keeps-port.test.ts`.
+- [x] **`am shot --video --json` announces recording started** (2026-09-22).
+      Progress rode on stderr in pretty only; `--json` stayed silent until the
+      final `{file,…}` document — a script drove a scene into a dead recorder
+      (field report §15). Same channel rule as `restartNote`: announce on
+      stderr, one document on stdout. Pins: `tests/am-shot-video.test.ts`.
+
 - [ ] Clear-out: move the DONE items below to `feedback/resolved.md`, the policy
       sections (beta gate, alpha70 decisions, standing policy, facts) to
       `.katana/` / docs, then delete them here; delete the per-app reports left
@@ -905,15 +977,14 @@ defects fixed, see CHANGELOG). Still open, from the same audit:
       `MARKETING_VERSION` with a suffix; no shared scheme; no UIScene.
 - [ ] A real phone (proof row `android (device)`), once one is attached.
 
-### Two browser-bundle gaps left after report 9 (2026-09-13)
+### ~~Two browser-bundle gaps left after report 9 (2026-09-13)~~ — DONE
 
-- `docs/auth/auth.md:357` imports `serverUser` into a cell module: that example
-  still fails the browser build. A re-export cannot fix it (the module needs
-  `node:async_hooks`); a browser `serverUser` that throws when called is a
-  design decision.
-- `blocking` is not on the browser bundle: `src/state/blocking.ts` has a
-  module-level initializer esbuild cannot drop (+0.8 KB gz on every page). Make
-  it lazy, then ship it.
+- ~~`docs/auth/auth.md` imports `serverUser` into a cell module~~ — browser
+  stubs throw the teachable line; `tests/browser-server-only-stubs.test.ts` pins
+  the docs examples bundle.
+- ~~`blocking` on the browser bundle~~ — facade in `browser-air` uses
+  `blocking-reason.ts` (no worker pool on the page); real `blocking.ts` defers
+  its worker URL to first use.
 
 ### A size pass on the page (1.0.1-beta, 2026-09-13)
 
@@ -2200,16 +2271,23 @@ This matters beyond a developer's busy laptop: a CI runner is a busy machine by
 definition, and a suite that goes red at no defect teaches its readers to re-run
 rather than read (the same argument as the orphan-directory ceiling).
 
-What would close it, in rough order of value:
+**CLOSED 2026-09-22** — the WHY was found, and it was not "teardown too short"
+in the abstract:
 
-- `stopChild` (tests/stop-child.ts) is the one teardown; the leaking sites do
-  not all go through it. Route them through it and give it a deadline that
-  ESCALATES (SIGTERM, wait, SIGKILL, wait) rather than one flat wait.
-- Failures should say what the child did — `tests/examples.test.ts` now keeps
-  the child's stderr and names its exit code; the am/spawn sites still do not.
-- A load-sensitive bound is a bound measured on the wrong machine. Where a test
-  waits for a child, wait for an OBSERVABLE (a port answering, a line in the
-  log), never a duration.
+- `tests/am.test.ts`: every trojan fixture wrote a stub `App.tsx`, which made
+  `startGraphValidation` spawn a real esbuild native child. Under load that
+  child outlived `stopEsbuild`'s 2 s bound; the sanitizer blamed the next test.
+  Fixtures no longer write `App.tsx` (validation short-circuits), wait for the
+  port to _answer_ instead of `sleep(50)`, and `assertAmCode` keeps
+  stdout/stderr/exit. Short-lived `am` CLIs still use `.output()` — there is
+  nothing for `stopChild` to stop.
+- `tests/spawn.test.ts`: a bare `sleep 300 &` inherited the pipes; under load
+  the product's `DRAIN_BOUND_MS` could expire with reads still open ("stdout/
+  stderr not closed"). Grandchild now redirects to `/dev/null`; post-kill sleeps
+  became `until(!alive)`; `stopSpawn` keeps the exit code. Product `kill()`
+  already escalates — `SpawnHandle` does not expose a `ChildProcess` for
+  `stopChild` without a surface break.
+- `tests/examples.test.ts` was already on `stopChild` with stderr+exit.
 
 ## Known gap: the harness cannot cross a transport boundary
 
@@ -2232,17 +2310,23 @@ second set of hand-written expectations that can drift from the first.
 
 **Started**: `tests/transport-differential.test.ts` does this for METHOD
 PAYLOADS — the same call dispatched in-process and over a real WebSocket, with
-the resulting state compared. It found and now pins two divergences the harness
-had been accepting silently: `{ gone: undefined }` keeps its key in-process and
+the resulting state compared. It found and now pins divergences the harness had
+been accepting silently: `{ gone: undefined }` keeps its key in-process and
 loses the KEY over the wire (so `"gone" in state` is true in a test and false in
-a browser), and `-0` arrives as `0`. Both are JSON, neither is an aio defect,
-and both are executable facts now rather than surprises.
+a browser); `undefined` in an _array_ becomes `null` (slot kept); `-0` arrives
+as `0`; `NaN`/`±Infinity` arrive as `null`; a `Set` arrives as `{}`. A `Date`
+payload is an instance in-process and an ISO string on the wire. A `BigInt`
+payload lands in-process and `enc()` refuses to send (JSON throws — not a silent
+loss). All are JSON facts (or JSON refusals), not aio defects, and all are
+executable now rather than surprises.
 
 The RETURN path is covered too, and it came out well: `serializeReturn` already
-knew that `Map`/`Set`/`RegExp`/`Error` become `{}` and warns — in dev AND prod —
-that "the caller receives a DIFFERENT value than the method returned". The test
-pins the value AND the warning, because an unwarned `{}` is the bug and a warned
-one is the design. That path is the model state was missing until this release.
+knew that `Map`/`Set`/`RegExp`/`Error` become `{}`, `Date` → ISO string, `NaN` →
+`null`, and warns — in dev AND prod — that "the caller receives a DIFFERENT
+value than the method returned". BigInt is dropped to `undefined` with the
+louder "cannot carry AT ALL" warning. The test pins the value AND the warning,
+because an unwarned change is the bug and a warned one is the design. That path
+is the model state was missing until this release.
 
 Async methods are covered as well, both the value and the throw. The contract is
 `_callId`: `aio-server.ts` says "an ASYNC method carries `_callId`; the executor
@@ -2266,9 +2350,12 @@ Still to cover, in rough order of what has already bitten:
   server-side whether the dispatch arrived over a socket or in-process, so the
   transport does not change them. The worker hop is where effects DO cross a
   boundary, which folds this into the item above.
-- the client-context replay of a sync method — needs a browser client; parts are
-  covered by `test:e2e`. Each is the same shape — run it both ways, compare, and
-  pin a divergence that is genuinely JSON's rather than hide it.
+- ~~the client-context replay of a sync method~~ **DONE** —
+  `tests/transport-differential-browser.test.ts`. Same sync `take` in-process
+  and from a real Chromium tab via `withE2E`; state (trojan) + return (DOM after
+  await) compared; `undefined` member / `Date` / `NaN` pinned with
+  `wireBecomes`. Skips when `BROWSER === null`. Own file so an ignored empty
+  case cannot break `check:vacuous`.
 
 Until then the standing rule is the cheap half of it: **a new validator is
 proven by BOOTING an app, not only by unit tests.**

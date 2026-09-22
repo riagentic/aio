@@ -82,12 +82,13 @@ each against a control:
 | Windows CryptoAPI (11 26200)       | enforced         | enforced    |
 | macOS Security.framework 14.8.9    | enforced         | **ignored** |
 | Java `CertPathValidator`           | ignored          | ignored     |
+| Android/Conscrypt 2.5.2            | ignored          | ignored     |
 
-An intermediate closes exactly one row — Java — and costs a new root plus
-`am trust` again on every machine, because the roots already deployed are
-`pathlen:0` and cannot sign one. Two locks that everything reads beat a third
-that is not read. Android/Conscrypt is the one stack still unmeasured, and says
-so in `todo.md` rather than being guessed at.
+An intermediate closes the Java/Conscrypt rows and nothing else, and costs a new
+root plus `am trust` again on every machine, because the roots already deployed
+are `pathlen:0` and cannot sign one. Two locks that everything reads beat a
+third that is not read. Conscrypt was measured after this release
+(`tests/x509-conscrypt.test.ts`) and joins the Java row.
 
 ## An Android or standalone app now forgets what you told it to forget
 

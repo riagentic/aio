@@ -60,16 +60,38 @@ Deno.test("matchPath: no false positives on similar paths", () => {
 // ── SPA fallback (server.ts) ──────────────────────────────────────────────
 
 import { createServer } from "../src/server/server.ts";
-import { join } from "@std/path";
 
 const SPA_PORT = freePort();
 
+/** Wait until the fixture answers HTTP — not a duration.
+ *
+ *  `createServer` returns once Deno.serve has bound, but under a loaded suite
+ *  the first request can still lose a race against accept. Sleeping 50 ms
+ *  measured the machine; fetching until we get a response measures the
+ *  server. */
+async function waitUntilAnswering(url: string, what: string): Promise<void> {
+  const deadline = Date.now() + 10_000;
+  let last = "";
+  while (Date.now() < deadline) {
+    try {
+      const resp = await fetch(url, { redirect: "manual" });
+      await resp.body?.cancel().catch(() => {});
+      if (resp.status > 0) return;
+      last = `status ${resp.status}`;
+    } catch (e) {
+      last = e instanceof Error ? e.message : String(e);
+    }
+    await new Promise((r) => setTimeout(r, 20));
+  }
+  throw new Error(`${what} never answered at ${url} — last: ${last}`);
+}
+
 Deno.test({
   name: "server: SPA fallback — unknown extensionless path returns HTML",
-  // Dev server spawns esbuild child process + fsWatcher async ops — not feasible to drain in test
   fn: async () => {
     const dir = await Deno.makeTempDir();
-    await Deno.writeTextFile(join(dir, "App.tsx"), "export default () => null");
+    // No App.tsx — SPA shell fallback does not need a client graph; a stub
+    // used to start graph validation + esbuild for no assertion benefit.
     const server = createServer({
       port: SPA_PORT,
       title: "SPA",
@@ -79,7 +101,8 @@ Deno.test({
       debug: () => {},
       prod: false,
     });
-    await new Promise((r) => setTimeout(r, 50));
+    const base = `http://localhost:${SPA_PORT}`;
+    await waitUntilAnswering(base, "SPA fixture");
     try {
       // Client-side routes should return HTML, not 404
       for (
@@ -90,7 +113,7 @@ Deno.test({
           "/any/deep/path",
         ]
       ) {
-        const resp = await fetch(`http://localhost:${SPA_PORT}${path}`);
+        const resp = await fetch(`${base}${path}`);
         assertEquals(resp.status, 200, `${path} should return 200`);
         const body = await resp.text();
         assertEquals(
@@ -100,14 +123,11 @@ Deno.test({
         );
       }
       // Assets with extensions should still 404
-      const r = await fetch(`http://localhost:${SPA_PORT}/missing.js`);
+      const r = await fetch(`${base}/missing.js`);
       assertEquals(r.status, 404);
       await r.body?.cancel();
     } finally {
       await server.shutdown();
-      // Stop esbuild child process spawned by dev-mode transpiler
-      const esbuild = await import("esbuild");
-      esbuild.stop();
       await Deno.remove(dir, { recursive: true });
     }
   },

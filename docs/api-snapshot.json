@@ -6814,7 +6814,7 @@
         },
         "UIElementHandle": {
           "kind": "interface",
-          "sig": "3294c0d14c1d294e",
+          "sig": "cbca9c8f41dded9b",
           "members": {
             "text": "req:9081d68fba9c8c8c",
             "value": "req:9081d68fba9c8c8c",
@@ -6822,6 +6822,8 @@
             "checked": "req:b0d796a0bdd3e6b1",
             "readonly": "req:b0d796a0bdd3e6b1",
             "required": "req:b0d796a0bdd3e6b1",
+            "pressed": "req:b0d796a0bdd3e6b1",
+            "expanded": "req:b0d796a0bdd3e6b1",
             "info": "req:e69d28151cb2b684",
             "click": "req:8cd9f1ffbe1d522b",
             "dblclick": "req:8cd9f1ffbe1d522b",
@@ -6838,15 +6840,16 @@
             "uncheck": "req:ea8fb37f7482dd65",
             "clear": "req:ea8fb37f7482dd65",
             "scroll": "req:1df43ad56c7aa7ec",
-            "dragTo": "req:4d2efd97471c3056"
+            "dragTo": "req:4d2efd97471c3056",
+            "attr": "req:20ca42c13d82d667"
           },
           "sigs": [
-            "3294c0d14c1d294e"
+            "cbca9c8f41dded9b"
           ]
         },
         "UIElementInfo": {
           "kind": "typeAlias",
-          "sig": "285eee0a11b455e2",
+          "sig": "3f214877c4662da5",
           "members": {
             "name": "req:2fb40568533c1a6d",
             "tag": "req:2fb40568533c1a6d",
@@ -6857,6 +6860,8 @@
             "disabled": "opt:0ecca0fe3beba89b",
             "readonly": "opt:0ecca0fe3beba89b",
             "required": "opt:0ecca0fe3beba89b",
+            "pressed": "opt:0ecca0fe3beba89b",
+            "expanded": "opt:0ecca0fe3beba89b",
             "path": "req:2fb40568533c1a6d",
             "rect": "opt:object",
             "rect.x": "req:f6522636230fa080",
@@ -6867,7 +6872,7 @@
             "_el": "opt:e21f3629ed25788f"
           },
           "sigs": [
-            "285eee0a11b455e2"
+            "3f214877c4662da5"
           ]
         },
         "UIKind": {

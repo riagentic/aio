@@ -1180,8 +1180,22 @@ export function triggerSelect(el: AnyEl, value: string): void {
  *  that promises to tick a box. Measured, and the docs claimed one
  *  implementation served both tiers all along.
  *
+ *  After the surface started reporting `checked` from `aria-checked` on
+ *  `role=radio|checkbox|switch`, the WRITE path had to match: a plain
+ *  `<button>` still refuses, but an ARIA switch whose surface says
+ *  `.checked === false` must accept `.check()` (a click), not answer
+ *  "the button has no checked state". Native `el.checked` still wins when it
+ *  is a boolean (the ui-kit `<input type=checkbox role=switch>` path).
+ *
  *  Already-in-that-state is a no-op, exactly as clicking a checked box to
  *  "check" it would be pointless — never a click, so no handler runs. */
+function ariaCheckableRole(el: AnyEl): boolean {
+  const roleRaw = el?.getAttribute?.("role");
+  if (typeof roleRaw !== "string") return false;
+  const role = roleRaw.trim().toLowerCase().split(/\s+/)[0] ?? "";
+  return role === "radio" || role === "checkbox" || role === "switch";
+}
+
 export function triggerSetChecked(
   el: AnyEl,
   want: boolean,
@@ -1190,16 +1204,24 @@ export function triggerSetChecked(
   const verb = want ? "check" : "uncheck";
   const tag = String(el?.tagName ?? "element").toLowerCase();
   const who = opts.name ? `"${opts.name}"` : `<${tag}>`;
-  if (typeof el?.checked !== "boolean") {
+  const native = typeof el?.checked === "boolean";
+  const aria = ariaCheckableRole(el);
+  if (!native && !aria) {
     throw new Error(
       `${opts.prefix ?? ""}cannot ${verb} ${who} — the ${tag} has no checked ` +
-        `state (only a checkbox/radio does)
+        `state (only a checkbox/radio/switch — native or role + aria-checked — does)
 ` +
         `  use .click() for a plain control`,
     );
   }
   assertOperable(el, verb, { name: opts.name, prefix: opts.prefix });
-  if (el.checked === want) return;
+  // Native IDL wins when present (checkbox/radio input, including role=switch
+  // on a real <input>). ARIA otherwise: "true" is on, "false"/"mixed"/absent
+  // is off — same boolean collapse the surface uses for `.checked`.
+  const current = native
+    ? (el.checked as boolean)
+    : el.getAttribute?.("aria-checked") === "true";
+  if (current === want) return;
   triggerClick(el);
 }
 

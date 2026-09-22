@@ -45,7 +45,10 @@ import { justified as okMarker } from "../src/diagnostics/ok-marker.ts";
 // the two swallows in the moved modules now sit in `dev-diagnostics.ts`,
 // which a production page never loads, and the loader itself SAYS which
 // audits are therefore not running rather than discarding the reason.
-const CEILING = 322;
+// 322 → 319 when three already-correct swallows were justified in place:
+// worker.terminate during retire/pool-teardown (blocking, async-db) and
+// private-mode storage adopt (browser-storage) — absence is the wanted outcome.
+const CEILING = 319;
 
 /** The budget for the PROMISE spelling, counted separately.
  *

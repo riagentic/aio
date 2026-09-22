@@ -318,6 +318,7 @@ Deno.test({
       // `--yes` means "I have decided", never "do not tell me what you did".
       assertEquals(done.applied, true);
       assertEquals(done.removed, [stale]);
+      assertEquals(done.failed, []);
       assertEquals(
         done.plan.filter((p: { keep: boolean }) => !p.keep)
           .map((p: { name: string }) => p.name),
@@ -329,6 +330,76 @@ Deno.test({
       );
       assertEquals((await Deno.stat(shipped)).isDirectory, true);
     } finally {
+      await dropTempDir(cache);
+    }
+  },
+});
+
+Deno.test({
+  name:
+    "`am prune --yes` exits 1 on a failed removal — no success, one JSON doc",
+  // aio-ok: a real subprocess's pipes, closed by the runtime after output().
+  sanitizeResources: false,
+  fn: async () => {
+    // A refusal that printed and then exited 0 left `am prune --yes && …`
+    // claiming success while the runtime stayed. And `outError` before the
+    // result document in `--json` made stdout two documents — so
+    // `JSON.parse(stdout)` failed on a command that HAD reported the failure.
+    const cache = await tempDir("aio-prune-fail-");
+    try {
+      const root = join(cache, "aio", "tools", "electron");
+      const stale = join(root, "41.2.1-linux-x64");
+      const shipped = join(root, `${DEFAULT_ELECTRON_VERSION}-linux-x64`);
+      for (const d of [stale, shipped]) {
+        await Deno.mkdir(d, { recursive: true });
+        await Deno.writeTextFile(join(d, "electron"), "binary");
+        await Deno.writeTextFile(
+          join(d, RUNTIME_USE_STAMP),
+          new Date(Date.now() - 400 * DAY).toISOString(),
+        );
+      }
+      // Parent without write: Deno.remove(child) fails; listing still works.
+      await Deno.chmod(root, 0o555);
+      let out: Deno.CommandOutput;
+      try {
+        out = await new Deno.Command(Deno.execPath(), {
+          args: ["run", "-A", "src/am.ts", "prune", "--json", "--yes"],
+          env: { ...Deno.env.toObject(), XDG_CACHE_HOME: cache },
+          stdout: "piped",
+          stderr: "piped",
+        }).output();
+      } finally {
+        await Deno.chmod(root, 0o755);
+      }
+      assertEquals(
+        out.code,
+        1,
+        `expected exit 1 after a failed removal, got ${out.code}\n` +
+          new TextDecoder().decode(out.stdout) +
+          new TextDecoder().decode(out.stderr),
+      );
+      const text = new TextDecoder().decode(out.stdout).trim();
+      // WHOLE of stdout is ONE document — the failure rides inside it.
+      const doc = JSON.parse(text);
+      assertEquals(doc.applied, true);
+      assertEquals(doc.removed, []);
+      assertEquals(
+        doc.freed,
+        0,
+        "freed must be what actually went, not the plan",
+      );
+      assertEquals(doc.failed.length, 1);
+      assertEquals(doc.failed[0].path, stale);
+      assert(typeof doc.error === "string" && doc.error.length > 0);
+      assertEquals(
+        (await Deno.stat(stale)).isDirectory,
+        true,
+        "the entry that could not be removed is still there",
+      );
+    } finally {
+      try {
+        await Deno.chmod(join(cache, "aio", "tools", "electron"), 0o755);
+      } catch { /* cleanup */ }
       await dropTempDir(cache);
     }
   },

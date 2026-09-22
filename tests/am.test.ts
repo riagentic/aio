@@ -531,13 +531,67 @@ let AM_TEST_PORT = 0;
  *  to have printed "loaded". */
 let lastLoaded: string | null = null;
 
+/** Wait until the fixture answers HTTP — not a duration.
+ *
+ *  `createServer` returns once Deno.serve has bound, but under a loaded suite
+ *  the first request can still lose a race against accept. Sleeping 50 ms
+ *  measured the machine; fetching until we get a response measures the
+ *  server. */
+async function waitUntilAnswering(url: string, what: string): Promise<void> {
+  const deadline = Date.now() + 10_000;
+  let last = "";
+  while (Date.now() < deadline) {
+    try {
+      const resp = await fetch(url, { redirect: "manual" });
+      await resp.body?.cancel().catch(() => {});
+      if (resp.status > 0) return;
+      last = `status ${resp.status}`;
+    } catch (e) {
+      last = e instanceof Error ? e.message : String(e);
+    }
+    await new Promise((r) => setTimeout(r, 20));
+  }
+  throw new Error(`${what} never answered at ${url} — last: ${last}`);
+}
+
+/** Failure text that keeps the child's own account — exit code + both streams.
+ *
+ *  Short-lived `am` CLIs go through `.output()` (they exit on their own; there
+ *  is nothing for `stopChild` to stop). When an assertion fires, the streams
+ *  used to be discarded and a red read as "exit 1" with no cause. */
+function amFailure(
+  r: { code: number; stdout: string; stderr: string },
+  want: number,
+  what: string,
+): string {
+  return (
+    `${what}: am exited ${r.code} (want ${want})\n` +
+    `── stdout ──\n${r.stdout || "(empty)"}\n` +
+    `── stderr ──\n${r.stderr || "(empty)"}`
+  );
+}
+
+function assertAmCode(
+  r: { code: number; stdout: string; stderr: string },
+  want: number,
+  what: string,
+): void {
+  assertEquals(r.code, want, amFailure(r, want, what));
+}
+
 async function withTrojanServer(
   fn: (url: string) => Promise<void>,
 ): Promise<void> {
   lastLoaded = null;
   AM_TEST_PORT = freePort();
   const dir = await tempDir("aio-am-");
-  await Deno.writeTextFile(join(dir, "App.tsx"), "export default () => null");
+  // No App.tsx on purpose. `startGraphValidation` short-circuits when the UI
+  // entry is missing; writing a stub used to kick off a real esbuild native
+  // child on EVERY trojan fixture. Under suite load that child sometimes
+  // outlived `server.shutdown()`'s 2 s esbuild-stop bound, and the sanitizer
+  // reported "a child process was started during the test, but not closed"
+  // against whichever test ran next — never a wrong answer, always a harness
+  // leak. These fixtures only need the trojan HTTP surface.
   const appState = { count: 10, items: ["a", "b"] };
   const server = createServer({
     port: AM_TEST_PORT,
@@ -550,7 +604,7 @@ async function withTrojanServer(
     },
     baseDir: dir,
     debug: () => {},
-    prod: false,
+    prod: false, // trojan is refused in prod — keep it mounted
     // Every REAL app mounts this (`aio-server.ts` always supplies it), and
     // `am health` asks it now instead of a bare `GET /` — which reported a
     // stranger's web server as this app being healthy and could not reach a
@@ -567,9 +621,10 @@ async function withTrojanServer(
       startedAt: Date.now() - 10_000,
     },
   });
-  await new Promise((r) => setTimeout(r, 50));
+  const url = `http://127.0.0.1:${AM_TEST_PORT}`;
+  await waitUntilAnswering(url, "trojan fixture");
   try {
-    await fn(`http://127.0.0.1:${AM_TEST_PORT}`);
+    await fn(url);
   } finally {
     await server.shutdown();
     await dropTempDir(dir);
@@ -676,7 +731,7 @@ async function runAm(
 Deno.test("am-cli: state — full state via subprocess", async () => {
   await withTrojanServer(async () => {
     const r = await runAm(["state"]);
-    assertEquals(r.code, 0);
+    assertAmCode(r, 0, "am");
     const data = r.json as { count: number; items: string[] };
     assertEquals(data.count, 10);
     assertEquals(data.items, ["a", "b"]);
@@ -686,7 +741,7 @@ Deno.test("am-cli: state — full state via subprocess", async () => {
 Deno.test("am-cli: state — dot-path resolution", async () => {
   await withTrojanServer(async () => {
     const r = await runAm(["state", "count"]);
-    assertEquals(r.code, 0);
+    assertAmCode(r, 0, "am");
     assertEquals(r.json, 10);
   });
 });
@@ -694,7 +749,7 @@ Deno.test("am-cli: state — dot-path resolution", async () => {
 Deno.test("am-cli: state — missing path error", async () => {
   await withTrojanServer(async () => {
     const r = await runAm(["state", "nonexistent"]);
-    assertEquals(r.code, 1);
+    assertAmCode(r, 1, "am");
     // json-mode errors land on STDOUT (the stream a script parses) + exit 1.
     assertEquals((r.stdout + r.stderr).includes("not found"), true);
   });
@@ -703,7 +758,7 @@ Deno.test("am-cli: state — missing path error", async () => {
 Deno.test("am-cli: dispatch — send action", async () => {
   await withTrojanServer(async () => {
     const r = await runAm(["dispatch", "Increment", "by=1"]);
-    assertEquals(r.code, 0);
+    assertAmCode(r, 0, "am");
     const data = r.json as { ok: boolean };
     assertEquals(data.ok, true);
   });
@@ -712,7 +767,7 @@ Deno.test("am-cli: dispatch — send action", async () => {
 Deno.test("am-cli: dispatch — --body JSON", async () => {
   await withTrojanServer(async () => {
     const r = await runAm(["dispatch", '--body={"type":"Reset"}']);
-    assertEquals(r.code, 0);
+    assertAmCode(r, 0, "am");
     const data = r.json as { ok: boolean };
     assertEquals(data.ok, true);
   });
@@ -721,7 +776,7 @@ Deno.test("am-cli: dispatch — --body JSON", async () => {
 Deno.test("am-cli: clients — list (empty)", async () => {
   await withTrojanServer(async () => {
     const r = await runAm(["clients"]);
-    assertEquals(r.code, 0);
+    assertAmCode(r, 0, "am");
     assertEquals(Array.isArray(r.json), true);
     assertEquals((r.json as unknown[]).length, 0);
   });
@@ -730,7 +785,7 @@ Deno.test("am-cli: clients — list (empty)", async () => {
 Deno.test("am-cli: schedules — list active", async () => {
   await withTrojanServer(async () => {
     const r = await runAm(["schedules"]);
-    assertEquals(r.code, 0);
+    assertAmCode(r, 0, "am");
     assertEquals(r.json, ["tick"]);
   });
 });
@@ -738,7 +793,7 @@ Deno.test("am-cli: schedules — list active", async () => {
 Deno.test("am-cli: config — returns port + title", async () => {
   await withTrojanServer(async () => {
     const r = await runAm(["config"]);
-    assertEquals(r.code, 0);
+    assertAmCode(r, 0, "am");
     const data = r.json as { port: number; title: string };
     assertEquals(data.port, AM_TEST_PORT);
     assertEquals(data.title, "AmTest");
@@ -748,7 +803,7 @@ Deno.test("am-cli: config — returns port + title", async () => {
 Deno.test("am-cli: metrics — returns uptime + connections", async () => {
   await withTrojanServer(async () => {
     const r = await runAm(["metrics"]);
-    assertEquals(r.code, 0);
+    assertAmCode(r, 0, "am");
     const data = r.json as { uptime: number; connections: number };
     assertEquals(typeof data.uptime, "number");
     assertEquals(data.connections, 0);
@@ -758,7 +813,7 @@ Deno.test("am-cli: metrics — returns uptime + connections", async () => {
 Deno.test("am-cli: health — running server ok", async () => {
   await withTrojanServer(async () => {
     const r = await runAm(["health"]);
-    assertEquals(r.code, 0);
+    assertAmCode(r, 0, "am");
     const data = r.json as { healthy: boolean };
     assertEquals(data.healthy, true);
   });
@@ -784,14 +839,14 @@ Deno.test("am-cli: health — dead port fails", async () => {
 
 Deno.test("am-cli: version — outputs semver", async () => {
   const r = await runAm(["version"]);
-  assertEquals(r.code, 0);
+  assertAmCode(r, 0, "am");
   const data = r.json as { version: string };
   assertEquals(data.version, VERSION);
 });
 
 Deno.test("am-cli: help — lists commands", async () => {
   const r = await runAm(["help"]);
-  assertEquals(r.code, 0);
+  assertAmCode(r, 0, "am");
   const data = r.json as { commands: string[] };
   assertEquals(Array.isArray(data.commands), true);
   assertEquals(data.commands.includes("start"), true);
@@ -881,7 +936,7 @@ Deno.test("am-cli: state --ui — returns filtered UI state", async () => {
   await withTrojanServer(async () => {
     // Pass a user arg to hit the server-state /ui route (no arg → DOM snapshot)
     const r = await runAm(["state", "--ui", "testuser"]);
-    assertEquals(r.code, 0);
+    assertAmCode(r, 0, "am");
     // getUIState in withTrojanServer returns { count: appState.count }
     const data = r.json as { count: number };
     assertEquals(data.count, 10);
@@ -895,7 +950,7 @@ Deno.test("am-cli: state --ui — returns filtered UI state", async () => {
 Deno.test("am-cli: actions — returns TT history", async () => {
   await withTrojanServer(async () => {
     const r = await runAm(["actions"]);
-    assertEquals(r.code, 0);
+    assertAmCode(r, 0, "am");
     // history endpoint returns { entries, index, paused }
     const data = r.json as { entries: unknown[] };
     assertEquals(typeof data, "object");
@@ -907,7 +962,7 @@ Deno.test("am-cli: actions — returns TT history", async () => {
 Deno.test("am-cli: errors — empty when no transpile errors", async () => {
   await withTrojanServer(async () => {
     const r = await runAm(["errors"]);
-    assertEquals(r.code, 0);
+    assertAmCode(r, 0, "am");
     const data = r.json as { errors: unknown[] };
     assertEquals(Array.isArray(data.errors), true);
     assertEquals(data.errors.length, 0);
@@ -920,14 +975,14 @@ Deno.test("am-cli: sql — error when no sqlQuery configured", async () => {
   // withTrojanServer does not configure sqlQuery → trojan returns 404
   await withTrojanServer(async () => {
     const r = await runAm(["sql", "SELECT 1"]);
-    assertEquals(r.code, 1);
+    assertAmCode(r, 1, "am");
   });
 });
 
 Deno.test("am-cli: tables — error when no sqlQuery configured", async () => {
   await withTrojanServer(async () => {
     const r = await runAm(["tables"]);
-    assertEquals(r.code, 1);
+    assertAmCode(r, 1, "am");
   });
 });
 
@@ -936,7 +991,7 @@ Deno.test("am-cli: tables — error when no sqlQuery configured", async () => {
 Deno.test("am-cli: snapshot — dumps state as JSON", async () => {
   await withTrojanServer(async () => {
     const r = await runAm(["snapshot"]);
-    assertEquals(r.code, 0);
+    assertAmCode(r, 0, "am");
     // Snapshot dumps raw JSON to stdout (not wrapped in json mode)
     const text = r.stdout;
     const parsed = JSON.parse(text);
@@ -954,7 +1009,7 @@ Deno.test("am-cli: snapshot save — writes file", async () => {
   try {
     await withTrojanServer(async () => {
       const r = await runAm(["snapshot", "save", tmp]);
-      assertEquals(r.code, 0);
+      assertAmCode(r, 0, "am");
       const saved = JSON.parse(await Deno.readTextFile(tmp));
       assertEquals(saved.count, 10);
 
@@ -1022,20 +1077,23 @@ Deno.test("am-cli: snapshot load — error on missing file", async () => {
       "load",
       "/tmp/nonexistent_aio_test_file.json",
     ]);
-    assertEquals(r.code, 1);
+    assertAmCode(r, 1, "am");
   });
 });
 
 // ── am tt — time-travel commands ─────────────────────────────
 
-const AM_TT_PORT = freePort();
-
-async function withTTServer(fn: (url: string) => Promise<void>): Promise<void> {
+async function withTTServer(
+  fn: (url: string, port: number) => Promise<void>,
+): Promise<void> {
+  // Fresh port per server — same reason as AM_TEST_PORT above. Caching one at
+  // module load turned a microsecond window into a file-long collision.
+  const port = freePort();
   const dir = await tempDir("aio-am-");
-  await Deno.writeTextFile(join(dir, "App.tsx"), "export default () => null");
+  // No App.tsx — see withTrojanServer. Timetravel only needs the trojan.
   const ttCmds: { cmd: string; arg?: number }[] = [];
   const server = createServer({
-    port: AM_TT_PORT,
+    port,
     title: "TTServer",
     getUIState: () => ({}),
     dispatch: () => {},
@@ -1051,9 +1109,10 @@ async function withTTServer(fn: (url: string) => Promise<void>): Promise<void> {
       startedAt: Date.now(),
     },
   });
-  await new Promise((r) => setTimeout(r, 50));
+  const url = `http://127.0.0.1:${port}`;
+  await waitUntilAnswering(url, "timetravel fixture");
   try {
-    await fn(`http://127.0.0.1:${AM_TT_PORT}`);
+    await fn(url, port);
   } finally {
     await server.shutdown();
     await dropTempDir(dir);
@@ -1085,39 +1144,39 @@ function runAmOnPort(port: number, args: string[]) {
 }
 
 Deno.test("am-cli: timetravel undo — sends command to server", async () => {
-  await withTTServer(async () => {
-    const r = await runAmOnPort(AM_TT_PORT, ["timetravel", "undo"]);
-    assertEquals(r.code, 0);
+  await withTTServer(async (_url, port) => {
+    const r = await runAmOnPort(port, ["timetravel", "undo"]);
+    assertAmCode(r, 0, "am");
   });
 });
 
 Deno.test("am-cli: timetravel goto N — sends goto with index", async () => {
-  await withTTServer(async () => {
-    const r = await runAmOnPort(AM_TT_PORT, ["timetravel", "goto", "2"]);
-    assertEquals(r.code, 0);
+  await withTTServer(async (_url, port) => {
+    const r = await runAmOnPort(port, ["timetravel", "goto", "2"]);
+    assertAmCode(r, 0, "am");
   });
 });
 
 Deno.test("am-cli: timetravel pause/resume — sends toggle", async () => {
-  await withTTServer(async () => {
-    const r1 = await runAmOnPort(AM_TT_PORT, ["timetravel", "pause"]);
-    assertEquals(r1.code, 0);
-    const r2 = await runAmOnPort(AM_TT_PORT, ["timetravel", "resume"]);
-    assertEquals(r2.code, 0);
+  await withTTServer(async (_url, port) => {
+    const r1 = await runAmOnPort(port, ["timetravel", "pause"]);
+    assertAmCode(r1, 0, "am");
+    const r2 = await runAmOnPort(port, ["timetravel", "resume"]);
+    assertAmCode(r2, 0, "am");
   });
 });
 
 Deno.test("am-cli: timetravel — no subcommand exits with error", async () => {
-  await withTTServer(async () => {
-    const r = await runAmOnPort(AM_TT_PORT, ["timetravel"]);
-    assertEquals(r.code, 1);
+  await withTTServer(async (_url, port) => {
+    const r = await runAmOnPort(port, ["timetravel"]);
+    assertAmCode(r, 1, "am");
   });
 });
 
 Deno.test("am-cli: timetravel goto — missing N exits with error", async () => {
-  await withTTServer(async () => {
-    const r = await runAmOnPort(AM_TT_PORT, ["timetravel", "goto"]);
-    assertEquals(r.code, 1);
+  await withTTServer(async (_url, port) => {
+    const r = await runAmOnPort(port, ["timetravel", "goto"]);
+    assertAmCode(r, 1, "am");
   });
 });
 
@@ -1126,6 +1185,6 @@ Deno.test("am-cli: timetravel goto — missing N exits with error", async () => 
 Deno.test("am-cli: dispatch — no args exits with error", async () => {
   await withTrojanServer(async () => {
     const r = await runAm(["dispatch"]);
-    assertEquals(r.code, 1);
+    assertAmCode(r, 1, "am");
   });
 });

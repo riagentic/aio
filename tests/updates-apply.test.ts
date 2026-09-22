@@ -533,7 +533,14 @@ Deno.test("unpack: a missing tool is named, not swallowed", async () => {
     await Deno.writeTextFile(bogus, "definitely not a zip");
     const r = await unpackArchive(bogus, join(dir, "out"));
     assertEquals(r.ok, false);
-    if (!r.ok) assert(r.error.length > 0);
+    if (!r.ok) {
+      // Must name the archive AND that unpacking failed — `length > 0` is true
+      // of every non-empty string and proves nothing about the reason.
+      assert(
+        r.error.includes("unpacking") && r.error.includes(bogus),
+        `names the failed unpack: ${r.error}`,
+      );
+    }
   } finally {
     await Deno.remove(dir, { recursive: true });
   }

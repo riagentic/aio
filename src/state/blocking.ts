@@ -172,7 +172,10 @@ export function createBlockingPool(opts?: { size?: number }): BlockingPool {
     if (i >= 0) idle.splice(i, 1);
     try {
       w.terminate();
-    } catch { /* already gone */ }
+    } catch {
+      // aio-ok: worker may already be gone — retire's terminate is best-effort
+      // teardown and its absence is the outcome we want.
+    }
   }
 
   function assign(w: Worker, task: Task): void {
