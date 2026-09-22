@@ -58,13 +58,23 @@ Deno.test("freePort: a port already issued is not handed out again", () => {
     } finally {
       busy.close(); // 29181 is now free, and was never issued
     }
+    // The SET, not the sequence. Where the cursor starts is deliberately
+    // pid-dependent (see `sliceStart`), so pinning the order here would pin
+    // this process's pid — a test that passes on one machine and not the
+    // next, for a reason nobody could act on.
     assertEquals(
-      issued,
+      [...issued].sort((a, b) => a - b),
       [29180, 29182, 29183],
-      "the cursor skipped the busy one",
+      "the cursor must hand out every free port and skip the busy one",
     );
-    // The cursor has wrapped. 29180 is free — its caller is between servers —
-    // and so is 29181. Only one of them is a port nobody was given.
+    assertEquals(
+      new Set(issued).size,
+      3,
+      "the same port was handed out twice in one process",
+    );
+    // The cursor has wrapped. Two ports are free: one whose caller is between
+    // servers (already issued) and 29181, which nobody was ever given. Only
+    // the second one is a correct answer.
     assertEquals(
       freePort(),
       29181,
@@ -110,4 +120,58 @@ Deno.test("freePort: with no slice it still answers a real free port", () => {
   } finally {
     if (had !== undefined) Deno.env.set(SLICE, had);
   }
+});
+
+// ── and the SECOND way the same port reaches two holders ────────────────────
+//
+// The test above is about one process. This is about two, and it is the one
+// that actually failed: a slice is inherited through the environment, so every
+// process a test spawns draws from the SAME range.
+// `tests/cookbook-recipes.test.ts` spawns `deno test --parallel`, whose four
+// workers are four sibling processes — each with its own empty `_issued` set
+// and its own cursor. All starting at `first` means all handing out the same
+// ports in the same order, so the collision is not a race that sometimes
+// happens, it is the arrangement. It surfaced as recipe 14 dying on
+// `port 24256 already in use` while recipe 15 held it.
+//
+// Two processes cannot be run from a unit test cheaply, so what is pinned is
+// the property that makes them differ: the first port depends on the pid.
+Deno.test("two processes do not start walking the slice at the same port", async () => {
+  const slice = "31000-31799";
+  const first = 31000;
+  // Ask two REAL processes, because the pid is the whole mechanism and this
+  // process only has one.
+  const ask = async () => {
+    const r = await new Deno.Command(Deno.execPath(), {
+      args: [
+        "eval",
+        "--no-lock",
+        `const { freePort } = await import("${
+          new URL("../src/testing/server-test.ts", import.meta.url).href
+        }");` +
+        `console.log(freePort());`,
+      ],
+      env: { ...Deno.env.toObject(), [SLICE]: slice, NO_COLOR: "1" },
+      stdout: "piped",
+      stderr: "piped",
+    }).output();
+    const out = new TextDecoder().decode(r.stdout).trim();
+    assert(r.success, `child failed: ${new TextDecoder().decode(r.stderr)}`);
+    const n = Number(out.split("\n").at(-1));
+    assert(Number.isInteger(n), `child printed no port: ${out}`);
+    return n;
+  };
+  const ports = await Promise.all([ask(), ask(), ask(), ask()]);
+  for (const p of ports) {
+    assert(p >= first && p <= 31799, `${p} is outside the slice`);
+  }
+  // Not "all different" — two pids CAN be congruent modulo the slice size, and
+  // a test that demands otherwise would flake for a reason nobody could act
+  // on. What must not happen is every process starting at `first`, which is
+  // what made the collision certain rather than unlikely.
+  assert(
+    new Set(ports).size > 1 || ports[0] !== first,
+    `every process started at ${first} — siblings are walking in lockstep, ` +
+      `which is exactly the arrangement that failed recipe 14: ${ports}`,
+  );
 });

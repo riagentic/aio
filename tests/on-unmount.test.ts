@@ -31,7 +31,7 @@ import {
   mount,
   setDevMode,
 } from "../src/air/aio-renderer.ts";
-import { onCleanup, onUnmount } from "../src/air/renderer-lifecycle.ts";
+import { onCleanup, onUnmount, useRef } from "../src/air/renderer-lifecycle.ts";
 import { signal } from "../src/state/signal.ts";
 
 function createDOM() {
@@ -180,4 +180,68 @@ Deno.test("onUnmount: the callback that runs is the LAST render's, not the first
   } finally {
     await cleanup();
   }
+});
+
+// A conditional `onUnmount` lands on the neighbouring hook's slot — and the
+// mechanism that makes it register once per CALL SITE rather than once per
+// render is what puts it there. State slots are matched by call order, so
+// `if (x) onUnmount(…)` takes whichever slot the cursor is on.
+//
+// MEASURED before this was named, with `onUnmount` one line above a
+// `useRef`:
+//
+//   slot held `{n: 7}`   -> truthy, so `fn` was written onto the app's OWN
+//                           object and `_onUnmount` was never called: the
+//                           hold LEAKED, silently, in production — the exact
+//                           bug onUnmount exists to prevent;
+//   slot held `"B"`      -> TypeError: Cannot create property 'fn' on string
+//                           'B', thrown from inside the renderer;
+//   slot held a signal   -> it worked, by luck.
+//
+// The dev hook-order tripwire is no answer to this: it runs AFTER the body
+// (so the TypeError beats it) and it is observe-only (so production never
+// hears it). `onMount` and `onCleanup` beside it MAY be called conditionally
+// and the docs say so, which is why someone writes this in the first place.
+Deno.test("onUnmount: a conditional call says so instead of leaking the hold", async () => {
+  const { document, root, cleanup } = createDOM();
+  _setDocument(document);
+  setDevMode(true);
+  const errors: string[] = [];
+  const origError = console.error;
+  console.error = (...a: unknown[]) => void errors.push(a.join(" "));
+  const log: string[] = [];
+  const tick = signal(0);
+  // The shape that leaked: the slot the conditional call lands on already
+  // holds the component's own object.
+  const Card = () => {
+    if (tick.value > 0) onUnmount(() => log.push("release"));
+    const box = useRef<{ n: number } | null>(null);
+    box.current ??= { n: 7 };
+    return h("div", null, String(tick.value));
+  };
+  try {
+    const handle = mount(root, Card);
+    tick.set(1);
+    await new Promise((r) => setTimeout(r, 5));
+    _unmount(handle);
+    await new Promise((r) => setTimeout(r, 5));
+  } finally {
+    console.error = origError;
+    setDevMode(false);
+    await cleanup();
+  }
+  const named = errors.find((e) => e.includes("onUnmount() landed on"));
+  assert(
+    named,
+    `the mis-placed onUnmount is never named — got ${JSON.stringify(errors)}`,
+  );
+  assert(
+    named.includes("unconditionally"),
+    `the message must say what to do instead: ${named}`,
+  );
+  assertEquals(
+    log,
+    [],
+    "nothing may have been registered on a slot that is not this call's",
+  );
 });

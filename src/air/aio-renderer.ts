@@ -172,7 +172,7 @@ function _devA11yCheck(
   // warning asks for a bug. `summary` and `label` were the two missing from
   // this list; both forward activation to something else by spec.
   // ARIA roles whose keyboard lives ELSEWHERE by the WAI-ARIA pattern, where
-  // "add onKeyDown here" is advice that cannot be followed (wallet report §10). A
+  // "add onKeyDown here" is advice that cannot be followed (field report §10). A
   // composite item (`option`, `row`, `tab`, …) is never itself focused in the
   // `aria-activedescendant` pattern: the arrows and Enter belong to its owner.
   // The owner (`listbox`, `grid`, …) is where that keyboard LIVES, so it is

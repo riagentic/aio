@@ -267,6 +267,19 @@ function elementRole(v: VNode, events: string[]): string {
   return pascal(String(v.tag)) || "Element";
 }
 
+/** The handle the AUTHOR wrote on this element — `t` first, then the
+ *  industry-standard `data-testid`. Pure; the ONE reading of "explicit", shared
+ *  by naming and by the duplicate report, so the two cannot disagree about
+ *  which names were written by a person. */
+function explicitHandle(v: VNode): string | undefined {
+  const p = v.props;
+  return typeof p.t === "string"
+    ? p.t
+    : typeof p["data-testid"] === "string"
+    ? p["data-testid"] as string
+    : undefined;
+}
+
 /** Infer the intuitive semantic name: `t` prop verbatim (then `data-testid`,
  *  the industry-standard test handle), else LABEL + ROLE —
  *  e.g. <button>Submit</button> → "SubmitButton",
@@ -279,11 +292,7 @@ function elementName(
   labelCtx?: LabelCtx,
 ): string {
   const p = v.props;
-  const explicit = typeof p.t === "string"
-    ? p.t
-    : typeof p["data-testid"] === "string"
-    ? p["data-testid"] as string
-    : undefined;
+  const explicit = explicitHandle(v);
   let base: string;
   if (explicit) {
     base = explicit;
@@ -333,15 +342,58 @@ const _warnedDuplicateT = new Set<string>();
  *  whichever came first in tree order and the other was reachable only by a
  *  name nobody wrote. The de-dupe still happens (an unaddressable element would
  *  be worse) — it just stops being silent. */
-function warnDuplicateHandle(base: string, assigned: string): void {
+function warnDuplicateHandle(
+  base: string,
+  assigned: string,
+  across?: { first: string; second: string },
+): void {
   if (_warnedDuplicateT.has(base)) return;
   _warnedDuplicateT.add(base);
+  const what = across
+    ? `it names an element in "${across.first}" AND in "${across.second}", ` +
+      `so the top-level "${base}" is ambiguous and resolving it throws at ` +
+      `use time`
+    : `this element is addressable as "${assigned}", not "${base}"`;
   console.warn(
-    `[aio:ui] duplicate t="${base}" on the surface — this element is ` +
-      `addressable as "${assigned}", not "${base}". A \`t\` handle is meant ` +
-      `to be unique within its component; rename one of them (or drop \`t\` ` +
-      `and let the label name it).`,
+    `[aio:ui] duplicate t="${base}" on the surface — ${what}. A \`t\` handle ` +
+      `is meant to be unique within its component; rename one of them (or ` +
+      `drop \`t\` and let the label name it).`,
   );
+}
+
+// CROSS-COMPONENT explicit handles. `taken` is per component — correctly so,
+// because a GENERATED ordinal ("SubmitButton", "SubmitButton2") is a
+// within-component count and restarting it per component is what keeps
+// `App/A:SubmitButton` and `App/B:SubmitButton` both addressable.
+//
+// An EXPLICIT `t` is a different promise: the author wrote one name, and the
+// harness hoists it to the top level (`ui.save`) regardless of nesting. Two
+// components writing the SAME `t` therefore made `ui.save` ambiguous — and the
+// per-component `taken` set could not see it, so the author heard nothing until
+// resolution happened to throw at use time, in a test that had passed before
+// (a field report). The walk remembers explicit handles for the whole surface
+// so the report arrives where the mistake is.
+//
+// It stays SILENT for two instances of ONE component — a list row's
+// `t="delete"` is one name written once, addressed per instance
+// (`ui.find("Row", id).delete`), and warning there would fire on correct code.
+// Comparison is therefore by component identity, not by instance path.
+const _explicitOwners = new Map<
+  string,
+  { component: string; path: string }
+>();
+
+/** Record an author-written handle and report it the first time a SECOND,
+ *  different component claims the same one. Observation only — the assigned
+ *  name is unchanged, so no address moves. */
+function noteExplicitHandle(name: string, owner: UISurfaceNode): void {
+  const first = _explicitOwners.get(name);
+  if (first === undefined) {
+    _explicitOwners.set(name, { component: owner.component, path: owner.path });
+    return;
+  }
+  if (first.component === owner.component) return; // same component, N instances
+  warnDuplicateHandle(name, name, { first: first.path, second: owner.path });
 }
 
 /** Test isolation — forget which duplicate handles have been reported. */
@@ -403,6 +455,8 @@ function walkOutput(
       typeof v.props["data-testid"] === "string"
     ) {
       const name = elementName(v, events, taken, labelCtx);
+      const explicit = explicitHandle(v);
+      if (explicit) noteExplicitHandle(explicit, owner);
       const el = v._dom && (v._dom as Node).nodeType === 1
         ? v._dom as Element & {
           value?: string;
@@ -573,8 +627,16 @@ export function buildUISurface(
   opts?: { maxText?: number },
 ): UISurfaceNode | null {
   _maxText = opts?.maxText ?? TEXT_CAP;
+  // Per WALK, not per process: the surface is rebuilt on every observation, so
+  // a set that survived would read the previous walk's handles as duplicates of
+  // this one's — a warning on code that never repeated a name.
+  _explicitOwners.clear();
   if (!isVNode(root)) return null;
-  if (typeof root.tag === "function") return walkComponent(root, "");
+  if (typeof root.tag === "function") {
+    const top = walkComponent(root, "");
+    _applyFormAttr(top);
+    return top;
+  }
   // Root that isn't a component (rare): wrap in a synthetic node
   const node: UISurfaceNode = {
     component: "(root)",
@@ -584,7 +646,55 @@ export function buildUISurface(
     text: "",
   };
   walkOutput(root, node, new Set());
+  _applyFormAttr(node);
   return node;
+}
+
+/** HTML's OTHER form association, applied after the walk: `form="checkout"`
+ *  names the form a control belongs to, and OVERRIDES nesting entirely.
+ *
+ *  The walk carries the enclosing `<form>` down the tree, which is the whole
+ *  answer for a button inside one and no answer at all for the two shapes that
+ *  use the attribute — a submit button in a sticky footer or a dialog's action
+ *  bar, sitting outside the form it drives, and a button inside one form that
+ *  drives another. MEASURED, a `<button form="real">` outside every form:
+ *  `am surface` listed `events: []` while `am trigger … click` ran the form's
+ *  `onSubmit` — the same "the surface reads the button that works as inert"
+ *  defect {@linkcode isSubmitControl} was written for, in the one case
+ *  nesting cannot see. The other direction is worse: a control inside a form
+ *  but named to another was reported as driving the form it merely sits in.
+ *
+ *  A second pass rather than a second rule: the named form can be anywhere in
+ *  the tree, including a component the walk has not reached yet, so it can
+ *  only be resolved once the whole tree is known. The events are then
+ *  recomputed from the element's OWN handlers through
+ *  {@linkcode effectiveEvents} — the same function the walk used — so the two
+ *  answers cannot drift. */
+function _applyFormAttr(root: UISurfaceNode): void {
+  const forms = new Map<string, string[]>();
+  const named: UIElementInfo[] = [];
+  const stack: UISurfaceNode[] = [root];
+  while (stack.length > 0) {
+    const n = stack.pop()!;
+    for (const el of n.elements) {
+      const v = el._vnode;
+      if (!v) continue;
+      if (el.tag === "form") {
+        const id = v.props.id;
+        if (typeof id === "string" && id !== "") forms.set(id, eventKinds(v));
+      } else if (typeof v.props.form === "string") named.push(el);
+    }
+    for (const c of n.children) stack.push(c);
+  }
+  if (named.length === 0) return;
+  for (const el of named) {
+    const v = el._vnode!;
+    el.events = effectiveEvents(
+      v,
+      eventKinds(v),
+      forms.get(v.props.form as string),
+    );
+  }
 }
 
 /** What {@linkcode measureSurface} found, so a caller can tell "everything is

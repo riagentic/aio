@@ -22,7 +22,7 @@ const net = require('net');
 const ctrl = net.connect(process.env.AIO_CTRL);
 ctrl.setEncoding('utf8');
 let cbuf = '';
-const wcH = {}, ipcH = {}, appH = {};
+const wcH = {}, ipcH = {}, appH = {}, invokeH = {};
 let protoHandler = null;
 function ev(o) { try { ctrl.write(JSON.stringify(o) + '\\n'); } catch {} }
 ctrl.on('data', (d) => {
@@ -45,7 +45,26 @@ ctrl.on('data', (d) => {
         if (m.event === 'did-navigate' && m.args && m.args[1]) _curUrl = m.args[1];
         for (const f of (wcH[m.event] || [])) f(...(m.args || []));
       }
-      else if (m.cmd === 'ipc') for (const f of (ipcH[m.channel] || [])) f({}, m.arg);
+      // An ipcMain 'on' event carries a REPLY leg back to the frame that sent
+      // it (Electron's IpcMainEvent.reply) — that is how a main-side answer
+      // reaches the renderer that asked. Reported so a test can read it.
+      else if (m.cmd === 'ipc') {
+        const evt = { reply: (channel, ...args) => ev({ ev: 'ipcReply', channel, args }) };
+        for (const f of (ipcH[m.channel] || [])) f(evt, m.arg);
+      }
+      // ipcRenderer.invoke: settles a promise in the renderer. Report which
+      // way it settled and with what — a rejection's message is the payload.
+      else if (m.cmd === 'invoke') {
+        const h = invokeH[m.channel];
+        (async () => {
+          try {
+            if (!h) throw new Error("No handler registered for '" + m.channel + "'");
+            ev({ ev: 'invoke', id: m.id, ok: true, value: await h({}, m.arg) });
+          } catch (e) { ev({ ev: 'invoke', id: m.id, ok: false, error: String(e && e.message || e) }); }
+          ev({ ev: 'done', id: m.id });
+        })();
+        continue;
+      }
       else if (m.cmd === 'app') for (const f of (appH[m.event] || [])) f();
       else if (m.cmd === 'proto') {
         // Drive the captured protocol.handle('aio') callback like Chromium
@@ -104,7 +123,13 @@ module.exports = {
   },
   BrowserWindow,
   Menu: { setApplicationMenu: () => {} },
-  ipcMain: { on: (c, fn) => { (ipcH[c] = ipcH[c] || []).push(fn); } },
+  ipcMain: {
+    on: (c, fn) => { (ipcH[c] = ipcH[c] || []).push(fn); },
+    handle: (c, fn) => {
+      if (invokeH[c]) throw new Error("Attempted to register a second handler for '" + c + "'");
+      invokeH[c] = fn;
+    },
+  },
   protocol: {
     registerSchemesAsPrivileged: (l) => ev({ ev: 'privileges', privileges: l[0].privileges }),
     handle: (_scheme, fn) => { protoHandler = fn; },
@@ -146,6 +171,11 @@ type Ev = {
   owned?: boolean;
   ownerIsWindow?: boolean;
   opts?: Record<string, unknown>;
+  /** `ipcReply` — the args main sent back to the frame that sent the message. */
+  args?: unknown[];
+  /** `invoke` — how the renderer's promise settled. */
+  ok?: boolean;
+  value?: unknown;
 };
 
 const encoder = new TextEncoder();
@@ -355,6 +385,12 @@ async function startMain(
     waitFor,
     /** The renderer's own "my listeners are registered" signal. */
     rendererReady: () => cmd({ cmd: "ipc", channel: "__aio:ready" }),
+    /** `ipcRenderer.invoke(channel, arg)` — returns how the promise settled. */
+    async invoke(channel: string, arg: unknown) {
+      const id = await cmd({ cmd: "invoke", channel, arg });
+      const r = events.find((e) => e.ev === "invoke" && e.id === id)!;
+      return r as Ev & { ok: boolean; value?: unknown; error?: string };
+    },
     finishLoad: () => cmd({ cmd: "wc", event: "did-finish-load" }),
     /** What the shell decides about a navigation the page requested. */
     async navigate(url: string) {
@@ -1749,6 +1785,156 @@ Deno.test("electron main: with the app's opt-in, sandbox:false is honoured", asy
       await Deno.writeTextFile(join(app, "p.js"), "");
       return app;
     },
+  });
+});
+
+// ── openWindow: the refusal reaches the RENDERER, not only the main log ────
+//
+// A field report (a crypto wallet built on aio): every guardrail's refusal was
+// written, well, and written with `console.warn` in the MAIN process. The app
+// author — the only person who can act on "add unsandboxedChildWindows" — is
+// on the RENDERER side of this channel and never saw a word of it. Their
+// caller had a catch-and-fall-back path, so the page opened in the system
+// browser instead. Forever. Silently.
+//
+// Asserted on what crosses the channel when the REAL generated main.cjs runs:
+// the `send` caller's reply leg, and an `invoke` caller's rejection.
+const replies = (main: { events: Ev[] }) =>
+  main.events.filter((e) =>
+    e.ev === "ipcReply" && e.channel === "__aio:openWindow"
+  ).map((e) => (e.args as [{ ok: boolean; reason?: string; url?: string }])[0]);
+
+Deno.test("electron main: openWindow answers the renderer that asked — reason and all", async () => {
+  let app = "";
+  await withHarness(async (_srv, main, dir) => {
+    await Deno.writeTextFile(join(dir, "outside.js"), "");
+    const send = (arg: Record<string, unknown>) =>
+      main.cmd({ cmd: "ipc", channel: "__aio:openWindow", arg });
+    const last = () => replies(main)[replies(main).length - 1]!;
+
+    // Every guardrail, answered on the wire — not just in the main-process log.
+    const cases: [Record<string, unknown>, string][] = [
+      [{ url: "nope", preload: join(app, "p.js") }, "not a URL"],
+      [
+        { url: "file:///etc/passwd", preload: join(app, "p.js") },
+        "only http/https",
+      ],
+      [{ url: "https://x.test" }, "no preload given"],
+      [
+        { url: "https://x.test", preload: join(dir, "outside.js") },
+        "outside the app directory",
+      ],
+      [
+        { url: "https://x.test", preload: join(app, "missing.js") },
+        "does not exist",
+      ],
+      [
+        { url: "https://x.test", preload: join(app, "p.js"), sandbox: false },
+        "unsandboxedChildWindows",
+      ],
+    ];
+    for (const [arg, why] of cases) {
+      const before = replies(main).length;
+      await send(arg);
+      await main.waitFor(() => replies(main).length > before);
+      assertEquals(last().ok, false, `${why}: refusal reported as success`);
+      assert(
+        (last().reason ?? "").includes(why),
+        `the renderer was told "${last().reason}", which never names "${why}"`,
+      );
+      // The operator's copy is not traded away for the author's.
+      assert(
+        (main.stderr.join("") + main.stdout.join("")).includes(why),
+        "the main-process warn stopped naming the guardrail",
+      );
+    }
+
+    // …and a request that IS allowed says so, with the url it opened.
+    const before = replies(main).length;
+    await send({ url: "https://x.test", preload: join(app, "p.js") });
+    await main.waitFor(() => replies(main).length > before);
+    assertEquals(last(), { ok: true, url: "https://x.test/" });
+  }, {
+    childWindows: true,
+    baseDir: async (dir) => {
+      app = await Deno.realPath(
+        // aio-ok: inside the harness's own dir, which it removes recursively
+        await Deno.makeTempDir({ dir, prefix: "app-" }),
+      );
+      await Deno.writeTextFile(join(app, "p.js"), "");
+      return app;
+    },
+  });
+});
+
+Deno.test("electron main: an invoking renderer's openWindow REJECTS with the reason", async () => {
+  let app = "";
+  await withHarness(async (_srv, main) => {
+    // The shape the field report's caller used: `await openWindow(...)` inside
+    // a try/catch whose fall-back opens the system browser. The catch now has
+    // something to print.
+    const refused = await main.invoke("__aio:openWindow", {
+      url: "https://x.test",
+      preload: join(app, "p.js"),
+      sandbox: false,
+    });
+    assertEquals(refused.ok, false, "a refused openWindow resolved instead");
+    assert(
+      (refused.error ?? "").includes("unsandboxedChildWindows"),
+      `the rejection said "${refused.error}"`,
+    );
+    assertEquals(
+      childWindows(main),
+      [],
+      "the refused window was opened anyway",
+    );
+
+    const opened = await main.invoke("__aio:openWindow", {
+      url: "https://x.test",
+      preload: join(app, "p.js"),
+    });
+    assertEquals(opened.ok, true, `openWindow rejected: ${opened.error}`);
+    assertEquals(opened.value, { ok: true, url: "https://x.test/" });
+    await main.waitFor(() => childWindows(main).length === 1);
+  }, {
+    childWindows: true,
+    baseDir: async (dir) => {
+      app = await Deno.realPath(
+        // aio-ok: inside the harness's own dir, which it removes recursively
+        await Deno.makeTempDir({ dir, prefix: "app-" }),
+      );
+      await Deno.writeTextFile(join(app, "p.js"), "");
+      return app;
+    },
+  });
+});
+
+Deno.test("electron main: openWindow with the gate OFF tells the renderer how to turn it on", async () => {
+  await withHarness(async (_srv, main) => {
+    const before = replies(main).length;
+    await main.cmd({
+      cmd: "ipc",
+      channel: "__aio:openWindow",
+      arg: { url: "https://x.test", preload: "p.js" },
+    });
+    await main.waitFor(() => replies(main).length > before);
+    const r = replies(main)[before]!;
+    assertEquals(r.ok, false);
+    assert(
+      (r.reason ?? "").includes("childWindows: true"),
+      `the renderer was told "${r.reason}"`,
+    );
+
+    const inv = await main.invoke("__aio:openWindow", {
+      url: "https://x.test",
+      preload: "p.js",
+    });
+    assertEquals(inv.ok, false);
+    assert(
+      (inv.error ?? "").includes("childWindows: true"),
+      `the rejection said "${inv.error}"`,
+    );
+    assertEquals(childWindows(main), [], "a gated-off request opened a window");
   });
 });
 

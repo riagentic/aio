@@ -82,7 +82,7 @@ export const jobSync = cell("jobSync", {
 });
 
 Deno.test("aiol: the shapes of a real app that were false alarms stay silent", async () => {
-  // wallet report: a call in a `.catch` callback (runs after the commit), a write the
+  // field report: a call in a `.catch` callback (runs after the commit), a write the
   // callee never reads, a call from a nested `flush` closure, and a call that
   // comes after an `await`.
   const found = await issues({

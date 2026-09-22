@@ -523,7 +523,7 @@ function tornSummary(t: TornLines): string {
 
 /** An `undefined` JSON drops that nevertheless comes back as the SAME value
  *  wherever replay reads it — so warning about it trains the reader to skip
- *  the warning that is real (wallet report §7).
+ *  the warning that is real (field report §7).
  *
  *  - `payload` itself: a missing key reads back `undefined`, which is what the
  *    method got live.

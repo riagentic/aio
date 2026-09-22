@@ -1,6 +1,6 @@
 {
   "name": "@riagentic/aio",
-  "version": "1.0.7-beta",
+  "version": "1.0.8-beta",
   "appId": "aio",
   "exports": {
     ".": "./mod.ts",
@@ -33,6 +33,8 @@
   },
   "publish": {
     "exclude": [
+      "feedback/",
+      "review/",
       "tests/",
       "**/*.test.ts",
       "examples/",
@@ -143,8 +145,9 @@
     "check:boundaries": "deno run --allow-read scripts/check-boundaries.ts",
     "check:silent-catch": "deno run --allow-read scripts/check-silent-catch.ts",
     "check:tempdirs": "deno run --allow-read scripts/check-temp-dirs.ts",
-    "check:ratchets": "deno run --allow-read scripts/check-temp-dirs.ts && deno run --allow-read scripts/check-vacuous.ts && deno run --allow-read scripts/check-dead-wiring.ts && deno run --allow-read scripts/check-silent-catch.ts && deno run --allow-read scripts/check-log-prefix.ts && deno run --allow-read scripts/check-gated-tests.ts && deno run --allow-read scripts/check-placeholders.ts && deno run --allow-read scripts/check-test-lanes.ts",
+    "check:ratchets": "deno run --allow-read --allow-run scripts/check-report-dirs.ts && deno run --allow-read scripts/check-temp-dirs.ts && deno run --allow-read scripts/check-vacuous.ts && deno run --allow-read scripts/check-dead-wiring.ts && deno run --allow-read scripts/check-silent-catch.ts && deno run --allow-read scripts/check-log-prefix.ts && deno run --allow-read scripts/check-gated-tests.ts && deno run --allow-read scripts/check-placeholders.ts && deno run --allow-read scripts/check-test-lanes.ts",
     "check:placeholders": "deno run --allow-read scripts/check-placeholders.ts",
+    "check:report-dirs": "deno run --allow-read --allow-run scripts/check-report-dirs.ts",
     "check:gated-tests": "deno run --allow-read scripts/check-gated-tests.ts",
     "check:lock": "deno run --allow-read scripts/check-lock.ts",
     "check:home-clean": "deno run --allow-read --allow-env scripts/check-home-clean.ts",

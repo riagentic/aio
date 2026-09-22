@@ -422,3 +422,71 @@ Deno.test("native store: adoption never invents a value, and never hides a faile
     `a failed adoption said nothing: ${JSON.stringify(said)}`,
   );
 });
+
+Deno.test("native store: adoption never overwrites a value that IS on disk", () => {
+  // The worst outcome the adoption path can produce, and the one a single
+  // nullable `get` cannot rule out.
+  //
+  // MainActivity.kt catches a read error and returns null — the SAME answer
+  // as "nothing written yet". The page then adopts what `localStorage` still
+  // holds (it is never cleared, so the pre-upgrade snapshot is there
+  // forever) and writes it in. On a read error that replaces the app's real,
+  // intact state with a snapshot from before the upgrade, and logs it as a
+  // successful adoption: silent data loss introduced BY the fix for silent
+  // data loss. `has()` is a stat, not a read, so it separates the two.
+  const n = fakeNative();
+  n.files.set("aio:app", '{"count":4000}'); // the real state, on disk
+  const bridge = {
+    ...n.bridge,
+    get: () => null, // the read threw; Kotlin logged it and returned null
+    has: (k: string) => n.files.has(k),
+  };
+  const l = fakeLocalStorage();
+  l.ls.setItem("aio:app", '{"count":7}'); // the pre-upgrade copy, still there
+
+  const said: string[] = [];
+  const realError = console.error;
+  console.error = (...a: unknown[]) => void said.push(a.join(" "));
+  let got: string | null;
+  try {
+    got = _pickPersistStore({ AioNativeStore: bridge, localStorage: l.ls })
+      .read("aio:app");
+  } finally {
+    console.error = realError;
+  }
+
+  assertEquals(
+    n.files.get("aio:app"),
+    '{"count":4000}',
+    "adoption wrote the pre-upgrade localStorage copy OVER the state that " +
+      "was on disk — 4000 counts replaced by 7, and nothing said so",
+  );
+  assertEquals(got, null, "the stale copy was handed to the app as its state");
+  assert(
+    said.some((m) => m.includes("REFUSING to adopt")),
+    `the refusal was silent: ${JSON.stringify(said)}`,
+  );
+});
+
+Deno.test("native store: a bridge with no has() still adopts (an app's own overlay)", () => {
+  // The guard above must not turn an upgraded app's boot into an empty one
+  // when `<app>/android/` overlays a MainActivity from before `has` existed.
+  const n = fakeNative();
+  const l = fakeLocalStorage();
+  l.ls.setItem("aio:app", '{"count":7}');
+  const store = _pickPersistStore({
+    AioNativeStore: n.bridge, // no `has`
+    localStorage: l.ls,
+  });
+  assertEquals(store.read("aio:app"), '{"count":7}');
+  assertEquals(n.files.get("aio:app"), '{"count":7}');
+});
+
+Deno.test("native store: the APK half of has() exists and does not read the file", () => {
+  // A green assertion about a Kotlin string is not evidence that an APK
+  // persists — but the page's guard is inert unless the method is there at
+  // all, and `isFile` (a stat) is what makes it able to answer when the read
+  // could not.
+  assertStringIncludes(KOTLIN, "fun has(key: String): Boolean");
+  assertStringIncludes(KOTLIN, "fileFor(key).isFile");
+});

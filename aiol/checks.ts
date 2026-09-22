@@ -2417,7 +2417,7 @@ export const checkPatterns: Checker = (ctx) => {
       } else if (INTERNALS_WITH_A_COMMAND[rel]) {
         // An internal whose whole job a public COMMAND already does. The
         // generic "say so — an entry can be added" sent a field app to ask
-        // for an `aio/graph` export duplicating `am check` (wallet report §6).
+        // for an `aio/graph` export duplicating `am check` (field report §6).
         const cmd = INTERNALS_WITH_A_COMMAND[rel]!;
         report(
           "hint",

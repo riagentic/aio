@@ -32,6 +32,10 @@ import { bindCell, bindCellReactive, type CellDef } from "./state/cell.ts";
 import { _whileCellsBoot, makeUnboundGuard } from "./state/cell-catalog.ts";
 import { composeCells } from "./state/cell-compose.ts";
 import {
+  buildDBStateGetter,
+  persistingCellIds,
+} from "./state/cell-persist-filter.ts";
+import {
   _resetCellBindings,
   _resetCellRegistry,
   getRegisteredCells,
@@ -597,6 +601,18 @@ type StandaloneConfig<S, A, E> = {
   persist?: boolean;
   persistKey?: string;
   persistDebounceMs?: number;
+  /** WHAT of the state reaches the store — the composed app's per-cell
+   *  `persist` filters. Omitted (a raw `initStandalone`, which has no cells to
+   *  read a filter off) means the whole state, as before. The rule itself is
+   *  `buildDBStateGetter` in `state/cell-persist-filter.ts`, THE one the
+   *  server's persistence uses: a second copy here is how the two runtimes
+   *  came to disagree about `persist: "none"` in the first place. */
+  getDBState?: (state: S) => unknown;
+  /** The cells whose slices may come BACK out of the store. The write-side
+   *  twin of `getDBState`, from the same module, so a slice that can never be
+   *  written can never be restored either — a blob left by an older build (or
+   *  by a downgrade) must not refill a cell that asked for `persist: "none"`. */
+  restorable?: Set<string>;
   perfCheck?: PerfCheck;
   perfBudget?: PerfBudget;
   freezeState?: boolean;
@@ -619,6 +635,12 @@ const NATIVE_STORE_GLOBAL = "AioNativeStore";
 type NativeStoreBridge = {
   get(key: string): string | null;
   set(key: string, value: string): boolean;
+  /** Is a value for this key ON DISK, whether or not `get` could read it?
+   *  `get` returns null for "never written" AND for "written, and this read
+   *  threw", and the adoption path below must not read one as the other.
+   *  Optional: a bridge overlaid by an app's own `<app>/android/` may predate
+   *  it, and a missing answer means the path behaves exactly as it did. */
+  has?(key: string): boolean;
   describe(): string;
 };
 
@@ -705,6 +727,34 @@ export function _pickPersistStore(g: {
         // next boot simply tries again.
         const old = g.localStorage?.getItem?.(k);
         if (typeof old !== "string") return null;
+        // …but ONLY into a store that is genuinely empty for this key.
+        //
+        // `native.get` answers null for "nothing written yet" AND for
+        // "written, and this read failed" (MainActivity.kt catches the read
+        // and logs it). Adopting on the second meaning is the worst outcome
+        // this file has: the app's real state is on disk, intact, and the
+        // pre-upgrade copy that `localStorage` still holds — forever, because
+        // adoption never clears it — is written straight over it, and the
+        // console says it succeeded. `has` is a stat, not a read, so it
+        // separates the two; an older/overlaid bridge without it behaves
+        // exactly as before, and a `has` that throws answers "present", which
+        // is the side that overwrites nothing.
+        let present: boolean;
+        try {
+          present = typeof native.has === "function" && native.has(k) === true;
+        } catch {
+          present = true; // it exists and could not tell — do not overwrite
+        }
+        if (present) {
+          console.error(
+            `[aio] ⚠ persistence: the native store HAS "${k}" on disk but ` +
+              `could not read it back (see logcat, tag "aio"). REFUSING to ` +
+              `adopt the older localStorage copy over it — that would ` +
+              `replace this app's state with a snapshot from before it was ` +
+              `upgraded. Nothing has been overwritten; restart the app.`,
+          );
+          return null;
+        }
         try {
           if (native.set(k, old) === false) {
             throw new Error(`the native store refused the write`);
@@ -760,6 +810,29 @@ export function _pickPersistStore(g: {
   };
 }
 
+/** Drop the slices of a restored blob that this app would never WRITE.
+ *
+ *  A cell declaring `persist: "none"` is filtered out of every write
+ *  (`getDBState`), so nothing it owns can be on disk — unless an older build,
+ *  or a downgrade, put it there. Restoring it then would hand the cell state
+ *  it explicitly refused to keep, and on a machine where the app has not
+ *  changed since the downgrade it would stay there for good. Same set, both
+ *  directions. `undefined` (a raw `initStandalone`) restores everything, as
+ *  before. */
+function restorableOnly(
+  persisted: unknown,
+  restorable: Set<string> | undefined,
+): unknown {
+  if (!restorable || !persisted || typeof persisted !== "object") {
+    return persisted;
+  }
+  const out: Record<string, unknown> = {};
+  for (const [k, v] of Object.entries(persisted as Record<string, unknown>)) {
+    if (restorable.has(k)) out[k] = v;
+  }
+  return out;
+}
+
 /** Initializes standalone runtime — call before AIR mounts */
 export function initStandalone<S, A, E>(
   initialState: S,
@@ -767,7 +840,7 @@ export function initStandalone<S, A, E>(
 ): AioApp<S, A> {
   const { reduce, execute } = config;
   const shouldPersist = config.persist !== false;
-  const getDBState = (s: S) => s;
+  const getDBState = config.getDBState ?? ((s: S) => s as unknown);
   const getUIState = (s: S) => s;
   const persistKey = config.persistKey ?? STORAGE_KEY;
 
@@ -789,7 +862,7 @@ export function initStandalone<S, A, E>(
     try {
       const raw = store.read(persistKey);
       if (raw) {
-        const persisted = JSON.parse(raw);
+        const persisted = restorableOnly(JSON.parse(raw), config.restorable);
         state = deepMerge(
           initialState as Record<string, unknown>,
           persisted as Record<string, unknown>,
@@ -835,13 +908,26 @@ export function initStandalone<S, A, E>(
       if (store.durable && ms > 32 && !slowWriteWarned) {
         slowWriteWarned = true;
         console.warn(
-          `[aio] ⚠ a durable save took ${ms}ms — the state written on ` +
-            `every change is large. Mark the parts that need not survive a ` +
-            `restart with \`persist: false\` on their cell.`,
+          `[aio] ⚠ a durable save took ${ms}ms — the whole state is written ` +
+            `and fsync'd on every change, so this cost is paid per ` +
+            `keystroke. Keep less of it: \`persist: "none"\` on a cell whose ` +
+            `state need not survive a restart, or ` +
+            `\`persist: { exclude: ["big"] }\` on the fields that need not.`,
         );
       }
     } catch (e) {
-      console.warn(`[aio] ${what} to ${store.kind} failed:`, e);
+      // A save that did not happen is data loss, not a warning. It used to be
+      // `console.warn`, which in a logcat flood reads like a note — and this
+      // path got a NEW way to be reached when `getDBState` started running
+      // the app's own `persist`/`onPersist` on this runtime: a shaper that
+      // throws persists NOTHING, every change, for as long as the app runs.
+      // The server answers that with a PERSIST_ERROR; this is the loudest
+      // thing a page has, and it says what it costs.
+      console.error(
+        `[aio] ✗ ${what} to ${store.kind} FAILED — THIS CHANGE IS NOT SAVED ` +
+          `and no later change will be either until this stops:`,
+        e,
+      );
     }
   }
 
@@ -1245,6 +1331,17 @@ function bootStandalone(
       execute: composed.execute,
       persist: opts.persist !== false && opts.persist !== "none",
       persistKey: `aio:${opts.appId ?? "app"}`,
+      // WHAT is written, and what may come back — the SAME rule the server's
+      // persistence runs (state/cell-persist-filter.ts). Without it this
+      // runtime wrote the whole composed state: a cell that said
+      // `persist: "none"` was fsync'd to the phone's disk on every change and
+      // restored on the next launch, while `deno task dev` dropped it — and
+      // the durable store's own ">32ms save" advice ("mark it `persist`")
+      // was inert on the one runtime that prints it.
+      getDBState: buildDBStateGetter(composed) as (
+        s: Record<string, unknown>,
+      ) => unknown,
+      restorable: persistingCellIds(composed),
       onRestore: opts.onRestore,
       perfBudget: opts.perfBudget,
       // push each committed state into per-cell signals so `counter.count`

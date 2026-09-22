@@ -76,7 +76,14 @@ vendor/
 *.log
 .cache/
 examples/**/deno.lock
+# Field reports and audits from real apps built on aio. They name the app, its
+# internals and — for a security audit — exactly where its secrets were
+# reachable. A private app's details must never leave this machine, so both
+# directories are ignored AND `scripts/check-report-dirs.ts` refuses to let a
+# file in either of them become tracked. `review/` was tracked for a month
+# before anybody noticed, in a public repo and in the published package.
 feedback/
+review/
 skills-lock.json
 .openclaude-profile.json
 .aio-test-home/

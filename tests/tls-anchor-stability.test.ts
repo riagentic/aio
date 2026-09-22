@@ -19,9 +19,11 @@ import {
   aioRootPaths,
   certSans,
   currentSans,
+  loadOrCreateAioRoot,
   loadOrCreateCert,
   sansCover,
 } from "../src/server/tls.ts";
+import { log } from "../src/diagnostics/logger.ts";
 import { tempDir } from "../src/testing/temp-dir.ts";
 import { pinnedTest } from "../src/testing/env-pin.ts";
 
@@ -398,6 +400,217 @@ test({
       assert(sansCover(sans, currentSans()));
     } finally {
       await Deno.remove(dir, { recursive: true });
+    }
+  },
+});
+
+// An address this machine really has, that the root is really not allowed to
+// name. 100.64/10 is CGNAT — and every Tailscale address, which is the single
+// most common reason to run `--expose` at all. Before this, it went into the
+// SAN list unexamined and the certificate became invalid for EVERY name in it,
+// localhost included: an app nobody had touched, unreachable over HTTPS, with
+// nothing in the logs about why. The four instruments that signed this code
+// off all fed it addresses the root was already permitted to name.
+test({
+  name: "tls: an address the root may not name is LEFT OUT, loudly",
+  ignore: SKIP,
+  fn: async () => {
+    const dir = await tempDir("aio-tls-cgnat-");
+    const real = Deno.networkInterfaces;
+    const warnings: string[] = [];
+    // deno-lint-ignore no-explicit-any
+    const origWarn = (log as any).warn;
+    try {
+      Deno.networkInterfaces = () =>
+        [
+          {
+            family: "IPv4",
+            name: "lo",
+            address: "127.0.0.1",
+            netmask: "255.0.0.0",
+            scopeid: null,
+            cidr: "127.0.0.1/8",
+            mac: "00:00:00:00:00:00",
+          },
+          {
+            family: "IPv4",
+            name: "eth0",
+            address: "192.168.1.5",
+            netmask: "255.255.255.0",
+            scopeid: null,
+            cidr: "192.168.1.5/24",
+            mac: "00:00:00:00:00:01",
+          },
+          {
+            family: "IPv4",
+            name: "tailscale0",
+            address: "100.64.7.9",
+            netmask: "255.192.0.0",
+            scopeid: null,
+            cidr: "100.64.7.9/10",
+            mac: "00:00:00:00:00:02",
+          },
+        ] as unknown as ReturnType<typeof Deno.networkInterfaces>;
+      // deno-lint-ignore no-explicit-any
+      (log as any).warn = (...a: unknown[]) =>
+        warnings.push(a.map(String).join(" "));
+
+      const t = await loadOrCreateCert(dir, undefined, undefined, "cgnat-app");
+
+      // ① the address is gone from the certificate…
+      const sans = await certSans(t.certPath);
+      assert(sans, "the leaf must carry SANs");
+      assert(
+        !sans.ips.includes("100.64.7.9"),
+        `100.64.7.9 is in the certificate: ${JSON.stringify(sans)}`,
+      );
+      // ② …and everything the root CAN name is still there.
+      assertEquals(sans.dns, ["localhost"]);
+      assert(sans.ips.includes("127.0.0.1"));
+      assert(sans.ips.includes("192.168.1.5"));
+      // ③ the user is told, by address and by remedy — a silent drop is the
+      //    same class of bug as the silent poisoning it replaced.
+      const said = warnings.join("\n");
+      assert(
+        said.includes("100.64.7.9") && said.includes("--cert"),
+        `nothing warned about the dropped address:\n${said}`,
+      );
+      // ④ and the certificate actually verifies, which it would not have
+      //    before: one out-of-subtree address invalidates the whole thing.
+      const v = await new Deno.Command("openssl", {
+        args: ["verify", "-CAfile", t.caPath!, t.certPath],
+        stdout: "piped",
+        stderr: "piped",
+      }).output();
+      assert(
+        v.success,
+        `the issued chain does not verify:\n${
+          new TextDecoder().decode(v.stdout) +
+          new TextDecoder().decode(v.stderr)
+        }`,
+      );
+      // ⑤ and it is not re-issued on every boot: the staleness check must ask
+      //    the same question the issuer answered, or the anchor churns daily.
+      assert(sansCover(sans, currentSans()));
+    } finally {
+      Deno.networkInterfaces = real;
+      // deno-lint-ignore no-explicit-any
+      (log as any).warn = origWarn;
+      await Deno.remove(dir, { recursive: true });
+    }
+  },
+});
+
+// A root already on disk is reused VERBATIM and forever — `loadOrCreateAioRoot`
+// has no "this looks out of date" branch, deliberately, because regenerating
+// would break every browser that trusted the old one without asking. So an
+// upgraded machine keeps whatever constraints its root was born with, and the
+// ONLY thing that can notice is a warning. These two tests are that warning's
+// only proof: that it fires on the old shape, and that it is silent on the
+// current one. A warning nobody checks for silence is a warning that will one
+// day fire on every boot for everyone.
+test({
+  name: "tls: a root predating the email/URI bases is reported, loudly",
+  ignore: SKIP,
+  fn: async () => {
+    const dir = await tempDir("aio-tls-oldroot-");
+    const warnings: string[] = [];
+    // deno-lint-ignore no-explicit-any
+    const origWarn = (log as any).warn;
+    try {
+      // Write an OLD-shaped root into the place this process will look.
+      const ca = join(dir, ".aio-ca");
+      await Deno.mkdir(ca, { recursive: true });
+      const cfg = join(dir, "old.cnf");
+      await Deno.writeTextFile(
+        cfg,
+        [
+          "[req]",
+          "distinguished_name = dn",
+          "x509_extensions = v3",
+          "prompt = no",
+          "[dn]",
+          "CN = aio local root (old)",
+          "[v3]",
+          "basicConstraints = critical,CA:TRUE,pathlen:0",
+          "keyUsage = critical,keyCertSign,cRLSign",
+          "extendedKeyUsage = serverAuth",
+          "nameConstraints = critical,permitted;DNS:localhost," +
+          "permitted;DNS:.local,permitted;IP:127.0.0.0/255.0.0.0",
+        ].join("\n"),
+      );
+      const made = await new Deno.Command("openssl", {
+        args: [
+          "req",
+          "-x509",
+          "-newkey",
+          "ec",
+          "-pkeyopt",
+          "ec_paramgen_curve:P-256",
+          "-nodes",
+          "-keyout",
+          join(ca, "aio-root-key.pem"),
+          "-out",
+          join(ca, "aio-root.pem"),
+          "-days",
+          "5",
+          "-config",
+          cfg,
+        ],
+        stdout: "null",
+        stderr: "null",
+      }).output();
+      assert(made.success, "could not write the old-shaped root");
+
+      // deno-lint-ignore no-explicit-any
+      (log as any).warn = (...a: unknown[]) =>
+        warnings.push(a.map(String).join(" "));
+      Deno.env.set("AIO_APPS_DIR", dir);
+      await loadOrCreateAioRoot();
+
+      const said = warnings.join("\n");
+      assert(
+        /rfc822Name|email addresses/.test(said),
+        `nothing warned that this root leaves email UNRESTRICTED:\n${said}`,
+      );
+      // It must name the fix, not just the problem — a warning a person
+      // cannot act on is noise they will learn to scroll past.
+      assert(
+        said.includes("am trust"),
+        `the warning does not say how to fix it:\n${said}`,
+      );
+    } finally {
+      // deno-lint-ignore no-explicit-any
+      (log as any).warn = origWarn;
+      Deno.env.set("AIO_APPS_DIR", SANDBOX);
+    }
+  },
+});
+
+test({
+  name: "tls: a root this version wrote warns about NOTHING",
+  ignore: SKIP,
+  fn: async () => {
+    const dir = await tempDir("aio-tls-newroot-");
+    const warnings: string[] = [];
+    // deno-lint-ignore no-explicit-any
+    const origWarn = (log as any).warn;
+    try {
+      Deno.env.set("AIO_APPS_DIR", dir);
+      await loadOrCreateAioRoot(); // writes it
+      // deno-lint-ignore no-explicit-any
+      (log as any).warn = (...a: unknown[]) =>
+        warnings.push(a.map(String).join(" "));
+      await loadOrCreateAioRoot(); // reads it back
+      assertEquals(
+        warnings.filter((w) => /constrain|Superfish|UNRESTRICTED/.test(w)),
+        [],
+        "a root this version just wrote was reported as under-constrained",
+      );
+    } finally {
+      // deno-lint-ignore no-explicit-any
+      (log as any).warn = origWarn;
+      Deno.env.set("AIO_APPS_DIR", SANDBOX);
     }
   },
 });

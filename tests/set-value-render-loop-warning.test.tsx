@@ -2,7 +2,7 @@
 // render is WRITING state that the same render READS") fired on `testUI`'s
 // own `setValue`, which types one character per synchronous handler→render
 // step: a 118-character value was 118 renders, read as a loop, and the advice
-// was to move a write that was already in an event handler (wallet report §11).
+// was to move a write that was already in an event handler (field report §11).
 //
 // The tripwire now counts only renders asked for by something other than an
 // event handler running outside a render — and a real loop still trips it.

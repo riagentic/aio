@@ -30,7 +30,7 @@ const _said = new Set<string>();
 
 /** Dev-only names for the signals a hook created, so an unnamed `useLocal`
  *  is reported as `<Row> useLocal #2` rather than "a cell/signal value" —
- *  which left a field report bisecting to find which one (wallet report §8). */
+ *  which left a field report bisecting to find which one (field report §8). */
 const _hookSignalNames = new WeakMap<object, string>();
 
 /** Per instance (keyed by its ref-slot array, which lives as long as the
@@ -78,7 +78,7 @@ export function _signalLabel(sig: unknown): string | undefined {
  *  component's `afterRender` ran every OTHER component's listener inside this
  *  hook's frame — and their reads were reported as this hook's, with advice
  *  ("read it in the render body") that cannot be followed for a signal
- *  another instance owns (wallet report §8). A listener is not the callback: what
+ *  another instance owns (field report §8). A listener is not the callback: what
  *  it reads is its own component's business.
  *
  *  Patched where `dispatchEvent` is owned — the window of the realm the

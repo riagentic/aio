@@ -129,3 +129,72 @@ testUI(
     assert(clicks > 0, "the type=button control still ran its own onClick");
   },
 );
+
+// HTML's OTHER association: `form="<id>"` names the form a control belongs to,
+// wherever the control sits, and OVERRIDES nesting. The walk carries the
+// ENCLOSING `<form>` down the tree, which answers neither shape that uses the
+// attribute — a submit button in a sticky footer or a dialog action bar,
+// outside the form it drives, and a button inside one form that drives
+// another.
+//
+// MEASURED in Chromium (`--headless --dump-dom`, each button clicked in turn,
+// each form's `submit` logged):
+//
+//   <button> in <form id=real>              -> real
+//   <button form=other> in <form id=real>   -> other      (NOT the one it sits in)
+//   <button form=real> outside every form   -> real
+//
+// and before this, `am surface` said `[]` for the third — the same "the
+// surface reads the button that works as inert" defect isSubmitControl was
+// written for, in the one case nesting cannot see — and `["submit"]` for the
+// second, naming a form that button does not drive.
+let attrSubmits = 0;
+
+function Attached() {
+  return (
+    <div>
+      <form
+        id="real"
+        onSubmit={(e: Event) => {
+          e.preventDefault();
+          attrSubmits++;
+        }}
+      >
+        <button t="Inside">Inside</button>
+        {/* belongs to #other, which handles nothing */}
+        <button t="Elsewhere" type="submit" form="other">Elsewhere</button>
+      </form>
+      <form id="other">
+        <span>no handler</span>
+      </form>
+      {/* outside every form, and the one that drives #real */}
+      <button t="Outside" form="real">Outside</button>
+    </div>
+  );
+}
+
+testUI(
+  Attached,
+  'surface: form="id" decides which form a control drives',
+  async (ui) => {
+    // Nesting still answers when nothing overrides it.
+    assertEquals(byName("Inside").events, ["submit"]);
+    // The attribute overrides nesting: this one drives #other, which handles
+    // nothing. (happy-dom resolves `form` to the ANCESTOR when there is one,
+    // so the click below would submit #real here and in no real browser —
+    // the surface follows HTML, which Chromium was measured against above.)
+    assertEquals(byName("Elsewhere").events, []);
+    // …and the case a click can prove in this harness too: outside every
+    // form, driving the one it names.
+    const outside = byName("Outside");
+    assertEquals(outside.events, ["submit"]);
+    const before = attrSubmits;
+    const r = await runUITrigger({ path: outside.path, action: "click" });
+    assert(r.ok, `${outside.path}: ${r.error}`);
+    await ui.settle();
+    assert(
+      attrSubmits > before,
+      "the surface claimed submit for a button whose click ran nothing",
+    );
+  },
+);

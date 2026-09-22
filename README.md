@@ -9,7 +9,7 @@
 </p>
 
 <p align="center">
-  <code>v1.0.7-beta</code> · <a href="LICENSE">MIT</a> ·
+  <code>v1.0.8-beta</code> · <a href="LICENSE">MIT</a> ·
   <a href="docs/content.md">Docs</a> ·
   <a href="docs/basics/quickstart.md">Quickstart</a> ·
   <a href="CHANGELOG.md">Changelog</a>
@@ -142,8 +142,8 @@ screen, `am trigger` acts on it.
 | 🚚 **Ship**    | browser · Electron · Android · iOS client · CLI · service · signed updates  |
 | 🛠️ **Operate** | `am` — status, health, logs, state, dispatch, pins, installs                |
 
-A whole client — renderer, protocol, offline queue, CRDT merge — is **90 KB
-gzipped**, 76 KB brotli. `deno task bench:bundle` prints it, and
+A whole client — renderer, protocol, offline queue, CRDT merge — is **77 KB
+gzipped**, 67 KB brotli. `deno task bench:bundle` prints it, and
 `tests/bundle-size.test.ts` keeps this sentence true — both numbers.
 
 ## 🏃 Run any aio app, from its repo

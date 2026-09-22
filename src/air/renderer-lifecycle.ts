@@ -172,14 +172,66 @@ export function onUnmount(fn: () => void): void {
   // The box is re-pointed at the newest closure each render, so the callback
   // that eventually runs reads the LAST render's values, not the first's —
   // pinning the first would be the same staleness bug from the other side.
-  const slot = useRef<{ fn: () => void } | null>(null);
-  if (slot.current) {
-    slot.current.fn = fn;
-    return;
+  //
+  // THE SLOT IS CHECKED, not assumed to be ours. A slot is matched by CALL
+  // ORDER, so a conditional `onUnmount` — the natural thing to write, since
+  // `onMount`/`onCleanup` beside it may be called conditionally and the docs
+  // say so — lands on a NEIGHBOUR's `useRef`/`useSignal` slot. Reading it as a
+  // box made that fail three different ways, none of them naming the cause:
+  //
+  //   slot holds `{n: 7}`  → truthy, so `fn` was written onto the app's own
+  //                          object and `_onUnmount` was NEVER CALLED: the
+  //                          hold was leaked, in silence, in production —
+  //                          the exact bug onUnmount exists to prevent;
+  //   slot holds `"B"`     → `TypeError: Cannot create property 'fn' on
+  //                          string 'B'`, from inside the renderer;
+  //   slot holds a signal  → it happened to work.
+  //
+  // The dev hook-order tripwire does not save this: it runs AFTER the body, so
+  // the TypeError beats it, and it is observe-only, so production never hears
+  // it at all. A fresh slot is recognised by a sentinel only this function
+  // can produce, a returning one by the box's own brand, and anything else is
+  // named here, at the call that did it.
+  const slot = useRef<unknown>(_EMPTY_SLOT);
+  const held = slot.current;
+  if (held !== _EMPTY_SLOT) {
+    if (_isUnmountBox(held)) {
+      held.fn = fn;
+      return;
+    }
+    throw new Error(
+      `[aio] onUnmount() landed on another hook's state slot (which holds ` +
+        `${
+          held === null
+            ? "null"
+            : typeof held === "object"
+            ? "an object"
+            : JSON.stringify(held)
+        }). ` +
+        `It takes a state slot so it can register once rather than once per ` +
+        `render, and state slots are matched by CALL ` +
+        `ORDER — so an onUnmount() behind an \`if\` (or in a loop whose ` +
+        `length changes) lands on the useRef/useSignal next to it, and the ` +
+        `hold is never released. Call onUnmount() unconditionally at the top ` +
+        `of the body and put the condition inside the callback.`,
+    );
   }
-  const box = { fn };
+  const box: _UnmountBox = { [_UNMOUNT_BOX]: true, fn };
   slot.current = box;
   _onUnmount(() => box.fn());
+}
+
+/** The value a slot this function has never used holds — module-private, so
+ *  nothing an app can put in a `useRef` is mistaken for it. */
+const _EMPTY_SLOT: unique symbol = Symbol("aio.onUnmountEmpty");
+/** The brand on {@linkcode onUnmount}'s box: a slot holding one is a slot this
+ *  call site already owns, and any other value is somebody else's. */
+const _UNMOUNT_BOX: unique symbol = Symbol("aio.onUnmountBox");
+type _UnmountBox = { [_UNMOUNT_BOX]: true; fn: () => void };
+
+function _isUnmountBox(v: unknown): v is _UnmountBox {
+  return typeof v === "object" && v !== null &&
+    (v as Record<symbol, unknown>)[_UNMOUNT_BOX] === true;
 }
 
 /** @internal Run `fn` when the component rendering right now goes away for
@@ -212,6 +264,20 @@ export type KeyChord = {
    *  a note is a bug in every app that has ever shipped one. */
   ignoreInInput?: boolean;
 };
+
+/** @internal Two monotonic counters, bumped by every `onGlobalKey` listener:
+ *  how many bindings a keydown actually RAN, and how many matched the chord
+ *  but were skipped because the key landed in a field (`ignoreInInput`).
+ *
+ *  The trigger tier (`triggerPress`) reads the delta across one press to tell
+ *  the two silent outcomes apart: "nothing was listening for that chord"
+ *  (not its business) from "a binding WAS listening and the input swallowed
+ *  it" — a press that dispatches, asserts green, and ran the handler zero
+ *  times. Counting here rather than re-deriving the predicate at the trigger
+ *  keeps ONE decider: whatever this listener skips is exactly what is warned
+ *  about, forever. Not dev-gated — two integer bumps, identical in dev and
+ *  prod, so the harness cannot observe a path prod does not take. */
+export const _globalKeyProbe = { ran: 0, swallowed: 0 };
 
 /** A window/document-level key binding, scoped to this component's lifetime.
  *
@@ -276,8 +342,12 @@ export function onGlobalKey(
         if (
           tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT" ||
           t?.isContentEditable
-        ) return;
+        ) {
+          _globalKeyProbe.swallowed++;
+          return;
+        }
       }
+      _globalKeyProbe.ran++;
       fnRef.current(e);
     };
     doc.addEventListener("keydown", handler);

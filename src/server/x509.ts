@@ -28,6 +28,52 @@
 // minted for `example.com` under this root is REFUSED with "permitted subtree
 // violation". The name constraints bite; they are not merely present.
 //
+// WHAT THOSE THREE COULD NOT SEE, found by feeding the encoder what a real
+// machine and a real thief would, and by asking verifiers that are neither
+// openssl nor rustls (Java's CertPathValidator, Python's `cryptography`):
+//   • a SAN the root may not name — a Tailscale 100.64/10 address, say —
+//     invalidates the WHOLE certificate, localhost included. `tls.ts` now
+//     filters the SAN set against the root's own subtrees and says so.
+//   • name constraints bound WHICH addresses and nothing about FOR WHAT, and
+//     rfc822Name/otherName are not constrained at all: with the key, openssl
+//     accepted an S/MIME certificate for `ceo@bigbank.com` and a client
+//     certificate carrying a Windows UPN. The root carries an extendedKeyUsage
+//     AND rfc822Name/URI bases, because one of them is not enough: measured on
+//     macOS 14.8.9, Security.framework does not apply a trust anchor's EKU and
+//     accepted the `ceo@bigbank.com` certificate with the EKU alone. openssl
+//     refuses it at depth 1 for the EKU, macOS at depth 0 for the base.
+//   • `"999.888.777.666"` minted as 231.120.9.154 and `"1.2.3"` as a
+//     three-byte iPAddress neither Java nor Python will read. Addresses are
+//     now parsed strictly, or refused.
+//   • openssl compares issuer and subject CANONICALLY, so it accepts a
+//     re-encoded DN — only a rustls handshake against a PrintableString root
+//     can prove the verbatim issuer copy below is load-bearing. One now does.
+//
+// AND THE LIMIT THAT REMAINS, measured: RFC 5280 §6.1 begins path validation
+// AFTER the trust anchor, so a validator that follows it literally never reads
+// the constraints in a self-signed root at all. Java's CertPathValidator is
+// one — it accepts `DNS:www.google.com` under this root, and rejects the same
+// leaf the moment the constraints sit on an intermediate. Closing that means
+// issuing leaves from a name-constrained intermediate.
+//
+// Every other verifier aio ships against DOES read the anchor, measured with
+// controls: openssl, rustls, NSS, Go, macOS Security.framework 14.8.9 and
+// Windows CryptoAPI (Win11 26200) all refuse a forged public name under this
+// root and all accept the legitimate `localhost` leaf. Java is the outlier,
+// not the rule. Do NOT read the extendedKeyUsage as covering Java anyway: a
+// forged SERVER certificate for a public name needs exactly serverAuth, so on
+// a verifier that skips the anchor the EKU is no obstacle to the case that
+// matters most.
+//
+// A WARNING ABOUT MEASURING THIS, which cost an hour and nearly shipped a
+// false claim in the other direction: a chain built with the root in .NET's
+// `ChainPolicy.ExtraStore` rather than a real trust store reports NO name
+// constraint violation at all — not for the anchor and not even for an
+// INTERMEDIATE. It does still report EKU violations, so the setup looks like
+// it is working. The first Windows run this way "showed" CryptoAPI ignoring
+// anchor constraints; a positive control (the same violation moved onto an
+// intermediate) showed the instrument was blind. Install the root.
+//
 // SCOPE. An encoder for exactly two certificate shapes, plus a reader for one
 // extension. Not a general X.509 library, and it must never grow into one —
 // everything here is reachable from `tls.ts` and nothing else.
@@ -214,20 +260,48 @@ export function distinguishedName(cn: string, org?: string): Bytes {
   return org ? SEQ(rdn(OID_CN, cn), rdn(OID_O, org)) : SEQ(rdn(OID_CN, cn));
 }
 
+/** An address that cannot be encoded is an ERROR, never a best guess.
+ *
+ *  The permissive version of this shipped: `"999.888.777.666"` became
+ *  `231.120.9.154` (`Number` then a Uint8Array truncation), `"1.2.3"` became a
+ *  THREE-byte iPAddress that Java and Python both refuse to read back, and
+ *  `"1:2:3:4:5:6:7:8:9:10"` silently lost its last two groups. Every one of
+ *  those minted a certificate openssl parses happily — a certificate naming an
+ *  address nobody asked for, which is the worst possible answer to "what is
+ *  this server called". */
 function ipv4(s: string): Bytes {
-  return bytes(s.split(".").map(Number));
+  const p = s.split(".");
+  if (p.length !== 4) throw new Error(`not an IPv4 address: ${s}`);
+  return bytes(p.map((g) => {
+    if (!/^\d{1,3}$/.test(g)) throw new Error(`not an IPv4 address: ${s}`);
+    const n = Number(g);
+    if (n > 255) throw new Error(`not an IPv4 address: ${s}`);
+    return n;
+  }));
 }
 
 function ipv6(s: string): Bytes {
-  const [head, tail] = s.split("::");
+  const halves = s.split("::");
+  if (halves.length > 2) throw new Error(`not an IPv6 address: ${s}`);
+  const [head, tail] = halves;
   const h = head ? head.split(":") : [];
   const t = tail ? tail.split(":") : [];
-  const groups = tail === undefined
-    ? h
-    : [...h, ...Array(Math.max(0, 8 - h.length - t.length)).fill("0"), ...t];
+  // `::` must actually elide at least one group, and the whole thing must come
+  // to exactly eight. Checked BEFORE the fill, so an over-long address is
+  // "not an IPv6 address" rather than a RangeError from `Array(-1)`.
+  const elided = halves.length === 2 ? 8 - h.length - t.length : 0;
+  if (halves.length === 2 ? elided < 1 : h.length !== 8) {
+    throw new Error(`not an IPv6 address: ${s}`);
+  }
+  // An IPv4 dotted tail (`::ffff:1.2.3.4`) is refused rather than misread as a
+  // hex group, which is what the permissive parser did.
+  const groups = [...h, ...Array(elided).fill("0"), ...t];
   const out = new Uint8Array(16) as Bytes;
   groups.forEach((g, i) => {
-    const v = parseInt(g || "0", 16) || 0;
+    if (!/^[0-9a-fA-F]{1,4}$/.test(g)) {
+      throw new Error(`not an IPv6 address: ${s}`);
+    }
+    const v = parseInt(g, 16);
     out[i * 2] = v >> 8;
     out[i * 2 + 1] = v & 0xff;
   });
@@ -235,6 +309,38 @@ function ipv6(s: string): Bytes {
 }
 
 const ipBytes = (s: string): Bytes => s.includes(":") ? ipv6(s) : ipv4(s);
+
+/** Is `ip` inside the name-constraint subtree `[base, mask]`?
+ *
+ *  Lives HERE, beside the encoder that turns an address into bytes, because a
+ *  second address parser is a second answer: the caller that decides which
+ *  addresses a leaf may carry and the encoder that writes them must agree
+ *  byte for byte or the certificate is refused as a whole. */
+export function ipWithinSubtree(
+  ip: string,
+  [base, mask]: readonly [string, string],
+): boolean {
+  let a: Bytes, b: Bytes, m: Bytes;
+  try {
+    a = ipBytes(ip);
+    b = ipBytes(base);
+    m = ipBytes(mask);
+  } catch {
+    return false; // an address that will not encode is in no subtree
+  }
+  if (a.length !== b.length || b.length !== m.length) return false;
+  return a.every((x, i) => (x & m[i]!) === (b[i]! & m[i]!));
+}
+
+/** RFC 5280 §4.2.1.10 dNSName matching, plus the leading-dot spelling openssl
+ *  and NSS both read as "this domain and anything under it". */
+export function dnsWithinSubtree(name: string, base: string): boolean {
+  const n = name.toLowerCase(), b = base.toLowerCase();
+  return b === "" ||
+    (b.startsWith(".")
+      ? n.length > b.length && n.endsWith(b)
+      : n === b || n.endsWith(`.${b}`));
+}
 
 /** GeneralName [2] dNSName and [7] iPAddress.
  *
@@ -244,6 +350,12 @@ const ipBytes = (s: string): Bytes => s.includes(":") ? ipv6(s) : ipv4(s);
  *  by different callers on purpose. */
 const gnDns = (d: string) => CTXP(2, new TextEncoder().encode(d));
 const gnIp = (ip: string) => CTXP(7, ipBytes(ip));
+
+/** GeneralName [1] rfc822Name and [6] uniformResourceIdentifier — used ONLY as
+ *  name-constraint bases here, never in a SAN. Same IA5String-as-raw-bytes
+ *  encoding as [2]. */
+const gnEmail = (e: string) => CTXP(1, new TextEncoder().encode(e));
+const gnUri = (u: string) => CTXP(6, new TextEncoder().encode(u));
 
 // ── extensions ──────────────────────────────────────────────────────────────
 
@@ -307,20 +419,68 @@ async function subjectKeyIdentifier(spki: Uint8Array): Promise<Bytes> {
   return ext("2.5.29.14", false, OCTET(h));
 }
 
-const subjectAltName = (dns: string[], ips: string[]) =>
-  ext("2.5.29.17", false, SEQ(...dns.map(gnDns), ...ips.map(gnIp)));
+/** `GeneralNames ::= SEQUENCE SIZE (1..MAX)`, so an empty one is not a SAN
+ *  with no addresses — it is a malformed extension. openssl reads it without
+ *  complaint; Java answers `No data available in passed DER encoded value` and
+ *  Python hands back `[]`, so a leaf that named nothing would fail later, on
+ *  someone else's machine, as a hostname mismatch nobody can explain. */
+const subjectAltName = (dns: string[], ips: string[]) => {
+  if (dns.length + ips.length === 0) {
+    throw new Error("a server certificate must name at least one address");
+  }
+  return ext("2.5.29.17", false, SEQ(...dns.map(gnDns), ...ips.map(gnIp)));
+};
 
 /** Permitted subtrees. A name type left UNCONSTRAINED is unrestricted, which
- *  is why callers list DNS and IP both. */
+ *  is why callers list DNS and IP both.
+ *
+ *  The other name forms — rfc822Name, otherName, uniformResourceIdentifier,
+ *  directoryName — stay unconstrained, and there is no portable way to write
+ *  "exclude all of these": an empty excluded base means "everything" to Go and
+ *  "nothing" to openssl (measured: an empty excluded rfc822Name printed as
+ *  `email:` and stopped nothing), and a directoryName subtree in a CRITICAL
+ *  extension is a name type Go refuses to process at all, which would make
+ *  every chain unverifiable there. What bounds them instead is the
+ *  extendedKeyUsage on the root: none of those forms is usable for serverAuth,
+ *  so a certificate built around one is refused on purpose grounds. */
 function nameConstraints(
   dns: string[],
   ipMasks: readonly (readonly [string, string])[],
 ) {
+  if (dns.length === 0 && ipMasks.length === 0) {
+    // permittedSubtrees MUST have at least one GeneralSubtree (RFC 5280
+    // §4.2.1.10). An empty SEQUENCE here is a malformed extension that some
+    // verifiers reject outright and others quietly ignore — the worst pair,
+    // since "ignored" means the root is UNCONSTRAINED while looking safe.
+    throw new Error(
+      "x509: name constraints with no permitted subtree would be a malformed " +
+        "extension, and a verifier that ignores it treats the root as " +
+        "unconstrained. Pass at least one DNS or IP base.",
+    );
+  }
   const subtrees = [
     ...dns.map((d) => SEQ(gnDns(d))),
     ...ipMasks.map(([addr, mask]) =>
       SEQ(CTXP(7, cat(ipBytes(addr), ipBytes(mask))))
     ),
+    // A name type left out of permittedSubtrees is UNRESTRICTED, and these two
+    // are the ones a stolen root key would reach for. `.invalid` is reserved
+    // by RFC 2606 and can never be a real address or host, so permitting only
+    // that is the narrowest legal way to say "none".
+    //
+    // These are NOT redundant with the serverAuth extendedKeyUsage on the
+    // root, which is what it looked like until it was measured. macOS
+    // Security.framework does NOT enforce EKU nesting at a trust anchor: with
+    // the EKU alone and no email base, `security verify-cert -p smime`
+    // ACCEPTED a certificate for `ceo@bigbank.com` signed by this root
+    // (macOS 14.8.9, controlled against a no-EKU root that also accepted it,
+    // so the EKU was doing nothing). With this base present the same verifier
+    // refuses it, while a legitimate `localhost` server leaf under the same
+    // root still verifies. openssl refuses it either way — at depth 1 for the
+    // EKU, at depth 0 for this. Two independent locks, because the verifiers
+    // that ship disagree about which one they check.
+    SEQ(gnEmail(".invalid")),
+    SEQ(gnUri(".invalid")),
   ];
   return ext("2.5.29.30", true, SEQ(CTX(0, cat(...subtrees))));
 }
@@ -431,6 +591,31 @@ export async function generateRoot(opts: {
       keyUsage(KU_keyCertSign, KU_cRLSign),
       await subjectKeyIdentifier(k.spki),
       nameConstraints(opts.permittedDns, opts.permittedIpMasks),
+      // The name constraints answer "WHICH addresses" and say nothing about
+      // "FOR WHAT". Without this line a root a person was asked to install
+      // machine-wide also vouches for code signing, S/MIME and client auth —
+      // and those name forms are not constrained at all, so with the key in
+      // hand `openssl verify -purpose smimesign` accepted a certificate for
+      // `ceo@bigbank.com`, and `-purpose sslclient` one carrying a Windows UPN
+      // `admin@corp.example`. Measured, not reasoned: with serverAuth here
+      // both are refused at depth 1 (the root itself is unsuitable), while the
+      // rustls handshake and `openssl verify` of a real leaf are unchanged.
+      // This line alone is NOT enough. The earlier claim here that "Windows
+      // CryptoAPI and macOS Security.framework enforce the same nesting" was
+      // written from documentation, and half of it is false. Measured, each
+      // against a control root carrying no EKU:
+      //
+      //   Windows CryptoAPI (Win11 26200): DOES apply it. The S/MIME leaf is
+      //     NotValidForUsage; the control is accepted.
+      //   macOS Security.framework 14.8.9: DOES NOT. `security verify-cert
+      //     -p smime` accepted a `ceo@bigbank.com` certificate signed by this
+      //     root, identically to the control — the extension did nothing.
+      //   openssl: refuses at depth 1, "unsuitable certificate purpose".
+      //
+      // So macOS is covered by the rfc822Name/URI bases above and not by this
+      // line, and the two together are why neither gap is open on any
+      // verifier that reads the anchor at all. aio needs no other purpose.
+      extendedKeyUsageServerAuth(),
     ],
   });
   return {
@@ -501,6 +686,7 @@ export function certSubjectDer(certPem: string): Bytes {
 }
 
 const SAN_OID = [0x55, 0x1d, 0x11]; // 2.5.29.17
+const NC_OID = [0x55, 0x1d, 0x1e]; // 2.5.29.30
 const SKI_OID = [0x55, 0x1d, 0x0e]; // 2.5.29.14
 
 /** The contents of the extension with this OID, or null when absent.
@@ -544,6 +730,40 @@ function ipToString(b: Uint8Array): string {
 
 /** The subjectAltName of the FIRST certificate in `certPem`, or null when it
  *  carries none. Replaces `openssl x509 -ext subjectAltName`. */
+/** Which GeneralName TYPES a root's permittedSubtrees actually covers.
+ *
+ *  A name type left out of permittedSubtrees is UNRESTRICTED — so this is the
+ *  question "what can a thief with this key still mint?", asked of a root that
+ *  is already on disk. Roots written before the rfc822Name/URI bases were
+ *  added cover DNS and IP only, and `tls.ts` reuses a root VERBATIM forever,
+ *  so nothing would otherwise ever notice.
+ *
+ *  Returns null when the certificate carries no name constraints at all, which
+ *  is a different and worse answer than "covers nothing". */
+export function certConstrainedNameTypes(
+  certPem: string,
+): { dns: boolean; ip: boolean; email: boolean; uri: boolean } | null {
+  const der = fromPem(certPem);
+  const inner = findExtension(der, NC_OID);
+  if (!inner) return null;
+  // NameConstraints ::= SEQUENCE { permittedSubtrees [0] GeneralSubtrees ... }
+  const top = children(inner, 0, inner.length)[0];
+  if (!top) return null;
+  const permitted = children(inner, top.s, top.e).find((n) => n.tag === 0xa0);
+  if (!permitted) return null;
+  const out = { dns: false, ip: false, email: false, uri: false };
+  for (const sub of children(inner, permitted.s, permitted.e)) {
+    // Each GeneralSubtree is a SEQUENCE whose first element is the base.
+    const base = children(inner, sub.s, sub.e)[0];
+    if (!base) continue;
+    if (base.tag === 0x82) out.dns = true;
+    else if (base.tag === 0x87) out.ip = true;
+    else if (base.tag === 0x81) out.email = true;
+    else if (base.tag === 0x86) out.uri = true;
+  }
+  return out;
+}
+
 export function certSubjectAltNames(
   certPem: string,
 ): { dns: string[]; ips: string[] } | null {

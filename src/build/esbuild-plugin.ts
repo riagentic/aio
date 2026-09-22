@@ -10,6 +10,16 @@
 import { SERVER_FILE_RE } from "../entries.ts";
 import { SERVER_ONLY_STUB_NS } from "./graph-audit.ts";
 
+/** Where the dev-only chunk is served FROM, as the bundle names it.
+ *
+ *  This is the dev server's generic framework-source route
+ *  (`server-static.ts`: `/__aio/<rel>.ts`, live-transpiled, `!prod` only), so
+ *  the specifier the bundle carries is the one URL that can actually serve it.
+ *  A production server closes that namespace, which is what makes the failure
+ *  both correct and loud. Absolute, not relative: it must not resolve against
+ *  wherever `app.js` happens to be mounted. */
+export const DEV_CHUNK_URL = "/__aio/browser/dev-diagnostics.ts";
+
 /** Static server-only imports seen in the last client build:
  *  `specifier → the modules that statically import it`.
  *
@@ -133,6 +143,32 @@ export function aioBrowserPlugin(): {
             return { path: args.path, external: true };
           }
           return undefined;
+        },
+      );
+
+      // THE DEV-ONLY CHUNK — kept out of the bundle, deliberately.
+      //
+      // `browser/dev-diagnostics.ts` holds every check a page carries for the
+      // DEVELOPER: the colour-contrast and #id-selector audits, the dev error
+      // overlay, the read-only-state hint, and the `am surface` / `am trigger`
+      // executor. Measured: 32,878 bytes raw, 12.0 KB gzipped, on every page
+      // load — and not one byte of it can run on a production page.
+      // `isDevMode()`
+      // reads `globalThis.__aioDev`, which only `aioDevHTML` sets, and that
+      // shell serves the dev import map rather than this bundle; the two
+      // trojan frames that drive the surface/trigger engine are never routed
+      // in prod (`server-static.ts`). No bundler can prove a runtime flag
+      // false, so the module is reached through a dynamic import and cut here.
+      //
+      // The external specifier is the DEV SERVER'S OWN route for that file, so
+      // it is a real, working URL wherever dev is real, and a 404 exactly
+      // where the framework-source routes are closed — which `loadDevChunk()`
+      // then reports, once, naming every check that is not running.
+      build.onResolve(
+        { filter: /(^|\/)dev-diagnostics\.ts$/ },
+        (args: { path: string; kind: string; importer: string }) => {
+          if (args.kind !== "dynamic-import") return undefined;
+          return { path: DEV_CHUNK_URL, external: true };
         },
       );
 

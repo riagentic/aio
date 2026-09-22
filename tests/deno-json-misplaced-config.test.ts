@@ -78,3 +78,20 @@ Deno.test("deno.json: `title` is read here AND valid in ui — no false positive
   assertEquals(DENO_JSON_READ_KEYS.has("title"), true);
   assertEquals(misplacedDenoJsonKeys({ title: "Wallet" }), []);
 });
+
+Deno.test("deno.json: `memory.maxHeap` belongs HERE and is not scolded", () => {
+  // The contradiction a field report hit, in one boot's output: this warning
+  // said `memory` was "silently doing nothing" and told the author to move it
+  // into `aio.run({ memory })` — where `validateMemoryConfig` throws on
+  // `maxHeap`, because that block is the pressure monitor. Meanwhile the BUILD
+  // reads maxHeap from exactly this spot, and so does `am start`. A key two
+  // surfaces read is not misplaced.
+  assertEquals(misplacedDenoJsonKeys({ memory: { maxHeap: "12GB" } }), []);
+  assertEquals(misplacedDenoJsonKeys({ memory: { maxHeap: 8192 } }), []);
+  // …and the rest of the block still belongs in aio.run(), so it is still said.
+  assertEquals(
+    misplacedDenoJsonKeys({ memory: { warnThreshold: 0.8 } }),
+    ["memory"],
+  );
+  assertEquals(misplacedDenoJsonKeys({ memory: {} }), ["memory"]);
+});

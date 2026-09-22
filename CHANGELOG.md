@@ -1,5 +1,234 @@
 # Changelog
 
+## v1.0.8-beta — a root key that cannot be turned against you, a page that cannot keep what you told it to forget, 13 KB off every page (2026-09-21)
+
+> **The public surface is unchanged** — `check:api` reports no additions, no
+> removals and no changed signatures. Nothing here is a migration. See
+> [what you may notice](docs/upgrade/from-1.0.7-beta-to-1.0.8-beta.md).
+
+This release is the verify round that attacked 1.0.7-beta's own fixes. Three of
+them were half-done, one shipped comment was factually false, and the largest
+finding came from asking every TLS verifier the same question from its own
+operating system instead of reading what the documentation said they do.
+
+### The local root: what a stolen key could do on macOS
+
+`am trust` installs a local root so `https://localhost` is a real lock and not a
+warning. The root has always been fenced — name-constrained to `localhost`, the
+`.localhost` suffix, `127.0.0.0/8`, `::1` and the CGNAT range, and limited by
+`extendedKeyUsage` to server and client authentication. The claim in the code
+was that a stolen root key could therefore only ever mint a certificate for a
+name the machine already owns.
+
+**Measured against a control on macOS 14.8.9, that was false.** Security.
+framework ignores a trust anchor's `extendedKeyUsage` entirely: a certificate
+for `ceo@bigbank.com`, signed by the aio root, was accepted for S/MIME exactly
+as a control root carrying no EKU at all was. RFC 5280 §6.1 begins path
+validation _after_ the trust anchor, so a verifier that skips the anchor's own
+extensions is within its rights — and the comment in `src/server/x509.ts` had
+been written from documentation and never measured.
+
+- **The root now constrains `rfc822Name` and `uniformResourceIdentifier`** to
+  `.invalid` (RFC 2606, a TLD reserved to never resolve). A name type ABSENT
+  from `permittedSubtrees` is unrestricted, so listing only DNS and IP left both
+  wide open — and this is the lock macOS does honour.
+- **`generateRoot` refuses an empty permitted set** instead of writing a
+  name-constraints extension with no subtrees. Such an extension is malformed,
+  several verifiers ignore it, and one that ignores it treats the root as
+  unconstrained — the worst outcome, wearing the appearance of the best.
+- **A root already on disk is now READ, and says what it does not constrain.**
+  `loadOrCreateAioRoot` reuses an existing root verbatim forever, so a machine
+  that upgraded kept the weaker one with nothing to notice. Boot warns once per
+  root path, naming what is unrestricted and the two commands that replace it.
+  It deliberately does not regenerate: browsers already trust that root, and
+  silently swapping it is not a decision a boot should make.
+- **The verifier matrix is measured, not assumed.** Each stack was asked from
+  its own operating system, each against a control: openssl, rustls, NSS and Go
+  enforce name constraints AND anchor EKU; Windows CryptoAPI (11 26200) enforces
+  both; macOS Security.framework enforces constraints and ignores EKU; Java's
+  `CertPathValidator` ignores both. The table is in `todo.md`, with the one
+  stack still unmeasured named (Android/Conscrypt).
+- **No intermediate CA.** The obvious answer to "the anchor's EKU is not always
+  read" is to sign with a constrained intermediate, whose extensions every
+  verifier reads. Measured, it closes exactly one row — Java — and costs a new
+  root plus `am trust` again on every machine, because the roots already
+  deployed are `pathlen:0` and cannot sign one. Two locks that are read by
+  everything beat a third that is not.
+
+### An app that was told to forget, and remembered
+
+- **`persist: "none"` was ignored by the standalone and Android runtime.** A
+  cell marked not-to-persist was written to disk AND restored on the next
+  launch, and `persist: { exclude: [...] }` and `onPersist` were no-ops there.
+  `deno task dev` honoured all three, so the same app kept different data
+  depending on how it was run — and since 1.0.7-beta, that slice was `fsync`'d
+  on every dispatch as well. One decider now,
+  `src/state/cell-persist-filter.ts`, shared by the server and the standalone
+  runtime.
+- **The localStorage-to-native adoption path could destroy good data.** A failed
+  read of the native store looked exactly like a fresh install, so the runtime
+  overwrote intact durable state with whatever `localStorage` held — and logged
+  the overwrite as a successful adoption. It asks whether the key EXISTS now,
+  and a read that fails is loud and changes nothing.
+
+### SSR: the head leak was only half closed
+
+1.0.7-beta gave each concurrent render its own scope. Three things were still
+wrong, all in the part that hands the head back:
+
+- **`collectHead()` answered for the most recently STARTED render.** You ask
+  after your own render has finished, so a render that merely began after yours
+  ended took your answer — one page's `<title>`, description and canonical URL
+  inside another page's response. It tracks the most recently FINISHED render.
+- **One abandoned stream poisoned every later call.** A dropped connection left
+  an unfinished render on the stack, and `collectHead()` threw for the rest of
+  the process — so a single closed tab 500'd every page after it.
+- **`collectHead()` with a key nobody registered answered `""` in silence.** It
+  warns in dev now, naming the key. An empty head is a page with no title, and
+  it looked like a page that simply had not set one.
+
+### Three more in the renderer
+
+- **Attribute-name validation threw in production on names Chromium accepts.**
+  The pattern was missing the astral plane, so `data-🎉` — a legal attribute
+  name that `setAttribute` takes without complaint — crashed the render. The
+  validator was added in 1.0.7-beta to refuse a genuinely illegal name; it was
+  refusing a legal one too.
+- **`onUnmount` wrote into the NEXT hook's slot** when called conditionally, so
+  the cleanup it registered silently leaked — the exact failure the hook was
+  added to prevent. It now claims its own slot, and a conditional call is caught
+  rather than mis-filed.
+- **`am surface` reports `submit` on a form's submit button**, which the
+  previous release fixed for one shape and missed for another.
+
+### A page downloads 77 KB gzipped, from 90
+
+Every production page carried 32,878 bytes raw / 12 KB gzipped of code that a
+production page can never run: the `am surface` / `am trigger` engine, the dev
+error overlay, the read-only-state hint, and the colour-contrast and
+`#id`-selector audits. They are all behind `isDevMode()` — a runtime read of a
+flag that only the dev server's own HTML ever sets — so no bundler could prove
+the branch dead, and the bundle's own contexts (a production page, an Electron
+package, a standalone APK) had no way to switch them on.
+
+They moved into one module reached through a dynamic import the browser bundler
+marks external, pointed at the dev server's live-transpile route. It is real
+wherever dev is real and 404s in production, where the framework-source routes
+are closed. A failed load says so once and names every check that is therefore
+not running — a dev session whose diagnostics quietly did not arrive is worse
+than one without them.
+
+- **AIR alone: 90 → 79 KB gz ceiling. The counter app: 92 → 82.** The measured
+  numbers are 77 and 80; every doc that quotes a size was updated, and
+  `check:bundle-size` keeps them true.
+- **Two modules deliberately did NOT move** — console forwarding reaches the
+  server log in production too, and the component profile counters are read by a
+  live `am eval` on a production app.
+- **`bench:bundle`'s "AIR alone" figure was measuring a bundle nobody ships.**
+
+### The harness, and the gates that watch it
+
+- **Four sibling test processes walked the port slice in lockstep.**
+  `AIO_TEST_PORT_SLICE` is inherited, and a test that spawns
+  `deno test
+  --parallel` gave each child a cursor starting at the same port.
+  Not a race — the arrangement. The start is seeded from the pid.
+- **A leaked timer** from an un-awaited `cleanup()`; the third of this class.
+- **The window-hygiene gate could not see an aliased closer.** Widened — and its
+  first version fired on eight CORRECT lines (method definitions, member calls),
+  caught by the gate's own self-test before it landed. An instrument that fires
+  on correct code is the same defect as one that stays silent on broken code.
+- **Ratchets:** silent catches 324 → 322 (the two swallows in the moved modules
+  now sit in a chunk production never loads, and the loader SAYS what is not
+  running rather than discarding the reason), temp dirs 776, promise handlers
+  84.
+
+### Refusals that said nothing
+
+A second field report, checked against this release's own source, found one
+class worth more than everything else in it: **a security gate whose refusal is
+invisible to the only person who can act on it.** Both instances cost the
+reporter a full day, from opposite ends of the same feature.
+
+- **A `<webview>` guest preload was refused in complete silence.** The guard is
+  right — a guest preload must resolve inside the app directory — but a refused
+  preload does NOT fail the attach: the guest loads, renders perfectly, and
+  simply has no bridge. The symptom is "the embedded page works but cannot see
+  the app", with no line, in any log, on either side, naming a rule. There is
+  nothing to grep for. The reporter found it by reading aio's source, not by
+  debugging their app. Worse, the `catch {}` discarded the `ENOENT` — the file
+  not being there at all, which is the likeliest cause in a packaged build —
+  that would have explained the whole thing. The refusal now names the path, the
+  directory it had to resolve inside, the caught reason, and the fact that the
+  guest will load with no bridge.
+- **`openWindow`'s refusal never reached the renderer that asked.** The main
+  process writes an excellent refusal, naming the config key to add — and then
+  `ipcRenderer.send` threw it away, because `send` is one-way. The caller got
+  `undefined` back. The reporter's code was
+  `openWindow(url, opts).catch(fallBackToSystemBrowser)`; `undefined` has no
+  `.catch`, so the `TypeError` took the fallback branch and the page opened in
+  the user's system browser instead — forever, silently, for a rule nobody was
+  told about. `openWindow` now returns a promise that RESOLVES with the opened
+  URL or REJECTS with the refusal text. Additive: a fire-and-forget caller is
+  unchanged, and the main process keeps a reply leg for any preload still
+  speaking the old way.
+
+### Tests and messages that proved nothing
+
+- **`press()` into a text field asserted nothing and stayed GREEN.**
+  `onGlobalKey`'s `ignoreInInput` deliberately skips a shortcut while focus is
+  in an `<input>` — so `await ui.AmountField.press("Enter")` passed while the
+  handler ran zero times, and the author concluded the shortcut worked. aio's
+  own test said _"the request succeeds — that is the trap"_: a trap the
+  framework had documented and left armed. It is now named in dev, and only when
+  a binding was really skipped AND none ran — a press a handler heard, a chord
+  that did not match, and `ignoreInInput: false` all stay silent. The probe is
+  bumped inside the listener itself, so the warning can never disagree with what
+  was actually skipped.
+- **`ui.window.press` / `keyDown` / `keyUp`** give the window binding the same
+  address in `testUI` that `am trigger window press` already had.
+- **The same `t=` handle in two different components warned nowhere.** The
+  duplicate check kept its set per component, so a collision across components
+  surfaced only later, as a throw at use time. Explicit author-written handles
+  are now checked across the whole surface; generated ordinals stay
+  per-component, and one component rendered many times is still silent.
+- **A component addressed with an element action pointed at the wrong
+  question.** `ui.SendSol.click()`, where `t="SendSol"` is on a component, said
+  _"no element or component named "click""_ — literally true, and it reads as
+  "your handle is wrong" when the handle was right and its KIND was wrong. It
+  now says the handle is a COMPONENT, names the component, and suggests its
+  input and a clickable sibling. The action set is read off the handle itself,
+  so it cannot drift from the actions that exist.
+
+### A config key that looked live and was not
+
+**`memory.maxHeap` applied to `deno compile` only.** At runtime the ceiling was
+always the automatic 25%-of-RAM share, so the key could neither raise it nor
+quiet the warning — while putting `memory` at the top level of `deno.json`
+earned a SECOND warning whose advice, followed, threw. Three surfaces, three
+answers, and the right action in none of them.
+
+Now: `am start` launches with the declared ceiling, the heap warning measures
+against the declared number when there is one and names the key when the process
+did not get it, and the misplaced-key notice stops scolding a `memory.maxHeap`
+that is where it belongs. A declared ceiling a process DID get says nothing, and
+an app that declared nothing sees the warning unchanged to the byte. Where the
+key lives is now read in ONE place — the boot path, the launcher and the
+compiler each had their own copy, which is how they came to disagree.
+
+### A field report cannot become a tracked file
+
+`feedback/` was ignored from the start. `review/` was not, and nothing was
+looking: a report directory's contents could be committed, pushed and shipped in
+the package without anything going red. `deno task check:report-dirs` (in
+`check:ratchets`, so every release runs it) refuses both halves — nothing under
+either directory may be tracked, AND both must still be named in `.gitignore`,
+or the first check is one `git add` from being defeated. Both directories are in
+the publish excludes as well.
+
+Every fix in this release was mutation-checked: the fix reverted alone, its test
+watched to go red for the right reason, and restored.
+
 ## v1.0.7-beta — a packaged app with no open doors, a page that cannot leak into another's, and an app that cannot lose your last change (2026-09-21)
 
 > **The public surface is additive only** (`check:api` reports the additions
@@ -208,8 +437,8 @@ established by RUNNING the code rather than reading it.
   Prune-on-launch, keep-N-newest and keep-this-platform were each rejected in
   writing — every one of them deletes the runtime some other app on the box
   starts from.
-- **Every `<webview>` close lit the dev error badge, permanently** (wallet report §11).
-  Measured on Electron 44.4.1, not read: attaching a `<webview>` to a real
+- **Every `<webview>` close lit the dev error badge, permanently** (field report
+  §11). Measured on Electron 44.4.1, not read: attaching a `<webview>` to a real
   window and removing it throws `Uncaught Error: Invalid guestInstanceId: 2`
   from `node:electron/js2c/isolated_bundle:1:7012`, with no app frame in the
   stack, on every removal — the guest is already gone and the page cannot

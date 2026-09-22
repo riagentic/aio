@@ -400,9 +400,12 @@ for await (const chunk of renderToStream(<App />, req)) write(chunk);
 const head = collectHead(req); // this response's head, never another's
 ```
 
-Unnamed, `collectHead()` answers for the most recent top-level render — and if
-that render is a stream that overlapped another, it THROWS rather than hand one
-page's title, description and canonical URL to another.
+Unnamed, `collectHead()` answers for the most recently FINISHED top-level
+render, because you always ask after your own render has ended — a render that
+merely started after yours finished is never yours. If another render finished
+while yours had not been asked for yet, one answer would belong to two
+responses, and it THROWS rather than hand one page's title, description and
+canonical URL to another.
 
 ## page() — State-Based Routing
 

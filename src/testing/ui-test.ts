@@ -45,6 +45,13 @@ import {
 import type { AioUser, AuthFeatures } from "../protocol/protocol-types.ts";
 import { _setDocument, _unmount, mount } from "../air/aio-renderer.ts";
 import { _installRouterListeners } from "../air/router-core.ts";
+// THE DEV-ONLY CHUNK, statically. In a browser it is fetched on demand (a
+// production bundle does not carry it — see air/dev-hooks.ts); here it is a
+// plain import, so every audit and hint it installs is armed BEFORE the first
+// render rather than one microtask into it. Tests are the strictest
+// environment, never the most permissive: a harness that raced the load would
+// let a warning be green by arriving late.
+import "../browser/dev-diagnostics.ts";
 import {
   _resetContrastAudit,
   _setContrastCascadeProbe,
@@ -324,7 +331,14 @@ export type TestUI = {
   /** The window the component is mounted in (happy-dom, owned by this mount;
    *  `null` only when a caller-supplied `document` has no `defaultView`).
    *  `globalThis.window` / `document` / `location` / `history` resolve to the
-   *  same objects while the harness is up. */
+   *  same objects while the harness is up.
+   *
+   *  It also answers the three KEY actions, for a binding that belongs to no
+   *  element (`onGlobalKey`): `ui.window.press("Escape")`,
+   *  `ui.window.keyDown("ArrowLeft")`, `ui.window.keyUp("ArrowLeft")` — same
+   *  address as `am trigger window press`, same ordered queue as every other
+   *  action. Aiming a window-level key at a field instead is skipped by
+   *  `ignoreInInput` and warns. */
   // deno-lint-ignore no-explicit-any
   readonly window: any;
   /** The document the component is mounted in — `ui.document.activeElement`,
@@ -590,6 +604,60 @@ let _traceSource: (() => Record<string, unknown>) | null = null;
  *  mounts. Installed and cleared beside `_traceSource`. */
 let _missSurface: (() => UISurfaceNode) | null = null;
 
+/** How a test SPELLS one name on `ui` — dot form when it is an identifier,
+ *  bracket form otherwise. One decider, so every miss quotes a spelling that
+ *  can be pasted back into the test. */
+function uiSpelling(name: string): string {
+  return /^[A-Za-z_$][A-Za-z0-9_$]*$/.test(name)
+    ? `ui.${name}`
+    : `ui[${JSON.stringify(name)}]`;
+}
+
+/** Every LIVE element in a component's subtree, in tree order. */
+function liveSubtreeElements(node: UISurfaceNode): UIElementInfo[] {
+  const out: UIElementInfo[] = [];
+  const visit = (n: UISurfaceNode) => {
+    for (const e of n.elements) if (e._el) out.push(e);
+    n.children.forEach(visit);
+  };
+  visit(node);
+  return out;
+}
+
+/** The component instance that OWNS `node`, or null when `node` is the root. */
+function parentOf(
+  root: UISurfaceNode,
+  node: UISurfaceNode,
+): UISurfaceNode | null {
+  let found: UISurfaceNode | null = null;
+  const visit = (n: UISurfaceNode) => {
+    for (const c of n.children) {
+      if (c.path === node.path) found = n;
+      else visit(c);
+    }
+  };
+  visit(root);
+  return found;
+}
+
+/** Up to `n` element candidates, spelled and tagged — the ones that actually
+ *  HANDLE events first, since "which of these can I click" is the question
+ *  being answered. Ranking is read off the surface (`events`), never a
+ *  hand-kept action→event table that could drift from the renderer. */
+function elementSuggestions(
+  els: UIElementInfo[],
+  n: number,
+  article: string,
+): string[] {
+  const ranked = [
+    ...els.filter((e) => e.events.length > 0),
+    ...els.filter((e) => e.events.length === 0),
+  ];
+  return ranked.slice(0, n).map((e) =>
+    `${uiSpelling(e.name)} (${article} ${e.tag})`
+  );
+}
+
 /** How THIS harness reaches an element path: `ui.start` when the name is
  *  unique on the surface (the top-level hoist), else the path itself —
  *  `ui["App/Button#2:start"]`, which the top level also accepts. The am path
@@ -605,11 +673,7 @@ function harnessSpelling(
   const t = (me?._vnode as { props?: Record<string, unknown> } | undefined)
     ?.props?.t;
   const unique = hits.length === 1;
-  const spelled = unique
-    ? (/^[A-Za-z_$][A-Za-z0-9_$]*$/.test(name)
-      ? `ui.${name}`
-      : `ui[${JSON.stringify(name)}]`)
-    : `ui[${JSON.stringify(path)}]`;
+  const spelled = unique ? uiSpelling(name) : `ui[${JSON.stringify(path)}]`;
   return { spelled, tNamed: typeof t === "string" && t === name };
 }
 
@@ -2256,6 +2320,28 @@ async function _buildTestUI(
     };
   }
 
+  /** The element handle's ACTION names, READ OFF the handle itself rather than
+   *  hand-kept — add an action to `elementHandle` and this set has it, so the
+   *  "you called an element action on a component" diagnosis below can never go
+   *  stale against the real API. Methods only: the state getters
+   *  (`value`/`checked`/…) are properties, not `.foo()` calls.
+   *
+   *  Probed with a resolver that throws, and read through property DESCRIPTORS,
+   *  so building the probe never resolves an element. */
+  let _actionNames: ReadonlySet<string> | null = null;
+  function elementActionNames(): ReadonlySet<string> {
+    if (_actionNames) return _actionNames;
+    const probe = elementHandle(() => {
+      throw new Error("testUI: action-name probe — never resolved");
+    }) as unknown as object;
+    _actionNames = new Set(
+      Object.entries(Object.getOwnPropertyDescriptors(probe))
+        .filter(([, d]) => typeof d.value === "function")
+        .map(([k]) => k),
+    );
+    return _actionNames;
+  }
+
   /** Handle for a name that isn't on the surface YET — actions resolve it
    *  inside the queue (after prior actions ran, e.g. a click that opens a
    *  modal), so `ui.OpenButton.click(); ui.Modal.ConfirmButton.click()`
@@ -2307,6 +2393,58 @@ async function _buildTestUI(
             `ui.….<Component>2.${name} (ordinal, tree order)`,
           hoisted.map((e) => e.path),
           name,
+        );
+      }
+      // THE HANDLE WAS RIGHT AND ITS KIND WAS WRONG.
+      //
+      // `t="SendSol"` on a COMPONENT makes `ui.SendSol` a component handle, so
+      // `ui.SendSol.click()` looks "click" up as a CHILD NAME and misses. The
+      // generic listing below is literally accurate and aims at the wrong
+      // question — it reads as "your handle is wrong" when the handle was the
+      // one thing that was right. A field report calls this the most common
+      // way to lose ten minutes in testUI: always one INFERENCE short, never
+      // information short. The resolver already knows it landed on a component,
+      // that the name is a real element action, and what is inside and beside
+      // that component — so it says so.
+      //
+      // Only when nothing else explains the miss: a SHADOWED name has a better
+      // hint, and a name that lives elsewhere on the surface is a genuine
+      // find-it-over-there. A mistyped CHILD name is not an action name and
+      // keeps the message below, which is right about it.
+      if (
+        !shadowed && elsewhere.length === 0 && elementActionNames().has(name)
+      ) {
+        const addr = node.handle ?? node.component;
+        const own = liveSubtreeElements(node);
+        const inner = elementSuggestions(own, 2, "its");
+        let sibs: string[] = [];
+        try {
+          const parent = parentOf(currentSurface(), node);
+          if (parent) {
+            const mine = new Set(own.map((e) => e.path));
+            sibs = elementSuggestions(
+              liveSubtreeElements(parent).filter((e) => !mine.has(e.path)),
+              1,
+              "a",
+            );
+          }
+        } catch {
+          // aio-ok: nothing mounted — the miss is already being raised and the
+          // sibling hint is pure enrichment, never the reason for the throw.
+        }
+        fail(
+          `testUI: ${uiSpelling(addr)} is a COMPONENT${
+            node.handle && node.handle !== node.component
+              ? ` (${node.component})`
+              : ""
+          } at ${node.path}, not an element — components have no .${name}(). ` +
+            (inner.length > 0
+              ? `Did you mean ${inner.join(", or ")}?`
+              : `It renders no element you can act on — put a t handle on the node you mean.`) +
+            (sibs.length > 0
+              ? ` Or a sibling element such as ${sibs[0]}.`
+              : ""),
+          listNames(node),
         );
       }
       fail(
@@ -2685,6 +2823,56 @@ async function _buildTestUI(
     }
   };
 
+  // The mount's own window, with a NAME for the key that belongs to no
+  // element. `onGlobalKey` ("Escape closes the lightbox", "⌘K opens the
+  // palette") registers on the document, so nothing on the semantic surface
+  // owns it — and the obvious `ui.<field>.press("Escape")` is skipped by
+  // `ignoreInInput`, which is the trap `triggerPress` now warns about. The
+  // `am` tier has had the address since alpha71 (`am trigger window press`);
+  // this is the same address in-process, so the warning can name a fix that
+  // exists. ADDITIVE: the methods are defined ON the real window object, so
+  // `ui.window` keeps its identity and every DOM member it already had.
+  const uiWindow =
+    (ownedWindow ?? (doc as AnyDoc).defaultView ?? null) as AnyDoc;
+  const keyLabel = (key: string, mods?: KeyModifiers) =>
+    (["ctrlKey", "metaKey", "altKey", "shiftKey"] as const)
+      .filter((k) => mods?.[k])
+      .map((k) => k.replace("Key", "") + "+")
+      .join("") + key;
+  if (uiWindow) {
+    const winKey = (
+      action: "press" | "keyDown" | "keyUp",
+      caption: string,
+    ) =>
+    (key: string, mods?: KeyModifiers): Promise<void> =>
+      enqueue(async () => {
+        video?.before(null, `window · ${caption} ${keyLabel(key, mods)}`);
+        try {
+          // Resolve the document at ACT time, off the window itself: a
+          // caller-supplied window outlives this mount, and a stale document
+          // would dispatch into a detached tree that nothing listens to.
+          triggerAction(uiWindow.document ?? doc, action, key, mods);
+          await settle();
+        } finally {
+          video?.after();
+        }
+      });
+    for (
+      const [name, fn] of [
+        ["press", winKey("press", "press")],
+        ["keyDown", winKey("keyDown", "hold")],
+        ["keyUp", winKey("keyUp", "release")],
+      ] as const
+    ) {
+      Object.defineProperty(uiWindow, name, {
+        value: fn,
+        writable: true,
+        configurable: true,
+        enumerable: false, // a window is enumerated by test helpers; stay out
+      });
+    }
+  }
+
   const api = {
     surface: () => serializeSurface(currentSurface()),
     // The mount's OWN window and document — the same objects `window` and
@@ -2692,7 +2880,7 @@ async function _buildTestUI(
     // thing (dispatch a `resize`, read `location`, register a listener where
     // the component's one lives) reaches them here instead of re-creating a
     // happy-dom of its own (field report §4.1).
-    window: (ownedWindow ?? (doc as AnyDoc).defaultView ?? null) as AnyDoc,
+    window: uiWindow,
     document: doc as AnyDoc,
     // Unfiltered server-authoritative state — what a server route sees
     // via app.getState(), including `ui.exclude`d fields the client proxy hides.

@@ -196,7 +196,11 @@ memory" on a 32 GB box with 28 GB free.
   the flag to add.
 - Override per app with `"memory": { "maxHeap": "12GB" }` in deno.json (`"25%"`,
   `"512MB"`, a number of MB, or `"default"`). An explicit value is honoured even
-  above 25%; the boot line says so rather than clamping it.
+  above 25%; the boot line says so rather than clamping it. It reaches V8
+  through the LAUNCH: `am start` reads it and sizes the `deno run`, and a
+  `deno compile` build bakes it in. A bare `deno run src/app.ts` cannot apply it
+  — V8 froze the ceiling before the config was read — and the boot warning says
+  so by name, with the flag that would.
 - The boot line reports the ceiling this process actually has, against the RAM
   of the machine reading it — and says when the ceiling exceeds that RAM, which
   means V8 will grow past physical memory before it collects.

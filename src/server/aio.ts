@@ -74,6 +74,7 @@ import { createCellWorkerPool } from "./cell-worker-pool.ts";
 import { validateSchedules } from "../state/schedule.ts";
 import {
   currentHeapLimitBytes,
+  declaredMaxHeapOf,
   describeHeapPolicy,
   physicalMemoryBytes,
   reportHeapCeiling,
@@ -1588,6 +1589,12 @@ async function _runPhases<S, A, E>(
       // the warning back on every boot.
       stampPath: join(_dirs.data, ".heap-notice"),
       always: cli.verbose,
+      // `memory.maxHeap` from the app's OWN deno.json — the same place
+      // `build-compile.ts` reads it, entry-relative like `version` and
+      // `title`. It reaches V8 only through the launch, so a bare `deno run`
+      // is capped at the automatic share while the config file says 12 GB;
+      // this is the surface that tells the author so (see reportHeapCeiling).
+      declaredMaxHeap: declaredMaxHeapOf(appDenoJson()),
     });
     // The same numbers the warning uses, stated unconditionally: an app that
     // died of "out of memory" with the machine half empty is a support thread

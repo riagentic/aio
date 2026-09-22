@@ -194,11 +194,12 @@ methods: {
 
 For large datasets, move to SQLite. Increase V8 heap:
 `deno run --v8-flags=--max-old-space-size=16384 main.ts` — though `am start` and
-`run.sh` already size it at 25% of RAM (floor 4 GB) on the machine they start. A
-**compiled binary** cannot: its ceiling is fixed at build time, so it ships with
-V8's ~4 GB default unless the app declares `"memory": { "maxHeap":
-"12GB" }`.
-See [production](./production.md#v8-heap-limits).
+`run.sh` already size it at 25% of RAM (floor 4 GB) on the machine they start,
+or at the app's `memory.maxHeap` when it declares one. A **compiled binary**
+cannot: its ceiling is fixed at build time, so it ships with V8's ~4 GB default
+unless the app declares `"memory": { "maxHeap":
+"12GB" }`. See
+[production](./production.md#v8-heap-limits).
 
 ---
 

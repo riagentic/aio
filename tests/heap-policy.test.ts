@@ -5,6 +5,7 @@
 // free. An app was not limited by aio; it was limited by a default nobody
 // chose.
 import { assert, assertEquals, assertThrows } from "@std/assert";
+import { dropTempDir, tempDir } from "../src/testing/temp-dir.ts";
 import {
   compiledMaxHeapMB,
   describeHeapPolicy,
@@ -121,6 +122,15 @@ Deno.test("heap: `default` opts out, nonsense is refused", () => {
   // which is the worst possible moment.
   for (const bad of ["lots", "16 gigs", "-4GB", "%", "0"]) {
     assertThrows(() => parseMaxHeap(bad, 64 * GB), Error, "maxHeap");
+  }
+  // …and a value of the wrong SHAPE is refused with the same teaching, not
+  // with `s.trim is not a function` from three frames down.
+  for (const bad of [{}, [], true]) {
+    assertThrows(
+      () => parseMaxHeap(bad as unknown as string, 64 * GB),
+      Error,
+      "maxHeap",
+    );
   }
 });
 
@@ -290,4 +300,140 @@ Deno.test("heap: the FLOOR above a tiny machine's RAM is not a warning", () => {
     });
     assertEquals(said, []);
   })();
+});
+
+// ── `memory.maxHeap` that cannot reach this process ─────────────────────────
+// A field report: `memory.maxHeap: "12GB"` declared, 4 GB actually in effect,
+// and three surfaces giving three different answers — the build honours the
+// key, the top-level-deno.json hint calls it inert, and the heap warning never
+// mentioned it. The warning is the one place the author is already looking, so
+// it is the place that has to say the key did not arrive, and what does apply
+// it. Only when it IS declared and IS unmet: crying wolf here is the "nothing
+// can launch this app without a heap warning" report all over again.
+
+Deno.test("heap: a declared maxHeap this process did not get is SAID, with the fix", async () => {
+  const said: string[] = [];
+  // 16 GB box → the automatic share is the 4 GB FLOOR, which V8's own default
+  // already meets. Before, that returned silently and the declared 12 GB was
+  // invisible: the gap was only ever measured against the automatic share.
+  await reportHeapCeiling({ warn: (m) => said.push(m) }, {
+    limitBytes: () => Promise.resolve(4192 * 1024 * 1024),
+    totalBytes: () => 16 * GB,
+    declaredMaxHeap: "12GB",
+  });
+  assertEquals(said.length, 1, said.join(" | "));
+  const msg = said[0]!;
+  assert(msg.includes("memory.maxHeap"), `names the key: ${msg}`);
+  assert(msg.includes("12.0 GB"), `names the declared number: ${msg}`);
+  assert(msg.includes("4.1 GB"), `names what it actually got: ${msg}`);
+  assert(/did NOT get it/.test(msg), `states the relation: ${msg}`);
+  assert(msg.includes("am start"), `the runnable fix: ${msg}`);
+  assert(
+    msg.includes("--max-old-space-size=12288"),
+    `the by-hand fix, with the DECLARED number: ${msg}`,
+  );
+  assert(msg.includes("deno compile"), `where it does apply today: ${msg}`);
+});
+
+Deno.test("heap: a declaration REPLACES the automatic share as the yardstick", async () => {
+  // 64 GB box, V8's default ceiling, `maxHeap: "32GB"` declared. The automatic
+  // share (16 GB) is not the measure any more: the author overrode it, and
+  // telling them the machine "allows" 16 GB is the framework arguing with the
+  // only person who knows the workload. One yardstick, one answer.
+  const said: string[] = [];
+  await reportHeapCeiling({ warn: (m) => said.push(m) }, {
+    limitBytes: () => Promise.resolve(4192 * 1024 * 1024),
+    totalBytes: () => 64 * GB,
+    declaredMaxHeap: "32GB",
+  });
+  assertEquals(said.length, 1, said.join(" | "));
+  const msg = said[0]!;
+  assert(msg.includes("32.0 GB"), `the declared ceiling: ${msg}`);
+  assert(
+    !msg.includes("16.0 GB (25% of RAM)"),
+    `the share the author overrode must not be argued back: ${msg}`,
+  );
+  assert(msg.includes("--max-old-space-size=32768"), msg);
+});
+
+Deno.test("heap: NO declaration → the warning is unchanged, to the byte", async () => {
+  // The cry-wolf pin. An app that declared nothing must not gain a sentence
+  // about a key it never wrote.
+  const base: string[] = [];
+  await reportHeapCeiling({ warn: (m) => base.push(m) }, {
+    limitBytes: () => Promise.resolve(4192 * 1024 * 1024),
+    totalBytes: () => 64 * GB,
+  });
+  assertEquals(base.length, 1, base.join(" | "));
+  assert(!base[0]!.includes("did NOT get it"), base[0]);
+  // `undefined` (no key) and `"default"` (the explicit "leave V8 alone") are
+  // the same sentence as each other and as the no-deps call.
+  for (const declared of [undefined, "default", ""] as const) {
+    const said: string[] = [];
+    await reportHeapCeiling({ warn: (m) => said.push(m) }, {
+      limitBytes: () => Promise.resolve(4192 * 1024 * 1024),
+      totalBytes: () => 64 * GB,
+      declaredMaxHeap: declared,
+    });
+    assertEquals(said, base, `declared=${JSON.stringify(declared)}`);
+  }
+});
+
+Deno.test("heap: a declared maxHeap this process DID get says nothing", async () => {
+  // `am start` applied it. Repeating the number back is noise, and noise is
+  // how loud stops working.
+  const said: string[] = [];
+  const log = { warn: (m: string) => said.push(m) };
+  await reportHeapCeiling(log, {
+    limitBytes: () => Promise.resolve(12288 * 1024 * 1024),
+    totalBytes: () => 64 * GB,
+    declaredMaxHeap: "12GB",
+  });
+  // …and a declaration BELOW what this process already has is not a shortfall.
+  await reportHeapCeiling(log, {
+    limitBytes: () => Promise.resolve(16384 * 1024 * 1024),
+    totalBytes: () => 64 * GB,
+    declaredMaxHeap: "2GB",
+  });
+  assertEquals(said, []);
+});
+
+Deno.test("heap: a typo'd maxHeap is said out loud, and never crashes the boot", async () => {
+  // `parseMaxHeap` throws by design — but this reporter is observe-only and
+  // awaited on the boot path, so a config typo must not take the app down.
+  const said: string[] = [];
+  await reportHeapCeiling({ warn: (m) => said.push(m) }, {
+    limitBytes: () => Promise.resolve(4192 * 1024 * 1024),
+    totalBytes: () => 8 * GB,
+    declaredMaxHeap: "12 gigs",
+  });
+  assertEquals(said.length, 1, said.join(" | "));
+  assert(said[0]!.includes("maxHeap"), said[0]);
+  assert(said[0]!.includes("12 gigs"), said[0]);
+});
+
+Deno.test("heap: the stamp re-speaks when the declared ceiling changes", async () => {
+  // The stamp is keyed on the numbers, and the declared ceiling is now one of
+  // them: adding `maxHeap` to deno.json must make the warning news again.
+  const dir = await tempDir("aio-heap-stamp-");
+  try {
+    const stampPath = `${dir}/.heap-notice`;
+    const said: string[] = [];
+    const log = { warn: (m: string) => said.push(m) };
+    const run = (declaredMaxHeap?: string) =>
+      reportHeapCeiling(log, {
+        limitBytes: () => Promise.resolve(4192 * 1024 * 1024),
+        totalBytes: () => 64 * GB,
+        stampPath,
+        declaredMaxHeap,
+      });
+    await run();
+    await run(); // same numbers — said once per machine
+    assertEquals(said.length, 1, said.join(" | "));
+    await run("32GB"); // the app declared one: news
+    assertEquals(said.length, 2, said.join(" | "));
+    assert(said[1]!.includes("memory.maxHeap"), said[1]);
+  } finally {
+    await dropTempDir(dir);
+  }
 });

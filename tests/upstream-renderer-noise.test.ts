@@ -1,5 +1,5 @@
 // `Invalid guestInstanceId` — an upstream throw that lit aio's error badge
-// forever (wallet report §11, electron#53989).
+// forever (field report §11, electron#53989).
 //
 // MEASURED on Electron 44.4.1 (the version this aio ships), in a real window
 // with aio's own preferences and `will-attach-webview` hook, by attaching a

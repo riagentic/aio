@@ -1,5 +1,5 @@
 // Two field findings where the colour audit reported "could not look" as a
-// finding (wallet report §9, §12): a gradient fill it read as transparent, and a theme
+// finding (field report §9, §12): a gradient fill it read as transparent, and a theme
 // switch it measured mid-transition. Both must be skipped — and the audit must
 // stay loud about a real violation right beside them.
 import { assert, assertEquals } from "@std/assert";

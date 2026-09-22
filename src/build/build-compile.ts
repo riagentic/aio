@@ -16,6 +16,7 @@ import { BUILD_VERSION_ENV } from "../server/app-version.ts";
 import { DEFAULT_PORT_ENV } from "../server/aio-cli.ts";
 import {
   compiledMaxHeapMB,
+  declaredMaxHeapOf,
   physicalMemoryBytes,
 } from "../server/heap-policy.ts";
 import type { BuildConfig } from "./build-config.ts";
@@ -845,11 +846,18 @@ export async function v8FlagsArg(root: string): Promise<string[]> {
   return flags.length ? [`--v8-flags=${flags.join(",")}`] : [];
 }
 
-/** `memory.maxHeap` from deno.json, when the app states one. */
+/** `memory.maxHeap` from deno.json, when the app states one.
+ *
+ *  Reads it through `declaredMaxHeapOf`, which is THE reader — this used to be
+ *  a third private copy of "where the key lives", beside the boot path and the
+ *  launcher. Three readers of one key is the shape that let the key mean
+ *  different things in different places for a whole release line: the compiled
+ *  artifact honoured it, the server and `am start` did not, and nothing
+ *  disagreed out loud. The local copy also took `maxHeap` at any type, so a
+ *  `{ maxHeap: {} }` reached the parser as an object. */
 function declaredMaxHeap(root: string): string | number | undefined {
   try {
-    const cfg = readDenoJsonSync(root)?.config ?? {};
-    return (cfg as { memory?: { maxHeap?: string | number } })?.memory?.maxHeap;
+    return declaredMaxHeapOf(readDenoJsonSync(root)?.config ?? {});
   } catch {
     return undefined; // no deno.json — the rule's default applies
   }

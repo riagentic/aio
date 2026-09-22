@@ -94,7 +94,7 @@ Deno.test("journal: said once per action type; JSON-shaped and redacted payloads
 });
 
 Deno.test("journal: undefined that replays as the same value says nothing — a delete's record, a missing payload", async () => {
-  // wallet report §7: aio's own record of `delete s.optimistic[k]` and a no-argument
+  // field report §7: aio's own record of `delete s.optimistic[k]` and a no-argument
   // call were each reported as "rebuild a different state".
   const dir = await Deno.makeTempDir({ prefix: "aio-journal-lossy-" });
   try {
