@@ -27,12 +27,17 @@
 import {
   assert,
   assertEquals,
+  assertRejects,
   assertStringIncludes,
   assertThrows,
 } from "@std/assert";
 import { collectHead, h, useHead, useId } from "../src/air.ts";
 import { renderToStream } from "../src/air/ssr-stream.ts";
-import { renderToString } from "../src/air/vdom-ssr.ts";
+import {
+  _isSsrRendering,
+  _registerSsrCapture,
+  renderToString,
+} from "../src/air/vdom-ssr.ts";
 import { _resetHead } from "../src/air/head.ts";
 import { setDevMode } from "../src/air/aio-renderer.ts";
 import type { VNode } from "../src/air/vdom-types.ts";
@@ -305,4 +310,284 @@ Deno.test("SSR: a key that names no render says so instead of an empty head", as
   }
   assertEquals(quiet, [], "the correct call must be silent");
   _resetHead();
+});
+
+// ── a client that went away (found by the SSR soak) ─────────────────────
+//
+// A stream whose consumer RETURNED it — a closed tab — ends with nobody
+// left to ask for its head. It used to count like any other finished page:
+// as the neighbour that made the NEXT request's no-argument answer a refusal
+// (one closed tab, one 500 — in an app serving one request at a time), and
+// as the no-argument answer itself.
+
+const Titled = (p: { name: string }) => {
+  if (p.name !== "headless") useHead({ title: p.name });
+  return h("div", null, h("p", null, p.name), h("p", null, "more"));
+};
+async function drain(name: string, key?: object): Promise<void> {
+  for await (const _ of renderToStream(h(Titled, { name }) as VNode, key)) {
+    /* the whole body */
+  }
+}
+async function closeTab(name: string): Promise<void> {
+  const gone = renderToStream(h(Titled, { name }) as VNode);
+  await gone.next(); // its head is registered…
+  await gone.return(); // …and the client went away
+}
+function silently<T>(fn: () => Promise<T>): Promise<T> {
+  const orig = console.warn;
+  const said: string[] = [];
+  console.warn = (...a: unknown[]) => void said.push(a.join(" "));
+  return fn().finally(() => {
+    console.warn = orig;
+    assertEquals(said, [], "collectHead() said something");
+  });
+}
+
+// A closed tab's caller is gone, so once another request has set up its
+// render, the tab's head is nobody's: 1.0.9 handed it to whoever asked next —
+// a visitor who had left's title, inside another page.
+Deno.test("SSR: a closed tab's head is not the no-argument answer once another render is set up", async () => {
+  _resetHead();
+  await silently(async () => {
+    await drain("mine");
+    assertStringIncludes(collectHead(), "<title>mine</title>");
+    await closeTab("gone"); // aborted after mine was answered
+    const next = renderToStream(h(Titled, { name: "next" }) as VNode);
+    assertEquals(collectHead(), ""); // mine's caller again: was gone's title
+    for await (const _ of next) { /* the next request, streamed */ }
+    assertStringIncludes(collectHead(), "<title>next</title>"); // no refusal
+  });
+  _resetHead();
+});
+
+// With nothing set up since, the one who asks may be the code that stopped
+// reading its own stream — a `break` out of the loop. It gets that render's
+// head, exactly as in 1.0.9.
+Deno.test("SSR: breaking out of your own stream, then asking, answers as 1.0.9", async () => {
+  _resetHead();
+  await silently(async () => {
+    const gen = renderToStream(h(Titled, { name: "Mine" }) as VNode);
+    for await (const c of gen) if (c.includes("Mine")) break;
+    assertStringIncludes(collectHead(), "<title>Mine</title>");
+  });
+  _resetHead();
+});
+
+// Nor the page before it: that page's caller may be the one asking AGAIN, and
+// B's head in A's response is exactly the leak the refusal exists to stop.
+// (Found by a hunt: an earlier version answered with the last completed page,
+// here Bob's — 1.0.9 answered with the closed tab's empty head.)
+Deno.test("SSR: a closed tab never hands out the page before it", async () => {
+  _resetHead();
+  await silently(async () => {
+    await drain("Alice-private"); // A: finished, caller not asked yet
+    await drain("Bob-private"); // B: finished after A, superseded
+    await closeTab("headless"); // C: headless, client leaves
+    assertEquals(collectHead(), ""); // A's caller: never Bob's head
+  });
+  _resetHead();
+});
+
+// A closed tab next to the page after it is still 1.0.9's neighbour: its
+// caller could not be told from the next one's, so the next page's
+// no-argument head is REFUSED — loud, where any answer could be the wrong
+// visitor's. The key is exact.
+Deno.test("SSR: a closed tab still makes the next page's no-argument head refused", async () => {
+  _resetHead();
+  await silently(async () => {
+    await drain("before");
+    assertStringIncludes(collectHead(), "<title>before</title>");
+    await closeTab("gone");
+    const req = {};
+    await drain("next", req);
+    const err = assertThrows(() => collectHead(), Error);
+    assertStringIncludes((err as Error).message, "collectHead(req)");
+    assertStringIncludes(collectHead(req), "<title>next</title>");
+  });
+  _resetHead();
+});
+
+// ── what 1.0.9 answered or refused, unchanged ──────────────────────────
+//
+// Pinned from two independent reviews of an earlier, wider version of this
+// ledger, which refused or warned about each of these in apps that render one
+// request at a time. Same answers as 1.0.9, and not a word said.
+
+Deno.test("SSR: 1.0.9 answers — a head collected mid-render, then the next page", async () => {
+  _resetHead();
+  let mid = "";
+  const Probe = () => {
+    mid = collectHead();
+    return h("i", null, "x");
+  };
+  await silently(async () => {
+    for await (
+      const _ of renderToStream(
+        h("div", null, h(Titled, { name: "A" }), h(Probe, null)) as VNode,
+      )
+    ) { /**/ }
+    await drain("B");
+    assertStringIncludes(collectHead(), "<title>B</title>");
+    assertStringIncludes(collectHead(), "<title>B</title>");
+  });
+  assertStringIncludes(mid, "<title>A</title>");
+  _resetHead();
+});
+
+Deno.test("SSR: 1.0.9 answers — a fragment endpoint that never asks, then pages", async () => {
+  _resetHead();
+  await silently(async () => {
+    await drain("frag"); // uses useHead; its handler never asks
+    for (let i = 0; i < 3; i++) {
+      assertEquals(
+        renderToString(h(Titled, { name: `s${i}` }) as VNode),
+        `<div><p>s${i}</p><p>more</p></div>`,
+      );
+      assertStringIncludes(collectHead(), `<title>s${i}</title>`);
+      assertStringIncludes(collectHead(), `<title>s${i}</title>`); // twice
+    }
+    await drain("Q");
+    assertStringIncludes(collectHead(), "<title>Q</title>");
+    await drain("Q2");
+    assertStringIncludes(collectHead(), "<title>Q2</title>");
+  });
+  _resetHead();
+});
+
+Deno.test("SSR: 1.0.9 answers — pages asked twice behind unasked fragments", async () => {
+  _resetHead();
+  await silently(async () => {
+    await drain("headless");
+    await drain("P");
+    assertStringIncludes(collectHead(), "<title>P</title>");
+    assertStringIncludes(collectHead(), "<title>P</title>");
+    await drain("F");
+    const q = {};
+    await drain("headless", q);
+    assertEquals(collectHead(), "");
+    assertEquals(collectHead(q), "");
+  });
+  _resetHead();
+});
+
+Deno.test("SSR: 1.0.9 answers — an error handler collecting a thrown page's head", async () => {
+  _resetHead();
+  const Boom = () => {
+    throw new Error("boom");
+  };
+  await silently(async () => {
+    await drain("headless");
+    try {
+      for await (
+        const _ of renderToStream(
+          h("div", null, h(Titled, { name: "Y" }), h(Boom, null)) as VNode,
+        )
+      ) { /**/ }
+    } catch { /* the handler's catch… */ }
+    assertStringIncludes(collectHead(), "<title>Y</title>"); // …asks
+  });
+  _resetHead();
+});
+
+Deno.test("SSR: 1.0.9 refuses — a thrown page and the page after it; a keyed neighbour", async () => {
+  _resetHead();
+  const Boom = () => {
+    throw new Error("boom");
+  };
+  const a = renderToStream(
+    h("div", null, h(Titled, { name: "A" }), h(Boom, null)) as VNode,
+  );
+  const b = renderToStream(h(Titled, { name: "B" }) as VNode);
+  await a.next();
+  await b.next();
+  try {
+    for await (const _ of a) { /**/ }
+  } catch { /* A's handler has its own catch */ }
+  for await (const _ of b) { /**/ }
+  // B's caller, and then A's error handler: either could be asking.
+  assertThrows(() => collectHead(), Error);
+  assertThrows(() => collectHead(), Error);
+  _resetHead();
+  const k = {};
+  await drain("A");
+  await drain("K", k);
+  await drain("B");
+  assertStringIncludes(collectHead(k), "<title>K</title>");
+  assertThrows(() => collectHead(), Error); // A's caller
+  assertThrows(() => collectHead(), Error); // B's caller
+  _resetHead();
+});
+
+// ── renderToStream sets up at the CALL, and fails at the first pull ────
+//
+// The request's route, key and nesting are taken when the stream is created
+// (see the HTTP route test in air-ssr-soak.test.ts). What that set-up throws
+// must still surface where the old `async function*` surfaced it — from the
+// first `next()`, never from the call — or a handler that creates the body
+// inside one try and reads it in another sees the error move.
+
+Deno.test("SSR stream: a key that cannot key a render fails at the first pull, not at the call", async () => {
+  _resetHead();
+  // An earlier test in this file leaves a stream open on purpose (ghost).
+  const wasRendering = _isSsrRendering();
+  const gen = renderToStream(h("p", null, "x"), 42 as unknown as object);
+  assertEquals(typeof gen.next, "function"); // the call itself returned
+  await assertRejects(() => gen.next(), TypeError);
+  assertEquals(await gen.next(), { done: true, value: undefined });
+  assertEquals(_isSsrRendering(), wasRendering);
+  _resetHead();
+});
+
+Deno.test("SSR stream: a request snapshot that throws fails at the first pull, not at the call", async () => {
+  _resetHead();
+  const wasRendering = _isSsrRendering();
+  const id = Symbol("test.throwingCapture");
+  let armed = true;
+  _registerSsrCapture(id, () => {
+    if (armed) throw new Error("capture exploded");
+    return null;
+  });
+  try {
+    const gen = renderToStream(h("p", null, "x"));
+    armed = false; // the error was taken at the call, and is held
+    await assertRejects(() => gen.next(), Error, "capture exploded");
+    assertEquals(_isSsrRendering(), wasRendering);
+    // And the next stream, set up without the error, renders.
+    let out = "";
+    for await (const c of renderToStream(h("p", null, "y"))) out += c;
+    assertEquals(out, "<p>y</p>");
+  } finally {
+    armed = false;
+    _resetHead();
+  }
+});
+
+// The end-of-turn re-read of the request values can throw too (a capture that
+// fails on the second read). Held, and thrown from the first pull — never a
+// silent fall back to the call-time snapshot.
+Deno.test("SSR stream: a request value that throws when re-read fails the first pull", async () => {
+  _resetHead();
+  const id = Symbol("test.throwsOnReread");
+  let armed = false;
+  _registerSsrCapture(id, () => {
+    if (armed) throw new Error("re-read exploded");
+    return null;
+  });
+  try {
+    // Settled at the first pull, still in the call's turn.
+    const a = renderToStream(h("p", null, "a"));
+    armed = true;
+    await assertRejects(() => a.next(), Error, "re-read exploded");
+    // Settled by the end-of-turn microtask, then pulled later.
+    armed = false;
+    const b = renderToStream(h("p", null, "b"));
+    armed = true;
+    await Promise.resolve();
+    armed = false;
+    await assertRejects(() => b.next(), Error, "re-read exploded");
+  } finally {
+    armed = false;
+    _resetHead();
+  }
 });

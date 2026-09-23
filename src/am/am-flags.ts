@@ -44,6 +44,7 @@ export const GLOBAL_FLAGS: readonly string[] = [
   "--no-wait",
   "--port",
   "--print",
+  "--profile",
   "--quiet",
   "--stale",
   "--tables",

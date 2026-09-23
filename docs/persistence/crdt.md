@@ -303,15 +303,17 @@ cell — an effect, cron, `serverFn`, a server-side method call, an async method
 outcome — folds into the cell's sync snapshot (debounced 100ms, flushed on clean
 shutdown; a cell written faster than that still settles at least every 500ms). A
 SIGKILL inside that window loses the writes in it — up to 500ms of them — unless
-the app runs with `journal: true`: then each one is journalled at commit and
-replayed after the op-log restore, by a watermark the fold writes in its own
-transaction, so a restart never rewinds a write the server confirmed and never
-applies one twice. The same fold is **pushed to every connected client** at its
-position, so an open tab takes the write into its confirmed state — without
-that, its next own change rebased the view onto a state that had never heard of
-the write, and the write vanished from the screen while the server kept it. The
-push costs what the write changed (a patch the client checks against a digest of
-the server's state), not the whole cell.
+the app runs with `journal: true`: then each one is journalled at commit, as the
+cell's state after it at its position in the op-log. Boot puts that state back
+between the cell's own ops, by a watermark the fold writes in its own
+transaction. A restart never rewinds a write the server confirmed, and never
+applies one twice. A `listensTo` reaction of a sync cell is journalled the same
+way (see [how persistence works](how-it-works.md)). The same fold is **pushed to
+every connected client** at its position, so an open tab takes the write into
+its confirmed state — without that, its next own change rebased the view onto a
+state that had never heard of the write, and the write vanished from the screen
+while the server kept it. The push costs what the write changed (a patch the
+client checks against a digest of the server's state), not the whole cell.
 
 Use `sync: false` wherever an optimistic preview would be a lie — an auth cell,
 a payment, a ledger balance the user must not see move until the server agrees.

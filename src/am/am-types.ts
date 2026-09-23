@@ -38,8 +38,9 @@ export type GlobalFlags = {
    *
    *  Not a new isolation mechanism — a NAME for the one aio already has.
    *  `AIO_APPS_DIR` relocates the data root and the lock/socket dir scopes
-   *  with it, so this resolves to `AIO_APPS_DIR=<root>/instances/<name>` for
-   *  the `am` process AND the child it starts. */
+   *  with it, so this resolves to `AIO_APPS_DIR=~/.aio-instances/<name>` for
+   *  the `am` process AND the child it starts. It composes with `--profile`:
+   *  `--instance=x --profile=dev` → `~/.aio-instances/x/<appId>-dev`. */
   instance?: string;
   wait?: number;
   /** `--no-wait` — return as soon as the child is spawned, without waiting for
@@ -90,6 +91,11 @@ export type GlobalFlags = {
    *  the default one's. `AIO_APPS_DIR` is the env-level equivalent (it
    *  relocates every app's home AND the lock dir). */
   home?: string;
+  /** `--profile=<name|path>` — the app's PROFILE: a second data home beside
+   *  its own (`dev` → `~/.<appId>-dev`, lock key `<appId>@dev`), or a folder
+   *  given by path. `--home` is the path-only alias. `am start` forwards it
+   *  to the child as `--profile=`; every other verb targets that instance. */
+  profile?: string;
   /** `--long` — the columns a listing keeps behind a flag because nobody
    *  compares them across rows (paths, sockets, data homes). The default
    *  listing is the one you scan; `--long` is the one you grep. */

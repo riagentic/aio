@@ -223,8 +223,10 @@ recovered instead of lost.
   instead of waiting for the timer. Watch `onError` for it: a journal that
   refuses every append means every action pays a full persist cycle.
 
-- Replay **re-reduces** the actions: state transitions only, effects discarded.
-  No I/O is repeated, and no request is re-sent.
+- Replay **re-reduces** a call line: state transitions only, effects discarded.
+  No I/O is repeated, and no request is re-sent. A **state line** is applied as
+  data instead (see below), and a call line whose effect a later state line
+  already holds is skipped, not reduced again.
 - The watermark that says "the snapshot already includes up to seq N" is a row
   in `state.db`, written **inside the same transaction as the snapshot**. A
   crash can therefore never make the two disagree, in either direction.
@@ -237,10 +239,86 @@ recovered instead of lost.
 - **Sync cells** (`sync: true`) are journalled too. A client's op is durable
   before it is acked (the op-log), but a server-side write — a trojan/CLI call,
   an effect, cron, an async method's outcome — is folded into the cell's CRDT
-  snapshot up to 500 ms after it is acked. Each such write is journalled, and
-  each sync cell keeps its **own** watermark, written inside the fold's
-  transaction; boot replays the writes past it **after** the op-log restore. A
-  write the fold already holds is never applied twice.
+  snapshot up to 500 ms after it is acked. Each such write is journalled as its
+  call and a **state line** (the cell's state after it, at its position in the
+  op-log). Each sync cell keeps its **own** watermark, written inside the fold's
+  transaction. Boot puts each state line back **between** the cell's own ops,
+  where it happened, then folds the ops after it. A write the fold already holds
+  is never applied twice.
+- **What `listensTo` reactions wrote is journalled as data.** A reaction that
+  lands on another save clock than the action that caused it (a sync op's
+  listeners, a sync cell listening to a store-persisted call) has no line of its
+  own to replay: its op is in the op-log, and replay never re-runs an op's
+  listeners. So the reacting cell's state is journalled as a state line: the
+  first line of a chain is whole, and each one after it is a delta against the
+  one before. For a sync cell, the first line after a fold is a delta against
+  the snapshot that fold wrote. A line written while a fold is in flight also
+  carries its delta against that fold's snapshot, so the chain resolves
+  whichever way a crash falls. A chain that cannot be resolved is refused by
+  name, never guessed.
+- **A line lives until every cell it writes holds it.** A line that writes named
+  cells (`only`) is compacted and replayed by the lowest of their watermarks. A
+  sync cell's lines go by that cell's watermark, and everything else goes by the
+  store's.
+- **Every line carries a format stamp** (`fmt`), and the op-log carries one too
+  (a `sync_meta` row named `__aio_reactions_fmt`, in `state.db`). Data that
+  1.0.9 or earlier last ran is recognised by the missing stamp, even after a
+  clean stop left the journal empty. Those builds recorded no reactions, and
+  nothing in their data proves which reactions a save holds, so none is
+  re-derived: each cell's own ops fold into it, and every listener that may lack
+  reactions is named once (see the 1.0.9 → 1.0.10 upgrade guide).
+- **A sync op on a listened action leaves three records.** Its intent is
+  journalled after its `server_ts` is issued and before its row is inserted
+  (`__aioSyncIntent`). Its reduce writes every reaction line and its commit
+  (`__aioSyncApplied`) as ONE journal line (`__aioBatch`), so a kill that tears
+  the write loses all of them or none. At boot:
+  - an op whose commit is readable is covered: the journal's reaction lines
+    restore its reactions;
+  - an op with an intent and no commit that is its cell's last row was caught
+    between its persist and its commit. It is reduced again, whole, with the
+    live server's decision: a refusal (`validate`, a guard, a throw) deletes it
+    from the op-log and nothing acks it. A reaction is applied only where the
+    listener's record certainly lacks it: a store-persisted listener whose store
+    has not saved since the intent, a sync listener whose last fold predates the
+    op. Every other one is held and named with its count;
+  - any other op has no record the boot can read — written by a run that kept
+    none (1.0.9, or this version with the journal off), or its journal lines
+    were lost (deleted, restored from a backup, cut short). Nothing is
+    re-applied, and each listener is named once ("cannot tell whether …") —
+    unless this version issued the op and then stopped cleanly: a stop whose
+    final store save and every sync cell's fold succeeded records the ops it
+    issued, and those are not named (their reactions are in those records). With
+    persistence off nothing is saved, so no stop is recorded.
+
+  The rules and what they rest on are the block above `SYNC_INTENT_TYPE` in
+  `src/server/journal.ts`. This needs the journal and the SQLite store, which is
+  where reactions are journalled at all.
+- **Turning the journal off never strands it.** A run with `journal: false` that
+  finds a journal a crash left first resolves the sync ops that crash caught in
+  flight exactly as a journal-on boot would (a refused one is removed; an
+  accepted one is reduced once, with its reactions), then moves the file aside
+  (`journal.unreplayed-<time>`) and warns with the path and the record count —
+  the next run with the journal on cannot roll newer data back with it. A sync
+  cell's journalled state older than its saved snapshot is never applied either
+  (the snapshot is newer).
+- **A store saved without the journal is noticed.** With `journal: true`, SQL
+  triggers on the store's rows (its `aio_kv` snapshot rows and bound tables)
+  flag any write this build's saves did not make — an older build run with the
+  journal off, a tool writing the file, or the app's own SQL on a bound table
+  (write a bound table through state; a SQL-only table is not watched). The next
+  boot then moves the journal aside, loudly, instead of replaying it over the
+  newer store. The triggers cost one small read per written row; a run with the
+  journal off drops them.
+- **A refused sync op has no reactions.** When a sync op's cell refuses it
+  (`validate`, a machine guard, a disabled cell), no `listensTo` listener runs
+  for it, live or at boot: the op is deleted from the op-log, so a reaction
+  would have survived only until the next restart. A refused call's listeners
+  still run, and replay repeats the same decision (docs/state/composition.md).
+- **A quarantined sync cell's lines are kept, not replayed.** Its state is its
+  last snapshot, and a line from before the crash cannot be applied to it. Boot
+  names the lines (their seq range), keeps them on disk, and replays them once
+  the cell's version is fixed. Its writes after that are not journalled, and
+  each one is answered `unsaved`.
 - **Worker cells** (`worker: true`) are journalled as the patch batches their
   worker commits (`__aioWorkerPatch`, attributed to the cell as
   `<cell>:__worker` in `am timeline`). A cell with any `redactActions` pattern

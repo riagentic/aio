@@ -46,8 +46,15 @@ const isPlainObject = (x: unknown): x is Record<string, unknown> => {
   return proto === Object.prototype || proto === null;
 };
 
-/** A value as JSON carries it inside an array: `undefined` becomes `null`. */
-const inArray = (v: unknown): unknown => v === undefined ? null : v;
+/** A value JSON does not carry: `undefined`, a function, a symbol. Dropped
+ *  from an object, `null` in an array — exactly what `JSON.stringify` (and
+ *  `stateDigest`) make of it. A patch that carried one as a value lost it on
+ *  the wire or in the journal, and the op no longer applied (review rev8). */
+const absent = (v: unknown): boolean =>
+  v === undefined || typeof v === "function" || typeof v === "symbol";
+
+/** A value as JSON carries it inside an array: an absent one becomes `null`. */
+const inArray = (v: unknown): unknown => absent(v) ? null : v;
 
 /**
  * The operations that turn `base` into `next`, by value.
@@ -55,7 +62,8 @@ const inArray = (v: unknown): unknown => v === undefined ? null : v;
  * Objects are walked key by key and arrays index by index, so a changed field
  * costs the field, and an appended element costs the element. Anything else
  * (a primitive, a class instance) is a leaf, replaced when it is not the same
- * value. `undefined` object values count as absent (JSON drops them).
+ * value. `undefined`, function and symbol values count as absent, as JSON
+ * has them: dropped from an object, `null` in an array.
  *
  * @internal Engine/framework wiring — not public API.
  */
@@ -72,17 +80,19 @@ function walk(
   out: StatePatchOp[],
 ): void {
   if (a === b) return;
+  // Both `null` in an array's JSON (an object never walks into one).
+  if (absent(a) && absent(b)) return;
   if (isPlainObject(a) && isPlainObject(b)) {
     for (const k of Object.keys(b)) {
       const bv = b[k];
-      if (bv === undefined) continue;
+      if (absent(bv)) continue;
       const av = Object.hasOwn(a, k) ? a[k] : undefined;
-      if (av === undefined) out.push({ p: [...path, k], v: bv });
+      if (absent(av)) out.push({ p: [...path, k], v: bv });
       else walk(av, bv, [...path, k], out);
     }
     for (const k of Object.keys(a)) {
-      if (a[k] === undefined) continue;
-      if (!Object.hasOwn(b, k) || b[k] === undefined) {
+      if (absent(a[k])) continue;
+      if (!Object.hasOwn(b, k) || absent(b[k])) {
         out.push({ p: [...path, k], d: 1 });
       }
     }

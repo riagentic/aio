@@ -30,6 +30,7 @@ import { writeClientLog } from "./client-log.ts";
 import { CLIENT_REPLY_TIMEOUT_MS, clientReplyTimeoutError } from "./uds.ts";
 import { log } from "../diagnostics/logger-api.ts";
 import { INFLIGHT } from "../state/dispatch.ts";
+import { inServerOrigin } from "../state/call-origin.ts";
 import { parseTTCommand } from "../diagnostics/time-travel.ts";
 import { originVerdict, rawStateControlAllowed } from "./server-auth.ts";
 import type { ClientLogEntry } from "../air/dom-inspector-types.ts";
@@ -182,7 +183,11 @@ function retryAfter(windowStart: number | undefined): number {
  *  server-side callers. */
 export { _isFrameworkInternalActionType } from "../protocol/action-gate.ts";
 import { _isFrameworkInternalActionType } from "../protocol/action-gate.ts";
-import { _dispatchRefusal, _dispatchShort } from "./action-ack.ts";
+import {
+  _dispatchRefusal,
+  _dispatchShort,
+  _dispatchUnsaved,
+} from "./action-ack.ts";
 import { guardHookResult } from "./aio-dispatch.ts";
 
 /** Strip client-set trusted provenance off a network action, loudly, and
@@ -209,6 +214,13 @@ import { guardHookResult } from "./aio-dispatch.ts";
  *    the op-log, so afterAction skips the durability fold for sync cells. A
  *    forged value makes the server treat a write that is durable NOWHERE as
  *    durable — it silently vanishes on restart.
+ *  - `_syncTs` — the op-log position the sync handler stamps on the op it
+ *    applied; journal:true records it as how far a cell's live state holds
+ *    its op-log (`SyncReaction.at`). A forged high value made every later
+ *    reaction line claim ops the state never held, and boot seeding skipped
+ *    them — acked ops lost for good once compaction dropped the log.
+ *  - `_syncId` — the op's id, beside `_syncTs`: journal:true names the op
+ *    it commits by both (journal.ts `SYNC_APPLIED_TYPE`).
  *  - `payload._origin` — the async-batcher sets it SERVER-side to the
  *    originating method name; the cell `access` gate discriminates on it. A
  *    caller could forge `payload:{_origin:"read"}` on a `cell:delete` action
@@ -218,7 +230,9 @@ import { guardHookResult } from "./aio-dispatch.ts";
  *  app hooks: clients tag their own dispatches `_source:"UI"` and deleting it
  *  outright would leave hooks unable to tell client input from server work.
  *  Anything OTHER than "UI" from the wire is warned about — a forged trusted
- *  field is an attack signal (or a badly stale client), never a shrug. */
+ *  field is an attack signal (or a badly stale client), never a shrug.
+ *
+ *  @decider */
 export function sanitizeClientAction(
   action: Record<string, unknown>,
   via: "ws" | "uds" | "trojan",
@@ -229,9 +243,13 @@ export function sanitizeClientAction(
     forged.push("_source");
   }
   if (action._syncOp !== undefined) forged.push("_syncOp");
+  if (action._syncTs !== undefined) forged.push("_syncTs");
+  if (action._syncId !== undefined) forged.push("_syncId");
   if (action[INFLIGHT] !== undefined) forged.push(INFLIGHT);
   delete action._user;
   delete action._syncOp;
+  delete action._syncTs;
+  delete action._syncId;
   delete action[INFLIGHT];
   const pl = action.payload;
   if (pl && typeof pl === "object") {
@@ -653,8 +671,14 @@ export function createWsManager(deps: WsDeps): WsManager {
         "ws",
         `hook ${name} failed: ${e instanceof Error ? e.message : String(e)}`,
       );
+    // Server origin: a connection hook is the APP's server code, exactly like
+    // `onInit` or a schedule. In production this is a pass-through (no scope
+    // is installed); under `testUI`, with the server in the same isolate, an
+    // `onConnect` calling a cell whose `access` refuses the network — the
+    // canonical presence pattern, `relay.setOnline(user.id, true)` — was
+    // refused as "an anonymous UI" (tests/access-conn-hook-origin.test.tsx).
     try {
-      guardHookResult(hook(user), failed);
+      guardHookResult(inServerOrigin(() => hook(user)), failed);
     } catch (e) {
       failed(e);
     }
@@ -2142,6 +2166,8 @@ export function createWsManager(deps: WsDeps): WsManager {
     // `short`: the call ran with arguments missing — the trojan's sentence,
     // stamped by dispatchNetwork, so the three doors agree (action-ack.ts).
     const short = _dispatchShort(action);
+    // `unsaved`: it ran, and what it wrote is not on disk (action-ack.ts).
+    const unsaved = _dispatchUnsaved(action);
     try {
       if (socket.readyState === WebSocket.OPEN) {
         socket.send(
@@ -2150,6 +2176,7 @@ export function createWsManager(deps: WsDeps): WsManager {
             ok: true,
             value: safe,
             ...(short !== undefined ? { short } : {}),
+            ...(unsaved !== undefined ? { unsaved } : {}),
           }),
         );
       }

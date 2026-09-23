@@ -881,7 +881,9 @@ export function inertAllowlistEntries(
  *  origin check reads", which has to be true.
  *
  *  Every documented spelling, in one place: `"*"`, a bare hostname, a
- *  `host:port`, or a full origin. */
+ *  `host:port`, or a full origin.
+ *
+ *  @decider */
 export function allowlistAdmits(
   entries: readonly string[] | undefined,
   what: { hostname: string; hostPort?: string; origin?: string },

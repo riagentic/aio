@@ -10,6 +10,7 @@ import { assertEquals, assertStringIncludes } from "@std/assert";
 import { join } from "@std/path";
 import { stopCommandFor } from "../src/am/am-cmd-process.ts";
 import { homedir } from "../src/server/paths.ts";
+import { dropTempDir, tempDir } from "../src/testing/temp-dir.ts";
 
 const DEFAULT_HOME = "/home/u/.notes";
 
@@ -61,7 +62,7 @@ Deno.test("stopWith: an AIO_APPS_DIR scope carries the variable", () => {
   );
 });
 
-Deno.test("stopWith: a second data home is addressed by --home", () => {
+Deno.test("stopWith: a second data home (not a profile) is addressed by --home", () => {
   assertEquals(
     stopCommandFor({ appId: "notes", home: "/data/notes-b" }, {
       defaultHome: DEFAULT_HOME,
@@ -70,8 +71,25 @@ Deno.test("stopWith: a second data home is addressed by --home", () => {
   );
 });
 
+Deno.test("stopWith: a profile is addressed by its NAME", () => {
+  // Recorded in the lock…
+  assertEquals(
+    stopCommandFor({ appId: "notes", home: "/x/notes-dev", profile: "dev" }, {
+      defaultHome: DEFAULT_HOME,
+    }),
+    "am stop --app=notes --profile=dev",
+  );
+  // …or derived from the home, for a lock that does not record it.
+  assertEquals(
+    stopCommandFor({ appId: "notes", home: `${DEFAULT_HOME}-dev` }, {
+      defaultHome: DEFAULT_HOME,
+    }),
+    "am stop --app=notes --profile=dev",
+  );
+});
+
 Deno.test("am --instance with a different AIO_APPS_DIR says it was ignored", async () => {
-  const apps = await Deno.makeTempDir({ prefix: "am-inst-ignored-" });
+  const apps = await tempDir("am-inst-ignored-");
   try {
     const out = await new Deno.Command(Deno.execPath(), {
       args: [
@@ -99,13 +117,13 @@ Deno.test("am --instance with a different AIO_APPS_DIR says it was ignored", asy
     // Only a warning: stdout is still the command's one JSON document.
     JSON.parse(new TextDecoder().decode(out.stdout));
   } finally {
-    await Deno.remove(apps, { recursive: true });
+    await dropTempDir(apps);
   }
 });
 
 Deno.test("am instances --json: stopWith, as printed, names the scope it was listed in", async () => {
   const { writeLock } = await import("../src/server/single-instance-lock.ts");
-  const apps = await Deno.makeTempDir({ prefix: "am-inst-scope-" });
+  const apps = await tempDir("am-inst-scope-");
   const alive = new Deno.Command("sleep", {
     args: ["60"],
     stdout: "null",
@@ -160,6 +178,6 @@ Deno.test("am instances --json: stopWith, as printed, names the scope it was lis
     else Deno.env.set("AIO_APPS_DIR", prev);
     alive.kill("SIGKILL");
     await alive.status;
-    await Deno.remove(apps, { recursive: true }).catch(() => {});
+    await dropTempDir(apps);
   }
 });

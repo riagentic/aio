@@ -94,7 +94,9 @@ export interface RouteOptions {
  *  prefix on the pattern at boot, and whatever matched first at request time.
  *
  *  Now both ask this. At boot it refuses a pattern inside the namespace (loud,
- *  as before); at dispatch it keeps a wildcard from capturing it. */
+ *  as before); at dispatch it keeps a wildcard from capturing it.
+ *
+ *  @decider */
 export function isReservedRoutePath(pathname: string): boolean {
   return pathname === "/ws" || pathname.startsWith("/__aio");
 }

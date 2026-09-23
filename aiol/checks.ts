@@ -4287,6 +4287,18 @@ export const checkLiveHazard: Checker = (ctx) => {
     // Only the pinned-read mode has this hazard at all.
     if (!/\btransaction\s*:/.test(literal)) continue;
     if (/\btransaction\s*:\s*false\b/.test(literal)) continue;
+    // `conflict: "warn"` commits through a conflict — the very fix this
+    // finding offers. Flagging a cell that already took it is a false alarm.
+    // The KEY is found in the masked literal (so a comment that merely
+    // mentions it cannot count); its VALUE is read off the raw source, because
+    // `codeText` blanks string bodies. The mask is length-preserving, so one
+    // offset addresses both copies.
+    const raw = cell.file.content.slice(span[0], span[1]);
+    if (
+      [...literal.matchAll(/\bconflict\s*:\s*(?=["'`])/g)].some((c) =>
+        /^(["'`])warn\1/.test(raw.slice(c.index + c[0].length))
+      )
+    ) continue;
 
     // Walk each async method body inside the literal.
     const header = /\basync\s+([A-Za-z_$][\w$]*)\s*\(\s*_?s\b[^)]*\)\s*\{/g;

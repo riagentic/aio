@@ -33,14 +33,18 @@ import {
   _ssrRenderNew,
   _ssrRenderOf,
   _ssrRenderStart,
+  type SsrRender,
 } from "./ssr-render.ts";
 import {
   _fallbackHtml,
+  _inSsrCall,
   _regionHtml,
   _renderPropsHtml as _renderProps,
   _ssrComponent,
+  _ssrRootEpoch,
   _ssrRootScope,
   _ssrScoped,
+  _ssrStreamSettler,
   _ssrTextareaText,
   type SsrContexts,
   type SsrNodes,
@@ -197,26 +201,82 @@ function _regionSync(
  * Omitted, nothing changes: the render is still its own, and `collectHead()`
  * answers for the most recent one.
  */
-export async function* renderToStream(
+export function renderToStream(
   vnode: VNode | string | number | null,
   key?: object,
 ): AsyncGenerator<string, void, unknown> {
-  const render = _ssrRenderNew("stream");
+  // The ROUTE is taken NOW, before the first pull, while the handler that
+  // called this is still the one running. As an `async function*` it waited
+  // for the first `next()` — and a handler that awaited anything before
+  // handing the body over (a session read, a log line) let the next request's
+  // `routePath.set()` win: measured, 200 of 200 overlapping pairs served the
+  // other visitor's page, keyed head or not.
+  //
+  // Only the route moved. Whether the stream is NESTED in an enclosing page,
+  // and the key it answers to, are still settled at the first pull, as in
+  // 1.0.9: a stream created inside a server component and read after that
+  // page ended is its own render (its own `useId` sequence, its own keyed
+  // head) exactly as before. A call made inside a component call takes no
+  // snapshot at all — it can only be the enclosing page's or, read later, a
+  // render of its own that reads the route at its first pull, as 1.0.9 did.
+  //
+  // Caller-invisible otherwise: whatever the eager part throws (a route
+  // snapshot that throws) is thrown from the FIRST PULL, exactly where the
+  // generator function threw it — never at the call.
+  try {
+    if (_inSsrCall()) return _renderStream(vnode, key, null);
+    const render = _ssrRenderNew("stream");
+    const scope = _ssrRootScope(render);
+    const settle = _ssrStreamSettler(scope, _ssrRootEpoch(), new Error());
+    return _renderStream(vnode, key, { render, settle });
+  } catch (e) {
+    return _failedStream(e);
+  }
+}
+
+/** A stream whose set-up threw: the error, at the first pull. */
+// deno-lint-ignore require-yield
+async function* _failedStream(
+  e: unknown,
+): AsyncGenerator<string, void, unknown> {
+  throw e;
+}
+
+/** The body of {@linkcode renderToStream}: runs from the first pull on.
+ *  `early` is the top-level set-up taken at the call; null for a call made
+ *  inside a component call, which is settled here exactly as 1.0.9 did. */
+async function* _renderStream(
+  vnode: VNode | string | number | null,
+  key: object | undefined,
+  early: { render: SsrRender; settle: (pull: boolean) => SsrContexts } | null,
+): AsyncGenerator<string, void, unknown> {
+  // Pulled from inside a server component call, a stream is part of the
+  // enclosing page (1.0.9's rule, decided here and nowhere else).
+  const nested = _inSsrCall();
+  const render = early && !nested ? early.render : _ssrRenderNew("stream");
   if (key) _ssrRenderBindKey(key, render);
-  const scope = _ssrRootScope(render);
-  // A stream nested inside a server component call is part of the enclosing
-  // page, so it inherits that render instead of opening one of its own.
+  // The request values this page renders with: the call's, plus any write in
+  // the call's own synchronous turn (1.0.9's create-then-set) — never later.
+  const scope = early && !nested ? early.settle(true) : _ssrRootScope(render);
   const isTopLevel = _ssrRenderOf(scope) === render;
   if (isTopLevel) _ssrRenderStart(render);
   // SAY that a server render is in progress, for the whole stream. Every hook
   // that asks `_isSsrRendering()` took the client branch here, because only
   // `renderToString` had ever set the flag — see `_enterSsr`.
   _enterSsr();
+  // RETURNED by its consumer (the client went away) is the one way to reach
+  // `finally` without finishing or throwing — see `_ssrRenderFinish` for why
+  // the head cares.
+  let returned = true;
   try {
     yield* _stream(vnode, scope);
+    returned = false;
+  } catch (e) {
+    returned = false;
+    throw e;
   } finally {
     _exitSsr();
-    if (isTopLevel) _ssrRenderFinish(render);
+    if (isTopLevel) _ssrRenderFinish(render, returned);
   }
 }
 
@@ -318,12 +378,76 @@ async function* _stream(
     return 1;
   }
 
-  // Fragment
+  // Fragment — streamed, holding back only until it is known to be non-empty.
+  // Stream a Fragment's children, holding chunks back only until the region
+  // is known to hold a node — then everything held is released and the rest
+  // streams as it is rendered. Returns the region's node count (always 1: its
+  // content or its anchor, see `_regionHtml`).
+  //
+  // It used to buffer the WHOLE region, because an empty Fragment must emit
+  // its comment anchor (AIO-195 parity) and emptiness is only certain at the
+  // end. But a Provider renders a Fragment, so a page under a root Provider —
+  // the ordinary way to give an app its context — was computed in ONE pull:
+  // `renderToStream` streamed nothing at all, in silence, and two requests
+  // never interleaved. Measured by the SSR soak, whose first page shape had a
+  // root Provider and could not see a shared `<select>` stack in 40 rounds.
+  //
+  // What makes early release safe: every writer path that yields NON-EMPTY
+  // markup counts at least one node for it (an element, a text, a `<!---->`
+  // slot, a fallback), so the first non-empty chunk proves the region is not
+  // empty. A child that yields only `""` (an empty text is still one node) is
+  // settled by its returned count instead.
+  //
+  // Written here, not in a helper generator: a `yield* helper()` is one more
+  // async level that every chunk of the region passes through — measured,
+  // a Fragment then cost ~1.3x an element per nesting level.
   if (vnode.tag === Fragment) {
-    // Buffered, not streamed child-by-child: an empty Fragment must emit its
-    // comment anchor (AIO-195 parity), which is only knowable once every child
-    // has produced nothing.
-    yield* _yieldRegion(await _bufferRegion(vnode, scope));
+    const held: string[] = [];
+    let live = false;
+    let nodes = 0;
+    for (const child of vnode.children) {
+      if (live) {
+        yield* _stream(child, scope);
+        continue;
+      }
+      const gen = _stream(child, scope);
+      let done = false;
+      try {
+        for (;;) {
+          const r = await gen.next();
+          if (r.done) {
+            nodes += r.value;
+            done = true;
+            break;
+          }
+          held.push(r.value);
+          if (r.value !== "") {
+            live = true;
+            yield* _drainHeld(held);
+            break;
+          }
+        }
+        // Live mid-child: DELEGATE the rest of it. A hand-written
+        // next()/yield loop costs an extra await per chunk per enclosing
+        // Fragment, and a Fragment's first child is on that path for its whole
+        // length. `yield*` also closes the child itself when the consumer
+        // returns.
+        if (!done) {
+          nodes += yield* gen;
+          done = true;
+        }
+      } finally {
+        // Returned while the held chunks were being released (the client went
+        // away): close the child too, so its own `finally` blocks run — its
+        // `<select>` scope among them.
+        if (!done) await gen.return(0);
+      }
+      if (!live && nodes > 0) {
+        live = true;
+        yield* _drainHeld(held);
+      }
+    }
+    if (!live) yield _regionHtml("", 0);
     return 1;
   }
 
@@ -384,6 +508,15 @@ async function* _stream(
   }
   yield `</${tag}>`;
   return 1;
+}
+
+/** Yield what a region held back, and empty it. Module-level on purpose: a
+ *  generator function created per region is a new closure and prototype per
+ *  Fragment — measured on the 10k-node Provider page, ~3% slower and no heap
+ *  difference; not worth it for nothing. */
+function* _drainHeld(held: string[]): Generator<string, void, unknown> {
+  for (const c of held) yield c;
+  held.length = 0;
 }
 
 /** Yield a buffered region — its chunks, or the anchor when it holds no node. */

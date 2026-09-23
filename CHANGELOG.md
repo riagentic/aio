@@ -1,5 +1,114 @@
 # Changelog
 
+## v1.0.10-beta — a lock two instances cannot share, a crash that cannot count twice, and a streamed page that keeps its own route (2026-09-23)
+
+> **The public surface is additive only** — optional `LockData.maintenance`
+> (`op`, `since`, `partial`) and `LockData.startEpoch`, `aio.run({ profiles })`
+> and the `--profile` flag, optional `unsaved` / `short` on the ack, and
+> `renderToStream`'s reviewed modifier change (same type). No removals, no
+> changed signatures. One behavior change to what listeners see, for sync ops
+> only; everything else a 1.0.9 app observes is unchanged. See
+> [what you may notice](docs/upgrade/from-1.0.9-beta-to-1.0.10-beta.md).
+
+This release is the 1.0.10 blueprint (hosts lane, persist-decider gate, SSR
+soak, sync properties, `am` exit-code sweep, `@decider` wiring) plus seven
+bug-hunt rounds and a verification pass over every fix those rounds made.
+
+### Profiles
+
+- **`--profile=<name>`: several copies of one app.** A home beside the app's own
+  (`~/.<appId>-<name>`), keyed `<appId>@<name>` — its own lock, socket, Windows
+  pipe and Electron profile. On every `am` verb, on the app itself (dev,
+  packaged binary, AppImage, Electron) and as `AIO_PROFILE`;
+  `am start myapp@dev` is the short form, `am restart` replays it.
+- **`--profile=<path>` / `--home=<dir>`** name an exact folder, keyed
+  `<appId>@<hash8(path)>`; `am start --home` now starts an instance there.
+  Conflicting values are refused.
+- **A home knows its owner** (`data/meta.json`): a profile never shares a
+  database with an app whose name derives the same folder.
+- **`aio.run({ profiles: false })`** refuses every form at boot; an app that
+  declares its own `--profile` / `--home` keeps it.
+- **Two fixes**: an `appDir` app under `--instance` / `AIO_APPS_DIR` could open
+  the default instance's `state.db` under a second lock (two writers); an
+  `--instance` Electron window shared the default Chromium profile. A home is
+  now OS-locked (`<home>/.aio-instance.lock`), so no two lock scopes can open
+  one `state.db`.
+- `am remove --data` lists profile homes (`profileHomes`) and never removes
+  them; an `appDir` named `<default home>-<name>` now keys as `<appId>@<name>`.
+
+### Single-instance lock
+
+- **Exclusive, compare-before-write.** Publish by link/rename (0600, never
+  half-written); every removal and every `am` write compares against the owner
+  it judged (pid + start identity) under a per-lock OS mutex. A restarted
+  instance's fresh lock can no longer be deleted or overwritten, which could put
+  two instances on one `state.db`.
+- **macOS start identity is UTC epoch seconds** (`startEpoch`); the old `ps`
+  text depended on the reader's time zone and locale.
+- **Lock dirs are pruned file by file**, never recursively; a bound socket keeps
+  its dir; torn locks naming no live pid are swept after 10 minutes; a long-path
+  socket fallback keeps a per-instance hash.
+
+### `am`
+
+- **`am backup` / `am restore` hold the app's lock** (`status: "maintenance"`),
+  copy to a staging name, swap atomically, exit 130/143 on a signal (a second
+  signal abandons the file in flight), and a killed one is named by whatever
+  finds its lock next.
+- **Seven exit-code bugs**: failures that exited 0 now exit 1 (`am check`,
+  `link`/`pin`/`fix --aio`, `installed`, verbs against a booting app).
+- **Messages vs data**: what `am` composes is sanitized (control, bidi,
+  zero-width, non-aio SGR); what you asked to see (`state`, `logs`, `eval`, …)
+  is byte-exact when piped and only loses cursor/title/link escapes on a
+  terminal.
+- `am create` undoes a half-done scaffold; `am pin` moves link and pin together;
+  the version store self-heals and never runs a repo-wide worktree prune.
+
+### Persistence, journal and sync
+
+- **`persist: "none"` is never restored** and older builds' slices are securely
+  deleted (`secure_delete` + `VACUUM` + WAL truncate); the checkpoint is
+  filtered too. One decider owns the persist rule (a CI gate enforces it).
+- **Acks wait for durability on every door**; an unsaved write says `unsaved`,
+  and the browser warns.
+- **Crash recovery cannot count a sync op's reactions twice.** Each listened
+  sync op journals an intent and a single-line commit carrying its reactions;
+  the one op a crash can catch mid-way is re-reduced once, and every doubt is
+  named. Data last run by 1.0.9 re-derives nothing and names each listener to
+  check.
+- **A refused sync op no longer runs its `listensTo` listeners** (1.0.9 ran
+  them, then lost the reaction at the next restart). Refused calls still run
+  them, as in 1.0.9.
+
+### SSR
+
+- **A streamed page takes its route at the `renderToStream()` call** (1.0.9
+  could render another request's route under overlap), with call-site warnings
+  for the patterns that now render differently.
+- A closed tab's head is not handed to the next no-argument `collectHead()`; a
+  Fragment/Provider root streams (first byte ~1 ms vs ~18 ms).
+
+### CLI client and aiol
+
+- **`connectCli` sends its token as `Authorization: Bearer`**, not `?token=` on
+  the WS upgrade and the health probe, and never prints it in a "cannot reach"
+  line (a runtime that cannot set a header falls back to the query, redacted in
+  logs).
+- **aiol's live-hazard check** no longer flags a cell that already declares
+  `transaction: { conflict: "warn" }`.
+- **A crashed Electron window exits the app 1** (after a graceful shutdown),
+  with an ERROR naming the signal/code; a normal close still exits 0.
+- **`onConnect` / `onDisconnect` run as server origin**, like `onInit` or a
+  schedule. Under `testUI` a hook that calls an `access`-gated method (the
+  presence pattern `relay.setOnline(user.id, true)`) was refused as "an
+  anonymous UI". Production was not affected.
+
+### Gates and tests
+
+- New lanes `test:hosts`, `test:ssr-soak`, `test:sync`, gate
+  `check:persist-decider`, `@decider` pins; test shards get a private runtime
+  dir; `src/diagnostics/code-mask.ts` reads `return /re/` as a regex.
+
 ## v1.0.9-beta — a CLI that cannot claim success after a failed removal, a Mute whose pressed is a boolean, and Conscrypt measured (2026-09-22)
 
 > **The public surface is additive only** — `pressed` / `expanded` (and a richer

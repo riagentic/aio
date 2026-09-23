@@ -25,11 +25,11 @@ import { writeAppMeta } from "../src/server/app-dirs.ts";
 
 /** Run a command with stdout captured and Deno.exit neutralised — these are CLI
  *  entry points, so "it exited 1 with this message" IS the behaviour. */
-function run(
-  fn: (args: string[], flags: Record<string, unknown>) => void,
+async function run(
+  fn: (args: string[], flags: Record<string, unknown>) => void | Promise<void>,
   args: string[],
   flags: Record<string, unknown>,
-): { out: string; exited: number | null } {
+): Promise<{ out: string; exited: number | null }> {
   const chunks: string[] = [];
   const origLog = console.log;
   const origError = console.error;
@@ -43,7 +43,7 @@ function run(
     throw new Error("__exit__");
   };
   try {
-    fn(args, flags);
+    await fn(args, flags);
   } catch (e) {
     if (!(e instanceof Error) || e.message !== "__exit__") throw e;
   } finally {
@@ -93,7 +93,7 @@ Deno.test("am data: lists the three tiers and names the backup unit", async () =
     seedApp("dtest", home);
     // `am` emits JSON whenever stdout isn't a tty — which is every test run, so
     // the machine shape is what the command produces here…
-    const { out, exited } = run(cmdData, [], { app: "dtest" });
+    const { out, exited } = await run(cmdData, [], { app: "dtest" });
     assertEquals(exited, null);
     const info = JSON.parse(out) as Parameters<typeof renderData>[0];
     assertEquals(info.appId, "dtest");
@@ -120,7 +120,7 @@ Deno.test("am backup: copies every file, keeps modes, refuses to overwrite", asy
   try {
     seedApp("btest", home);
     const dest = join(home, "archive");
-    const first = run(cmdBackup, [dest], { app: "btest" });
+    const first = await run(cmdBackup, [dest], { app: "btest" });
     assertEquals(first.exited, null, first.out);
     assertEquals(Deno.readTextFileSync(join(dest, "state.db")), "STATE");
     assertEquals(Deno.readTextFileSync(join(dest, "auth.db")), "AUTH");
@@ -136,7 +136,7 @@ Deno.test("am backup: copies every file, keeps modes, refuses to overwrite", asy
     );
 
     // Second run at the same destination must refuse rather than merge.
-    const again = run(cmdBackup, [dest], { app: "btest" });
+    const again = await run(cmdBackup, [dest], { app: "btest" });
     assertEquals(again.exited, 1);
     assertStringIncludes(again.out, "already exists");
     assertEquals(Deno.readTextFileSync(join(dest, "state.db")), "STATE");
@@ -154,7 +154,7 @@ Deno.test("am restore: refuses another app's archive, keeps replaced data", asyn
     const other = seedApp("other-app", home);
 
     // Wrong app: meta.json says "other-app", target is "rtest" → refuse.
-    const wrong = run(cmdRestore, [other.data], { app: "rtest" });
+    const wrong = await run(cmdRestore, [other.data], { app: "rtest" });
     assertEquals(wrong.exited, 1);
     assertStringIncludes(wrong.out, "belongs to");
     assertStringIncludes(wrong.out, "other-app");
@@ -166,11 +166,11 @@ Deno.test("am restore: refuses another app's archive, keeps replaced data", asyn
 
     // A real archive of the SAME app restores, and the replaced data is kept.
     const archive = join(home, "rtest-archive");
-    const backup = run(cmdBackup, [archive], { app: "rtest" });
+    const backup = await run(cmdBackup, [archive], { app: "rtest" });
     assertEquals(backup.exited, null, backup.out);
     Deno.writeTextFileSync(join(archive, "state.db"), "RESTORED");
 
-    const ok = run(cmdRestore, [archive], { app: "rtest" });
+    const ok = await run(cmdRestore, [archive], { app: "rtest" });
     assertEquals(ok.exited, null, ok.out);
     const d = appDirs("rtest", join(home, "rtest"));
     assertEquals(Deno.readTextFileSync(d.stateDb), "RESTORED");
@@ -187,11 +187,13 @@ Deno.test("am restore: needs an argument and a real directory", async () => {
   const home = await Deno.makeTempDir({ prefix: "am-restore-args-" });
   pin(home);
   try {
-    const none = run(cmdRestore, [], { app: "xtest" });
+    const none = await run(cmdRestore, [], { app: "xtest" });
     assertEquals(none.exited, 1);
     assertStringIncludes(none.out, "usage: am restore");
 
-    const missing = run(cmdRestore, [join(home, "nope")], { app: "xtest" });
+    const missing = await run(cmdRestore, [join(home, "nope")], {
+      app: "xtest",
+    });
     assertEquals(missing.exited, 1);
     assertStringIncludes(missing.out, "no backup directory");
   } finally {
@@ -204,7 +206,7 @@ Deno.test("am backup: says so when the app never ran", async () => {
   const home = await Deno.makeTempDir({ prefix: "am-backup-empty-" });
   pin(home);
   try {
-    const r = run(cmdBackup, [join(home, "out")], { app: "ghost" });
+    const r = await run(cmdBackup, [join(home, "out")], { app: "ghost" });
     assertEquals(r.exited, 1);
     assertStringIncludes(r.out, "ever run?");
   } finally {
@@ -230,13 +232,13 @@ Deno.test("am backup/restore: refuse while the app is running", async () => {
       JSON.stringify({ appId, pid: Deno.pid, port: 65123 }),
     );
 
-    const blocked = run(cmdBackup, [join(home, "out")], { app: appId });
+    const blocked = await run(cmdBackup, [join(home, "out")], { app: appId });
     assertEquals(blocked.exited, 1);
     assertStringIncludes(blocked.out, "is running");
     assertStringIncludes(blocked.out, "am stop");
 
     // --force is the documented escape hatch, and it must actually copy.
-    const forced = run(cmdBackup, [join(home, "out"), "--force"], {
+    const forced = await run(cmdBackup, [join(home, "out"), "--force"], {
       app: appId,
     });
     assertEquals(forced.exited, null, forced.out);
@@ -247,7 +249,7 @@ Deno.test("am backup/restore: refuse while the app is running", async () => {
     );
 
     // Restore has NO escape hatch — there is no safe way to do it live.
-    const noRestore = run(cmdRestore, [join(home, "out"), "--force"], {
+    const noRestore = await run(cmdRestore, [join(home, "out"), "--force"], {
       app: appId,
     });
     assertEquals(noRestore.exited, 1);
@@ -264,7 +266,7 @@ Deno.test("am backup: refuses a destination inside data/ (the copy would recurse
   pin(home);
   try {
     const d = seedApp("intest", home);
-    const inside = run(cmdBackup, [join(d.data, "backups", "b1")], {
+    const inside = await run(cmdBackup, [join(d.data, "backups", "b1")], {
       app: "intest",
     });
     assertEquals(inside.exited, 1);
@@ -289,11 +291,11 @@ Deno.test("am restore: refuses a source overlapping data/ (the move-aside would 
     // src INSIDE data/…
     const insideSrc = join(d.data, "old-copy");
     Deno.mkdirSync(insideSrc, { recursive: true });
-    const a = run(cmdRestore, [insideSrc], { app: "ovtest" });
+    const a = await run(cmdRestore, [insideSrc], { app: "ovtest" });
     assertEquals(a.exited, 1);
     assertStringIncludes(a.out, "overlaps");
     // …and data/'s PARENT as src (data/ inside src).
-    const b = run(cmdRestore, [join(home, "ovtest")], { app: "ovtest" });
+    const b = await run(cmdRestore, [join(home, "ovtest")], { app: "ovtest" });
     assertEquals(b.exited, 1);
     assertStringIncludes(b.out, "overlaps");
     assertEquals(Deno.readTextFileSync(d.stateDb), "STATE", "untouched");
@@ -309,16 +311,18 @@ Deno.test("am restore: a corrupt meta.json refuses (the wrong-app check is blind
   try {
     seedApp("ctest", home);
     const archive = join(home, "ctest-archive");
-    const backup = run(cmdBackup, [archive], { app: "ctest" });
+    const backup = await run(cmdBackup, [archive], { app: "ctest" });
     assertEquals(backup.exited, null, backup.out);
     // A live --force backup can tear meta.json mid-write — simulate the tear.
     Deno.writeTextFileSync(join(archive, "meta.json"), '{"appId": "ct');
 
-    const blind = run(cmdRestore, [archive], { app: "ctest" });
+    const blind = await run(cmdRestore, [archive], { app: "ctest" });
     assertEquals(blind.exited, 1);
     assertStringIncludes(blind.out, "cannot be parsed");
 
-    const forced = run(cmdRestore, [archive, "--force"], { app: "ctest" });
+    const forced = await run(cmdRestore, [archive, "--force"], {
+      app: "ctest",
+    });
     assertEquals(forced.exited, null, forced.out);
   } finally {
     unpin();
@@ -341,7 +345,7 @@ Deno.test("am restore: refuses a directory that is not a backup", async () => {
     Deno.mkdirSync(notAnArchive, { recursive: true });
     Deno.writeTextFileSync(join(notAnArchive, "notes.txt"), "hello");
 
-    const r = run(cmdRestore, [notAnArchive], { app: "ntest" });
+    const r = await run(cmdRestore, [notAnArchive], { app: "ntest" });
     assertEquals(r.exited, 1, r.out);
     assertStringIncludes(r.out, "is not an aio backup");
     // The live data is where it was — nothing moved aside, nothing emptied.
@@ -354,7 +358,9 @@ Deno.test("am restore: refuses a directory that is not a backup", async () => {
       "a refused restore must not have moved anything",
     );
     // --force is for "the wrong archive", not for "no archive".
-    const forced = run(cmdRestore, [notAnArchive, "--force"], { app: "ntest" });
+    const forced = await run(cmdRestore, [notAnArchive, "--force"], {
+      app: "ntest",
+    });
     assertEquals(forced.exited, 1);
     assertEquals(Deno.readTextFileSync(d.stateDb), "STATE");
 
@@ -363,7 +369,7 @@ Deno.test("am restore: refuses a directory that is not a backup", async () => {
     const handMade = join(home, "handmade");
     Deno.mkdirSync(handMade, { recursive: true });
     Deno.writeTextFileSync(join(handMade, "state.db"), "OLDER");
-    const ok = run(cmdRestore, [handMade], { app: "ntest" });
+    const ok = await run(cmdRestore, [handMade], { app: "ntest" });
     assertEquals(ok.exited, null, ok.out);
     assertEquals(Deno.readTextFileSync(d.stateDb), "OLDER");
   } finally {
@@ -384,7 +390,7 @@ Deno.test("am backup: the default destination is not the user's checkout", async
   try {
     seedApp("dfl", home);
     Deno.chdir(checkout);
-    const r = run(cmdBackup, [], { app: "dfl" });
+    const r = await run(cmdBackup, [], { app: "dfl" });
     assertEquals(r.exited, null, r.out);
     const dest = JSON.parse(r.out).dest as string;
     assertEquals(

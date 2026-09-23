@@ -74,6 +74,9 @@ export type FindElectronOpts = {
   unpackEmbedded?: (log: Log) => Promise<string>;
   /** The dev-only `deno install` step (`autoInstallElectron`). */
   denoInstall?: (log: Log) => Promise<boolean>;
+  /** Aborted when the app starts shutting down: an installer still running
+   *  is killed (its whole process group) instead of outliving the app. */
+  signal?: AbortSignal;
 };
 
 /** Resolves an Electron binary — $ELECTRON_PATH > packaged dist > node_modules
@@ -114,7 +117,18 @@ export async function findElectronBin(
     ? "node_modules\\.bin\\electron.cmd"
     : "node_modules/.bin/electron";
   const compiled = opts.compiled ?? isCompiled();
-  const denoInstall = opts.denoInstall ?? ((l: Log) => autoInstallElectron(l));
+  const denoInstall = opts.denoInstall ??
+    ((l: Log) =>
+      autoInstallElectron(
+        l,
+        opts.signal
+          ? (v) => runInstaller(electronInstallArgs(v), undefined, opts.signal)
+          : undefined,
+        undefined,
+        undefined,
+        undefined,
+        opts.signal,
+      ));
   // A compiled binary never takes it: started from inside a dev tree it used
   // to run THAT tree's Electron instead of the one it was built with (review
   // pass, 2026-09-18). node_modules is a dev-time thing.
@@ -156,6 +170,8 @@ export async function findElectronBin(
   if (!compiled && await denoInstall(log)) {
     if (await electronBinReady(electronBin)) return electronBin;
   }
+  // Stopping: no 100 MB fetch for a window nobody will see.
+  if (opts.signal?.aborted) return null;
 
   const version = (await bakedElectronVersion(opts.distDir)) ??
     DEFAULT_ELECTRON_VERSION;
@@ -444,21 +460,7 @@ export async function autoInstallElectron(
     error: (m: string) => void;
   },
   run: (version: string) => Promise<{ success: boolean }> = (v: string) =>
-    new Deno.Command(Deno.execPath(), {
-      // PINNED to the framework's one version, not bare `npm:electron`.
-      // Bare resolves to whatever is latest at INSTALL time, so a dev tree
-      // could run one Electron while the build's floor is another — the exact
-      // drift `tests/electron-version-consistency.test.ts` now gates. The pin
-      // lives in this folder (`electron-runtime-fetch.ts`), so no boundary is
-      // crossed to read it.
-      args: [
-        "install",
-        "--allow-scripts=npm:electron",
-        `npm:electron@${v}`,
-      ],
-      stdout: "inherit",
-      stderr: "inherit",
-    }).output(),
+    runInstaller(electronInstallArgs(v)),
   // "Is the runtime actually there?" — the ONLY question whose answer this
   // function may return. It used to return `run().success`, i.e. whether the
   // installer EXITED ZERO, and that is the defect: `deno install` exits zero
@@ -473,7 +475,10 @@ export async function autoInstallElectron(
   /** Where the app's config lives — the file `deno install` REWRITES, read
    *  before and after so the rewrite is reported rather than silent. */
   root = ".",
+  /** Aborted when the app starts shutting down — see `runInstaller`. */
+  signal?: AbortSignal,
 ): Promise<boolean> {
+  if (signal?.aborted) return false;
   (log.info ?? console.log)(
     `electron: not installed — auto-installing (deno install ` +
       `--allow-scripts=npm:electron npm:electron@${version})… ` +
@@ -510,6 +515,7 @@ export async function autoInstallElectron(
     // deno load it. This is the step that makes `--target=electron` work on a
     // machine that has never seen Electron.
     for (const pkg of await electronPkgDirs()) {
+      if (signal?.aborted) return false;
       try {
         await Deno.stat(`${pkg}/install.js`);
       } catch {
@@ -518,18 +524,171 @@ export async function autoInstallElectron(
       (log.info ?? console.log)(
         `electron: the lifecycle script did not run — invoking ${pkg}/install.js directly`,
       );
-      const r = await new Deno.Command(Deno.execPath(), {
-        args: ["run", "-A", "--unstable-detect-cjs", "install.js"],
-        cwd: pkg,
-        stdout: "inherit",
-        stderr: "inherit",
-      }).output();
+      const r = await runInstaller(
+        ["run", "-A", "--unstable-detect-cjs", "install.js"],
+        pkg,
+        signal,
+      );
       if (r.success && await isInstalled()) return true;
     }
     return await isInstalled();
   } catch {
     return false;
   }
+}
+
+/** `deno install` of the ONE pinned Electron. PINNED to the framework's
+ *  version, not bare `npm:electron`: bare resolves to whatever is latest at
+ *  INSTALL time, so a dev tree could run one Electron while the build's floor
+ *  is another — the drift `tests/electron-version-consistency.test.ts` gates.
+ *  The pin lives in this folder (`electron-runtime-fetch.ts`), so no boundary
+ *  is crossed to read it. */
+function electronInstallArgs(v: string): string[] {
+  return ["install", "--allow-scripts=npm:electron", `npm:electron@${v}`];
+}
+
+/** How an installer started with an abort signal is ended — as a whole
+ *  TREE, because `install.js` (and whatever `deno install`'s lifecycle step
+ *  spawns) is a grandchild, and killing the direct child alone orphans it:
+ *  - POSIX: the child leads its own process group (`detached`) → signal the
+ *    group;
+ *  - Windows: there are no process groups to signal, and ending a process
+ *    never ends its children → `taskkill /T /F /PID <pid>` (tree, forced).
+ *  Pure — pinned by its test, since Windows cannot run here.
+ *  @internal exported for its test only. */
+export function installerKillPlan(
+  os: typeof Deno.build.os,
+  pid: number,
+):
+  | { kind: "group"; pgid: number }
+  | { kind: "tree"; cmd: string; args: string[] } {
+  return os === "windows"
+    ? { kind: "tree", cmd: "taskkill", args: ["/T", "/F", "/PID", String(pid)] }
+    : { kind: "group", pgid: pid };
+}
+
+/** End one installer tree per its plan. Synchronous: it also runs from
+ *  `unload`, where nothing async completes. */
+function killInstallerTree(
+  pid: number,
+  plan: ReturnType<typeof installerKillPlan>,
+): void {
+  try {
+    if (plan.kind === "group") {
+      Deno.kill(-plan.pgid, "SIGTERM");
+      return;
+    }
+    const r = new Deno.Command(plan.cmd, {
+      args: plan.args,
+      stdin: "null",
+      stdout: "null",
+      stderr: "null",
+    }).outputSync();
+    // taskkill missing or refused: at least the direct child goes.
+    if (!r.success) Deno.kill(pid, "SIGKILL");
+  } catch { /* aio-ok: the installer already exited — nothing to kill */ }
+}
+
+/** Installers started with a signal and still running → how to end each.
+ *  Killed on ANY process exit. */
+const _installerTrees = new Map<
+  number,
+  ReturnType<typeof installerKillPlan>
+>();
+let _unloadArmed = false;
+function killInstallerGroups(): void {
+  for (const [pid, plan] of _installerTrees) killInstallerTree(pid, plan);
+  _installerTrees.clear();
+}
+
+/** Run a `deno` installer step, killable by `signal`.
+ *
+ *  The dev launcher installs Electron DURING boot, and a SIGTERM there used to
+ *  leave the installer running: the app exited, `deno install` and the
+ *  `install.js` it spawns kept downloading 100 MB as orphans. With a signal the
+ *  step is killed as a whole TREE on abort ({@linkcode installerKillPlan}: its
+ *  own process group on POSIX, `taskkill /T` on Windows) — `install.js` is a
+ *  grandchild, so killing the direct child alone would still orphan it.
+ *  Without a signal (`deno task install:electron`, a build) it is an ordinary
+ *  foreground child, exactly as before.
+ *
+ *  On POSIX its own session also means a closed terminal's SIGHUP no longer
+ *  reaches it, so the tree is killed on every other way out too — on every
+ *  OS: SIGHUP is a stop for an Electron app (`aio-lifecycle.ts`, which aborts
+ *  `signal`), and the exits that skip the abort are covered by listeners
+ *  armed below: `unload` for `Deno.exit` and a normal end — but NOT for an
+ *  uncaught error or an unhandled rejection, which on Deno 2.9 end the
+ *  process without `unload` (measured), hence the `error` /
+ *  `unhandledrejection` listeners. Those never `preventDefault()` (the
+ *  process still dies as it would have) and stand down when an earlier
+ *  listener — an app's crash handler — already prevented it, because then
+ *  the process lives on and so may its install.
+ *  @internal exported for its test only. */
+export async function runInstaller(
+  args: string[],
+  cwd?: string,
+  signal?: AbortSignal,
+): Promise<{ success: boolean }> {
+  if (signal?.aborted) return { success: false };
+  const tracked = !!signal;
+  const group = tracked && Deno.build.os !== "windows";
+  const child = new Deno.Command(Deno.execPath(), {
+    args,
+    cwd,
+    stdin: tracked ? "null" : "inherit",
+    stdout: "inherit",
+    stderr: "inherit",
+    detached: group,
+  }).spawn();
+  const plan = installerKillPlan(Deno.build.os, child.pid);
+  if (tracked) {
+    _installerTrees.set(child.pid, plan);
+    if (!_unloadArmed) {
+      _unloadArmed = true;
+      globalThis.addEventListener("unload", killInstallerGroups);
+      const onFatal = (e: Event) => {
+        if (!e.defaultPrevented) killInstallerGroups();
+      };
+      globalThis.addEventListener("error", onFatal);
+      globalThis.addEventListener("unhandledrejection", onFatal);
+    }
+  }
+  const kill = () => killInstallerTree(child.pid, plan);
+  signal?.addEventListener("abort", kill, { once: true });
+  try {
+    return await child.status;
+  } finally {
+    _installerTrees.delete(child.pid);
+    signal?.removeEventListener("abort", kill);
+  }
+}
+
+/** How many of the window's last stderr lines a crash report quotes. */
+const STDERR_TAIL_LINES = 8;
+
+/** Per launched window: its last stderr lines (GPU-probe noise excluded) and
+ *  when the stream ended. Read by {@linkcode electronStderrTail}. */
+const _stderrTails = new WeakMap<
+  Deno.ChildProcess,
+  { lines: string[]; done: Promise<void> }
+>();
+
+/** The last stderr lines of a window this module launched — what a crash
+ *  report quotes ("Authorization required", a Chromium FATAL). Waits up to
+ *  `waitMs` for the stream to end, since the exit status can resolve before
+ *  the pipe is drained. Empty for a process not launched here. */
+export async function electronStderrTail(
+  proc: Deno.ChildProcess,
+  waitMs = 500,
+): Promise<string[]> {
+  const t = _stderrTails.get(proc);
+  if (!t) return [];
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  await Promise.race([
+    t.done,
+    new Promise<void>((r) => timer = setTimeout(r, waitMs)),
+  ]).finally(() => clearTimeout(timer));
+  return [...t.lines];
 }
 
 /** Route the Electron child's stderr: renderer lines the shell tagged go to
@@ -540,11 +699,21 @@ export async function autoInstallElectron(
 function forwardStderr(proc: Deno.ChildProcess): void {
   let dropped = 0;
   let reported = false;
+  const tail: string[] = [];
+  let finished!: () => void;
+  _stderrTails.set(proc, {
+    lines: tail,
+    done: new Promise<void>((r) => finished = r),
+  });
   void (async () => {
     const enc = new TextEncoder();
     let carry = "";
     const route = async (line: string) => {
       const r = classifyElectronLine(line);
+      if (r.route !== "drop" && r.text.trim() !== "") {
+        tail.push(r.text);
+        if (tail.length > STDERR_TAIL_LINES) tail.shift();
+      }
       switch (r.route) {
         case "drop":
           dropped++;
@@ -580,6 +749,7 @@ function forwardStderr(proc: Deno.ChildProcess): void {
       }
       if (carry !== "") await route(carry);
     } catch { /* child gone — nothing left to forward */ }
+    finished();
     if (dropped > 0) {
       await Deno.stderr.write(enc.encode(
         `[aio] suppressed ${dropped} GPU device-probe line(s)\n`,
@@ -1161,9 +1331,14 @@ export async function launchElectron(
   distDir?: string,
   /** `--cdp`: open the DevTools Protocol on this loopback port (`am shot`). */
   cdpPort?: number,
+  /** Aborted when the app starts shutting down. The lookup can take minutes
+   *  (a first-run install), and a stop that lands meanwhile must not be
+   *  followed by a window: once aborted this returns null and spawns nothing. */
+  signal?: AbortSignal,
 ): Promise<Deno.ChildProcess | null> {
-  const bin = await findElectronBin(log, { distDir });
-  if (!bin) return null;
+  if (signal?.aborted) return null;
+  const bin = await findElectronBin(log, { distDir, signal });
+  if (!bin || signal?.aborted) return null;
   // The cache holds both a downloaded runtime and one unpacked from the exe
   // itself — the same path, so the path cannot tell them apart; whether this
   // binary CARRIES one can.

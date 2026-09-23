@@ -166,10 +166,10 @@
 
 ## Upgrade guides — version-to-version migration notes
 
-- [Upgrade Guides](upgrade/README.md) — every one, newest first (84 pages)
+- [Upgrade Guides](upgrade/README.md) — every one, newest first (85 pages)
+- [Upgrading from 1.0.9-beta to 1.0.10-beta](upgrade/from-1.0.9-beta-to-1.0.10-beta.md) — Nothing is removed and nothing changes shape; the surface only grows (the
 - [Upgrading from 1.0.8-beta to 1.0.9-beta](upgrade/from-1.0.8-beta-to-1.0.9-beta.md) — Nothing breaks; the testing surface gains pressed, expanded, richer checked, and
 - [Upgrading from 1.0.7-beta to 1.0.8-beta](upgrade/from-1.0.7-beta-to-1.0.8-beta.md) — removals and no changed signatures.
-- [Upgrading from 1.0.6-beta to 1.0.7-beta](upgrade/from-1.0.6-beta-to-1.0.7-beta.md) — changed.
 - [The aio restructure — alpha27/alpha28 breaking changes](upgrade/restructure.md) — This guide tracks every breaking change of the restructure
 
 ## Design specs — decision records — background, not manuals

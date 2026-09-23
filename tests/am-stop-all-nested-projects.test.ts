@@ -18,6 +18,7 @@ import {
   type LockData,
   writeLock,
 } from "../src/server/single-instance-lock.ts";
+import { dropTempDir, tempDir } from "../src/testing/temp-dir.ts";
 
 const AM = new URL("../src/am.ts", import.meta.url).pathname;
 const CONFIG = new URL("../deno.json", import.meta.url).pathname;
@@ -33,7 +34,7 @@ const lock = (appId: string, cwd: string, pid = Deno.pid): LockData => ({
 
 /** `home/{deno.json, p1/deno.json, p2/deno.json, Downloads/, dist/srv/}` */
 async function layout(): Promise<{ base: string; home: string }> {
-  const base = await Deno.makeTempDir({ prefix: "am-stopall-nested-" });
+  const base = await tempDir("am-stopall-nested-");
   const home = join(base, "home");
   for (const d of ["p1", "p2", "Downloads", "dist/srv"]) {
     await Deno.mkdir(join(home, d), { recursive: true });
@@ -78,7 +79,7 @@ Deno.test("instancesInProject: a nested project's app is not the parent's", asyn
       );
     });
   } finally {
-    await Deno.remove(base, { recursive: true }).catch(() => {});
+    await dropTempDir(base);
   }
 });
 
@@ -124,6 +125,6 @@ Deno.test("am stop --all from a plain folder under a stray deno.json stops no ot
       } catch { /* gone — the failing case */ }
       await v.status;
     }
-    await Deno.remove(base, { recursive: true }).catch(() => {});
+    await dropTempDir(base);
   }
 });

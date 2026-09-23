@@ -680,7 +680,9 @@ export type _PersistStore = {
  *  Pure: everything it inspects arrives in `g`, and the choice is RETURNED,
  *  never stashed — `initStandalone` holds the one instance and both the
  *  restore and the writes go through it, so no second copy of this decision
- *  can exist to disagree with the first. */
+ *  can exist to disagree with the first.
+ *
+ *  @decider */
 export function _pickPersistStore(g: {
   [NATIVE_STORE_GLOBAL]?: unknown;
   localStorage?: {
@@ -840,6 +842,7 @@ export function initStandalone<S, A, E>(
 ): AioApp<S, A> {
   const { reduce, execute } = config;
   const shouldPersist = config.persist !== false;
+  // aio-ok(persist-decider): the ONE whole-state default — a raw initStandalone has no cells, so no filter exists; composed apps pass buildDBStateGetter below.
   const getDBState = config.getDBState ?? ((s: S) => s as unknown);
   const getUIState = (s: S) => s;
   const persistKey = config.persistKey ?? STORAGE_KEY;
@@ -895,8 +898,16 @@ export function initStandalone<S, A, E>(
   const persistMs = config.persistDebounceMs ?? 100;
   let persistTimer: ReturnType<typeof setTimeout> | null = null;
   let slowWriteWarned = false;
+  /** Set once close() has written the final snapshot — see schedulePersist. */
+  let finalWritten = false;
 
   function writeNow(what: string): void {
+    // The final snapshot is the LAST write — the server's order too. The
+    // cells' `:__destroy` teardown dispatches after close() still commit, and
+    // on the durable store each one wrote straight through (a lazy store's
+    // background flush did the same later): every clean close replaced the
+    // app's state with its teardown state. Pinned by tests/hosts.test.ts.
+    if (finalWritten) return;
     try {
       const t0 = Date.now();
       store.write(persistKey, JSON.stringify(getDBState(state)));
@@ -1064,6 +1075,7 @@ export function initStandalone<S, A, E>(
         endShutdownAbort(_standaloneCells, _standaloneAppId);
       }
       flushPersist();
+      finalWritten = true;
     },
     mode: "standalone",
   };

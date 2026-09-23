@@ -49,7 +49,7 @@
 import { join, resolve } from "@std/path";
 import { stripVersionToken } from "../server/app-version.ts";
 import type { GlobalFlags } from "./am-types.ts";
-import { detectMode, fail, out } from "./am-output.ts";
+import { detectMode, fail, out, sayErr } from "./am-output.ts";
 
 // ── The four labs ──────────────────────────────────────────
 
@@ -1371,7 +1371,7 @@ export async function cmdLab(
   if (!os) {
     // The usage IS the fix here — printing "see --help" when `am <x> --help`
     // is intercepted upstream into the global help would send them nowhere.
-    console.error(LAB_USAGE + "\n"); // stderr — never pollutes --json stdout
+    sayErr(LAB_USAGE + "\n"); // stderr — never pollutes --json stdout
     fail(
       `am lab needs an OS: ${
         LAB_OS_LIST.map((o) => `\`am lab ${o}\``).join(", ")
@@ -1495,7 +1495,7 @@ async function labStop(
     return;
   }
   if (st.running) {
-    console.error(
+    sayErr(
       `▸ asking ${spec.os} to shut down (up to ${STOP_TIMEOUT_SEC}s)` +
         (spec.kind === "vm"
           ? ` — killing a guest mid-write leaves a dirty disk and a repair cycle on next boot`
@@ -1606,7 +1606,7 @@ async function labStart(
     // with it and the operator's fix for everything else is "run it again".
     const mounted = await mountedShare(spec.container) ?? wanted;
     if (opt.dist && mounted !== wanted) {
-      console.error(
+      sayErr(
         `⚠ this lab was started with ${mounted} mounted, not ${wanted} — a ` +
           `bind mount cannot be changed on a live container. Restart it to ` +
           `swap: am lab ${spec.os} --stop && am lab ${spec.os} --dist=${wanted}`,
@@ -1654,7 +1654,7 @@ async function labStart(
 
   const facts = await probe(spec, dirs.root);
   const verdict = preflight(spec, facts);
-  for (const w of verdict.warnings) console.error(`⚠ ${w}`);
+  for (const w of verdict.warnings) sayErr(`⚠ ${w}`);
   if (verdict.errors.length) {
     fail(
       `${spec.os} lab preflight failed:\n  - ` + verdict.errors.join("\n  - "),
@@ -1693,7 +1693,7 @@ async function labStart(
   if (fresh && spec.versionedStorage) {
     const have = await installedVersions(dirs.storage);
     if (have.length) {
-      console.error(
+      sayErr(
         `⚠ no ${spec.os} disk for version "${opt.version}" — this installs a ` +
           `SECOND ${spec.os} from scratch (tens of GB, an hour of it manual). ` +
           `Already installed: ${have.join(", ")}. Boot one of those with ` +
@@ -1711,11 +1711,11 @@ async function labStart(
   }
 
   const url = `http://127.0.0.1:${port}/`;
-  console.error(
+  sayErr(
     `▸ ${spec.os} lab starting — viewer will be ${url}\n` +
       `  share: ${share}  →  ${shareUrl(spec)} in the guest`,
   );
-  if (fresh) console.error(`▸ first run: ${spec.firstRun}`);
+  if (fresh) sayErr(`▸ first run: ${spec.firstRun}`);
 
   // Poll rather than sleep: the operator gets the URL the moment it serves,
   // and a line of real progress every few seconds until then. A 20-minute
@@ -1746,7 +1746,7 @@ async function labStart(
     const phase = phaseFromLogs(logs.out + logs.err);
     if (phase && phase !== lastPhase) {
       lastPhase = phase;
-      console.error(`  … ${phase}`);
+      sayErr(`  … ${phase}`);
     }
     await new Promise((r) => setTimeout(r, 3000));
   }
@@ -1794,7 +1794,7 @@ async function labStart(
   );
 
   if (opt.tunnel) {
-    console.error(
+    sayErr(
       `▸ tunnel open on ${url} — THIS PROCESS IS THE TUNNEL: leave it running, ` +
         `Ctrl-C when you are done. The lab keeps running either way; stop it ` +
         `with \`am lab ${spec.os} --stop\`.`,
@@ -1977,7 +1977,7 @@ async function installApk(
     }
     if (Date.now() - lastProgress >= BOOT_PROGRESS_MS) {
       lastProgress = Date.now();
-      console.error(
+      sayErr(
         `  … waiting for Android to boot (${
           Math.round((Date.now() - started) / 1000)
         }s; sys.boot_completed=${lastSeen || "no answer yet"})`,
@@ -1988,7 +1988,7 @@ async function installApk(
   if (!booted) {
     return { ok: false, message: bootTimeoutMessage(spec, lastSeen) };
   }
-  console.error(
+  sayErr(
     `▸ Android booted — docker exec ${spec.container} ${
       fetchCommand(spec.os, file)
     }`,
@@ -2015,7 +2015,7 @@ async function licenceNotice(root: string): Promise<void> {
     await Deno.stat(stamp);
     return;
   } catch { /* not shown yet */ }
-  console.error(`▸ ${MACOS_LICENCE}`);
+  sayErr(`▸ ${MACOS_LICENCE}`);
   try {
     await Deno.mkdir(root, { recursive: true });
     await Deno.writeTextFile(stamp, new Date().toISOString() + "\n");

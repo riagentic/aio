@@ -8,7 +8,7 @@
 //    the running app, to reproduce a bug (the "froze in electron but the test
 //    passed" class becomes replay-and-look). `--dry` lists without dispatching.
 import type { GlobalFlags } from "./am-types.ts";
-import { detectMode, out, outError } from "./am-output.ts";
+import { detectMode, out, outData, outError, sayErr } from "./am-output.ts";
 import { amCtx, defaultJournalPath, resolveAmAppId } from "./am-utils.ts";
 import { trojanGet, trojanPost } from "./am-http.ts";
 import {
@@ -20,7 +20,12 @@ import {
 import type { DiffEntry, TimelineEntry } from "../server/timeline.ts";
 import { TIMELINE_RING } from "../server/timeline.ts";
 import { count } from "../diagnostics/fmt.ts";
-import { staleStamps, TT_RESTORE_TYPE } from "../server/journal.ts";
+import {
+  isListenerReaction,
+  isSyncOpReaction,
+  staleStamps,
+  TT_RESTORE_TYPE,
+} from "../server/journal.ts";
 
 /** hh:mm:ss for a ms timestamp (local time). */
 function clock(ts: number): string {
@@ -66,7 +71,9 @@ function renderTimeline(entries: TimelineEntry[]): string {
       ? `${e.origin} ⟵ write-set (${e.type.slice(e.type.indexOf(":") + 1)})`
       : e.type;
     lines.push(
-      e.type === TT_RESTORE_TYPE
+      isListenerReaction(e)
+        ? `#${e.seq}  ${clock(e.ts)}  ${reactionLabel(e)}`
+        : e.type === TT_RESTORE_TYPE
         ? `#${e.seq}  ${clock(e.ts)}  ${timeTravelLabel(e.payload)}`
         : `#${e.seq}  ${clock(e.ts)}  ${what}${argStr}`,
     );
@@ -84,10 +91,41 @@ function timeTravelLabel(payload: unknown): string {
     ` (state restored)`;
 }
 
+/** A `listensTo` reaction row: the cells whose state it carries — it is
+ *  neither an action nor a jump (see `isListenerReaction`). */
+function reactionLabel(e: { type: string; payload?: unknown }): string {
+  const p = e.payload as
+    | { cell?: unknown; cells?: unknown; deltas?: unknown }
+    | undefined;
+  const keys = (o: unknown): string[] =>
+    o && typeof o === "object" ? Object.keys(o) : [];
+  const cells = typeof p?.cell === "string" ? [p.cell] : [
+    ...keys(p?.cells),
+    ...keys((p as { keyframes?: unknown } | undefined)?.keyframes),
+    ...keys(p?.deltas),
+  ];
+  if ((p as { write?: unknown } | undefined)?.write === true) {
+    return `state of ${
+      cells.join(", ") || "?"
+    } after the call above, at its op-log position (restored from here)`;
+  }
+  if ((p as { jump?: unknown } | undefined)?.jump === true) {
+    return `time travel: ${cells.join(", ") || "?"} (sync state restored)`;
+  }
+  return `listensTo reaction: ${cells.join(", ") || "?"} (state recorded${
+    isSyncOpReaction(e)
+      ? "; caused by a sync op, not in the journal — not reproduced"
+      : ""
+  })`;
+}
+
 /** Pretty-render offline journal rows (no diffs — the file stores actions only). */
 function renderJournalRows(rows: JournalRow[]): string {
   if (rows.length === 0) return "journal has no entries";
   return rows.map((r) => {
+    if (isListenerReaction(r)) {
+      return `#${r.seq}${r.ts ? `  ${clock(r.ts)}` : ""}  ${reactionLabel(r)}`;
+    }
     if (r.type === TT_RESTORE_TYPE) {
       return `#${r.seq}${r.ts ? `  ${clock(r.ts)}` : ""}  ${
         timeTravelLabel(r.payload)
@@ -144,10 +182,13 @@ export async function cmdTimeline(
     // to truncate at the first bad line and report the remainder as the whole
     // file, exit 0.
     const damage = journalDamage(parsed, path);
-    if (damage) console.error(damage);
+    if (damage) sayErr(damage);
     let rows = parsed.rows;
     if (limit && rows.length > limit) rows = rows.slice(rows.length - limit);
-    out(mode === "pretty" ? renderJournalRows(rows) : { entries: rows }, mode);
+    outData(
+      mode === "pretty" ? renderJournalRows(rows) : { entries: rows },
+      mode,
+    );
     return;
   }
 
@@ -170,7 +211,7 @@ export async function cmdTimeline(
   // "as much as I keep" are different answers, and only one of them means you
   // can stop looking. The journal is the unbounded history; name it.
   const capped = timelineCapped(limit, entries.length, data?.rotated);
-  out(
+  outData(
     capped
       ? {
         entries,
@@ -208,6 +249,8 @@ export type ReplaySkipReason =
   | "effect"
   | "write-set"
   | "time-travel"
+  | "reaction"
+  | "sync-reaction"
   | "internal"
   | "version";
 
@@ -246,6 +289,12 @@ export const REPLAY_SKIP_WHY: Record<ReplaySkipReason, string> = {
     "re-applies it",
   "time-travel": "a time-travel jump — a state restore, not an action; the " +
     "live app is not rewound, so the rows after it run on different state",
+  reaction: "a listensTo reaction, journalled as the state it wrote — the " +
+    "action that caused it is re-run, and the live app reacts again",
+  "sync-reaction": "a listensTo reaction caused by a sync op — the op is in " +
+    "the op-log, not the journal, so nothing sent re-creates it: caused by a " +
+    "sync op, not in the journal — not reproduced (the rows after it run on " +
+    "different state)",
   internal: "framework-internal — not dispatchable",
   version: "written under a cell version the running app does not run (the " +
     "same rule boot recovery applies) — its method is not this build's, and " +
@@ -276,7 +325,18 @@ export function planReplay(
   for (const r of rows) {
     const method = r.type.slice(r.type.indexOf(":") + 1);
     const cause = (r as { cause?: unknown }).cause;
-    const reason: ReplaySkipReason | null = r.type === TT_RESTORE_TYPE
+    // `jump: true` means "time travel" ONLY on a sync-reaction row (see
+    // `SyncReaction.jump` in journal.ts). Read on any row, it skipped a real
+    // user action whose own payload happens to say it — `player:move
+    // {jump: true}` — as time travel, and the replay silently dropped it.
+    const reason: ReplaySkipReason | null = isListenerReaction(r) &&
+        (r.payload as { jump?: unknown } | undefined)?.jump === true
+      ? "time-travel"
+      : isSyncOpReaction(r)
+      ? "sync-reaction"
+      : isListenerReaction(r)
+      ? "reaction"
+      : r.type === TT_RESTORE_TYPE
       ? "time-travel"
       : method.startsWith("__set")
       ? "write-set"
@@ -393,7 +453,7 @@ export async function cmdReplay(
   }
   const parsed = parseJournal(text);
   const damage = journalDamage(parsed, path);
-  if (damage) console.error(damage);
+  if (damage) sayErr(damage);
   // A tear INSIDE the file means the actions between the good ones are gone,
   // so a replay would run a sequence that never happened. Refuse it rather
   // than replay a hole silently.
@@ -473,7 +533,7 @@ export async function cmdReplay(
   // Dry run: show what WOULD replay, dispatch nothing. The count is the
   // plan's — the same rows the real run sends.
   if (dry) {
-    out(
+    outData(
       mode === "pretty"
         ? [
           `would replay ${count(plan.send.length, "action")}:`,

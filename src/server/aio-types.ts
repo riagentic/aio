@@ -296,12 +296,17 @@ export type AioConfig<S, A, E> = {
   ) => { state: S; effects: (E | ScheduleEffect | OwnEffect)[] };
   execute: (app: AioApp<S, A>, effect: E) => void;
   persist?: boolean; // default: true — persists to SQLite (state.db, aio_kv table)
-  /** Where this app keeps everything it owns. Default `~/.<appId>` — `data/`
+  /** `--profile=<name>` puts a copy beside it (`<appDir>-<name>`). Where
+   *  this app keeps everything it owns. Default `~/.<appId>` — `data/`
    *  inside it is the whole backup; `logs/` and `launch.json` are disposable.
    *  This is the AUTHOR's choice; whoever runs the app can move every app at
    *  once with `AIO_APPS_DIR=<root>` (→ `<root>/<appId>`).
    *  See docs/persistence/where-files-live.md. */
   appDir?: string;
+  /** Default true. `false`: the app runs from one folder only —
+   *  --profile/AIO_PROFILE/--home refused; AIO_APPS_DIR still moves every app.
+   *  The refusal is at boot, exit 1. See docs/clients/app-manager.md. */
+  profiles?: boolean;
   /** Override the SQLite file (":memory:" for hermetic tests, or an absolute
    *  path). Default: `<appDir>/data/state.db`. */
   dbPath?: string;
@@ -686,6 +691,8 @@ export type AioConfig<S, A, E> = {
   >;
   /** Internal: per-cell versions — flat map for persistence */
   _cellVersions?: Record<string, number>;
+  /** Internal: per cell, the foreign action types it `listensTo`. */
+  _cellForeignActions?: Record<string, string[]>;
   /** Internal: built from per-cell persist filters (replaces removed stateForDB) */
   _getDBState?: (state: S) => unknown;
   /** Internal: built from per-cell ui filters (replaces removed stateForUI) */
@@ -892,7 +899,8 @@ export type CellsConfig = {
    *  ```
    */
   tls?: "auto" | false | { cert: string; key: string };
-  /** Where this app keeps everything it owns. Default `~/.<appId>` — `data/`
+  /** `--profile=<name>` puts a copy beside it (`<appDir>-<name>`). Where
+   *  this app keeps everything it owns. Default `~/.<appId>` — `data/`
    *  inside it is the whole backup; `logs/` and `launch.json` are disposable.
    *  This is the AUTHOR's choice; whoever runs the app can move every app at
    *  once with `AIO_APPS_DIR=<root>` (→ `<root>/<appId>`).
@@ -904,6 +912,17 @@ export type CellsConfig = {
    *  ```
    */
   appDir?: string;
+  /** Default true. `false`: the app runs from one folder only —
+   *  --profile/AIO_PROFILE/--home refused; AIO_APPS_DIR still moves every app.
+   *
+   *  The refusal is at boot, exit 1 — for a name, a path and the env alike.
+   *
+   *  @example
+   *  ```ts
+   *  profiles: false,   // a kiosk/service binary: one data home, always
+   *  ```
+   */
+  profiles?: boolean;
   /** Override the SQLite file (":memory:" for hermetic tests).
    *
    *  @example
@@ -1120,10 +1139,11 @@ export type CellsConfig = {
    *  where it had a value. Dev warns once per method whenever a refusal is
    *  swallowed, so the divergence is discoverable either way. Default: false. */
   refusalsReject?: boolean;
-  /** Durable action journal: every committed action is appended to
-   *  a durable log; on the next boot the actions after the last snapshot are
-   *  replayed on top of it, so a SIGKILL / power cut in the persist debounce
-   *  window loses NOTHING. Opt-in. */
+  /** Action journal: every committed action is appended to a log beside the
+   *  database; on the next boot the actions after the last snapshot are
+   *  replayed on top of it, so a SIGKILL in the persist debounce window loses
+   *  nothing — a power cut can (appends are not fsynced, so it can take the
+   *  newest lines; see docs/persistence/how-it-works.md). Opt-in. */
   journal?: boolean;
   /** Action types whose recorded VALUES must never be retained anywhere: the
    *  durable journal, the in-memory timeline (`am timeline`) and the optional

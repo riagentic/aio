@@ -364,7 +364,7 @@
         },
         "CellsConfig": {
           "kind": "typeAlias",
-          "sig": "29dd6426b8fa4b46",
+          "sig": "8e9f69b92e2a3280",
           "members": {
             "appId": "opt:2fb40568533c1a6d",
             "cells": "opt:58dbae2820cab862",
@@ -380,6 +380,7 @@
             "tls.cert": "req:2fb40568533c1a6d",
             "tls.key": "req:2fb40568533c1a6d",
             "appDir": "opt:2fb40568533c1a6d",
+            "profiles": "opt:0ecca0fe3beba89b",
             "dbPath": "opt:2fb40568533c1a6d",
             "dbPragmas": "opt:6941c580c10685fb",
             "checkIntegrityOnBoot": "opt:0ecca0fe3beba89b",
@@ -455,7 +456,7 @@
             "onCheckpointRestore": "opt:bc30aaf8d4dd00e2"
           },
           "sigs": [
-            "29dd6426b8fa4b46"
+            "8e9f69b92e2a3280"
           ]
         },
         "CellState": {
@@ -2721,14 +2722,14 @@
         },
         "renderToStream": {
           "kind": "function",
-          "sig": "986230b1b096f5ee",
+          "sig": "e75779b73fb37413",
           "members": {
             "param0": "req:db1f3454b1ecdf8d|336e2b46aff6c271~string+6aa3b7f779609e8d~VNode+b3d9da3d9fc5eb30~number+e47c90b8d1952424~null",
             "param1": "opt:b019059a2f930138|3ca36bd054eb18b8~object",
             "return": "req:2b09cfd8328d90bf"
           },
           "sigs": [
-            "cbf9fab39fc856a8"
+            "b51c161fdcc0b632"
           ]
         },
         "renderToString": {
@@ -4509,7 +4510,7 @@
         },
         "CliFlags": {
           "kind": "typeAlias",
-          "sig": "67acdb6c3e337775",
+          "sig": "fea4e8fca0941376",
           "members": {
             "port": "opt:f6522636230fa080",
             "persist": "opt:0ecca0fe3beba89b",
@@ -4539,10 +4540,12 @@
             "logBudget": "opt:f6522636230fa080",
             "noDataMigrate": "opt:0ecca0fe3beba89b",
             "cdp": "opt:8daa393fece80d5f",
-            "watch": "opt:53469494ce2e14b4"
+            "watch": "opt:53469494ce2e14b4",
+            "profile": "opt:2fb40568533c1a6d",
+            "home": "opt:2fb40568533c1a6d"
           },
           "sigs": [
-            "67acdb6c3e337775"
+            "fea4e8fca0941376"
           ]
         },
         "createSliceSelector": {
@@ -4670,13 +4673,17 @@
         },
         "LockData": {
           "kind": "typeAlias",
-          "sig": "1a9338af6378c117",
+          "sig": "b925ff518131cb01",
           "members": {
             "appId": "req:2fb40568533c1a6d",
             "pid": "req:f6522636230fa080",
             "port": "req:f6522636230fa080",
             "startedAt": "req:f6522636230fa080",
             "status": "req:699ffb337c0bd892",
+            "maintenance": "opt:object",
+            "maintenance.op": "req:2fb40568533c1a6d",
+            "maintenance.since": "opt:f6522636230fa080",
+            "maintenance.partial": "opt:2fb40568533c1a6d",
             "cwd": "req:2fb40568533c1a6d",
             "home": "opt:2fb40568533c1a6d",
             "socketPath": "opt:2fb40568533c1a6d",
@@ -4685,15 +4692,17 @@
             "discovery.title": "opt:2fb40568533c1a6d",
             "discovery.tls": "req:0ecca0fe3beba89b",
             "discovery.needsAuth": "req:0ecca0fe3beba89b",
+            "profile": "opt:2fb40568533c1a6d",
             "aioVersion": "opt:2fb40568533c1a6d",
             "cdpPort": "opt:f6522636230fa080",
             "client": "opt:2fb40568533c1a6d",
             "dataDir": "opt:2fb40568533c1a6d",
             "startToken": "opt:2fb40568533c1a6d",
+            "startEpoch": "opt:f6522636230fa080",
             "settings": "opt:09b94ba87da5c3f0"
           },
           "sigs": [
-            "1a9338af6378c117"
+            "b925ff518131cb01"
           ]
         },
         "markAsync": {
@@ -5334,16 +5343,17 @@
         },
         "AppMeta": {
           "kind": "typeAlias",
-          "sig": "fa302fc2d813d586",
+          "sig": "a28080ec755b24f5",
           "members": {
             "appId": "req:2fb40568533c1a6d",
+            "profile": "opt:2fb40568533c1a6d",
             "aio": "req:2fb40568533c1a6d",
             "app": "opt:2fb40568533c1a6d",
             "createdAt": "req:2fb40568533c1a6d",
             "updatedAt": "req:2fb40568533c1a6d"
           },
           "sigs": [
-            "fa302fc2d813d586"
+            "a28080ec755b24f5"
           ]
         },
         "appVersion": {
@@ -8014,6 +8024,10 @@
           "kind": "flag",
           "sig": "bool"
         },
+        "aio --home": {
+          "kind": "flag",
+          "sig": "value"
+        },
         "aio --host": {
           "kind": "flag",
           "sig": "value"
@@ -8061,6 +8075,10 @@
         "aio --prod": {
           "kind": "flag",
           "sig": "bool"
+        },
+        "aio --profile": {
+          "kind": "flag",
+          "sig": "value"
         },
         "aio --server-url": {
           "kind": "flag",

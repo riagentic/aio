@@ -12,11 +12,19 @@ import {
   fail,
   formatUptime,
   out,
+  outData,
   outError,
   outValue,
+  say,
+  sayData,
+  sayDataStream,
+  sayErr,
 } from "./am-output.ts";
 import {
   amCtx,
+  liveLock,
+  lockHasNoDoor,
+  noDoorMessage,
   parseNumArg,
   resolveAmAppId,
   resolvePort,
@@ -259,8 +267,8 @@ export async function cmdTables(
   }
   const rows = result.data as { name: string }[];
   if (mode === "pretty") {
-    if (rows.length === 0) console.log("no tables");
-    else rows.forEach((r) => console.log(r.name));
+    if (rows.length === 0) say("no tables");
+    else rows.forEach((r) => sayData(r.name));
   } else {
     out(rows.map((r) => r.name), mode);
   }
@@ -612,7 +620,7 @@ export async function cmdLog(
         since: sinceRaw ?? null,
         lines: clean,
       }, mode);
-    } else console.log(tail.join("\n"));
+    } else sayData(tail.join("\n"));
     offset = Deno.statSync(LOG_FILE).size;
   } catch {
     // Nothing to read. Without --follow that is a FAILURE, and it names the
@@ -637,7 +645,6 @@ export async function cmdLog(
       await new Promise((r) => setTimeout(r, 500));
     }
   }
-  const enc = new TextEncoder();
   const watcher = Deno.watchFs(LOG_FILE);
   let buf = "";
   for await (const event of watcher) {
@@ -677,7 +684,7 @@ export async function cmdLog(
           }
           evs = evs.filter((e) => logEventMatches(e, { level, tag }));
           const filtered = evs.flat().join("\n") + "\n";
-          if (filtered.trim()) await Deno.stdout.write(enc.encode(filtered));
+          if (filtered.trim()) await sayDataStream(filtered);
         }
       } finally {
         file.close();
@@ -753,7 +760,7 @@ export async function cmdErrors(
     parts.push(`runtime — last ${runtime.length} from error.log:`);
     parts.push(runtime.join("\n"));
   }
-  out(parts.join("\n"), mode);
+  outData(parts.join("\n"), mode); // error.log lines are the app's DATA
 }
 
 /** The tail of the app's own `error.log`. Absent file = no errors yet, which
@@ -872,7 +879,6 @@ export async function cmdTop(
     Deno.exit(1);
   }
   const intervalMs = Math.max(250, secs.value * 1000);
-  const enc = new TextEncoder();
   let running = true;
   const stop = () => (running = false);
   Deno.addSignalListener("SIGINT", stop);
@@ -882,13 +888,13 @@ export async function cmdTop(
       const frame = m
         ? renderTopFrame(m, new Date().toLocaleTimeString())
         : `aio top — app not running on port ${port} (retrying…)`;
-      await Deno.stdout.write(enc.encode("\x1b[2J\x1b[H" + frame + "\n"));
+      await sayDataStream(frame + "\n", "\x1b[2J\x1b[H");
       if (!running) break;
       await new Promise((r) => setTimeout(r, intervalMs));
     }
   } finally {
     Deno.removeSignalListener("SIGINT", stop);
-    await Deno.stdout.write(enc.encode("\n"));
+    await sayDataStream("\n");
   }
 }
 
@@ -992,7 +998,7 @@ export async function cmdDiscover(
     ? "\n\u26bf apps pair by the 6-digit code they print at startup \u2014 enter it in " +
       "the aio client, or export a profile on the host with `am profile`."
     : "";
-  console.log(
+  say(
     `found ${apps.length} aio app(s) on the LAN:\n${lines.join("\n")}${hint}`,
   );
 }
@@ -1006,6 +1012,13 @@ export async function cmdProfile(
 ): Promise<void> {
   const mode = detectMode(flags);
   const appId = resolveAmAppId(flags.app);
+  // A booting app's lock names no door yet, and a profile built from it said
+  // `"port": 0` and exited 0 — a file that can never connect, handed over as
+  // a success. Refuse by the same name every other verb uses.
+  const booting = liveLock(appId);
+  if (booting && lockHasNoDoor(booting)) {
+    fail(noDoorMessage(appId, booting), mode);
+  }
   const { buildLocalProfile } = await import("../server/profile.ts");
   const profile = buildLocalProfile(appId);
   if (!profile) {
@@ -1020,7 +1033,7 @@ export async function cmdProfile(
   // file that works on THIS MACHINE only, and that is worth saying before
   // someone mails it to a colleague. `host` names the truth either way.
   if (profile.host === "127.0.0.1") {
-    console.error(
+    sayErr(
       `${HEY} am profile: "${appId}" is bound to 127.0.0.1 (no --expose), so this ` +
         `profile only connects from this machine. Restart it with --expose ` +
         `to make a profile another device can use.`,
@@ -1162,7 +1175,7 @@ function reportRects(
   measured: { measurable: number; laidOut: number } | undefined,
 ): void {
   const v = rectsVerdict(measured);
-  if (v.note) console.error(v.note);
+  if (v.note) sayErr(v.note);
   if (!v.ok) Deno.exit(1);
 }
 
@@ -1369,7 +1382,7 @@ export async function cmdSurface(
     );
     if (headless.ok) {
       if (mode !== "json") {
-        console.error(
+        sayErr(
           "note: no client connected — this is a server-side render",
         );
       }
@@ -1415,7 +1428,7 @@ export async function cmdSurface(
     const stale = (payload as ({ stale?: unknown } | null)[])
       .find((r) => r?.stale)?.stale;
     for (const n of scoped) (n as { stale?: unknown }).stale ??= stale;
-    if (mode !== "json") console.error(`note: ${staleNote}`);
+    if (mode !== "json") sayErr(`note: ${staleNote}`);
   }
   if (scoped.length === 0 && (wantComponent || wantPath)) {
     // Loud, and useful: an empty result from a filter is usually a typo, so say
@@ -1450,7 +1463,7 @@ export async function cmdSurface(
       out({ names, render }, mode);
       return;
     }
-    out(
+    outData( // element names are the UI's own text: DATA
       names.length
         ? names.join("\n") +
           `\n\ntrigger with: am trigger "<one of the above>" <action> [text]`
@@ -1473,12 +1486,12 @@ export async function cmdSurface(
     out("(no mounted UI surface)", mode);
     return;
   }
-  console.log(roots.map((r) => renderSurface(r)).join("\n"));
+  sayData(roots.map((r) => renderSurface(r)).join("\n"));
   // The hint has to be a command that can actually RUN. A headless render has
   // no client behind it and `am trigger` drives a client, so `am trigger 0`
   // here dead-ends the observe -> act -> observe loop one step after this line
   // (it used to print exactly that, because the hint assumed a client).
-  console.log(
+  say(
     headlessRender
       ? `this is a server-side render — am trigger drives a CONNECTED ` +
         `client: open the app (or start it with --client=browser), then ` +
@@ -1654,7 +1667,7 @@ export async function cmdTrigger(
     // failed trigger, not a result to print under a green exit.
     const data = r.data as { ok?: boolean; error?: string } | null;
     if (data && data.ok === false) {
-      out(data, mode);
+      outData(data, mode); // the reply carries the surface: DATA
       Deno.exit(1);
     }
     if (data && typeof data.error === "string") {
@@ -1698,7 +1711,7 @@ export async function cmdTrigger(
   const data = action === "setValue" && replied && typeof replied === "object"
     ? { ...replied as Record<string, unknown>, action }
     : replied;
-  out(data, mode);
+  outData(data, mode); // the reply's surface is the UI's text: DATA
 }
 
 /** `am open` — open THIS app in a browser.

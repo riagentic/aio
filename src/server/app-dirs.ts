@@ -21,7 +21,8 @@
 //
 // See docs/specs/2026-07-26-data-dir-and-updates.md.
 
-import { basename, join, resolve } from "@std/path";
+import { basename, dirname, join, resolve } from "@std/path";
+import { sweepStaleTmps, uuidTmpBefore } from "../diagnostics/tmp-sweep.ts";
 import { homedir } from "./paths.ts";
 
 /** Two ways to answer "where does this app live", and one rule each:
@@ -69,6 +70,101 @@ export function appHome(appId: string, configured?: string): string {
   const root = appsDirEnv();
   if (root) return join(root, appId);
   return join(homedir(), `.${appId}`);
+}
+
+// ── Profiles ────────────────────────────────────────────────────────────────
+//
+// A PROFILE is a second data home for the same app — `myapp --profile=dev`
+// runs from `~/.myapp-dev`, beside `~/.myapp`, with its own lock (`myapp@dev`)
+// and its own everything. Not a new isolation mechanism: a NAMED home, derived
+// from the base home the app would otherwise use (`~/.<appId>`,
+// `$AIO_APPS_DIR/<appId>`, or `aio.run({ appDir })`) with `-<profile>` added.
+
+/** What a profile name may be: short, lowercase, filename- and URL-safe. */
+const PROFILE_NAME = /^[a-z0-9][a-z0-9-]{0,31}$/;
+
+/** `null` when `name` may be a profile, else why not. Pure.
+ *
+ *  Refused besides the shape: `default` (it would read as "no profile" and
+ *  is not), and eight hex digits — the SHAPE of the hash tag an isolated home
+ *  gets in its lock key (`myapp@1a2b3c4d`), so a profile could never be told
+ *  apart from one. */
+export function profileNameError(name: string): string | null {
+  if (!PROFILE_NAME.test(name)) {
+    return `profile ${JSON.stringify(name)} is not a profile name: use 1-32 ` +
+      `lowercase letters, digits and dashes, starting with a letter or ` +
+      `digit (e.g. dev, test-2)`;
+  }
+  if (name === "default") {
+    return `profile "default" is reserved — the default IS no profile (leave ` +
+      `--profile off)`;
+  }
+  if (/^[0-9a-f]{8}$/.test(name)) {
+    return `profile "${name}" looks like the 8-hex-digit tag of an isolated ` +
+      `home's lock key (appId@1a2b3c4d), so the two could not be told apart — ` +
+      `pick another name`;
+  }
+  return null;
+}
+
+/** THE profile home: `<base>-<profile>`, where `base` is the home the app
+ *  would use without one (`appDir` when the author named it, else
+ *  {@linkcode appHome}). Pure; the name is assumed valid. */
+export function profileHome(
+  appId: string,
+  profile: string,
+  appDir?: string,
+): string {
+  return `${resolve(appDir ?? appHome(appId))}-${profile}`;
+}
+
+/** Is a `--profile` value a PATH (that exact folder) rather than a NAME?
+ *  A path has a separator, or starts with `~` or `.`, or a Windows drive
+ *  (`C:`). Everything else is a name. Pure. */
+export function isProfilePath(value: string): boolean {
+  return /[\\/]/.test(value) || /^[~.]/.test(value) ||
+    /^[A-Za-z]:/.test(value);
+}
+
+/** A path-form `--profile` / `--home` value as an absolute folder: `~`
+ *  expanded, a relative path resolved against the cwd. */
+export function expandProfilePath(value: string): string {
+  if (value === "~" || value.startsWith("~/") || value.startsWith("~\\")) {
+    return resolve(homedir(), value.slice(2));
+  }
+  return resolve(value);
+}
+
+/** The profile NAME whose home `home` is (`~/.myapp-dev` → `dev`), else
+ *  undefined — so the path form of a profile's folder IS that profile. Pure. */
+export function profileOfHome(
+  appId: string,
+  home: string,
+  appDir?: string,
+): string | undefined {
+  const base = `${resolve(appDir ?? appHome(appId))}-`;
+  const want = resolve(home);
+  if (!want.startsWith(base)) return undefined;
+  const name = want.slice(base.length);
+  return profileNameError(name) === null ? name : undefined;
+}
+
+/** Which data home the PERSON RUNNING the app asked for — `--profile=<name
+ *  or path>` / `AIO_PROFILE`, and its path-only alias `--home=<dir>`. The
+ *  flag beats the env variable; see
+ *  {@linkcode resolveAppDirs} for how it ranks against the rest. */
+export type HomeRequest = {
+  profile?: string;
+  home?: string;
+  /** How it was asked — for the refusal `profiles: false` prints. */
+  source?: string;
+};
+
+/** The refusal `aio.run({ profiles: false })` makes. */
+export function profilesOffError(req: HomeRequest): string {
+  return `this app runs from one folder only (profiles: false) — ` +
+    `${req.source ?? "a profile/home was requested"} is refused. Unset it ` +
+    `(AIO_APPS_DIR still moves the whole apps root).`;
 }
 
 /** Every path an app writes, derived from one root. */
@@ -155,6 +251,32 @@ export type AppDirs = {
 // from `~/.<appId>`. One resolver has to mean one answer per app.
 const _registered = new Map<string, AppDirs>();
 
+/** The profile each booted app runs under (absent = none), keyed by appId —
+ *  next to `_registered`, and set by the same resolution. */
+const _profiles = new Map<string, string>();
+
+/** Apps whose home came from a {@linkcode HomeRequest} in this process. */
+const _requested = new Set<string>();
+
+/** Did `appId`'s home come from `--profile`/`--home` (or their env
+ *  variables)? The inner boot then reuses the registered dirs instead of
+ *  resolving a second time. */
+export function homeRequested(appId: string): boolean {
+  return _requested.has(appId);
+}
+
+/** Record the profile `appId` runs under (`am --profile`, which targets an
+ *  instance instead of booting one). `undefined` forgets it. */
+export function registerProfile(appId: string, profile?: string): void {
+  if (profile === undefined) _profiles.delete(appId);
+  else _profiles.set(appId, profile);
+}
+
+/** The profile `appId` booted under in this process, if any. */
+export function registeredProfile(appId: string): string | undefined {
+  return _profiles.get(appId);
+}
+
 /** Record the dirs an app actually booted with (aio.run(), once per app). */
 export function registerAppDirs(appId: string, dirs: AppDirs): void {
   _registered.set(appId, dirs);
@@ -166,6 +288,8 @@ export function registerAppDirs(appId: string, dirs: AppDirs): void {
  *  @internal */
 export function _resetAppDirs(): void {
   _registered.clear();
+  _profiles.clear();
+  _requested.clear();
 }
 
 /** Where a BUILT app is installed — the program, not its data.
@@ -183,7 +307,9 @@ export function _resetAppDirs(): void {
  *  THE decider: `run.sh` asks for this through
  *  `build.ts --print-install-root` rather than hardcoding `~/app`, and `am
  *  remove` and the updater read it directly. A shell copy of this rule is how
- *  an installer and an uninstaller come to disagree about where things are. */
+ *  an installer and an uninstaller come to disagree about where things are.
+ *
+ *  @decider */
 export function installRoot(): string {
   const override = Deno.env.get("AIO_INSTALL_ROOT");
   if (override && override.trim()) return override;
@@ -283,8 +409,34 @@ export function resolveAppDirs(opts: {
   appDir?: string;
   libraryMode?: boolean;
   baseDir?: string;
+  /** `--profile`/`AIO_PROFILE`, `--home` — ignored in
+   *  libraryMode (a test inherits the environment it runs in). */
+  request?: HomeRequest;
+  /** `aio.run({ profiles: false })` — a request is REFUSED, not ignored. */
+  profiles?: boolean;
 }): AppDirs {
   const { appId, appDir, libraryMode, baseDir } = opts;
+  const req = libraryMode ? undefined : opts.request;
+  if (req && (req.home !== undefined || req.profile !== undefined)) {
+    // Precedence: --home > --profile > appDir > AIO_APPS_DIR > default.
+    if (opts.profiles === false) throw new Error(profilesOffError(req));
+    const home = requestedHome(appId, req, appDir);
+    // The folder of a profile IS that profile, however it was named — so
+    // `--profile=~/.myapp-dev` and `--profile=dev` are one instance.
+    const profile = profileOfHome(appId, home, appDir);
+    const dirs = appDirs(appId, home);
+    // A requested home is checked like a DERIVED one: the person typing a
+    // profile name did not choose a directory, and `--home` pointed at a
+    // folder of someone else's files is the same mistake as `appId: "ssh"`.
+    const refusal = foreignAppHomeError(appId, dirs.home) ??
+      reservedAppHomeError(appId, dirs.home) ??
+      homeOwnerError(dirs, appId, profile);
+    if (refusal) throw new Error(refusal);
+    if (profile) _profiles.set(appId, profile);
+    else _profiles.delete(appId);
+    _requested.add(appId);
+    return dirs;
+  }
   // libraryMode with NO directory named by the author: `AIO_APPS_DIR`, when
   // set, places it like any app (`<root>/<appId>`). The cwd default ignored
   // the appId, so two such apps in one cwd shared one state.db and journal —
@@ -306,7 +458,82 @@ export function resolveAppDirs(opts: {
       reservedAppHomeError(appId, dirs.home);
     if (refusal) throw new Error(refusal);
   }
+  // A plain boot into a PROFILE's home (`myapp-dev` meeting the `dev` profile
+  // of `myapp` at `~/.myapp-dev`) is refused like the reverse — see
+  // homeOwnerError. Only a profile's meta.json can say so, so homes written
+  // by 1.0.9 and earlier are never refused here.
+  if (!libraryMode) {
+    const owner = homeOwnerError(dirs, appId, undefined, true);
+    if (owner) throw new Error(owner);
+  }
+  _profiles.delete(appId);
+  _requested.delete(appId);
   return dirs;
+}
+
+/** The folder a {@linkcode HomeRequest} names: a profile NAME → its
+ *  {@linkcode profileHome}; a PATH (either flag) → that folder. Both given and
+ *  naming two folders is refused — neither can be the one that was meant. */
+function requestedHome(
+  appId: string,
+  req: HomeRequest,
+  appDir: string | undefined,
+): string {
+  const one = (v: string, flag: string): string => {
+    if (v.trim() === "") throw new Error(`${flag} is empty — name a profile`);
+    if (flag.includes("home") || isProfilePath(v)) return expandProfilePath(v);
+    const bad = profileNameError(v);
+    if (bad) throw new Error(bad);
+    return profileHome(appId, v, appDir);
+  };
+  const byProfile = req.profile !== undefined
+    ? one(req.profile, "--profile/AIO_PROFILE")
+    : undefined;
+  const byHome = req.home !== undefined ? one(req.home, "--home") : undefined;
+  if (byProfile && byHome && byProfile !== byHome) {
+    throw new Error(
+      `--profile (${req.profile} → ${byProfile}) and --home (${req.home} → ` +
+        `${byHome}) name two different folders — give one of them. --home is ` +
+        `the path-only spelling of --profile.`,
+    );
+  }
+  return (byHome ?? byProfile)!;
+}
+
+/** `null` when `dirs.home` may be `appId`'s under `profile`, else the refusal.
+ *
+ *  Two names can derive ONE folder: the `dev` profile of `myapp` and an app
+ *  called `myapp-dev` both live at `~/.myapp-dev`. They have different lock
+ *  keys (`myapp@dev`, `myapp-dev`), so nothing else stops them from opening
+ *  one state.db. `meta.json` says who the folder belongs to, and it is read
+ *  BEFORE anything opens a database. `onlyProfiles`: a plain boot refuses only
+ *  a folder a PROFILE wrote (an older meta.json carries no profile and was
+ *  never refused before). Unreadable or absent = a first boot. */
+export function homeOwnerError(
+  dirs: AppDirs,
+  appId: string,
+  profile: string | undefined,
+  onlyProfiles = false,
+): string | null {
+  let meta: Partial<AppMeta>;
+  try {
+    meta = JSON.parse(Deno.readTextFileSync(dirs.meta));
+  } catch {
+    return null;
+  }
+  if (!meta || typeof meta !== "object" || typeof meta.appId !== "string") {
+    return null;
+  }
+  const had = typeof meta.profile === "string" ? meta.profile : undefined;
+  if (onlyProfiles && had === undefined) return null;
+  if (meta.appId === appId && had === profile) return null;
+  const who = (id: string, p?: string) =>
+    p ? `profile "${p}" of app "${id}"` : `app "${id}"`;
+  return `${dirs.home} belongs to ${who(meta.appId, had)} (its ` +
+    `data/meta.json says so), not to ${who(appId, profile)} — two names ` +
+    `derive this one folder, and booting would share its database.\n` +
+    `  fix: pick another profile name (--profile=<name>), or name the ` +
+    `folder with --home=<dir>`;
 }
 
 /** App names whose home would be somebody else's directory.
@@ -400,6 +627,8 @@ const AIO_HOME_ENTRIES: ReadonlySet<string> = new Set([
   "app",
   "backups",
   "launch.json",
+  ".aio-instance.lock",
+  ".aio-instance.json",
 ]);
 
 /** Files a desktop drops into ANY folder a person opens — Finder's view state,
@@ -600,6 +829,9 @@ export function checkUnpackLocation(dirs: AppDirs): string | null {
  *  and to warn when a backup is newer than the binary reading it. */
 export type AppMeta = {
   appId: string;
+  /** The profile this folder is the home of (`--profile`); absent = none.
+   *  Read before the database opens — see {@linkcode homeOwnerError}. */
+  profile?: string;
   /** The aio version that last wrote this directory. */
   aio: string;
   /** App version (`config.appVersion`) when known. */
@@ -612,7 +844,7 @@ export type AppMeta = {
  *  boot — the app runs fine without it, only `am restore` loses a safety check. */
 export function writeAppMeta(
   dirs: AppDirs,
-  info: { appId: string; aio: string; app?: string },
+  info: { appId: string; aio: string; app?: string; profile?: string },
 ): void {
   try {
     const now = new Date().toISOString();
@@ -622,7 +854,29 @@ export function writeAppMeta(
       if (typeof prev.createdAt === "string") createdAt = prev.createdAt;
     } catch { /* first write, or unreadable — treat as new */ }
     const meta: AppMeta = { ...info, createdAt, updatedAt: now };
-    Deno.writeTextFileSync(dirs.meta, JSON.stringify(meta, null, 2) + "\n");
+    // Whole or not at all: a private temp (createNew — never an existing
+    // file, never through a planted link) renamed over the name. An in-place
+    // rewrite could be read half-written — by `am backup`'s copy, or by the
+    // next boot's `createdAt` read — and a `meta.json` symlink was written
+    // THROUGH; rename replaces the link itself.
+    // A process killed between the write and the rename leaves its tmp:
+    // swept here (the boot's only writer runs under the singleton lock), by
+    // the shared rule — exact name shape, regular file, ours, and older than
+    // this process, so a live writer's tmp is never taken.
+    sweepStaleTmps(dirname(dirs.meta), [uuidTmpBefore(basename(dirs.meta))]);
+    const tmp = `${dirs.meta}.${crypto.randomUUID()}.tmp`;
+    try {
+      Deno.writeTextFileSync(tmp, JSON.stringify(meta, null, 2) + "\n", {
+        createNew: true,
+        mode: 0o600,
+      });
+      Deno.renameSync(tmp, dirs.meta);
+    } catch (e) {
+      try {
+        Deno.removeSync(tmp);
+      } catch { /* aio-ok: never created, or already renamed */ }
+      throw e;
+    }
   } catch { /* best-effort by design */ }
 }
 

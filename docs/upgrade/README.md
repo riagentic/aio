@@ -20,6 +20,22 @@ app, that is a bug in aio, not a step you missed.
 - **[The aio restructure (alpha27+)](restructure.md)** — every restructure
   breaking change with before → after recipes (methods-only cells, instances,
   SQLite-only persistence, `aio/extras`, wire catalog)
+- [1.0.9-beta → **1.0.10-beta**](from-1.0.9-beta-to-1.0.10-beta.md) — nothing is
+  removed, and the public surface does not move. A streamed page takes its route
+  when `renderToStream()` is called, so a handler that awaits before sending the
+  body no longer renders the next request's page; a route set after the call is
+  reported (one same-step shape with a `renderToString()` shell is not — see the
+  guide), and one set after an `await` that follows the call is no longer
+  rendered (set it before the call); a closed tab's head is no longer handed to
+  the next no-argument `collectHead()`, and a root-Provider page streams. The
+  browser warns when a call or a sync op ran but was NOT SAVED, and runs one
+  `sync-err` retry loop instead of one per error. `persist: "none"` slices an
+  older build stored are securely deleted at boot, and `journal: true` also
+  records `listensTo` reactions and server writes to sync cells, so a crash
+  restores them in order. `am backup` / `am restore` hold the app's lock
+  (`am status` says `maintenance`, exit 2), several `am` failure paths now exit
+  1, a failed `am create` / `am pin` undoes itself, and SIGHUP stops a desktop
+  app gracefully.
 - [1.0.8-beta → **1.0.9-beta**](from-1.0.8-beta-to-1.0.9-beta.md) — nothing
   breaks; the public surface grows only on the testing side (`.pressed` /
   `.expanded`, richer `.checked`). `am prune` / `lab` / `doctor` /

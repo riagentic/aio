@@ -21,7 +21,7 @@
  */
 
 import type { GlobalFlags } from "./am-types.ts";
-import { detectMode, fail, out } from "./am-output.ts";
+import { detectMode, fail, out, say } from "./am-output.ts";
 import { aioRootPaths, loadOrCreateAioRoot } from "../server/tls.ts";
 
 /** Where each platform keeps the trust store, and the one command that adds to
@@ -123,7 +123,7 @@ export async function cmdTrust(
     return;
   }
 
-  const L = (s = "") => console.log(s);
+  const L = (s = "") => say(s);
   L();
   L(`  aio local root${root.created ? "  (created just now)" : ""}`);
   L(`  ${root.certPath}`);

@@ -5,9 +5,19 @@
 
 import { readDenoJson } from "../server/deno-json.ts";
 import { KILL_POLL_MS } from "../server/single-instance-lock.ts";
-import { dirname, join, resolve } from "@std/path";
+import { basename, dirname, join, resolve } from "@std/path";
 import { cwdIsProject, isUnder, projectRoot } from "./am-project.ts";
-import { appDirs, appHome, appsDirEnv } from "../server/app-dirs.ts";
+import {
+  appDirs,
+  appHome,
+  appsDirEnv,
+  foreignAppHomeError,
+  homeOwnerError,
+  profileOfHome,
+  registerAppDirs,
+  registeredProfile,
+  reservedAppHomeError,
+} from "../server/app-dirs.ts";
 import { homedir } from "../server/paths.ts";
 import {
   DEFAULT_BACKUP_KEEP,
@@ -23,6 +33,7 @@ import {
 import type { GlobalFlags } from "./am-types.ts";
 import {
   AppLock,
+  deadOwnerWarning,
   type InstanceInfo,
   instances,
   isLockOwnerAlive,
@@ -32,13 +43,16 @@ import {
   killProcess,
   type LockData,
   lockDir,
-  processStartToken,
+  lockKey,
+  ownerIdentity,
   readLaunchInfo,
+  readLock,
+  removeLockIfOwner,
+  replaceLockIf,
   resolveAppId,
   STARTUP_GRACE_MS,
   STUCK_STARTING_MS,
   writeLaunchInfo,
-  writeLock,
 } from "../server/single-instance-lock.ts";
 import { EXIT_WAIT_MS } from "../server/shutdown-budget.ts";
 import { HEY } from "../diagnostics/fmt.ts";
@@ -61,6 +75,8 @@ import {
   mark,
   out,
   outError,
+  say,
+  sayErr,
   stack,
   style,
   table,
@@ -68,10 +84,18 @@ import {
 } from "./am-output.ts";
 import { repoRoot } from "./am-cmd-create.ts";
 import {
+  amLockKey,
   declaredPort,
+  holderSince,
   liveLock,
+  lockHasNoDoor,
+  MAINTENANCE_STATUS,
+  maintenanceMessage,
+  maintenanceOp,
+  noDoorMessage,
   readEntryConfig,
   readPid,
+  removeLockKeyed,
   removePid,
   resolveAmAppId,
   resolveEntry,
@@ -288,6 +312,14 @@ export async function ensureSingleton(
     return;
   }
 
+  // `am backup` / `am restore` holding the lock (`maintenanceMark`): not an
+  // app, so neither "stuck" nor a zombie — it read as a door-less `started`
+  // lock below and was SIGTERMed mid-copy. Wait for it; never kill it.
+  if (maintenanceOp(pf)) {
+    outError(maintenanceMessage(appId, pf), mode);
+    Deno.exit(1);
+  }
+
   // Process alive — behavior depends on status
   if (pf.status === "stopping") {
     // Already shutting down — wait up to 3s, then force kill
@@ -298,10 +330,10 @@ export async function ensureSingleton(
       mode,
     );
     const deadline = Date.now() + SINGLETON_WAIT_MS;
-    while (Date.now() < deadline && isProcessAlive(pf.pid)) {
+    while (Date.now() < deadline && isLockOwnerAlive(pf)) {
       await new Promise((r) => setTimeout(r, POLL_INTERVAL_MS));
     }
-    if (isProcessAlive(pf.pid)) {
+    if (isLockOwnerAlive(pf)) {
       await killProcess(pf.pid, 0, pf); // already waited, go straight to SIGKILL
     }
     removePid(appId, pf);
@@ -389,7 +421,7 @@ export async function ensureSingleton(
       );
       Deno.exit(1);
     }
-    console.error(`am: note: still starting (pid ${pf.pid}) — waiting`);
+    sayErr(`am: note: still starting (pid ${pf.pid}) — waiting`);
     await awaitStarted({
       appId,
       pid: pf.pid,
@@ -576,6 +608,19 @@ export async function cmdUi(
   );
 }
 
+/** The `--profile=` a started child gets: the NAME when one was given (so the
+ *  runtime derives the home exactly as it would for `deno task dev
+ *  --profile=dev`), else the targeted folder as an absolute path; nothing
+ *  for the app's own home. Pure but for the registry read. */
+export function profileArg(appId: string, flags: GlobalFlags): string | null {
+  if (flags.profile === undefined && flags.home === undefined) return null;
+  const home = appDirs(appId).home;
+  const name = registeredProfile(appId) ?? profileOfHome(appId, home);
+  if (name !== undefined) return `--profile=${name}`;
+  if (resolve(home) === resolve(appHome(appId))) return null;
+  return `--profile=${home}`;
+}
+
 export async function cmdStart(
   args: string[],
   flags: GlobalFlags,
@@ -650,7 +695,7 @@ export async function cmdStart(
   let reused: number | undefined;
   if (declared === undefined && opts?.reusePort) {
     if (await isPortInUse(opts.reusePort)) {
-      console.error(
+      sayErr(
         `am: note: port ${opts.reusePort} (the one this app bound before) ` +
           `is taken now — the app picks a free one`,
       );
@@ -659,35 +704,36 @@ export async function cmdStart(
   // 0 = "not decided yet", for the placeholder lock
   const port = declared ?? reused ?? 0;
 
+  // A REQUESTED home (`--profile`, `--home`) is checked BEFORE am writes
+  // anything into it — the same refusals the child makes. Written first, a
+  // launch.json or a logs/ dir made a foreign folder look like an aio app's
+  // (and so pass the child's own check), and overwrote another app's.
+  const requested = flags.profile !== undefined || flags.home !== undefined;
+  if (requested) {
+    const dirs = appDirs(appId);
+    const refusal = foreignAppHomeError(appId, dirs.home) ??
+      reservedAppHomeError(appId, dirs.home) ??
+      homeOwnerError(dirs, appId, registeredProfile(appId));
+    if (refusal) {
+      outError(
+        flags.home !== undefined
+          ? refusal.replaceAll("--profile=<name>", "--home=<other dir>")
+          : refusal,
+        mode,
+      );
+      Deno.exit(1);
+    }
+  }
+
   // Clean up stuck/zombie instances before acquiring lock — or ATTACH to one
   // that is still booting (this returns only when there is nothing to attach
   // to; see ensureSingleton).
   await ensureSingleton(appId, mode, flags);
 
-  // `--home=<dir>` TARGETS an instance that is already running from that data
-  // home (docs/clients/app-manager.md: "Target the instance of the app running
-  // from data home DIR"). It cannot LAUNCH one: the runtime has no CLI flag for
-  // its data home — an app chooses it with `aio.run({ appDir })`, or the whole
-  // root moves with `AIO_APPS_DIR` — and `am` does not forward `--home` to the
-  // child. Combining it with `start` used to boot the app in the DEFAULT home
-  // while am filed the placeholder lock under the scoped key, leaving a
-  // "starting, port 0" lock that never resolves and never clears. Refuse, and
-  // name the two things that actually work.
-  if (flags.home !== undefined) {
-    outError(
-      `--home targets an instance that is already running; it cannot start ` +
-        `one. The runtime has no flag for its data home, so am cannot tell ` +
-        `the child to boot in ${flags.home}.\n` +
-        `  fix: AIO_APPS_DIR=${flags.home} am start   (moves the whole apps ` +
-        `root for the child)\n` +
-        `  or:  aio.run({ appDir: "${flags.home}" })  (the app decides, in ` +
-        `its own entry)\n` +
-        `  then: am --home=${flags.home} status|stop  targets it`,
-      mode,
-    );
-    Deno.exit(1);
-  }
-
+  // `--profile=<name|path>` / `--home=<dir>`: the data home was bound by
+  // `targetHome` (am.ts) before anything read a lock, so the placeholder
+  // below is filed under the key the child will use — and the child is TOLD
+  // (see `profileArg`), so it boots there.
   // Single-instance enforcement via AppLock.
   //
   // THE home, from the app-dirs registry — which `--home=<dir>` has already
@@ -699,7 +745,7 @@ export async function cmdStart(
   // longer update or release its own lock, so a stale lock survived its clean
   // shutdown and the next boot refused to start.
   const home = appDirs(appId).home;
-  const lock = new AppLock(appId, home);
+  const lock = new AppLock(appId, home, registeredProfile(appId));
   const result = await lock.acquire(port);
   if (!result.ok) {
     outError(alreadyRunningLine(result.existing), mode);
@@ -739,17 +785,23 @@ export async function cmdStart(
         outError(
           `port ${port} in use by aio app "${
             cfg.title ?? "?"
-          }" — stop it first or use --port=N`,
+          }" — stop it first, or run this one on --port=0 (a free port) ` +
+            `— a profile of a fixed-port app needs its own`,
           mode,
         );
       } else if (!trojan.ok && trojan.error === "auth") {
         outError(
           `port ${port} in use by an aio app that requires a key (it answered ` +
-            `the probe with 401) — stop it first, or use --port=N`,
+            `the probe with 401) — stop it first, or use --port=0 (a free ` +
+            `port)`,
           mode,
         );
       } else {
-        outError(`port ${port} in use by another process — use --port=N`, mode);
+        outError(
+          `port ${port} in use by another process — use --port=0 (a free ` +
+            `port) or --port=N`,
+          mode,
+        );
       }
       Deno.exit(1);
     } catch { /* port free — good */ }
@@ -810,6 +862,15 @@ export async function cmdStart(
   if (flags.port && !passthrough.some((a) => a.startsWith("--port="))) {
     passthrough.push(`--port=${flags.port}`);
   }
+  // The profile, as ARGV — never env-only: a runtime older than profiles then
+  // REFUSES the unknown flag, where an ignored variable would boot it on the
+  // app's real data. Recorded in launch.json below, so `am restart` replays it.
+  {
+    const pa = profileArg(appId, flags);
+    const i = passthrough.findIndex((a) => a.startsWith("--profile="));
+    if (i !== -1) passthrough.splice(i, 1);
+    if (pa) passthrough.push(pa);
+  }
   if (
     flags.transport && !passthrough.some((a) => a.startsWith("--transport="))
   ) {
@@ -822,7 +883,13 @@ export async function cmdStart(
   // Recorded BEFORE a reused port joins: that port is this restart's answer,
   // not the app's declaration.
   const cwd = projectRoot();
-  writeLaunchInfo(appId, { flags: [...passthrough], entry, cwd });
+  const launchInfo = { flags: [...passthrough], entry, cwd };
+  // For a REQUESTED home, recorded only once the child has STARTED — into the
+  // home its lock reports (see `awaitStarted`): a refused boot leaves nothing.
+  if (!requested) {
+    const unrecorded = writeLaunchInfo(appId, launchInfo);
+    if (unrecorded) sayErr(`am: warning: ${unrecorded}`);
+  }
   if (reused !== undefined) passthrough.push(`--port=${reused}`);
   // The command word this app's own `dev` task gives its entry (`serve`), in
   // FRONT of the flags — the cli scaffold routes on `Deno.args[0]`. Derived at
@@ -848,8 +915,12 @@ export async function cmdStart(
   // must land in the log file, and its real PID must come back on stdout. The
   // HOW is per-OS (sh/nohup does not exist on Windows — am start used to fail
   // there outright); detachedSpawnSpec builds the right command for each.
-  const logFile = stdoutLogPath(appId);
-  await prepareStdoutLog(logFile, passthrough);
+  // A requested home gets its stdout log BESIDE it until the child has
+  // started (same file system, so it can be renamed in) — never inside it.
+  const logFile = requested
+    ? besideLog(appDirs(appId).home)
+    : stdoutLogPath(appId);
+  if (!requested) await prepareStdoutLog(logFile, passthrough);
   const spec = detachedSpawnSpec(Deno.build.os, denoArgs, logFile);
   // Where the window goes, and whether the app may open a tab in the human's
   // browser. `{}` unless something is actually being contained, so a human at
@@ -873,7 +944,7 @@ export async function cmdStart(
     // happened, "warning:" is "this did not work and your desktop is about to
     // be used". tests/every-message-has-a-level pins that every CLI
     // diagnostic says which.
-    console.error(
+    sayErr(
       plan.level === "warn"
         ? `am: warning: ${plan.note}`
         : `am: note: ${plan.note}`,
@@ -980,13 +1051,70 @@ export async function cmdStart(
     // process from a stranger that inherits its pid. The child overwrites this
     // lock with its own (which records the same thing); this covers the window
     // in between.
-    ...(processStartToken(pid) !== null
-      ? { startToken: processStartToken(pid)! }
-      : {}),
+    ...ownerIdentity(pid),
   };
-  if (!childLock || childLock.pid !== pid) writeLock(lockData);
+  writeStartPlaceholder(childLock, {
+    ...lockData,
+    // Every lock am writes carries the profile, so its key is the child's.
+    ...(registeredProfile(appId) ? { profile: registeredProfile(appId) } : {}),
+  });
 
-  await awaitStarted({ appId, pid, declared, port, flags, mode });
+  await awaitStarted({
+    appId,
+    pid,
+    declared,
+    port,
+    flags,
+    mode,
+    logFile,
+    onStarted: requested
+      ? async (real) => {
+        // The home the CHILD resolved — for an `appDir` app, `<appDir>-dev`,
+        // not the `~/.<app>-dev` am computed.
+        const home = real?.home ?? appDirs(appId).home;
+        registerAppDirs(appId, appDirs(appId, home));
+        const logs = appDirs(appId).logs;
+        try {
+          Deno.mkdirSync(logs, { recursive: true });
+          const dest = join(logs, "stdout.log");
+          await prepareStdoutLog(dest, passthrough);
+          try {
+            Deno.renameSync(logFile, dest);
+          } catch {
+            Deno.symlinkSync(logFile, dest); // another file system
+          }
+        } catch (e) {
+          sayErr(`am: warning: the start log stays at ${logFile} (${e})`);
+        }
+        const unrecorded = writeLaunchInfo(appId, launchInfo);
+        if (unrecorded) sayErr(`am: warning: ${unrecorded}`);
+      }
+      : undefined,
+  });
+}
+
+/** The start log of a REQUESTED home: beside it (same file system, so it can
+ *  be renamed in once the child started), never inside it. The parent — the
+ *  apps root, `~` — is made if missing; the home itself is not. */
+function besideLog(home: string): string {
+  try {
+    Deno.mkdirSync(dirname(home), { recursive: true });
+  } catch { /* aio-ok: the redirect reports an unwritable parent */ }
+  return join(dirname(home), `.${basename(home)}.am-start-${Deno.pid}.log`);
+}
+
+/** The lock of the child `am` spawned (`pid`): under the key am computed, or
+ *  — for an app that chose its own home (`appDir`) — wherever it filed it. */
+function childLockOf(appId: string, pid: number): LockData | null {
+  const own = readPid(appId);
+  if (own && own.pid === pid) {
+    // Our placeholder, unless the child filed its real lock elsewhere.
+    const real = instances(appId).find((i) =>
+      i.pid === pid && lockKey(i.appId, i.home, i.profile) !== amLockKey(appId)
+    );
+    return real ?? own;
+  }
+  return instances(appId).find((i) => i.pid === pid) ?? own;
 }
 
 /** Wait for `pid` — a child `am start` just spawned, or a booting instance it
@@ -1005,8 +1133,13 @@ async function awaitStarted(o: {
   port: number;
   flags: GlobalFlags;
   mode: import("./am-types.ts").OutputMode;
+  /** The child's stdout log, when not `stdoutLogPath(appId)`. */
+  logFile?: string;
+  /** Run once the child is up, with its real lock. */
+  onStarted?: (real: LockData | null) => Promise<void>;
 }): Promise<void> {
   const { appId, pid, declared, port, flags, mode } = o;
+  const logPath = () => o.logFile ?? stdoutLogPath(appId);
   // ── `am start` WAITS by default ──
   //
   // It used to return the instant the child was spawned, with
@@ -1057,11 +1190,11 @@ async function awaitStarted(o: {
     // is what it is doing; wait for it — bounded, announced, and only when
     // no explicit `--wait` was given (an explicit number is the caller's).
     if (slowStart === null && !flags.wait) {
-      slowStart = slowStartReason(readLogTail(stdoutLogPath(appId)));
+      slowStart = slowStartReason(readLogTail(logPath()));
       if (slowStart) {
         timeout = SLOW_START_WAIT_MS;
         deadline = startedAt + timeout;
-        console.error(
+        sayErr(
           `am: note: ${slowStart} — waiting up to ${
             SLOW_START_WAIT_MS / 1000
           }s for it (--wait=N to change)`,
@@ -1069,7 +1202,7 @@ async function awaitStarted(o: {
       }
     }
     if (livePort === undefined) {
-      const written = readPid(appId); // our own child's lock — see above
+      const written = childLockOf(appId, pid); // our own child's lock
       // A SOCKET-ONLY app never binds a port, and `port: 0` is falsy — so
       // `livePort` never resolved, the loop always ran out, and `am start`
       // exited 1 with "not responding on port 0 after 10s" for a desktop app
@@ -1101,9 +1234,19 @@ async function awaitStarted(o: {
 
   if (healthy) {
     // Child's _run() should have updated the lock by now
-    const updated = readPid(appId); // our own child's lock — see above
+    const updated = childLockOf(appId, pid); // our own child's lock
+    // The child filed its lock under ANOTHER key (an `appDir` app): am's
+    // placeholder under the computed key is a ghost — same pid — and goes.
+    if (
+      updated &&
+      lockKey(updated.appId, updated.home, updated.profile) !== amLockKey(appId)
+    ) {
+      removeLockIfOwner(amLockKey(appId), { pid });
+    }
+    await o.onStarted?.(updated);
     if (updated && updated.status !== "started") {
-      writeLock({ ...updated, status: "started" });
+      // CAS: only the record just read — never over a lock written since.
+      replaceLockIf(updated, (now) => ({ ...now, status: "started" }));
     }
     // The port the app ACTUALLY bound — from its own lock, falling back to what
     // we probed. Reporting `port` here would print am's placeholder for an app
@@ -1116,17 +1259,19 @@ async function awaitStarted(o: {
       mode,
     );
   } else if (!isProcessAlive(pid)) {
-    removePid(appId); // our own child's placeholder, under our own home
+    // Our own child's placeholder, under our own home — and ONLY it: by the
+    // time the child died another start may have taken the name.
+    removeLockIfOwner(amLockKey(appId), { pid });
     // What it said — the `error:` line and the `→ fix:` lines under it, not
     // the last lines of the log (the stack frames, so the one line that says
     // what to do was the first to be cut).
-    const said = crashTail(readLogTail(stdoutLogPath(appId)));
+    const said = crashTail(readLogTail(logPath()));
     outError(
       said.length
         ? `${appId} did not start — the child (pid ${pid}) exited.\n` +
           `  it said:\n${said.map((l) => `      ${l}`).join("\n")}\n` +
-          `  full log: ${stdoutLogPath(appId)}`
-        : `process crashed — check ${stdoutLogPath(appId)}`,
+          `  full log: ${logPath()}`
+        : `process crashed — check ${logPath()}`,
       mode,
     );
     Deno.exit(1);
@@ -1507,6 +1652,7 @@ export function alreadyRunningLine(
   pf: Pick<LockData, "appId" | "pid" | "port" | "cwd">,
   root = projectRoot(),
 ): string {
+  if (maintenanceOp(pf)) return maintenanceMessage(pf.appId, pf);
   const other = foreignCheckout(pf, root);
   return `already running: ${pf.appId} (pid ${pf.pid}, port ${pf.port})` +
     (other
@@ -1603,7 +1749,9 @@ async function finalPersistVerdict(
   return /persist failed:/.test(r.error) ? r.error : null;
 }
 
-async function stopOne(
+/** Stop ONE resolved target. Exported for the no-door test only.
+ *  @internal */
+export async function stopOne(
   target: StopTarget,
   flags: GlobalFlags,
 ): Promise<
@@ -1611,25 +1759,94 @@ async function stopOne(
   | { ok: false; appId: string; error: string }
 > {
   const { appId, port, pf } = target;
+  // A lock with NO DOOR (`am start`'s "starting, port 0" placeholder — see
+  // `lockHasNoDoor`) has nothing to ask for a graceful shutdown or a persist
+  // verdict: both went to `:0` and came back as the runtime's "Requests to
+  // port 0 are blocked". Stopping a booting app is still `stop`'s job — its
+  // owner gets the SIGTERM the fallback below gives any app that cannot
+  // answer; an owner already gone is reported by name, not by fetch.
+  const noDoor = pf !== null && lockHasNoDoor(pf);
+  if (noDoor && !isLockOwnerAlive(pf)) {
+    // Said ONCE, then cleaned up like every other stale lock — left in
+    // place, every later `am stop` repeated the warning forever.
+    // `removeLockKeyed` rather than `removePid`: the error below is where
+    // the killed op is named, and removePid would name it a second time.
+    removeLockKeyed(pf);
+    return {
+      ok: false,
+      appId,
+      error: maintenanceOp(pf)
+        ? `${appId} is not running — ${deadOwnerWarning(appId, pf)}`
+        : `${appId} is not running — its lock (${pf.status}, no port or ` +
+          `socket yet) names pid ${pf.pid}, which has exited`,
+    };
+  }
 
-  // Mark as stopping
-  if (pf) writeLock({ ...pf, status: "stopping" });
+  // `am backup` / `am restore` holding the lock is not an app to stop: the
+  // SIGTERM below ended the copy (and marked the lock `stopping` for good).
+  if (pf && maintenanceOp(pf)) {
+    return { ok: false, appId, error: maintenanceMessage(appId, pf) };
+  }
 
-  const unsaved = await finalPersistVerdict(port, appId);
+  // Mark as stopping — only while the lock still names the OWNER read (same
+  // pid and start identity; its status may have moved on — a booting app
+  // flips `starting` → `started` under us, and that is still the app to
+  // stop). A lock another process published since is not this stop's to
+  // touch: marking it copied the old record over the new one, and the next
+  // reader reclaimed a live instance's lock. Nothing is signalled either.
+  const mark: { was?: LockData } = {};
+  if (
+    pf &&
+    !replaceLockIf(pf, (now) => (mark.was = { ...now, status: "stopping" }))
+  ) {
+    const now = readLock(lockKey(pf.appId, pf.home, pf.profile));
+    if (!now) {
+      // Gone, AND its owner with it: the app exited between the read and
+      // here — stopped. Gone but the owner LIVES (a lock removed by hand, an
+      // exit still under way): nothing to mark, but the process is still
+      // the one to stop — fall through to the stop below, as ever.
+      if (!isLockOwnerAlive(pf)) return { ok: true, appId, pid: pf.pid, port };
+    } else {
+      return {
+        ok: false,
+        appId,
+        error:
+          `${appId}: its lock now names another process (pid ${now.pid}, ` +
+          `was ${pf.pid}) — a new instance started while this stop was ` +
+          `reading it. Nothing was stopped; run \`am status\` and stop again ` +
+          `if you meant it.`,
+      };
+    }
+  }
+
+  const unsaved = noDoor ? undefined : await finalPersistVerdict(port, appId);
 
   // Try graceful shutdown via trojan API, fall back to SIGTERM
-  const result = await trojanPost(port, "shutdown", undefined, appId);
+  const result = noDoor
+    ? { ok: false as const, error: noDoorMessage(appId, pf!) }
+    : await trojanPost(port, "shutdown", undefined, appId);
   // The SIGTERM fallback is for an app that has a lock ON THIS PORT and is not
   // answering. It must never fire on an identity refusal — killing our own pid
   // because someone ELSE holds the port is the same retargeting bug mirrored.
-  if (!result.ok && pf && pf.port === port && isLockOwnerAlive(pf)) {
+  if (
+    !result.ok && pf && (noDoor || pf.port === port) && isLockOwnerAlive(pf)
+  ) {
     try {
       Deno.kill(pf.pid, "SIGTERM");
     } catch { /* already dead */ }
   } else if (!result.ok) {
     // The real reason, not the generic literal that discarded it: "app not
     // running on port N", an identity refusal, or the app's own error.
-    if (pf) writeLock(pf); // we stopped nothing — undo the "stopping" mark
+    // We stopped nothing — undo the "stopping" mark, if it is still ours.
+    if (pf && mark.was) {
+      // …and only if the mark is still there: the app may have moved its own
+      // status on since (it is the same owner, so the CAS lets us in).
+      replaceLockIf(
+        mark.was,
+        (now) =>
+          now.status === "stopping" ? { ...now, status: pf.status } : now,
+      );
+    }
     return { ok: false, appId, error: result.error };
   }
 
@@ -1659,7 +1876,7 @@ async function stopOne(
       // finished, while the same app WITHOUT `--wait` shut down cleanly.
       // `--wait` is the flag a script uses to be safe; it was the only one
       // that truncated shutdown. `am restart` forces it, so it inherited it.
-      if (!isProcessAlive(pf.pid)) break;
+      if (!isLockOwnerAlive(pf)) break;
     } else {
       // No pid to watch — the HTTP probe is the only evidence there is.
       try {
@@ -1676,7 +1893,7 @@ async function stopOne(
   }
 
   // Graceful timeout expired — escalate to SIGKILL
-  if (pf && isProcessAlive(pf.pid)) {
+  if (pf && isLockOwnerAlive(pf)) {
     await killProcess(pf.pid, 0, pf); // already waited gracefully
   }
   removePid(appId, pf);
@@ -1759,7 +1976,7 @@ export async function cmdStop(
       Deno.exit(1);
     }
     if (nested.length > 0) {
-      console.error(
+      sayErr(
         `[am] note: left running — other projects below ${root}: ${nestedList}`,
       );
     }
@@ -1910,6 +2127,22 @@ async function restartAll(
 /** One app's restart: stop it, taking the durability verdict the way `am
  *  stop` does, wait for the port, start it again. Returns the verdict; it
  *  never exits on it (see {@linkcode restartAll}). */
+/** `am start`'s placeholder lock for the child it just spawned (`data.pid`),
+ *  written compare-and-swap: create it only while no lock is there, or
+ *  replace a DEAD owner's — never a LIVE instance's (the child is refused by
+ *  that one anyway, and overwriting its lock made it look stale to the next
+ *  reader, which reclaimed it: two instances on one state.db), and never the
+ *  child's own, which it may have written since `seen` was read. True when
+ *  written. @internal exported for its test */
+export function writeStartPlaceholder(
+  seen: LockData | null,
+  data: LockData,
+): boolean {
+  if (!seen) return replaceLockIf(null, data);
+  if (seen.pid === data.pid || isLockOwnerAlive(seen)) return false;
+  return replaceLockIf(seen, data);
+}
+
 /** `am`'s OWN flags — the ones that steer the restart rather than the app.
  *
  *  `--force` decides whether to take over another checkout; `--json` picks an
@@ -1964,7 +2197,7 @@ export function mergeLaunchFlags(
  *  verb keeps — failed on a command that had already started the app. Notes
  *  ride on stderr in `--json`; the one document is the start result. */
 function restartNote(mode: ReturnType<typeof detectMode>, line: string): void {
-  if (mode === "json") console.error(line);
+  if (mode === "json") sayErr(line);
   else out(line, mode);
 }
 
@@ -2000,7 +2233,15 @@ async function restartApp(
     ? t.target.appId
     : resolveAmAppId(flags.app);
   const pf = t.kind === "target" ? t.target.pf : null;
-  const running = pf !== null && isProcessAlive(pf.pid);
+  const running = pf !== null && isLockOwnerAlive(pf);
+
+  // `am backup` / `am restore` holding the lock: nothing to restart, and the
+  // start half would be refused anyway — refuse FIRST, before any
+  // "restart: …" note announces a relaunch that is not going to happen.
+  if (pf && running && maintenanceOp(pf)) {
+    outError(maintenanceMessage(appId, pf), mode);
+    Deno.exit(1);
+  }
 
   // Restarting an instance started from ANOTHER checkout of this app relaunches
   // it from HERE — a different tree, possibly a different framework pin. It
@@ -2256,11 +2497,15 @@ export async function cmdStatus(
     } else if (plan.kind === "all") {
       const rows = plan.components.map((c) => {
         const pf = liveLock(c.appId);
-        const up = pf !== null && isProcessAlive(pf.pid);
+        const up = pf !== null && isLockOwnerAlive(pf);
         return {
           component: c.label,
           appId: c.appId,
-          status: up ? (pf.status ?? "started") : "stopped",
+          // A maintenance hold reads `maintenance` first — its `status` is
+          // the "starting" written for older readers.
+          status: up
+            ? (maintenanceOp(pf) ? MAINTENANCE_STATUS : pf.status ?? "started")
+            : "stopped",
           ...(up ? { pid: pf.pid, port: pf.port } : {}),
         };
       });
@@ -2311,12 +2556,44 @@ export async function cmdStatus(
   // makes it one answer.
   if (!pf) {
     const others = instances();
+    // Its PROFILES are not "the app", but they are what the reader is looking
+    // for when the app itself is stopped: name each, with the command.
+    const profiles = others.filter((i) => i.appId === appId && i.alive)
+      .map((i) =>
+        i.profile ?? (i.home ? profileOfHome(appId, i.home) : undefined)
+      )
+      .filter((p): p is string => !!p);
     out(
-      { appId, status: "stopped", running: others.map((i) => i.appId) },
+      {
+        appId,
+        status: "stopped",
+        running: others.map((i) =>
+          i.profile ? `${i.appId}@${i.profile}` : i.appId
+        ),
+        ...(profiles.length
+          ? {
+            profiles: profiles.map((p) => ({
+              key: `${appId}@${p}`,
+              stopWith: `am stop --app=${appId}@${p}`,
+            })),
+          }
+          : {}),
+      },
       mode,
       () =>
         stack(
           `${mark("warn")} ${style.bold(appId)}  ${style.dim("stopped")}`,
+          profiles.length > 0 &&
+            block(
+              "info",
+              `Its profile${profiles.length === 1 ? " is" : "s are"} running: ${
+                profiles.map((p) => `${appId}@${p}`).join(", ")
+              }.`,
+              undefined,
+              `am status --app=${appId}@${
+                profiles[0]
+              }  ·  am stop --app=${appId}@${profiles[0]}`,
+            ),
           others.length > 0 &&
             block(
               "info",
@@ -2335,7 +2612,7 @@ export async function cmdStatus(
     Deno.exit(1);
   }
 
-  const alive = isProcessAlive(pf.pid);
+  const alive = isLockOwnerAlive(pf);
 
   // Lock file exists but process dead → stale, clean up
   if (!alive) {
@@ -2345,6 +2622,19 @@ export async function cmdStatus(
       mode,
     );
     Deno.exit(1);
+  }
+
+  // Held by `am backup` / `am restore` — transitional like `stopping`, and
+  // named: "starting" was the lie a maintenance hold used to read as.
+  const op = maintenanceOp(pf);
+  if (op) {
+    out(
+      mode === "pretty"
+        ? `${appId}: maintenance — ${op} is running (pid ${pf.pid})`
+        : { appId, status: MAINTENANCE_STATUS, op, pid: pf.pid },
+      mode,
+    );
+    Deno.exit(2);
   }
 
   // Process alive + stopping → report stopping (exit 2 = transitional, not error)
@@ -2380,7 +2670,17 @@ export async function cmdStatus(
 
   if (portResponds) {
     // Port responds → started (auto-fix lock if stuck at 'starting')
-    if (pf.status !== "started") writeLock({ ...pf, status: "started" });
+    // CAS: repair only the record read — a lock re-published meanwhile is
+    // someone else's, and is left exactly as it is (said, never silent).
+    if (
+      pf.status !== "started" &&
+      !replaceLockIf(pf, (now) => ({ ...now, status: "started" })) &&
+      mode === "pretty"
+    ) {
+      sayErr(
+        `am: note: ${appId}'s lock changed while it was read — not repaired`,
+      );
+    }
     const metrics = await trojanGet(port, "metrics", appId);
     const transport = pf.socketPath ? "uds" : "ws";
     if (metrics.ok) {
@@ -2471,13 +2771,14 @@ function shellWord(s: string): string {
  *  every part of the address the list was read with:
  *   - the scope: `--instance=<name>` when that is what set it, otherwise the
  *     `AIO_APPS_DIR=<dir>` it came from (a variable, so it prefixes);
- *   - the home: `--home=<dir>` when the instance runs from anything but the
- *     scope's default home for its id — two boots of one id are two locks.
+ *   - the home: `--profile=<name>` for a profile, `--profile=<dir>` for any
+ *     other folder than the scope's default home for its id — two boots of
+ *     one id are two locks.
  *
  *  Pure over its inputs: `defaultHome` is `appHome(appId)` in the listing's
  *  scope, passed in so the test does not need to move the process env. */
 export function stopCommandFor(
-  inst: { appId: string; home?: string },
+  inst: { appId: string; home?: string; profile?: string },
   scope: { instance?: string; appsDir?: string; defaultHome: string },
 ): string {
   const parts = ["am", "stop", `--app=${inst.appId}`];
@@ -2490,7 +2791,15 @@ export function stopCommandFor(
     else prefix = `AIO_APPS_DIR=${shellWord(scope.appsDir)} `;
   }
   if (inst.home && resolve(inst.home) !== resolve(scope.defaultHome)) {
-    parts.push(`--home=${shellWord(inst.home)}`);
+    // A profile by its NAME (what was typed to start it); any other folder
+    // by its path — the one flag either way.
+    const name = inst.profile ??
+      (scope.defaultHome
+        ? profileOfHome(inst.appId, inst.home, scope.defaultHome)
+        : undefined);
+    parts.push(
+      name ? `--profile=${shellWord(name)}` : `--home=${shellWord(inst.home)}`,
+    );
   }
   return prefix + parts.join(" ");
 }
@@ -2521,10 +2830,16 @@ export function cmdInstances(_args: string[], flags: GlobalFlags): void {
     const anyCdp = all.some((i) => i.cdpPort);
     const rows = all.map((inst) => ({
       "": mark(inst.status === "started" ? "run" : "warn"),
-      APP: inst.appId,
+      // The KEY for a profile (`myapp@dev`) — what `am stop myapp@dev` takes.
+      APP: inst.profile ? `${inst.appId}@${inst.profile}` : inst.appId,
       PID: String(inst.pid),
-      LISTENING: inst.socketPath ? "uds" : `:${inst.port}`,
-      UP: formatUptime(Math.round((Date.now() - inst.startedAt) / 1000)),
+      // A maintenance hold listens on nothing: name the op instead of `:0`.
+      LISTENING: maintenanceOp(inst)
+        ? `(${maintenanceOp(inst)})`
+        : inst.socketPath
+        ? "uds"
+        : `:${inst.port}`,
+      UP: formatUptime(Math.round((Date.now() - holderSince(inst)) / 1000)),
       AIO: instanceAioMismatch(inst.aioVersion)
         ? style.yellow(`${inst.aioVersion ?? "?"} ≠`)
         : inst.aioVersion ?? style.dim("?"),
@@ -2548,7 +2863,7 @@ export function cmdInstances(_args: string[], flags: GlobalFlags): void {
         : {}),
     }));
     const mismatched = all.filter((i) => instanceAioMismatch(i.aioVersion));
-    console.log(stack(
+    say(stack(
       indent(table(rows, {
         columns: (Object.keys(rows[0]!) as (keyof typeof rows[0])[]).map((
           k,
@@ -2589,12 +2904,22 @@ export function cmdInstances(_args: string[], flags: GlobalFlags): void {
     out(
       all.map((inst) => ({
         appId: inst.appId,
+        // The PROFILE (`--profile=dev`) this instance runs under; null for the
+        // app's own home and any other folder. Always present, like dataDir.
+        profile: inst.profile ??
+          (inst.home ? profileOfHome(inst.appId, inst.home) : undefined) ??
+          null,
         pid: inst.pid,
         port: inst.port,
-        status: inst.status,
+        // `am backup` / `am restore` holding the lock is not a booting app:
+        // the same `maintenance` + `op` `am status` reports, and no
+        // `stopWith` — `am stop` refuses a hold (wait for it, or Ctrl-C it).
+        ...(maintenanceOp(inst)
+          ? { status: MAINTENANCE_STATUS, op: maintenanceOp(inst) }
+          : { status: inst.status }),
         transport: inst.socketPath ? "uds" : "ws",
         ...(inst.socketPath ? { socketPath: inst.socketPath } : {}),
-        uptime: Math.round((Date.now() - inst.startedAt) / 1000),
+        uptime: Math.round((Date.now() - holderSince(inst)) / 1000),
         // The command that ends THIS app and nothing else, spelled out.
         //
         // A hint is for the pretty branch and an agent is always on the JSON
@@ -2602,10 +2927,12 @@ export function cmdInstances(_args: string[], flags: GlobalFlags): void {
         // the one whose next move, after listing every aio process on the
         // box, is to match them by name and kill them all. Naming the safe
         // command inline costs a field and removes the guess.
-        stopWith: stopCommandFor(inst, {
-          instance: flags.instance,
-          appsDir: appsDirEnv(),
-          defaultHome: appHome(inst.appId),
+        ...(maintenanceOp(inst) ? {} : {
+          stopWith: stopCommandFor(inst, {
+            instance: flags.instance,
+            appsDir: appsDirEnv(),
+            defaultHome: appHome(inst.appId),
+          }),
         }),
         // The DevTools port, when the app was started with `--cdp`.
         //
@@ -2782,10 +3109,15 @@ export async function cmdKill(
       outError(noLockOnPortMessage(t.port), mode);
       Deno.exit(1);
     }
+    // Not running: exit 1, and the document carries `error` like every other
+    // failed `--json` answer (additive — `killed: false` stays), so a script
+    // keyed on `error` does not read a kill that found nothing as a success.
     if (t.kind === "none") {
       const appId = resolveAmAppId(flags.app);
       out(
-        mode === "pretty" ? `${appId}: not running` : { appId, killed: false },
+        mode === "pretty"
+          ? `${appId}: not running`
+          : { appId, killed: false, error: `${appId} is not running` },
         mode,
       );
       Deno.exit(1);
@@ -2794,7 +3126,9 @@ export async function cmdKill(
     const pf = t.target.pf; // wherever the instance's home is
     if (!pf || !isLockOwnerAlive(pf)) {
       out(
-        mode === "pretty" ? `${appId}: not running` : { appId, killed: false },
+        mode === "pretty"
+          ? `${appId}: not running`
+          : { appId, killed: false, error: `${appId} is not running` },
         mode,
       );
       Deno.exit(1);
@@ -2802,6 +3136,22 @@ export async function cmdKill(
     try {
       Deno.kill(pf.pid, "SIGTERM");
     } catch { /* raced us to the exit */ }
+    // `am backup` / `am restore` holding the lock: the SIGTERM interrupts THE
+    // OP, not an app — say so. And leave its lock alone: the op releases it
+    // itself once it has cleaned up (removing it here let an app start while
+    // a restore was still putting data/ in place).
+    const op = maintenanceOp(pf);
+    if (op) {
+      out(
+        mode === "pretty"
+          ? `interrupted ${op} on ${appId} (pid ${pf.pid}) — it stops at the ` +
+            `next file, removes its partial copy and exits 143; data/ is left ` +
+            `as it was`
+          : { appId, pid: pf.pid, killed: true, op },
+        mode,
+      );
+      return;
+    }
     removePid(appId, pf);
     out(
       mode === "pretty"

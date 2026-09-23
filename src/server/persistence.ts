@@ -123,6 +123,9 @@ export interface PersistenceConfig {
    *  snapshot and the mark that says "this snapshot includes up to seq" are one
    *  write. When this is set, `onPersisted` is bookkeeping only (compaction). */
   planPersisted?: (seq: number) => SkvStmt[];
+  /** Journal on: statements every save's transaction runs LAST — the
+   *  store is this build's again (store-gen.ts). */
+  planSaveAfter?: () => SkvStmt[];
   /** Stored-but-undeclared cell slices found at boot. Carried into
    *  EVERY persisted document verbatim, so user data is never dropped because
    *  a build stopped declaring its cell. */
@@ -974,6 +977,7 @@ export function createPersistenceManager(
           ...rows,
           ...stamp.pairs.flatMap(([k, v]) => kv.planSet!(k, v)),
           ...wm,
+          ...(planned && whole ? cfg.planSaveAfter?.() ?? [] : []),
         ],
         write: async () =>
           (await kv.setMulti(persistKey, toWrite, removedKeys)).ok,
@@ -1034,6 +1038,7 @@ export function createPersistenceManager(
         ...row,
         ...stamp.pairs.flatMap(([k, v]) => kv.planSet!(k, v)),
         ...wm,
+        ...(planned && whole ? cfg.planSaveAfter?.() ?? [] : []),
       ],
       write: async () => {
         await kv.set(persistKey, toStore);

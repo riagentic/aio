@@ -20,6 +20,20 @@
 // `timeout` on a hung test) never runs it. That case is `deno task clean:tmp`.
 
 import { aioTestRoot } from "./test-strict.ts";
+import { pruneDeadLockDirsTagged } from "../server/single-instance-lock.ts";
+
+/** A test that pointed `AIO_APPS_DIR` into a temp dir made a scoped lock dir
+ *  in the REAL `$XDG_RUNTIME_DIR` — and a child app it SIGKILLed (or any
+ *  in-process creator) left it there: ~5,400 of them after one day. Dropping
+ *  the temp dir drops its lock dirs too, once nothing live is in them: every
+ *  one whose name carries the temp dir's unique tail. */
+function pruneLockDirsOf(dir: string): void {
+  const tag = (dir.split(/[/\\]/).pop() ?? "").replace(/[^a-zA-Z0-9]+/g, "-")
+    .slice(-16);
+  try {
+    pruneDeadLockDirsTagged(tag);
+  } catch { /* aio-ok: best effort — check:orphans names what is left */ }
+}
 
 const registry = new Set<string>();
 let sweepArmed = false;
@@ -29,6 +43,7 @@ function sweep(): void {
   for (const dir of registry) {
     try {
       Deno.removeSync(dir, { recursive: true });
+      pruneLockDirsOf(dir);
     } catch (e) {
       if (e instanceof Deno.errors.NotFound) continue; // already gone — fine
       // Anything else is a directory this process is leaving behind on disk,
@@ -87,6 +102,7 @@ export async function dropTempDir(dir: string): Promise<void> {
   try {
     await Deno.remove(dir, { recursive: true });
     registry.delete(dir);
+    pruneLockDirsOf(dir);
   } catch {
     // aio-ok: still in use (a child's cwd, an open handle) or already gone.
     // Neither is worth a line here, and neither is a leak: the dir stays

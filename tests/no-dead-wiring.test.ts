@@ -105,3 +105,144 @@ Deno.test("dead-wiring: node_modules and .d.ts under a root are not scanned", as
   });
   assertEquals(hits, []);
 });
+
+// ── @decider: a function that claims to be THE decider is pinned by a test ──
+//
+// The tag, never the word: ~85 files say "THE decider" in prose. A JSDoc
+// `@decider` tag is placed on purpose, and `checkDeciders` requires every
+// tagged function to be exported and imported by some tests/**/*.test.ts(x),
+// directly or through a re-export chain.
+
+import {
+  checkDeciders,
+  readFile,
+  specResolver,
+  unpinnedDeciders,
+} from "../scripts/check-dead-wiring.ts";
+
+Deno.test("@decider: every tagged function in the repo is imported by a test", async () => {
+  const miss = await checkDeciders(REPO);
+  assertEquals(
+    miss.map((o) => `${o.file}:${o.line} ${o.name} (${o.kind})`),
+    [],
+  );
+});
+
+/** Run the REAL check over in-memory files. `files` holds src/ and tests/. */
+function decidersFixture(files: Record<string, string>): string[] {
+  const all = Object.entries(files).map(([p, s]) => readFile(p, s));
+  const tests = all.filter((f) => f.path.startsWith("tests/"));
+  const sources = all.filter((f) => !f.path.startsWith("tests/"));
+  const read = (p: string) => files[p];
+  return unpinnedDeciders(
+    sources,
+    tests,
+    specResolver({ aio: "./mod.ts" }),
+    read,
+  ).map((o) => `${o.name}|${o.kind}`);
+}
+
+const DECIDER_SRC = `/** THE rule for x.
+ *
+ *  @decider */
+export function decideX(v: number): boolean {
+  return v > 0;
+}
+`;
+
+Deno.test("@decider: a tagged function no test imports is RED", () => {
+  assertEquals(
+    decidersFixture({
+      "src/x/rule.ts": DECIDER_SRC,
+      "tests/other.test.ts": `import { other } from "../src/x/other.ts";`,
+    }),
+    ["decideX|@decider no test imports"],
+  );
+});
+
+Deno.test("@decider: a direct import from its file pins it", () => {
+  assertEquals(
+    decidersFixture({
+      "src/x/rule.ts": DECIDER_SRC,
+      "tests/rule.test.ts":
+        `import { decideX } from "../src/x/rule.ts";\ndecideX(1);`,
+    }),
+    [],
+  );
+});
+
+Deno.test("@decider: an import through a re-export chain (mod.ts → export *) pins it", () => {
+  assertEquals(
+    decidersFixture({
+      "src/x/rule.ts": DECIDER_SRC,
+      "src/x.ts": `export { decideX } from "./x/rule.ts";`,
+      "mod.ts": `export * from "./src/x.ts";`,
+      "tests/rule.test.ts": `import { decideX } from "aio";\ndecideX(1);`,
+    }),
+    [],
+  );
+});
+
+Deno.test("@decider: an import inside a fixture string or a comment does not pin it", () => {
+  assertEquals(
+    decidersFixture({
+      "src/x/rule.ts": DECIDER_SRC,
+      "tests/rule.test.ts": `// import { decideX } from "../src/x/rule.ts";\n` +
+        'const fixture = `import { decideX } from "../src/x/rule.ts";`;',
+    }),
+    ["decideX|@decider no test imports"],
+  );
+});
+
+Deno.test("@decider: the same NAME from another file does not pin it", () => {
+  assertEquals(
+    decidersFixture({
+      "src/x/rule.ts": DECIDER_SRC,
+      "src/y/rule.ts": `export function decideX() { return 0; }`,
+      "tests/rule.test.ts": `import { decideX } from "../src/y/rule.ts";`,
+    }),
+    ["decideX|@decider no test imports"],
+  );
+});
+
+Deno.test("@decider: a tagged but unexported function is RED — no test could import it", () => {
+  assertEquals(
+    decidersFixture({
+      "src/x/rule.ts": DECIDER_SRC.replace("export function", "function"),
+      "tests/rule.test.ts": `import { decideX } from "../src/x/rule.ts";`,
+    }),
+    ["decideX|@decider not exported"],
+  );
+});
+
+Deno.test("@decider: a prose mention is not a tag — only `@decider` at the start of a doc line", () => {
+  assertEquals(
+    decidersFixture({
+      "src/x/rule.ts":
+        `/** THE decider for x — see the @decider rule. */\nexport function decideX() {}`,
+    }),
+    [],
+  );
+});
+
+// ── the CLIs themselves run to completion ─────────────────────────────────
+//
+// The tests above import functions and never reach `import.meta.main`. A
+// circular import between the two scripts once deadlocked the dead-wiring CLI
+// on its own top-level await ("Top-level await promise never resolved") while
+// every test here stayed green. So: spawn each CLI exactly as the task does.
+
+for (const script of ["check-dead-wiring.ts", "check-persist-decider.ts"]) {
+  Deno.test(`CLI: scripts/${script} runs to completion and exits 0 on this tree`, async () => {
+    const out = await new Deno.Command(Deno.execPath(), {
+      args: ["run", "--allow-read", `${REPO}scripts/${script}`],
+      cwd: REPO,
+      stdout: "piped",
+      stderr: "piped",
+    }).output();
+    const text = new TextDecoder().decode(out.stdout) +
+      new TextDecoder().decode(out.stderr);
+    assertEquals(out.code, 0, text);
+    assertEquals(/— clean\./.test(text), true, text);
+  });
+}

@@ -26,22 +26,6 @@
  *  body. Same length as `src`. Pure. */
 export function codeMask(src: string): Uint8Array {
   const mask = new Uint8Array(src.length).fill(1);
-  // A `/` opens a regex literal (not a division) when the previous meaningful
-  // char can't end an expression — the standard heuristic.
-  const regexOk = (i: number): boolean => {
-    for (let j = i - 1; j >= 0; j--) {
-      const c = src[j]!;
-      if (c === " " || c === "\t") continue;
-      // A line start counts as "expression position" (ASI) — `/re/.test(x)` as
-      // the first token of a line is a regex, never a division.
-      if (c === "\n" || c === "\r") return true;
-      // `<` is NOT in this set: in a .tsx file the `/` after it is the start
-      // of a closing tag (`</div>`), never a regex — and a `<` before a real
-      // regex (`x < /re/.source.length`) has no counterpart in this tree.
-      return "([{,;:=!&|?+-*%~^>".includes(c);
-    }
-    return true; // start of file
-  };
   let i = 0;
   while (i < src.length) {
     const c = src[i]!;
@@ -109,7 +93,7 @@ export function codeMask(src: string): Uint8Array {
       continue;
     }
     // Regex literal — `/…/flags`; contents (incl. quotes) are not code.
-    if (c === "/" && regexOk(i)) {
+    if (c === "/" && regexStart(src, i)) {
       let j = i + 1, cls = false, closed = false;
       for (; j < src.length && src[j] !== "\n"; j++) {
         if (src[j] === "\\") {
@@ -132,6 +116,89 @@ export function codeMask(src: string): Uint8Array {
     i++;
   }
   return mask;
+}
+
+/** Is the `/` at `i` the start of a REGEX literal rather than a division?
+ *  The one rule, shared by this mask and `scripts/source-mask.ts`.
+ *
+ *  A previous-CHARACTER set alone read `return /x/` and `if (a) /x/` as
+ *  division (the regex body then scanned as code — a quote or backtick in it
+ *  derailed the rest of the file) and `b++ / 2` as a regex (blanking code), so
+ *  it also knows expression keywords, statement heads and postfix `++`/`--`.
+ *  Pinned case by case in tests/code-mask.test.ts. Pure. */
+export function regexStart(src: string, i: number): boolean {
+  let j = i - 1;
+  while (j >= 0 && (src[j] === " " || src[j] === "\t")) j--;
+  if (j < 0) return true; // start of file
+  const c = src[j]!;
+  // A line start counts as "expression position" (ASI) — `/re/.test(x)` as
+  // the first token of a line is a regex, never a division.
+  if (c === "\n" || c === "\r") return true;
+  // A WORD: a keyword that takes an expression (`return /x/`, `typeof /x/`,
+  // `case /x/:`, `else /x/.test(s)`) is followed by one; any other word — a
+  // name, a number, `this`, a member `.return` — is a value, so `/` divides.
+  if (isWord(c)) {
+    let k = j;
+    while (k > 0 && isWord(src[k - 1]!)) k--;
+    if (src[k - 1] === ".") return false;
+    return EXPR_KEYWORDS.has(src.slice(k, j + 1));
+  }
+  // `)` ends a VALUE (`f(x) / 2`) unless it closes the head of an
+  // `if`/`while`/`for`/`with`, after which a statement — a regex — may begin.
+  if (c === ")") {
+    const open = matchingOpen(src, j);
+    if (open < 0) return false;
+    let k = open - 1;
+    while (k >= 0 && /\s/.test(src[k]!)) k--;
+    const end = k;
+    while (k >= 0 && isWord(src[k]!)) k--;
+    return HEAD_KEYWORDS.has(src.slice(k + 1, end + 1)) && src[k] !== ".";
+  }
+  // Postfix `b++ / 2` and `b-- / 2`: the operand is complete, so it divides.
+  // (A PREFIX `++` cannot precede a regex — it needs an assignable operand.)
+  if ((c === "+" || c === "-") && src[j - 1] === c) return false;
+  // `<` is NOT in this set: in a .tsx file the `/` after it is the start of a
+  // closing tag (`</div>`), never a regex — and a `<` before a real regex
+  // (`x < /re/.source.length`) has no counterpart in this tree.
+  return "([{,;:=!&|?+-*%~^>".includes(c);
+}
+
+const isWord = (c: string): boolean => /[\w$]/.test(c);
+
+/** Keywords after which an EXPRESSION starts (so `/` opens a regex). */
+const EXPR_KEYWORDS: ReadonlySet<string> = new Set([
+  "return",
+  "typeof",
+  "instanceof",
+  "in",
+  "of",
+  "new",
+  "delete",
+  "void",
+  "throw",
+  "case",
+  "do",
+  "else",
+  "yield",
+  "await",
+]);
+/** Statement heads whose `(…)` is followed by a statement, not a value. */
+const HEAD_KEYWORDS: ReadonlySet<string> = new Set([
+  "if",
+  "while",
+  "for",
+  "with",
+]);
+
+/** The `(` matching the `)` at `j`, or -1. Brackets inside strings are rare
+ *  enough in a condition that a plain depth count is the honest trade. */
+function matchingOpen(src: string, j: number): number {
+  let depth = 0;
+  for (let k = j; k >= 0; k--) {
+    if (src[k] === ")") depth++;
+    else if (src[k] === "(" && --depth === 0) return k;
+  }
+  return -1;
 }
 
 /** The source with every non-code span blanked to spaces (offsets AND line

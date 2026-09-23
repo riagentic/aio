@@ -1,10 +1,9 @@
 // Shared types, helpers, and CJS template fragments for Electron script generators
 
-import {
-  lockKey,
-  parseLockKey,
-  slugify,
-} from "../server/single-instance-lock.ts";
+import { resolve } from "@std/path";
+import { hash8, slugify } from "../server/single-instance-lock.ts";
+import { appsDirEnv, profileOfHome } from "../server/app-dirs.ts";
+import { homedir } from "../server/paths.ts";
 import { generateHTML } from "../server/server-html-gen.ts";
 import type { TrayConfig, UiTheme } from "../server/aio-types.ts";
 import {
@@ -131,10 +130,27 @@ export function electronProfileName(
   appId: string,
   title: string,
   home?: string,
+  profile?: string,
 ): string {
   const slug = toSlug(title);
-  const tag = parseLockKey(lockKey(appId, home)).tag;
-  return tag ? `${slug}@${tag}` : slug;
+  // The Chromium profile is a MACHINE-wide directory, so it is keyed against
+  // the machine-wide default home (`~/.<appId>`), never the scoped one: under
+  // `AIO_APPS_DIR` (`--instance`) the lock key is the plain id, and an
+  // instance's window opened the user's own profile (ERR_CACHE_READ_FAILURE).
+  if (!home) return slug;
+  const want = resolve(home);
+  const machineDefault = resolve(homedir(), `.${appId}`);
+  if (want === machineDefault) return slug;
+  // A profile by its name — the default base's (`~/.myapp-dev`), or an
+  // `appDir` app's (`<appDir>-dev`, named by the caller) — unless the apps root
+  // is scoped (`--instance`): that `dev` is not the machine's `dev`.
+  const named = profileOfHome(appId, want, machineDefault) ??
+    (profile !== undefined && appsDirEnv() === undefined &&
+        want.endsWith(`-${profile}`)
+      ? profile
+      : undefined);
+  if (named) return `${slug}@${named}`;
+  return `${slug}@${hash8(want)}`;
 }
 
 // ── Reusable CJS template fragments (embedded in generated Electron main.cjs) ──

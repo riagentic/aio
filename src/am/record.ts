@@ -5,7 +5,7 @@
 // file, which is the crash-recovery tail. Emits a test skeleton that
 // re-dispatches the flow, ready for assertions.
 import type { GlobalFlags } from "./am-types.ts";
-import { detectMode, out, outError } from "./am-output.ts";
+import { detectMode, out, outData, outError, sayErr } from "./am-output.ts";
 import {
   amCtx,
   defaultJournalPath,
@@ -18,7 +18,13 @@ import { TIMELINE_RING, type TimelineEntry } from "../server/timeline.ts";
 // redacted" across every sink (journal, timeline, am). am → diagnostics is an
 // allowed boundary edge.
 import { REDACTED } from "../diagnostics/redact.ts";
-import { TT_RESTORE_TYPE } from "../server/journal.ts";
+import {
+  BATCH_TYPE,
+  expandBatch,
+  isListenerReaction,
+  isSyncOpReaction,
+  TT_RESTORE_TYPE,
+} from "../server/journal.ts";
 import { count } from "../diagnostics/fmt.ts";
 import { dirname, join, relative, resolve } from "@std/path";
 import { projectRoot } from "./am-project.ts";
@@ -117,6 +123,7 @@ export function generateReplayTest(
   let callCount = 0;
   let caused = 0;
   let jumps = 0;
+  let syncReactions = 0;
   let rejects = false;
   // A caused action is not called — its cause re-creates it — but a SCHEDULED
   // one only fires when the harness's virtual clock gets there, and bootCells'
@@ -176,6 +183,15 @@ export function generateReplayTest(
     group = [];
   };
   for (const [i, a] of actions.entries()) {
+    // A listensTo reaction recorded as data is not a jump, and not a call:
+    // re-running the call that caused it reacts again — unless a SYNC OP
+    // caused it. The op is in the op-log, not the journal, so this flow does
+    // not reproduce it: counted and said, like a jump.
+    if (isSyncOpReaction(a)) {
+      syncReactions++;
+      continue;
+    }
+    if (isListenerReaction(a)) continue;
     if (a.type === TT_RESTORE_TYPE) {
       jumps++;
       continue;
@@ -286,6 +302,16 @@ export function generateReplayTest(
         `//`,
         `// ⚠ the run TIME-TRAVELLED (${count(jumps, "jump")}) — calls after a`,
         `// jump ran on restored state, which this replay does not reproduce.`,
+      ]
+      : []),
+    ...(syncReactions > 0
+      ? [
+        `//`,
+        `// ⚠ ${
+          count(syncReactions, "listensTo reaction")
+        } in this run were caused by a sync op,`,
+        `// not in the journal — not reproduced. Calls after one ran on state`,
+        `// this replay does not reach.`,
       ]
       : []),
     rejects
@@ -460,8 +486,11 @@ export function parseJournal(text: string): JournalParse {
     lastContentLine = i + 1;
     try {
       const e = JSON.parse(line) as JournalRow;
-      if (typeof e.type === "string") rows.push(e);
-      else badLines.push(i + 1);
+      if (typeof e.type !== "string") badLines.push(i + 1);
+      // A batch line is its entries (server/journal.ts `BATCH_TYPE`).
+      else if (e.type === BATCH_TYPE) {
+        rows.push(...(expandBatch(e as never) as unknown as JournalRow[]));
+      } else rows.push(e);
     } catch {
       badLines.push(i + 1);
     }
@@ -536,7 +565,7 @@ export async function cmdRecord(
     // re-runs a sequence the app never ran — say so rather than imply it is
     // complete.
     if (live.rotated ?? live.entries.length >= TIMELINE_RING) {
-      console.error(
+      sayErr(
         `[am] ⚠ the live timeline is full (${TIMELINE_RING} dispatches, ` +
           `fewer when they carry big values) — ` +
           `earlier actions have rotated out, so this replay may start ` +
@@ -579,7 +608,7 @@ export async function cmdRecord(
     // success, is the worst outcome this file can produce: it looks like a
     // recording of what happened and is not one.
     const damage = journalDamage(parsed, journalPath);
-    if (damage) console.error(damage);
+    if (damage) sayErr(damage);
     if (damage && !parsed.tornTailOnly) {
       outError(
         `refusing to generate a test from a damaged journal — ` +
@@ -639,7 +668,7 @@ export async function cmdRecord(
       mode,
     );
   } else {
-    out(test, mode);
+    outData(test, mode); // generated SOURCE, the recorded args inside: DATA
   }
 }
 

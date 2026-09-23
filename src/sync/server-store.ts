@@ -183,6 +183,10 @@ export async function persistOp(
    *  Callers pass the cell's declared version; the default is the default
    *  `version` a cell declares (0). */
   cellVersion = 0,
+  /** Told the issued `server_ts` BEFORE the row is inserted, synchronously —
+   *  the host's journal records the op's intent there (journal.ts J3). A
+   *  throw is the caller's: the op is then not inserted. */
+  onIssue?: (serverTs: number) => void,
 ): Promise<number | null> {
   await seedServerTs(db);
   // Known-id check first (see `isKnownOpId`): a duplicate reaching the INSERT
@@ -196,6 +200,7 @@ export async function persistOp(
   // INSERT OR IGNORE stays the authority (`changes === 0` ⇒ duplicate): the
   // check above is an optimization, not the correctness boundary.
   const serverTs = nextServerTs();
+  onIssue?.(serverTs);
   const { changes } = await db.execute(
     `INSERT OR IGNORE INTO sync_ops (id, cell, action, payload, hlc_phys, hlc_cnt, hlc_node, server_ts, version)
      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,

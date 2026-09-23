@@ -15,13 +15,30 @@ import { LOCAL_PIN_FILE, readFrameworkPin } from "../server/deno-json.ts";
 
 /** Resolve the framework checkout to link against: --aio flag › $AIO_HOME ›
  *  the checkout am itself runs from › the default install location. Verified to
- *  actually be an aio checkout (has mod.ts) before use. */
+ *  actually be an aio checkout (has mod.ts) before use.
+ *
+ *  An EXPLICIT `--aio=<path>` is the answer or an error — never a first guess.
+ *  It used to be one more candidate: a typo'd or missing checkout fell through
+ *  to whatever else was on the machine, and `am link --aio=/typo` printed
+ *  `linked: true` (exit 0) about a framework the developer had not named. */
 export function resolveAioRoot(args: string[]): string | null {
   const flag = aioFlagValue(args);
+  if (flag !== undefined) {
+    const want = resolve(Deno.cwd(), flag);
+    try {
+      Deno.statSync(join(want, "mod.ts"));
+      return want;
+    } catch {
+      throw new Error(
+        `--aio ${flag}: not an aio checkout (no ${join(want, "mod.ts")}) — ` +
+          `pass the root of an aio checkout, or drop --aio to use the ` +
+          `installed one.`,
+      );
+    }
+  }
   const home = Deno.env.get("AIO_HOME");
   const userHome = Deno.env.get("HOME") ?? Deno.env.get("USERPROFILE");
   const candidates = [
-    flag ? resolve(Deno.cwd(), flag) : undefined,
     home,
     repoRoot(),
     // Skipped entirely when there is no home — `""/.local/lib/aio` is

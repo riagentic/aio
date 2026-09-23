@@ -1,4 +1,4 @@
-import { assertEquals } from "@std/assert";
+import { assert, assertEquals } from "@std/assert";
 import { createActionLog } from "../../src/diagnostics/action-log.ts";
 
 const TEST_DIR = await Deno.makeTempDir();
@@ -81,4 +81,47 @@ Deno.test("action-log: actions.jsonl is 0600 — payloads are user data, like ev
   const mode = (await Deno.stat(path)).mode! & 0o777;
   assertEquals(mode, 0o600, "action payloads must not be group/world readable");
   await alog.flush();
+});
+
+Deno.test("action-log: a burst is written in batches, waits for at most `max` lines, and says once what it dropped", async () => {
+  const path = `${TEST_DIR}/actions-burst.jsonl`;
+  const max = 100;
+  const alog = createActionLog(path, max);
+  // Count the file writes, and what the log says.
+  const write = Deno.writeTextFile;
+  let writes = 0;
+  (Deno as { writeTextFile: typeof write }).writeTextFile = (p, d, o) => {
+    if (String(p) === path) writes++;
+    return write(p, d, o);
+  };
+  const said: string[] = [];
+  const orig = { log: console.log, warn: console.warn, error: console.error };
+  const grab = (...a: unknown[]) => void said.push(a.map(String).join(" "));
+  Object.assign(console, { log: grab, warn: grab, error: grab });
+  try {
+    const n = 20_000;
+    // Two bursts, so two rounds of dropping: said once, not per round.
+    const rounds: [number, number][] = [[0, n / 2], [n / 2, n]];
+    for (const [from, to] of rounds) {
+      const all: Promise<void>[] = [];
+      for (let i = from; i < to; i++) {
+        all.push(alog.append(`burst:${i}`, { i }));
+      }
+      await Promise.all(all);
+    }
+    await alog.flush();
+    // One write carries every line that arrived meanwhile: a handful, not n.
+    assert(writes <= 20, `${writes} writes for ${n} appends`);
+    const lines = await readLines(path);
+    assert(lines.length <= max, `${lines.length} lines, max ${max}`);
+    assertEquals(JSON.parse(lines.at(-1)!).type, `burst:${n - 1}`);
+    // In order, with no hole inside what was kept.
+    const kept = lines.map((l) => JSON.parse(l).payload.i as number);
+    kept.forEach((v, k) => k > 0 && assertEquals(v, kept[k - 1]! + 1));
+    const drops = said.filter((s) => s.includes("were dropped, oldest first"));
+    assertEquals(drops.length, 1, said.join("\n"));
+  } finally {
+    Object.assign(console, orig);
+    (Deno as { writeTextFile: typeof write }).writeTextFile = write;
+  }
 });

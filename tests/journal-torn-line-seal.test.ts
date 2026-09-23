@@ -163,6 +163,34 @@ Deno.test("journal: a line an OLDER build fused is reported as two lost entries,
   }
 });
 
+Deno.test("journal: a torn BATCH is a crash mid-write that took all its entries — not a fused line", async () => {
+  // One `__aioBatch` line holds several entries (journal.ts J1): a tear
+  // inside it loses every one of them, and it is the ordinary crash tear.
+  const dir = await tempDir("aio-journal-seal-batch-");
+  try {
+    const path = join(dir, "journal");
+    await Deno.writeTextFile(
+      path,
+      `{"seq":1,"type":"add","payload":5,"ts":1}\n` +
+        `{"seq":3,"type":"__aioBatch","fmt":2,"ts":2,"entries":[` +
+        `{"seq":2,"type":"add","payload":7,"ts":2},{"seq":3,"type":"ad`,
+    );
+    let next = 0;
+    const warned = await tornWarnings(() => {
+      const j = createJournal(path);
+      assertEquals(j.readSince(0).map((e) => e.seq), [1]);
+      next = j.currentSeq() + 1;
+    });
+    assertEquals(next, 4, "the batch's seqs are never re-issued");
+    assertEquals(warned.length, 1, warned.join("\n"));
+    assertStringIncludes(warned[0]!, "crash mid-write");
+    assertStringIncludes(warned[0]!, "2 entries lost");
+    assert(!warned[0]!.includes("fused"), warned[0]);
+  } finally {
+    await dropTempDir(dir);
+  }
+});
+
 Deno.test("journal: a real boot seals the torn tail before its first append", async () => {
   const dir = await tempDir("aio-journal-seal-boot-");
   const dbPath = join(dir, "data.db");

@@ -45,6 +45,7 @@ const CEILING_MIN: Record<string, number> = {
   "test:onboard": 45,
   "test:build": 45,
   "test:electron": 45,
+  "test:hosts": 20,
   "lab (fresh ubuntu)": 45,
 };
 
@@ -75,6 +76,8 @@ async function run(name: string, cmd: string[]): Promise<Result> {
   const child = new Deno.Command(bin!, {
     args,
     cwd: root,
+    // The gate already runs inside FENCE; a nested runner must not fence again.
+    env: { AIO_TEST_FENCED: "1" },
     stdout: "piped",
     stderr: "piped",
   }).spawn();
@@ -337,6 +340,14 @@ const HEAVY: [string, string[]][] = [
   // named test to go red. Heavy because it runs `deno test` twice per entry,
   // not because it is slow to fail.
   ["check:mutations", ["deno", "task", "check:mutations"]],
+  // ~20 s: N overlapping server renders on a seeded schedule (FUZZ_SEED
+  // replays a failure), a third aborted mid-stream, plus the real Deno.serve
+  // path with clients that leave mid-body. Every response must equal its solo
+  // render and carry only its own head; every server render reaches `finally`.
+  ["test:ssr-soak", ["deno", "task", "test:ssr-soak"]],
+  // Seeded HLC / cursor / offline-replay / compaction properties over the
+  // real engine and a real SQLite op-log, plus every sync regression file.
+  ["test:sync", ["deno", "task", "test:sync"]],
   ["test:onboard", ["deno", "task", "test:onboard"]],
   ["test:build", ["deno", "task", "test:build"]],
   // The Electron package is a release surface (`docs/build/targets.md` says
@@ -345,6 +356,12 @@ const HEAVY: [string, string[]][] = [
   // one. It fetches the runtime once (~/.cache/aio/tools) and packages a real
   // image; the cost is minutes on the first run and seconds after.
   ["test:electron", ["deno", "task", "test:electron"]],
+  // One app, every runtime (server, standalone ×2, packaged Electron from a
+  // foreign cwd): `persist: "none"` never on disk and never restored, the
+  // last write survives shutdown, and the packaged doors hold on the ARTIFACT.
+  // After test:electron, which has already fetched the Electron runtime.
+  // Two data bugs were live in 1.0.9 when this lane first ran.
+  ["test:hosts", ["deno", "task", "test:hosts"]],
 ];
 
 /** Is there a container runtime for the onboarding lab?

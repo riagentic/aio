@@ -2,13 +2,14 @@
 // transport, and os × kind → socket path. `os` is a parameter of both
 // functions, so the windows rows run on Linux CI.
 
-import { assert, assertEquals } from "@std/assert";
+import { assert, assertEquals, assertMatch } from "@std/assert";
+import { join } from "@std/path";
 import {
   isPipePath,
   resolveSocketPath,
   resolveTransport,
 } from "../src/server/paths.ts";
-import { heldLockKey } from "../src/server/single-instance-lock.ts";
+import { heldLockKey, lockDir } from "../src/server/single-instance-lock.ts";
 
 type OS = typeof Deno.build.os;
 const OSES: OS[] = ["linux", "darwin", "windows", "freebsd"];
@@ -90,8 +91,21 @@ Deno.test("resolveSocketPath: unix rows are files under the lock dir, and unchan
     const p = resolveSocketPath("some-app", undefined, os);
     const h = resolveSocketPath("some-app", "http", os);
     assert(!isPipePath(p));
-    assert(p.endsWith("some-app.sock"), p);
-    assert(h.endsWith("some-app.http.sock"), h);
+    // Under a long runtime dir a path that does not fit takes the hashed
+    // `/tmp/aio` fallback — named for the same app, never another's.
+    const fits = (f: string) => join(lockDir(), f).length <= 100;
+    assertMatch(
+      p,
+      fits("some-app.sock")
+        ? /\/some-app\.sock$/
+        : /\/some-app-[0-9a-f]{8}\.sock$/,
+    );
+    assertMatch(
+      h,
+      fits("some-app.http.sock")
+        ? /\/some-app\.http\.sock$/
+        : /\/some-app-[0-9a-f]{8}\.http\.sock$/,
+    );
   }
   assertEquals(
     resolveSocketPath("some-app"),

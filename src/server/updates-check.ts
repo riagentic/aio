@@ -136,7 +136,9 @@ export function recordInstalledSha256(dataDir: string, sha256: string): void {
  *  browsers treat 127.0.0.1 as a secure context). Plain `http:` to anywhere
  *  else does not: anyone on the path chooses what the manifest says.
  *
- *  This is the ONE decider for "may a key be pinned from here". */
+ *  This is the ONE decider for "may a key be pinned from here".
+ *
+ *  @decider */
 export function transportAuthenticatesHost(url: string): boolean {
   let u: URL;
   try {

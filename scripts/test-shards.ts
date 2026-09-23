@@ -26,6 +26,11 @@
  * no timing yet counts as one second.
  */
 import { join, relative } from "@std/path";
+import {
+  pruneDeadLockDir,
+  pruneDeadLockDirAt,
+  sweepRootRegistry,
+} from "../src/server/single-instance-lock.ts";
 
 const ROOT = new URL("..", import.meta.url).pathname.replace(/\/$/, "");
 const TIMINGS = join(ROOT, ".aio", "test-timings.json");
@@ -186,6 +191,13 @@ export async function machineFence(): Promise<
   ReturnType<typeof cpuFence> & { cores: number }
 > {
   const cores = navigator.hardwareConcurrency ?? 4;
+  // Already inside a fence (`check:release` runs every gate in one): the
+  // affinity mask this process inherited IS the budget. Fencing again would
+  // subtract the free cores a second time — 12 visible, 20 kept free → one
+  // shard, and the 8-minute suite took 34.
+  if (Deno.env.get("AIO_TEST_FENCED") === "1") {
+    return { cores, usable: cores, prefix: [] };
+  }
   return {
     cores,
     ...cpuFence(
@@ -197,7 +209,173 @@ export async function machineFence(): Promise<
   };
 }
 
+/** Remove a shard's private runtime dir once the shard is done: every lock
+ *  dir in it pruned by the one rule (`pruneDeadLockDirAt` — dead locks,
+ *  unbound sockets, idle mutexes; never recursively), the registry swept,
+ *  then the rest. A lock dir something LIVE still holds is left, with the
+ *  whole runtime dir, and named — a process that outlived its test, which
+ *  `check:orphans` must still be able to find. Never throws: what went wrong
+ *  is returned with what was left, for the report.
+ *
+ *  Where the platform has no socket table the rule reads (`boundUnixSockets`
+ *  → null), a socket is "unknown" and kept; here, where every process the
+ *  shard started is done, a socket nobody ANSWERS on (connect refused) is
+ *  dead, and goes — so an unknown platform does not fail every shard. */
+async function dropShardRuntime(runtime: string): Promise<string[]> {
+  const left: string[] = [];
+  try {
+    // Already gone: the shard's own finish and an interrupt can both get here.
+    if (!exists(runtime)) {
+      _runtimes.delete(runtime);
+      return left;
+    }
+    for (const e of Deno.readDirSync(runtime)) {
+      if (!e.isDirectory || !/^aio(-|$)/.test(e.name)) continue;
+      const d = join(runtime, e.name);
+      if (pruneDeadLockDirAt(d, true) || !dirHasEntries(d)) continue;
+      await dropRefusedSockets(d);
+      if (!pruneDeadLockDirAt(d, true) && dirHasEntries(d)) left.push(d);
+    }
+    sweepRootRegistry(runtime);
+    if (left.length) return left;
+    // Nothing of aio's is live: the rest (a registry, a dconf cache a child
+    // made) goes with the dir this run created.
+    Deno.removeSync(runtime, { recursive: true });
+    _runtimes.delete(runtime);
+  } catch (e) {
+    left.push(`${runtime} (${e instanceof Error ? e.message : String(e)})`);
+  }
+  return left;
+}
+
+/** Remove the sockets in `dir` that refuse a connection — nobody is bound. */
+async function dropRefusedSockets(dir: string): Promise<void> {
+  for (const e of Deno.readDirSync(dir)) {
+    if (!e.name.endsWith(".sock")) continue;
+    const path = join(dir, e.name);
+    try {
+      (await Deno.connect({ transport: "unix", path })).close();
+    } catch (err) {
+      if (
+        err instanceof Deno.errors.ConnectionRefused ||
+        err instanceof Deno.errors.NotFound
+      ) {
+        try {
+          if (Deno.lstatSync(path).isSocket) Deno.removeSync(path);
+        } catch { /* aio-ok: gone meanwhile */ }
+      }
+    }
+  }
+}
+
+function exists(p: string): boolean {
+  try {
+    Deno.lstatSync(p);
+    return true;
+  } catch {
+    return false; // aio-ok: absent (or unreadable, which prunes nothing)
+  }
+}
+
+function dirHasEntries(d: string): boolean {
+  try {
+    return [...Deno.readDirSync(d)].length > 0;
+  } catch {
+    return false;
+  }
+}
+
+/** Runtime dirs made and not yet removed — an interrupted run (Ctrl-C, a
+ *  kill) removes them too, once nothing live is in them. */
+const _runtimes = new Set<string>();
+function dropAllRuntimesSync(): void {
+  for (const r of _runtimes) {
+    try {
+      for (const e of Deno.readDirSync(r)) {
+        if (e.isDirectory && /^aio(-|$)/.test(e.name)) {
+          pruneDeadLockDirAt(join(r, e.name), true);
+        }
+      }
+      sweepRootRegistry(r);
+      const live = [...Deno.readDirSync(r)].some((e) =>
+        e.isDirectory && /^aio(-|$)/.test(e.name)
+      );
+      if (!live) Deno.removeSync(r, { recursive: true });
+    } catch {
+      /* aio-ok: best effort on the way out — named by check:orphans */
+    }
+  }
+  _runtimes.clear();
+}
+
+/** The shard processes still running — an interrupt stops them first. */
+const _children = new Set<Deno.ChildProcess>();
+
+/** Interrupted: stop every shard and AWAIT its exit before any runtime dir is
+ *  judged. Pruning first (the old signal handler did) found every lock still
+ *  held by a shard that had not died yet, and left all the dirs behind.
+ *  SIGTERM, up to `graceMs` for them to go, then SIGKILL; then each runtime
+ *  dir by the one rule. Returns what is still held — a process outlived its
+ *  shard — for the caller to NAME. Never throws. */
+export async function interruptShards(
+  children: ReadonlySet<Deno.ChildProcess>,
+  runtimes: ReadonlySet<string>,
+  graceMs = 5000,
+): Promise<string[]> {
+  const kill = (sig: Deno.Signal) => {
+    for (const c of children) {
+      try {
+        c.kill(sig);
+      } catch { /* aio-ok: already exited */ }
+    }
+  };
+  const done = Promise.all([...children].map((c) => c.status));
+  kill("SIGTERM");
+  if (!await within(done, graceMs)) {
+    kill("SIGKILL");
+    await within(done, 2000);
+  }
+  const left: string[] = [];
+  for (const r of [...runtimes]) left.push(...await dropShardRuntime(r));
+  return left;
+}
+
+/** Whether `p` settled within `ms`. */
+async function within(p: Promise<unknown>, ms: number): Promise<boolean> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const late = new Promise<false>((r) =>
+    timer = setTimeout(() => r(false), ms)
+  );
+  try {
+    return await Promise.race([p.then(() => true, () => true), late]);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 if (import.meta.main) {
+  // Interrupted (Ctrl-C, SIGTERM from an outer timeout): the shards are
+  // stopped and awaited, THEN no runtime dir is left behind unless something
+  // live is still in it — and that one is named. A second signal exits now.
+  let stopping = false;
+  for (const sig of ["SIGINT", "SIGTERM"] as const) {
+    try {
+      Deno.addSignalListener(sig, async () => {
+        const code = sig === "SIGINT" ? 130 : 143;
+        if (stopping) Deno.exit(code);
+        stopping = true;
+        const left = await interruptShards(_children, _runtimes);
+        if (left.length) {
+          console.error(
+            `\ninterrupted — still held by a live process (check:orphans ` +
+              `names its owner):\n  ${left.join("\n  ")}`,
+          );
+        }
+        Deno.exit(code);
+      });
+    } catch { /* aio-ok: no such signal here (windows SIGTERM) */ }
+  }
+  addEventListener("unload", dropAllRuntimesSync);
   const flag = Deno.args.find((a) => a.startsWith("--shards="));
   const fence = await machineFence();
   const cores = fence.cores;
@@ -237,9 +415,23 @@ if (import.meta.main) {
     await Deno.mkdir(home, { recursive: true });
     const log = join(OUT, `${i}.log`);
     const junit = join(OUT, `${i}.xml`);
+    // Its OWN runtime dir — lock dirs, sockets, the registry — so a shard
+    // never writes into the developer's real $XDG_RUNTIME_DIR, and shards
+    // cannot see each other's locks. Short (`/tmp/xdg-shard-XXXX`): socket
+    // paths are built under it. Not for the real-window shard 0, whose
+    // Electron needs the session's display/dbus sockets there.
+    const runtime = i === 0 && windowed.size > 0
+      ? null
+      // A FIXED short base: `makeTempDir` follows TMPDIR, which on macOS is
+      // `/var/folders/…/T/` — long enough to push socket paths past the limit.
+      : await Deno.makeTempDir({
+        dir: Deno.build.os === "windows" ? undefined : "/tmp",
+        prefix: "xdg-shard-",
+      });
+    if (runtime) _runtimes.add(runtime);
     const t0 = performance.now();
     const [cmd, ...pre] = [...fence.prefix, Deno.execPath()];
-    const { code, stdout, stderr } = await new Deno.Command(cmd!, {
+    const child = new Deno.Command(cmd!, {
       args: [
         ...pre,
         "test",
@@ -255,11 +447,27 @@ if (import.meta.main) {
       env: {
         AIO_APPS_DIR: home,
         AIO_TEST_PORT_SLICE: portSliceFor(i, shards.length),
+        ...(runtime ? { XDG_RUNTIME_DIR: runtime } : {}),
       },
       stdin: "null",
-    }).output();
+      stdout: "piped",
+      stderr: "piped",
+    }).spawn();
+    _children.add(child); // an interrupt stops it before judging its dir
+    const { code, stdout, stderr } = await child.output()
+      .finally(() => _children.delete(child));
+    // The shard is done, and so is every process it started: the scoped lock
+    // dir its AIO_APPS_DIR made in $XDG_RUNTIME_DIR goes, unless something
+    // live is still in it (check:orphans reports that one).
+    let left: string[] = [];
+    if (runtime) left = await dropShardRuntime(runtime);
+    else pruneDeadLockDir(home);
     const dec = new TextDecoder();
-    const text = dec.decode(stdout) + dec.decode(stderr);
+    const text = dec.decode(stdout) + dec.decode(stderr) +
+      (left.length
+        ? `\nFAILED | shard runtime dir ${runtime} still holds live lock ` +
+          `dirs (a process outlived its test): ${left.join(", ")}\n`
+        : "");
     await Deno.writeTextFile(log, text);
     const secs = Math.round((performance.now() - t0) / 1000);
     const failed = failures(text);
@@ -274,7 +482,7 @@ if (import.meta.main) {
     try {
       times = junitTimes(await Deno.readTextFile(junit));
     } catch { /* a shard that died before writing its report */ }
-    return { i, code, failed, log, times };
+    return { i, code, failed, log, times, left: left.length > 0 };
   }));
 
   // Remember what each file cost, for the next run's balance.
@@ -283,7 +491,7 @@ if (import.meta.main) {
   await Deno.mkdir(join(ROOT, ".aio"), { recursive: true });
   await Deno.writeTextFile(TIMINGS, JSON.stringify(merged, null, 0));
 
-  const bad = results.filter((r) => r.code !== 0);
+  const bad = results.filter((r) => r.code !== 0 || r.left);
   const wall = Math.round((performance.now() - started) / 1000);
   if (bad.length === 0) {
     console.log(`\n✓ all ${shards.length} shards passed in ${wall}s`);

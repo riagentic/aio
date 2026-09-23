@@ -58,7 +58,11 @@ import {
   _isFrameworkInternalActionType,
   sanitizeClientAction,
 } from "./server-ws.ts";
-import { _dispatchRefusal, _dispatchShort } from "./action-ack.ts";
+import {
+  _dispatchRefusal,
+  _dispatchShort,
+  _dispatchUnsaved,
+} from "./action-ack.ts";
 import { invokeServerFn } from "./server-fns.ts";
 import {
   _registerDialogHost,
@@ -87,6 +91,7 @@ import {
 } from "../protocol/protocol-version.ts";
 import type { ServerSyncHandler } from "../sync/server-handler.ts";
 import { isPipePath, listenLocal, type LocalConn } from "./local-listen.ts";
+import { ensureLockDirOf } from "./single-instance-lock.ts";
 import { flushAllUrgent } from "./broadcast-coalescer.ts";
 import {
   filterPatchesBySubs,
@@ -285,6 +290,10 @@ export function createUDSListener(
     } catch { /* doesn't exist */ }
   }
 
+  // The lock dir may have been pruned since `lockDir()` cached it — a
+  // sibling's exit removes it whenever it is empty, and a `singleton: false`
+  // app holds no lock to keep it: the bind then failed ENOENT.
+  ensureLockDirOf(socketPath);
   const listener = listenLocal(socketPath);
   const connSet = new Set<LocalConn>();
   const clientMap = new Map<LocalConn, UDSClient>();
@@ -1383,6 +1392,7 @@ function _handleUDSConn(
                     const { value: safe } = serializeReturn(value, actionType);
                     // `short` — parity with the WS ack (action-ack.ts).
                     const short = _dispatchShort(action);
+                    const unsaved = _dispatchUnsaved(action);
                     try {
                       sendTo(
                         conn,
@@ -1391,6 +1401,7 @@ function _handleUDSConn(
                           ok: true,
                           value: safe,
                           ...(short !== undefined ? { short } : {}),
+                          ...(unsaved !== undefined ? { unsaved } : {}),
                         }),
                       );
                     } catch { /* client gone */ }

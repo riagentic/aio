@@ -209,7 +209,9 @@ export function table(columns: Record<string, ColumnDef>): TableDef {
  *  `ref()` hard-coded `REFERENCES <table>(id)`. A table whose key column is
  *  called anything else (`userId`) produced a schema SQLite happily CREATEs and
  *  then refuses every write to — `foreign key mismatch`, on every persist
- *  window, forever. One function, both call sites. */
+ *  window, forever. One function, both call sites.
+ *
+ *  @decider */
 export function pkColumn(def: TableDef): string | null {
   for (const [name, col] of Object.entries(def.columns)) {
     if (col.pk) return name;

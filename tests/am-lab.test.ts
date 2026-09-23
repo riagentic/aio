@@ -1159,17 +1159,28 @@ any {
   }
 }
 
+/** The PARENT's module cache. These tests move `XDG_CACHE_HOME` into a temp
+ *  home, and deno derives its own cache from it — so every `am` child started
+ *  cold and re-fetched every dependency from the network. One stalled fetch
+ *  hung the whole shard for 54 minutes. Pin the cache; the temp home still
+ *  owns everything `am lab` itself writes. */
+const PARENT_DENO_DIR = Deno.env.get("DENO_DIR") ??
+  `${Deno.env.get("XDG_CACHE_HOME") ?? `${Deno.env.get("HOME")}/.cache`}/deno`;
+
 async function am(args: string[], env: Record<string, string>) {
   const p = await new Deno.Command(Deno.execPath(), {
     args: ["run", "-A", `${REPO}/src/am.ts`, ...args],
     env: {
       ...Deno.env.toObject(),
       AIO_AM_NO_DELEGATE: "1",
+      DENO_DIR: PARENT_DENO_DIR,
       ...env,
     },
     cwd: REPO,
     stdout: "piped",
     stderr: "piped",
+    // A child that hangs must fail THIS test, not stall the shard.
+    signal: AbortSignal.timeout(180_000),
   }).output();
   return {
     code: p.code,

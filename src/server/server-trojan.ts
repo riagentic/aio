@@ -21,7 +21,11 @@ import v8 from "node:v8";
 import { measureCellState } from "../diagnostics/memory-monitor.ts";
 import { CELL_METHOD_SEP } from "../state/cell-helpers.ts";
 import { serializeReturn } from "../protocol/return-value.ts";
-import { _dispatchRefusal, shortCallSentence } from "./action-ack.ts";
+import {
+  _dispatchRefusal,
+  _dispatchUnsaved,
+  shortCallSentence,
+} from "./action-ack.ts";
 import {
   CONTROL_MAX_BODY,
   declaresOverLimit,
@@ -114,7 +118,12 @@ export interface TrojanDeps {
   /** Snapshot support */
   loadSnapshot?: (json: string, opts?: { force?: boolean }) => void;
   /** Time-travel command handler */
-  onTTCommand?: (cmd: string, arg?: number) => void;
+  /** A promise when the jump owes a save (aio.ts `_durableFor`): awaited
+   *  before the reply. */
+  onTTCommand?: (
+    cmd: string,
+    arg?: number,
+  ) => void | Promise<string | undefined>;
   /** List connected WS clients (read-only view) */
   getWsClients: () => Array<{ ws: WebSocket; meta: TrojanClientInfo }>;
   /** Find WS client by index and send message, returning response promise */
@@ -1001,6 +1010,9 @@ async function handlePost(
       const persistErr = deps.lastPersistError
         ? deps.lastPersistError()
         : undefined;
+      // What THIS call owed and did not get on disk (its stand-in save, see
+      // action-ack.ts) — the same field and sentence the WS/UDS acks carry.
+      const owedUnsaved = _dispatchUnsaved(action);
       return json({
         ok: true,
         ...(ret.value !== undefined ? { result: ret.value } : {}),
@@ -1024,11 +1036,15 @@ async function handlePost(
             ),
           }
           : {}),
-        ...(persistErr === undefined ? {} : {
-          unsaved: persistErr
-            ? `${PERSIST_REFUSED} ${persistErr.message}`
-            : null,
-        }),
+        ...(owedUnsaved !== undefined
+          ? { unsaved: owedUnsaved }
+          : persistErr === undefined
+          ? {}
+          : {
+            unsaved: persistErr
+              ? `${PERSIST_REFUSED} ${persistErr.message}`
+              : null,
+          }),
       });
     } catch {
       return err("invalid JSON");
@@ -1172,9 +1188,12 @@ async function handlePost(
             404,
           );
         }
-        deps.onTTCommand("goto", arg);
-      } else deps.onTTCommand(cmd);
-      return json({ ok: true });
+        const owed = await deps.onTTCommand("goto", arg);
+        return json({ ok: true, ...(owed ? { unsaved: owed } : {}) });
+      }
+      // A jump's stand-in save that did not land (see action-ack.ts).
+      const owed = await deps.onTTCommand(cmd);
+      return json({ ok: true, ...(owed ? { unsaved: owed } : {}) });
     } catch {
       return err("invalid JSON");
     }

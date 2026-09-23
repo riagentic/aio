@@ -48,14 +48,14 @@ import { justified as okMarker } from "../src/diagnostics/ok-marker.ts";
 // 322 → 319 when three already-correct swallows were justified in place:
 // worker.terminate during retire/pool-teardown (blocking, async-db) and
 // private-mode storage adopt (browser-storage) — absence is the wanted outcome.
-const CEILING = 319;
+const CEILING = 315;
 
 /** The budget for the PROMISE spelling, counted separately.
  *
  *  Separately because the two are one rule but not one number: folding 102
  *  pre-existing swallows into `CEILING` would move it upward, and this file's
  *  own contract is that it only ever moves down. Two ratchets, both falling. */
-const HANDLER_CEILING = 84;
+const HANDLER_CEILING = 82;
 
 const ROOT = new URL("../src/", import.meta.url).pathname;
 

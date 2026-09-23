@@ -84,6 +84,14 @@ export type SymbolEntry = {
    *  the only one produced the identical verdict, and adding an overload is the
    *  main additive move a frozen surface has left. */
   sigs?: string[];
+  /** IN MEMORY ONLY, never written to the snapshot: the `sig` this very
+   *  declaration would have had with its `async` / `*` modifiers set any other
+   *  way — computed only for a single function declaration whose return type
+   *  is DECLARED (without an annotation the modifier IS the return type). A
+   *  match proves a change is modifier-only; it does NOT prove it harmless —
+   *  modifiers move when a throw or a side effect happens. That takes a
+   *  reviewed entry too: see {@linkcode modifierOnly}. */
+  modifierAlts?: string[];
 };
 /** One line of API drift, and whether it BREAKS a caller.
  *
@@ -104,7 +112,107 @@ export type Snapshot = {
 
 // ── Normalization ────────────────────────────────────────────────────
 
-/** Recursively strip machine/doc-text noise so digests are stable. */
+/** The `sig` digest formula, over one symbol's declarations. */
+export function sigOf(
+  decls: readonly Record<string, unknown>[],
+): Promise<string> {
+  return sha256Hex(
+    JSON.stringify(normalize(decls.map((d) => ({ kind: d.kind, def: d.def })))),
+  );
+}
+
+/** The `sig` a single function declaration would have with its `async` / `*`
+ *  modifiers set each other way — only when its return type is DECLARED
+ *  (see `SymbolEntry.modifierAlts`); otherwise none. `deno doc` omits a false
+ *  flag, so "absent" and "true" are the two spellings of each. */
+export async function modifierAlternates(
+  decls: readonly Record<string, unknown>[],
+): Promise<string[]> {
+  if (decls.length !== 1 || decls[0]!.kind !== "function") return [];
+  const def = decls[0]!.def as Record<string, unknown> | undefined;
+  if (!def || def.returnType === undefined || def.returnType === null) {
+    return [];
+  }
+  const { isAsync: _a, isGenerator: _g, ...rest } = def;
+  const out: string[] = [];
+  for (const isAsync of [false, true]) {
+    for (const isGenerator of [false, true]) {
+      if (!!def.isAsync === isAsync && !!def.isGenerator === isGenerator) {
+        continue; // this declaration as it is: that is `sig`
+      }
+      out.push(
+        await sigOf([{
+          kind: decls[0]!.kind,
+          def: {
+            ...rest,
+            ...(isAsync ? { isAsync: true } : {}),
+            ...(isGenerator ? { isGenerator: true } : {}),
+          },
+        }]),
+      );
+    }
+  }
+  return out;
+}
+
+/** Modifier-only changes a PERSON reviewed. A changed `async` / `*` modifier
+ *  can be felt even when the declared type is identical — `async` → plain
+ *  moves a throw from the returned promise to the call; `function*` → plain
+ *  runs the body's side effects at the call instead of the first `next()` — so
+ *  the gate never infers "harmless" from the digests alone. Each entry names
+ *  both digests exactly: any further change to the symbol is judged afresh. */
+export type ReviewedModifierChange = {
+  entry: string;
+  symbol: string;
+  oldSig: string;
+  newSig: string;
+  reason: string;
+};
+
+export const MODIFIER_REVIEWED: readonly ReviewedModifierChange[] = [
+  {
+    entry: "./air",
+    symbol: "renderToStream",
+    oldSig: "986230b1b096f5ee",
+    newSig: "e75779b73fb37413",
+    reason: "async function* → a plain function returning the generator, so " +
+      "the request's route is taken at the call. Nothing is thrown " +
+      "at the call: every set-up error is rethrown from the first next() " +
+      "(_failedStream); nesting and the key are still settled at the first " +
+      "pull. A route set after the call IN THE CALL'S TURN still renders, " +
+      "unless a render set up since in that turn took another route; one " +
+      "set after a later await does not, and is reported at the first " +
+      "pull. Create-stream, set-route, renderToString(shell) in one step " +
+      "keeps the call's route unreported (indistinguishable from two " +
+      "correct requests; listed in the upgrade guide) — pinned by " +
+      "tests/air-ssr-soak.test.ts, " +
+      "tests/air-ssr-stream-1-0-9-compat.test.ts and " +
+      "tests/air-ssr-concurrent-render-state.test.ts.",
+  },
+];
+
+/** The committed declaration differs from the current one ONLY in its
+ *  `async` / `*` modifiers (same parameters, same DECLARED return type — both
+ *  are inside the digest), AND a person reviewed exactly this change: an
+ *  entry in `reviewed` names this symbol and both digests. Anything else is
+ *  judged as before. */
+export function modifierOnly(
+  entry: string,
+  name: string,
+  a: SymbolEntry,
+  b: SymbolEntry,
+  reviewed: readonly ReviewedModifierChange[] = MODIFIER_REVIEWED,
+): boolean {
+  if (a.kind !== b.kind || a.sigs?.slice(1).length || b.sigs?.slice(1).length) {
+    return false;
+  }
+  if (!b.modifierAlts?.includes(a.sig)) return false;
+  return reviewed.some((r) =>
+    r.entry === entry && r.symbol === name && r.oldSig === a.sig &&
+    r.newSig === b.sig
+  );
+}
+
 /** A declaration's `def` without `hasBody` — see the `sigs` comment. */
 function _withoutBody(def: unknown): unknown {
   if (!def || typeof def !== "object") return def;
@@ -121,6 +229,7 @@ function _withoutBody(def: unknown): unknown {
 // deno-lint-ignore no-control-regex -- ESC and the CSI range are the point
 const ANSI_RE = /\u001b\[[0-9;]*m/g;
 
+/** Recursively strip machine/doc-text noise so digests are stable. */
 function normalize(value: unknown): unknown {
   if (typeof value === "string") return value.replace(ANSI_RE, "");
   if (Array.isArray(value)) return value.map(normalize);
@@ -601,12 +710,8 @@ async function buildSnapshot(): Promise<{
         decls.some((d) => hasTag(d, "experimental"));
       const kinds = [...new Set(decls.map((d) => d.kind as string))].sort();
       const opaque = isOpaque(decls);
-      const sig = opaque ? UNPINNED : await sha256Hex(
-        JSON.stringify(normalize(decls.map((d) => ({
-          kind: d.kind,
-          def: d.def,
-        })))),
-      );
+      const sig = opaque ? UNPINNED : await sigOf(decls);
+      const modifierAlts = opaque ? [] : await modifierAlternates(decls);
       const members = opaque ? undefined : await extractMembers(decls);
       // Computed with the SAME formula as `sig` on a one-element array, so a
       // single-declaration `sig` and an overload's `sigs[0]` are comparable.
@@ -636,6 +741,7 @@ async function buildSnapshot(): Promise<{
         ...(experimental ? { experimental: true as const } : {}),
         ...(members && Object.keys(members).length ? { members } : {}),
         ...(sigs ? { sigs } : {}),
+        ...(modifierAlts.length ? { modifierAlts } : {}),
       };
       if (opaque) {
         const file = declFile(decls);
@@ -668,6 +774,7 @@ async function buildSnapshot(): Promise<{
         sig: to.sig,
         alias: target,
         ...(to.members ? { members: to.members } : {}),
+        ...(to.modifierAlts ? { modifierAlts: to.modifierAlts } : {}),
       };
     }
 
@@ -858,6 +965,7 @@ export function diffMembers(
 export function diffSnapshots(
   committed: Snapshot,
   current: Snapshot,
+  reviewed: readonly ReviewedModifierChange[] = MODIFIER_REVIEWED,
 ): ApiChange[] {
   const lines: ApiChange[] = [];
   const add = (line: string, breaking: boolean, experimental = false): void => {
@@ -933,6 +1041,15 @@ export function diffSnapshots(
               `describes it, so the gate can no longer see it change`,
             !sa.experimental,
             sa.experimental,
+          );
+        } else if (modifierOnly(entry, name, sa, sb, reviewed)) {
+          // Same parameters, same DECLARED return type, and a reviewed entry
+          // saying why the timing change cannot be felt either.
+          add(
+            `~ ${entry} › ${name}: async/generator modifier changed — ` +
+              `parameters and declared return type identical, reviewed ` +
+              `(MODIFIER_REVIEWED)`,
+            false,
           );
         } else if (overloadAdded(sa, sb)) {
           // The previous signature is still there, verbatim, as the first
@@ -1060,7 +1177,13 @@ async function main(): Promise<void> {
     Deno.exit(1);
   }
 
-  const rendered = JSON.stringify(snapshot, null, 2) + "\n";
+  // `modifierAlts` are the CURRENT side's alternatives, read by the diff —
+  // never part of the record (see `SymbolEntry.modifierAlts`).
+  const rendered = JSON.stringify(
+    snapshot,
+    (k, v) => k === "modifierAlts" ? undefined : v,
+    2,
+  ) + "\n";
 
   if (!check) {
     // A regeneration is the one move that ERASES the record of a break, so it

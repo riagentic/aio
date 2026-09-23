@@ -20,21 +20,40 @@ import type { CellFieldFilter } from "./cell-types.ts";
 import type { ComposedCells } from "./cell-compose.ts";
 import { applyCellFieldFilter } from "./state-filter.ts";
 
+/** One composed cell, as this module reads it. */
+type ComposedCell = ComposedCells["cells"][number];
+
+/** A cell's persist filter, RESOLVED: what it declared (after `cellDefaults`
+ *  has been applied onto it), else `"all"`. Every reader that describes or
+ *  replays what the store holds — the composition report, journal replay's
+ *  per-cell filter — asks this instead of restating `?? "all"`, so the default
+ *  cannot drift from the one the store's own getter applies.
+ *  `scripts/check-persist-decider.ts` keeps it that way.
+ *
+ *  @decider */
+export function persistFilterOf(cell: ComposedCell): CellFieldFilter {
+  return cell.__aio.persist ?? "all";
+}
+
 /** The cells whose state reaches the store at all — everything not explicitly
  *  `persist: "none"`. The write side ({@linkcode buildDBStateGetter}) and the
  *  restore side read the SAME set, so a slice that can never be written can
  *  never be restored either (a blob written by an older build, or by a
- *  downgrade, would otherwise come back into a cell that asked for none). */
+ *  downgrade, would otherwise come back into a cell that asked for none).
+ *
+ *  @decider */
 export function persistingCellIds(composed: ComposedCells): Set<string> {
   return new Set(
-    composed.cells.filter((f) => (f.__aio.persist ?? "all") !== "none")
+    composed.cells.filter((f) => persistFilterOf(f) !== "none")
       .map((f) => f.__aio.id),
   );
 }
 
 /** Build getDBState from per-cell persist filters.
  *  Default resolution: cell.persist > cellDefaults.persist > "all".
- *  Every cell always gets an entry; "all" persists the full slice, "none" is filtered out. */
+ *  Every cell always gets an entry; "all" persists the full slice, "none" is filtered out.
+ *
+ *  @decider */
 export function buildDBStateGetter(
   composed: ComposedCells,
 ): (s: unknown) => unknown {
@@ -45,7 +64,7 @@ export function buildDBStateGetter(
   >();
   const persisting = persistingCellIds(composed);
   for (const f of composed.cells) {
-    const resolved: CellFieldFilter = f.__aio.persist ?? "all";
+    const resolved = persistFilterOf(f);
     if (persisting.has(f.__aio.id)) {
       cellPersistFilters.set(f.__aio.id, resolved);
       const t = f.__aio.persistTransform;

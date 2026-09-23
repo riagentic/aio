@@ -63,6 +63,7 @@ export function _refuseUnsafeCells(
     defs[i]?.__aio?.scope !== "client"
   );
   if (serverScoped.length === 0) return; // nothing to refuse; composeCells would warn
+  // aio-ok(persist-decider): composed only to run the boot refusals; never reduced, never stored.
   const composed = composeCells(serverScoped, { perfCheck: false });
   // The SAME two passes `aio.run` makes before it refuses: both change what a
   // cell hides and whether it syncs, and the contradiction is only decidable

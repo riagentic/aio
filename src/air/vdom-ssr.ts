@@ -25,10 +25,13 @@ import {
   _STRING_FALSE_ATTRS,
 } from "./prop-write.ts";
 import {
+  _ssrLateRouteSiteOnce,
   _ssrRenderEnter,
+  _ssrRenderEpoch,
   _ssrRenderFinish,
   _ssrRenderNew,
   _ssrRenderOf,
+  _ssrRenderSetUp,
   _ssrRenderStart,
   SSR_RENDER_KEY,
   type SsrRender,
@@ -361,12 +364,224 @@ export function _ssrComponent(
  *  started at `/p/42` finished as the `/about` page. The router registers a
  *  capture here; each top-level render reads it once into its root scope, and
  *  every component call of that render sees its own snapshot. */
-const _ssrCaptures = new Map<symbol, () => unknown>();
+const _ssrCaptures = new Map<
+  symbol,
+  { read: () => unknown; same: (a: unknown, b: unknown) => boolean }
+>();
 
 /** @internal Snapshot `read()` under `id` at the start of every top-level
- *  server render (read back with `_ssrContextValue(id)`). */
-export function _registerSsrCapture(id: symbol, read: () => unknown): void {
-  _ssrCaptures.set(id, read);
+ *  server render (read back with `_ssrContextValue(id)`). `same` tells two
+ *  snapshots apart (default `Object.is`) — see {@linkcode _ssrStreamSettler}. */
+export function _registerSsrCapture(
+  id: symbol,
+  read: () => unknown,
+  same: (a: unknown, b: unknown) => boolean = Object.is,
+): void {
+  _ssrCaptures.set(id, { read, same });
+}
+
+/** @internal The current render epoch (see `_ssrRenderSetUp`). */
+export function _ssrRootEpoch(): number {
+  return _ssrRenderEpoch();
+}
+
+/** The values the most recent top-level set-up snapshotted — what the live
+ *  values are EXPECTED to be while nobody sets them after a call. */
+let _ssrLatest: ReadonlyMap<symbol, unknown> = new Map();
+
+/** Streams whose request values are not settled yet (see
+ *  {@linkcode _ssrStreamSettler}): each hears of every top-level set-up that
+ *  follows its own until it settles — at the end of its call's turn, or at
+ *  its first pull if that comes sooner — so a set is at most the streams of
+ *  one synchronous turn. */
+const _ssrUnsettled = new Set<{ since: ReadonlyMap<symbol, unknown>[] }>();
+
+/** @internal Test seam — how many streams are waiting to settle. Zero once
+ *  the turn that created them has ended, whatever became of the streams. */
+// aio-ok: test seam — read by tests/air-ssr-stream-1-0-9-compat (a stream never outlives its turn)
+export function _ssrUnsettledCount(): number {
+  return _ssrUnsettled.size;
+}
+
+/** The call site of a stream, as the first stack frame outside this module's
+ *  own set-up. */
+function _siteOf(site: Error): string {
+  const frames = (site.stack ?? "").split("\n").slice(1);
+  return frames.find((f) => !/ssr-stream\.ts|vdom-ssr\.ts/.test(f))
+    ?.trim() ?? "unknown";
+}
+
+/** The live re-read CHANGED a value: 1.0.9 honoured it and so does this, but
+ *  no timing can tell this stream's own late write from another request's
+ *  (two requests resumed by one shared promise run in one turn), so it is
+ *  said — once per call site, observe-only, dev and prod alike. */
+function _warnLateRouteAt(site: Error): void {
+  const at = _siteOf(site);
+  if (!_ssrLateRouteSiteOnce(at)) return;
+  console.warn(
+    "[aio] routePath changed after renderToStream() — set it BEFORE the " +
+      "call; under concurrent requests this can render another request's " +
+      `route (${at}).`,
+  );
+}
+
+/** The values changed after this stream's turn and before its first read,
+ *  and the change is not another render's set-up: 1.0.9 rendered the new
+ *  value, this renders the one it was called with — said, once per call site
+ *  (observe-only, dev and prod alike). */
+function _warnRouteBeforePullAt(site: Error): void {
+  const at = _siteOf(site);
+  if (!_ssrLateRouteSiteOnce("pull " + at)) return;
+  console.warn(
+    "[aio] routePath changed after renderToStream() was called and before " +
+      "the stream was first read — the stream renders the route it was " +
+      "CALLED with (1.0.9 read it at the first read). Set routePath before " +
+      `renderToStream(), with no await in between (${at}).`,
+  );
+}
+
+/** Whether two snapshots hold the same request values. */
+function _ssrSameValues(
+  x: ReadonlyMap<symbol, unknown>,
+  y: ReadonlyMap<symbol, unknown>,
+): boolean {
+  for (const [id, { same }] of _ssrCaptures) {
+    if (!same(x.get(id), y.get(id))) return false;
+  }
+  return true;
+}
+
+/** The values changed after this stream's call, in the same turn as another
+ *  top-level render's set-up that took DIFFERENT values: the snapshot stands.
+ *  A live value that is neither this stream's nor any of those renders' was
+ *  set after all of them, by nobody who rendered — said once per call site.
+ *  A live value that IS one of theirs is correct concurrent code (two requests
+ *  resumed by one shared promise, each setting and rendering) and says
+ *  nothing. */
+function _ssrSameTurnCheck(
+  scope: ReadonlyMap<symbol, unknown>,
+  since: readonly ReadonlyMap<symbol, unknown>[],
+  site: Error,
+): void {
+  for (const [id, { read, same }] of _ssrCaptures) {
+    let now: unknown;
+    try {
+      now = read();
+    } catch {
+      continue; // aio-ok: the comparison is observe-only; the snapshot stands
+    }
+    if (same(scope.get(id), now) || since.some((o) => same(o.get(id), now))) {
+      continue;
+    }
+    const at = _siteOf(site);
+    if (!_ssrLateRouteSiteOnce("turn " + at)) return;
+    console.warn(
+      "[aio] renderToStream(): the route (or another request value) changed " +
+        "after renderToStream() was called, in the same turn as another " +
+        "render's call — this stream keeps the value it was CALLED with. " +
+        `Set routePath before renderToStream(), with no await in between (${at}).`,
+    );
+    return;
+  }
+}
+
+/** @internal Settle which request values a top-level stream renders with.
+ *
+ *  `renderToStream` snapshots them at its call: a handler that awaits between
+ *  creating the body and sending it must not render the NEXT request's route.
+ *  1.0.9 read them at the first pull instead, and code written against it
+ *  creates the stream and THEN sets the route — in the same synchronous turn
+ *  (`const body = renderToStream(<App/>); routePath.set(p)`). That one window,
+ *  and only that one, is honoured: the values are read again, live, ONCE, at
+ *  the end of the call's turn (a microtask) or at the first pull if that comes
+ *  sooner — and never again, so a route another request sets later (even one
+ *  that has not called `renderToStream` yet: its session read, its reset
+ *  token) can never reach this page. If another top-level render set up in
+ *  that same turn took DIFFERENT values, the live value may be ITS, so the
+ *  snapshot stands, and only a live value that is none of those renders' is
+ *  said (once per call site); renders that took this stream's own values
+ *  (1.0.9's two streams created before one `routePath.set`) do not count.
+ *
+ *  A write after the turn is not honoured — it is the other request's as
+ *  often as it is this one's — but it is not silent either: at the first pull,
+ *  a live value that differs from the settled one while nothing was set up
+ *  since the call, or that is not the latest set-up's, is said once per call
+ *  site (observe-only, dev and prod alike). 1.0.9 code that creates the
+ *  stream, awaits, and then sets the route lands there.
+ *
+ *  Returns the settle function: idempotent, it gives the scope to render with
+ *  and throws what a live read threw (at the first pull, as 1.0.9 did);
+ *  `pull` is true for the stream's first pull. */
+export function _ssrStreamSettler(
+  scope: SsrContexts,
+  epoch: number,
+  site: Error,
+): (pull: boolean) => SsrContexts {
+  const pending = { since: [] as ReadonlyMap<symbol, unknown>[] };
+  if (scope !== null) _ssrUnsettled.add(pending);
+  let done = false;
+  let pulled = false;
+  let out: SsrContexts = scope;
+  let error: { e: unknown } | null = null;
+  const settle = (pull: boolean): SsrContexts => {
+    if (!done) {
+      done = true;
+      _ssrUnsettled.delete(pending);
+      // Re-read live when nobody else can have set the value: no render was
+      // set up since, or every one that was took THIS stream's values (the
+      // same request, or one on the same route — 1.0.9's two streams created
+      // before one `routePath.set`).
+      if (
+        scope !== null &&
+        pending.since.every((o) => _ssrSameValues(scope, o))
+      ) {
+        try {
+          const fresh = new Map(scope);
+          let changed = false;
+          for (const [id, { read, same }] of _ssrCaptures) {
+            const now = read();
+            if (!same(scope.get(id), now)) changed = true;
+            fresh.set(id, now);
+          }
+          out = fresh;
+          if (changed) _warnLateRouteAt(site);
+        } catch (e) {
+          error = { e }; // thrown from the first pull, where 1.0.9 threw it
+        }
+      } else if (scope !== null) {
+        _ssrSameTurnCheck(scope, pending.since, site);
+      }
+    } else if (pull && !pulled && error === null && out !== null) {
+      // Settled at the end of the call's turn; this is the first pull.
+      const unchanged = epoch === _ssrRenderEpoch();
+      for (const [id, { read, same }] of _ssrCaptures) {
+        let now: unknown;
+        try {
+          now = read();
+        } catch {
+          continue; // aio-ok: the comparison is observe-only
+        }
+        if (
+          !same(out.get(id), now) &&
+          (unchanged || !same(_ssrLatest.get(id), now))
+        ) {
+          _warnRouteBeforePullAt(site);
+          break;
+        }
+      }
+    }
+    if (pull) pulled = true;
+    if (error) throw error.e;
+    return out;
+  };
+  queueMicrotask(() => {
+    try {
+      settle(false);
+    } catch {
+      // aio-ok: held in `error` and rethrown by the stream's first pull
+    }
+  });
+  return settle;
 }
 
 /** @internal The scope a top-level writer starts in: the request snapshots
@@ -381,8 +596,14 @@ export function _registerSsrCapture(id: symbol, read: () => unknown): void {
 export function _ssrRootScope(render: SsrRender): SsrContexts {
   if (_ssrCall) return _ssrCall.visible;
   const scope = new Map<symbol, unknown>();
-  for (const [id, read] of _ssrCaptures) scope.set(id, read());
+  for (const [id, { read }] of _ssrCaptures) scope.set(id, read());
+  // The map itself, not a copy: a root scope is only ever written here, before
+  // it is returned — every later scope is a new Map built from it — so this
+  // stays exactly the snapshot it was (read for capture ids only).
+  _ssrLatest = scope;
+  for (const p of _ssrUnsettled) p.since.push(scope);
   scope.set(SSR_RENDER_KEY, render);
+  _ssrRenderSetUp(render);
   return scope;
 }
 

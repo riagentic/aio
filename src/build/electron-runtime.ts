@@ -119,7 +119,9 @@ export async function localElectronDistFor(
  *  forever: `am pin` moved the framework and left the Chromium under it on a
  *  version this aio never ran. The app's spec and runtime are now copies aio
  *  keeps in line (`am pin`, `am fix`, the dev launcher); a stale copy is
- *  REPORTED (`electronDrift`), never shipped. `root` is kept for callers. */
+ *  REPORTED (`electronDrift`), never shipped. `root` is kept for callers.
+ *
+ *  @decider */
 export function resolveElectronVersion(_root = "."): Promise<string> {
   return Promise.resolve(DEFAULT_ELECTRON_VERSION);
 }

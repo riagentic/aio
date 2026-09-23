@@ -6,8 +6,13 @@ import {
   resolveOptions,
 } from "./types.ts";
 import { computeDiffs, formatDiff } from "./state-diff.ts";
+import { sweepStaleTmps, uuidTmpAfter } from "./tmp-sweep.ts";
 import { createActionLog } from "./action-log.ts";
-import { createCheckpoint, readCheckpoint } from "./checkpoint.ts";
+import {
+  type CheckpointView,
+  createCheckpoint,
+  readCheckpoint,
+} from "./checkpoint.ts";
 import { installCrashHandler } from "./crash-handler.ts";
 import { log } from "./logger-api.ts";
 import { diagSubscribe } from "./diagnostic-bus.ts";
@@ -27,6 +32,10 @@ export type DiagnosticsHooks = {
   onStop: () => Promise<void>;
   onError: (cellName: string) => void;
   getRecoveredState: () => CheckpointData | null;
+  /** Hand the checkpoint the app's restore rule, so it never holds a
+   *  `persist: "none"` cell (see `CheckpointView`). Optional: a runtime with
+   *  no cells has no rule, and its checkpoint stays whole. */
+  setCheckpointView?: (view: CheckpointView) => void;
   setHealthGetter: (
     fn: () => Record<string, { errors: number; enabled: boolean }>,
   ) => void;
@@ -41,6 +50,7 @@ const ARTIFACTS = {
   actionLog: ["actions.jsonl"],
   checkpoint: ["checkpoint.json", "checkpoint.json.tmp"],
 } as const;
+const CHECKPOINT_TMP = "checkpoint.json.tmp";
 
 /**
  * Remove the artifacts of every disabled writer.
@@ -66,6 +76,11 @@ export function purgeDisabledArtifacts(
         // fix, and failing boot over a leftover diagnostic file would be worse
         // than leaving it.
       }
+    }
+    // …and the random-named tmps its writer leaves on a crash
+    // (`checkpoint.json.tmp.<uuid>`), by the same narrow rule as the sweep.
+    if (flag === "checkpoint") {
+      removed.push(...sweepStaleTmps(logDir, [uuidTmpAfter(CHECKPOINT_TMP)]));
     }
   }
   if (removed.length > 0) {
@@ -102,6 +117,7 @@ export function initDiagnostics(
 
   // ── Checkpoint (read early, before cells init) ──
   let recovered: CheckpointData | null = null;
+  let cpView: CheckpointView | null = null;
   let cpWriter: ReturnType<typeof createCheckpoint> | null = null;
   if (opts.checkpoint) {
     recovered = readCheckpoint(logDir);
@@ -130,7 +146,7 @@ export function initDiagnostics(
       : 5000;
     // The checkpoint honours the SAME redaction list as the other three sinks.
     // It was the one that did not, and it is the one that writes the most.
-    cpWriter = createCheckpoint(logDir, debounce, redact);
+    cpWriter = createCheckpoint(logDir, debounce, redact, () => cpView);
   }
 
   // ── Action log ──
@@ -321,6 +337,18 @@ export function initDiagnostics(
     onStop,
     onError,
     getRecoveredState: () => recovered,
+    setCheckpointView: (v) => {
+      cpView = v;
+      // The checkpoint an OLDER build left is rewritten through the view at
+      // once when it holds anything the view drops — not on this run's first
+      // write, which may never come (tests/hosts.test.ts, boot step).
+      if (recovered && cpWriter) {
+        const kept = v(recovered.state);
+        if (
+          Object.keys(kept).length !== Object.keys(recovered.state).length
+        ) cpWriter.rewriteNow(recovered);
+      }
+    },
     setHealthGetter: (fn) => {
       healthGetter = fn;
     },

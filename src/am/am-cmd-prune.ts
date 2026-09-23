@@ -24,7 +24,7 @@
  * `build/electron-cache.ts`.
  */
 import type { GlobalFlags } from "./am-types.ts";
-import { detectMode, fail, out, outError } from "./am-output.ts";
+import { detectMode, fail, out, outError, sayErr } from "./am-output.ts";
 import {
   applyElectronPrune,
   type CacheEntry,
@@ -218,7 +218,7 @@ export async function cmdPrune(
     } else {
       outError(summary, mode);
       if (result.removed.length) {
-        console.error(
+        sayErr(
           result.removed.map((p) => `  removed: ${p}`).join("\n"),
         );
       }

@@ -170,8 +170,21 @@ export function routeCommand(
         // `wireError` keeps the server's failure CODE on the rejection, so an
         // app can branch with `errorCode(e) === "ACCESS_DENIED"` instead of
         // matching a message the semver policy never promised to keep.
-        if (ok) _resolveAck(cid, value);
-        else _rejectAck(cid, wireError(d, "server rejected action"));
+        if (ok) {
+          // The call RAN, and the server says more: what it wrote is not on
+          // disk (`unsaved` — a failed save), or it ran on fewer arguments
+          // than it declares (`short`). `am` prints both; a tab resolving the
+          // call with neither word was the one door that stayed silent.
+          // Additive: the call still resolves — it did run.
+          const notes = [
+            typeof d.unsaved === "string" ? `NOT SAVED — ${d.unsaved}` : null,
+            typeof d.short === "string" ? d.short : null,
+          ].filter((n): n is string => n !== null);
+          if (notes.length > 0) {
+            console.warn(`[aio] call ${cid} ran, but: ${notes.join("; ")}`);
+          }
+          _resolveAck(cid, value);
+        } else _rejectAck(cid, wireError(d, "server rejected action"));
       }
       return true;
     }

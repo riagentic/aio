@@ -15,6 +15,8 @@ import {
   out,
   outError,
   pad,
+  say,
+  sayErr,
   stack,
   style,
   termWidth,
@@ -168,7 +170,7 @@ export async function cmdUpdate(
       outError(`install from ${checkout} failed (deno exit ${code})`, mode);
       Deno.exit(code);
     }
-    console.error(
+    sayErr(
       `⚠ global am now runs from ${checkout} — a DEV am on live files ` +
         `(your edits apply immediately). Plain "am upgrade" returns to the ` +
         `released am.`,
@@ -207,7 +209,7 @@ export async function cmdUpdate(
       outError(`reinstall from ${canonical} failed (deno exit ${code})`, mode);
       Deno.exit(code);
     }
-    console.error(
+    sayErr(
       `am: note: returned from dev checkout (${root}) to ${canonical}`,
     );
     root = canonical;
@@ -702,7 +704,7 @@ export function cmdHelp(
   if (cmd) {
     const block = helpBlock(HELP_TEXT, cmd);
     if (block) {
-      console.log(
+      say(
         stack(
           heading(`am ${cmd}`),
           block,
@@ -713,7 +715,7 @@ export function cmdHelp(
     }
     // A mapped command with no entry of its own (`help`) or an unknown word:
     // say so, then the whole text — never a silent fall-through.
-    console.error(
+    sayErr(
       commandKeys.includes(cmd)
         ? `am: "${cmd}" has no help entry of its own — see the full list:`
         : `am: unknown command "${cmd}" — the full list:`,
@@ -729,7 +731,7 @@ export function cmdHelp(
   // flat list is how you find the verb whose name you half-remember. `--all`:
   // the prose, every flag of every command.
   const listAll = !full && args.includes("--commands");
-  console.log(stack(
+  say(stack(
     heading("am", VERSION, "the aio app manager"),
     full
       ? HELP_TEXT

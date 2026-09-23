@@ -65,7 +65,9 @@ export function selfMethodOf(action: unknown): string | null {
 /** Resolve a self-descriptor against its owning cell — the ONE decider for
  *  what `self("m")` means. Throws (loud, at the capture site) when the cell
  *  has no such method; returns the input unchanged for normal actions.
- *  @internal */
+ *  @internal
+ *
+ *  @decider */
 export function resolveSelfAction<
   A extends { type: string; payload?: unknown },
 >(

@@ -70,6 +70,21 @@ The handler must be sync (it runs inside the reduce) and receives the foreign
 action's payload. Unknown method names and async handlers fail loudly at
 `cell()` time.
 
+**When the source cell refuses the action** (its `validate` fails, a machine
+guard blocks it, or the cell is disabled), the source's state is unchanged, and
+what a listener sees depends on how the action arrived:
+
+- **A call** (a method call, `am dispatch`, a trojan POST — anything that is not
+  a sync op): the listener **still runs**, as it always has. Its reaction is
+  kept, and a journal replay makes the same decision again, so a restart gives
+  the same state. If a listener must only count accepted actions, check the
+  source's state in the handler.
+- **A sync op** (a client write to a `sync: true` cell): the listener **does not
+  run**. The op is answered `op-rejected` and deleted from the op-log, so the
+  write never happened for its origin, for any peer, or after a restart — and
+  neither does the reaction. (Before 1.0.10 the listener ran, and the next boot
+  took its reaction back.)
+
 One form: the object, which names the method that reacts. (The bare array,
 `listensTo: [cart.addItem]` — retired in alpha70 — routed the action through the
 cell and ran nothing.) When the source naturally knows the target, direct

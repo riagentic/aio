@@ -65,7 +65,9 @@ export function pinnedFrameworkPath(pin: string): string {
 }
 
 /** Does a `dep/aio` link satisfy the app's pin? THE decider — every tool that
- *  reports pin/link agreement asks this, so they cannot contradict each other. */
+ *  reports pin/link agreement asks this, so they cannot contradict each other.
+ *
+ *  @decider */
 export function linkSatisfiesPin(pin: string, linkedPath: string): boolean {
   return isPathPin(pin)
     ? resolve(linkedPath) === resolve(pathPinTarget(pin))

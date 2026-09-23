@@ -18,9 +18,13 @@ the part you back up is one subdirectory of it.
   cache/    ← ② regenerable BULK your app writes: downloads, build trees, thumbnails
   app/      ← ② the unpacked binaries a packaged app RUNS from (AppImage) 🔒 0700
   launch.json ← ② the flags `am` started it with, so `am restart` replays them
+  .aio-instance.lock  ← the home's OS lock, held while the app runs: one process
+  .aio-instance.json    per folder, whatever lock scope (the json names the holder)
 
 $XDG_RUNTIME_DIR/aio/   ← ③ must NOT survive a reboot
   wallet.lock           the instance: pid, port, status, home (no separate .pid)
+  wallet.lock.mx        ┐ transient, 0600: the lock's mutex, and a lock being
+  wallet.lock.<pid>.…tmp┘ published — a killed process's are swept at next start
   wallet.sock           ┐ only on the socket transport — a desktop app
   wallet.http.sock      ┘ running with no TCP port
 ```
@@ -165,14 +169,14 @@ A listed action keeps its type, sequence, timestamp and the state **paths** it
 changed — "what did it touch" still works — while its payload and the
 before/after values it wrote become `"[redacted]"`. One list governs every sink;
 they cannot disagree. That includes the diagnostic **checkpoint**, which holds
-current state rather than actions and so cannot redact per action: the whole
-slice of a listed cell is withheld (`"[redacted]"` in place of the state), and
-the file is created `0600` like the journal. An async method's write-set commit
-(`cell:__setMethod`) is covered by whichever pattern covers the method itself,
-so an exact `"vault:unlockWith"` protects both. A trailing `*` matches by
-prefix, because a list of individual method names is the list that goes stale
-the day someone adds another unlock method — and a stale redaction list fails
-open.
+current state rather than actions (minus every `persist: "none"` cell, which is
+never in it) and so cannot redact per action: the whole slice of a listed cell
+is withheld (`"[redacted]"` in place of the state), and the file is created
+`0600` like the journal. An async method's write-set commit (`cell:__setMethod`)
+is covered by whichever pattern covers the method itself, so an exact
+`"vault:unlockWith"` protects both. A trailing `*` matches by prefix, because a
+list of individual method names is the list that goes stale the day someone adds
+another unlock method — and a stale redaction list fails open.
 
 **A redacted action cannot be replayed.** Its payload _is_ its arguments, and
 they were deliberately never written, so boot **skips** it and says so:
@@ -206,17 +210,25 @@ am data --json          # the same, machine-readable
 
 ```bash
 am stop wallet          # a live SQLite file can copy mid-write
-am backup               # → ./wallet-backup-20260726-113000/
+am backup               # → ~/.wallet/backups/wallet-backup-20260726-113000/
 am backup /mnt/usb/w1   # …or wherever you want it
 
 am restore /mnt/usb/w1  # refuses another app's archive; keeps what it replaces
 ```
 
 `am backup` refuses while the app is running (`--force` overrides, and marks the
-result as possibly torn). `am restore` has no such override — a running app
-holds the databases open and would write its in-memory pages straight back over
-the restored file. The data being replaced is **moved** to
-`data.replaced-<timestamp>`, never deleted, so restoring the wrong archive is
+result as possibly torn). While either one copies, it holds the app's lock: the
+app cannot start, `am status` says `maintenance` (exit 2), and `am stop` refuses
+rather than killing the copy. A backup is written to `<dest>.partial` and
+renamed into place only once complete, so `<dest>` is never a half-copy. A
+leftover `.partial` (a killed backup) is refused by name. A restore copies into
+`data.restoring-<timestamp>` first and swaps only a complete copy in. Ctrl-C
+aborts either one cleanly at the next file (exit 130; SIGTERM 143), with the
+data untouched; a second Ctrl-C abandons a large file still copying and exits at
+once. `am restore` has no such override — a running app holds the databases open
+and would write its in-memory pages straight back over the restored file. The
+data being replaced is **moved** to `data.replaced-<timestamp>` (`-2`, `-3`, …
+when that name is taken), never deleted, so restoring the wrong archive is
 undoable.
 
 Nothing stops you doing it by hand — that's the point of one directory:
@@ -235,6 +247,17 @@ it names the **root all apps** sit under:
 | the author | `aio.run({ appDir: "/opt/w" })` | `/opt/w/{data,logs}`        |
 | the runner | `AIO_APPS_DIR=/srv/aio`         | `/srv/aio/<appId>/{data,…}` |
 | nobody     | —                               | `~/.<appId>`                |
+
+A **profile** is a third, per-RUN knob: a second copy of the app with its own
+home. `--profile=dev` (or `AIO_PROFILE=dev`) puts it BESIDE the home the table
+picked — `~/.<appId>-dev`, `/srv/aio/<appId>-dev`, `/opt/w-dev` — with the same
+`data/ logs/ cache/` layout, and its lock and socket in tier ③ as
+`<appId>@dev.lock` / `.sock`. A path (`--profile=~/scratch/w`, or its alias
+`--home=`) is that exact folder, keyed `<appId>@<hash8(path)>`. The home's
+`data/meta.json` records its appId and profile, and boot refuses a home owned by
+another app or profile. `aio.run({ profiles: false })` refuses all of it.
+`am remove --data` lists profile homes and never removes them. See
+[profiles](../clients/app-manager.md#profiles-several-copies-of-one-app).
 
 ```ts
 await aio.run({

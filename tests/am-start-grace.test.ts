@@ -8,13 +8,14 @@
 // runtime gives a starting owner STARTUP_GRACE_MS; `am` gave none.
 import { assert, assertEquals } from "@std/assert";
 import { ensureSingleton } from "../src/am/am-cmd-process.ts";
-import { readPid, removePid, writePid } from "../src/am/am-utils.ts";
+import { readPid, writePid } from "../src/am/am-utils.ts";
 import {
   isProcessAlive,
   type LockData,
   STARTUP_GRACE_MS,
   STUCK_STARTING_MS,
 } from "../src/server/single-instance-lock.ts";
+import { dropFixtureLock } from "./fixture-lock-helper.ts";
 
 class ExitSignal extends Error {
   constructor(public code: number) {
@@ -83,7 +84,7 @@ Deno.test("am start: a 'starting' lock inside the grace is refused, never killed
   } finally {
     child.kill("SIGKILL");
     await child.status;
-    removePid(appId);
+    dropFixtureLock(appId);
   }
 });
 
@@ -104,7 +105,7 @@ Deno.test("am start: past the grace with NO port to probe is still refused, neve
   } finally {
     child.kill("SIGKILL");
     await child.status;
-    removePid(appId);
+    dropFixtureLock(appId);
   }
 });
 
@@ -133,7 +134,7 @@ Deno.test("am start: past the grace, a declared port NOT YET BOUND is a slow boo
   } finally {
     child.kill("SIGKILL");
     await child.status;
-    removePid(appId);
+    dropFixtureLock(appId);
   }
 });
 
@@ -156,7 +157,7 @@ Deno.test("am start: nothing bound and no progress for STUCK_STARTING_MS IS stuc
       child.kill("SIGKILL");
     } catch { /* already dead */ }
     await child.status;
-    removePid(appId);
+    dropFixtureLock(appId);
   }
 });
 
@@ -190,7 +191,7 @@ Deno.test("am start: past the grace, a port that is BOUND but never answers ok I
       child.kill("SIGKILL");
     } catch { /* already dead */ }
     await child.status;
-    removePid(appId);
+    dropFixtureLock(appId);
     ac.abort();
     await srv.finished;
   }

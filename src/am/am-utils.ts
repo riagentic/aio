@@ -8,23 +8,35 @@ import { readDenoJsonSync } from "../server/deno-json.ts";
 import { envPort, resolveEntryPath } from "../server/paths.ts";
 import { envDefaultPort } from "../server/aio-cli.ts";
 import {
+  type AppLock,
   type InstanceInfo,
   instances,
+  isHold,
+  isLockOwnerAlive,
   type LockData,
   lockKey,
+  noteDeadHolder,
+  printable,
   readLock,
-  removeLock,
+  removeLockIfOwner,
   resolveAppId,
   writeLock,
 } from "../server/single-instance-lock.ts";
 import { basename, join, resolve } from "@std/path";
 import {
   appDirs,
+  expandProfilePath,
+  isProfilePath,
+  profileHome,
+  profileNameError,
+  profileOfHome,
   registerAppDirs,
+  registeredProfile,
+  registerProfile,
   RESERVED_APP_NAMES,
 } from "../server/app-dirs.ts";
 import type { GlobalFlags } from "./am-types.ts";
-import { detectMode, fail, outError, outValue } from "./am-output.ts";
+import { detectMode, fail, outError, outValue, sayErr } from "./am-output.ts";
 import { trojanGet, trojanPost } from "./am-http.ts";
 import { type Component, projectComponents } from "./am-components.ts";
 import { cwdIsProject, projectRoot } from "./am-project.ts";
@@ -89,7 +101,7 @@ function refuseAmbiguousApp(labels: string[]): never {
     ? "json"
     : "pretty";
   if (mode === "pretty") {
-    console.error(
+    sayErr(
       `[am] ✗ this project has several components (${list}) and this command ` +
         `acts on one.\n` +
         `    Pick one:  --app=${labels[0]}\n` +
@@ -229,7 +241,7 @@ function _warnDenoJsonPort(): void {
     ) as { port?: number };
     if (typeof cfg.port !== "number") return;
     _warnedDenoJsonPort = true;
-    console.error(
+    sayErr(
       `[am] note: deno.json has a top-level "port": ${cfg.port} — aio never ` +
         `reads it there (deno.json carries identity and build only), so the ` +
         `app does not bind it and am no longer aims at it. Move it into ` +
@@ -275,8 +287,13 @@ export function resolveEntry(flagEntry?: string): string | null {
  *  control key, launch info, logs — follow that instance, exactly as the app's
  *  own process does after `aio.run()` resolved `appDir`. Nothing else in `am`
  *  needs to know the flag exists. */
-export function targetHome(appId: string, home: string): void {
+export function targetHome(
+  appId: string,
+  home: string,
+  profile?: string,
+): void {
   registerAppDirs(appId, appDirs(appId, home));
+  registerProfile(appId, profile ?? profileOfHome(appId, home));
   _homePinned = true;
 }
 
@@ -316,11 +333,95 @@ export function adoptRunningHome(appId: string): void {
   } catch {
     return; // no lock dir readable — the default home is the only answer
   }
-  const live = running.filter((i) => i.alive);
+  // A PROFILE instance is never adopted: `am stop` with no --profile means
+  // the app's own instance, and must not stop `dev` because it is the only
+  // one up.
+  const live = notProfiles(appId, running).filter((i) => i.alive);
   if (live.length !== 1) return;
   const home = live[0]!.home;
   if (!home || home === appDirs(appId).home) return;
   registerAppDirs(appId, appDirs(appId, home));
+}
+
+/** Split `myapp@dev` — the `--app` / process-verb positional spelling of a
+ *  profile — into its halves. A plain id comes back whole. Pure. */
+export function splitAppProfile(v: string): { app: string; profile?: string } {
+  const at = v.lastIndexOf("@");
+  return at > 0
+    ? { app: v.slice(0, at), profile: v.slice(at + 1) }
+    : { app: v };
+}
+
+/** The data home `am` targets for `--profile` (a NAME or a PATH) and its
+ *  path-only alias `--home`, or why neither can be used.
+ *
+ *  A name resolves to the RUNNING instance filed under it when there is one
+ *  (its lock records the home the runtime chose — an app with `appDir` puts
+ *  its profiles beside THAT), else to {@linkcode profileHome}. A tag that is
+ *  a lock key's hash (`myapp@1a2b3c4d`, copied from `am instances`) resolves
+ *  to the running instance filed under that key. Pure but for the lock read. */
+export function amProfileHome(
+  appId: string,
+  opts: { profile?: string; home?: string },
+): { home?: string; profile?: string; error?: string } {
+  const live = (() => {
+    try {
+      return instances(appId).filter((i) => i.alive);
+    } catch {
+      return []; // aio-ok: no lock dir — nothing running to follow
+    }
+  })();
+  type Hit = { home: string; profile?: string } | { error: string };
+  const one = (v: string, pathOnly: boolean): Hit => {
+    if (pathOnly || isProfilePath(v)) {
+      const home = expandProfilePath(v);
+      const running = live.find((i) => i.home && resolve(i.home) === home);
+      const profile = running?.profile ?? profileOfHome(appId, home);
+      return profile ? { home, profile } : { home };
+    }
+    if (/^[0-9a-f]{8}$/.test(v)) {
+      const hit = live.find((i) =>
+        lockKey(appId, i.home, i.profile) === `${appId}@${v}`
+      );
+      if (hit?.home) return { home: hit.home };
+      return {
+        error: `${appId}@${v} names no running instance (the tag is a lock ` +
+          `key's, and nothing runs under it now — am instances lists them)`,
+      };
+    }
+    const bad = profileNameError(v);
+    if (bad) return { error: bad };
+    const running = live.find((i) =>
+      i.profile === v || (i.home && profileOfHome(appId, i.home) === v)
+    );
+    return { home: running?.home ?? profileHome(appId, v), profile: v };
+  };
+  const a = opts.profile !== undefined ? one(opts.profile, false) : undefined;
+  const b = opts.home !== undefined ? one(opts.home, true) : undefined;
+  for (const x of [a, b]) if (x && "error" in x) return x;
+  const ha = a as { home: string; profile?: string } | undefined;
+  const hb = b as { home: string; profile?: string } | undefined;
+  if (ha && hb && resolve(ha.home) !== resolve(hb.home)) {
+    return {
+      error: `--profile=${opts.profile} (${ha.home}) and --home=${opts.home} ` +
+        `(${hb.home}) name two different folders — give one. --home is the ` +
+        `path-only spelling of --profile.`,
+    };
+  }
+  return hb ?? ha ?? {};
+}
+
+/** `running` minus every PROFILE instance — and minus any other lock whose
+ *  pid a profile's lock names (a start placeholder filed under another key
+ *  is the same process, not a second instance). Pure. */
+export function notProfiles(
+  appId: string,
+  running: readonly InstanceInfo[],
+): InstanceInfo[] {
+  const isProfile = (i: InstanceInfo) =>
+    !!i.profile || !!(i.home && profileOfHome(appId, i.home));
+  const pids = new Set(running.filter(isProfile).map((i) => i.pid));
+  return running.filter((i) => !isProfile(i) && !pids.has(i.pid));
 }
 
 /** Whether `--home` named an instance. When it did, {@linkcode liveLock} must
@@ -337,7 +438,7 @@ export function _resetHomePin(): void {
 /** The lock key `am` targets for `appId`: the plain id for the default home,
  *  `<id>@<hash8(home)>` after {@linkcode targetHome}. */
 export function amLockKey(appId: string): string {
-  return lockKey(appId, appDirs(appId).home);
+  return lockKey(appId, appDirs(appId).home, registeredProfile(appId));
 }
 
 /** Read lock data for current app — replaces old readPid().
@@ -372,7 +473,9 @@ export function liveLock(appId?: string): LockData | null {
   const id = appId ?? resolveAmAppId();
   const own = readPid(id);
   if (own || _homePinned) return own;
-  const running = instances(id);
+  // A PROFILE instance is never "the app": with no --profile, `am stop` /
+  // `am status` must not reach `dev` because it happens to be the only one.
+  const running = notProfiles(id, instances(id));
   if (running.length === 0) return null;
   if (running.length === 1) return running[0]!;
   throw new Error(
@@ -388,15 +491,29 @@ export function writePid(pf: LockData): void {
   writeLock(pf);
 }
 
-/** Remove a lock. With `pf` — the lock a command actually READ (via
- *  {@linkcode liveLock}) — the removal targets that instance's key, wherever
- *  its home is; without it, the home-keyed key `am` computes. Removing by id
+/** Remove the lock `pf` — the record a command actually READ (via
+ *  {@linkcode liveLock}) — at that instance's key, wherever its home is, and
+ *  only while it still names `pf`'s owner (compare-and-delete). Removing by id
  *  alone after reading by `liveLock` would miss an `<id>@<hash>` lock and
  *  leave the stale record `am status` just called stale. */
-export function removePid(appId?: string, pf?: LockData | null): void {
-  removeLock(
-    pf ? lockKey(pf.appId, pf.home) : amLockKey(appId ?? resolveAmAppId()),
-  );
+export function removePid(_appId?: string, pf?: LockData | null): void {
+  // No record read, nothing judged: whatever lock sits at the key now was
+  // written by an instance this command never looked at (a port-only stop,
+  // or one that booted meanwhile). Removing it anyway is how a live lock
+  // went and a second instance opened the same state.db.
+  if (!pf) return;
+  // A killed `am backup`/`am restore`: named before its lock goes.
+  if (!isLockOwnerAlive(pf)) noteDeadHolder(pf);
+  removeLockKeyed(pf);
+}
+
+/** Remove the lock `pf` was read from — ONLY while it still names `pf`'s
+ *  owner, and saying nothing (the caller names it). By the time a command
+ *  decides a lock is stale, a new instance may hold the same name; deleting
+ *  whatever sits at the path removed ITS live lock, and a second instance
+ *  then opened the same state.db. */
+export function removeLockKeyed(pf: LockData): void {
+  removeLockIfOwner(lockKey(pf.appId, pf.home, pf.profile), pf);
 }
 
 /** Names already reported by {@linkcode resolvePort}, so one `am` invocation
@@ -450,6 +567,98 @@ export function _resetTargetGuess(): void {
   _targetNoted.clear();
 }
 
+/** The lock record of an `am` MAINTENANCE hold — `am backup` / `am restore`
+ *  holding the app's lock so it cannot start while its data is copied or
+ *  swapped. Status `maintenance` (+ the op) instead of the `starting` a boot
+ *  writes: with `starting`, `am status` called it a booting app, `am stop`
+ *  SIGTERMed the backup, and a real start was told to `am stop` it.
+ *
+ *  Additive on the wire: every reader so far validates appId/pid/port only
+ *  (v1.0.9's `readLock` included), so an older `am` or app still sees a HELD
+ *  lock — it just cannot name it. The record is `LockData.maintenance`, with
+ *  `status: "starting"` for readers that predate it (see that field for why
+ *  that value); the app's own boot refusal names the op
+ *  (`_alreadyRunningMessage`). What `am status` REPORTS for it: */
+export const MAINTENANCE_STATUS = "maintenance";
+
+/** The partial `AppLock.update()` writes to turn a hold into a maintenance
+ *  record. */
+export function maintenanceMark(
+  op: string,
+  since: number = Date.now(),
+  partial?: string,
+): Parameters<AppLock["update"]>[0] {
+  return {
+    status: "starting",
+    maintenance: { op, since, ...(partial ? { partial } : {}) },
+  };
+}
+
+/** When the lock's holder really started (epoch ms): a maintenance hold's
+ *  `since`, else `startedAt` — which a hold's heartbeat keeps rewriting.
+ *  Pure. */
+export function holderSince(
+  pf: Pick<LockData, "startedAt" | "maintenance">,
+): number {
+  const s = pf.maintenance?.since;
+  return typeof s === "number" && Number.isFinite(s) ? s : pf.startedAt;
+}
+
+/** The `am` operation holding `pf`, or null when it is an app. Pure. */
+export function maintenanceOp(pf: unknown): string | null {
+  const m = (pf as { maintenance?: unknown } | null | undefined)?.maintenance;
+  if (!isHold(pf as { maintenance?: unknown } | null)) return null;
+  const op = typeof m === "object" ? (m as { op?: unknown }).op : undefined;
+  return typeof op === "string" && op ? printable(op) : "am";
+}
+
+/** The lock module's one print-safety helper, for `am`'s own callers. */
+export { printable };
+
+/** What every verb says about a maintenance hold. Pure. */
+export function maintenanceMessage(
+  appId: string,
+  pf: { pid: number; maintenance?: unknown },
+): string {
+  return `${maintenanceOp(pf) ?? "am"} is running on "${appId}" (pid ` +
+    `${pf.pid}) — the app cannot start, and has nothing to answer, until it ` +
+    `finishes. Wait for it, or Ctrl-C it.`;
+}
+
+/** A lock that names NO DOOR: no socket and port 0. That is the placeholder
+ *  `am start` files before the child binds anything ("starting", port 0) —
+ *  and, should a lock ever say it while `started`, an instance there is still
+ *  no way to reach. Port 0 alone is NOT this: a UDS-only app's lock says
+ *  `port: 0` honestly and is reached over its socket. The ONE place that
+ *  state is recognized; `resolvePort` refuses it by name. Pure. */
+export function lockHasNoDoor(
+  pf: Pick<LockData, "port" | "socketPath">,
+): boolean {
+  return !pf.socketPath && !(pf.port > 0);
+}
+
+/** What `am` says about a {@linkcode lockHasNoDoor} instance. Before this,
+ *  every HTTP verb aimed at `:0` and printed the runtime's "Requests to port 0
+ *  are blocked" — true of fetch, and no help about the app. Pure. */
+export function noDoorMessage(
+  appId: string,
+  pf: Pick<LockData, "pid" | "status" | "maintenance">,
+): string {
+  if (maintenanceOp(pf)) return maintenanceMessage(appId, pf);
+  return pf.status === "starting"
+    ? `"${appId}" is still starting (pid ${pf.pid}) — it has not bound a ` +
+      `port or socket yet, so there is nothing to ask. Retry in a moment ` +
+      `(\`am status\` exits 2 while it starts, 0 once it is up).`
+    : `"${appId}" (pid ${pf.pid}, ${pf.status}) has no port or socket in ` +
+      `its lock — nothing to ask. \`am restart --app=${appId}\` gives it one.`;
+}
+
+/** The port of a live lock, or the named refusal when it has no door. */
+function doorPort(appId: string, pf: LockData): number {
+  if (lockHasNoDoor(pf)) throw new Error(noDoorMessage(appId, pf));
+  return pf.port;
+}
+
 export function resolvePort(
   flag?: number,
   appId?: string,
@@ -461,7 +670,7 @@ export function resolvePort(
   // `appDir` resolves here (its lock says `port: 0`, honestly: the transport
   // decider in am-http then reaches it over the socket, never over :0).
   const pf = liveLock(id);
-  if (pf) return pf.port;
+  if (pf) return doorPort(id, pf);
 
   const live = instances();
   // The "one running instance" rung exists for a GUESSED id — a cwd with no
@@ -485,7 +694,7 @@ export function resolvePort(
     _discoveredTarget = only.appId;
     if (!_targetNoted.has(only.appId)) {
       _targetNoted.add(only.appId);
-      console.error(
+      sayErr(
         `[am] note: no app named "${id}" is running — using the one that ` +
           `is: ` +
           `${only.appId} @ ${
@@ -494,7 +703,7 @@ export function resolvePort(
           `Pin it with --app=${only.appId}, or run am from its directory.`,
       );
     }
-    return only.port;
+    return doorPort(only.appId, only);
   }
   // Nothing is running under this id. The app's OWN declaration is still a
   // real answer — `am start` on a declared port, an app between restarts.
@@ -642,6 +851,7 @@ export function resolvePath(
 const SINGLE_VALUE_FLAGS: readonly string[] = [
   "--app",
   "--home",
+  "--profile",
   "--instance",
   "--entry",
   "--transport",
@@ -664,6 +874,8 @@ const SINGLE_VALUE_FLAGS: readonly string[] = [
 const NEEDS_A_VALUE: Readonly<Record<string, string>> = {
   "--app": "--app needs an app id: --app=<id> (am instances lists them)",
   "--entry": "--entry needs a file: --entry=src/app.ts",
+  "--profile":
+    "--profile needs a name or a folder: --profile=dev, --profile=~/data/x",
 };
 
 /** The client INDEX has four spellings; this is the long one.
@@ -736,6 +948,7 @@ export function parseGlobalFlags(
     "--app",
     "--client-index",
     "--home",
+    "--profile",
     "--timeout",
     "--instance",
     "--from",
@@ -851,6 +1064,7 @@ export function parseGlobalFlags(
     else if (a.startsWith("--transport=")) flags.transport = a.slice(12);
     else if (a.startsWith("--app=")) flags.app = a.slice(6);
     else if (a.startsWith("--home=")) flags.home = a.slice(7);
+    else if (a.startsWith("--profile=")) flags.profile = a.slice(10);
     else if (a.startsWith("--instance=")) flags.instance = a.slice(11);
     else if (a.startsWith("--timeout=")) {
       flags.timeout = num(a.slice(10), "--timeout", { min: 1, integer: true });
@@ -875,7 +1089,7 @@ export function parseGlobalFlags(
       // RUNTIME's --client=<kind> — forwarded as a positional so commands
       // that launch an app (`am ui --client=browser`) can pass it through.
       if (/^\d+$/.test(a.slice(9).trim())) {
-        console.error(
+        sayErr(
           "am: warning: --client=N is now --client-index=N (or -i N) — the old " +
             "spelling still works, but collides with the app runtime's " +
             "--client=<kind>",
@@ -892,7 +1106,7 @@ export function parseGlobalFlags(
       // `-c2` was the short form of `--client=2`. `-c2x` used to fail the
       // isNaN test and fall through to the POSITIONAL args, where it became a
       // command argument — the same NaN class, silent one step further along.
-      console.error("am: warning: -cN is now -i N (client index)");
+      sayErr("am: warning: -cN is now -i N (client index)");
       flags.client = num(a.slice(2), "-c (client index)");
     } else if (a === "--client") flags.client = 0;
     else if (a === "--ui") flags.ui = true;

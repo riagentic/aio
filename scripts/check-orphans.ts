@@ -25,6 +25,12 @@
 //                                    /tmp/aio-* dirs, stale lock dirs and
 //                                    stale watcher sentinels
 import { join } from "@std/path";
+import {
+  pruneDeadLockDirAt,
+  removeLockFileIf,
+  rootRegistryEntry,
+  sweepRootRegistry,
+} from "../src/server/single-instance-lock.ts";
 
 const clean = Deno.args.includes("--clean");
 /** Sweep only the DEBRIS a finished run leaves: scoped lock dirs with no live
@@ -74,6 +80,10 @@ function cmdlineOf(pid: number): string {
 }
 
 function lockRoots(): string[] {
+  // A test's seam: its own fake runtime base ONLY, so the gate's test never
+  // scans — let alone prunes — the machine's real `/tmp`.
+  const only = Deno.env.get("AIO_ORPHANS_LOCK_ROOTS");
+  if (only) return only.split(":").filter(Boolean);
   const roots = new Set<string>();
   const xdg = Deno.env.get("XDG_RUNTIME_DIR");
   if (xdg) roots.add(xdg);
@@ -209,8 +219,10 @@ for (const root of lockRoots()) {
             startedAt?: number;
           }
           | null = null;
+        let raw: string | null = null;
         try {
-          lock = JSON.parse(Deno.readTextFileSync(path));
+          raw = Deno.readTextFileSync(path);
+          lock = JSON.parse(raw);
         } catch { /* corrupt — stale */ }
         const pid = lock?.pid ?? 0;
         if (pid > 0 && alive(pid)) {
@@ -254,8 +266,10 @@ for (const root of lockRoots()) {
             port: lock?.port ?? 0,
             dir,
           });
-        } else if (clean && !foreign) {
-          Deno.removeSync(path);
+        } else if (clean && !foreign && raw !== null) {
+          // Compare-and-delete: only the record judged dead, never a lock an
+          // app published at this path since it was read.
+          removeLockFileIf(path, raw);
         }
       } else if (f.name.startsWith("watch-") && f.name.endsWith(".tmp")) {
         // A watcher sentinel whose process is gone is a hard-killed app. The
@@ -340,20 +354,70 @@ for (const o of orphans) {
       `        ${cmdlineOf(o.pid)}\n        lock: ${o.dir}`,
   );
 }
+// ── New lock dirs: what THIS run left in the runtime dir ─────────────────
+//
+// The stale sweep above skips anything touched recently, so a run's own
+// leftovers were never counted by the run that made them — measured, ~5,400
+// empty `aio-<scope>` dirs in $XDG_RUNTIME_DIR after one day, every one
+// "recent" to the gate that could have caught it. So the START of a suite
+// (`--clean-stale`) records which scoped lock dirs exist, and the END (this
+// report) fails on every scoped dir that appeared since and holds no live
+// lock: a creator that did not prune what it made.
+const BASELINE = ".aio/lock-dirs-baseline.json";
+function scopedLockDirs(): string[] {
+  const out: string[] = [];
+  for (const root of lockRoots()) {
+    try {
+      for (const e of Deno.readDirSync(root)) {
+        // `aio-preload-*` is an Electron window's private preload dir
+        // (`electron-shared.ts`), swept by that window at exit — not a lock
+        // dir. Any aio app on the machine makes one, so counting it blamed
+        // this run for another app's live window.
+        if (
+          e.isDirectory && e.name.startsWith("aio-") &&
+          !e.name.startsWith("aio-preload-")
+        ) {
+          out.push(join(root, e.name));
+        }
+      }
+    } catch { /* aio-ok: no such root on this host */ }
+  }
+  return out;
+}
+/** A dir with no lock file whose owner is alive — nothing is using it. */
+function leftoverLockDir(dir: string): boolean {
+  try {
+    for (const f of Deno.readDirSync(dir)) {
+      if (!f.name.endsWith(".lock")) continue;
+      try {
+        const pid = JSON.parse(Deno.readTextFileSync(join(dir, f.name))).pid;
+        if (typeof pid === "number" && alive(pid)) return false;
+      } catch { /* aio-ok: unreadable — no live owner to protect */ }
+    }
+  } catch {
+    return false; // aio-ok: gone meanwhile — not left over
+  }
+  return true;
+}
+
 if (staleOnly) {
   let swept = 0;
-  for (const d of staleDirs) {
-    try {
-      Deno.removeSync(d, { recursive: true });
-      swept++;
-    } catch { /* aio-ok: in use by a run that started while we scanned */ }
-  }
+  // File by file, never recursively (`pruneDeadLockDirAt`): the scan above
+  // saw no live LOCK, but a `singleton: false` app holds none — its socket is
+  // the only sign of it — and an app may publish a lock after the scan.
+  for (const d of staleDirs) if (pruneDeadLockDirAt(d)) swept++;
   console.log(
     `clean-stale: ${swept} of ${staleDirs.length} stale lock dir(s) removed` +
       (orphans.length
         ? ` (${orphans.length} live orphan(s) left alone — \`deno task check:orphans\` reports them)`
         : ""),
   );
+  try {
+    Deno.mkdirSync(".aio", { recursive: true });
+    Deno.writeTextFileSync(BASELINE, JSON.stringify(scopedLockDirs()));
+  } catch (e) {
+    console.error(`clean-stale: could not record ${BASELINE}: ${e}`);
+  }
   Deno.exit(0);
 }
 if (clean) {
@@ -364,12 +428,7 @@ if (clean) {
     } catch { /* gone */ }
   }
   let removed = 0;
-  for (const d of staleDirs) {
-    try {
-      Deno.removeSync(d, { recursive: true });
-      removed++;
-    } catch { /* in use */ }
-  }
+  for (const d of staleDirs) if (pruneDeadLockDirAt(d)) removed++;
   let homes = 0;
   const kept: string[] = [];
   for (const d of tmpDirs) {
@@ -387,6 +446,65 @@ if (clean) {
   // Never a silent "0 removed": say which ones resisted, and why.
   for (const k of kept) console.error(`  could not remove ${k}`);
   Deno.exit(0);
+}
+{
+  let before: string[] | null = null;
+  try {
+    before = JSON.parse(Deno.readTextFileSync(BASELINE));
+    Deno.removeSync(BASELINE); // one baseline per run
+  } catch { /* aio-ok: no suite start recorded (a bare check:orphans) */ }
+  if (before) {
+    const had = new Set(before);
+    // A dir whose apps root (its `<base>/.aio-roots/<name>` entry) is gone
+    // and that holds nothing live is debris no process will ever use again —
+    // a SIGKILLed child app's, whose test then deleted its temp root. Only
+    // here, after every test has ended: at runtime a missing root is no
+    // proof (an `AIO_APPS_DIR` is often created after its lock dir). What is
+    // LEFT is what nothing would ever clear: an unregistered dir, or one
+    // whose root still exists.
+    let swept = 0;
+    const fresh = scopedLockDirs().filter((d) => {
+      if (had.has(d) || !leftoverLockDir(d)) return false;
+      let root: string | null = null;
+      try {
+        root = Deno.readTextFileSync(rootRegistryEntry(d));
+      } catch { /* aio-ok: unregistered — cannot be judged, so it counts */ }
+      if (root !== null) {
+        let rootGone = false;
+        try {
+          Deno.lstatSync(root);
+        } catch {
+          rootGone = true;
+        }
+        // Dead files one by one, then a non-recursive rmdir — anything
+        // live or unknown keeps it, and it is counted below.
+        if (rootGone && pruneDeadLockDirAt(d, true)) {
+          swept++;
+          return false;
+        }
+      }
+      return true;
+    });
+    if (swept) {
+      console.log(
+        `lock dirs: ${swept} orphaned (apps root deleted, nothing live) swept`,
+      );
+    }
+    // …and the registry entries of dirs that are gone, however they went.
+    for (const root of lockRoots()) sweepRootRegistry(root);
+    if (fresh.length) {
+      console.error(
+        `\n${fresh.length} scoped lock dir(s) appeared in the runtime dir ` +
+          `during this run and were left behind (no live lock in them):\n` +
+          fresh.slice(0, 10).map((d) => `  ${d}`).join("\n") +
+          (fresh.length > 10 ? `\n  … and ${fresh.length - 10} more` : "") +
+          `\n  Whatever created them did not prune them at exit ` +
+          `(single-instance-lock.ts pruneAtExit). \`deno task clean:tmp\` ` +
+          `removes them.`,
+      );
+      Deno.exit(1);
+    }
+  }
 }
 if (orphans.length) {
   console.error(

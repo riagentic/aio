@@ -4,6 +4,7 @@
  */
 
 import type { GlobalFlags, OutputMode } from "./am-types.ts";
+import { printable, terminalSafe } from "../server/single-instance-lock.ts";
 import { block, describe, dur } from "../diagnostics/fmt.ts";
 
 export {
@@ -86,13 +87,58 @@ export function out(
 ): void {
   if (mode === "quiet") return;
   if (mode === "json") {
-    console.log(jsonText(typeof data === "string" ? { message: data } : data));
+    sayData(jsonText(typeof data === "string" ? { message: data } : data));
     return;
   }
+  // PRINTED for a terminal: lock files, app state and logs are text anything
+  // running as the user can write, so an escape in them is neutralised here
+  // — the one place every pretty line passes (JSON escapes its own). The
+  // FINAL text is sanitized, never the object: a walk over the value stops
+  // somewhere (a depth, a class instance) and whatever lies past it reached
+  // the terminal raw. `describe`'s own colours are on the allowlist.
   const human = typeof pretty === "function" ? pretty() : pretty;
-  if (human !== undefined) console.log(human);
-  else if (typeof data === "string") console.log(data);
-  else console.log(describe(data));
+  const clean = (t: string) => printable(t, true);
+  say(
+    human ?? (typeof data === "string" ? data : describe(cells(data, clean))),
+  );
+}
+
+/** THE terminal sinks for `am` — two kinds, because the two trades differ.
+ *  `tests/am-output-sink.test.ts` fails on any other `console` /
+ *  `Deno.stdout|stderr` use in `src/am/`.
+ *
+ *  MESSAGES (`say`, `sayErr`, `out`, `outError`) — what `am` composes: a
+ *  refusal, a status line, a table of instances. They carry lock-file text
+ *  (an appId, a home, a socket path) that anything running as the user can
+ *  write, so {@linkcode printable}: every control, bidi and zero-width char
+ *  replaced, only aio's own colour codes kept.
+ *
+ *  DATA (`sayData`, `sayDataStream`, `outData`, `outValue`) — what the user
+ *  asked to SEE: an app's state, its logs, an eval result, surface text.
+ *  Byte-exact when piped (`am logs -f | grep`), and on a terminal only what
+ *  it would EXECUTE is removed ({@linkcode terminalSafe}) — a ZWJ emoji, a
+ *  Persian ZWNJ, an RLM, `\r` and the app's own colours are the data. */
+export function say(...parts: unknown[]): void {
+  console.log(printable(joinParts(parts), true));
+}
+/** {@linkcode say}, to stderr. */
+export function sayErr(...parts: unknown[]): void {
+  console.error(printable(joinParts(parts), true));
+}
+/** DATA to stdout: byte-exact unless stdout is a terminal. */
+export function sayData(text: string): void {
+  console.log(Deno.stdout.isTerminal() ? terminalSafe(text) : text);
+}
+/** DATA to stdout as it streams (`am logs -f`, `am top`), no newline added.
+ *  `prefix` is `am`'s own control sequence (a screen clear), kept as is. */
+export async function sayDataStream(text: string, prefix = ""): Promise<void> {
+  const body = Deno.stdout.isTerminal() ? terminalSafe(text) : text;
+  await Deno.stdout.write(new TextEncoder().encode(prefix + body));
+}
+function joinParts(parts: unknown[]): string {
+  return parts.map((p) =>
+    typeof p === "string" ? p : Deno.inspect(p, { colors: false })
+  ).join(" ");
 }
 
 /** Print a DATA VALUE — what a command was ASKED FOR, not what it has to say.
@@ -115,10 +161,53 @@ export function outValue(
 ): void {
   if (mode === "quiet") return;
   if (mode === "json") {
-    console.log(jsonText(data));
+    sayData(jsonText(data));
     return;
   }
-  out(data, mode, pretty);
+  outData(data, mode, pretty);
+}
+
+/** {@linkcode out} for DATA: the pretty form keeps what displays (see the
+ *  sinks above). For a result the user asked for — an eval, a timeline, a
+ *  surface — whose `pretty` text is the data itself. */
+export function outData(
+  data: unknown,
+  mode: OutputMode,
+  pretty?: string | (() => string),
+): void {
+  if (mode === "quiet") return;
+  if (mode === "json") {
+    sayData(jsonText(typeof data === "string" ? { message: data } : data));
+    return;
+  }
+  // The rendered TEXT, sanitized as a whole — see `out`.
+  const human = typeof pretty === "function" ? pretty() : pretty;
+  const clean = (t: string) => Deno.stdout.isTerminal() ? terminalSafe(t) : t;
+  sayData(
+    human ?? (typeof data === "string" ? data : describe(cells(data, clean))),
+  );
+}
+
+/** `v` with every string in its plain objects and arrays (keys too) passed
+ *  through `fn` — ALIGNMENT only: `describe` measures a table cell before the
+ *  sink sanitizes the line, so a cell whose escape the sink rewrites (conceal, SGR 8
+ *  → `?`) or removes (an OSC) shifted every column after it. Safety stays with
+ *  the sink, which sees the final text. Unbounded, cycle-safe; a class
+ *  instance is left as is (its `String()` is sanitized in the line). Pure. */
+function cells(
+  v: unknown,
+  fn: (s: string) => string,
+  seen = new WeakSet<object>(),
+): unknown {
+  if (typeof v === "string") return fn(v);
+  if (v === null || typeof v !== "object" || seen.has(v)) return v;
+  seen.add(v);
+  if (Array.isArray(v)) return v.map((x) => cells(x, fn, seen));
+  const proto = Object.getPrototypeOf(v);
+  if (proto !== Object.prototype && proto !== null) return v;
+  return Object.fromEntries(
+    Object.entries(v).map(([k, x]) => [fn(k), cells(x, fn, seen)]),
+  );
 }
 
 /** Multi-line USAGE text — always plain, unless `--json` was asked for.
@@ -128,8 +217,8 @@ export function outValue(
  *  Help is for a human by definition; a pipe does not change who is reading.
  *  Only an explicit `--json` (a script asking) turns it into data. */
 export function usage(text: string, flags: { json?: boolean }): void {
-  if (flags.json) console.log(JSON.stringify({ usage: text }));
-  else console.log(text);
+  if (flags.json) sayData(JSON.stringify({ usage: text }));
+  else say(text);
 }
 
 /** Error output — JSON or plain depending on mode.
@@ -162,13 +251,15 @@ export function outError(
   // sentence. The message is the error; the constructor's name is noise.
   msg = msg.replace(/^\s*(?:[A-Z]\w*)?Error:\s*/, "");
   if (mode === "json") {
-    console.log(JSON.stringify(fix ? { error: msg, fix } : { error: msg }));
+    sayData(JSON.stringify(fix ? { error: msg, fix } : { error: msg }));
   } else {
     // Split into a HEADLINE and a body. A refusal is usually one sentence of
     // what happened followed by three of context, and painting the whole
     // paragraph red made none of it stand out — the reader has to find the
     // first sentence before they can decide whether to keep reading. An
     // explicit newline wins; otherwise the first sentence-ending period does.
+    msg = printable(msg, true); // for a terminal — see `out`
+    if (fix) fix = printable(fix, true);
     const nl = msg.indexOf("\n");
     const dot = /[.!?](?:\s|$)/.exec(msg);
     const cut = nl >= 0 && (!dot || nl < dot.index)

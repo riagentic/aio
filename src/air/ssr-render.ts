@@ -54,6 +54,11 @@ export interface SsrRender {
    *  to be asked for its head: from that moment the no-argument answer is
    *  this render for BOTH callers, so there is no honest one. */
   superseded: boolean;
+  /** Its consumer returned the stream before the end — the client went away.
+   *  Its caller will never ask, and its head is nobody else's answer. */
+  aborted: boolean;
+  /** The render epoch right after its own set-up (see `_ssrRenderSetUp`). */
+  epoch: number;
 }
 
 /** The key the render travels under inside an SSR context scope. Not a context
@@ -116,7 +121,24 @@ export function _ssrRenderNew(kind: SsrRender["kind"]): SsrRender {
     hasHead: false,
     collected: false,
     superseded: false,
+    aborted: false,
+    epoch: 0,
   };
+}
+
+/** Top-level server renders SET UP so far (a stream's at its call, a string
+ *  render's at its start). A render's `epoch` is this count right after its
+ *  own set-up, so "has anything else been set up since?" is one comparison. */
+let _setUps = 0;
+
+/** A top-level render was set up: count it, and stamp it. */
+export function _ssrRenderSetUp(r: SsrRender): void {
+  r.epoch = ++_setUps;
+}
+
+/** The render epoch now — see `_ssrRenderSetUp`. */
+export function _ssrRenderEpoch(): number {
+  return _setUps;
 }
 
 /** Mark a top-level render as in progress. */
@@ -134,8 +156,9 @@ export function _ssrRenderStart(r: SsrRender): void {
  *  `collectHead()` into a permanent throw, for an app serving one request at
  *  a time. Nothing here now depends on a render ever ending, so a render that
  *  never does costs exactly one object. */
-export function _ssrRenderFinish(r: SsrRender): void {
+export function _ssrRenderFinish(r: SsrRender, returned = false): void {
   r.ended = true;
+  r.aborted = returned;
   const prev = _lastEnded;
   // The one case end order cannot separate: an earlier STREAM finished, its
   // caller has not asked yet (only a stream's caller can be separated from
@@ -183,6 +206,16 @@ export function _ssrRenderForKey(key: object): SsrRender | null {
   return _byKey.get(key) ?? null;
 }
 
+/** Call sites already told their route changed after `renderToStream()`. */
+const _lateRouteSites = new Set<string>();
+
+/** True the FIRST time only for this call site. */
+export function _ssrLateRouteSiteOnce(site: string): boolean {
+  if (_lateRouteSites.has(site)) return false;
+  _lateRouteSites.add(site);
+  return true;
+}
+
 /** @internal Test seam — forget every server render.
  *
  *  Module-scope state whose lifetime nobody owns is cross-test bleed: without
@@ -192,6 +225,7 @@ export function _ssrRenderForKey(key: object): SsrRender | null {
  */
 // aio-ok: a test-only seam; a live render never forgets itself
 export function _resetSsrRenders(): void {
+  _lateRouteSites.clear();
   _last = null;
   _lastEnded = null;
   _current = null;

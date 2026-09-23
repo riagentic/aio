@@ -63,6 +63,11 @@
 //   deno task check:dead-wiring --print-ledger  paste-ready regenerated ledger
 
 import { justified as okMarker } from "../src/diagnostics/ok-marker.ts";
+import { mask } from "./source-mask.ts";
+import {
+  check as persistCheck,
+  report as persistReport,
+} from "./check-persist-decider.ts";
 
 export type Offender = {
   file: string;
@@ -75,101 +80,9 @@ export type Offender = {
  *  its file does not churn the ledger. */
 export const key = (o: Offender): string => `${o.file}|${o.name}`;
 
-// ─── source masking ────────────────────────────────────────────────────────
-// Every scan below runs over a copy of the source in which comments and string
-// literals have been replaced by spaces of the SAME length, so offsets still
-// line up with the original. This is the whole point of the detector: a doc
-// comment that NAMES a function is exactly the evidence that fooled everyone
-// about `_noteDispatch`, and it must not count as a reference.
-//
-// It differs from `check-vacuous.ts`'s `mask` in one way, and the difference
-// is load-bearing here: a template `${…}` hole is real CODE. Blanking it whole
-// (right for a test file, where masking asks "is this structure?") loses
-// `` `__set${capitalize(m)}` `` — 23 real call sites in src/, every one of
-// which would have been reported as dead.
-
-export function mask(src: string): string {
-  const out = src.split("");
-  const n = src.length;
-  const blank = (from: number, to: number) => {
-    for (let k = from; k < to && k < n; k++) if (out[k] !== "\n") out[k] = " ";
-  };
-  // Returns the index of the `}` that closed this level (or `n`).
-  const scan = (start: number, stop: "}" | ""): number => {
-    let i = start;
-    while (i < n) {
-      const c = src[i]!, d = src[i + 1];
-      if (stop === "}" && c === "}") return i;
-      if (c === "/" && d === "/") {
-        const e = src.indexOf("\n", i);
-        const end = e === -1 ? n : e;
-        blank(i, end);
-        i = end;
-      } else if (c === "/" && d === "*") {
-        const e = src.indexOf("*/", i + 2);
-        const end = e === -1 ? n : e + 2;
-        blank(i, end);
-        i = end;
-      } else if (c === '"' || c === "'") {
-        let k = i + 1;
-        while (k < n) {
-          if (src[k] === "\\") k += 2;
-          // A newline ends a quoted string in valid TS. Without this, an
-          // apostrophe inside a regex character class blanks the rest of the
-          // file and every reference in it disappears.
-          else if (src[k] === c || src[k] === "\n") break;
-          else k++;
-        }
-        blank(i + 1, k);
-        i = Math.min(k + 1, n);
-      } else if (c === "/" && _regexStart(src, i)) {
-        // A REGEX LITERAL, skipped whole. Its CONTENTS can hold a backtick —
-        // `/["'`]?/` in `src/db/reactive.ts` does — and the template branch
-        // below would then read that backtick as an opener and blank forward
-        // to the next one in the file, hiding every reference and declaration
-        // between. Harmless there only by luck (the next backtick is two lines
-        // away); the next such regex would take the rest of its file with it.
-        // Quotes already stop at a newline for the same reason one line up.
-        let k = i + 1;
-        let inClass = false;
-        while (k < n) {
-          const ch = src[k]!;
-          if (ch === "\\") {
-            k += 2;
-            continue;
-          }
-          if (ch === "\n") break; // unterminated — it was division after all
-          if (inClass) {
-            if (ch === "]") inClass = false;
-          } else if (ch === "[") inClass = true;
-          else if (ch === "/") break;
-          k++;
-        }
-        blank(i + 1, k);
-        i = Math.min(k + 1, n);
-      } else if (c === "`") {
-        let k = i + 1, text = i + 1;
-        while (k < n) {
-          if (src[k] === "\\") k += 2;
-          else if (src[k] === "`") break;
-          else if (src[k] === "$" && src[k + 1] === "{") {
-            blank(text, k);
-            k = scan(k + 2, "}");
-            text = k + 1;
-            k = text;
-          } else k++;
-        }
-        blank(text, k);
-        i = Math.min(k + 1, n);
-      } else if (c === "{") {
-        i = scan(i + 1, "}") + 1;
-      } else i++;
-    }
-    return n;
-  };
-  scan(0, "");
-  return out.join("");
-}
+// Masking lives in ./source-mask.ts (shared with check-persist-decider.ts,
+// which must not import this file: a cycle deadlocks this CLI's top-level await).
+export { mask } from "./source-mask.ts";
 
 const lineOf = (src: string, idx: number): number =>
   src.slice(0, idx).split("\n").length;
@@ -181,24 +94,6 @@ const lineOf = (src: string, idx: number): number =>
 /** One marker, both spellings, honoured only when it is addressed to
  *  this gate or to nobody in particular. See scripts/ok-marker.ts. */
 const JUSTIFIED = { test: (line: string) => okMarker(line, "dead-wiring") };
-
-/** Is the `/` at `i` a REGEX literal rather than division?
- *
- *  The same lookback `src/diagnostics/code-mask.ts` uses — this file keeps its
- *  own mask on purpose (that one counts `${…}` holes as template content,
- *  while this gate needs them as CODE, worth 23 false positives), so the
- *  heuristic is mirrored rather than shared. */
-function _regexStart(src: string, i: number): boolean {
-  for (let j = i - 1; j >= 0; j--) {
-    const c = src[j]!;
-    if (c === " " || c === "\t") continue;
-    if (c === "\n" || c === "\r") return true; // line start = expression position
-    // No `<`: `</div>` in a .tsx file is a closing tag, not a regex — with it
-    // in the set, everything between two closing tags on one line vanished.
-    return "([{,;:=!&|?+-*%~^>".includes(c);
-  }
-  return true; // start of file
-}
 
 /** True when the declaring line, or the line above it, carries `aio-ok: …`. */
 function justified(src: string, idx: number): boolean {
@@ -402,9 +297,7 @@ export async function scan(
   paths.push("mod.ts");
 
   const by = new Map<string, File>();
-  for (const p of paths) {
-    by.set(p, readFile(p, await Deno.readTextFile(`${root}${p}`)));
-  }
+  for (const p of paths) by.set(p, await loadFile(root, p));
 
   const entries = await entryFiles(root, paths);
   const wholesale = starExported(entries, by);
@@ -478,7 +371,6 @@ export const LEDGER: readonly string[] = [
   "src/diagnostics/diagnostic-bus.ts|_diagDedupSize",
   "src/protocol/broadcast-utils.ts|SubClient",
   "src/protocol/envelope.ts|SERVES",
-  "src/server/aio-boot.ts|getSyncReplayContext",
   "src/server/aio-cli.ts|_resetParsedCli",
   "src/server/app-dirs.ts|ensureAppPayloadDir",
   "src/server/auth-oidc.ts|_resetOidcCaches",
@@ -571,11 +463,35 @@ async function readSources(root: string): Promise<File[]> {
   const out: File[] = [];
   for (const r of ROOTS) {
     for await (const p of walk(`${root}${r}`)) {
-      const rel = p.slice(root.length);
-      out.push(readFile(rel, await Deno.readTextFile(p)));
+      out.push(await loadFile(root, p.slice(root.length)));
     }
   }
   return out;
+}
+
+/** One read + one mask per file per process. `scan`, the aliased-import scan
+ *  and the `@decider` check all walk the same tree; before this each re-read
+ *  and re-masked it (the whole gate runs before every `deno task test`). */
+const _files = new Map<string, File>();
+async function loadFile(root: string, rel: string): Promise<File> {
+  const key = root + rel;
+  let f = _files.get(key);
+  if (!f) {
+    f = readFile(rel, await Deno.readTextFile(key));
+    _files.set(key, f);
+  }
+  return f;
+}
+
+/** `mask(src)`, memoised by content — the re-export walk revisits files. */
+const _masked = new Map<string, string>();
+function maskOnce(src: string): string {
+  let m = _masked.get(src);
+  if (m === undefined) {
+    m = mask(src);
+    _masked.set(src, m);
+  }
+  return m;
 }
 
 /** An `_`-aliased import that is never used — the one dead wiring the LANGUAGE
@@ -616,6 +532,272 @@ export function aliasedDeadImports(files: readonly File[]): Offender[] {
   return out;
 }
 
+// ─── @decider: a single decider is pinned by a test ─────────────────────────
+//
+// ~85 files call something "THE decider" / "ONE decider" in prose. That is a
+// claim that a whole class of behaviour flows through one function — and the
+// claim is only worth anything if a test holds that function still. Prose is
+// never the gate (grepping the WORD would be all noise); the gate is a JSDoc
+// TAG, placed deliberately on the functions that really are one decider:
+//
+//     /** THE decider for "is this app reachable off loopback?" …
+//      *
+//      *  @decider */
+//     export function _exposeOf(…)
+//
+//   THE RULE — a function whose JSDoc carries `@decider` (as a tag: at the
+//   start of a doc line) must be EXPORTED, and some `tests/**/*.test.ts(x)`
+//   must IMPORT it — from its own file, or from any module that re-exports it
+//   (`export { x } from` / `export * from`, followed to the declaration). An
+//   import that sits in a comment or a fixture string does not count.
+
+/** A `@decider` tag at the start of a JSDoc line — never a prose mention. */
+const DECIDER_TAG = /(?:^|\n)[ \t]*\*?[ \t]*@decider\b/;
+
+/** The declaration a doc block documents: whatever follows it, past blank
+ *  lines and `//` comments (an `aio-ok:` marker often sits between). */
+const DOC_TARGET =
+  /^(?:\s|\/\/[^\n]*\n)*(export\s+)?(?:(?:async\s+)?function\s*\*?\s*|(?:const|let)\s+)([A-Za-z_$][\w$]*)/;
+
+/** Every `@decider`-tagged declaration in a file. */
+export function taggedDeciders(
+  f: File,
+): { name: string; line: number; exported: boolean }[] {
+  const out: { name: string; line: number; exported: boolean }[] = [];
+  for (const m of f.src.matchAll(/\/\*\*([\s\S]*?)\*\//g)) {
+    if (!DECIDER_TAG.test(m[1]!)) continue;
+    const end = m.index + m[0].length;
+    const t = DOC_TARGET.exec(f.src.slice(end));
+    out.push({
+      name: t?.[2] ?? "",
+      line: lineOf(f.src, t ? end + t[0].length - t[2]!.length : m.index),
+      exported: !!t?.[1],
+    });
+  }
+  return out;
+}
+
+/** What a test file imports: `[resolved path, imported name]` pairs, from
+ *  static named imports, and — for a namespace import (`ns.x`) or a dynamic
+ *  `import("…")` — every name in `wanted` the test's CODE uses. Only matches
+ *  whose `import` keyword is code in the masked copy count, so an import
+ *  written inside a fixture string or a comment is not one. */
+export function testImports(
+  t: File,
+  resolveSpec: (from: string, spec: string) => string | null,
+  wanted: ReadonlySet<string>,
+): [string, string][] {
+  const out: [string, string][] = [];
+  const isCode = (i: number) => t.masked.startsWith("import", i);
+  for (
+    const m of t.src.matchAll(
+      /\bimport\s+(type\s+)?(?:[\w$]+\s*,\s*)?\{([^}]*)\}\s*from\s*["']([^"']+)["']/g,
+    )
+  ) {
+    if (m[1] || !isCode(m.index)) continue;
+    const file = resolveSpec(t.path, m[3]!);
+    if (!file) continue;
+    for (const spec of m[2]!.split(",")) {
+      const s = spec.trim();
+      if (!s || /^type\s/.test(s)) continue;
+      out.push([file, s.split(/\s+as\s+/)[0]!.trim()]);
+    }
+  }
+  const byName = (file: string) => {
+    for (const name of wanted) if (t.idents.has(name)) out.push([file, name]);
+  };
+  for (
+    const m of t.src.matchAll(
+      /\bimport\s+\*\s+as\s+[\w$]+\s+from\s*["']([^"']+)["']/g,
+    )
+  ) {
+    if (!isCode(m.index)) continue;
+    const file = resolveSpec(t.path, m[1]!);
+    if (file) byName(file);
+  }
+  for (
+    const m of t.src.matchAll(/\bimport\s*\(\s*["'`]([^"'`$]+)["'`]\s*\)/g)
+  ) {
+    if (!isCode(m.index)) continue;
+    const file = resolveSpec(t.path, m[1]!);
+    if (file) byName(file);
+  }
+  return out;
+}
+
+/** `export { a as b } from "x"` / `export * from "x"` edges of one file:
+ *  `[exported name | "*", target file, source name]`. */
+function reexports(
+  file: string,
+  read: (p: string) => string | undefined,
+): [string, string, string][] {
+  const src = read(file);
+  if (src === undefined) return [];
+  const code = maskOnce(src);
+  const out: [string, string, string][] = [];
+  for (
+    const m of src.matchAll(
+      /\bexport\s+(?:type\s+)?(?:\{([^}]*)\}|\*)\s*from\s*["']([^"']+)["']/g,
+    )
+  ) {
+    if (!code.startsWith("export", m.index)) continue;
+    const next = resolve(file, m[2]!);
+    if (m[1] === undefined) {
+      out.push(["*", next, "*"]);
+      continue;
+    }
+    for (const spec of m[1].split(",")) {
+      const [from, alias] = spec.trim().replace(/^type\s+/, "").split(
+        /\s+as\s+/,
+      );
+      if (from?.trim()) out.push([(alias ?? from).trim(), next, from.trim()]);
+    }
+  }
+  return out;
+}
+
+/** A resolver from `(file, name)` to the `@decider` declarations
+ *  (`"<file>|<name>"` in `targets`) it leads to, following re-export chains.
+ *  Memoised per file, so a whole test tree resolves in one pass. */
+export function decidersReached(
+  targets: ReadonlySet<string>,
+  read: (p: string) => string | undefined,
+): (file: string, name: string) => boolean {
+  const edges = new Map<string, [string, string, string][]>();
+  const memo = new Map<string, boolean>();
+  const go = (file: string, name: string, seen: Set<string>): boolean => {
+    const key = `${file}|${name}`;
+    if (targets.has(key)) return true;
+    const hit = memo.get(key);
+    if (hit !== undefined) return hit;
+    if (seen.has(key)) return false;
+    seen.add(key);
+    if (!edges.has(file)) edges.set(file, reexports(file, read));
+    let ok = false;
+    for (const [as, next, from] of edges.get(file)!) {
+      if (
+        as === "*" ? go(next, name, seen) : as === name && go(next, from, seen)
+      ) {
+        ok = true;
+        break;
+      }
+    }
+    memo.set(key, ok);
+    return ok;
+  };
+  return (file, name) => go(file, name, new Set());
+}
+
+/** `@decider`-tagged functions no test imports (or that no test COULD
+ *  import, being unexported). */
+export function unpinnedDeciders(
+  sources: readonly File[],
+  tests: readonly File[],
+  resolveSpec: (from: string, spec: string) => string | null,
+  read: (p: string) => string | undefined,
+): Offender[] {
+  const out: Offender[] = [];
+  const live: { file: string; line: number; name: string }[] = [];
+  for (const f of sources) {
+    for (const d of taggedDeciders(f)) {
+      const at = { file: f.path, line: d.line, name: d.name || "?" };
+      if (!d.name) out.push({ ...at, kind: "@decider on no function" });
+      else if (!d.exported) out.push({ ...at, kind: "@decider not exported" });
+      else live.push(at);
+    }
+  }
+  const wanted = new Set(live.map((d) => d.name));
+  const pinned = new Set<string>();
+  const reached = (target: string) => decidersReached(new Set([target]), read);
+  // One resolver per decider keeps each answer exact (a name re-exported from
+  // two files cannot credit the wrong one); the memo inside keeps it cheap.
+  const resolvers = new Map(live.map((d) => {
+    const k = `${d.file}|${d.name}`;
+    return [k, reached(k)] as const;
+  }));
+  // Only an import of a decider's OWN name is followed. A re-export that
+  // renames a decider (`export { x as y }`) would read as unpinned — a loud
+  // false positive, never a silent pass.
+  for (const t of tests) {
+    for (const [file, name] of testImports(t, resolveSpec, wanted)) {
+      if (!wanted.has(name)) continue;
+      for (const d of live) {
+        const k = `${d.file}|${d.name}`;
+        if (d.name !== name || pinned.has(k)) continue;
+        if (resolvers.get(k)!(file, name)) pinned.add(k);
+      }
+    }
+  }
+  for (const d of live) {
+    if (!pinned.has(`${d.file}|${d.name}`)) {
+      out.push({ ...d, kind: "@decider no test imports" });
+    }
+  }
+  return out.sort((a, b) =>
+    a.file === b.file ? a.line - b.line : a.file < b.file ? -1 : 1
+  );
+}
+
+/** Resolve a test's import specifier to a repo-relative path: relative
+ *  paths, and `deno.json`'s `imports` entries that point into the repo. */
+export function specResolver(
+  importMap: Record<string, string>,
+): (from: string, spec: string) => string | null {
+  return (from, spec) => {
+    if (spec.startsWith(".")) return resolve(from, spec);
+    const mapped = importMap[spec];
+    if (mapped?.startsWith("./")) return mapped.slice(2);
+    return null;
+  };
+}
+
+async function* walkTests(dir: string): AsyncGenerator<string> {
+  for await (const e of Deno.readDir(dir)) {
+    const p = `${dir}/${e.name}`;
+    if (e.isDirectory) yield* walkTests(p);
+    else if (/\.test\.tsx?$/.test(e.name)) yield p;
+  }
+}
+
+/** The whole `@decider` check against the repo at `root`. */
+export async function checkDeciders(root: string): Promise<Offender[]> {
+  const sources = await readSources(root);
+  // Only a test whose TEXT names some decider can import one; the rest (the
+  // vast majority) are never masked or indexed. A substring test is a
+  // superset of every import form the parser credits, so it drops nothing.
+  const names = [
+    ...new Set(sources.flatMap((f) => taggedDeciders(f).map((d) => d.name))),
+  ].filter(Boolean);
+  const tests: File[] = [];
+  for await (const p of walkTests(`${root}tests`)) {
+    const text = await Deno.readTextFile(p);
+    if (!names.some((n) => text.includes(n))) continue;
+    tests.push(readFile(p.slice(root.length), text));
+  }
+  const dj = JSON.parse(await Deno.readTextFile(`${root}deno.json`)) as {
+    imports?: Record<string, string>;
+  };
+  const cache = new Map<string, string | undefined>();
+  const read = (p: string) => {
+    const hit = _files.get(root + p);
+    if (hit) return hit.src;
+    if (!cache.has(p)) {
+      try {
+        cache.set(p, Deno.readTextFileSync(`${root}${p}`));
+      } catch {
+        cache.set(p, undefined); // aio-ok(silent-catch): an unresolvable specifier is simply not a route to the decider
+      }
+    }
+    return cache.get(p);
+  };
+  return unpinnedDeciders(
+    sources,
+    tests,
+    specResolver(dj.imports ?? {}),
+    read,
+  );
+}
+
 if (import.meta.main) {
   const root = new URL("../", import.meta.url).pathname;
   const all = await scan(root);
@@ -643,6 +825,30 @@ if (import.meta.main) {
         `and are dead:\n` +
         aliased.map((o) => `  ${o.file}:${o.line}  ${o.name}`).join("\n") +
         `\n\nWire it, or delete the import.`,
+    );
+    Deno.exit(1);
+  }
+  const unpinned = await checkDeciders(root);
+  // check:persist-decider rides along here so the pre-test ratchet reads and
+  // masks src/ ONCE (its own CLI stays for running it alone).
+  const persist = persistCheck(
+    (await readSources(root)).filter((f) => f.path.startsWith("src/")),
+  );
+  if (persist.length) {
+    console.error(
+      `\ncheck:persist-decider — cell state can reach a store around ` +
+        `src/state/cell-persist-filter.ts:\n` + persistReport(persist),
+    );
+    Deno.exit(1);
+  }
+  if (unpinned.length) {
+    console.error(
+      `\n${unpinned.length} \`@decider\` function(s) no test holds still:\n` +
+        unpinned.map((o) => `  ${o.file}:${o.line}  ${o.name}  (${o.kind})`)
+          .join("\n") +
+        `\n\nA function tagged \`@decider\` claims a whole behaviour flows ` +
+        `through it. Import it from a tests/*.test.ts and pin that behaviour ` +
+        `(export it first if it is not), or drop the tag.`,
     );
     Deno.exit(1);
   }

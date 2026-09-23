@@ -38,6 +38,10 @@ export interface SyncHandlerDeps {
       /** Origin marker: this action IS a persisted sync op — the afterAction
        *  hook must not schedule a durability snapshot for it. */
       _syncOp?: boolean;
+      /** The op's position in the op-log (its `server_ts`). */
+      _syncTs?: number;
+      /** The op's id. */
+      _syncId?: string;
     },
     // Returns whatever the app's dispatch returns — a PROMISE that rejects
     // when the action could not be applied (REDUCE_ERROR, QUEUE_OVERFLOW,
@@ -46,6 +50,18 @@ export interface SyncHandlerDeps {
     // `void`) so a plain non-promise dispatch is still a valid dep — awaiting
     // one resolves immediately.
   ) => unknown;
+  /** What must be durable before this action may be acked — the saves that
+   *  stand in for a journal line the action's commit could not (or may not)
+   *  write (a refused append, a redacted cell's state). Undefined: nothing
+   *  outstanding. Awaited AFTER dispatch, before the ack; see `_parked` for
+   *  why that wait cannot deadlock on another cell's lock. Optional so a
+   *  handler double in a test stays valid. */
+  durableFor?: (action: object) => Promise<string | undefined> | undefined;
+  /** Why ops cannot be applied RIGHT NOW, if so (time travel paused): such
+   *  an op is held — not persisted, not acked, not refused — and the client
+   *  is sent `sync-err`, which it answers by re-requesting (its pending ops
+   *  included) until the reason is gone. Optional: no reason ever. */
+  heldBecause?: () => string | undefined;
   db: DB;
   syncCellIds: string[];
   /** RAW cell state — server-internal only (compaction snapshots). Sync cells
@@ -116,12 +132,26 @@ export interface ServerSyncHandler {
    *  into the cell's sync snapshot. */
   noteServerWrite: (cell: string) => void;
   /** Flush pending noteServerWrite debounces — called on shutdown so the last
-   *  write of a clean exit is never inside the debounce window. */
-  flushServerWrites: () => Promise<void>;
+   *  write of a clean exit is never inside the debounce window. `cells`
+   *  limits it to those (a write that must be durable NOW, without folding
+   *  every other pending cell with it). Resolves to why a fold failed, or
+   *  undefined; without `cells`, a cell whose last fold failed earlier counts
+   *  too (its snapshot still lacks it). */
+  flushServerWrites: (cells?: readonly string[]) => Promise<string | undefined>;
   /** Record, INSIDE every snapshot fold's transaction, how far a write log is
    *  folded in — see {@linkcode SyncFoldWatermark}. `null` detaches. Optional
    *  so a handler double in a test stays valid. */
   setFoldWatermark?: (w: SyncFoldWatermark | null) => void;
+  /** Called with every op's issued `server_ts` after it is issued and before
+   *  its row is inserted, synchronously (see `persistOp`'s `onIssue`) — where
+   *  the host records the op's intent. A throw keeps the op out of the log:
+   *  it is not acked, and the client resends it. `null` detaches. Optional
+   *  so a handler double in a test stays valid. */
+  setOpIssueHook?: (
+    fn:
+      | ((op: { id: string; cell: string; action: string }, ts: number) => void)
+      | null,
+  ) => void;
 }
 
 /** A write log whose position rides in the fold that makes it durable.
@@ -186,6 +216,8 @@ function isValidCellCursor(
  * doors converge, not in each router.
 
  *  @internal Engine/framework wiring (alpha52 sweep) — not public API.
+ *
+ *  @decider
  */
 export function isValidSyncOp(
   op: unknown,
@@ -284,6 +316,83 @@ export function createServerSyncHandler(
   // Per-cell async mutex — serializes handleOp + compact to prevent
   // race where an op is persisted between state capture and DELETE in compact.
   const _locks = new Map<string, Promise<void>>();
+  /** Cells whose lock holder is WAITING for durability (`durableFor`) —
+   *  dispatched, not yet acked, doing nothing else under the lock. An op on A
+   *  whose reaction's stand-in is the fold of B waits under A's lock (the ack
+   *  must stay where it is in the frame order); an op on B can wait for the
+   *  fold of A the same way, and two such waits on each other's lock were a
+   *  deadlock. A fold asked for a parked cell therefore runs AT ONCE, under
+   *  the holder's lock (the holder is quiescent, and resumes only once every
+   *  such fold is done). */
+  const _parked = new Map<string, Promise<unknown>[]>();
+  /** Folds queued for a cell's lock, to be run at once if its holder parks
+   *  first (a fold asked for BEFORE the holder reached its wait). */
+  const _parkWaiters = new Map<
+    string,
+    Set<(list: Promise<unknown>[]) => void>
+  >();
+  /** A fold of `cell`: under its lock, or — once its holder is parked —
+   *  under the holder's, whichever comes first. */
+  function foldLocked<T>(cell: string, fn: () => Promise<T>): Promise<T> {
+    const parked = _parked.get(cell);
+    if (parked !== undefined) {
+      const run = fn();
+      parked.push(run);
+      return run;
+    }
+    let claimed = false;
+    return new Promise<T>((resolve, reject) => {
+      const waiters = _parkWaiters.get(cell) ?? new Set();
+      _parkWaiters.set(cell, waiters);
+      const viaPark = (list: Promise<unknown>[]): void => {
+        if (claimed) return;
+        claimed = true;
+        const run = fn();
+        list.push(run);
+        run.then(resolve, reject);
+      };
+      waiters.add(viaPark);
+      withLock(cell, async () => {
+        waiters.delete(viaPark);
+        if (waiters.size === 0 && _parkWaiters.get(cell) === waiters) {
+          _parkWaiters.delete(cell);
+        }
+        if (claimed) return;
+        claimed = true;
+        await fn().then(resolve, reject);
+      }).catch(reject);
+    });
+  }
+
+  /** After an op's dispatch, under its cell's lock: wait until what its
+   *  commit could not journal is durable (`durableFor`), parked (see
+   *  `_parked`), and every fold that ran under this lock meanwhile is done. */
+  async function waitDurable(
+    cell: string,
+    action: object,
+  ): Promise<string | undefined> {
+    const d = deps.durableFor?.(action);
+    if (d === undefined) return undefined;
+    const parked: Promise<unknown>[] = [];
+    _parked.set(cell, parked);
+    // Folds already queued for this lock run now, under it.
+    for (const w of _parkWaiters.get(cell) ?? []) w(parked);
+    _parkWaiters.delete(cell);
+    try {
+      const verdict = await d;
+      while (parked.length > 0) {
+        await parked.shift()!.catch(
+          () => {
+            /* aio-ok: its own verdict is the fold's log line and the stand-in's verdict */
+          },
+        );
+      }
+      return verdict;
+    } finally {
+      _parked.delete(cell);
+    }
+  }
+
   function withLock(cell: string, fn: () => Promise<void>): Promise<void> {
     const prev = _locks.get(cell) ?? Promise.resolve();
     // F-8: mirror client-side sync-engine cleanup so the map doesn't retain
@@ -295,6 +404,56 @@ export function createServerSyncHandler(
     });
     _locks.set(cell, next);
     return next;
+  }
+
+  // ── Held: ops that cannot be applied RIGHT NOW (see `heldBecause`) ────
+  /** Answer `sync-err` and hold the op(s): not persisted, not acked, not
+   *  refused — the client keeps them and re-requests. */
+  function holdIfHeld(socket: WebSocket): boolean {
+    const why = deps.heldBecause?.();
+    if (why === undefined) return false;
+    sayHeld(socket, why);
+    return true;
+  }
+  /** Sockets already told "held" since their last `sync-req` (or accepted
+   *  op). A client meets EVERY `sync-err` with a retry, and one built before
+   *  its single retry timer (v1.0.9 and earlier — a cached bundle after a
+   *  deploy) runs one retry LOOP per frame: a held `sync-err` per op frame,
+   *  during a pause or a shutdown drain, was N loops each resending the whole
+   *  queue. One per socket until it asks again; its retry is the resend. */
+  const _heldSaid = new WeakSet<WebSocket>();
+  function sayHeld(socket: WebSocket, why: string): void {
+    if (_heldSaid.has(socket)) return;
+    _heldSaid.add(socket);
+    sendTo(socket, enc("sync-err", { reason: why }), "sync-err (held)");
+  }
+  /** The backstop: dispatch refused an op because the server was not TAKING
+   *  input — dispatch closed or draining (a shutdown in progress), or time
+   *  travel paused (tagged DISPATCH_CLOSED) — and the in-lock check above
+   *  did not see it coming. That is not the op's fault: refusing it
+   *  (`op-rejected`) made the client prune the edit, so every deploy lost
+   *  the edits in flight. It is held like the rest. */
+  function isHeldRefusal(e: unknown): boolean {
+    const code = (e as { code?: unknown } | null)?.code;
+    return code === "DISPATCH_CLOSED" || code === "DISPATCH_DRAINING";
+  }
+  function sendHeld(socket: WebSocket): void {
+    sayHeld(
+      socket,
+      deps.heldBecause?.() ??
+        "the server is not taking input right now — sync ops are held " +
+          "(not applied, not dropped) and resent",
+    );
+  }
+  async function dropRow(id: string): Promise<void> {
+    await deps.db.execute("DELETE FROM sync_ops WHERE id = ?", [id]).catch(
+      (delErr: unknown) =>
+        deps.log.error(
+          `[sync:server] could not remove held op ${id} from the log — the ` +
+            `next boot replays it, and the client's resend is then a ` +
+            `duplicate (re-acked, not re-applied): ${delErr}`,
+        ),
+    );
   }
 
   // ── Quarantine: a cell whose log the boot replay could not fold ───────
@@ -309,6 +468,7 @@ export function createServerSyncHandler(
   // surgery. A write it cannot make durable must be REFUSED, loudly, at the
   // door — the same `op-rejected` the client already knows how to surface.
   const _quarantineWarned = new Set<string>();
+  const _compactQuarantineSaid = new Set<string>();
   function quarantineReason(cell: string): string {
     return `cell "${cell}" is quarantined since boot: its op-log could not be ` +
       `replayed into the shape this build declares, so a write cannot be made ` +
@@ -508,19 +668,31 @@ export function createServerSyncHandler(
     return inserted ?? getOpServerTs(deps.db, opId);
   }
 
-  async function tryCompact(cell: string, force = false): Promise<void> {
+  /** Resolves with why the fold did not land (undefined: it did, or there
+   *  was nothing to fold) — the verdict a stand-in save reports. */
+  async function tryCompact(
+    cell: string,
+    force = false,
+  ): Promise<string | undefined> {
     // A quarantined cell's live state is NOT the data (the replay could not
     // fold the log; the slice is the last snapshot, or the defaults). Writing
     // it into sync_snapshots and DELETING the ops it "contains" would be the
     // exact data loss the quarantine exists to prevent. Refused here — the ONE
     // path every snapshot write takes (op-count, server-write, shutdown flush).
     if (deps.isQuarantined?.(cell)) {
-      deps.log.warn(
-        `[sync:server] compaction of "${cell}" skipped — the cell is ` +
-          `quarantined since boot (its op-log could not be replayed into the ` +
-          `current shape); fix the cell's version/onMigrate and restart`,
-      );
-      return;
+      // Once per cell: every write that reaches the cell (a listener's
+      // reaction on each op of another) asks again, and the same line per
+      // fold buried the one that explains it.
+      if (!_compactQuarantineSaid.has(cell)) {
+        _compactQuarantineSaid.add(cell);
+        deps.log.warn(
+          `[sync:server] compaction of "${cell}" skipped — the cell is ` +
+            `quarantined since boot (its op-log could not be replayed into ` +
+            `the current shape); fix the cell's version/onMigrate and ` +
+            `restart (said once per cell)`,
+        );
+      }
+      return `"${cell}" is quarantined — its snapshot is not written`;
     }
     // The fold watermark rides in the snapshot's own transaction
     // (`alsoWrite`, planned after the state capture). A fold that never reaches
@@ -554,10 +726,18 @@ export function createServerSyncHandler(
       if (fw !== null && planned) fw.folded(cell, at!);
     } catch (e) {
       deps.log.error(`[sync:server] compact failed for ${cell}: ${e}`);
+      return `the fold of "${cell}" failed: ${
+        e instanceof Error ? e.message : String(e)
+      }`;
     }
+    return undefined;
   }
 
   let _foldWatermark: SyncFoldWatermark | null = null;
+  /** See `ServerSyncHandler.setOpIssueHook`. */
+  let _issueHook:
+    | ((op: { id: string; cell: string; action: string }, ts: number) => void)
+    | null = null;
 
   // ── Server-origin write durability ─────────────────────────────────
   // Same debounce scale as KV persistence (100ms), and a clean shutdown flushes
@@ -578,12 +758,55 @@ export function createServerSyncHandler(
     string,
     { timer: ReturnType<typeof setTimeout>; since: number }
   >();
+  /** Cells whose live state holds a server-origin write that is in no op and
+   *  not yet in the snapshot — from `noteServerWrite` until its fold, which
+   *  runs under the cell lock a catch-up also takes. The log cannot serve such
+   *  a cell: a catch-up answered from it is ops only, and the write can have
+   *  gone out already (a push another client's catch-up snapshot carried, see
+   *  `pushCaptured`) while this client was away — so the fold finds nothing
+   *  left to push, and the client stays without the write, connected and
+   *  "synced", until some later push or reconnect repairs it. Found by the
+   *  offline-replay property (tests/sync/properties/offline-replay.test.ts);
+   *  pinned by tests/sync/server-write-catchup-window.test.ts. */
+  const _unfolded = new Set<string>();
+  /** Cells whose LAST fold failed: a failed fold is not retried until the
+   *  cell is written again, so its snapshot lacks what that fold carried.
+   *  A whole-handler flush (the shutdown's) reports them — a stop that left
+   *  one behind is not clean. */
+  const _foldFailed = new Map<string, string>();
+  /** Folds in flight, per cell — what `flushServerWrites` also waits for. */
+  const _settling = new Map<string, Set<Promise<string | undefined>>>();
+  function track(
+    cell: string,
+    p: Promise<string | undefined>,
+  ): Promise<string | undefined> {
+    const set = _settling.get(cell) ?? new Set<Promise<string | undefined>>();
+    _settling.set(cell, set);
+    const done: Promise<string | undefined> = p.catch((e) => {
+      deps.log.error(`[sync:server] fold of "${cell}" failed: ${e}`);
+      return `the fold of "${cell}" failed: ${e}`;
+    }).then((v) => {
+      // Until a later fold of the cell lands, its snapshot lacks what this
+      // one was folding (see `_foldFailed`).
+      if (v === undefined) _foldFailed.delete(cell);
+      else _foldFailed.set(cell, v);
+      return v;
+    }).finally(() => {
+      set.delete(done);
+      if (set.size === 0 && _settling.get(cell) === set) _settling.delete(cell);
+    });
+    set.add(done);
+    return done;
+  }
 
   function noteServerWrite(cell: string): void {
     if (!syncCells.has(cell)) return;
     // Synchronous with the commit (the afterAction hook): from here until a
     // push captures the cell's state, live clients do not have this write.
     _dirty.add(cell);
+    // …and from here until the fold, the op-log cannot serve it (see
+    // `_unfolded`).
+    _unfolded.add(cell);
     const now = Date.now();
     const existing = _pendingWrites.get(cell);
     if (existing !== undefined) clearTimeout(existing.timer);
@@ -599,19 +822,37 @@ export function createServerSyncHandler(
       since,
       timer: setTimeout(() => {
         _pendingWrites.delete(cell);
-        void withLock(cell, () => settleServerWrite(cell));
+        track(cell, foldLocked(cell, () => settleServerWrite(cell)));
       }, delay),
     });
   }
 
   /** Make a server-origin write durable AND tell every live client about it.
    *  Caller holds the cell lock. */
-  async function settleServerWrite(cell: string): Promise<void> {
-    await tryCompact(cell, true);
+  async function settleServerWrite(cell: string): Promise<string | undefined> {
+    const failed = await tryCompact(cell, true);
+    _unfolded.delete(cell);
     // Already pushed — a catch-up served meanwhile carried it out (see
     // `pushCaptured` in handleSync) — and nothing written since.
-    if (!_dirty.has(cell)) return;
+    if (!_dirty.has(cell)) return failed;
+    // Under a PARKED holder of this very cell (see `_parked`): its op is
+    // applied but not yet acked, so a push now would reach its origin as a
+    // state holding the op BEFORE the op's ack — the client folds it and
+    // rebases the still-pending op on top: applied twice until the ack.
+    // Folded now, pushed once the holder has acked (`pushDeferred`).
+    if (_parked.has(cell)) {
+      _deferPush.add(cell);
+      return failed;
+    }
     await pushServerState(cell);
+    return failed;
+  }
+  /** Cells whose push waits for their parked holder's ack. */
+  const _deferPush = new Set<string>();
+  /** Run at the end of an op's locked section — after its ack. */
+  async function pushDeferred(cell: string): Promise<void> {
+    if (!_deferPush.delete(cell)) return;
+    if (_dirty.has(cell)) await pushServerState(cell);
   }
 
   // ── Server-origin writes reach LIVE clients ─────────────────────────
@@ -783,13 +1024,29 @@ export function createServerSyncHandler(
     deps.broadcastRaw.fn(patchFrame);
   }
 
-  async function flushServerWrites(): Promise<void> {
-    const cells = [..._pendingWrites.keys()];
-    for (const p of _pendingWrites.values()) clearTimeout(p.timer);
-    _pendingWrites.clear();
-    await Promise.all(
-      cells.map((cell) => withLock(cell, () => settleServerWrite(cell))),
-    );
+  async function flushServerWrites(
+    only?: readonly string[],
+  ): Promise<string | undefined> {
+    const wanted = (c: string) => only === undefined || only.includes(c);
+    // A fold whose timer already fired is IN FLIGHT: a flush that returned
+    // without it let a shutdown close the database under it (or a caller ack
+    // a write that fold was still writing). Awaited with the rest.
+    const inFlight = [..._settling].filter(([c]) => wanted(c)).flatMap((
+      [, ps],
+    ) => [...ps]);
+    const cells = [..._pendingWrites.keys()].filter(wanted);
+    for (const c of cells) {
+      clearTimeout(_pendingWrites.get(c)!.timer);
+      _pendingWrites.delete(c);
+    }
+    const verdicts = await Promise.all([
+      ...inFlight,
+      ...cells.map((cell) =>
+        track(cell, foldLocked(cell, () => settleServerWrite(cell)))
+      ),
+    ]);
+    return verdicts.find((v) => v !== undefined) ??
+      (only === undefined ? [..._foldFailed.values()][0] : undefined);
   }
 
   // Clients already told their cursor is foreign (see `foreign` in
@@ -800,6 +1057,9 @@ export function createServerSyncHandler(
   return {
     noteServerWrite,
     flushServerWrites,
+    setOpIssueHook(fn) {
+      _issueHook = fn;
+    },
     setFoldWatermark(w) {
       _foldWatermark = w;
     },
@@ -833,6 +1093,7 @@ export function createServerSyncHandler(
       // Refuse before persist: an ack is a durability promise, and a
       // quarantined cell cannot keep it (see `refuseIfQuarantined`).
       if (refuseIfQuarantined(op.id, op.cell, socket)) return;
+      if (holdIfHeld(socket)) return;
       if (refuseIfRefusedBefore(op.id, op.cell, socket)) return;
       if (refuseIfDrifted(op.id, op.cell, op.hlc, socket)) return;
       // AUTH-1: enforce the cell's declarative `access` rule on the sync path
@@ -863,6 +1124,11 @@ export function createServerSyncHandler(
         if (refuseIfRefusedBefore(op.id, op.cell, socket)) return;
         // Under the lock, before the persist — see `refuseIfStale`.
         if (await refuseIfStale(op.id, op.cell, op.hlc, socket)) return;
+        // AGAIN, here: the door's check ran before this op queued on the
+        // lock, and a pause (or a shutdown) that began meanwhile would meet it
+        // at dispatch — a permanent op-rejected for an op that is only
+        // early. The last moment before the persist is the one that counts.
+        if (holdIfHeld(socket)) return;
         clock.receive(op.hlc);
         const serverHlc = clock.tick();
 
@@ -873,6 +1139,7 @@ export function createServerSyncHandler(
             deps.db,
             op,
             deps.cellVersion?.(op.cell) ?? 0,
+            (ts) => _issueHook?.(op, ts),
           );
         } catch (e) {
           deps.log.error(`[sync:server] failed to persist op ${op.id}: ${e}`);
@@ -885,6 +1152,11 @@ export function createServerSyncHandler(
         // persistOp is INSERT OR IGNORE, so `serverTs === null` means the
         // op's effect is already in live state — re-applying would double it.
         let rejectedReason: string | null = null;
+        /** Refused because the server was not taking input — held. */
+        let held = false;
+        /** A stand-in save this op's commit owed did not land — said on
+         *  the ack (`unsaved`), as every door says it. */
+        let unsaved: string | undefined;
         if (serverTs === null) {
           // Observe-only: a duplicate here is the client re-sending after a
           // lost ack (normal) — or a cursor bug upstream (worth seeing).
@@ -915,8 +1187,14 @@ export function createServerSyncHandler(
               // Origin marker: this write IS a persisted op — afterAction must
               // not schedule a durability snapshot for it.
               _syncOp: true,
+              // …and WHERE in the op-log it sits: the host tracks, at commit,
+              // how far each cell's live state holds its log (the position a
+              // journalled listener reaction is replayed at).
+              _syncTs: serverTs,
+              _syncId: op.id,
             };
             await deps.dispatch(action);
+            unsaved = await waitDurable(op.cell, action);
             // D11: the server's re-execution is the authority — if the
             // validate hook refused this op, the op is POISON: delete it
             // from the log (state and log must agree) and tell the origin
@@ -929,30 +1207,44 @@ export function createServerSyncHandler(
               ]);
             }
           } catch (e) {
-            // Same poison treatment as a validate refusal: the server could
-            // not apply it, so the log must not keep it and no one must be
-            // told it succeeded.
-            rejectedReason = `dispatch failed: ${
-              e instanceof Error ? e.message : String(e)
-            }`;
-            deps.log.error(
-              `[sync:server] dispatch of op ${op.id} failed: ${e}`,
-            );
-            await deps.db.execute("DELETE FROM sync_ops WHERE id = ?", [op.id])
-              // A failed cleanup is NOT cosmetic: the op stays in `sync_ops`,
-              // so the next drain picks up the same already-failed op and
-              // retries it — forever, silently. That is the server twin of the
-              // browser bug `browser-sync.ts` was written to kill, and it hid
-              // behind an empty catch.
-              .catch((delErr: unknown) =>
-                deps.log.error(
-                  `[sync:server] could not delete failed op ${op.id} — it ` +
-                    `will be retried on every drain until removed: ${delErr}`,
-                )
+            if (isHeldRefusal(e)) {
+              // Not poison: the server was not TAKING input (see
+              // `isHeldRefusal`). Out of the log, and held — never refused.
+              held = true;
+              await dropRow(op.id);
+            } else {
+              // Same poison treatment as a validate refusal: the server could
+              // not apply it, so the log must not keep it and no one must be
+              // told it succeeded.
+              rejectedReason = `dispatch failed: ${
+                e instanceof Error ? e.message : String(e)
+              }`;
+              deps.log.error(
+                `[sync:server] dispatch of op ${op.id} failed: ${e}`,
               );
+              await deps.db.execute("DELETE FROM sync_ops WHERE id = ?", [
+                op.id,
+              ])
+                // A failed cleanup is NOT cosmetic: the op stays in `sync_ops`,
+                // so the next drain picks up the same already-failed op and
+                // retries it — forever, silently. That is the server twin of the
+                // browser bug `browser-sync.ts` was written to kill, and it hid
+                // behind an empty catch.
+                .catch((delErr: unknown) =>
+                  deps.log.error(
+                    `[sync:server] could not delete failed op ${op.id} — it ` +
+                      `will be retried on every drain until removed: ${delErr}`,
+                  )
+                );
+            }
           }
         }
 
+        if (held) {
+          sendHeld(socket);
+          if (_deferPush.has(op.cell)) await pushDeferred(op.cell);
+          return;
+        }
         if (rejectedReason !== null) {
           rememberRefusal(op.id, rejectedReason);
           sendTo(
@@ -967,6 +1259,7 @@ export function createServerSyncHandler(
           deps.log.warn(
             `[sync:server] op ${op.id} (${op.cell}:${op.action}) rejected: ${rejectedReason}`,
           );
+          if (_deferPush.has(op.cell)) await pushDeferred(op.cell);
           return;
         }
 
@@ -979,6 +1272,7 @@ export function createServerSyncHandler(
         // re-ack used to go out bare — precisely the ack most likely to follow
         // a snapshot, since it means the first ack was lost.
         const ackTs = await ackServerTs(op.id, serverTs);
+        _heldSaid.delete(socket); // taking input again — see `_heldSaid`
         sendTo(
           socket,
           enc("sync-ack", {
@@ -986,6 +1280,7 @@ export function createServerSyncHandler(
             opId: op.id,
             serverHlc,
             ...(ackTs !== null ? { serverTs: ackTs } : {}),
+            ...(unsaved !== undefined ? { unsaved } : {}),
           }),
           `sync-ack for ${op.id}`,
         );
@@ -1018,6 +1313,10 @@ export function createServerSyncHandler(
 
           await tryCompact(op.cell);
         }
+        // A fold that ran under this op's parked lock pushes now, after the
+        // ack and the broadcast (see `settleServerWrite`). Checked first:
+        // nothing deferred, nothing awaited — the lock's timing is unchanged.
+        if (_deferPush.has(op.cell)) await pushDeferred(op.cell);
 
         deps.log.debug(
           `[sync:server] persisted op ${op.id} for ${op.cell}:${op.action}`,
@@ -1105,6 +1404,10 @@ export function createServerSyncHandler(
         pushPatch?: unknown;
       };
       noteSyncSocket(socket, sync.pushPatch === true);
+      _heldSaid.delete(socket); // it asked again — see `_heldSaid`
+      // Held ops come back in this request's `pendingOps` — held again, the
+      // whole request with them (the client retries it as one).
+      if ((sync.pendingOps?.length ?? 0) > 0 && holdIfHeld(socket)) return;
       const resyncCells = new Set(
         Array.isArray(sync.resync)
           ? sync.resync.filter((c): c is string => typeof c === "string")
@@ -1134,8 +1437,13 @@ export function createServerSyncHandler(
         // different history's cursor is served "incrementally" — it keeps
         // every op the other history had (tests/sync/foreign-cursor.test.ts).
         const highWaterBefore = await reserveServerTs(deps.db);
+        /** A pending op was held (see holdIfHeld): `sync-err` is sent, the
+         *  rest of the request — its later ops, its response — waits for the
+         *  client's resend. */
+        let heldMid = false;
         // Persist pending ops under per-cell lock (prevents compact race)
         for (const pending of sync.pendingOps ?? []) {
+          if (heldMid) return;
           if (!isValidSyncOp(pending)) {
             deps.log.warn(
               "[sync:server] handleSync: invalid pending op — skipping",
@@ -1198,6 +1506,12 @@ export function createServerSyncHandler(
             if (
               await refuseIfStale(pending.id, pending.cell, pending.hlc, socket)
             ) return;
+            // Same last-moment check as handleOp: held, the whole request
+            // with it (the client resends it as one).
+            if (holdIfHeld(socket)) {
+              heldMid = true;
+              return;
+            }
             clock.receive(pending.hlc);
             const serverHlc = clock.tick();
             let serverTs: number | null = null;
@@ -1206,6 +1520,7 @@ export function createServerSyncHandler(
                 deps.db,
                 pending,
                 deps.cellVersion?.(pending.cell) ?? 0,
+                (ts) => _issueHook?.(pending, ts),
               );
             } catch (e) {
               deps.log.error(
@@ -1225,6 +1540,7 @@ export function createServerSyncHandler(
               );
             }
             let rejectedReason: string | null = null;
+            let pendingUnsaved: string | undefined; // see handleOp's `unsaved`
             if (serverTs !== null) {
               try {
                 const action = { // held for the rejection key — see handleOp
@@ -1232,8 +1548,11 @@ export function createServerSyncHandler(
                   payload: pending.payload,
                   _user: meta.user,
                   _syncOp: true,
+                  _syncTs: serverTs, // see handleOp
+                  _syncId: pending.id,
                 };
                 await deps.dispatch(action); // awaited — see handleOp
+                pendingUnsaved = await waitDurable(pending.cell, action);
                 // D11, same as handleOp: the server's re-execution is the
                 // authority. Without this check a reconnect-flushed op that
                 // the validate hook REFUSED was still broadcast to every peer,
@@ -1251,6 +1570,15 @@ export function createServerSyncHandler(
                   ]);
                 }
               } catch (e) {
+                if (isHeldRefusal(e)) { // see handleOp
+                  heldMid = true;
+                  await dropRow(pending.id);
+                  sendHeld(socket);
+                  if (_deferPush.has(pending.cell)) {
+                    await pushDeferred(pending.cell);
+                  }
+                  return;
+                }
                 rejectedReason = `dispatch failed: ${
                   e instanceof Error ? e.message : String(e)
                 }`;
@@ -1297,6 +1625,9 @@ export function createServerSyncHandler(
               deps.log.warn(
                 `[sync:server] pending op ${pending.id} (${pending.cell}:${pending.action}) rejected: ${rejectedReason}`,
               );
+              if (_deferPush.has(pending.cell)) {
+                await pushDeferred(pending.cell);
+              }
               return; // no ack — the op was refused, not applied
             }
             // Ack ALWAYS (duplicate = retransmit of a lost ack). Without this
@@ -1311,12 +1642,19 @@ export function createServerSyncHandler(
                 opId: pending.id,
                 serverHlc,
                 ...(ackTs !== null ? { serverTs: ackTs } : {}), // see handleOp
+                ...(pendingUnsaved !== undefined
+                  ? { unsaved: pendingUnsaved }
+                  : {}),
               }),
               `sync-ack for pending op ${pending.id}`,
             );
+            if (_deferPush.has(pending.cell)) {
+              await pushDeferred(pending.cell);
+            }
           });
         }
 
+        if (heldMid) return;
         // Build response per cell (read under lock to get consistent view)
         const responseOps: SyncOp[] = [];
         let useSnapshot = false;
@@ -1472,6 +1810,7 @@ export function createServerSyncHandler(
             const resync = resyncCells.has(cell);
             if (
               cursorBelowCompaction || snapshotUnnamed || foreign || resync ||
+              _unfolded.has(cell) ||
               (cellLW && lastHlc &&
                 (lastHlc[0] < cellLW[0] ||
                   (lastHlc[0] === cellLW[0] && lastHlc[1] < cellLW[1])))
@@ -1522,7 +1861,19 @@ export function createServerSyncHandler(
               // burst. Pushed at one position with one state, the snapshot
               // and the push are the same fact (the held push is skipped as
               // covered by the snapshot).
-              if (_dirty.has(cell)) {
+              //
+              // …but only a FOLDED state is one fact per position. A server
+              // write takes no lock: it can land during this section's awaits,
+              // after the position was reserved, and it changes the state
+              // without moving the position. Two captures at one position then
+              // carry two states, and a client that got the older as its
+              // catch-up snapshot drops the newer, pushed at the same position,
+              // as "covered" — the write missing from its screen for good
+              // (found by the offline-replay property under scheduling
+              // jitter). Unfolded, the snapshot goes to its requester alone;
+              // the fold pushes the write to everyone at its own, higher,
+              // position.
+              if (_dirty.has(cell) && !_unfolded.has(cell)) {
                 pushCaptured(cell, serverTsMap[cell], clientState);
               }
             } else {

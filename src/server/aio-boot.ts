@@ -5,7 +5,17 @@ import {
   createPersistenceManager,
   type PersistenceManager,
 } from "./persistence.ts";
-import { createJournal, type Journal, journalWatermarkKey } from "./journal.ts";
+import {
+  CLEAN_STOP_ROW,
+  createJournal,
+  type Journal,
+  type JournalEntry,
+  journalWatermarkKey,
+  REACTIONS_FORMAT_ROW,
+  SYNC_REACTION_TYPE,
+  syncJournalWatermarkKey,
+  type SyncReaction,
+} from "./journal.ts";
 import type { SkvInstance } from "./skv.ts";
 import { migrateLegacyKv, SKV_SCHEMA, sqliteKv } from "./skv-sqlite.ts";
 import type { DB } from "../db/types.ts";
@@ -30,6 +40,7 @@ import { createDeclaredShapeGuard } from "./declared-shape-guard.ts";
 import { isCompiled, resolveKvPath } from "./paths.ts";
 import { prodRequested } from "./aio-cli.ts";
 import { SYNC_VERSION_UNKNOWN } from "../sync/compact.ts";
+import { applyStatePatch } from "../sync/state-patch.ts";
 import { dirname, join, resolve, SEPARATOR } from "@std/path";
 import { appDirs, appsDirEnv } from "./app-dirs.ts";
 import {
@@ -46,12 +57,18 @@ import type { CheckpointData, DiagnosticsHooks } from "../diagnostics/mod.ts";
 import type { ServerSyncHandler } from "../sync/server-handler.ts";
 import { cloneState } from "../state/immutable.ts";
 import {
+  getCompactedTs,
   getLowWater,
   loadOpsSince,
   loadSnapshot,
   seedSyncSnapshot,
 } from "../sync/server-store.ts";
 import { count } from "../diagnostics/fmt.ts";
+import {
+  bootStoreGen,
+  planStoreGenRecord,
+  recordStoreGen,
+} from "./store-gen.ts";
 
 /** What the boot replay needs to know about the app beyond the reducer —
  *  built by `bootStorage` (which has the cell metadata) and looked up by
@@ -138,7 +155,7 @@ export function isDevBoot(): boolean {
 }
 
 /** `{ state, effects }` (the composed reducer) → state; a bare state passes. */
-function unwrapReduced<S>(r: S | { state: S; effects?: unknown[] }): S {
+export function unwrapReduced<S>(r: S | { state: S; effects?: unknown[] }): S {
   return _isObj(r) && "state" in r && Array.isArray(r.effects)
     ? (r as { state: S }).state
     : r as S;
@@ -153,6 +170,192 @@ function withDefaults(
   slice: Record<string, unknown>,
 ): Record<string, unknown> {
   return _isObj(initial) ? { ...initial, ...slice } : slice;
+}
+
+/** Put each sync cell's journalled `listensTo` reactions back where they
+ *  happened — BETWEEN its own ops (`SYNC_REACTION_TYPE`, journal `tail` past
+ *  each cell's watermark). Runs after `replaySyncOps` and before the rest of
+ *  the journal is replayed.
+ *
+ *  The newest such line for a cell is the cell's live state at the instant of
+ *  its last unsaved reaction, holding exactly its ops up to `at` (the host
+ *  records `at` at each op's commit) — resolved from its chain: the newest
+ *  keyframe, then each delta whose `base` is the line before it (a break is
+ *  said, and the state of the last whole link is used; see `SyncReaction`).
+ *  So the cell is rebuilt as that state
+ *  plus its ops ABOVE `at`, folded through the composed reducer and taken
+ *  for this cell only — every reaction, and every op acked after one, in
+ *  their live order. Returns the seq each cell was seeded from: the journal
+ *  replay that follows must not write the cell from any line at or below it
+ *  (that line's state already holds them).
+ *
+ *  Refused per cell, loudly, and the op-log result kept: a quarantined cell,
+ *  a line stamped with another shape version, an op that no longer folds. */
+export async function seedSyncReactions<S>(
+  db: DB,
+  syncCellIds: readonly string[],
+  reduce: (
+    state: S,
+    action: { type: string; payload?: unknown },
+  ) => S | { state: S; effects?: unknown[] },
+  state: S,
+  tail: readonly JournalEntry[],
+  versionOf: (cell: string) => number,
+  log: Pick<Log, "info" | "error" | "warn">,
+  /** The cell's journal watermark — what `SyncReaction.baseSnapshotAt` must
+   *  equal for a chain to start from the saved snapshot. Absent ⇒ never. */
+  watermarkOf?: (cell: string) => number,
+  /** Ops persisted but never reduced — left out, as `replaySyncOps` leaves
+   *  them out (its `defer`). */
+  defer?: ReadonlyMap<string, number>,
+  /** The cell's `compacted_ts` as of its last fold that recorded a journal
+   *  watermark (`syncJournalSnapshotKey`). Absent ⇒ no evidence either way. */
+  foldedAt?: (cell: string) => number | undefined,
+): Promise<{ state: S; seededAt: Map<string, number> }> {
+  const seededAt = new Map<string, number>();
+  const lines = new Map<string, JournalEntry[]>();
+  for (const e of tail) {
+    if (e.type !== SYNC_REACTION_TYPE) continue;
+    const c = (e.payload as Partial<SyncReaction> | undefined)?.cell;
+    if (typeof c !== "string" || !syncCellIds.includes(c)) continue;
+    const chain = lines.get(c);
+    if (chain) chain.push(e);
+    else lines.set(c, [e]);
+  }
+  let next = state;
+  for (const [cell, chain] of lines) {
+    // The newest keyframe starts the chain that holds the newest state — or
+    // the newest delta taken against the snapshot this boot restored from
+    // (its capture is exactly the watermark the store holds for the cell).
+    const wm = watermarkOf?.(cell);
+    const snapshotOps = (r: SyncReaction): unknown[] | undefined =>
+      wm === undefined
+        ? undefined
+        : r.baseSnapshotAt === wm && Array.isArray(r.ops)
+        ? r.ops
+        : r.alsoSnapshot?.at === wm && Array.isArray(r.alsoSnapshot.ops)
+        ? r.alsoSnapshot.ops
+        : undefined;
+    const onSnapshot = (r: SyncReaction): boolean =>
+      snapshotOps(r) !== undefined;
+    let k = chain.length - 1;
+    while (
+      k >= 0 && !_isObj((chain[k]!.payload as SyncReaction).state) &&
+      !onSnapshot(chain[k]!.payload as SyncReaction)
+    ) k--;
+    let snapshotStart: Record<string, unknown> | null = null;
+    if (k >= 0 && !_isObj((chain[k]!.payload as SyncReaction).state)) {
+      const snap = await loadSnapshot(db, cell).catch(() => null);
+      snapshotStart = snap && _isObj(snap.state)
+        ? applyStatePatch(
+          snap.state as Record<string, unknown>,
+          snapshotOps(chain[k]!.payload as SyncReaction)!,
+        )
+        : null;
+      if (snapshotStart === null) {
+        log.error(
+          `journal: "${cell}"'s listensTo reaction chain starts on its saved ` +
+            `snapshot (seq ${chain[k]!.seq}), which could not be read or ` +
+            `patched — the op-log result is kept, without the reactions`,
+        );
+        continue;
+      }
+    }
+    if (k < 0) {
+      log.error(
+        `journal: "${cell}"'s journalled listensTo reactions (seq ` +
+          `${chain[0]!.seq}–${chain.at(-1)!.seq}) have no keyframe — the ` +
+          `op-log result is kept, without them`,
+      );
+      continue;
+    }
+    const e = chain[k]!;
+    if (_syncContexts.get(db)?.quarantined.has(cell)) {
+      log.warn(
+        `journal: "${cell}" is quarantined — its journalled listensTo ` +
+          `reactions (seq ${e.seq}–${chain.at(-1)!.seq}) are not applied`,
+      );
+      continue;
+    }
+    const stamped = e.v?.[cell];
+    if (stamped !== undefined && stamped !== versionOf(cell)) {
+      log.warn(
+        `journal: "${cell}"'s journalled listensTo reactions (seq ${e.seq}) ` +
+          `were written by v${stamped}, this build declares ` +
+          `v${versionOf(cell)} — not applied (their state is the older shape)`,
+      );
+      continue;
+    }
+    let slice = snapshotStart ?? (e.payload as SyncReaction).state!;
+    let last = e;
+    for (const d of chain.slice(k + 1)) {
+      const r = d.payload as SyncReaction;
+      const patched = r.base === last.seq && Array.isArray(r.ops)
+        ? applyStatePatch(slice, r.ops)
+        : null;
+      if (patched === null) {
+        log.error(
+          `journal: "${cell}"'s listensTo reaction chain breaks at seq ` +
+            `${d.seq} (base ${String(r.base)}, expected ${last.seq}) — ` +
+            `restored up to seq ${last.seq}; the reactions after it are lost`,
+        );
+        break;
+      }
+      slice = patched;
+      last = d;
+    }
+    const at = (last.payload as SyncReaction).at;
+    // A snapshot written by a fold that recorded no journal watermark — a
+    // run with the journal off (or a build that keeps none) — is newer than
+    // every line here: the line would roll it back.
+    const recorded = foldedAt?.(cell);
+    const snapAt = recorded === undefined
+      ? 0
+      : await getCompactedTs(db, cell).catch(() => 0);
+    if (recorded !== undefined && snapAt > recorded) {
+      log.warn(
+        `journal: "${cell}"'s journalled state (seq ${last.seq}) is older ` +
+          `than its saved snapshot, which a run without the journal wrote — ` +
+          `not applied, nor the cell's journalled actions up to it; the ` +
+          `snapshot is kept`,
+      );
+      // …and neither are the action lines those states recorded.
+      seededAt.set(cell, last.seq);
+      continue;
+    }
+    try {
+      let root = {
+        ...(next as Record<string, unknown>),
+        [cell]: slice,
+      } as Record<
+        string,
+        unknown
+      >;
+      for (const op of await loadOpsSince(db, cell, null, at)) {
+        if (defer?.get(cell) === op.serverTs) continue;
+        const folded = unwrapReduced(
+          reduce(root as S, {
+            type: `${cell}:${op.action}`,
+            payload: op.payload,
+          }),
+        ) as Record<string, unknown>;
+        root = { ...root, [cell]: folded[cell] };
+      }
+      next = root as S;
+      seededAt.set(cell, last.seq);
+      log.info(
+        `journal: "${cell}" restored its listensTo reactions (seq ` +
+          `${last.seq}, op-log above ${at})`,
+      );
+    } catch (err) {
+      log.error(
+        `journal: "${cell}"'s journalled listensTo reaction (seq ` +
+          `${last.seq}) could not be combined with its op-log — the op-log ` +
+          `result is kept, without the reaction: ${err}`,
+      );
+    }
+  }
+  return { state: next, seededAt };
 }
 
 /** B1/AIO-416: replay each sync cell's committed op-log into state at boot.
@@ -195,6 +398,12 @@ export async function replaySyncOps<S>(
   /** Explicit context (tests); otherwise the one `bootStorage` registered for
    *  this db. Absent entirely ⇒ no versions declared, dev-strict. */
   context?: Partial<SyncReplayContext>,
+  opts: {
+    /** Sync cell → the `server_ts` of its last op when that op was persisted
+     *  but never reduced (see journal.ts `SYNC_APPLIED_TYPE`): left out of
+     *  the cell's own fold, for the caller to reduce whole. */
+    defer?: Map<string, number>;
+  } = {},
 ): Promise<S> {
   const ctx: SyncReplayContext = {
     versions: {},
@@ -387,11 +596,26 @@ export async function replaySyncOps<S>(
             `log, and the state has already been migrated to v${current}`;
           continue;
         }
+        // Persisted, never reduced: boot reduces it whole, later (aio.ts).
+        if (opts.defer?.get(cell) === op.serverTs) continue;
         try {
-          next = unwrapReduced(reduce(next, {
+          // Only THIS cell's slice is taken from the fold. The composed
+          // reducer also runs every `listensTo` listener of the op, and each
+          // of those reactions is already durable by its own cell's rule — a
+          // non-sync listener in the KV store, a sync listener in its own
+          // snapshot (the live hook folds a reaction there, see
+          // `noteServerWrite` in aio.ts's afterAction). Taking the whole root
+          // re-applied every surviving op to every non-sync listener on every
+          // restart (a tally of 2 came back 4, then 6), and let one sync
+          // cell's replay write into another's slice.
+          const folded = unwrapReduced(reduce(next, {
             type: `${op.cell}:${op.action}`,
             payload: op.payload,
-          }));
+          })) as Record<string, unknown>;
+          next = {
+            ...(next as Record<string, unknown>),
+            [cell]: folded[cell],
+          } as S;
           applied++;
         } catch (e) {
           failures.push(`op ${op.id} (${op.cell}:${op.action}) threw: ${e}`);
@@ -466,13 +690,144 @@ export async function replaySyncOps<S>(
       `sync: cell "${cell}" QUARANTINED — ${what}. The cell runs at its ` +
         `${seeded ? "last snapshot" : "declared defaults"}; its snapshot ` +
         `will not be rewritten and its op-log not compacted, so nothing on ` +
-        `disk is lost — and every write to it is REFUSED at the door with an ` +
-        `\`op-rejected\` carrying the reason, rather than acknowledged and ` +
-        `then lost on the next restart. The cell is read-only until this is ` +
-        `fixed. ${fix}`,
+        `disk is lost — and every client op to it is REFUSED at the door ` +
+        `with an \`op-rejected\` carrying the reason, rather than ` +
+        `acknowledged and then lost on the next restart; a server-origin ` +
+        `write is applied in memory only, answered \`unsaved\` and logged. ` +
+        `The cell is read-only until this is fixed. ${fix}`,
     );
   }
   return next;
+}
+
+/** The format a build that records its reactions stamped this op-log with
+ *  (see `REACTIONS_FORMAT_ROW`); undefined when none did. */
+export async function reactionsFormat(db: DB): Promise<number | undefined> {
+  const { rows } = await db.query<{ v: string }>(
+    "SELECT low_water AS v FROM sync_meta WHERE cell = ?",
+    [REACTIONS_FORMAT_ROW],
+  );
+  return rows[0] ? Number(rows[0].v) : undefined;
+}
+
+/** A run with the journal OFF over a journal a crash left unreplayed.
+ *
+ *  Its records are writes (and op records) newer than the store's last save.
+ *  This run does not replay them, and its own saves do not move the journal's
+ *  watermarks — so left where they are, the next run with the journal on
+ *  would replay them as the newest state, over everything this run saved
+ *  (a sync cell's state line replaces the slice). So the boot reads the op
+ *  records it needs from them (an op a crash caught in flight is resolved as
+ *  a journal-on boot resolves it) and then moves them aside
+ *  (`moveJournalAside`). Null when there is no such file, or it is empty. */
+export async function openStrayJournal(
+  path: string,
+  appId: string,
+  kv: SkvInstance | null,
+  syncCellIds: readonly string[],
+): Promise<Journal | null> {
+  try {
+    if (Deno.statSync(path).size === 0) return null;
+  } catch (e) {
+    if (e instanceof Deno.errors.NotFound) return null;
+    throw e;
+  }
+  const storedWatermark = kv
+    ? await kv.get<number>(journalWatermarkKey(appId)) ?? 0
+    : undefined;
+  const j = createJournal(path, {
+    ...(storedWatermark !== undefined ? { storedWatermark } : {}),
+  });
+  if (kv) {
+    const stored: Record<string, number> = {};
+    for (const c of syncCellIds) {
+      const at = await kv.get<number>(syncJournalWatermarkKey(appId, c));
+      if (typeof at === "number") stored[c] = at;
+    }
+    j.trackCells(stored);
+  }
+  return j;
+}
+
+/** Move a journal whose tail must never be replayed aside — kept for a
+ *  person, never applied, and said loudly with the file named. Nothing when
+ *  its tail is empty (the store holds every line). A refused move throws:
+ *  running on would lose data silently. */
+export function moveJournalAside(
+  j: Journal,
+  why: "journal-off" | "foreign-save",
+  log: Pick<Log, "warn">,
+): void {
+  const tail = j.readTail();
+  if (tail.length === 0) return;
+  const to = `${j.path}.unreplayed-${
+    new Date().toISOString().replace(/[:.]/g, "-")
+  }`;
+  j.quarantine(to);
+  const what = `${count(tail.length, "record")} (seq ${tail[0]!.seq}–` +
+    `${tail.at(-1)!.seq})`;
+  log.warn(
+    why === "journal-off"
+      ? `journal: this run has the journal off, but ${j.path} held ${what} ` +
+        `a crash left unreplayed — writes newer than the store's last save. ` +
+        `They are NOT applied: this run starts from the saved store without ` +
+        `them, and they are moved to ${to} (with ${to}.base) so that no ` +
+        `later run replays them over newer data. To recover them, stop, move ` +
+        `the file back to ${j.path} and start once with journal: true.`
+      : `journal: the store was written outside aio's journalled saves — by ` +
+        `an older aio build (the journal off), a tool, or the app's own SQL ` +
+        `on a table that mirrors state — after ${j.path} recorded ${what}; ` +
+        `replaying them now could roll that newer data back. They are NOT ` +
+        `applied, and they are moved to ${to} (with ${to}.base); check what ` +
+        `they held against the store.`,
+  );
+}
+
+/** The ops a clean stop recorded (see `CLEAN_STOP_ROW`): `server_ts` in
+ *  (from, to]. Undefined when none (or unreadable). */
+export async function cleanStopThrough(
+  db: DB,
+): Promise<{ from: number; to: number } | undefined> {
+  const { rows } = await db.query<{ v: string }>(
+    "SELECT low_water AS v FROM sync_meta WHERE cell = ?",
+    [CLEAN_STOP_ROW],
+  );
+  const m = /^(\d+):(\d+)$/.exec(rows[0]?.v ?? "");
+  return m ? { from: Number(m[1]), to: Number(m[2]) } : undefined;
+}
+
+/** Record a clean stop over `server_ts` (from, to] (see `CLEAN_STOP_ROW`). */
+export async function recordCleanStop(
+  db: DB,
+  from: number,
+  to: number,
+): Promise<void> {
+  await db.execute(
+    `INSERT INTO sync_meta (cell, low_water, last_compact, op_count, compacted_ts)
+       VALUES (?, ?, 0, 0, 0)
+       ON CONFLICT(cell) DO UPDATE SET low_water = excluded.low_water`,
+    [CLEAN_STOP_ROW, `${from}:${to}`],
+  );
+}
+
+/** The highest `server_ts` issued: an op's or a fold's. */
+export async function issuedThrough(db: DB): Promise<number> {
+  const { rows } = await db.query<{ m: number | null }>(
+    "SELECT MAX(v) AS m FROM (SELECT MAX(server_ts) AS v FROM sync_ops " +
+      "UNION ALL SELECT MAX(compacted_ts) FROM sync_meta)",
+  );
+  return rows[0]?.m ?? 0;
+}
+
+/** Stamp this op-log with the format this run records its reactions in (see
+ *  `REACTIONS_FORMAT_ROW`). */
+export async function stampReactions(db: DB, format: number): Promise<void> {
+  await db.execute(
+    `INSERT INTO sync_meta (cell, low_water, last_compact, op_count, compacted_ts)
+       VALUES (?, ?, 0, 0, 0)
+       ON CONFLICT(cell) DO UPDATE SET low_water = excluded.low_water`,
+    [REACTIONS_FORMAT_ROW, String(format)],
+  );
 }
 
 /** Per-cell migration metadata — version + optional onMigrate hook */
@@ -885,6 +1240,11 @@ export interface BootConfig<S> {
    *  stored keys are the shape's, not drift, and their `onRestore` is handed
    *  them (see {@linkcode runCellRestore}). */
   cellPersistShaped?: string[];
+  /** The restore half of the persist rule (`persistingCellIds`, via the
+   *  bridge): a declared cell outside it is never restored — a slice an older
+   *  build or a downgrade left in the store stays there, unread. Absent (a raw
+   *  boot with no cells) = restore everything, as before. */
+  persistingCellIds?: readonly string[];
   log: Log;
 }
 
@@ -896,17 +1256,93 @@ export interface BootResult<S> {
   persistence: PersistenceManager;
   /** Durable action journal — null unless `journal: true`. */
   journal: Journal | null;
+  /** With the journal OFF: a journal a crash left, opened for its op
+   *  records only (`openStrayJournal`) — the orchestrator resolves them,
+   *  then moves it aside. Never replayed. */
+  strayJournal: Journal | null;
+  /** A run that journals nothing saved the store after this build last
+   *  recorded it (store-gen.ts) — the journal's tail is older than the
+   *  store. */
+  storeSavedElsewhere: boolean;
   /** Boot migration + shape-drift picture — undefined when nothing
    *  was restored. Surfaced live via `am migrations`. */
   migrations: MigrationSummary | undefined;
   syncHandler: ServerSyncHandler | undefined;
   /** Mutable ref — caller wires broadcast after server creation */
   syncBroadcastRef: { fn: (msg: string, exclude?: WebSocket) => void };
-  syncDispatchRef: { fn: (a: { type: string; payload?: unknown }) => void };
+  syncDispatchRef: {
+    fn: (a: { type: string; payload?: unknown }) => void;
+    durableFor?: (a: object) => Promise<string | undefined> | undefined;
+    heldBecause?: () => string | undefined;
+  };
   /** Observe-only: call with each committed reduce's action type and patches
    *  — warns (dev and prod) about writes the next boot will undo. Absent when
    *  nothing persists. See declared-shape-guard.ts. */
   writeGuard?: (actionType: string, patches: unknown) => void;
+  /** The store held a saved state at boot — it has saved at least once. */
+  storeHeldState?: boolean;
+}
+
+/** Delete the slices of `persist: "none"` cells that an OLDER build (or a
+ *  downgrade) left in the store — and make the delete reach the disk.
+ *
+ *  A plain SQLite delete only unlinks: the row's bytes sit in a free page, and
+ *  in the -wal, until something happens to reuse them. For the slice of a
+ *  cell that declared it must never be kept (a session token, a passphrase),
+ *  "gone from the table" is not "gone". So, for this one rare delete only:
+ *  `secure_delete` ON (per connection — the app db is one writer worker, and
+ *  nothing else runs this early in boot), delete, restore the previous
+ *  setting, then `VACUUM` (older revisions of the slice sit in pages earlier
+ *  saves already freed) and `wal_checkpoint(TRUNCATE)` so the old frames
+ *  leave the -wal too. Every ordinary write keeps its speed. Single layout: the one blob is
+ *  rewritten without the slice (the old blob's page is zeroed as it is freed);
+ *  multi layout: the slice's rows are deleted. */
+async function scrubStaleSlices(
+  db: DB,
+  kv: SkvInstance,
+  persistKey: string,
+  persistMode: "single" | "multi",
+  stale: string[],
+): Promise<void> {
+  const was = (await db.query<{ secure_delete: number }>(
+    "PRAGMA secure_delete",
+  )).rows[0]?.secure_delete === 1;
+  await db.execute("PRAGMA secure_delete = 1");
+  try {
+    if (persistMode === "multi") {
+      await kv.setMulti(persistKey, {}, stale);
+    } else {
+      const doc = await kv.get<Record<string, unknown>>(persistKey);
+      if (doc) {
+        const rest = { ...doc };
+        for (const k of stale) delete rest[k];
+        await kv.set(persistKey, rest);
+      }
+    }
+  } finally {
+    await db.execute(`PRAGMA secure_delete = ${was ? 1 : 0}`);
+  }
+  // secure_delete zeroes what THIS delete frees — not the older revisions of
+  // the slice, which every earlier save left in pages SQLite had already
+  // freed (tests/hosts.test.ts plants several and finds them). VACUUM
+  // rebuilds the file from the live rows only; the checkpoint then moves it
+  // out of the WAL and truncates that too.
+  await db.execute("VACUUM");
+  await db.execute("PRAGMA wal_checkpoint(TRUNCATE)");
+}
+
+/** A stored document minus the declared cells that must never come back
+ *  (outside `persistingCellIds` — i.e. `persist: "none"`). Undeclared keys
+ *  (renamed cells, parked `__` slices) pass: boot handles those itself. */
+function restorableSlices(
+  stored: Record<string, unknown>,
+  persisting: readonly string[],
+  declared: Record<string, unknown>,
+): Record<string, unknown> {
+  const keep = new Set(persisting);
+  return Object.fromEntries(
+    Object.entries(stored).filter(([k]) => !(k in declared) || keep.has(k)),
+  );
 }
 
 /** Runs the full storage boot sequence — SQLite, CRDT sync, KV restore,
@@ -935,6 +1371,18 @@ export async function bootStorage<S>(
     getReportOpts,
     log,
   } = cfg;
+
+  // The dev checkpoint never holds a `persist: "none"` cell — from the first
+  // dispatch on (diagnostics/checkpoint.ts `CheckpointView`).
+  // Whole cells only, never the store's SHAPE: the checkpoint is handed to
+  // `onCheckpointRestore` and assigned into live state with no `onRestore`,
+  // so an `onPersist`-shaped or field-filtered slice would land there as-is.
+  const persisting = cfg.persistingCellIds;
+  if (persisting) {
+    diagHooks?.setCheckpointView?.((s) =>
+      restorableSlices(s, persisting, initialState as Record<string, unknown>)
+    );
+  }
 
   // A MUTABLE working copy of the declaration.
   //
@@ -1234,6 +1682,10 @@ export async function bootStorage<S>(
   // Late-bound like syncBroadcastRef — dispatch doesn't exist yet at boot.
   const syncDispatchRef: {
     fn: (a: { type: string; payload?: unknown }) => void;
+    /** Late-bound like `fn` — aio.ts `_durableFor`. */
+    durableFor?: (a: object) => Promise<string | undefined> | undefined;
+    /** Late-bound like `fn` — why ops are held right now (time travel). */
+    heldBecause?: () => string | undefined;
   } = { fn: () => {} };
   let syncHandler: ServerSyncHandler | undefined;
   // Cells the boot replay could not fold into the current shape (field report
@@ -1271,6 +1723,8 @@ export async function bootStorage<S>(
         : undefined;
       syncHandler = createServerSyncHandler({
         dispatch: (a) => syncDispatchRef.fn(a),
+        durableFor: (a) => syncDispatchRef.durableFor?.(a),
+        heldBecause: () => syncDispatchRef.heldBecause?.(),
         db: asyncDb,
         syncCellIds,
         accessCheck,
@@ -1332,6 +1786,14 @@ export async function bootStorage<S>(
   // Raw stored snapshot (pre-deepMerge) — kept for boot-time shape-drift
   // detection against the declared `initialState`.
   let persistedSnapshot: Record<string, unknown> | null = null;
+  // The keys the STORE holds, before the restore filter below drops any.
+  // Persistence deletes rows by diffing these against what it writes, so a
+  // `persist: "none"` row an older build left in multi mode has to be in this
+  // list — or it is never deleted, and the secret stays on disk for good.
+  let storedKeysOnDisk: string[] | null = null;
+  /** A run that journals nothing saved the store after this build last
+   *  recorded it (store-gen.ts). */
+  let storeSavedElsewhere = false;
   // Migration + shape-drift summary, surfaced live via `am migrations`.
   let migrations: MigrationSummary | undefined;
   // The per-cell version stamp of the build that last persisted — also the
@@ -1351,16 +1813,75 @@ export async function bootStorage<S>(
         log.debug(`sqlite: opened for persistence at ${dbPath}`);
       }
       await asyncDb.execute(SKV_SCHEMA);
+      // Before this build writes any store row (store-gen.ts): did a run
+      // that journals nothing save the store since this build last did?
+      storeSavedElsewhere = (await bootStoreGen(
+        asyncDb,
+        appId,
+        persistKey,
+        // Only the tables that MIRROR state: a SQL-only `db:` table is the
+        // app's to write directly (`app.db`, `am sql`), and its writes are
+        // not the store's saves.
+        dbBindings.filter((b) => b.path.length > 0).map((b) => b.table),
+        journalWatermarkKey(appId),
+        !!cfg.journal && dbPathOverride !== ":memory:",
+      )).foreign;
       await migrateLegacyKv(asyncDb, resolveKvPath(appId), log);
       kvDb = sqliteKv(asyncDb);
       log.debug(`persist: SQLite aio_kv mode=${persistMode}`);
-      const migrated = await loadAndMigrateSnapshot(
+      let migrated = await loadAndMigrateSnapshot(
         kvDb,
         appId,
         persistKey,
         persistMode,
         log,
       );
+      if (migrated) storedKeysOnDisk = Object.keys(migrated);
+      if (migrated && cfg.persistingCellIds) {
+        // `persist: "none"` means never written AND never read back. The
+        // write half always held; this read did not — a blob an older build
+        // (or a downgrade) wrote came straight back into a cell that asked to
+        // keep nothing, and stayed there until the next write. The
+        // standalone runtime closed the same hole (`restorableOnly`); the
+        // server had none. Found by tests/hosts.test.ts.
+        const kept = restorableSlices(
+          migrated,
+          cfg.persistingCellIds,
+          initialState as Record<string, unknown>,
+        );
+        const stale = Object.keys(migrated).filter((k) => !(k in kept));
+        if (stale.length > 0) {
+          await scrubStaleSlices(asyncDb, kvDb, persistKey, persistMode, stale)
+            .then(() =>
+              log.info(
+                `persist: removed ${
+                  count(stale.length, "stored slice")
+                } of persist:"none" cell(s) ${stale.join(", ")} — left by an ` +
+                  `older build; overwritten on disk, not just unlinked`,
+              )
+            )
+            .catch((e) =>
+              // Loud, never fatal: the slice is still not RESTORED, and the
+              // first persist deletes the row the ordinary way.
+              log.error(
+                `persist: could not scrub the persist:"none" slice(s) ` +
+                  `${stale.join(", ")} an older build left in the store — ` +
+                  `they are not restored, and the next write drops them, but ` +
+                  `their bytes may remain in the database file: ${e}`,
+              )
+            );
+        }
+        migrated = kept;
+      }
+      // This boot's own store writes (a layout adopted, a legacy store
+      // moved in, a stale slice scrubbed) are done: recorded now, so a boot
+      // that fails after them never reads as a foreign save. A foreign save
+      // found above stays flagged until the journal is dealt with.
+      if (
+        !storeSavedElsewhere && cfg.journal && dbPathOverride !== ":memory:"
+      ) {
+        await recordStoreGen(asyncDb, appId, journalWatermarkKey(appId));
+      }
       if (migrated) {
         hadPersistedState = true;
         persistedSnapshot = migrated; // raw stored shape — for drift detection
@@ -1746,7 +2267,20 @@ export async function bootStorage<S>(
   // ── 6. Checkpoint restore ─────────────────────────────────────────
   if (diagHooks?.getRecoveredState() && onCheckpointRestore) {
     try {
-      const recovered = diagHooks.getRecoveredState()!;
+      const raw = diagHooks.getRecoveredState()!;
+      // …and what comes BACK is the restore half of the same rule: a
+      // checkpoint an older build wrote raw still holds `persist: "none"`
+      // slices, and the app's hook would hand them straight back.
+      const recovered = cfg.persistingCellIds
+        ? {
+          ...raw,
+          state: restorableSlices(
+            raw.state,
+            cfg.persistingCellIds,
+            initialState as Record<string, unknown>,
+          ),
+        }
+        : raw;
       const restored = onCheckpointRestore(recovered);
       if (restored) {
         Object.assign(state as Record<string, unknown>, restored);
@@ -1845,6 +2379,17 @@ export async function bootStorage<S>(
       },
     )
     : null;
+  const strayJournal = !journalOn && dbPathOverride !== ":memory:" &&
+      (shouldPersist || asyncDb !== null)
+    ? await openStrayJournal(
+      dbPathOverride
+        ? dbPathOverride + ".journal"
+        : appDirs(appId, cfg.appDir).journal,
+      appId,
+      asyncDb && kvDb?.planSet ? kvDb : null,
+      syncCellIds,
+    )
+    : null;
 
   // Said once per `cell.path`, whichever of the two write-time checks gets
   // there first (the guard names the method; the watcher sees every write).
@@ -1919,20 +2464,23 @@ export async function bootStorage<S>(
     syncCells: syncCellIds.length > 0 ? new Set(syncCellIds) : undefined,
     cellVersions,
     appId,
-    getJournalSeq: journal ? () => journal.currentSeq() : undefined,
+    getJournalSeq: journal ? () => journal.capture() : undefined,
     onPersisted: journal ? (seq) => journal.setWatermark(seq) : undefined,
     ...(journal && journalWmStored
       ? {
         planPersisted: (seq: number) =>
           kvDb!.planSet!(journalWatermarkKey(appId), seq),
+        // Every journalled save ends by making the store its own again
+        // (store-gen.ts).
+        planSaveAfter: () =>
+          planStoreGenRecord(appId, journalWatermarkKey(appId)),
       }
       : {}),
     ...(Object.keys(orphanCells).length ? { orphanCells } : {}),
     ...(persistedSnapshot
       ? {
-        storedKeys: Object.keys(persistedSnapshot).filter((k) =>
-          !k.startsWith("__")
-        ),
+        storedKeys: (storedKeysOnDisk ?? Object.keys(persistedSnapshot))
+          .filter((k) => !k.startsWith("__")),
       }
       : {}),
   });
@@ -1964,6 +2512,9 @@ export async function bootStorage<S>(
     syncBroadcastRef,
     syncDispatchRef,
     ...(writeGuard ? { writeGuard } : {}),
+    storeHeldState: hadPersistedState,
+    strayJournal,
+    storeSavedElsewhere,
   };
 }
 

@@ -9,9 +9,10 @@
 // request it was asked to open and the method's acked return value — in
 // `$AIO_DIALOG_STANDIN_OUT`. The test reads that file.
 //
-// The socket is found the way `am` finds it: in the lock dir the app's
-// `AIO_APPS_DIR` scopes.
-import { lockDir } from "../../src/server/single-instance-lock.ts";
+// The socket is found the way `am` finds it: through the lock record in the
+// lock dir the app's `AIO_APPS_DIR` scopes — its `socketPath`, which is NOT
+// in that dir when the path is too long and falls back to `/tmp/aio`.
+import { lockDir, readLock } from "../../src/server/single-instance-lock.ts";
 import { dec, enc } from "../../src/protocol/envelope.ts";
 import { protoHello } from "../../src/protocol/protocol-version.ts";
 import { VERSION } from "../../src/server/aio-cli.ts";
@@ -26,9 +27,9 @@ async function findSocket(): Promise<string> {
   while (Date.now() < deadline) {
     try {
       for (const e of Deno.readDirSync(dir)) {
-        if (e.name.endsWith(".sock") && !e.name.endsWith(".http.sock")) {
-          return join(dir, e.name);
-        }
+        if (!e.name.endsWith(".lock")) continue;
+        const sock = readLock(e.name.slice(0, -".lock".length))?.socketPath;
+        if (sock) return sock;
       }
     } catch { /* not created yet */ }
     await new Promise((r) => setTimeout(r, 100));

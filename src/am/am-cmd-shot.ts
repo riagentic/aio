@@ -6,7 +6,12 @@
 
 import type { GlobalFlags } from "./am-types.ts";
 import { detectMode, out, outError } from "./am-output.ts";
-import { liveLock, resolveAmAppId } from "./am-utils.ts";
+import {
+  liveLock,
+  lockHasNoDoor,
+  noDoorMessage,
+  resolveAmAppId,
+} from "./am-utils.ts";
 import { appPageTargets, cdpConnect, cdpTargets } from "./am-cdp.ts";
 import { comparePng, type PngDiffOptions } from "./png-compare.ts";
 import { recordShotVideo, shotVideoOptions } from "./am-cmd-shot-video.ts";
@@ -97,6 +102,12 @@ export async function cmdShot(
   const pf = liveLock(appId); // wherever the instance's home is
   if (!pf) {
     outError(`${appId} is not running (no lock) — am start first`, mode);
+    Deno.exit(1);
+  }
+  // Still booting: no window and no cdp port recorded YET — "restart with
+  // --cdp" would be the wrong advice for an app that may well have it.
+  if (lockHasNoDoor(pf)) {
+    outError(noDoorMessage(appId, pf), mode);
     Deno.exit(1);
   }
   // A client with no window is refused FIRST, cdp port or not: a recorded

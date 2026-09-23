@@ -16,8 +16,13 @@ import { parse as parseJsonc } from "@std/jsonc";
 import { refOfLink } from "../server/framework-pin.ts";
 import { resolveEntryPath } from "../server/paths.ts";
 import type { GlobalFlags } from "./am-types.ts";
-import { detectMode, out, outError } from "./am-output.ts";
-import { linkDepAio, probeDepAio, resolveAioRoot } from "./am-cmd-link.ts";
+import { detectMode, out, outError, say } from "./am-output.ts";
+import {
+  aioFlagValue,
+  linkDepAio,
+  probeDepAio,
+  resolveAioRoot,
+} from "./am-cmd-link.ts";
 import {
   compareVersions,
   ensureVersion,
@@ -567,7 +572,9 @@ export async function cmdFix(
     let root = install;
     let pin: string | null = null;
     let sealed = false;
-    const honorPin = install && !args.some((a) => a.startsWith("--aio="));
+    // BOTH spellings of --aio (`aioFlagValue`): `--aio <path>` was not seen
+    // here, so the pin overrode an explicit checkout without a word.
+    const honorPin = install && aioFlagValue(args) === undefined;
     if (honorPin) {
       pin = await readPin(dir);
       if (pin && !dry) {
@@ -1292,6 +1299,10 @@ export async function cmdFix(
   const advise = res.filter((r) => r.outcome === "advise");
   const manual = res.filter((r) => r.outcome === "manual");
   if (mode === "json") {
+    // A blocker exits 1, and the ONE document says why in `error` — the key
+    // every other failed `am --json` answer carries, so a script that checks
+    // for it (rather than counting `manual`) cannot read a blocked repair as
+    // a clean one. Additive: every other field is unchanged.
     out({
       dir,
       dryRun: dry,
@@ -1300,6 +1311,12 @@ export async function cmdFix(
       advise: advise.length,
       manual: manual.length,
       results: res,
+      ...(manual.length
+        ? {
+          error: `am fix: ${count(manual.length, "blocker")} — ` +
+            manual.map((r) => `${r.name}: ${r.note}`).join("; "),
+        }
+        : {}),
     }, "json");
     if (manual.length) Deno.exit(1);
     return;
@@ -1317,11 +1334,11 @@ export async function cmdFix(
       ? "✗"
       : "–";
   for (const r of res) {
-    console.log(
+    say(
       `  ${icon(r.outcome)} ${r.name}${r.note ? `  — ${r.note}` : ""}`,
     );
   }
-  console.log(
+  say(
     dry
       ? `\n${would} safe fix(es) available, ${
         count(advise.length, "suggestion")
@@ -1337,7 +1354,7 @@ export async function cmdFix(
   if (advise.length) {
     // Code-level issues (deprecated APIs, older-version patterns) aren't safe
     // to auto-fix — point at the linter rather than touching source.
-    console.log(
+    say(
       "  suggestions above aren't auto-applied (they touch your source/config). " +
         "For code-level checks run the aio linter: `deno task lint:aio` (aiol).",
     );

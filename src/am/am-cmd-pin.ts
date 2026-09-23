@@ -22,15 +22,17 @@ import {
   block,
   count,
   detectMode,
+  fail,
   fold,
   hints,
   kv,
   out,
   outError,
+  sayErr,
   stack,
 } from "./am-output.ts";
 import { resolveAioRoot, withoutAioFlag } from "./am-cmd-link.ts";
-import { basename, relative, resolve } from "@std/path";
+import { basename, join, relative, resolve } from "@std/path";
 import {
   compareVersions,
   currentLink,
@@ -423,7 +425,7 @@ export async function cmdPin(
     );
     ref = PATH_PIN_PREFIX + target;
     // Always on stderr, every mode — the trade-off must be impossible to miss.
-    console.error(
+    sayErr(
       `⚠ local-dev pin — this machine only: recorded in ${LOCAL_PIN_FILE} ` +
         `(git-ignored), deno.json untouched. Return to a release with ` +
         `"am pin latest".`,
@@ -452,7 +454,7 @@ export async function cmdPin(
     if (
       current && parseVersion(l)?.major !== current.major && mode === "pretty"
     ) {
-      console.error(
+      sayErr(
         `⚠ crossing a major: ${pinned} → ${l}. Read ` +
           `docs/upgrade/ before shipping this.`,
       );
@@ -477,7 +479,7 @@ export async function cmdPin(
     // line, never refused. Always stderr: the pin proceeds and this must not
     // vanish into a JSON payload nobody reads.
     if (fixtures.length) {
-      console.error(
+      sayErr(
         `⚠ ${fixtures.length} removed API(s) on test/fixture paths — ` +
           `${ref} no longer runs them; pinning anyway:\n` +
           fixtures.map(blockerLines).join("\n"),
@@ -494,6 +496,15 @@ export async function cmdPin(
     outError(res.error, mode);
     Deno.exit(1);
   }
+  // Link and pin move TOGETHER or not at all. The link used to be repointed
+  // first and the pin written second, so a pin write that failed (a
+  // read-only deno.json) left dep/aio on the new version while the app still
+  // declared the old one — the exact disagreement doctor and aiol flag.
+  const prevLink = await currentLink(appDir);
+  const localPin = join(appDir, LOCAL_PIN_FILE);
+  const prevLocal = await Deno.readFile(localPin).catch(() => null);
+  const aioDir = join(appDir, ".aio");
+  const hadAioDir = await Deno.lstat(aioDir).then(() => true, () => false);
   try {
     await linkTo(appDir, res.path);
   } catch (e) {
@@ -504,7 +515,45 @@ export async function cmdPin(
   // `main-<sha>`, so the pin in the repo is always exact and a clone reproduces
   // the same tree. "Follow main" stays an action you re-run, never a stored
   // state that can change the framework under an app behind its back.
-  const wrote = await writePin(appDir, res.ref);
+  let wrote: Awaited<ReturnType<typeof writePin>>;
+  try {
+    wrote = await writePin(appDir, res.ref);
+  } catch (e) {
+    const link = join(appDir, "dep", "aio");
+    let undone = true;
+    try {
+      if (prevLink !== null) await linkTo(appDir, prevLink);
+      else await Deno.remove(link);
+      if (prevLocal !== null) await Deno.writeFile(localPin, prevLocal);
+      else {
+        // A pin.local THIS call wrote (then `.gitignore` failed) is not
+        // "put back" while it is still there: it pins the app all the same.
+        await Deno.remove(localPin).catch((e) => {
+          if (!(e instanceof Deno.errors.NotFound)) throw e;
+        });
+        // Non-recursive: only the empty `.aio/` this call made.
+        if (!hadAioDir) {
+          await Deno.remove(aioDir).catch((e) => {
+            if (!(e instanceof Deno.errors.NotFound)) throw e;
+          });
+        }
+      }
+    } catch {
+      // aio-ok: the message below says the undo did not complete
+      undone = false;
+    }
+    fail(
+      `am pin: could not record ${res.ref} — ` +
+        `${e instanceof Error ? e.message : String(e)}\n` +
+        (undone
+          ? `  dep/aio was put back${
+            prevLink !== null ? ` (→ ${prevLink})` : ""
+          }, so link and pin still agree.`
+          : `  dep/aio now points at ${res.path} but the pin was NOT ` +
+            `recorded — they disagree until you re-run am pin.`),
+      mode,
+    );
+  }
   // The other half of the pin: align the framework-owned dep entries in the
   // app's map with what THIS version declares (see syncFrameworkDeps).
   //

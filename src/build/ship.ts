@@ -1518,7 +1518,9 @@ export function defaultKeyPath(project: string): string {
  *  the `ship` CLI and `am publish` — a key that keygen wrote to the documented
  *  default used to be ignored unless the same path was typed back as --key,
  *  and the release went out unsigned.
- *  @internal */
+ *  @internal
+ *
+ *  @decider */
 export async function resolveSigningKey(
   explicit: string | undefined,
   appName: string,

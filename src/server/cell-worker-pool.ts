@@ -12,6 +12,7 @@ import type { WirePatch as Patch } from "../protocol/patch-ops.ts";
 import type { CellDef, Msg } from "../state/cell-types.ts";
 import { WORKER_PATCH_ACTION } from "../state/cell-compose-reduce.ts";
 import { markInflight } from "../state/dispatch.ts";
+import { _dispatchUnsaved, _noteUnsaved } from "./action-ack.ts";
 import {
   _cancelTargetPrefixes,
   notifyMethodCancel,
@@ -153,6 +154,11 @@ export function createCellWorkerPool(opts: {
   }
 
   const byCell = new Map<string, CellWorker>();
+  /** Per worker cell: its patch batches still being dispatched on main —
+   *  a call's own batches arrive before its `done` (FIFO), and each resolves
+   *  only once what its commit owes is durable (aio.ts `_durableFor`), so
+   *  the call is answered after them, with their `unsaved` verdict. */
+  const patching = new Map<string, Set<Promise<string | undefined>>>();
   for (const f of cells) {
     const name = f.__aio.id;
     byCell.set(
@@ -173,11 +179,22 @@ export function createCellWorkerPool(opts: {
           // must be let through exactly like a local method's commits, not
           // refused as new input. Server-constructed only; every network
           // entry point strips the flag.
-          void dispatch(markInflight({
+          const batch = markInflight({
             type: WORKER_PATCH_ACTION,
             payload: { cell, ops },
             _source: "Effect",
-          }) as unknown as Msg);
+          }) as unknown as Msg;
+          const set = patching.get(cell) ?? new Set();
+          patching.set(cell, set);
+          const p: Promise<string | undefined> = Promise.resolve(
+            dispatch(batch),
+          ).then(
+            () => _dispatchUnsaved(batch),
+            // Refused or thrown: reported by dispatch itself; the call's own
+            // answer is the worker's `done`/`fail`.
+            () => undefined,
+          ).finally(() => set.delete(p));
+          set.add(p);
         },
         runEffect,
       }),
@@ -261,9 +278,32 @@ export function createCellWorkerPool(opts: {
     route: (dispatchFn) => (action: Msg) => {
       const owner = ownerOf(action);
       forwardCancel(action, owner);
-      return owner
-        ? counted(action.type, owner.call(action))
-        : dispatchFn(action);
+      if (!owner) return dispatchFn(action);
+      const cell = action.type.slice(0, action.type.indexOf(":"));
+      const settle = async (): Promise<void> => {
+        const why = (await Promise.all([...(patching.get(cell) ?? [])]))
+          .filter((v) => v !== undefined);
+        if (why.length > 0) {
+          _noteUnsaved(
+            action as object,
+            undefined,
+            [...new Set(why)].join("; "),
+          );
+        }
+      };
+      return counted(
+        action.type,
+        owner.call(action).then(
+          async (v) => {
+            await settle();
+            return v;
+          },
+          async (e) => {
+            await settle();
+            throw e;
+          },
+        ),
+      );
     },
     ready: async () => {
       await Promise.all([...byCell.values()].map((w) => w.ready()));

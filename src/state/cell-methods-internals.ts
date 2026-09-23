@@ -303,7 +303,9 @@ export function buildMethodsMachine(
  *  armed the timer and handed the whole array back as a value). All elements
  *  effects → effects; none → value; a MIX has no coherent meaning, so it throws
  *  the same teachable error on both paths (sync: REDUCE_ERROR rejects the
- *  caller; async: the catch rejects the caller — loud either way). */
+ *  caller; async: the catch rejects the caller — loud either way).
+ *
+ *  @decider */
 export function classifyReturnedArray(
   cellName: string,
   methodKey: string,

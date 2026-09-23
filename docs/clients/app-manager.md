@@ -231,7 +231,8 @@ to `deno.json` as a dev convenience.
 | `--no-wait`    | `start` only: return as soon as the child is spawned, before it has picked a port. The old default, kept for a script that genuinely wants the spawn                                                                    |
 | `--json`       | Force JSON output                                                                                                                                                                                                       |
 | `--quiet`      | Suppress output (exit code only)                                                                                                                                                                                        |
-| `--home=DIR`   | Target the instance of the app running from data home `DIR` — an isolated second boot (`appDir`) beside the user's own. `AIO_APPS_DIR` is the env form                                                                  |
+| `--profile=X`  | Start or target profile `X` of the app — a name (`~/.<appId>-X`, key `<appId>@X`) or a path. `am start myapp@X` is the short form. See [Profiles](#profiles-several-copies-of-one-app)                                  |
+| `--home=DIR`   | The path form of `--profile`: start or target the instance whose data home is `DIR`. `am start --home` starts one there (1.0.9 refused). See [Profiles](#profiles-several-copies-of-one-app)                            |
 | `--timeout=MS` | `surface`/`trigger`: how long to wait for the live client (default 8000; must exceed the server's own 5000 ms client wait)                                                                                              |
 
 A value `am` cannot act on is refused before any verb runs, never guessed:
@@ -272,11 +273,15 @@ rotation story and a stolen copy is worthless.
 **Where the data is.** Three things are spelled like "where this app lives" and
 only one moves the database:
 
-|                       |                                                     |
-| --------------------- | --------------------------------------------------- |
-| `--home <dir>`        | addresses an existing instance — moves nothing      |
-| `AIO_APPS_DIR`        | moves the ROOT that homes resolve under             |
-| `aio.run({ appDir })` | moves the app's own directory, and the data with it |
+|                       |                                                        |
+| --------------------- | ------------------------------------------------------ |
+| `--profile <name>`    | a separate home beside the app's own (`<home>-<name>`) |
+| `--home <dir>`        | that exact folder — the path form of `--profile`       |
+| `AIO_APPS_DIR`        | moves the ROOT that homes resolve under                |
+| `aio.run({ appDir })` | moves the app's own directory, and the data with it    |
+
+The first two are per RUN (pass them on every verb); see
+[Profiles](#profiles-several-copies-of-one-app) for which one to use.
 
 `am instances --json` reports `dataDir` on every row (`null` for a lock written
 before 1.0.0-beta), and `--long` shows a `DATA` column when it differs from
@@ -355,14 +360,27 @@ deno task am kill --stale         # reap ORPHANS — processes still serving wit
                                   # --port=N for an orphan on an unrecorded port
 deno task am restart              # stop + start — exit 1 + NOT SAVED if the final write was refused (the app still restarts)
                                   # keeps the port it had when that port is still free
-deno task am status               # stopped|starting|started|stopping
+deno task am status               # stopped|starting|started|stopping|maintenance
 deno task am open                 # open THIS app in a browser (--print writes the URL)
 ```
 
 In a repo that declares COMPONENTS (below), `start`, `stop`, `restart` and
 `status` mean the whole project, and take a component label to mean one of it.
 
-Exit codes: `started` -> 0, `stopped` -> 1, `starting`/`stopping` -> 2.
+Exit codes: `started` -> 0, `stopped` -> 1, `starting`/`stopping`/`maintenance`
+-> 2. `maintenance` is `am backup` / `am restore` holding the app's lock
+(`--json`: `{ appId, status, op, pid }`); `start`, `stop` and the app verbs
+refuse while it lasts, naming it. `am instances` lists the hold the same way
+(`status: "maintenance"`, `op`, no `stopWith`). `am kill` is the one verb that
+acts on it: it interrupts the op (SIGTERM), which removes its partial copy and
+exits 143 with `data/` as it was. A holder that is wedged and ignores even that
+(a hung disk, a stopped process) is ended with `kill -9 <pid>`: the lock names a
+dead pid from then on, and whatever finds it next — `am start`, `am status`,
+`am instances`, or the app's own boot — reclaims it, saying which op was killed
+and naming the partial copy it left. A killed backup leaves `<dest>.partial`
+(refused by name, never reused); a killed restore leaves `data/` old or restored
+(killed between the swap's two renames: missing, with the previous data in
+`data.replaced-*`), plus a `data.restoring-*` that the next restore names.
 
 A global flag given to a verb that does not read it is warned about on stderr
 and ignored — the verb still runs, with its own exit code — and the warning
@@ -372,7 +390,7 @@ for timeline — ignored", "--follow is read by: am logs"):
 --as-server --body --args --data`.
 The cross-cutting ones
 (`--app --port
---home --json --quiet --wait --timeout --client-index --entry --force`)
+--profile --home --json --quiet --wait --timeout --client-index --entry --force`)
 and the launch flags (`--no-wait --transport`) are accepted everywhere. `--`
 ends am's options: what follows is an argument, never a flag.
 
@@ -476,7 +494,8 @@ The default home keeps the plain `{appId}.lock`, so nothing migrates. A refusal
 ("Already running … (home …)") therefore always means the SAME home — a true
 duplicate, whose port and pid are your own instance's. `am --home=<dir>` (or
 `AIO_APPS_DIR=<root>`) targets the instance you mean; `am instances` shows each
-instance's `home`.
+instance's `home`. A named profile's key is `{appId}@{name}` rather than a hash
+— see [Profiles](#profiles-several-copies-of-one-app).
 
 **Filters.** A substring cannot ask "warnings and worse", "from this cell", or
 "since the restart":
@@ -912,7 +931,10 @@ the commands add over `cp -r` is two refusals:
   no `state.db`): restoring nothing over your data is not a restore.
 
 A restore **moves** the data it replaces to `data.replaced-<stamp>` rather than
-deleting it, so restoring the wrong archive is recoverable.
+deleting it, so restoring the wrong archive is recoverable. The name is never
+reused: a second restore within the same second gets `data.replaced-<stamp>-2`.
+A `data.restoring-*` left by a killed restore is named on the next restore
+(never deleted for you).
 
 ## UI inspection and interaction (dev mode)
 
@@ -1296,6 +1318,103 @@ Electron loses its runtime), keep only this host's platform (cross-build
 runtimes for Windows and macOS are build inputs, not leftovers), or run as part
 of `am fix` (silent, remote, and unrecoverable without a network).
 
+## Profiles: several copies of one app
+
+A second copy of an app with its own data — a `dev` copy beside the one you use,
+a clean one for a test run, a demo seeded with fixtures — is one flag:
+
+```sh
+am start --profile=dev                            # ~/.myapp-dev: own state.db, lock, socket, logs
+am start myapp@dev                                # the same, short form (names only)
+am dispatch --profile=dev todo:add --args='["x"]' # every verb takes it, every time
+am instances                                      # APP column: myapp, myapp@dev
+am stop myapp@dev                                 # a bare `am stop` never stops a profile
+```
+
+The app itself takes the same flag, so it works without `am`:
+`deno task dev --profile=dev`, `./myapp.AppImage --profile=dev`, a packaged
+Electron app, or `AIO_PROFILE=dev` in the environment (the flag wins over the
+variable). `am restart` replays it from `launch.json`.
+
+**The rules**
+
+- **A name** — `^[a-z0-9][a-z0-9-]{0,31}$`, not `default`, not eight hex digits
+  (that reads as a path hash) — is a home beside the app's own: `<base>-<name>`,
+  where `<base>` is `~/.<appId>`, `$AIO_APPS_DIR/<appId>`, or the app's
+  `appDir`. Its key is `<appId>@<name>`: lock `<appId>@<name>.lock`, socket
+  `<appId>@<name>.sock`, Windows pipe `\\.\pipe\aio-<appId>@<name>`, and its own
+  Electron (Chromium) profile.
+- **A path** — contains `/` or `\`, starts with `~` or `.`, or a drive (`C:`) —
+  is that exact folder. Its key is `<appId>@<hash8(path)>`, because two folders
+  can share a last segment. `--home=<dir>` (the app reads `--home=` /
+  `AIO_PROFILE=<path>`) is the same thing, path only. `--profile` and `--home`
+  naming two different folders are refused:
+  `… name two different folders — give one. --home is the path-only spelling of --profile.`
+  A path that IS a named profile's folder (`--profile=~/.myapp-dev`) is that
+  profile. A path is checked like a derived home: a folder holding another
+  program's files, or a reserved name (`~/.ssh`, `~/.aio`, …), is refused.
+- **`@` never occurs in an appId**, so `myapp@dev` is unambiguous:
+  `am start myapp@dev`, `am stop myapp@dev`, `--app=myapp@dev`. Names only — a
+  path goes in `--profile=` or `--home=`. A hash tag as `am instances` prints it
+  (`myapp@1a2b3c4d`) also works, for an instance that is RUNNING under that key.
+- **Every `am` verb takes it** — `start`, `stop`, `restart`, `status`, `logs`,
+  `state`, `dispatch`, `backup`, `restore`, … — and `am instances --profile=dev`
+  filters. Like `--instance`, it is passed each time: it picks which copy you
+  are talking to.
+- **Precedence:** `--home` / a path > a name / `AIO_PROFILE` > `appDir` >
+  `AIO_APPS_DIR` > `~/.<appId>`. A name is placed relative to whichever of the
+  last three applies.
+- **A home knows its owner.** `data/meta.json` records the appId and profile;
+  boot refuses a home owned by another app or profile:
+  `<home> belongs to profile "dev" of app "myapp" (its data/meta.json says so), not to …`.
+  The `dev` profile of `myapp` and an app called `myapp-dev` both derive
+  `~/.myapp-dev`, and never open one database. A plain boot (no profile) is
+  refused only by a `meta.json` a PROFILE wrote — a folder an older aio wrote is
+  never refused.
+- **One folder, one process.** `<home>/.aio-instance.lock` is an OS lock held
+  for the life of the app (`.aio-instance.json` beside it names the holder), so
+  two processes in different lock scopes (`--instance`, `AIO_APPS_DIR`) still
+  cannot open one `state.db`: the second is refused with
+  `already running from …`.
+- **Ports do not change**: a free port unless the app fixes one (a packaged
+  Electron app binds none). Two copies of an app with a fixed `port` clash; the
+  refusal names the aio app holding the port and suggests `--port=0`.
+- **`am remove --data` never removes a profile.** It lists the app's profile
+  homes (`--json`: `profileHomes`) and leaves them; delete one by hand.
+- **Listed like any instance**: `am instances` shows `myapp@dev` (the APP column
+  is the key; `--json` adds `profile`), and amui shows it.
+
+**When the app says no.** `aio.run({ profiles: false })` (default `true`) runs
+from one folder only: every form — a name, a path, `--home`, `AIO_PROFILE` — is
+refused at boot with exit 1:
+`this app runs from one folder only (profiles: false) — <source> is refused. Unset it (AIO_APPS_DIR still moves the whole apps root).`
+
+**When the app owns the flag.** An app that declares its OWN `--profile` or
+`--home` flag keeps it: aio reads only `AIO_PROFILE`, and warns once if the flag
+is on the command line. `am` forwards its argv unchanged, so for such an app
+`am start --profile=dev` hands `--profile=dev` to the APP — use
+`AIO_PROFILE=dev am start` instead.
+
+**Mixed versions.** An app on aio 1.0.9 or older does not know the flag. `am`
+forwards it as an argument, the app refuses the unknown flag, and nothing boots
+on the real data.
+
+Not to be confused with `am profile`, which exports the `.aioapp` pairing
+profile (cert + key) for a client.
+
+**Which one do I use?** For a copy of an app, `--profile=<name>`.
+
+| You want                                              | Use                                  | Data home                         | Key                     |
+| ----------------------------------------------------- | ------------------------------------ | --------------------------------- | ----------------------- |
+| a second copy with its own data (dev, test, demo)     | `--profile=<name>` ✓                 | `~/.<appId>-<name>`               | `<appId>@<name>`        |
+| a copy in a folder you choose                         | `--profile=<path>` / `--home=<path>` | that folder                       | `<appId>@<hash8(path)>` |
+| a separate world: every app, lock dir, socket, log    | `--instance=<name>`                  | `~/.aio-instances/<name>/<appId>` | `<appId>`, own lock dir |
+| every app under another root (you run it, not own it) | `AIO_APPS_DIR=<root>`                | `<root>/<appId>`                  | `<appId>`, own lock dir |
+| the app's data in one fixed place (you wrote it)      | `aio.run({ appDir })`                | that folder                       | `<appId>@<hash8(home)>` |
+
+A profile is per RUN and leaves the code alone; `appDir` is the author's, in the
+code; `AIO_APPS_DIR` and `--instance` move every app at once.
+
 ## A private copy: `--instance=<name>`
 
 The singleton lock is on the appId, and the appId picks the data home — so two
@@ -1321,7 +1440,13 @@ the more specific instruction — and `am` says so on stderr
 (`--instance=agent1 is ignored — AIO_APPS_DIR is set …`) rather than letting the
 flag do nothing in silence. `am instances --json` prints each row's `stopWith`
 with the scope it was listed in (`--instance=<name>`, `AIO_APPS_DIR=<dir>`,
-`--home=<dir>`), so the command reaches that copy and not the default one.
+`--profile=<name>`, or `--home=<dir>` for any other home), so the command
+reaches that copy and not the default one.
+
+A second copy of ONE app, beside the real one in the same world, is a
+[profile](#profiles-several-copies-of-one-app), not an instance. The two
+compose: `am --instance=agent1 start --profile=dev` is the `dev` profile inside
+agent1's world.
 
 ## Reporting findings about aio (`am feedback`)
 

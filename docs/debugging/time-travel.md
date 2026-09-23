@@ -52,6 +52,10 @@ are O(1) — the entry's state is simply served.
   2000 actions.
 - Dev only: `if (prod) return false` — by design, not by accident.
 - Off switch: `diagnostics: { dev: { timeTravel: false } }`.
+- `sync: true` cells jump too. The jump reaches them as a server write: pushed
+  to every connected client, folded into the cell's snapshot and, with
+  `journal: true`, journalled — so undo survives a restart. The cell's ops after
+  the restored point are discarded, like any other state they built.
 - UI: `useTimeTravel()` in any AIR component; server side drives it over the
   `tt-state` / `tt-cmd` frames.
 

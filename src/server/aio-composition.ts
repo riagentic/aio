@@ -6,7 +6,11 @@ import {
   type ComposedCells,
 } from "../state/cell.ts";
 import { isRefusableCredential, looksSecret } from "../state/secret-names.ts";
-import { buildDBStateGetter } from "../state/cell-persist-filter.ts";
+import {
+  buildDBStateGetter,
+  persistFilterOf,
+  persistingCellIds,
+} from "../state/cell-persist-filter.ts";
 import { forUserView } from "../state/cell-reactive.ts";
 import {
   applyCellFieldFilter,
@@ -88,6 +92,10 @@ export type VisibilityRow = {
 export type ComposeCellsResult = {
   composed: ComposedCells;
   autoGetDBState: (s: unknown) => unknown;
+  /** The restore half of the same rule (`persistingCellIds`): the cells whose
+   *  slice may be written and may come back. Computed HERE, beside the write
+   *  half, so the two cannot be decided in two places. */
+  persistingCellIds: Set<string>;
   autoGetUIState: ((s: unknown, user?: unknown) => unknown) | undefined;
   cellPatchStrategies: Map<string, CellPatchStrategy>;
   cellFilterFields: Map<string, PatchFilterFields>;
@@ -625,6 +633,7 @@ export function composeCellsWiring(
   return {
     composed,
     autoGetDBState,
+    persistingCellIds: persistingCellIds(composed),
     autoGetUIState,
     cellPatchStrategies,
     cellFilterFields,
@@ -813,7 +822,7 @@ function buildVisibilityReport(composed: ComposedCells): VisibilityRow[] {
     rows.push({
       cell: f.__aio.id,
       ui: uiResolved,
-      persist: f.__aio.persist ?? "all",
+      persist: persistFilterOf(f),
       access: f.__aio.access,
       uiDecided: f.__aio.ui !== undefined || !!f.__aio.uiForUser,
       fields: Object.keys(
