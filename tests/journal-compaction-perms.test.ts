@@ -39,7 +39,7 @@ Deno.test("journal: compaction keeps the file owner-only (0600)", async () => {
     // No stray temp file is left behind holding the same payloads.
     const leftovers = [...Deno.readDirSync(dir)].map((e) => e.name);
     assert(
-      !leftovers.includes("actions.journal.tmp"),
+      !leftovers.some((n) => n.includes(".tmp")),
       `temp file left behind: ${leftovers.join(", ")}`,
     );
   } finally {

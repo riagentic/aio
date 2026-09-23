@@ -89,3 +89,44 @@ export function _dispatchShort(action: unknown): string | undefined {
     ? _shortNotes.get(action)
     : undefined;
 }
+
+// ── `unsaved`: applied, acked — and NOT durable ─────────────────────────
+// A write whose journal line could not be written (a refused append, a
+// redacted cell's state) is made durable by a SAVE instead, and every ack
+// waits for it (aio.ts `_durableFor`). When that save fails, the call still
+// ran — `ok: true` stays true — but the caller is told the write is not on
+// disk, in the same `unsaved` field and sentence the trojan reply already
+// carries (`PERSIST_REFUSED`). One note per action (or per async call, whose
+// ack comes at the method's end), read by every door.
+const _unsavedNotes = new WeakMap<object, string>();
+const _unsavedCalls = new Map<string, string>();
+
+/** Record that what `action` (or async call `callId`) owes did not land.
+ *  @internal */
+export function _noteUnsaved(
+  action: object | undefined,
+  callId: string | undefined,
+  sentence: string,
+): void {
+  if (action) _unsavedNotes.set(action, sentence);
+  if (callId !== undefined) {
+    if (_unsavedCalls.size >= 1024) {
+      _unsavedCalls.delete(_unsavedCalls.keys().next().value!);
+    }
+    _unsavedCalls.set(callId, sentence);
+  }
+}
+
+/** The `unsaved` sentence for `action`'s ack, if its stand-in save failed —
+ *  keyed by the frame object, or by the async call id it carries. */
+export function _dispatchUnsaved(action: unknown): string | undefined {
+  if (!action || typeof action !== "object") return undefined;
+  const direct = _unsavedNotes.get(action);
+  if (direct !== undefined) return direct;
+  const call = (action as { payload?: { _callId?: unknown } }).payload
+    ?._callId;
+  if (typeof call !== "string") return undefined;
+  const v = _unsavedCalls.get(call);
+  _unsavedCalls.delete(call);
+  return v;
+}

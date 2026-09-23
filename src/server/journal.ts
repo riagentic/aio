@@ -17,7 +17,14 @@ import type { Redactor } from "../diagnostics/redact.ts";
 import { runWithUser } from "./auth-context.ts";
 import type { AioUser } from "./aio-types.ts";
 import { log } from "../diagnostics/logger-api.ts";
+import {
+  exactName,
+  sweepStaleTmps,
+  uuidTmpBefore,
+} from "../diagnostics/tmp-sweep.ts";
+import { basename, dirname } from "@std/path";
 import { stringifyWithIssues } from "./persist-guard.ts";
+import { applyStatePatch, type StatePatchOp } from "../sync/state-patch.ts";
 import type { PersistIssue } from "./persist-guard.ts";
 import { WORKER_PATCH_ACTION } from "../state/cell-compose-reduce.ts";
 
@@ -66,6 +73,13 @@ function redactsWorkerPatch(
  *  up to seq N" is true exactly when that snapshot is. */
 export const syncJournalWatermarkKey = (appId: string, cell: string): string =>
   `${appId}:__journal_wm:${cell}`;
+
+/** Beside it, in the same fold transaction: the cell's `compacted_ts` that
+ *  fold left. A later snapshot with a higher one was written by a fold that
+ *  recorded no watermark — a run with the journal off, or another build —
+ *  so it is newer than every journalled state line of the cell. */
+export const syncJournalSnapshotKey = (appId: string, cell: string): string =>
+  `${appId}:__journal_snap:${cell}`;
 
 /** What a compaction dropped, recorded beside the journal (`<journal>.base`).
  *
@@ -132,7 +146,113 @@ export type TimeTravelRestore = {
    *  keeps out of the store (`persist: { exclude }`, `persist: "none"`) is not
    *  written here either — the journal must not hold what the store refuses to. */
   cells: Record<string, Record<string, unknown>>;
+  /** A `listensTo` reaction line only: cell id → its stored slice as a DELTA
+   *  (`diffState`) against the reaction line at seq `base`, which carried the
+   *  cell's slice whole or as a delta itself — a chain that starts at a line
+   *  carrying it in `cells` (see `SyncReaction` for why chains restart at
+   *  each save's capture). A build that predates it sees no cell here and
+   *  changes nothing. */
+  deltas?: Record<string, { base: number; ops: StatePatchOp[] }>;
+  /** A `listensTo` reaction line only: cell id → its stored slice WHOLE (a
+   *  chain's keyframe). Where these used to sit — `cells` — a build that
+   *  predates reaction lines (v1.0.9, an `am pin` downgrade) applied them as
+   *  a jump AFTER re-deriving the reaction from the lines that caused it,
+   *  so a chain's first slice reset the cell (a tally of 10 back to 1) and
+   *  was then persisted for good. Here, such a build sees an empty `cells`
+   *  and changes nothing — its own behaviour. */
+  keyframes?: Record<string, Record<string, unknown>>;
 };
+
+/** `TimeTravelRestore.cmd` of a line that is NOT a jump: a `listensTo`
+ *  REACTION of a store-persisted cell, journalled as the state it wrote
+ *  (aio.ts `_journalReaction`). Readers that report jumps skip it. */
+export const LISTENS_TO_CMD = "listensTo";
+
+/** {@linkcode LISTENS_TO_CMD}'s twin for a reaction a SYNC OP caused. The op
+ *  is in the op-log, not the journal, so nothing in the journal re-creates
+ *  the reaction: `am replay`/`am record` say so instead of implying the call
+ *  that caused it is in the flow. */
+export const LISTENS_TO_SYNC_OP_CMD = "listensTo:syncOp";
+
+/** A `listensTo` reaction of a SYNC cell, journalled as that cell's state at
+ *  a position in its op-log (aio.ts `_journalReaction`). Boot seeds the cell
+ *  from the newest such line past the cell's watermark and folds only the ops
+ *  above `at` on top — so the reaction lands between the cell's own ops
+ *  exactly where it happened live.
+ *
+ *  `__`-prefixed and with no `cell:` part: every build's reducer treats it as
+ *  a framework-internal no-op (no warning, no state change), which is what a
+ *  build that predates it — an `am pin` downgrade — does with the line. */
+export const SYNC_REACTION_TYPE = "__aioSyncReaction";
+
+/** The payload of a {@linkcode SYNC_REACTION_TYPE} line: the cell's state
+ *  at op-log position `at`, as a CHAIN — a keyframe (`state`) and then, per
+ *  reaction, only what changed since the previous line of the chain (`ops`,
+ *  `base` = that line's seq). A reaction on a 2 MB cell costs the change, not
+ *  2 MB. A chain starts with a keyframe at boot. A fold does not restart it:
+ *  the first line after the fold lands is a delta against the snapshot it
+ *  wrote (`baseSnapshotAt`), and the first line written while the fold is in
+ *  flight carries that delta beside its own (`alsoSnapshot`). So the tail a
+ *  fold's watermark leaves always starts at a line boot can resolve: a
+ *  keyframe, or a delta on the snapshot the store holds. */
+export type SyncReaction = {
+  cell: string;
+  /** The highest op-log position (`server_ts`) the state holds. */
+  at: number;
+  /** Keyframe: the whole state. */
+  state?: Record<string, unknown>;
+  /** Delta: `diffState(previous line's state, this state)`. */
+  ops?: StatePatchOp[];
+  /** Delta: the seq of the previous line of the chain. */
+  base?: number;
+  /** Delta against the cell's SAVED SNAPSHOT instead of a line: the fold
+   *  that wrote it captured the state this delta was taken against, at this
+   *  journal seq — the cell's journal watermark, which the fold records in
+   *  the snapshot's own transaction. Boot starts the chain from the snapshot
+   *  only when the watermark it holds is exactly this (else the snapshot is
+   *  another capture, and the line cannot be resolved — said). So a fold no
+   *  longer forces the next line to carry the whole cell. */
+  baseSnapshotAt?: number;
+  /** The first line written while a fold was in flight: `ops` here are the
+   *  same state as a delta against THAT fold's snapshot (captured at `at`).
+   *  The line's own `state`/`base` chain still resolves if the fold never
+   *  lands; once it has, the older lines that chain rests on are gone and
+   *  boot starts here instead (when the cell's watermark is exactly `at`). */
+  alsoSnapshot?: { at: number; ops: unknown[] };
+  /** A sync op caused it (see {@linkcode LISTENS_TO_SYNC_OP_CMD}). */
+  bySyncOp?: true;
+  /** Not a reaction: the state a time-travel jump put the cell in (the
+   *  jump's own `TT_RESTORE_TYPE` line precedes it). */
+  jump?: true;
+  /** Not a reaction: the state a server-origin write (a plain call, an
+   *  effect, a trojan dispatch — no op) left the cell in, at its op-log
+   *  position. The write's own call line precedes it; boot restores from
+   *  this line and skips that one (see aio.ts's `_afterAction`). */
+  write?: true;
+};
+
+/** A journal line that records a `listensTo` reaction, not an action or a
+ *  time-travel jump — so `am record`/`am replay`/`am timeline` do not report
+ *  it as either. Pure. */
+export function isListenerReaction(
+  e: { type: string; payload?: unknown },
+): boolean {
+  if (e.type === SYNC_REACTION_TYPE) return true;
+  if (e.type !== TT_RESTORE_TYPE) return false;
+  const cmd = (e.payload as { cmd?: unknown } | undefined)?.cmd;
+  return cmd === LISTENS_TO_CMD || cmd === LISTENS_TO_SYNC_OP_CMD;
+}
+
+/** A {@linkcode isListenerReaction} line whose cause is a SYNC OP — which is
+ *  in the op-log, not the journal, so a replay of the journal's calls does
+ *  not re-create it. Pure. */
+export function isSyncOpReaction(
+  e: { type: string; payload?: unknown },
+): boolean {
+  const p = e.payload as { bySyncOp?: unknown; cmd?: unknown } | undefined;
+  return (e.type === SYNC_REACTION_TYPE && p?.bySyncOp === true) ||
+    (e.type === TT_RESTORE_TYPE && p?.cmd === LISTENS_TO_SYNC_OP_CMD);
+}
 
 /** Where an action came from, as the journal records it.
  *
@@ -147,9 +267,165 @@ export type TimeTravelRestore = {
  *  Absent on journals written before this field existed. */
 export type ActionCause = "input" | "effect";
 
+/** The journal format this build writes (`JournalEntry.fmt`). */
+const JOURNAL_FORMAT = 2;
+
+/** Was this tail written by a build that predates the format stamp (v1.0.9
+ *  and earlier)? Such a build journalled no `listensTo` reactions — its boot
+ *  re-derived them by folding each sync op through the WHOLE root — so a
+ *  newer boot over its crashed tail must re-derive them, once (aio.ts). Legacy
+ *  ⇔ some unstamped line is newer than the newest upgrade marker (a marker
+ *  answers only for the lines before it). An empty tail says nothing either
+ *  way — aio.ts also asks the op-log (`REACTIONS_FORMAT_ROW`). Pure. */
+export function isLegacyTail(tail: readonly JournalEntry[]): boolean {
+  const marker = tail.reduce(
+    (m, e) => e.type === LEGACY_RECOVERED_TYPE ? Math.max(m, e.seq) : m,
+    -Infinity,
+  );
+  return tail.some((e) => e.fmt === undefined && e.seq > marker);
+}
+
+/** The `sync_meta` row (its `cell`) a build that records its reactions
+ *  stamps, in `state.db` beside the op-log, once its boot is settled — with
+ *  the format in `low_water`. An op-log with no stamp was last run by an
+ *  older build, whose reactions are in no record even when its journal is
+ *  empty (a clean stop compacts it) or when it ran with `persist` off. Not a
+ *  cell: `__`-prefixed, and every read of `sync_meta` but the high-water
+ *  mark is by cell (whose `compacted_ts` 0 this row never raises). */
+export const REACTIONS_FORMAT_ROW = "__aio_reactions_fmt";
+
+/** The `sync_meta` row a CLEAN stop writes: `low_water` = "from:to", the
+ *  `server_ts` range (from, to] of the ops that run issued (continued from
+ *  the previous clean stop when no other run came between). It says: every
+ *  one of those ops was reduced with its listeners live, then the store SAVED
+ *  and every sync cell FOLDED with no failure — so their `listensTo`
+ *  reactions are in those records, journal or not. Written only by a run
+ *  that persists; ops issued before the run are not vouched for (an earlier
+ *  crash may have lost their reactions). Only ever overwritten, by the next
+ *  clean stop. */
+export const CLEAN_STOP_ROW = "__aio_clean_stop";
+
+/** What {@linkcode REACTIONS_FORMAT_ROW} records: a run of this build that
+ *  did not mark its reduced sync ops (no journal, or `persist` off) ... */
+export const REACTIONS_FORMAT = JOURNAL_FORMAT;
+/** ... and one that marked every reduced op on a listened action
+ *  ({@linkcode SYNC_APPLIED_TYPE}) — the only run after which an unmarked
+ *  op proves it was never reduced. */
+export const REACTIONS_MARKED = JOURNAL_FORMAT + 1;
+
+/** Closes a boot over a {@linkcode isLegacyTail} tail: that boot re-derived
+ *  every listener reaction the old build never journalled, wrote them as
+ *  stamped state lines, and then this. The unstamped lines before it are
+ *  never legacy again (an older build writing on after it is) — so a SECOND
+ *  crash right after the upgrade (old lines, this line, new lines) replays
+ *  the new way, from the state lines, and never folds the old ops through
+ *  every listener twice. Before it lands, the tail is still
+ *  legacy and the whole recovery runs again (the state lines it may already
+ *  have written are absolute: re-applied, they change nothing). Lives until
+ *  every cell's watermark holds it (`only` = all cells) — no longer than the
+ *  old lines it answers for. `__`-prefixed with no `cell:` part: a no-op to
+ *  every build's reducer. */
+export const LEGACY_RECOVERED_TYPE = "__aioLegacyRecovered";
+
+/* ── Sync ops on a listened action: the journal's record of their reactions ──
+ *
+ * A sync op X (cell c, `server_ts` X.ts) on an action some cell `listensTo`
+ * changes c through the op-log, and every listener through the reduce alone:
+ * the op-log replays X into c, never into a listener. So a listener's
+ * reaction to X is durable only through the journal (or a later save of the
+ * listener). Three records, written by a build with a journal:
+ *
+ *   INTENT(X)  {@linkcode SYNC_INTENT_TYPE} — after X.ts is issued, BEFORE
+ *              X's row is inserted.
+ *   COMMIT(X)  {@linkcode SYNC_APPLIED_TYPE} — after X is reduced, in ONE
+ *              journal line ({@linkcode BATCH_TYPE}) with every reaction line
+ *              X's reduce wrote.
+ *   ROW(X)     the op-log row.
+ *
+ * What holds, and what each rule below rests on:
+ *
+ *  J1  One line is on disk whole or not at all to a reader: a torn line does
+ *      not parse and is skipped. So COMMIT(X) is readable ⇔ every reaction
+ *      line of X is.
+ *  J2  Lines land in append order and a crash loses only a suffix (SIGKILL
+ *      always; a power cut with `sync: true` — without it, not promised).
+ *  J3  INTENT(X) precedes ROW(X). So ROW(X) with no readable INTENT(X) and no
+ *      COMMIT(X) means the journal does not cover X: a run that wrote no
+ *      intents inserted it (an older build, or this one with no journal), or
+ *      the journal lost lines (deleted, restored, truncated). Nothing then
+ *      proves whether X's reactions are in any record.
+ *  J4  X is persisted, reduced and committed under c's lock, and c's next op
+ *      is persisted only after X's dispatch settled. So at most one op of c
+ *      lacks its COMMIT because the process died between its persist and its
+ *      commit — and it is c's LAST row. An uncommitted op that is not c's last
+ *      had its commit refused (a journal failure, reported then) while the
+ *      run went on: its reactions may have reached a save, or not.
+ *  J5  INTENT and COMMIT live by c's own watermark, which moves only with a
+ *      fold of c that deletes every op it holds from the log: while ROW(X)
+ *      exists, its INTENT and COMMIT are in the file unless the file lost
+ *      lines.
+ *  J6  A save of the store records the journal seq it read at (the store's
+ *      watermark), and every build's seq continues above every line in the
+ *      file. So a store watermark below INTENT(X)'s seq proves no store save
+ *      happened after X was persisted — by any build that journals.
+ *  J7  (F3, op-placement.ts) A fold of a sync cell issues its snapshot
+ *      value and captures the state in one turn: a snapshot value below X.ts
+ *      proves the snapshot was captured before X was reduced.
+ *
+ * Boot (aio.ts), per op X in the log on a listened action:
+ *  - COMMIT(X) readable → covered: journal replay restores its reactions.
+ *  - INTENT(X), no COMMIT(X), X is c's last row → in flight (J4): X is
+ *    reduced again whole, exactly as the live server decides — a refusal
+ *    (validate, guard, throw) deletes the row and nothing is acked. Its
+ *    reaction is applied to a listener only where that listener's record
+ *    certainly lacks it: a store-persisted one whose store has not saved
+ *    since INTENT(X) (J6), a sync one whose snapshot predates X (J7); held
+ *    and named everywhere else.
+ *  - anything else → not covered (J3, J4): its reactions are NOT re-derived,
+ *    and every listener that may lack them is named.
+ * Then every op the boot has placed gets its COMMIT, before any input, so it
+ * is placed — and named — once.
+ * ────────────────────────────────────────────────────────────────────────── */
+
+/** INTENT(X) — see the block above. Payload `{ cell, id, ts }`; lives by the
+ *  cell's own watermark (`only`). `__`-prefixed with no `cell:` part: a no-op
+ *  to every build's reducer. */
+export const SYNC_INTENT_TYPE = "__aioSyncIntent";
+
+/** COMMIT(X) — see the block above. Payload `{ cell, id, ts }` (`ts` = the
+ *  op's `server_ts`); always inside the op's {@linkcode BATCH_TYPE} line when
+ *  the live server wrote it. Lives by its cell's own watermark (`only`).
+ *  `__`-prefixed with no `cell:` part: a no-op to every build's reducer. */
+export const SYNC_APPLIED_TYPE = "__aioSyncApplied";
+
+/** One line holding several entries (`entries`), so they reach a reader all
+ *  together or not at all (J1) — what {@linkcode Journal.atomic} writes.
+ *  Every read expands it into its entries; the line itself is no entry.
+ *  `seq` is its last entry's. An older build reads it as one entry of an
+ *  unknown `__` type: a no-op. */
+export const BATCH_TYPE = "__aioBatch";
+
+/** Every read's view of a parsed line: a {@linkcode BATCH_TYPE} line is its
+ *  entries. Pure. */
+export function expandBatch(e: JournalEntry): JournalEntry[] {
+  if (e.type !== BATCH_TYPE) return [e];
+  const inner = (e as { entries?: unknown }).entries;
+  if (!Array.isArray(inner)) return [];
+  return inner.filter((x): x is JournalEntry =>
+    x !== null && typeof x === "object" &&
+    typeof (x as JournalEntry).seq === "number" &&
+    typeof (x as JournalEntry).type === "string" &&
+    (x as JournalEntry).type !== BATCH_TYPE
+  );
+}
+
 export type JournalEntry = {
   seq: number;
   type: string;
+  /** The journal format that wrote the line ({@linkcode JOURNAL_FORMAT});
+   *  absent from a line written before it existed. Additive: an older build
+   *  reads past it. */
+  fmt?: number;
   payload?: unknown;
   ts: number;
   /** See {@linkcode ActionCause}. */
@@ -188,6 +464,14 @@ export type JournalEntry = {
    *  see `replayJournal`. Absent on journals written before this field
    *  existed, which replay as they always did. */
   v?: Record<string, number>;
+  /** The cells a `listensTo` REACTION line writes (a `TT_RESTORE_TYPE` line
+   *  carrying their slices as data — see aio.ts `_journalReaction`). Such a
+   *  line lives until EVERY one of them has saved it, not by the app-wide
+   *  watermark its type would otherwise go by: a sync cell folds on its own
+   *  clock, later than the KV persist. Replay needs nothing from it — the
+   *  payload already names the cells, each taken past its own watermark — so
+   *  a build that predates the field reads the line exactly as before. */
+  only?: string[];
 };
 
 export type Journal = {
@@ -201,9 +485,17 @@ export type Journal = {
       cause?: ActionCause;
       call?: string;
       v?: Record<string, number>;
+      only?: string[];
     },
     ts: number,
   ): number;
+  /** Run `fn` with every entry it appends written after it as ONE line
+   *  ({@linkcode BATCH_TYPE}) — a reader sees all of them or none, wherever
+   *  a crash tears the write (J1). Throws when that write is refused: every
+   *  entry of the block is then lost, and the caller must say so. Nested
+   *  blocks join the outer one. Optional so a journal double in a test
+   *  stays valid. */
+  atomic?<T>(fn: () => T): T;
   /** All entries with seq > `after` (the persisted watermark), in order. */
   readSince(after: number): JournalEntry[];
   /** What boot must replay: every entry past the watermark that GOVERNS it —
@@ -221,6 +513,16 @@ export type Journal = {
    *  {@linkcode syncJournalWatermarkKey}), with what the store holds for each.
    *  Their entries are compacted and replayed by that watermark only. */
   trackCells(stored: Record<string, number>): void;
+  /** Cells whose watermark will never move — a quarantined sync cell (its
+   *  log cannot fold, so it never saves). A line kept for them alone would
+   *  pin compaction forever while boot refuses it anyway; for such a cell
+   *  every line ABOVE `fromSeq` counts as held (`governing`), so it goes at
+   *  the next compaction and is not replayed. The lines at or below it —
+   *  written before the cell was quarantined, i.e. before this boot — stay
+   *  by the cell's own watermark: fixing the cell's version and restarting
+   *  recovers them (retired from `-Infinity`, the default, they were
+   *  deleted by the first save of a boot that could not apply them). */
+  retireCells(cells: Iterable<string>, fromSeq?: number): void;
   /** Record that `cell`'s own durable record holds its entries up to `seq`
    *  (called after the fold that wrote it committed); compacts the journal. */
   setCellWatermark(cell: string, seq: number): void;
@@ -237,6 +539,13 @@ export type Journal = {
   readonly path: string;
   /** The highest seq appended so far. */
   currentSeq(): number;
+  /** {@linkcode Journal.currentSeq}, taken by a save in the synchronous turn
+   *  it reads the state it writes — `cell` for a sync cell's fold, none for
+   *  the store's persist — and told to every `onCapture` listener. */
+  capture(cell?: string): number;
+  /** Called at every {@linkcode Journal.capture}: the lines up to here are
+   *  the ones that save's watermark will drop. */
+  onCapture(fn: (cell: string | undefined) => void): void;
   /** Flush + release. */
   close(): void;
 };
@@ -342,10 +651,25 @@ export function replayJournal<S, A>(
    *  shape, and refusing it lost acked writes for nothing. A NEWER stamp (a
    *  downgrade) is always refused. Absent ⇒ every mismatch is refused. */
   cellMigrates?: (cell: string) => boolean,
+  /** How a time-travel line's STORED fields become the cell's live slice.
+   *  The fields are what the store writes — for an `onPersist` cell a SHAPE,
+   *  not the state — so spreading them over the live slice (the default)
+   *  mixes the two: `{ n: 0, saved: 1 }`. The host rebuilds such a cell the
+   *  way a restart does (declared state, stored fields merged, `onRestore`).
+   *  Absent ⇒ spread, as before. */
+  restoreStored?: (
+    cell: string,
+    stored: Record<string, unknown>,
+    live: Record<string, unknown>,
+  ) => Record<string, unknown>,
 ): ReplayResult<S> {
   let s = state;
   let replayed = 0;
   const skipped: SkippedEntry[] = [];
+  /** Per cell: the last time-travel line's stored slice of it and that line's
+   *  seq — what a reaction line's delta (`TimeTravelRestore.deltas`) is
+   *  resolved against. */
+  const stored = new Map<string, { seq: number; fields: unknown }>();
   /** `next` with every key whose watermark already covers `seq` put back. */
   const admit = (prev: S, next: S, seq: number): S => {
     if (!keyWatermark || prev === next) return next;
@@ -360,7 +684,23 @@ export function replayJournal<S, A>(
     }
     return (out ?? next) as S;
   };
+  /** The newest upgrade marker in the tail — see `LEGACY_RECOVERED_TYPE`. */
+  const retiredBelow = entries.reduce(
+    (m, e) => e.type === LEGACY_RECOVERED_TYPE ? Math.max(m, e.seq) : m,
+    -Infinity,
+  );
   for (const e of [...entries].sort((a, b) => a.seq - b.seq)) {
+    // Markers, not calls.
+    if (
+      e.type === LEGACY_RECOVERED_TYPE || e.type === SYNC_APPLIED_TYPE ||
+      e.type === SYNC_INTENT_TYPE
+    ) continue;
+    // An older build's line below the upgrade marker: the boot that wrote
+    // the marker already recovered everything the old tail holds and wrote
+    // it down as the stamped state lines before it. Reducing an old call
+    // again re-ran it on a state that holds it (an idempotency guard threw,
+    // "COULD NOT be replayed") and re-applied its reactions.
+    if (e.fmt === undefined && e.seq < retiredBelow) continue;
     if (isUnreplayable(e)) {
       skipped.push({ seq: e.seq, type: e.type, reason: "redacted" });
       continue;
@@ -386,8 +726,55 @@ export function replayJournal<S, A>(
       // Not an action: the state a time-travel jump put in place. Applied as
       // the store applies a snapshot — each persisted field replaced, fields
       // the store does not hold left as they are.
-      const cells = (e.payload as Partial<TimeTravelRestore> | undefined)
-        ?.cells;
+      const tt = e.payload as Partial<TimeTravelRestore> | undefined;
+      let cells = tt?.cells;
+      // A reaction line's keyframes (see `TimeTravelRestore.keyframes`).
+      if (
+        isListenerReaction(e) && tt?.keyframes &&
+        typeof tt.keyframes === "object"
+      ) {
+        cells = {
+          ...(cells && typeof cells === "object" ? cells : {}),
+          ...tt.keyframes,
+        };
+      }
+      // A reaction line's deltas, resolved to the stored slices they stand
+      // for. A delta whose base is not the cell's last line cannot be: that
+      // cell is skipped, said.
+      if (cells && typeof cells === "object" && tt?.deltas) {
+        cells = { ...cells };
+        for (const [cell, d] of Object.entries(tt.deltas)) {
+          const link = stored.get(cell);
+          const got = link && link.seq === d?.base &&
+              link.fields !== null && typeof link.fields === "object"
+            ? applyStatePatch(
+              link.fields as Record<string, unknown>,
+              Array.isArray(d.ops) ? d.ops : [null],
+            )
+            : null;
+          if (got === null) {
+            stored.delete(cell);
+            skipped.push({
+              seq: e.seq,
+              type: e.type,
+              reason: "threw",
+              error: `"${cell}"'s listensTo reaction delta has no base ` +
+                `(line ${String(d?.base)}${
+                  link ? `, last line ${link.seq}` : ", none in the tail"
+                })`,
+            });
+            continue;
+          }
+          cells[cell] = got;
+        }
+      }
+      // Only a reaction line is a link: a user's jump between two of them is
+      // not what the next delta was taken against.
+      if (cells && typeof cells === "object" && isListenerReaction(e)) {
+        for (const [cell, fields] of Object.entries(cells)) {
+          stored.set(cell, { seq: e.seq, fields });
+        }
+      }
       if (!cells || typeof cells !== "object") {
         skipped.push({
           seq: e.seq,
@@ -411,12 +798,29 @@ export function replayJournal<S, A>(
         if (cur === null || typeof cur !== "object" || Array.isArray(cur)) {
           continue;
         }
-        next[cell] = { ...(cur as Record<string, unknown>), ...fields };
+        next[cell] = restoreStored
+          ? restoreStored(cell, fields, cur as Record<string, unknown>)
+          : { ...(cur as Record<string, unknown>), ...fields };
       }
       s = admit(s, next as S, e.seq);
       replayed++;
       continue;
     }
+    // A call whose own cell is already covered at this seq — by its save, or
+    // by the state line written right after it (a server write to a sync
+    // cell, aio.ts `_afterAction`) — changes nothing `admit` would keep, and
+    // every other cell it touched has its own line (this build journals every
+    // cross-clock reaction as data). Reducing it anyway re-ran the method on
+    // a state that already holds its write: an idempotency guard threw and
+    // boot said the call "COULD NOT be replayed". Only for a line this format
+    // wrote: an older build's call is the only record of its reactions.
+    const own = e.type.includes(":")
+      ? e.type.slice(0, e.type.indexOf(":"))
+      : workerPatchCell(e.type, e.payload);
+    if (
+      e.fmt !== undefined && own !== undefined && keyWatermark &&
+      keyWatermark(own) >= e.seq
+    ) continue;
     try {
       // Under the caller it really had. A user-scoped method (`serverUser()`
       // for authorization, for "my rows only", for a per-caller quota) throws
@@ -482,6 +886,8 @@ type TornLines = {
  *  per boot (open, `readSince` and compaction all parse the same file). */
 function parseJournalLines(
   text: string,
+  /** Internal: false keeps a batch line as it is (compaction rewrites it). */
+  expand = true,
 ): { entries: JournalEntry[]; torn: TornLines } {
   const torn: TornLines = { lines: 0, entries: 0, seqs: [], fused: 0 };
   const entries: JournalEntry[] = [];
@@ -490,15 +896,22 @@ function parseJournalLines(
     try {
       const e = JSON.parse(line) as JournalEntry;
       if (typeof e.seq === "number" && typeof e.type === "string") {
-        entries.push(e);
+        entries.push(...(expand ? expandBatch(e) : [e]));
       }
     } catch {
       torn.lines++;
       // Every `"seq":N` on the line: one for a plain tear, two or more when
-      // an earlier build appended onto an unterminated line. Each is an
+      // an earlier build appended onto an unterminated line — or when the
+      // line is a torn batch (J1: all its entries go with it). Each is an
       // entry that is gone, and each is a seq that must not be re-issued.
-      const seqs = [...line.matchAll(/"seq":(\d+)/g)].map((m) => Number(m[1]));
-      if (seqs.length >= 2) torn.fused++;
+      const seqs = [
+        ...new Set(
+          [...line.matchAll(/"seq":(\d+)/g)].map((m) => Number(m[1])),
+        ),
+      ];
+      const batch = line.startsWith(`{"seq":`) &&
+        /^\{"seq":\d+,"type":"__aioBatch"/.test(line);
+      if (seqs.length >= 2 && !batch) torn.fused++;
       torn.entries += Math.max(1, seqs.length);
       torn.seqs.push(...seqs);
     }
@@ -583,6 +996,30 @@ function warnLossyEntry(type: string, issues: PersistIssue[]): void {
   );
 }
 
+/** Replace `target` atomically with `text`, owner-only: written to a tmp
+ *  name no one can predict, CREATED by this call (`createNew` — O_EXCL, so a
+ *  symlink or file planted there is refused, never followed or reused with
+ *  its looser mode), then renamed over `target`. A fixed `<file>.tmp` with
+ *  remove-then-write followed a planted symlink wherever the journal's
+ *  directory is writable by someone else. @internal */
+function replaceFileSync(target: string, text: string): void {
+  const tmp = `${target}.${crypto.randomUUID()}.tmp`;
+  try {
+    Deno.writeTextFileSync(tmp, text, { createNew: true, mode: 0o600 });
+    Deno.renameSync(tmp, target);
+  } catch (e) {
+    // A write that failed AFTER creating the tmp (a full disk, a file-size
+    // limit) left it behind — one per compaction. Only an `AlreadyExists`
+    // means the name was someone else's, and that is never removed.
+    if (!(e instanceof Deno.errors.AlreadyExists)) {
+      try {
+        Deno.removeSync(tmp);
+      } catch { /* aio-ok: never created — the write's error is reported */ }
+    }
+    throw e;
+  }
+}
+
 export function createJournal(
   path: string,
   opts: {
@@ -609,6 +1046,19 @@ export function createJournal(
 ): Journal {
   const redacted = opts.redact ?? noRedaction;
   const wmPath = path + ".wm";
+  // The tmp files a crash between `replaceFileSync`'s write and rename left
+  // (see `sweepStaleTmps`): the journal's, its base's, its watermark's —
+  // and the fixed `<file>.tmp` an older build used.
+  {
+    const name = basename(path);
+    sweepStaleTmps(
+      dirname(path),
+      [name, `${name}.base`, `${name}.wm`].flatMap((n) => [
+        uuidTmpBefore(n),
+        exactName(`${n}.tmp`),
+      ]),
+    );
+  }
   const storeOwnsWatermark = opts.storedWatermark !== undefined;
   let seq = 0;
   let wm = 0;
@@ -654,13 +1104,24 @@ export function createJournal(
   const basePath = path + ".base";
   /** Tracked (sync) cell → the seq its own durable record holds. */
   const cellWm = new Map<string, number>();
+  /** See `Journal.retireCells`: cell → the seq its retirement starts after. */
+  const retired = new Map<string, number>();
+  const isRetired = (k: string, e: JournalEntry): boolean =>
+    e.seq > (retired.get(k) ?? Infinity);
   const cellOf = (e: JournalEntry): string | undefined => {
     const i = e.type.indexOf(":");
     return i > 0 ? e.type.slice(0, i) : undefined;
   };
   /** The watermark an entry is compacted and replayed by. */
   const governing = (e: JournalEntry): number => {
+    // A line that writes only named keys lives until the LAST of them holds it.
+    if (e.only?.length) {
+      return Math.min(
+        ...e.only.map((k) => isRetired(k, e) ? Infinity : cellWm.get(k) ?? wm),
+      );
+    }
     const c = cellOf(e);
+    if (c !== undefined && isRetired(c, e)) return Infinity;
     return c !== undefined && cellWm.has(c) ? cellWm.get(c)! : wm;
   };
   /** The base on disk; null when there is none (a journal from before it
@@ -687,13 +1148,10 @@ export function createJournal(
   /** Record what the journal is about to stop holding. Atomic (tmp + rename)
    *  and owner-only like the journal. Throws — the caller decides how loud. */
   const writeBase = (): void => {
-    const tmp = basePath + ".tmp";
-    Deno.writeTextFileSync(
-      tmp,
+    replaceFileSync(
+      basePath,
       JSON.stringify({ wm, cells: Object.fromEntries(cellWm) }),
-      { mode: 0o600 },
     );
-    Deno.renameSync(tmp, basePath);
   };
   const openBase = readBase();
   if (openBase) {
@@ -712,6 +1170,7 @@ export function createJournal(
     baseOwed = false;
   };
 
+  const captureListeners: ((cell: string | undefined) => void)[] = [];
   const enc = new TextEncoder();
   // Owner-only: the journal sits next to the database it recovers, and a
   // world-readable copy of recent action payloads is a leak in its own right.
@@ -721,6 +1180,18 @@ export function createJournal(
     mode: 0o600,
   };
 
+  /** Entries an `atomic` block has appended, not yet written. */
+  let held: string[] | null = null;
+  /** Write one entry's line (after the seal a refused append owes). */
+  function writeOwn(json: string): void {
+    try {
+      writeLine((sealOwed ? "\n" : "") + json + "\n");
+    } catch (e) {
+      cutTornTail();
+      throw e; // the caller reports the refused append (PERSIST_ERROR)
+    }
+    sealOwed = false;
+  }
   function writeLine(line: string): void {
     if (opts.sync) {
       const f = Deno.openSync(path, { write: true, ...mode });
@@ -762,20 +1233,81 @@ export function createJournal(
     }
   }
 
+  // A refused append can still have written PART of its line (ENOSPC or EIO
+  // after a short write): the file then ends mid-line, and the next append —
+  // acked — was glued onto it and skipped as torn at the next boot. The open
+  // seal above covers a tear found at boot; this covers one made at runtime.
+  // The torn tail is cut back to the last "\n"; where even that is refused,
+  // the next append starts with the "\n" itself.
+  let sealOwed = false;
+  function cutTornTail(): void {
+    try {
+      const bytes = Deno.readFileSync(path);
+      const end = bytes.lastIndexOf(10) + 1;
+      if (end < bytes.length) Deno.truncateSync(path, end);
+    } catch (e) {
+      if (e instanceof Deno.errors.NotFound) return; // nothing was written
+      sealOwed = true;
+      log.warn(
+        "journal",
+        `journal: could not cut a refused append's partial line from ${path} ` +
+          `(${e}) — the next append starts on a new line instead`,
+      );
+    }
+  }
+
   const api: Journal = {
+    atomic(fn) {
+      if (held !== null) return fn();
+      held = [];
+      let out: ReturnType<typeof fn>;
+      try {
+        out = fn();
+      } catch (e) {
+        held = null; // a block that threw writes nothing of its own
+        throw e;
+      }
+      const lines = held.map((l) => l.trim()).filter((l) => l.length > 0);
+      held = null;
+      if (lines.length === 1) {
+        writeOwn(lines[0]!);
+      } else if (lines.length > 1) {
+        // ONE line (J1): a tear anywhere in it loses every entry of the
+        // block, never some of them. `seq` first, `type` second — the torn
+        // summary tells a torn batch from fused lines by that prefix.
+        const last = (JSON.parse(lines[lines.length - 1]!) as JournalEntry)
+          .seq;
+        writeOwn(
+          `{"seq":${last},"type":"${BATCH_TYPE}","fmt":${JOURNAL_FORMAT},` +
+            `"ts":${Date.now()},"entries":[${lines.join(",")}]}`,
+        );
+      }
+      return out;
+    },
     append(action, ts) {
       const s = ++seq;
       // The write-set of a redacted method carries the same secret as its
       // arguments, under a DIFFERENT type — `isRedactedAction` checks the
       // origin too so an exact pattern cannot plug one and leave the other.
-      const hide = isRedactedAction(redacted, action.type, action.origin) ||
-        redactsWorkerPatch(redacted, action.type, action.payload);
+      //
+      // Never for the framework's own STATE lines (a time-travel jump, a
+      // `listensTo` reaction): their type names no cell, so a pattern that
+      // matched it (`"a*"` matches `aio:__timeTravel`, `"__*"` the sync
+      // reaction) blanked every such line — the state lost after a crash and
+      // nothing protected. Their redaction is per CELL, decided where they
+      // are written (aio.ts: a redacted cell's state is never put in them).
+      const stateLine = action.type === TT_RESTORE_TYPE ||
+        action.type === SYNC_REACTION_TYPE;
+      const hide = !stateLine &&
+        (isRedactedAction(redacted, action.type, action.origin) ||
+          redactsWorkerPatch(redacted, action.type, action.payload));
       // One pass that both serializes the line and names every value JSON
       // would bring back different (see `warnLossyEntry`). A value JSON
       // refuses outright (a BigInt, a cycle) throws here with its path, as it
       // always threw — the caller reports a refused append.
       const { json, issues } = stringifyWithIssues({
         seq: s,
+        fmt: JOURNAL_FORMAT,
         type: action.type,
         payload: hide ? REDACTED : action.payload,
         ts,
@@ -791,6 +1323,7 @@ export function createJournal(
         ...(action.cause !== undefined ? { cause: action.cause } : {}),
         ...(action.call !== undefined ? { call: action.call } : {}),
         ...(action.v !== undefined ? { v: action.v } : {}),
+        ...(action.only !== undefined ? { only: action.only } : {}),
         // The marker travels WITH the entry: replay must be able to refuse it
         // without pattern-matching a sentinel string, and the file outlives
         // the config that redacted it (a journal written under
@@ -812,7 +1345,8 @@ export function createJournal(
           // refusal loudly (PERSIST_ERROR); the next compaction writes it.
         }
       }
-      writeLine(json + "\n");
+      if (held !== null) held.push(json);
+      else writeOwn(json);
       return s;
     },
     readSince(after) {
@@ -835,7 +1369,7 @@ export function createJournal(
       // snapshot — writing it again here would only re-open the window.
       if (!storeOwnsWatermark) {
         try {
-          Deno.writeTextFileSync(wmPath, String(s));
+          replaceFileSync(wmPath, String(s));
         } catch (e) {
           // NEVER swallowed. A watermark that cannot be written means every
           // later boot replays an already-applied tail — silently, and growing.
@@ -878,38 +1412,35 @@ export function createJournal(
         }
         // Quiet (said at open): the compaction is what DROPS the torn line,
         // and it used to blame "a crash mid-write" on the way out.
-        const parsed = parseJournal(text, { quiet: true });
-        const keep = parsed.filter((e) => e.seq > s);
         // A tracked (sync) cell's entries go by ITS watermark: the KV snapshot
         // that advanced `s` does not hold them, and dropping them here lost
         // exactly the writes the fold had not reached yet.
-        if (cellWm.size > 0) {
-          keep.push(
-            ...parseJournal(text, { quiet: true }).filter((e) =>
-              e.seq <= s && e.seq > governing(e)
-            ),
-          );
-          keep.sort((a, b) => a.seq - b.seq);
+        const keeps = (e: JournalEntry) =>
+          e.seq > s || (cellWm.size > 0 && e.seq > governing(e));
+        // Line by line, so a batch stays ONE line with what it keeps (J1): a
+        // tear after this rewrite must still take all of it or none.
+        const keep: JournalEntry[] = [];
+        for (const line of parseJournalLines(text, false).entries) {
+          const kept = expandBatch(line).filter(keeps);
+          if (line.type !== BATCH_TYPE || kept.length <= 1) keep.push(...kept);
+          else {
+            keep.push(
+              {
+                ...line,
+                seq: kept[kept.length - 1]!.seq,
+                entries: kept,
+              } as JournalEntry,
+            );
+          }
         }
+        keep.sort((a, b) => a.seq - b.seq);
         // What is dropped is recorded BEFORE it is gone (see JournalBase).
         recordBase();
-        const tmp = path + ".tmp";
-        // A leftover tmp from an earlier crash may exist with looser
-        // permissions; `mode` only applies at CREATE time, so remove it first.
-        try {
-          Deno.removeSync(tmp);
-        } catch (e) {
-          // NotFound: nothing to clear. Anything else means the leftover —
-          // and its looser mode — would be REUSED by the write below.
-          if (!(e instanceof Deno.errors.NotFound)) throw e;
-        }
-        Deno.writeTextFileSync(
-          tmp,
+        replaceFileSync(
+          path,
           keep.map((e) => JSON.stringify(e)).join("\n") +
             (keep.length ? "\n" : ""),
-          { mode: 0o600 },
         );
-        Deno.renameSync(tmp, path);
       } catch (e) {
         // Compaction is an optimization — the watermark alone decides what is
         // replayed — but a journal that can never be compacted grows without
@@ -936,6 +1467,9 @@ export function createJournal(
         // and the next boot would read the new writes as already folded.
         if (at > seq) seq = at;
       }
+    },
+    retireCells(cells, fromSeq = -Infinity) {
+      for (const c of cells) retired.set(c, fromSeq);
     },
     setCellWatermark(cell, at) {
       cellWm.set(cell, Math.max(cellWm.get(cell) ?? 0, at));
@@ -994,6 +1528,13 @@ export function createJournal(
     rebase: () => recordBase(),
     path,
     currentSeq: () => seq,
+    capture(cell) {
+      for (const fn of captureListeners) fn(cell);
+      return seq;
+    },
+    onCapture(fn) {
+      captureListeners.push(fn);
+    },
     close() {/* writes are synchronous — nothing buffered */},
   };
   return api;

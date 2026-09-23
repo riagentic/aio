@@ -45,12 +45,10 @@ Deno.test("checkpoint: atomic write leaves no .tmp on success", async () => {
     recentActions: [],
     cells: {},
   });
-  let tmpExists = true;
-  try {
-    await Deno.stat(`${dir}/checkpoint.json.tmp`);
-  } catch {
-    tmpExists = false;
-  }
+  // The tmp is renamed away (its name is random — any `.tmp` counts).
+  const tmpExists = [...Deno.readDirSync(dir)].some((e) =>
+    e.name.includes(".tmp")
+  );
   assertEquals(tmpExists, false);
 });
 

@@ -32,7 +32,7 @@ import {
   cmdTables,
   cmdTrigger,
 } from "../src/am/am-cmd-inspect.ts";
-import { readPid, removePid, writePid } from "../src/am/am-utils.ts";
+import { readPid, writePid } from "../src/am/am-utils.ts";
 import { isProcessAlive } from "../src/server/single-instance-lock.ts";
 import type { LockData } from "../src/server/single-instance-lock.ts";
 import type { GlobalFlags } from "../src/am/am-types.ts";
@@ -220,7 +220,7 @@ Deno.test("am: ensureSingleton — waits out a stopping instance", async () => {
       "reports the wait",
     );
   } finally {
-    removePid(app);
+    dropFixtureLock(app);
     await child.status;
   }
 });
@@ -238,7 +238,7 @@ Deno.test("am: ensureSingleton — responding instance refuses with exit 1", asy
     // --json errors land on STDOUT (the stream a script parses) + exit 1.
     assert(logs.some((l) => l.includes("already running")));
   } finally {
-    removePid(app);
+    dropFixtureLock(app);
     await server.shutdown();
   }
 });
@@ -254,7 +254,7 @@ Deno.test("am: ensureSingleton — unresponsive 'started' zombie is killed", asy
     assertEquals(readPid(app), null, "lock removed");
     assert(logs.some((l) => l.includes("unresponsive")));
   } finally {
-    removePid(app);
+    dropFixtureLock(app);
     await child.status;
   }
 });
@@ -293,7 +293,7 @@ Deno.test("am: cmdStatus — stopping instance reports exit 2", async () => {
     });
     assertEquals(JSON.parse(logs[0]!).status, "stopping");
   } finally {
-    removePid(app);
+    dropFixtureLock(app);
   }
 });
 
@@ -311,7 +311,7 @@ Deno.test("am: cmdStatus — responding instance reports started + metrics", asy
     assertEquals(st.connections, 2);
     assertEquals(st.transport, "ws");
   } finally {
-    removePid(app);
+    dropFixtureLock(app);
     await server.shutdown();
   }
 });
@@ -326,7 +326,7 @@ Deno.test("am: cmdStatus — auto-heals a stuck 'starting' lock to started", asy
     await capture(() => cmdStatus([], flagsFor(server.addr.port, app)));
     assertEquals(readPid(app)?.status, "started", "lock status auto-fixed");
   } finally {
-    removePid(app);
+    dropFixtureLock(app);
     await server.shutdown();
   }
 });
@@ -341,7 +341,7 @@ Deno.test("am: cmdStatus — alive but not responding reports starting, exit 2",
     });
     assertEquals(JSON.parse(logs[0]!).status, "starting");
   } finally {
-    removePid(app);
+    dropFixtureLock(app);
   }
 });
 
@@ -356,7 +356,7 @@ Deno.test("am: cmdInstances — lists the written lock in json mode", async () =
     assert(Array.isArray(all));
     assert(all.some((i) => i.appId === app), "written instance listed");
   } finally {
-    removePid(app);
+    dropFixtureLock(app);
   }
 });
 
@@ -537,7 +537,7 @@ Deno.test("am: cmdStop — SIGTERM fallback stops an unresponsive child", async 
     assertEquals(readPid(app), null, "lock removed");
     assertEquals(JSON.parse(logs.at(-1)!).status, "stopped");
   } finally {
-    removePid(app);
+    dropFixtureLock(app);
     await child.status;
   }
 });
@@ -554,7 +554,7 @@ Deno.test("am: cmdStop — without --wait returns immediately as stopping", asyn
     assertEquals(readPid(app)?.status, "stopping", "lock marked stopping");
   } finally {
     await killProcess(child.pid, 0);
-    removePid(app);
+    dropFixtureLock(app);
     await child.status;
   }
 });
@@ -1270,6 +1270,7 @@ Deno.test("am delegates to a path-pinned checkout's am (toolchain coherence)", a
 
 // ── am update <path> — switch the global am to a dev checkout ────────────────
 import { cmdUpdate, installFromArgv } from "../src/am/am-cmd-meta.ts";
+import { dropFixtureLock } from "./fixture-lock-helper.ts";
 
 Deno.test("am update <path>: installs the checkout's am globally (sandboxed)", async () => {
   const fw = await Deno.makeTempDir();

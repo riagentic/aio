@@ -676,6 +676,7 @@ export const BRIEF_RUN_KEYS: readonly {
       "persistDebounceMs",
       "persistMode",
       "appDir",
+      "profiles",
       "dbPath",
       "dbPragmas",
       "db",
@@ -1177,7 +1178,8 @@ project  am create <name> · am add cell <n> · am add server <n> · am build [t
          [app] [--create] · am report · am agent [--task=<slug>] [--list] [--min] [--max]
 net/auth am auth users|create <id> --role=admin|passwd|unlock|totp <id> off|role|verify|revoke|rm ·
          am pair · am profile [--out=F] · am trust · am discover [--timeout=ms]
-global   --app=<id> --port=N --home=<dir> --instance=<name> (private copy: own lock/data/logs)
+global   --app=<id>[@profile] --port=N --profile=<name|path> (2nd data home)
+         --instance=<name> (private copy: own lock/data/logs)
          --quiet --timeout=ms --wait[=N] · \`--\` ends am's flags · am help <verb> = full detail`,
     )
   }`;
@@ -1281,7 +1283,8 @@ const PRACTICE = `## PRACTICE — how an expert writes aio
 - Dispatch-test every method, testUI every flow, reproduce every bug as a red test first.
 - One appId (pinned), one cell per file, entry dir = app root, tests/ at the root, files < ~200 lines.
 - Operate through am's verbs only: am start/stop/status; --client=server-only without pixels;
-  --instance=<name> for a private copy beside the human's app.
+  --instance=<name> for a private copy beside the human's app; --profile=dev for a
+  second data home of the same app (am stop <app>@dev).
 - Upgrading aio: am pin latest → am migrate → read docs/upgrade/ for that version.`;
 
 const MORE = `## DOCS — only for marginal details (inside an app: dep/aio/docs/)

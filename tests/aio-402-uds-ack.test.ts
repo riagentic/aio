@@ -5,6 +5,8 @@
 // v2 (B4b): actions and acks are envelopes.
 import { assertEquals, assertStringIncludes } from "@std/assert";
 import { createUDSListener } from "../src/server/aio.ts";
+import { _noteUnsaved } from "../src/server/action-ack.ts";
+import { dropTempDir, tempDir } from "../src/testing/temp-dir.ts";
 import { join } from "@std/path";
 
 Deno.test("aio-402: UDS server acks a dispatch that carries a cid", async () => {
@@ -117,6 +119,8 @@ Deno.test("uds: forged trusted provenance is stripped and _source re-stamped", a
           _user: { id: "root", role: "admin" },
           _source: "Effect",
           _syncOp: true,
+          _syncTs: 9e15,
+          _syncId: "op-forged",
           _inflight: true,
           cid: "spoof-1",
         },
@@ -131,6 +135,11 @@ Deno.test("uds: forged trusted provenance is stripped and _source re-stamped", a
   if (!action) throw new Error("action never reached onAction");
   assertEquals(action._user, undefined, "_user stripped");
   assertEquals(action._syncOp, undefined, "_syncOp stripped");
+  // A forged op-log position would pin how far a sync cell's live state
+  // claims to hold its log (journal reaction lines, `SyncReaction.at`).
+  assertEquals(action._syncTs, undefined, "_syncTs stripped");
+  // …and the op id a journal commit names (journal.ts COMMIT(X)).
+  assertEquals(action._syncId, undefined, "_syncId stripped");
   assertEquals(action._source, "UI", "_source re-stamped as client input");
   // alpha70: the drain-window flag. A forged one would run a `cell:method`
   // during shutdown drain and have its write captured by the final persist.
@@ -143,4 +152,78 @@ Deno.test("uds: forged trusted provenance is stripped and _source re-stamped", a
   writer.releaseLock();
   conn.close();
   uds.shutdown();
+});
+
+Deno.test("aio-402: a UDS ack carries `unsaved` when what the call wrote could not be saved — same as the WS ack", async () => {
+  // The honesty contract (tests/journal-owed-saves-all-callers.test.ts): the
+  // call ran, but what it wrote is not on disk — a failed stand-in save. The
+  // WS ack, the trojan reply and the sync-ack say so; the UDS ack (electron's
+  // transport) is the same door and must say it the same way. Both keys the
+  // verdict is filed under: the action itself (a sync method's commit) and
+  // its call id (an async method's settlement).
+  const dir = await tempDir("aio402d-");
+  const socketPath = join(dir, "aio402d.sock");
+  const uds = createUDSListener(
+    socketPath,
+    () => ({ ok: true }),
+    (action) => {
+      const a = action as { type: string; payload: { _callId?: string } };
+      // An async method's call is tagged server-side (a client's `_callId`
+      // is stripped at the door), as `bindCellReactive` does.
+      if (a.type === "doc:async") a.payload._callId = "k-9";
+      // What dispatch does when the owed save fails: noted before it settles.
+      return Promise.resolve().then(() => {
+        if (a.type === "doc:sync") {
+          _noteUnsaved(a, undefined, "persist failed: disk says no (sync)");
+        } else if (a.type === "doc:async") {
+          _noteUnsaved(
+            undefined,
+            a.payload!._callId!,
+            "persist failed: disk says no (async)",
+          );
+        }
+      });
+    },
+    () => {},
+  );
+  const conn = await Deno.connect({ path: socketPath, transport: "unix" });
+  const writer = conn.writable.getWriter();
+  const reader = conn.readable.getReader();
+  try {
+    const enc = new TextEncoder();
+    const dec = new TextDecoder();
+    const send = (d: Record<string, unknown>) =>
+      writer.write(enc.encode(JSON.stringify({ v: 2, t: "action", d }) + "\n"));
+    await send({ type: "doc:sync", payload: { args: [] }, cid: "u-1" });
+    await send({
+      type: "doc:async",
+      payload: { args: [] },
+      cid: "u-2",
+    });
+    await send({ type: "doc:fine", payload: { args: [] }, cid: "u-3" });
+    let got = "";
+    const acks = () =>
+      got.split("\n").filter((l) => l.includes('"t":"ack"')).map((l) =>
+        JSON.parse(l).d as { cid: string; ok: boolean; unsaved?: string }
+      );
+    const deadline = Date.now() + 3000;
+    while (Date.now() < deadline && acks().length < 3) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      got += dec.decode(value);
+    }
+    const byCid = Object.fromEntries(acks().map((a) => [a.cid, a]));
+    assertEquals(byCid["u-1"]?.ok, true, got);
+    assertEquals(byCid["u-1"]?.unsaved, "persist failed: disk says no (sync)");
+    assertEquals(byCid["u-2"]?.ok, true, got);
+    assertEquals(byCid["u-2"]?.unsaved, "persist failed: disk says no (async)");
+    assertEquals(byCid["u-3"]?.ok, true, got);
+    assertEquals(byCid["u-3"]?.unsaved, undefined, "a saved call says nothing");
+  } finally {
+    reader.releaseLock();
+    writer.releaseLock();
+    conn.close();
+    uds.shutdown();
+    await dropTempDir(dir);
+  }
 });

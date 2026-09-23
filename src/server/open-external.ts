@@ -79,7 +79,9 @@ export function hasDesktopSession(): boolean {
  *     `xdg-open` has nothing to open into.
  *
  *  Refusing is never silent: the URL is logged, which is what a person needs
- *  anyway. */
+ *  anyway.
+ *
+ *  @decider */
 export function mayOpenExternal(): { ok: true } | { ok: false; why: string } {
   if (Deno.env.get("AIO_NO_OPEN")) {
     return { ok: false, why: "AIO_NO_OPEN is set" };

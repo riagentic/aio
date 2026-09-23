@@ -217,6 +217,7 @@ export const VALID_AIO_CONFIG_KEYS = new Set<string>([
   "persistKey",
   "dbPath",
   "appDir",
+  "profiles",
   "dbPragmas",
   "checkIntegrityOnBoot",
   "persistDebounceMs",
@@ -300,6 +301,7 @@ export const VALID_AIO_CONFIG_KEYS = new Set<string>([
   "_cellMigrations",
   "_cellRestores",
   "_cellVersions",
+  "_cellForeignActions",
 ]);
 
 export const VALID_FEATURES_CONFIG_KEYS = new Set<string>([
@@ -317,6 +319,7 @@ export const VALID_FEATURES_CONFIG_KEYS = new Set<string>([
   "persistKey",
   "dbPath",
   "appDir",
+  "profiles",
   "dbPragmas",
   "checkIntegrityOnBoot",
   "persistDebounceMs",
@@ -420,6 +423,10 @@ export const CONFIG_DOCS: Record<string, [string, string]> = {
   dbPath: [
     "<appDir>/data/state.db",
     'override the SQLite file (":memory:" for tests)',
+  ],
+  profiles: [
+    "true",
+    "false → the app runs from ONE folder: --profile / AIO_PROFILE / --home / AIO_HOME are refused (AIO_APPS_DIR still moves all apps)",
   ],
   appDir: [
     "~/.<appId>",
@@ -707,6 +714,7 @@ export const CONFIG_GROUPS: [string, string[]][] = [
     "persistKey",
     "dbPath",
     "appDir",
+    "profiles",
     "dbPragmas",
     "checkIntegrityOnBoot",
     "persistDebounceMs",
@@ -877,6 +885,57 @@ export function validateCallableConfig(
         `function itself (no parentheses).`,
     );
   }
+}
+
+/** Where each misplaced `diagnostics` key belongs — pure, so the words are a
+ *  unit test and the boot only decides to print them.
+ *
+ *  `DiagnosticsConfig` is `boolean | { dev?, prod?, onDiagnostic? }`: the
+ *  per-subsystem switches live one level DOWN, per mode. Written at the top
+ *  (`diagnostics: { checkpoint: false }`) they were read by nothing — the app
+ *  kept a checkpoint it had just turned off, and nothing said so. Three tests
+ *  in this repo had written it that way and passed on the defaults.
+ *
+ *  A WARNING, not the unknown-key refusal `validateConfig` gives: this spelling
+ *  has booted (as a no-op) since the key existed, and the surface is frozen —
+ *  refusing it now would stop apps that start today. Loud at every boot. */
+export function diagnosticsConfigProblems(
+  cfg: unknown,
+  optionKeys: Iterable<string>,
+): string[] {
+  if (!cfg || typeof cfg !== "object" || Array.isArray(cfg)) return [];
+  const options = new Set(optionKeys);
+  const top = new Set(["dev", "prod", "onDiagnostic"]);
+  const out: string[] = [];
+  for (const k of Object.keys(cfg)) {
+    if (top.has(k)) continue;
+    if (options.has(k)) {
+      out.push(
+        `diagnostics.${k} is IGNORED — the switches are per mode: write ` +
+          `diagnostics: { dev: { ${k}: … } } (did you mean "diagnostics.dev.${k}"?` +
+          ` — or "prod", for the production build)`,
+      );
+      continue;
+    }
+    const near = nearestOf(k, [...top, ...options]);
+    out.push(
+      `diagnostics.${k} is not a diagnostics key and is ignored` +
+        (near ? ` (did you mean "${near}"?)` : ""),
+    );
+  }
+  for (const mode of ["dev", "prod"] as const) {
+    const m = (cfg as Record<string, unknown>)[mode];
+    if (!m || typeof m !== "object" || Array.isArray(m)) continue;
+    for (const k of Object.keys(m)) {
+      if (options.has(k)) continue;
+      const near = nearestOf(k, options);
+      out.push(
+        `diagnostics.${mode}.${k} is not a diagnostics option and is ignored` +
+          (near ? ` (did you mean "diagnostics.${mode}.${near}"?)` : ""),
+      );
+    }
+  }
+  return out;
 }
 
 export function validateConfig(
@@ -1230,6 +1289,7 @@ export const SHAPE_VALUES: Record<string, ConfigShape> = {
   takeover: "boolean",
   freezeState: "boolean",
   singleton: "boolean",
+  profiles: "boolean",
   libraryMode: "boolean",
   fatalOnStart: "boolean",
   guardDispatches: "boolean",

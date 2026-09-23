@@ -17,12 +17,13 @@ import {
   writeLock,
 } from "../src/server/single-instance-lock.ts";
 import { isProcessAlive } from "../src/server/single-instance-lock.ts";
+import { dropTempDir, tempDir } from "../src/testing/temp-dir.ts";
 
 const AM = new URL("../src/am.ts", import.meta.url).pathname;
 const CONFIG = new URL("../deno.json", import.meta.url).pathname;
 
 Deno.test("am stop --all outside a project refuses, and stops nothing", async () => {
-  const base = await Deno.makeTempDir({ prefix: "am-stopall-noproj-" });
+  const base = await tempDir("am-stopall-noproj-");
   const apps = join(base, "apps");
   const nowhere = join(base, "not-a-project");
   const launched = join(nowhere, "some-checkout", "dist");
@@ -79,6 +80,6 @@ Deno.test("am stop --all outside a project refuses, and stops nothing", async ()
       victim.kill("SIGKILL");
     } catch { /* already gone — the failing case */ }
     await victim.status;
-    await Deno.remove(base, { recursive: true }).catch(() => {});
+    await dropTempDir(base);
   }
 });

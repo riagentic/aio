@@ -51,6 +51,13 @@ type Flags = {
   noTls?: boolean;
 };
 
+/** `--profile` > `AIO_PROFILE` — a profile NAME or a folder PATH (see
+ *  app-dirs.ts `resolveAppDirs` for how it ranks against `--home`/`appDir`). */
+export const profileOf = (
+  cli: { profile?: string },
+  env: string | undefined,
+): Sourced<string> | undefined => pick(["flag", cli.profile], ["env", env]);
+
 /** `--host` > `aio.run({ host })`; unset means "the expose default". */
 export const hostOf = (
   cli: Pick<Flags, "host">,

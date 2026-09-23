@@ -18,6 +18,7 @@ import { normalizeSyncConfig } from "../../src/sync/types.ts";
 import type { HLC, SyncConfig } from "../../src/sync/types.ts";
 import type { SyncReducer } from "../../src/sync/rebase.ts";
 import { createTestDb } from "./_test-db.ts";
+import type { DB } from "../../src/db/types.ts";
 
 export type State = Record<string, unknown>;
 
@@ -33,6 +34,9 @@ export interface NetClient {
   inbox: string[];
   /** Every client→server frame ever sent, as sent. */
   sentLog: string[];
+  /** The listener cell's confirmed / optimistic state (see `listener`). */
+  confirmedOf: (cell: string) => State;
+  viewOf: (cell: string) => State;
   socket: WebSocket;
   online: boolean;
 }
@@ -46,20 +50,87 @@ export function createNet(opts: {
   reducer?: SyncReducer;
   sync?: Partial<SyncConfig>;
   engine?: Partial<SyncEngineDeps>;
+  /** A second SYNC cell that `listensTo` the first: `react` runs inside the
+   *  same server dispatch as each op of `cell` (the composed reduce), and a
+   *  change is folded into the listener's own snapshot, as aio.ts's
+   *  afterAction hook does (`noteServerWrite`). */
+  /** Scheduling jitter (seeded): a burst of extra microtask yields before
+   *  and after every database call and after every dispatch — the handler's
+   *  await points. The test database answers in the same turn, where a real
+   *  one answers a message round-trip later; an ordering bug that only the
+   *  zero-latency timing hides is found here (see offline-replay's jitter
+   *  mode). Microtasks only, so a seed replays exactly. */
+  jitter?: () => number;
+  /** Runs at every jittered await point, before its yields: what may land
+   *  THERE — a server-origin write takes no cell lock, so the handler must
+   *  hold at any await it has. */
+  atYield?: () => void;
+  listener?: {
+    cell: string;
+    initial: () => State;
+    react: (s: State, action: string, payload: unknown) => State;
+    /** The listener's OWN methods — direct ops on it, by action name. */
+    own?: {
+      actions: string[];
+      apply: (s: State, action: string, payload: unknown) => State;
+    };
+  };
 }) {
   _resetServerTsForTest();
   const { db, close } = createTestDb();
+  const J = opts.jitter;
+  const jitter = async (): Promise<void> => {
+    if (J === undefined) return;
+    opts.atYield?.();
+    const x = J();
+    if (x < 0.4) return; // most calls: no extra yield
+    // Heavy-tailed: mostly a few turns, sometimes long enough that the test
+    // program runs several steps while this call is "in the database".
+    const n = x < 0.9
+      ? Math.floor((x - 0.4) * 40)
+      : 100 + Math.floor((x - 0.9) * 4000);
+    for (let i = n; i >= 0; i--) await Promise.resolve();
+  };
+  const around =
+    <A extends unknown[], R>(fn: (...a: A) => Promise<R>) =>
+    async (...a: A): Promise<R> => {
+      await jitter();
+      const r = await fn(...a);
+      await jitter();
+      return r;
+    };
+  const handlerDb: DB = J === undefined ? db : {
+    ...db,
+    query: around(db.query.bind(db)) as DB["query"],
+    execute: around(db.execute.bind(db)),
+    transaction: around(
+      db.transaction.bind(db) as (a: unknown) => Promise<unknown>,
+    ) as DB["transaction"],
+  };
   let live: State = opts.initial();
+  const L = opts.listener;
+  let liveL: State = L ? L.initial() : {};
   const clients: NetClient[] = [];
   const serverLog: string[] = [];
   const handler = createServerSyncHandler({
     dispatch: (a) => {
-      live = opts.apply(live, a.type.slice(a.type.indexOf(":") + 1), a.payload);
+      const action = a.type.slice(a.type.indexOf(":") + 1);
+      if (L?.own && a.type.startsWith(`${L.cell}:`)) {
+        liveL = L.own.apply(liveL, action, a.payload); // a direct op on it
+        return J === undefined ? undefined : jitter();
+      }
+      live = opts.apply(live, action, a.payload);
+      if (L) {
+        const before = liveL;
+        liveL = L.react(liveL, action, a.payload);
+        if (liveL !== before) handler.noteServerWrite(L.cell);
+      }
+      return J === undefined ? undefined : jitter();
     },
-    db,
-    syncCellIds: [opts.cell],
-    getCellState: () => live,
-    getClientCellState: () => live,
+    db: handlerDb,
+    syncCellIds: L ? [opts.cell, L.cell] : [opts.cell],
+    getCellState: (c) => (L && c === L.cell ? liveL : live),
+    getClientCellState: (c) => (L && c === L.cell ? liveL : live),
     broadcastRaw: {
       fn: (m, exclude) => {
         for (const c of clients) {
@@ -77,6 +148,8 @@ export function createNet(opts: {
   function addClient(name: string, storage = createMemoryStorage()): NetClient {
     let confirmed = opts.initial();
     let view = confirmed;
+    let confirmedL: State = L ? L.initial() : {};
+    let viewL = confirmedL;
     const buffer = createOpBuffer(storage);
     const c = {
       name,
@@ -92,7 +165,10 @@ export function createNet(opts: {
     } as unknown as WebSocket;
     c.engine = createSyncEngine({
       clientId: name,
-      cells: { [opts.cell]: normalizeSyncConfig(opts.sync ?? true) },
+      cells: {
+        [opts.cell]: normalizeSyncConfig(opts.sync ?? true),
+        ...(L ? { [L.cell]: normalizeSyncConfig(true) } : {}),
+      },
       buffer,
       send: (m) => {
         if (!c.online) return;
@@ -100,19 +176,29 @@ export function createNet(opts: {
         c.sentLog.push(m);
       },
       reducer: opts.reducer ??
-        ((s, action, payload) => opts.apply(s, action, payload)),
-      getConfirmedState: () => ({ [opts.cell]: confirmed }),
-      setConfirmedState: (_c, s) => {
-        confirmed = s;
+        ((s, action, payload) =>
+          L?.own?.actions.includes(action)
+            ? L.own.apply(s, action, payload)
+            : opts.apply(s, action, payload)),
+      getConfirmedState: () => ({
+        [opts.cell]: confirmed,
+        ...(L ? { [L.cell]: confirmedL } : {}),
+      }),
+      setConfirmedState: (c, s) => {
+        if (L && c === L.cell) confirmedL = s;
+        else confirmed = s;
       },
-      onStateUpdate: (_c, s) => {
-        view = s;
+      onStateUpdate: (c, s) => {
+        if (L && c === L.cell) viewL = s;
+        else view = s;
       },
       log: { warn: () => {}, debug: () => {} },
       ...opts.engine,
     });
     c.confirmed = () => confirmed;
     c.view = () => view;
+    c.confirmedOf = (cell) => (L && cell === L.cell ? confirmedL : confirmed);
+    c.viewOf = (cell) => (L && cell === L.cell ? viewL : view);
     clients.push(c);
     return c;
   }
@@ -168,6 +254,8 @@ export function createNet(opts: {
     pump,
     serverLog,
     live: () => live,
+    /** The listener cell's live server state. */
+    liveOf: (cell: string): State => (L && cell === L.cell ? liveL : live),
     /** A server-origin write: what an effect, cron, serverFn, `am dispatch` or
      *  an async method's commit does — state changes, no op exists. */
     serverWrite(fn: (s: State) => State): void {

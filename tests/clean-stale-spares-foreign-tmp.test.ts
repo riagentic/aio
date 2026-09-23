@@ -5,7 +5,9 @@
 // a macOS `.dmg` build staging `payload.tgz` under `/tmp/aio-dmg-*` lost it
 // between `tar` and `scp` while a suite started beside it (a field report, #7).
 //
-// Pinned here by running the real script against real `/tmp` fixtures:
+// Pinned here by running the real script against `aio*` fixtures in a
+// throwaway root it is told to scan INSTEAD of `/tmp` and the runtime dir
+// (`AIO_ORPHANS_LOCK_ROOTS`) — a test never sweeps the machine's real dirs:
 //   • a directory that holds anything a lock dir never holds is not a lock dir,
 //     however old, and survives;
 //   • a lock-shaped directory touched in the last ten minutes survives (a run
@@ -14,12 +16,15 @@
 //     the sweep exists for.
 import { assertEquals } from "@std/assert";
 import { join } from "@std/path";
+import { dropTempDir, tempDir } from "../src/testing/temp-dir.ts";
 
 const ROOT = new URL("..", import.meta.url).pathname;
 const OLD = new Date(Date.now() - 60 * 60_000); // an hour ago
 
+/** The fake lock root this file's scans are pinned to. */
+let ROOTDIR = "";
 async function fixture(name: string, files: Record<string, string>) {
-  const dir = join("/tmp", name);
+  const dir = join(ROOTDIR, name);
   await Deno.mkdir(dir, { recursive: true });
   for (const [f, body] of Object.entries(files)) {
     await Deno.writeTextFile(join(dir, f), body);
@@ -29,12 +34,23 @@ async function fixture(name: string, files: Record<string, string>) {
 
 const exists = (p: string) => Deno.stat(p).then(() => true).catch(() => false);
 
-async function cleanStale(): Promise<string> {
-  const out = await new Deno.Command(Deno.execPath(), {
-    args: ["run", "-A", `${ROOT}scripts/check-orphans.ts`, "--clean-stale"],
+/** The script, pinned to ROOTDIR (and run FROM it, so the suite's own
+ *  `.aio/lock-dirs-baseline.json` is never overwritten). */
+function script(...args: string[]): Deno.Command {
+  return new Deno.Command(Deno.execPath(), {
+    args: ["run", "-A", `${ROOT}scripts/check-orphans.ts`, ...args],
+    cwd: ROOTDIR,
+    env: {
+      AIO_ORPHANS_LOCK_ROOTS: ROOTDIR,
+      AIO_TEST_ROOT: join(ROOTDIR, "test-root"),
+    },
     stdout: "piped",
     stderr: "piped",
-  }).output();
+  });
+}
+
+async function cleanStale(): Promise<string> {
+  const out = await script("--clean-stale").output();
   const text = new TextDecoder().decode(out.stdout) +
     new TextDecoder().decode(out.stderr);
   assertEquals(out.code, 0, text);
@@ -43,9 +59,10 @@ async function cleanStale(): Promise<string> {
 
 Deno.test({
   name:
-    "clean-stale: a /tmp/aio-* dir that is not a lock dir survives; a stale lock dir does not",
+    "clean-stale: an aio-* dir that is not a lock dir survives; a stale lock dir does not",
   ignore: Deno.build.os === "windows",
   fn: async () => {
+    ROOTDIR = await tempDir("orphans-root-");
     const tag = crypto.randomUUID().slice(0, 8);
     // A build's staging dir: an hour old and holding a payload — the #7 shape.
     const staging = await fixture(`aio-dmg-cst-${tag}`, {
@@ -95,12 +112,7 @@ Deno.test({
         `a nested display's cookie was swept with its directory:\n${said}`,
       );
     } finally {
-      // Literal-per-fixture removes; each path was built above from a fixed
-      // prefix and this test's own random tag.
-      await Deno.remove(staging, { recursive: true }).catch(() => {});
-      await Deno.remove(fresh, { recursive: true }).catch(() => {});
-      await Deno.remove(stale, { recursive: true }).catch(() => {});
-      await Deno.remove(cookie, { recursive: true }).catch(() => {});
+      await dropTempDir(ROOTDIR); // every fixture lives under it
     }
   },
 });
@@ -115,6 +127,7 @@ Deno.test({
   name: "clean: a stale lock dir is removed, not merely emptied",
   ignore: Deno.build.os === "windows",
   fn: async () => {
+    ROOTDIR = await tempDir("orphans-root-");
     const tag = crypto.randomUUID().slice(0, 8);
     const dir = await fixture(`aio-cln-${tag}`, {
       "x.lock": JSON.stringify({ pid: 2 ** 22 + 7, appId: "x" }),
@@ -126,17 +139,7 @@ Deno.test({
       // is signalled or any temp home is removed, so this sweeps debris only —
       // what `--clean-stale` does, plus the dead lock FILES that make the
       // difference here.
-      const out = await new Deno.Command(Deno.execPath(), {
-        args: [
-          "run",
-          "-A",
-          `${ROOT}scripts/check-orphans.ts`,
-          "--clean",
-          "--clean-stale",
-        ],
-        stdout: "piped",
-        stderr: "piped",
-      }).output();
+      const out = await script("--clean", "--clean-stale").output();
       const said = new TextDecoder().decode(out.stdout) +
         new TextDecoder().decode(out.stderr);
       assertEquals(out.code, 0, said);
@@ -146,8 +149,7 @@ Deno.test({
         `the stale lock dir survived the sweep that emptied it:\n${said}`,
       );
     } finally {
-      // Literal path, built above from a fixed prefix and this test's own tag.
-      await Deno.remove(dir, { recursive: true }).catch(() => {});
+      await dropTempDir(ROOTDIR); // the fixture lives under it
     }
   },
 });

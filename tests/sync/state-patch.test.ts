@@ -136,3 +136,33 @@ Deno.test("a patch that does not fit the state is refused, not half-applied", ()
   assertEquals(Object.getPrototypeOf(got), Object.prototype);
   assertEquals(({} as Record<string, unknown>).polluted, undefined);
 });
+
+// A value JSON does not carry — a function, a symbol, `undefined` — is ABSENT
+// to a patch, exactly as JSON has it: dropped from an object, `null` in an
+// array. A patch that carried one as a value lost it in transit (the wire
+// frame, a journal line), the op then did not apply, and a journalled
+// reaction chain broke there (review rev8).
+Deno.test("a function, symbol or undefined value is absent to a patch, as JSON has it", () => {
+  const f = () => 1;
+  const sym = Symbol("s");
+  const cases: [Record<string, unknown>, Record<string, unknown>][] = [
+    [{ a: 1 }, { a: 1, f }],
+    [{ a: 1, f }, { a: 1 }],
+    [{ a: 1, f }, { a: 2, g: () => 2 }],
+    [{ a: 1 }, { a: 1, s: sym, u: undefined }],
+    [{ xs: [1, 2] }, { xs: [1, f, sym, undefined, 3] }],
+    [{ xs: [f, 2] }, { xs: [() => 3, 2] }],
+    [{ o: { f } }, { o: { f, n: 1 } }],
+  ];
+  for (const [base, next] of cases) {
+    const wire = JSON.parse(JSON.stringify(diffState(base, next)));
+    const got = applyStatePatch(JSON.parse(JSON.stringify(base)), wire);
+    assertEquals(got, JSON.parse(JSON.stringify(next)), JSON.stringify(wire));
+    assertEquals(
+      stateDigest(got)!.digest,
+      stateDigest(next)!.digest,
+      "the digest the client checks agrees",
+    );
+  }
+  assertEquals(diffState({ a: 1 }, { a: 1, f }), [], "nothing JSON would see");
+});

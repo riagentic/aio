@@ -317,24 +317,28 @@ const CATALOG: Row[] = [
       const aio = await code("src/server/aio.ts");
       const body = fnBody(aio, "_journalAppend");
       assertMatch(body, /createAioError\("PERSIST_ERROR"/);
-      // The compensating flush is a parameter now (a sync cell's fold closes
-      // the gap, not a KV flush) — its DEFAULT is still the persist flush,
-      // and the body still runs it.
+      // The compensating save is a parameter (a sync cell's fold closes the
+      // gap, not a KV flush) — its DEFAULT is still the persist flush, and
+      // the body still runs it, owed to the caller (`_saveNow`).
       assertMatch(
         aio,
-        /function _journalAppend\([^]*?compensate: \(\) => Promise<void> = \(\) =>\s*persistence\.flushPersist\(\),?\s*\)/,
+        /function _journalAppend\([^]*?save: SaveNow = \{ clock: "kv" \},?\s*\)/,
       );
-      assertMatch(body, /compensate\(\)\.catch\(/);
+      assertMatch(body, /_saveNow\(save\)/);
       assertMatch(body, /_journalHealth\.fail\(e\)/);
       assertMatch(body, /_journalHealth\.ok\(\)/);
-      // The compensating flush's rejection handler is LOUD — flushPersist
+      // The compensating save's rejection handler is LOUD — flushPersist
       // never rejects by contract, so a rejection there is a broken contract
       // and the one thing it must not be is `.catch(() => {})`.
-      assert(
-        !/\.catch\(\(\) => \{\}\)/.test(body),
-        "no silent catch in the journal path",
-      );
-      assertMatch(body, /\.catch\(\(err\) => \{[^]*log\.error\(/);
+      const saveNow = fnBody(aio, "_saveNow");
+      assertMatch(saveNow, /persistence\.flushPersist\(\)/);
+      for (const b of [body, saveNow]) {
+        assert(
+          !/\.catch\(\(\) => \{\}\)/.test(b),
+          "no silent catch in the journal path",
+        );
+      }
+      assertMatch(saveNow, /\(err\) => \{[^]*log\.error\(/);
       assertMatch(
         aio,
         /degraded\(`journal:\$\{resolveAppId\(config\.appId\)\}`, \{\s*after: 1,?\s*\}\)/,

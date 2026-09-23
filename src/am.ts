@@ -94,9 +94,11 @@ import { cmdEval } from "./am/am-cmd-eval.ts";
 import { cmdLab } from "./am/am-cmd-lab.ts";
 import {
   adoptRunningHome,
+  amProfileHome,
   argsForHandler,
   parseGlobalFlags,
   resolveAmAppId,
+  splitAppProfile,
   targetHome,
 } from "./am/am-utils.ts";
 import { cmdWhere } from "./am/am-cmd-where.ts";
@@ -312,6 +314,17 @@ export function sameFile(a: string, b: string): boolean {
   return a === b || real(a) === real(b);
 }
 
+/** Verbs whose first positional may name the target as `myapp@dev`. */
+const PROFILE_POSITIONAL_VERBS: ReadonlySet<string> = new Set([
+  "start",
+  "stop",
+  "restart",
+  "status",
+  "kill",
+  "logs",
+  "log",
+]);
+
 async function main(): Promise<void> {
   // FIRST: stdout belongs to the command's own document (see am-log.ts).
   routeAmLogsToStderr();
@@ -365,14 +378,56 @@ async function main(): Promise<void> {
       );
     }
   }
-  // `--home=<dir>` targets the instance running from that data home. Bound
-  // here, once, before any command resolves a lock — see `targetHome`.
-  if (flags.home !== undefined) {
-    if (!flags.home) {
+  // `myapp@dev` — the PROFILE spelling of a target, in `--app` and in a
+  // process verb's positional (`am stop myapp@dev`). am's parser only: the
+  // runtime's appId rules are untouched.
+  {
+    const fail = (m: string): never => {
+      outError(m, detectMode(flags));
+      Deno.exit(1);
+    };
+    const take = (v: string) => {
+      const { app, profile } = splitAppProfile(v);
+      if (profile === undefined) return false;
+      if (flags.app !== undefined && flags.app !== app && flags.app !== v) {
+        fail(`"${v}" and --app=${flags.app} name two apps — pass one`);
+      }
+      if (flags.profile !== undefined && flags.profile !== profile) {
+        fail(
+          `"${v}" and --profile=${flags.profile} name two profiles — ` +
+            `pass one`,
+        );
+      }
+      flags.app = app;
+      flags.profile = profile;
+      return true;
+    };
+    if (flags.app !== undefined) take(flags.app);
+    if (PROFILE_POSITIONAL_VERBS.has(command)) {
+      const i = args.findIndex((a) => !a.startsWith("-"));
+      if (i !== -1 && /^[^@\s]+@[^@\s]+$/.test(args[i]!) && take(args[i]!)) {
+        args.splice(i, 1);
+      }
+    }
+  }
+  // `--profile=<name|path>` (and its path-only alias `--home=<dir>`) target
+  // that instance's data home. Bound here, once, before any command resolves
+  // a lock — see `targetHome`.
+  if (flags.home !== undefined || flags.profile !== undefined) {
+    if (flags.home === "") {
       outError("--home needs a directory: --home=<dir>", detectMode(flags));
       Deno.exit(1);
     }
-    targetHome(resolveAmAppId(flags.app), flags.home);
+    const appId = resolveAmAppId(flags.app);
+    const t = amProfileHome(appId, {
+      profile: flags.profile,
+      home: flags.home,
+    });
+    if (t.error) {
+      outError(t.error, detectMode(flags));
+      Deno.exit(1);
+    }
+    targetHome(appId, t.home!, t.profile);
   } else {
     // No `--home`: follow the instance that is actually running, if there is
     // exactly one. Bound in the same place and for the same reason — before

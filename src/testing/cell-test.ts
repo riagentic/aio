@@ -423,6 +423,7 @@ export function testCell(
     _refuseUnsafeCells([f]);
 
     // Compose a single-cell system
+    // aio-ok(persist-decider): testCell is in-memory — its state lives in a local variable and never reaches a store.
     const composed = composeCells([f]);
     const machine = f.__aio.machine;
 

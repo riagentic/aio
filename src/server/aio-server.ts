@@ -182,7 +182,10 @@ export interface ServerSetupDeps<S, A> {
   useElectron: boolean;
   // Time-travel
   tt: {
-    handleTTCommand: (cmd: string, arg?: number) => void;
+    handleTTCommand: (
+      cmd: string,
+      arg?: number,
+    ) => void | Promise<string | undefined>;
     getTTBroadcast: () => unknown;
   } | null;
   // Sync

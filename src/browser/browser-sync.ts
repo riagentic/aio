@@ -41,6 +41,16 @@ import { _armAckTimer, _rejectAck, _resolveAck } from "./browser-ack.ts";
 const SYNC_ERR_RETRY_MS = 2_000;
 
 let _engine: SyncEngine | null = null;
+/** The ONE pending `sync-err` retry. Each `sync-err` used to schedule its own:
+ *  a server holding ops (time travel paused) answers every op frame with one,
+ *  so N ops typed meanwhile ran N retry loops, each re-sending the whole
+ *  queue every 2s. One timer per engine; later errors ride on it. */
+let _syncErrTimer: ReturnType<typeof setTimeout> | null = null;
+/** The last `sync-err` reason logged — said once per episode, not per retry;
+ *  a sync that lands (`sync-res`) ends the episode. */
+let _syncErrSaid: string | null = null;
+/** Ops whose `unsaved` ack was already said (bounded). */
+const _unsavedSaid = new Set<string>();
 let _syncCells: Map<string, CellDef> | null = null;
 
 /** Every sync frame the engine handles is fire-and-forget, and each one used to
@@ -218,7 +228,20 @@ export function handleSyncMessage(t: string, d: unknown): void {
         opId: string;
         serverHlc: unknown;
         serverTs?: number;
+        unsaved?: unknown;
       };
+      // The op is applied, but what its commit owed could not be saved (a
+      // failed stand-in save) — the same `unsaved` every other door carries.
+      // Said once per op: a lost ack's retransmit carries it again.
+      if (typeof a.unsaved === "string" && !_unsavedSaid.has(a.opId)) {
+        if (_unsavedSaid.size >= 1024) {
+          _unsavedSaid.delete(_unsavedSaid.values().next().value!);
+        }
+        _unsavedSaid.add(a.opId);
+        console.warn(
+          `[aio:sync] op ${a.opId} on ${a.cell} NOT SAVED — ${a.unsaved}`,
+        );
+      }
       watch(
         "sync:ack",
         _engine.handleAck(
@@ -247,6 +270,7 @@ export function handleSyncMessage(t: string, d: unknown): void {
       );
       return;
     case "sync-res":
+      _syncErrSaid = null; // the episode is over — a new failure is news
       watch(
         "sync:response",
         _engine.handleSyncResponse(
@@ -258,12 +282,20 @@ export function handleSyncMessage(t: string, d: unknown): void {
       // Server-side sync failure — without this branch the client hangs in
       // "syncing" forever. Log loudly, back off, re-request.
       const reason = (d as { reason?: string } | undefined)?.reason ?? "?";
-      console.error(
-        `[aio:sync] server sync failed: ${reason} — retrying in 2s`,
-      );
+      if (reason !== _syncErrSaid) {
+        _syncErrSaid = reason;
+        console.error(
+          `[aio:sync] server sync failed: ${reason} — retrying every 2s ` +
+            `(said once until a sync lands)`,
+        );
+      }
+      if (_syncErrTimer !== null) return; // a retry is already scheduled
       const engine = _engine;
-      setTimeout(() => {
-        if (engine) watch("sync:request", engine.requestSync());
+      _syncErrTimer = setTimeout(() => {
+        _syncErrTimer = null;
+        if (engine && engine === _engine) {
+          watch("sync:request", engine.requestSync());
+        }
       }, SYNC_ERR_RETRY_MS);
       return;
     }
@@ -437,6 +469,10 @@ export function _resetBrowserSync(): void {
   // on its own.
   _engine?.dispose();
   _engine = null;
+  if (_syncErrTimer !== null) clearTimeout(_syncErrTimer);
+  _syncErrTimer = null;
+  _syncErrSaid = null;
+  _unsavedSaid.clear();
   _syncCells = null;
   _storageWarned = false;
 }

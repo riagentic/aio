@@ -407,6 +407,20 @@ while yours had not been asked for yet, one answer would belong to two
 responses, and it THROWS rather than hand one page's title, description and
 canonical URL to another.
 
+A render whose client went away (a closed tab: the stream was returned before
+its end) has no caller left once another render has been set up — once anything
+has called `renderToStream()` or `renderToString()` at the top level (not from
+inside a component) since it was called — so its head is then nobody's answer:
+asked after that, the no-argument form answers EMPTY. With nothing set up since,
+the one asking may be the code that stopped reading its own stream (a `break`
+out of the loop), and it gets that stream's head. A closed tab that had a head
+still counts as the next page's neighbour, so that page's no-argument head
+throws as above — loud, where any answer could be another visitor's. The key is
+exact.
+
+**The no-argument form is exact only when one request renders at a time.** Under
+concurrency — any server that streams — pass the key: `collectHead(req)`.
+
 ## page() — State-Based Routing
 
 For Electron, kiosk, or single-tab apps where URL doesn't matter:

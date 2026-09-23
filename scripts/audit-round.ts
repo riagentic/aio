@@ -2116,6 +2116,8 @@ async function round30(r: () => number): Promise<void> {
     "--db-path=": "/tmp/x.db",
     "--host=": "192.168.1.20",
     "--cdp=": "9222",
+    "--profile=": "dev",
+    "--home=": "/tmp/aio-audit-home",
     "--__aio-relaunch-after=": "123",
   };
 

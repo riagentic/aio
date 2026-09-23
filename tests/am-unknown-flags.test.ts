@@ -179,7 +179,7 @@ Deno.test("am help: the compact form still documents the global flags", () => {
   const full = capture(() =>
     cmdHelp(["--commands"], {} as GlobalFlags, ["help"])
   );
-  assertStringIncludes(full.out.join("\n"), "--home: target the instance");
+  assertStringIncludes(full.out.join("\n"), "--profile: a NAME");
 });
 
 // `am help` advertised `--template=counter|todo` while `--template=cli` worked

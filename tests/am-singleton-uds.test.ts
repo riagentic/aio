@@ -10,9 +10,10 @@
 import { assert, assertEquals } from "@std/assert";
 import { join } from "@std/path";
 import { ensureSingleton } from "../src/am/am-cmd-process.ts";
-import { removePid, writePid } from "../src/am/am-utils.ts";
+import { writePid } from "../src/am/am-utils.ts";
 import { isProcessAlive } from "../src/server/single-instance-lock.ts";
 import { freePort } from "../src/testing/server-test.ts";
+import { dropFixtureLock } from "./fixture-lock-helper.ts";
 
 class ExitSignal extends Error {
   constructor(public code: number) {
@@ -103,7 +104,7 @@ Deno.test({
       } catch { /* already dead */ }
       await child.status;
       listener.close();
-      removePid(appId);
+      dropFixtureLock(appId);
       await Deno.remove(dir, { recursive: true });
     }
   },
@@ -143,7 +144,7 @@ Deno.test({
         child.kill("SIGKILL");
       } catch { /* already dead */ }
       await child.status;
-      removePid(appId);
+      dropFixtureLock(appId);
       await Deno.remove(dir, { recursive: true });
     }
   },

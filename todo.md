@@ -14,6 +14,73 @@ is frozen — additive only, bugfix-only through beta; 1.0.0 = boring.
 
 ---
 
+## DONE — 1.0.10-beta blueprint (agreed 2026-09-22, shipped in 1.0.10-beta)
+
+From an outside code-and-docs review, checked against HEAD. Already done and
+dropped from the list: one persist filter (`buildDBStateGetter`, both hosts,
+1.0.8) · one dispatch loop (`createDispatch` on server, standalone and worker
+cells) · `bundle-dev-chunk.test.ts` · `multi-instance.test.ts` ·
+`scripts/proof.ts`. Refused: `am trust --replace` (new surface, and it fights
+the "warn, don't regenerate" TLS freeze — rotation stays delete + `am trust`).
+Nothing gets added to this list until `test:hosts` has failed once for a real
+reason and been fixed.
+
+- [x] **`test:hosts` lane.** One app × {server, standalone, packaged Electron} →
+      `persist: "none"` never reaches disk and never comes back · the last write
+      survives shutdown drain · the packaged doors hold (snapshot route off, CSP
+      meta). Transport policy ALREADY exists (`resolveTransport`,
+      `src/server/paths.ts:185`: electron ∧ ¬expose → uds, but an explicit
+      `transport: "ws"` wins). So assert the DEFAULT on the built ARTIFACT (no
+      TCP listen socket), and never ban the explicit `ws` opt-in: banning it
+      would break compat.
+- [x] **Persist-decider gate.** CI goes red when any `src/` host persists state
+      without `buildDBStateGetter` (`state/cell-persist-filter.ts`). The only
+      allowed fallback is a raw `initStandalone` (no cells, whole state).
+- [x] **SSR soak inside `check:release`.** N overlapping renders plus a
+      mid-stream abort; extends `air-ssr-concurrent-render-state.test.ts`.
+- [x] **`test:sync` lane + a cross-sync boot warning.** Property tests (HLC
+      order, ack, offline replay, compaction). Warn at boot when linked cells
+      disagree on `sync`.
+- [x] **`am` exit-code sweep.** One test loops over every verb: a failed side
+      effect → exit 1, and no success JSON after it.
+- [x] **`@decider` wiring.** A function tagged `@decider` must be imported by a
+      `tests/*.test.ts`; enforced in `check:dead-wiring`. Never grep for the
+      word "decider" (85 files use it, so the gate would be all noise).
+
+REFUSED in 1.0.10-beta (user verdict 2026-09-23, "approve all") — design limits,
+each documented where a user meets it; not open items:
+
+- [refused] Unkeyed `collectHead()` under concurrent streaming can still hand
+  out another page's head or an empty one (as 1.0.9); `collectHead(req)` is
+  exact. Deno's `enterWith` leaks across requests, so no ALS fix exists.
+- [refused] `routePath` is one process-wide signal: set it and render in one
+  synchronous step. `renderToStream(); routePath.set(); renderToString()` in one
+  step keeps the call's route with NO warning (indistinguishable from two
+  correct requests on a shared promise).
+- [refused] `journal: true` with listened sync ops costs ~5–10% ops/s (up to
+  ~30% with MB-sized listener state); journal off is unchanged.
+- [refused] Data last run by 1.0.9 re-derives no `listensTo` reaction of a sync
+  op — each listener is named once; the user checks it. Downgrading an app with
+  a store-persisted listener of a sync cell double-counts on every 1.0.9 boot
+  (1.0.9's own behavior; documented, no safe way back).
+- [refused] A v1.0.9 `am kill` still removes a backup/restore hold's lock.
+- [refused] macOS nohup detection is a TTY heuristic.
+- [refused] `ssr-fragment-nest` ratio bench: deep Fragment chains are now faster
+  than 1.0.9, but the WeakSet in `vdom-create.ts` (`_literal`) keeps its peak
+  table size (bounded by the largest page, same as 1.0.9).
+
+Checked and deliberately NOT added: a `check:vacuous` rule for "handler ran zero
+times". The 1.0.8 `press()` trap was a test with no assertion about the handler
+at all, and no static shape can see that. It is fixed where it can be seen: a
+dev warning inside the listener. If this class grows, extend that runtime probe
+to the other drive helpers (click on disabled, type into readonly). Don't build
+a lint rule for it.
+
+1.0.0 (no suffix) = a date, not a feature: once the first three items have been
+boring for several WEEKS. The user's call.
+
+---
+
 ## RESUME HERE — post-1.0.7-beta verify round (2026-09-21, HELD, NOT RELEASED)
 
 **Status: fixed in the working tree, deliberately NOT released.** 1.0.7-beta is

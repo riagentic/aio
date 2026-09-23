@@ -31,8 +31,13 @@
  * verb adds no surface an app has not already opened.
  */
 import type { GlobalFlags } from "./am-types.ts";
-import { detectMode, out, outError } from "./am-output.ts";
-import { liveLock, resolveAmAppId } from "./am-utils.ts";
+import { detectMode, outData, outError } from "./am-output.ts";
+import {
+  liveLock,
+  lockHasNoDoor,
+  noDoorMessage,
+  resolveAmAppId,
+} from "./am-utils.ts";
 import { appPageTargets, cdpConnect, cdpTargets } from "./am-cdp.ts";
 import { noCdpMessage } from "./am-cmd-shot.ts";
 
@@ -151,6 +156,12 @@ export async function cmdEval(
     outError(`${appId} is not running (no lock) — am start first`, mode);
     Deno.exit(1);
   }
+  // Still booting: no window and no cdp port recorded YET — "restart with
+  // --cdp" would be the wrong advice for an app that may well have it.
+  if (lockHasNoDoor(pf)) {
+    outError(noDoorMessage(appId, pf), mode);
+    Deno.exit(1);
+  }
   if (!pf.cdpPort) {
     // The same message `am shot` gives, deliberately: two verbs that need the
     // same flag must not explain it two ways — but they must each name their
@@ -222,7 +233,7 @@ export async function cmdEval(
       );
       Deno.exit(1);
     }
-    out(
+    outData(
       mode === "pretty"
         ? (outcome.type === "undefined"
           ? "undefined"

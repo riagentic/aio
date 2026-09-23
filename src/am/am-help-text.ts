@@ -232,8 +232,9 @@ Process (singleton — one instance per app identity):
                           nothing records.
   restart [component]     Stop + start (the whole project, or one component)
   watch [dir]             Hot-restart on .ts/.tsx change in dir (default: src/)
-  status [component]      stopped|starting|started|stopping (exit 0=started,
-                          1=stopped, 2=transitional). With components: one line
+  status [component]      stopped|starting|started|stopping|maintenance (exit
+                          0=started, 1=stopped, 2=transitional; maintenance =
+                          am backup/restore holds the app). With components: one line
                           each, and the same three codes read over the whole
                           project — 0 every one up, 1 every one down, 2 partial.
   instances               List running aio apps in THIS scope — an instance or
@@ -352,6 +353,11 @@ Inspect:
   --instance=<name>       (global) run and address a PRIVATE copy: its own
                           lock, data home and logs, beside anyone else's.
                           An agent and a human stop sharing one session
+  --profile=<name|path>   (global) the app's PROFILE: a second data home
+                          beside its own (dev → ~/.<app>-dev, shown as
+                          <app>@dev). am start --profile dev starts it; every
+                          other verb targets it; <app>@dev works as --app and
+                          as start/stop/restart/status's argument
   testgen [entry] [--out=F]  GENERATE A TYPED TEST CLIENT from what the app actually renders — ui.App.SaveButton.click() autocompletes and a renamed button breaks tests at COMPILE time, instead of a string key whose typo is a runtime undefined. Re-run after a UI change (default out: tests/ui.gen.ts)
   feedback [app]          Where THIS app's findings about aio go — a stable
                           path outside the version store, so \`am pin\` and
@@ -448,11 +454,13 @@ Driving an app with no human in the loop (agents, CI, scripts): ASSERT with
 --json: machine-readable output for EVERY command — the scripting interface
         (errors included; a non-zero exit still means failed)
 
-Flags: --app=X  --port=N  --entry=<path>  --wait[=N]  --no-wait  --json  --quiet  --body='{...}'  --args='[...]'  --filter=X  --lines=N  --follow/-f  --transport=ws|uds  --client-index=N/-i N  --all  --home=<dir>  --timeout=<ms>
+Flags: --app=X  --port=N  --entry=<path>  --wait[=N]  --no-wait  --json  --quiet  --body='{...}'  --args='[...]'  --filter=X  --lines=N  --follow/-f  --transport=ws|uds  --client-index=N/-i N  --all  --profile=<name|path>  --home=<dir>  --timeout=<ms>
 
 --app: target specific app by ID (default: resolved from deno.json name)
---home: target the instance of that app running from <dir> (an isolated
-        second boot); AIO_APPS_DIR is the env-level equivalent
+--profile: a NAME (dev → ~/.<app>-dev, lock <app>@dev) or a PATH (./x,
+        ~/x, /x — that exact folder). am start forwards it; a bare am stop
+        never stops a profile
+--home: the path-only alias of --profile
 --timeout: ms to wait for a live client (surface/trigger; default 8000)
 --entry: override entry point (default: deno.json "entry" > src/app.ts)
 --wait: start/stop block until complete (start 10s, stop 11s) — start does this by

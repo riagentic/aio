@@ -207,7 +207,9 @@ export function overAdvisedShare(
  *  top-level deno.json keys called it inert. Three surfaces, three answers,
  *  and the key that looked live was not. Pure: the caller supplies the parsed
  *  config (`appDenoJson()`, `readDenoJson(root)`), so this never touches disk
- *  and can be tested with an object. */
+ *  and can be tested with an object.
+ *
+ *  @decider */
 export function declaredMaxHeapOf(
   denoJsonConfig: Record<string, unknown> | undefined,
 ): string | number | undefined {

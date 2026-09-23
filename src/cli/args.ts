@@ -7,7 +7,10 @@
 // 127.0.0.1 while its author believed it was on the LAN. A typo is loud, with
 // a did-you-mean, and exits `EXIT.usage`.
 
-import { AIO_RUNTIME_FLAGS } from "../diagnostics/runtime-flags.ts";
+import {
+  AIO_RUNTIME_FLAGS,
+  claimRuntimeFlag,
+} from "../diagnostics/runtime-flags.ts";
 import { nearestOf } from "../state/cell-helpers.ts";
 import { type CliIO, defaultIO } from "./io.ts";
 import { EXIT, fail } from "./exit.ts";
@@ -91,6 +94,11 @@ export function args<const S extends ArgsSpec>(
   const argv = opts.argv ?? Deno.args;
   const io = opts.io ?? defaultIO();
   const flagSpecs = spec.flags ?? {};
+  // An app that parses its OWN `--profile`/`--home` keeps it: the aio runtime
+  // then reads its profile from AIO_PROFILE / AIO_HOME only.
+  for (const n of ["profile", "home"]) {
+    if (Object.hasOwn(flagSpecs, n)) claimRuntimeFlag(`--${n}`);
+  }
   const help = helpText(spec);
   const hasJson = flagSpecs.json?.type === "boolean";
   const json = hasJson && argv.includes("--json") &&

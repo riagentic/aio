@@ -10,8 +10,10 @@ import {
   detectMode,
   fail,
   out,
+  outData,
   outError,
   outValue,
+  sayData,
   stack,
   style,
 } from "./am-output.ts";
@@ -901,7 +903,9 @@ export async function cmdDispatch(
       // braces and quotes. `--json` still carries it verbatim — this is the
       // human branch, and a method that returns a record is exactly the case
       // an aligned `label  value` block reads better than `{ "a": 1 }`.
-      out(
+      // DATA: the method's return value is the app's text (a ZWJ, an RLM, its
+      // own colours are the data), so the data sink, not the message one.
+      outData(
         { message: label, result: data.result },
         mode,
         () =>
@@ -1233,7 +1237,12 @@ export async function cmdSnapshot(
       outError(result.error, mode);
       Deno.exit(1);
     }
-    console.log(result.data);
+    // A DATA document for a script — byte-true (see sayData).
+    sayData(
+      typeof result.data === "string"
+        ? result.data
+        : JSON.stringify(result.data),
+    );
     return;
   }
 

@@ -160,9 +160,13 @@ the hook returns.
 
 ## `persist` is about the STORE — `diagnostics` is about the record
 
-`persist: "none"` keeps a cell's **state** out of the state store. It does not
-keep the cell's **actions** out of `logs/actions.jsonl`, and it was reasonably
-read as if it did.
+`persist: "none"` keeps a cell's **state** out of the state store — and out of
+the dev checkpoint (`logs/checkpoint.json`), which can be read back by
+`onCheckpointRestore` and so leaves every `persist: "none"` cell out. It does
+not keep the cell's **actions** out of `logs/actions.jsonl`: an action log
+records payloads, and a payload is what the caller passed, not the cell's state.
+For that, use `diagnostics: false` (the whole cell) or `redactActions` (named
+actions), below.
 
 They are different things and they now have different words:
 

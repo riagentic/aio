@@ -82,7 +82,25 @@ export function testDisplay(): string {
   // number when `:77` belongs to another account (its socket being up says
   // nothing about whose desktop it is; see server/nested-display.ts).
   const pick = pickNestedDisplay();
-  if (pick?.up) return (_resolved = pick.display);
+  if (pick?.up) {
+    // Up, but its cookie is not where THIS process looks (`$XDG_RUNTIME_DIR/
+    // aio`): a Xephyr started with access control then refuses every child
+    // ("Authorization required") — Electron dies at launch, its app stops
+    // itself cleanly mid-test, and the failure surfaces steps later as lost
+    // state. Measured: test:hosts under a relocated XDG_RUNTIME_DIR.
+    if (!pick.secured && !_warned) {
+      _warned = true;
+      console.error(
+        `[aio:test] ${pick.display} is up but no access cookie for it is in ` +
+          `${Deno.env.get("XDG_RUNTIME_DIR") ?? "/tmp"}/aio — if it was ` +
+          `started with access control (scripts/xephyr.sh, am start, an ` +
+          `earlier test run under another XDG_RUNTIME_DIR), every GUI child ` +
+          `will be REFUSED ("Authorization required"). Run with the ` +
+          `XDG_RUNTIME_DIR it was started under, or set $AIO_TEST_DISPLAY.`,
+      );
+    }
+    return (_resolved = pick.display);
+  }
   // No parent display: a headless box or CI. Xephyr is a NESTED server — it
   // needs a session to open its window inside — and there is no focus to steal
   // here anyway. Trying anyway costs a doomed spawn and a 3s wait per run.

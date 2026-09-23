@@ -23,7 +23,7 @@
 import { join, resolve } from "@std/path";
 import type { GlobalFlags } from "./am-types.ts";
 import { PLATFORMS } from "../build/platforms.ts";
-import { detectMode, fail, out } from "./am-output.ts";
+import { detectMode, fail, out, sayErr } from "./am-output.ts";
 import { readDenoJson } from "../server/deno-json.ts";
 import {
   artifactFormat,
@@ -319,9 +319,9 @@ export async function cmdPublish(
   // The warning is the same fact in both modes — a CI log used to get
   // `"signed":false` and nothing else, and an unsigned release is the one a
   // client refuses on someone else's machine.
-  if (unsigned) console.error(unsignedWarning(manifests[0]!.name));
+  if (unsigned) sayErr(unsignedWarning(manifests[0]!.name));
   else if (key.source === "default") {
-    console.error(
+    sayErr(
       `am publish: ✓ signed with ${key.path} (the ship keygen default; --key=<path> picks another)`,
     );
   }

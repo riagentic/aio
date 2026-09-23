@@ -8,7 +8,7 @@
 
 import { dirname } from "@std/path";
 import type { OutputMode } from "./am-types.ts";
-import { out, outError } from "./am-output.ts";
+import { out, outError, sayErr } from "./am-output.ts";
 import { parseNumArg } from "./am-utils.ts";
 import type { CdpSession } from "../media/cdp.ts";
 import type { VideoFormat } from "../media/chunks.ts";
@@ -163,7 +163,7 @@ const mb = (n: number) => `${(n / 1024 / 1024).toFixed(1)} MB`;
  *  Same channel rule as `restartNote` in am-cmd-process.ts. */
 export function shotVideoProgress(mode: OutputMode, line: string): void {
   if (mode === "quiet") return;
-  console.error(line);
+  sayErr(line);
 }
 
 /** The line that means "recording has started". Greppable; `--json` scripts

@@ -32,6 +32,7 @@ import { _activeRoot } from "./renderer-state.ts";
 import {
   _resetSsrRenders,
   _ssrRenderCurrent,
+  _ssrRenderEpoch,
   _ssrRenderForKey,
   _ssrRenderLast,
   _ssrRenderLastEnded,
@@ -450,6 +451,19 @@ function _collectTarget(): SsrRender | null {
         "and ask for it by name — `renderToStream(<App/>, req)` … " +
         "`collectHead(req)`, with any object that identifies this response.",
     );
+  }
+  // A render whose client went away (a closed tab) has no caller left to ask
+  // — once ANOTHER render has been set up since it, that is: then its head is
+  // nobody's answer, and handing it out gave a visitor who had left's title,
+  // description and canonical to whoever asked next. The answer is empty —
+  // not the render before it, whose caller may already have asked (a repeat
+  // ask would then carry that other page's head). It counts as asked, as it
+  // did when it was the answer. With nothing set up since, the asker can be
+  // the code that stopped reading its own stream (a `break` out of the loop):
+  // it gets that render's head, as in 1.0.9.
+  if (last && last.aborted && last.epoch !== _ssrRenderEpoch()) {
+    last.collected = true;
+    return null;
   }
   return last;
 }

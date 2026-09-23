@@ -2,7 +2,7 @@
 // Thin orchestrator — delegates to server-*.ts modules
 import { APP_STYLE, appHasStylesheet, UI_ENTRY } from "./app-files.ts";
 import { declaresOverLimit, readBounded } from "./read-body.ts";
-import { slugify } from "./single-instance-lock.ts";
+import { ensureLockDirOf, instances, slugify } from "./single-instance-lock.ts";
 import { isPipePath, listenLocal } from "./local-listen.ts";
 import { serveHttpOverLocal } from "./http-over-conn.ts";
 import { enc } from "../protocol/envelope.ts";
@@ -1722,6 +1722,7 @@ export function createServer(config: ServerConfig): ServerHandle {
     try {
       Deno.removeSync(udsPath);
     } catch { /* doesn't exist */ }
+    ensureLockDirOf(udsPath); // pruned since `lockDir()` cached it — see uds.ts
     httpServer = Deno.serve(
       { path: udsPath, onListen: () => {} },
       handleRequest,
@@ -1767,12 +1768,25 @@ export function createServer(config: ServerConfig): ServerHandle {
         // that while asserting the opposite. Two deciders, one contradicting
         // the other, in the message an operator reads while looking at an
         // unrelated process on the port.
+        // Name the holder when it is an aio app — typically another profile
+        // or home of THIS app, whose declared port is fixed.
+        let holder = "";
+        try {
+          const h = instances().find((i) =>
+            i.port === port && i.pid !== Deno.pid && i.alive
+          );
+          if (h) {
+            holder = ` It is held by aio app ${h.appId}${
+              h.profile ? `@${h.profile}` : ""
+            } (pid ${h.pid}).`;
+          }
+        } catch { /* aio-ok: no lock dir to read — the port is named anyway */ }
         throw new Error(
           `port ${port} already in use — something else is listening on it ` +
             `(this app's own singleton lock was free, so it is not a second ` +
-            `copy of this app). Refusing to start: a second cell runtime on ` +
-            `shared persistence could corrupt it. Free the port, or use ` +
-            `--port=N.`,
+            `copy of this app).${holder} Refusing to start: a second cell ` +
+            `runtime on shared persistence could corrupt it. Free the port, ` +
+            `or use --port=0 (a free one) or --port=N.`,
         );
       }
       // A HOST THIS MACHINE CANNOT BIND is user input too, and it arrived as a

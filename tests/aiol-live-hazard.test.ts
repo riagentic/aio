@@ -202,3 +202,23 @@ export const g = cell("g", {
   });
   assertEquals(found.length, 1);
 });
+
+Deno.test('aiol: conflict: "warn" is the fix already taken — not flagged', async () => {
+  const found = await issues({
+    "src/issues.ts": HAZARD.replace(
+      "transaction: true,",
+      'transaction: { conflict: "warn" },',
+    ),
+  });
+  assertEquals(found.length, 0, "the finding's own suggested fix silences it");
+});
+
+Deno.test('aiol: a COMMENT naming conflict: "warn" does not silence it', async () => {
+  const found = await issues({
+    "src/issues.ts": HAZARD.replace(
+      "transaction: true,",
+      '// consider conflict: "warn" here\n  transaction: true,',
+    ),
+  });
+  assertEquals(found.length, 1, "only the real key counts");
+});

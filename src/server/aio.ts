@@ -14,7 +14,11 @@ import {
   UI_ENTRY,
 } from "./app-files.ts";
 import { readLocalPinSync } from "./deno-json.ts";
-import { createShutdownOrchestrator, registerRuntime } from "./shutdown.ts";
+import {
+  createShutdownOrchestrator,
+  registerRuntime,
+  runtimeCount,
+} from "./shutdown.ts";
 import { _registerAuthStore, serverUser } from "./auth-context.ts";
 import type { ServerHandle } from "./server-types.ts";
 import type { UDSHandle } from "./uds.ts";
@@ -46,18 +50,44 @@ import {
 // Phase modules — extracted _run() logic
 import {
   bootStorage,
+  cleanStopThrough,
+  getSyncReplayContext,
   isDevBoot,
+  issuedThrough,
+  moveJournalAside,
+  reactionsFormat,
+  recordCleanStop,
   replaySyncOps,
   runCellRestore,
+  seedSyncReactions,
+  stampReactions,
+  unwrapReduced,
 } from "./aio-boot.ts";
+import { getCompactedTs } from "../sync/server-store.ts";
+import { recordStoreGen } from "./store-gen.ts";
+import { inFlightVerdict, opKey, placeOps } from "./op-placement.ts";
+import { takeRejectionFor } from "../state/rejection-tracker.ts";
+import { diffState } from "../sync/state-patch.ts";
 import { deepMerge } from "../state/deep-merge.ts";
 import { restoreExcluded } from "../state/state-filter.ts";
 import {
   type ActionCause,
+  isLegacyTail,
   type JournalEntry,
   type JournalGap,
+  journalWatermarkKey,
+  LEGACY_RECOVERED_TYPE,
+  LISTENS_TO_CMD,
+  LISTENS_TO_SYNC_OP_CMD,
+  REACTIONS_FORMAT,
+  REACTIONS_MARKED,
   replayJournal,
+  SYNC_APPLIED_TYPE,
+  SYNC_INTENT_TYPE,
+  SYNC_REACTION_TYPE,
+  syncJournalSnapshotKey,
   syncJournalWatermarkKey,
+  type SyncReaction,
   type TimeTravelRestore,
   TT_RESTORE_TYPE,
   workerPatchCell,
@@ -97,7 +127,9 @@ import {
   appDirs,
   checkUnpackLocation,
   ensureAppDirs,
+  homeRequested,
   registerAppDirs,
+  registeredProfile,
   resolveAppDirs,
   sweepAppPayloadDir,
   writeAppMeta,
@@ -140,8 +172,11 @@ import { composeCellsWiring } from "./aio-composition.ts";
 import {
   _cloneAcrossWorkerBoundary,
   _mapCallResult,
+  _onCallSettle,
   _setCallTimeouts,
 } from "../state/cell-impl.ts";
+import { _noteUnsaved } from "./action-ack.ts";
+import { PERSIST_REFUSED } from "./server-trojan.ts";
 import { _moveRejections } from "../state/rejection-tracker.ts";
 import {
   buildLegacyConfig,
@@ -169,6 +204,7 @@ import {
   declareAppFlags,
   electronOnlyFlagRefusal,
   envDefaultPort,
+  homeRequest,
   parseCli,
   printHelp,
   VERSION,
@@ -306,7 +342,9 @@ validateVersion();
  *  at all, which is precisely the state `--expose` exists to make loud. This
  *  function's whole reason to exist is that exposure has ONE decider, so it
  *  reads both keys. A loopback `host` (the default, or an explicit
- *  `--host=127.0.0.1`) is not exposure and changes nothing. */
+ *  `--host=127.0.0.1`) is not exposure and changes nothing.
+ *
+ *  @decider */
 export function _exposeOf(
   cli: { expose?: boolean; host?: string },
   config: { expose?: boolean; host?: string },
@@ -1152,6 +1190,7 @@ async function _runAsApp(a?: any, b?: any): Promise<AioApp<any, any>> {
     const {
       composed,
       autoGetDBState,
+      persistingCellIds,
       autoGetUIState,
       cellPatchStrategies,
       cellFilterFields,
@@ -1279,15 +1318,29 @@ async function _runAsApp(a?: any, b?: any): Promise<AioApp<any, any>> {
     // the same registry, so registering after it would send a libraryMode app's
     // logs into the user's home (the inner _run() registers again, harmlessly).
     const _earlyAppId = resolveAppId(fc.appId);
-    registerAppDirs(
-      _earlyAppId,
-      resolveAppDirs({
+    let _earlyDirs: ReturnType<typeof resolveAppDirs>;
+    try {
+      _earlyDirs = resolveAppDirs({
         appId: _earlyAppId,
         appDir: fc.appDir,
         libraryMode: fc.libraryMode,
         baseDir: fc.baseDir,
-      }),
-    );
+        // `--profile` / `--home` (+ AIO_PROFILE): the RUNNER's say.
+        request: fc.libraryMode ? undefined : homeRequest(),
+        profiles: fc.profiles,
+      });
+    } catch (e) {
+      // A refused data folder (profiles: false, another app's, a foreign
+      // one) is an operator's answer, not a crash: one line, exit 1.
+      if (fc.libraryMode || runtimeCount() > 0) throw e;
+      log.error(e instanceof Error ? e.message : String(e));
+      Deno.exit(1);
+    }
+    registerAppDirs(_earlyAppId, _earlyDirs);
+    // A requested home IS the appDir from here on: many readers call
+    // `appDirs(appId, cfg.appDir)` with the author's value, which would name
+    // the base home instead of the profile's.
+    if (homeRequested(_earlyAppId)) fc = { ...fc, appDir: _earlyDirs.home };
 
     // Logger — skipped in `--aio-data-contract` mode: installing it would
     // replace the stderr-only sink (putting boot lines back on the parsed
@@ -1303,6 +1356,7 @@ async function _runAsApp(a?: any, b?: any): Promise<AioApp<any, any>> {
       onRestore,
       autoGetUIState,
       autoGetDBState,
+      persistingCellIds,
       cellPatchStrategies,
       cellFilterFieldsMap: cellFilterFields,
       cellReportOpts,
@@ -1544,7 +1598,11 @@ async function _runPhases<S, A, E>(
   // already point at a temp dir). Everything else resolves to `~/.<appId>`.
   // Boot-report values assembled as the boot proceeds (printed by bootLines).
   let _heapLine: string | undefined;
-  const _dirs = resolveAppDirs({
+  /** The boot's writes into `<data>/` — deferred until the lock is held. */
+  let _stampDataDir: (() => Promise<void>) | undefined;
+  // A requested home was resolved (and written into appDir) by the outer
+  // boot; resolving again would read appDir as the BASE of the profile.
+  const _dirs = homeRequested(appId) ? appDirs(appId) : resolveAppDirs({
     appId,
     appDir: config.appDir,
     libraryMode: config.libraryMode,
@@ -1580,22 +1638,6 @@ async function _runPhases<S, A, E>(
     // ends in "out of memory" with most of the machine free, and it must not be
     // discovered then. `am start`, run.sh and the build all size it correctly;
     // a bare `deno run src/app.ts` is the case that lands here.
-    await reportHeapCeiling(log, {
-      // Once per machine, keyed on the numbers — see reportHeapCeiling. The
-      // stamp lives beside the app's other disposables, so wiping the data dir
-      // legitimately makes it say the thing again.
-      // `<data>/` not `<data>/files/`: `files` is the APP's upload space
-      // (created lazily, and not ours), and a write that quietly fails puts
-      // the warning back on every boot.
-      stampPath: join(_dirs.data, ".heap-notice"),
-      always: cli.verbose,
-      // `memory.maxHeap` from the app's OWN deno.json — the same place
-      // `build-compile.ts` reads it, entry-relative like `version` and
-      // `title`. It reaches V8 only through the launch, so a bare `deno run`
-      // is capped at the automatic share while the config file says 12 GB;
-      // this is the surface that tells the author so (see reportHeapCeiling).
-      declaredMaxHeap: declaredMaxHeapOf(appDenoJson()),
-    });
     // The same numbers the warning uses, stated unconditionally: an app that
     // died of "out of memory" with the machine half empty is a support thread
     // that starts with "what was the ceiling?".
@@ -1611,23 +1653,48 @@ async function _runPhases<S, A, E>(
     sweepAppPayloadDir(_dirs);
     const unsafeUnpack = checkUnpackLocation(_dirs);
     if (unsafeUnpack) log.warn("security", unsafeUnpack);
-    if (!cli.noDataMigrate) {
-      const _m = migrateLegacyLayout({
-        appId,
-        dirs: _dirs,
-        cwd: Deno.cwd(),
-        legacyXdgDir: resolveDataDirLegacy(appId),
+    // Everything this boot WRITES into `<data>/` — the heap-notice stamp, the
+    // legacy-layout migration, meta.json — runs only once the singleton lock
+    // is ours (`_stampDataDir()` below). A boot the lock REFUSES — another
+    // instance, or `am backup`/`am restore` holding it — must leave data/
+    // byte-identical: it used to rewrite meta.json (a torn copy in a backup)
+    // and could refill a data/ a restore had just moved aside.
+    _stampDataDir = async () => {
+      await reportHeapCeiling(log, {
+        // Once per machine, keyed on the numbers — see reportHeapCeiling. The
+        // stamp lives beside the app's other disposables, so wiping the data dir
+        // legitimately makes it say the thing again.
+        // `<data>/` not `<data>/files/`: `files` is the APP's upload space
+        // (created lazily, and not ours), and a write that quietly fails puts
+        // the warning back on every boot.
+        stampPath: join(_dirs.data, ".heap-notice"),
+        always: cli.verbose,
+        // `memory.maxHeap` from the app's OWN deno.json — the same place
+        // `build-compile.ts` reads it, entry-relative like `version` and
+        // `title`. It reaches V8 only through the launch, so a bare `deno run`
+        // is capped at the automatic share while the config file says 12 GB;
+        // this is the surface that tells the author so (see reportHeapCeiling).
+        declaredMaxHeap: declaredMaxHeapOf(appDenoJson()),
       });
-      for (const line of describeMigration(_m, _dirs)) {
-        if (line.includes("FAILED") || _m.refused) log.warn("data", line);
-        else log.info("data", line);
+      if (!cli.noDataMigrate) {
+        const _m = migrateLegacyLayout({
+          appId,
+          dirs: _dirs,
+          cwd: Deno.cwd(),
+          legacyXdgDir: resolveDataDirLegacy(appId),
+        });
+        for (const line of describeMigration(_m, _dirs)) {
+          if (line.includes("FAILED") || _m.refused) log.warn("data", line);
+          else log.info("data", line);
+        }
       }
-    }
-    writeAppMeta(_dirs, {
-      appId,
-      aio: VERSION,
-      app: await _appVersion(),
-    });
+      writeAppMeta(_dirs, {
+        appId,
+        aio: VERSION,
+        app: await _appVersion(),
+        profile: registeredProfile(appId),
+      });
+    };
   }
   // THE port chain, in one place, with `am` reading the same four rungs
   // (`declaredPort`): `--port` (operator, this run) > `AIO_PORT` (operator, no
@@ -1700,6 +1767,7 @@ async function _runPhases<S, A, E>(
     takeover,
     {
       aioVersion: VERSION,
+      profile: registeredProfile(appId),
       cdpPort: cdpPort(),
       // What `am doctor` shows: each multi-home setting and who decided it.
       settings: Object.fromEntries(_settings),
@@ -1716,6 +1784,8 @@ async function _runPhases<S, A, E>(
     },
   );
   bootUndo.push("lock", () => appLock?.release());
+  // The lock is ours (or this boot takes none): only now may it write data/.
+  await _stampDataDir?.();
 
   // Did the last boot install something? Count this attempt, or — having spent
   // them — put the old artifact back and let the supervisor start it. Runs in
@@ -1975,7 +2045,20 @@ async function _runPhases<S, A, E>(
   // so the (s) => s fallback here is a safety net, not the primary path.
   const _rawGetUIState = config._getUIState ?? ((s: S, _user?: AioUser) => s);
   const getUIState = createMemoizedUIState(_rawGetUIState);
-  const getDBState = config._getDBState ?? ((s: S) => s);
+  // WHAT reaches the store comes from ONE rule (state/cell-persist-filter.ts),
+  // handed in by `buildLegacyConfig`. There is no whole-state default: a
+  // `persist: "none"` cell written to disk is the 1.0.7 standalone bug, and a
+  // silent `(s) => s` here is how a new caller would reintroduce it on the
+  // server. scripts/check-persist-decider.ts holds the line statically.
+  const decidedDBState = config._getDBState;
+  if (!decidedDBState) {
+    throw new Error(
+      "[aio] internal: the boot was reached without a persist filter " +
+        "(`_getDBState`, built by `buildDBStateGetter`). Refusing to guess — " +
+        'a whole-state default would write `persist: "none"` cells to disk.',
+    );
+  }
+  const getDBState: (s: S) => unknown = decidedDBState;
   const persistKey = config.persistKey ?? "state";
   const persistMode = config.persistMode ?? "single";
   const ui = config.ui ?? {} as UiConfig;
@@ -2084,11 +2167,20 @@ async function _runPhases<S, A, E>(
     redactActions: config.redactActions,
     cellPersist: config._cellPersist,
     cellPersistShaped: config._cellPersistShaped,
+    persistingCellIds: config._persistingCellIds,
     log,
   });
   state = boot.state as S;
-  const { kvDb, asyncDb, persistence, journal, syncHandler, syncBroadcastRef } =
-    boot;
+  const {
+    kvDb,
+    asyncDb,
+    persistence,
+    journal,
+    syncHandler,
+    syncBroadcastRef,
+    strayJournal,
+    storeSavedElsewhere,
+  } = boot;
   bootUndo.push("sqlite", () => asyncDb?.close());
   bootUndo.push("kv", () => kvDb?.close());
   const migrationSummary = boot.migrations;
@@ -2098,7 +2190,219 @@ async function _runPhases<S, A, E>(
   // B1/AIO-416: recover sync cells from their op-log at boot (after KV restore +
   // onRestore, before any dispatch/broadcast). Without this, sync cells came back
   // empty on a server restart until a client reconnected — silent data loss.
+  /** The store-restored state, when this boot replays a crashed journal an
+   *  older build wrote (see `LEGACY_RECOVERED_TYPE`); null otherwise. */
+  let _legacyBoot: S | null = null;
+  /** This run journals every sync op on a listened action — its intent and
+   *  its commit (journal.ts, J1–J7). */
+  const _marking = journal !== null && syncCellIds.length > 0 &&
+    !!syncHandler?.setFoldWatermark && !!kvDb?.planSet;
+  /** Action types some cell `listensTo`. */
+  const _listenedTypes = new Set(
+    Object.values(config._cellForeignActions ?? {}).flat(),
+  );
+  /** The ops a crash caught between their persist and their commit
+   *  (journal.ts J4): left out of their cells' replay, reduced whole after
+   *  the journal. `intentSeq`: where their intent sits in the journal. */
+  const _deferred: {
+    cell: string;
+    id: string;
+    action: string;
+    payload: unknown;
+    ts: number;
+    intentSeq: number;
+  }[] = [];
+  /** The listened ops in the log this boot placed with no commit yet —
+   *  committed before any input, so each is placed (and named) once. */
+  const _unmarked: { cell: string; id: string; ts: number }[] = [];
+  /** A store saved by a run that journals nothing, after this journal's tail
+   *  was written (store-gen.ts): the tail is moved aside, never replayed. An
+   *  older build's own tail is the legacy path's. */
+  const _retireForeign = storeSavedElsewhere && journal !== null &&
+    !isLegacyTail(journal.readTail());
+  /** Where the ops a clean stop of this run may vouch for start (exclusive):
+   *  the ones issued before it were placed — or lost — by an earlier run. */
+  let _cleanRunFrom: number | undefined;
   if (asyncDb && syncCellIds.length > 0) {
+    let tail: JournalEntry[] = [];
+    let lines: JournalEntry[] = [];
+    try {
+      tail = journal?.readTail() ?? [];
+      lines = (journal ?? strayJournal)?.readSince(-Infinity) ?? [];
+    } catch { /* aio-ok: an unreadable journal is refused, loudly, below */ }
+    // Data an OLDER build (1.0.9 or earlier) last wrote holds no record of
+    // the `listensTo` reactions of its sync ops on other cells — that build
+    // re-derived them at its own boots, through the whole root, and saved
+    // them or lost them in ways no record shows. None is re-derived here:
+    // re-applying a reaction its save already held counted it twice (a
+    // tally of 24 came back 45). Each cell's own ops fold into it, as
+    // always, and every listener that may lack reactions is NAMED. Legacy
+    // is this build's stamp missing from the op-log (a clean stop compacts
+    // the journal empty, and a store may be off) and none of its records in
+    // the journal; over data this build HAS run, an op an older build wrote
+    // after a downgrade is found by its own missing records (journal.ts J3).
+    const ours = await reactionsFormat(asyncDb) !== undefined ||
+      lines.some((e) =>
+        e.type === SYNC_INTENT_TYPE || e.type === SYNC_APPLIED_TYPE
+      );
+    const legacyTail = isLegacyTail(tail);
+    // The latest clean stop (see `CLEAN_STOP_ROW`): the ops it covers, and
+    // where this run's own ops start — continuing that range only when
+    // nothing was issued since (no other run came between).
+    const clean = await cleanStopThrough(asyncDb);
+    const issuedAtBoot = await issuedThrough(asyncDb);
+    _cleanRunFrom = clean !== undefined && clean.to >= issuedAtBoot
+      ? clean.from
+      : issuedAtBoot;
+    let legacy = false;
+    try {
+      legacy = !ours && (legacyTail ||
+        (!tail.some((e) => e.fmt !== undefined) &&
+          (await asyncDb.query<{ n: number }>(
+              "SELECT (SELECT COUNT(*) FROM sync_ops) + " +
+                "(SELECT COUNT(*) FROM sync_snapshots) AS n",
+            )).rows[0]!.n > 0));
+    } catch { /* aio-ok: an unreadable op-log is refused, loudly, below */ }
+    // An older build's unstamped lines above the last upgrade marker are
+    // CALLS, replayed as calls; the marker this boot writes after them
+    // retires them (see `LEGACY_RECOVERED_TYPE`).
+    _legacyBoot = legacyTail ? state : null;
+    const fa = config._cellForeignActions ?? {};
+    const cellOf = (t: string) => t.slice(0, Math.max(0, t.indexOf(":")));
+    if (legacy) {
+      log.warn(
+        `journal: this data was last run by an older aio build (1.0.9 or ` +
+          `earlier), which recorded no listensTo reactions of its sync ops — ` +
+          `none is re-derived, so nothing is counted twice; every listener ` +
+          `that may lack some is named below`,
+      );
+    }
+    /** Listener → what it may lack, in words. */
+    const lacks = new Map<string, string[]>();
+    const say = (k: string, what: string) =>
+      lacks.set(k, [...lacks.get(k) ?? [], what]);
+    const listenersOf = (src: string) =>
+      Object.entries(fa).filter(([, types]) =>
+        types.some((t) => cellOf(t) === src)
+      ).map(([k]) => k);
+    // Every listened op in the log, placed by the journal's records
+    // (journal.ts J1–J7, op-placement.ts `placeOps`). Over legacy data none
+    // has a record; with no journal this run records none — and names none,
+    // its crash losing them as documented (docs/persistence/crdt.md).
+    // With the journal off, a journal a crash left still holds the op
+    // records: its ops caught in flight are resolved as a journal-on boot
+    // resolves them — and nothing else is placed (`strayJournal`).
+    if (_marking || legacy || strayJournal !== null) {
+      const intents = new Map<string, number>();
+      const commits = new Set<string>();
+      // A journal that is moved aside unreplayed (below) takes its reaction
+      // lines and its commits with it: none of them covers anything any
+      // more — each op is named once here and committed anew.
+      for (const e of lines) {
+        if (e.type !== SYNC_INTENT_TYPE && e.type !== SYNC_APPLIED_TYPE) {
+          continue;
+        }
+        if (e.type === SYNC_APPLIED_TYPE && _retireForeign) continue;
+        const p = e.payload as { id?: unknown; ts?: unknown };
+        if (typeof p?.id !== "string" || typeof p.ts !== "number") continue;
+        if (e.type === SYNC_INTENT_TYPE) intents.set(opKey(p.id, p.ts), e.seq);
+        else commits.add(opKey(p.id, p.ts));
+      }
+      for (const c of syncCellIds) {
+        const { rows } = await asyncDb.query<
+          { id: string; action: string; payload: string; server_ts: number }
+        >(
+          "SELECT id, action, payload, server_ts FROM sync_ops WHERE cell = ? " +
+            "ORDER BY server_ts",
+          [c],
+        );
+        const placed = placeOps(
+          rows.map((r) => ({
+            id: r.id,
+            ts: r.server_ts,
+            listened: _listenedTypes.has(`${c}:${r.action}`),
+          })),
+          new Set(intents.keys()),
+          commits,
+        );
+        const uncovered: number[] = [];
+        for (const r of rows) {
+          const p = placed.get(r.id);
+          if (p === undefined || p === "covered") continue;
+          if (p === "in-flight") {
+            _deferred.push({
+              cell: c,
+              id: r.id,
+              action: r.action,
+              payload: JSON.parse(r.payload),
+              ts: r.server_ts,
+              intentSeq: intents.get(opKey(r.id, r.server_ts))!,
+            });
+            continue;
+          }
+          if (!_marking && !legacy) continue;
+          // A run that stopped cleanly after it saved every record: the
+          // reactions are in them, journal or not.
+          if (
+            !legacy && clean !== undefined && r.server_ts > clean.from &&
+            r.server_ts <= clean.to
+          ) {
+            if (_marking) {
+              _unmarked.push({ cell: c, id: r.id, ts: r.server_ts });
+            }
+            continue;
+          }
+          uncovered.push(r.server_ts);
+          if (_marking) _unmarked.push({ cell: c, id: r.id, ts: r.server_ts });
+        }
+        const n = uncovered.length;
+        const folded = legacy && await getCompactedTs(asyncDb, c) > 0;
+        for (const k of listenersOf(c)) {
+          if (n > 0) {
+            say(
+              k,
+              `${count(n, `"${c}" op`)} in the op-log (server_ts ${
+                uncovered[0]
+              }–${uncovered[n - 1]})`,
+            );
+          }
+          if (folded) say(k, `the "${c}" ops it folded out of the op-log`);
+        }
+      }
+    }
+    // A sync listener of a store CALL: the older build recorded its
+    // reaction in no fold it can show — named with the rest.
+    if (legacy) {
+      for (const c of syncCellIds) {
+        const calls = (fa[c] ?? []).filter((t) =>
+          !syncCellIds.includes(cellOf(t))
+        );
+        if (calls.length > 0) {
+          say(c, `the ${calls.map((t) => `"${t}"`).join(", ")} calls`);
+        }
+      }
+    }
+    for (const [k, what] of lacks) {
+      log.warn(
+        legacy
+          ? `sync: "${k}"'s listensTo reactions to ${what.join(", and to ")} ` +
+            `are in no record this boot can read — this data was last ` +
+            `written by an older aio build (1.0.9 or earlier), which kept ` +
+            `none. Nothing was re-applied, so nothing is counted twice; 1.0.9 ` +
+            `may have saved these reactions or lost them — check "${k}".`
+          : `sync: cannot tell whether "${k}" holds its listensTo reactions ` +
+            `to ${what.join(", and to ")} — those ops were written by a run ` +
+            `that recorded neither a journal of them nor a clean stop (an ` +
+            `older aio build, or this one with the journal or persistence ` +
+            `off), or the journal lost lines (deleted, restored from a ` +
+            `backup, cut short). ${
+              syncCellIds.includes(k)
+                ? `"${k}"'s last fold`
+                : "The store's last save"
+            } may hold them or not. Nothing was re-applied, so nothing is ` +
+            `counted twice — check "${k}".`,
+      );
+    }
     state = await replaySyncOps(
       asyncDb,
       syncCellIds,
@@ -2108,6 +2412,8 @@ async function _runPhases<S, A, E>(
       ) => S,
       state,
       log,
+      undefined,
+      { defer: new Map(_deferred.map((d) => [d.cell, d.ts])) },
     );
   }
 
@@ -2210,6 +2516,51 @@ async function _runPhases<S, A, E>(
     return (out ?? replayed) as S;
   }
 
+  /** A time-travel line's STORED fields as the cell's live slice (see
+   *  `replayJournal`'s `restoreStored`): an `onPersist`-shaped cell is rebuilt
+   *  the way a restart rebuilds it — declared state, the stored shape merged
+   *  over it, the cell's `onRestore` — because the fields are its SHAPE, not
+   *  its state, and spreading them over the live slice produced
+   *  `{ n: 0, saved: 1 }` for `onPersist: (s) => ({ saved: s.n })`, which
+   *  `_roundTripShapedCells` then reshaped from `n: 0` (external review, rev4).
+   *  Every other cell keeps the spread. */
+  function _restoreStoredSlice(
+    cell: string,
+    stored: Record<string, unknown>,
+    live: Record<string, unknown>,
+  ): Record<string, unknown> {
+    const declared = (initialState as Record<string, unknown>)[cell];
+    if (!_isRecord(declared)) return { ...live, ...stored };
+    const disk = JSON.parse(JSON.stringify(stored)) as Record<string, unknown>;
+    if (!config._cellPersistShaped?.includes(cell)) {
+      // Rebuilt as a restart rebuilds it — declared state, the stored fields
+      // over it — and NOT spread over the live slice: a key the line's state
+      // no longer has (a reaction that `delete`d or undefined'd it) is absent
+      // from `stored`, and the spread kept the live value, i.e. the OLDER
+      // store snapshot's (`err: "boom"` back after a crash, `""` after a
+      // clean restart). Only what the persist filter keeps off disk comes
+      // from the live slice: the line never had it to say.
+      return _unpersistedFromBoot(
+        config._cellPersist?.[cell] ?? "all",
+        live,
+        deepMerge(structuredClone(declared) as Record<string, unknown>, disk),
+      );
+    }
+    let slice = deepMerge(
+      structuredClone(declared) as Record<string, unknown>,
+      disk,
+    );
+    const hook = config._cellRestores?.get(cell);
+    if (hook) {
+      slice = runCellRestore(cell, hook, slice, {
+        stored: disk,
+        declared,
+        retyped: true,
+      }, log);
+    }
+    return slice;
+  }
+
   /** Say it when the tail holds lines with NO version stamp for a cell this
    *  boot migrated (an `onMigrate` ran, or a downgrade).
    *
@@ -2221,6 +2572,21 @@ async function _runPhases<S, A, E>(
    *  that migrated in memory and crashed before its first snapshot, where
    *  replaying it is right. Neither is provable from the file, so replay keeps
    *  doing what it always did with them; it used to do it silently. */
+  /** Every cell a time-travel line carries state for — whole (`cells`, a
+   *  reaction's `keyframes`) or as a delta (`deltas`). Each one is stamped
+   *  with its version (`_journalVersions`) and judged by it on replay. */
+  function _ttStateCells(
+    tt: Partial<TimeTravelRestore> | undefined,
+  ): string[] {
+    return [
+      ...new Set([
+        ...Object.keys(tt?.cells ?? {}),
+        ...Object.keys(tt?.keyframes ?? {}),
+        ...Object.keys(tt?.deltas ?? {}),
+      ]),
+    ];
+  }
+
   function _warnUnstampedAcrossMigration(tail: JournalEntry[]): void {
     const moved = new Map<string, { from: number; to: number }>();
     for (const r of migrationSummary?.report ?? []) {
@@ -2231,11 +2597,8 @@ async function _runPhases<S, A, E>(
     if (moved.size === 0) return;
     const hits = new Map<string, number[]>();
     for (const e of tail) {
-      if (e.v !== undefined) continue;
       const cells = e.type === TT_RESTORE_TYPE
-        ? Object.keys(
-          (e.payload as Partial<TimeTravelRestore> | undefined)?.cells ?? {},
-        )
+        ? _ttStateCells(e.payload as Partial<TimeTravelRestore> | undefined)
         : [
           workerPatchCell(e.type, e.payload) ??
             (e.origin ?? e.type).slice(
@@ -2244,7 +2607,9 @@ async function _runPhases<S, A, E>(
             ),
         ];
       for (const c of cells) {
-        if (!moved.has(c)) continue;
+        // Judged per cell: a stamped line that stamps some cells and not
+        // this one cannot be judged for it either.
+        if (!moved.has(c) || e.v?.[c] !== undefined) continue;
         const seqs = hits.get(c) ?? [];
         seqs.push(e.seq);
         hits.set(c, seqs);
@@ -2380,6 +2745,43 @@ async function _runPhases<S, A, E>(
     return slice;
   }
 
+  /** The tail minus the lines that write only a quarantined sync cell: its
+   *  state is its last snapshot, and a line from before the crash applied to
+   *  it would fold a write onto a shape it was never taken on. They stay on
+   *  disk (`retireCells` spares them), and are NAMED — fixing the cell's
+   *  version/onMigrate and restarting replays them. */
+  function _quarantinedTail(tail: JournalEntry[]): JournalEntry[] {
+    const q = asyncDb ? getSyncReplayContext(asyncDb)?.quarantined : undefined;
+    if (!q?.size || tail.length === 0) return tail;
+    const own = (e: JournalEntry): string | undefined => {
+      if (e.only?.length) {
+        return e.only.every((k) => q.has(k)) ? e.only[0] : undefined;
+      }
+      const i = e.type.indexOf(":");
+      const c = i > 0 ? e.type.slice(0, i) : undefined;
+      return c !== undefined && q.has(c) ? c : undefined;
+    };
+    const held = new Map<string, number[]>();
+    const rest = tail.filter((e) => {
+      const c = own(e);
+      if (c === undefined) return true;
+      const seqs = held.get(c) ?? [];
+      held.set(c, seqs);
+      seqs.push(e.seq);
+      return false;
+    });
+    for (const [c, seqs] of held) {
+      log.error(
+        `journal: "${c}" is quarantined — ${
+          count(seqs.length, "journalled line")
+        } written for it before this boot (seq ${seqs[0]}–${seqs.at(-1)}) ` +
+          `are KEPT in ${journal!.path}, not applied. Fix "${c}"'s ` +
+          `version/onMigrate and restart: they are replayed then.`,
+      );
+    }
+    return rest;
+  }
+
   /** Refuse a journal replay across a hole (see `JournalGap`), keep the
    *  journal, and say where both halves of the evidence went. Boot goes on:
    *  the database is consistent on its own, and the integrity check already
@@ -2444,6 +2846,40 @@ async function _runPhases<S, A, E>(
   // not applied a second time.
   const _syncJournal = journal !== null && syncCellIds.length > 0 &&
     !!syncHandler?.setFoldWatermark && !!kvDb?.planSet;
+  /** Per sync cell: the highest op-log position (`server_ts`) its LIVE state
+   *  holds — advanced at each op's commit (afterAction), read when a
+   *  `listensTo` reaction of the cell is journalled (`SyncReaction.at`).
+   *  Seeded below, after boot has restored every op the log holds. */
+  const _appliedTs = new Map<string, number>();
+  /** Per sync cell: the last reaction line of its current chain (see
+   *  `SyncReaction`) — its seq and the live slice it recorded, which the next
+   *  line is a delta against. Absent ⇒ the next line is a keyframe: at boot,
+   *  after a fold capture, after an append that did not land. */
+  const _reactionChain = new Map<
+    string,
+    { seq: number; state: unknown; snapshotAt?: number }
+  >();
+  /** Per sync cell: the fold in flight — the state it captured and the journal
+   *  seq it captured at, the chain's new base once it lands (`folded`).
+   *  `lined`: a reaction line was written since the capture (the first one
+   *  carries `SyncReaction.alsoSnapshot`, so the chain survives either way). */
+  const _captured = new Map<
+    string,
+    { at: number; state: unknown; lined: boolean }
+  >();
+  /** The same, per store-persisted cell: the stored slice its last reaction
+   *  line resolves to (`TimeTravelRestore.deltas`). */
+  const _kvChain = new Map<string, { seq: number; stored: unknown }>();
+  // A save captures here: the lines its watermark will drop end here, so the
+  // next reaction line of what it saves starts a new chain (whole, not a
+  // delta) — a chain never outlives its first line. A sync cell's fold
+  // re-bases its chain on the snapshot instead (`setFoldWatermark` below).
+  journal?.onCapture((c) => {
+    if (c === undefined) _kvChain.clear();
+  });
+  /** Per sync cell: the `compacted_ts` its last journalled fold left, as
+   *  recorded before this boot (`syncJournalSnapshotKey`). */
+  const _foldedAt = new Map<string, number>();
   if (journal) {
     if (_syncJournal) {
       const stored: Record<string, number> = {};
@@ -2462,11 +2898,72 @@ async function _runPhases<S, A, E>(
         stored[c] = journal.watermark();
         await kvDb!.set(key, stored[c]);
       }
+      // Where each cell's snapshot stands as this run starts journalling it
+      // — once; its folds keep it current from then on.
+      for (const c of syncCellIds) {
+        const key = syncJournalSnapshotKey(appId, c);
+        const at = await kvDb!.get<number>(key);
+        if (typeof at === "number") _foldedAt.set(c, at);
+        else await kvDb!.set(key, await getCompactedTs(asyncDb!, c));
+      }
       journal.trackCells(stored);
+      // …and the ones whose watermark will never move (see `retireCells`).
+      // Only the lines this boot writes: the ones already there were written
+      // before the cell was quarantined, and fixing its version recovers them
+      // (kept by its own watermark, not replayed — see `_quarantinedTail`).
+      journal.retireCells(
+        getSyncReplayContext(asyncDb!)?.quarantined ?? [],
+        journal.currentSeq(),
+      );
+      // Boot has restored every op the log holds: that is where each sync
+      // cell's live state starts (`_appliedTs`).
+      for (const c of syncCellIds) {
+        const { rows } = await asyncDb!.query<{ m: number | null }>(
+          "SELECT MAX(server_ts) AS m FROM sync_ops WHERE cell = ?",
+          [c],
+        );
+        _appliedTs.set(
+          c,
+          Math.max(rows[0]?.m ?? 0, await getCompactedTs(asyncDb!, c)),
+        );
+      }
       syncHandler!.setFoldWatermark!({
-        capture: () => journal.currentSeq(),
-        plan: (c, at) => kvDb!.planSet!(syncJournalWatermarkKey(appId, c), at),
-        folded: (c, at) => journal.setCellWatermark(c, at),
+        capture: (c) => {
+          // Same synchronous turn as the fold's own state read: this IS the
+          // state its snapshot holds.
+          const at = journal.capture(c);
+          _captured.set(c, {
+            at,
+            state: (state as Record<string, unknown>)[c],
+            lined: false,
+          });
+          return at;
+        },
+        plan: (c, at) => [
+          ...kvDb!.planSet!(syncJournalWatermarkKey(appId, c), at),
+          // Last in the fold's transaction: the `compacted_ts` it just wrote.
+          {
+            sql: `INSERT INTO aio_kv (k, v)
+                    SELECT ?, CAST(compacted_ts AS TEXT) FROM sync_meta
+                    WHERE cell = ?
+                    ON CONFLICT(k) DO UPDATE SET v = excluded.v`,
+            params: [syncJournalSnapshotKey(appId, c), c],
+          },
+        ],
+        folded: (c, at) => {
+          journal.setCellWatermark(c, at);
+          // The snapshot is on disk, with its watermark: every line at or
+          // below `at` is gone from the tail. A line written while the fold
+          // was in flight is above it and resolves on its own (a keyframe,
+          // or `alsoSnapshot`) — the chain goes on from it. Else the next
+          // line is a delta against the snapshot (`baseSnapshotAt`).
+          const cap = _captured.get(c);
+          _captured.delete(c);
+          if (cap?.at === at && cap.lined) return;
+          if (cap?.at === at) {
+            _reactionChain.set(c, { seq: 0, state: cap.state, snapshotAt: at });
+          } else _reactionChain.delete(c);
+        },
       });
     }
     // A database that went BACK in time — `checkIntegrityOnBoot` restored its
@@ -2476,6 +2973,14 @@ async function _runPhases<S, A, E>(
     // deposits, replayed onto the restored balance of 50, recorded a
     // withdrawal of 50 that never happened. Refused, loudly, and the journal
     // is kept — beside the damaged database when there is one.
+    // A store saved by a run that journals nothing, after this tail was
+    // written (store-gen.ts): the tail is older than the store — moved aside,
+    // never replayed. An older build's own tail is the legacy path's.
+    if (_retireForeign) moveJournalAside(journal, "foreign-save", log);
+    // …and from here, this boot's picture of the store is the record.
+    if (asyncDb && kvDb?.planSet) {
+      await recordStoreGen(asyncDb, appId, journalWatermarkKey(appId));
+    }
     let gap = journal.gap();
     // Nothing past the store's watermarks: the hole has nothing after it to
     // invent history with (a clean stop compacts the journal empty before a
@@ -2494,17 +2999,42 @@ async function _runPhases<S, A, E>(
       gap = null;
     }
     if (gap) await _refuseJournalAcrossGap(journal, gap);
-    const tail = gap ? [] : journal.readTail();
+    const tail = _quarantinedTail(gap ? [] : journal.readTail());
     if (tail.length > 0) _warnUnstampedAcrossMigration(tail);
     if (tail.length > 0) {
+      // Sync cells' `listensTo` reactions first: each goes back BETWEEN the
+      // cell's own ops (see `seedSyncReactions`), and no later line may write
+      // the cell again from before that point.
+      let seededAt = new Map<string, number>();
+      if (_syncJournal && asyncDb) {
+        const seeded = await seedSyncReactions(
+          asyncDb,
+          syncCellIds,
+          config.reduce as unknown as (
+            s: S,
+            a: { type: string; payload?: unknown },
+          ) => { state: S },
+          state,
+          tail,
+          (cell) => config._cellVersions?.[cell] ?? 0,
+          log,
+          (cell) => journal.watermarkFor(cell),
+          new Map(_deferred.map((d) => [d.cell, d.ts])),
+          (cell) => _foldedAt.get(cell),
+        );
+        state = seeded.state;
+        seededAt = seeded.seededAt;
+        for (const c of seededAt.keys()) syncHandler!.noteServerWrite(c);
+      }
       const before = state;
       const replay = replayJournal(
         state,
         tail,
         config.reduce as (s: S, a: A) => { state: S },
-        (key) => journal.watermarkFor(key),
+        (key) => Math.max(journal.watermarkFor(key), seededAt.get(key) ?? 0),
         (cell) => config._cellVersions?.[cell] ?? 0,
         (cell) => !!config._cellMigrations?.get(cell)?.onMigrate,
+        _restoreStoredSlice,
       );
       state = _rerunRestoreHooks(
         state,
@@ -2592,6 +3122,115 @@ async function _runPhases<S, A, E>(
     }
   }
 
+  // The ops a crash caught between their persist and their commit
+  // (`_deferred`, left out of their cells' replay above): reduced now, whole,
+  // exactly as the live server decides — a refusal deletes the op and nothing
+  // acks it — and recorded below (`_unmarked`). A reaction is applied only
+  // where its listener's record certainly lacks it (op-placement.ts
+  // `inFlightVerdict`); held and named everywhere else.
+  const _rederivedCells = new Set<string>();
+  if (_deferred.length > 0 && asyncDb) {
+    const quarantined = getSyncReplayContext(asyncDb)?.quarantined;
+    // A store another run saved without journalling may hold anything: a
+    // store-persisted listener's reaction is held, never applied.
+    const storeWm = storeSavedElsewhere
+      ? Infinity
+      : (journal ?? strayJournal)?.watermark() ?? 0;
+    /** Listener → reactions held back. */
+    const held = new Map<string, number>();
+    let reduced = 0;
+    for (const d of [..._deferred].sort((a, b) => a.ts - b.ts)) {
+      if (quarantined?.has(d.cell)) continue;
+      // A sync op, exactly as the live server dispatches it: the same
+      // accept/refuse decision (a refusal discards this whole fold below).
+      const action = {
+        type: `${d.cell}:${d.action}`,
+        payload: d.payload,
+        _syncOp: true,
+        _syncTs: d.ts,
+        _syncId: d.id,
+      };
+      const was = state as Record<string, unknown>;
+      let folded: Record<string, unknown> | undefined;
+      let refusal: string | undefined;
+      try {
+        folded = unwrapReduced(
+          (config.reduce as (
+            s: S,
+            a: { type: string; payload?: unknown },
+          ) => S | { state: S })(state, action),
+        ) as Record<string, unknown>;
+        refusal = takeRejectionFor(action, d.cell)?.reason;
+      } catch (e) {
+        refusal = String(e);
+      }
+      if (refusal !== undefined || folded === undefined) {
+        // The live server refuses such an op and deletes it (D11): so does
+        // this boot — nothing acks it, and a resend meets the same decision.
+        await asyncDb.execute("DELETE FROM sync_ops WHERE id = ?", [d.id]);
+        log.warn(
+          `sync: "${d.cell}"'s op ${d.id} was persisted but not yet ` +
+            `committed when the server stopped, and its reduce is refused ` +
+            `(${refusal}) — removed from the op-log and not acknowledged, ` +
+            `as the live server does`,
+        );
+        continue;
+      }
+      const next = { ...was };
+      for (const k of Object.keys(folded)) {
+        if (folded[k] === was[k]) continue;
+        if (k === d.cell) {
+          next[k] = folded[k];
+          continue;
+        }
+        // A quarantined listener's live state is not its data.
+        if (quarantined?.has(k)) continue;
+        const verdict = inFlightVerdict(
+          syncCellIds.includes(k)
+            ? { snapshotTs: await getCompactedTs(asyncDb, k) }
+            : { storeWm },
+          { ts: d.ts, intentSeq: d.intentSeq },
+        );
+        if (verdict === "held") {
+          held.set(k, (held.get(k) ?? 0) + 1);
+          continue;
+        }
+        next[k] = folded[k];
+        _rederivedCells.add(k);
+      }
+      state = next as S;
+      reduced++;
+      _unmarked.push({ cell: d.cell, id: d.id, ts: d.ts });
+    }
+    if (reduced > 0) {
+      log.info(
+        `journal: reduced ${
+          count(reduced, "sync op")
+        } the crash caught between its persist and its commit${
+          _rederivedCells.size > 0
+            ? ` (with its listensTo reactions on ${
+              [..._rederivedCells].join(", ")
+            })`
+            : ""
+        }`,
+      );
+    }
+    for (const [k, n] of held) {
+      log.warn(
+        `sync: "${k}": ${count(n, "listensTo reaction")} of the sync op${
+          n === 1 ? "" : "s"
+        } a crash caught between ` +
+          `persist and commit held, not re-applied — ${
+            syncCellIds.includes(k)
+              ? `"${k}" was folded`
+              : "the store was saved"
+          } after the op was persisted, so it may already hold ${
+            n === 1 ? "it" : "them"
+          }; if not, ${n === 1 ? "it is" : "they are"} MISSING — check "${k}".`,
+      );
+    }
+  }
+
   // The persistence manager captured its `db:` table baseline while `state`
   // was still initialState — restored rows only land here. Left stale, the
   // first flush after a restart diffs restored-rows-vs-nothing, re-INSERTs
@@ -2600,6 +3239,21 @@ async function _runPhases<S, A, E>(
   // (the baseline only advances on success, so it never recovered). Re-seed
   // it now that `state` is what the database actually holds.
   persistence.resetPrevState();
+  // A journal-off run over a journal a crash left: its op records are used
+  // (above), and now it is moved aside BEFORE this run saves anything — then
+  // the reactions this boot re-derived for its in-flight ops are saved (they
+  // are in no journal). A kill between loses them unrecorded as in-flight;
+  // the next journal-on boot names their op (no clean stop covers it).
+  if (strayJournal && shouldPersist) {
+    moveJournalAside(strayJournal, "journal-off", log);
+    if (_rederivedCells.size > 0) {
+      persistence.schedulePersist();
+      await persistence.flushPersist();
+      const sync = [..._rederivedCells].filter((k) => syncCellIds.includes(k));
+      for (const k of sync) syncHandler?.noteServerWrite(k);
+      if (sync.length > 0) await syncHandler?.flushServerWrites(sync);
+    }
+  }
 
   // Time-travel — dev only, AND only when diagnostics leave it on.
   //
@@ -2676,7 +3330,10 @@ async function _runPhases<S, A, E>(
   // to re-seed.
   let _reseedWorkerCells: () => void = () => {};
 
-  function handleTTCommand(cmd: string, arg?: number): void {
+  function handleTTCommand(
+    cmd: string,
+    arg?: number,
+  ): void | Promise<string | undefined> {
     if (!tt) return;
     const prev = tt;
     switch (cmd) {
@@ -2707,7 +3364,15 @@ async function _runPhases<S, A, E>(
       // A worker cell's copy would otherwise keep mutating the state we just
       // discarded — re-seed it from the restored slice.
       _reseedWorkerCells();
-      if (restored !== before) _recordTimeTravel(cmd, arg, before, restored);
+      if (restored !== before) {
+        _owedTo = _ttOwed;
+        try {
+          _recordTimeTravel(cmd, arg, before, restored);
+          _jumpSyncCells(before, restored);
+        } finally {
+          _owedTo = null;
+        }
+      }
     }
     log.debug(
       `time-travel: ${cmd}${
@@ -2717,6 +3382,7 @@ async function _runPhases<S, A, E>(
     server.broadcastTT();
     server.broadcast();
     udsCtrl.broadcastFull();
+    return _durableFor(_ttOwed);
   }
 
   /** Make a time-travel jump as durable as the actions around it.
@@ -2733,6 +3399,56 @@ async function _runPhases<S, A, E>(
    *  when the process ends paused there. The timeline records it too:
    *  its diffs are the only description of how state got where it is, and a
    *  change missing from them cannot be folded back into the real state. */
+  /** A slice as the store would write it (see the note in
+   *  `_recordTimeTravel`); undefined when the store keeps none of it or the
+   *  shaping threw (said, never silent). */
+  /** Set when the last `_storedSlice` call's shaping THREW (not when the
+   *  store just keeps none of the cell). */
+  let _shapeThrew = false;
+  function _storedSlice(cell: string, slice: unknown): unknown {
+    _shapeThrew = false;
+    try {
+      return (getDBState({ [cell]: slice } as S) as
+        | Record<string, unknown>
+        | undefined)?.[cell];
+    } catch (e) {
+      _shapeThrew = true;
+      // A shape that throws is the same failure the persist path reports
+      // on its next write. Nothing is written for the cell — a journal
+      // line must never carry what the store refused to.
+      log.error(
+        `journal: could not shape the "${cell}" slice the way the store ` +
+          `writes it, so the journal line carries none of it — a replay ` +
+          `leaves the cell where it is: ${
+            e instanceof Error ? e.message : String(e)
+          }`,
+      );
+      return undefined;
+    }
+  }
+
+  /** What a jump owes before its reply (see `_durableFor`). */
+  const _ttOwed = {};
+  /** A jump moves SYNC cells too — their state is part of the restored tree
+   *  — and a sync cell's state is durable only in its op-log and snapshot,
+   *  neither of which a jump writes. So the jump went live (every tab showed
+   *  it) and a restart put the cell back where the op-log left it: undo half
+   *  applied (review rev9). A jumped sync cell is now a SERVER WRITE — the
+   *  one path that makes a non-op change durable and pushes it to every
+   *  client (`noteServerWrite`) — and under `journal: true` also a
+   *  positional state line, exactly as a `listensTo` reaction is (the jump
+   *  discards the cell's ops it rewinds past; later ops fold on top). */
+  function _jumpSyncCells(before: S, after: S): void {
+    const jumped = [..._syncCellSet].filter((c) =>
+      (before as Record<string, unknown>)[c] !==
+        (after as Record<string, unknown>)[c]
+    );
+    for (const c of jumped) syncHandler?.noteServerWrite(c);
+    if (_syncJournal && jumped.length > 0) {
+      _journalReaction(after, jumped, false, true);
+    }
+  }
+
   function _recordTimeTravel(
     cmd: string,
     arg: number | undefined,
@@ -2744,12 +3460,19 @@ async function _runPhases<S, A, E>(
     let seq: number;
     if (journal) {
       const cells: TimeTravelRestore["cells"] = {};
+      let withheld = false;
       for (
         const [cell, slice] of Object.entries(after as Record<string, unknown>)
       ) {
         // A sync cell recovers from its own op-log, never from the journal.
         if (_syncCellSet.has(cell)) continue;
         if (slice === null || typeof slice !== "object") continue;
+        // A redacted cell's state goes in no sink — the store keeps the jump
+        // (saved now, below), the journal does not.
+        if (redact.redactsCell(cell)) {
+          withheld = true;
+          continue;
+        }
         // WHAT THE STORE WOULD WRITE for this slice — the store's own getter,
         // not a second reading of the declaration. `persist` is TWO screens:
         // the include/exclude filter (dot paths included) and then
@@ -2763,30 +3486,14 @@ async function _runPhases<S, A, E>(
         // `persist: "none"` ⇒ nothing of this cell is stored, so the line
         // names it not at all; replay leaves such a cell where it is either
         // way.
-        let kept: unknown;
-        try {
-          kept = (getDBState({ [cell]: slice } as S) as
-            | Record<string, unknown>
-            | undefined)?.[cell];
-        } catch (e) {
-          // A shape that throws is the same failure the persist path reports
-          // on its next write. Nothing is written for the cell — a journal
-          // line must never carry what the store refused to.
-          log.error(
-            `journal: could not shape the "${cell}" slice the way the store ` +
-              `writes it, so the time-travel line carries none of it — a ` +
-              `replay of this jump leaves the cell where it is: ${
-                e instanceof Error ? e.message : String(e)
-              }`,
-          );
-          continue;
-        }
+        const kept = _storedSlice(cell, slice);
         if (kept !== undefined) {
           cells[cell] = kept as Record<string, unknown>;
         }
       }
       const restore: TimeTravelRestore = { ...ttPayload, cells };
       seq = _journalAppend({ type: TT_RESTORE_TYPE, payload: restore }, ts);
+      if (withheld) _saveNow({ clock: "kv" });
     } else seq = timeline.lastSeq() + 1;
     timeline.record(seq, TT_RESTORE_TYPE, ttPayload, before, after, ts);
   }
@@ -2871,6 +3578,48 @@ async function _runPhases<S, A, E>(
     return _callScope.run(root, fn);
   };
   const afterActionHook = (prev: S, next: S, action: A): void => {
+    if (action !== null && typeof action === "object") {
+      _afterSeen.add(action as object);
+    }
+    _owedTo = action as object;
+    try {
+      // A sync op's marker and the reaction lines it causes land in ONE
+      // write (see `SYNC_APPLIED_TYPE`): a kill between them would read as
+      // "reduced, reactions lost", silently.
+      if ((action as { _syncOp?: boolean })._syncOp && journal?.atomic) {
+        _atomically(() => _afterAction(prev, next, action));
+      } else _afterAction(prev, next, action);
+    } finally {
+      _owedTo = null;
+    }
+  };
+  /** Run `fn` with its journal lines written in one write; a refused write
+   *  loses them all, and is handled as every refused append is — reported,
+   *  and each chain restarted, and the saves that stand in for the lines
+   *  run now. */
+  function _atomically(fn: () => void): void {
+    const owed: SaveNow[] = [];
+    _atomicOwed = owed;
+    try {
+      if (journal?.atomic) journal.atomic(fn);
+      else fn();
+    } catch (e) {
+      _appendOk = false;
+      _journalHealth.fail(e);
+      reportAioError(
+        createAioError("PERSIST_ERROR", e, { actionType: "journal batch" }),
+        _reportOpts,
+      );
+      _reactionChain.clear();
+      _kvChain.clear();
+      for (const w of owed) _saveNow(w);
+    } finally {
+      _atomicOwed = null;
+    }
+  }
+  /** The saves the lines of the running `_atomically` block stand in for. */
+  let _atomicOwed: SaveNow[] | null = null;
+  const _afterAction = (prev: S, next: S, action: A): void => {
     _diagAfterAction?.(prev, next, action);
     // An async method's failure is its own frame, `cell:__error`, which is
     // not recorded (and usually changes nothing, so it would stop at the
@@ -2882,11 +3631,52 @@ async function _runPhases<S, A, E>(
         ?._callId;
       if (typeof callId === "string") timeline.markThrew(callId);
     }
+    // Before anything can return: a reduced sync op, even a no-op one.
+    _markSyncApplied(action);
     if (prev === next) return; // no-op action — nothing to record
     const t = (action as { type?: string }).type ?? "";
     const ci = t.indexOf(":");
     const cell = ci >= 0 ? t.slice(0, ci) : "";
     const method = ci >= 0 ? t.slice(ci + 1) : t;
+    // A `listensTo` reaction: ANOTHER sync cell changed inside this action's
+    // reduce. It is not that cell's op (so not in its op-log), boot replay
+    // re-folds only an op's own cell (replaySyncOps), and sync cells are out
+    // of KV — so it is durable only once folded into the cell's own snapshot,
+    // the same path every server-origin write takes (which also pushes it to
+    // live clients). The action's own cell is handled just below.
+    for (const c of _syncCellSet) {
+      if (
+        c !== cell &&
+        (prev as Record<string, unknown>)[c] !==
+          (next as Record<string, unknown>)[c]
+      ) {
+        _quarantinedWrite(c);
+        syncHandler?.noteServerWrite(c);
+      }
+    }
+    // How far this cell's live state holds its op-log — set at the commit of
+    // each op, so a reaction journalled at any later instant knows exactly
+    // which of the cell's ops it already contains (`SyncReaction.at`).
+    // Honoured only on the sync handler's own op (`_syncOp`, which every
+    // network door strips along with `_syncTs` — sanitizeClientAction): a
+    // forged position must never move the mark.
+    const isSyncOp = !!(action as { _syncOp?: boolean })._syncOp;
+    const syncTs = (action as { _syncTs?: unknown })._syncTs;
+    if (isSyncOp && typeof syncTs === "number" && _syncCellSet.has(cell)) {
+      _appliedTs.set(cell, Math.max(_appliedTs.get(cell) ?? 0, syncTs));
+    }
+    // `listensTo` reactions that land on a DIFFERENT save clock than the
+    // action's own line (a sync cell folds on its own; see `_syncJournal`) are
+    // journalled AS DATA — see `_journalReaction`, appended after the
+    // action's own line below. A sync op has no journal line at all, so every
+    // reaction to one counts; a store-persisted cell reacting to a
+    // store-persisted action rides that action's own line.
+    const reacted = _syncJournal
+      ? _reactedKeys(prev, next, cell).filter((k) =>
+        isSyncOp || _syncCellSet.has(k) || _syncCellSet.has(cell)
+      )
+      : [];
+    const multiClock = reacted.length > 0;
     if (_syncCellSet.has(cell)) {
       // A sync op is already durable in the op-log. Anything ELSE that
       // committed to a sync cell — an effect, cron, serverFn, a plain action,
@@ -2895,7 +3685,12 @@ async function _runPhases<S, A, E>(
       // snapshot. Without this, a restart silently rewound every server-origin
       // write since the last compaction.
       if (method.startsWith("__") && !method.startsWith("__set")) return;
-      if (!(action as { _syncOp?: boolean })._syncOp) {
+      if ((action as { _syncOp?: boolean })._syncOp) {
+        // The op is durable in the op-log already; its LISTENERS' reactions
+        // are in no log at all — journal them (as data, never the op).
+        if (reacted.length > 0) _journalReaction(next, reacted, true);
+      } else {
+        _quarantinedWrite(cell);
         syncHandler?.noteServerWrite(cell);
         // …and the fold is up to 500 ms away, while the caller was acked NOW.
         // A SIGKILL inside that window lost every acked write in it — all 36
@@ -2904,7 +3699,11 @@ async function _runPhases<S, A, E>(
         // write, by the cell's own watermark (see `_syncJournal`), and boot
         // replays it after the op-log restore. A refused append closes the
         // window by folding now (the fold noted just above is what it flushes).
-        if (_syncJournal) {
+        if (_syncJournal && _quarantinedSkip(cell)) {
+          // No line for the quarantined cell itself — its reactions on
+          // other cells are journalled as usual.
+          _journalReaction(next, reacted, false);
+        } else if (_syncJournal) {
           const payload = (action as { payload?: unknown }).payload;
           _journalAppend(
             {
@@ -2918,8 +3717,17 @@ async function _runPhases<S, A, E>(
               call: _callOf(action),
             },
             Date.now(),
-            () => syncHandler!.flushServerWrites(),
+            { clock: "sync", cell },
           );
+          // …and the state it left, AT its op-log position. Replayed as a
+          // call after the whole op-log, the write landed after ops the
+          // server applied AFTER it: `clear` then an acked `add("new")`,
+          // SIGKILL → boot folded `add` and then cleared it (the op row stays,
+          // so the client never resends — for good). As data at `at`, boot
+          // puts it back BETWEEN the ops (`seedSyncReactions`), and the call
+          // line above — kept for `am timeline`/`am replay` — is covered by
+          // it (its seq is below the data line's).
+          _journalReaction(next, [cell, ...reacted], false, false, cell);
         }
       }
       return;
@@ -2977,15 +3785,19 @@ async function _runPhases<S, A, E>(
     const cause = _causeOf(action);
     const call = _callOf(action);
     const seq = journal
-      ? _journalAppend({
-        type: t,
-        payload,
-        origin,
-        user: (action as { _user?: AioUser })._user,
-        cause,
-        call,
-      }, ts)
+      ? _journalAppend(
+        {
+          type: t,
+          payload,
+          origin,
+          user: (action as { _user?: AioUser })._user,
+          cause,
+          call,
+        },
+        ts,
+      )
       : timeline.lastSeq() + 1;
+    if (journal && multiClock) _journalReaction(next, reacted, false);
     // `cell({ diagnostics: false })` covers `am timeline` too. A key by that
     // name that still listed the cell in the diagnostic surface people
     // actually read would be dishonest.
@@ -3013,10 +3825,9 @@ async function _runPhases<S, A, E>(
   // client has already seen. The honest move is to keep the promise by the
   // other mechanism: report it as what it is (PERSIST_ERROR — the durability
   // path failed) and close the debounce window NOW, so the snapshot carries
-  // the write. One flush per burst: a second refusal while one is pending
-  // rides on it (the cycle reads state after this commit, or the batch-end
-  // schedulePersist re-arms the flush loop).
-  let _journalFlushPending = false;
+  // the write — by the clock that holds it (`_saveNow`).
+  /** Whether the last `_journalAppend` reached the journal. */
+  let _appendOk = true;
   // The journal's own health, for `/__aio/health`. The compensating flush
   // keeps the STATE on disk, so `persist.ok` stays true and is right to — but
   // a `journal: true` app whose every append is refused is paying a full
@@ -3028,41 +3839,434 @@ async function _runPhases<S, A, E>(
   const _journalHealth = degraded(`journal:${resolveAppId(config.appId)}`, {
     after: 1,
   });
+  /** Journal what `listensTo` reactions WROTE, as data — never the action
+   *  (re-running it on replay throws in an idempotency guard, and a build that
+   *  predates this re-applied it to the op's own cell; external review rev1).
+   *
+   *  • A SYNC cell's reaction is its state at a POSITION in its op-log
+   *    (`SYNC_REACTION_TYPE`, `at` = the last op of it the live state holds).
+   *    Boot seeds the cell from the newest such line and folds only the ops
+   *    above `at`, so the reaction lands between the cell's own ops where it
+   *    happened live. An absolute slice applied AFTER the op-log instead
+   *    rolled back every op acked after the reaction (review rev4).
+   *  • A store-persisted cell's reaction is a time-travel line of its stored
+   *    slice, marked `LISTENS_TO_CMD`: every write to such a cell is a
+   *    journal line, so journal order IS its order.
+   *
+   *  Each line lives until its cell has saved it (`only`). Cost, only under
+   *  `journal: true`: for a sync cell, what the reaction changed (a delta
+   *  chain from a keyframe, see `SyncReaction` — a whole-slice line per
+   *  reaction was 8× the op cost on a 2 MB listener, review rev7); for a
+   *  store-persisted cell, its stored slice.
+   *
+   *  A REDACTED cell's state is never journalled (the journal is a sink like
+   *  any other): its own save runs now instead (`_saveNow`). */
+  /** A QUARANTINED sync cell gets no journal line: its log cannot fold, so
+   *  its watermark never moves and the lines would never be compacted —
+   *  one per op, forever, while boot refuses them anyway (and its writes
+   *  cannot be made durable at all; boot said so). Said once per cell. */
+  const _quarantineSaid = new Set<string>();
+  /** Per quarantined cell: writes not said yet, when it last said, and the
+   *  timer that says the rest. */
+  const _quarantinedWrites = new Map<
+    string,
+    { n: number; at: number; timer?: ReturnType<typeof setTimeout> }
+  >();
+  /** A server-origin write (a plain call, an effect, a cron, a listener's
+   *  reaction) to a quarantined sync cell: client ops are refused at the
+   *  door, but this one already committed in memory — and its cell can save
+   *  nothing (no fold, no journal line), so the next restart loses it. Owed
+   *  as a refused save, so every door's ack carries it as `unsaved`, and said
+   *  in the log: the first at once, the rest counted and said within 10 s. */
+  function _quarantinedWrite(cell: string): void {
+    if (!asyncDb || !getSyncReplayContext(asyncDb)?.quarantined.has(cell)) {
+      return;
+    }
+    const why = `"${cell}" is quarantined (its op-log could not be folded ` +
+      `at boot) — this write is applied in memory only and is lost on ` +
+      `restart; fix its version/onMigrate and restart`;
+    void _owe(Promise.resolve(`${PERSIST_REFUSED} ${why}`));
+    const said = _quarantinedWrites.get(cell);
+    const now = Date.now();
+    if (said === undefined || now - said.at >= 10_000) {
+      if (said?.timer !== undefined) clearTimeout(said.timer);
+      const more = said?.n ? ` (and ${count(said.n, "earlier write")})` : "";
+      _quarantinedWrites.set(cell, { n: 0, at: now });
+      log.error(`sync: a write to ${why}${more}`);
+      return;
+    }
+    said.n++;
+    if (said.timer !== undefined) return;
+    const timer = setTimeout(() => {
+      _quarantinedWrites.set(cell, { n: 0, at: Date.now() });
+      log.error(
+        `sync: ${count(said.n, "more write")} to "${cell}" in the last 10 s ` +
+          `applied in memory only — it is quarantined; they are lost on ` +
+          `restart`,
+      );
+    }, said.at + 10_000 - now);
+    said.timer = timer;
+    Deno.unrefTimer(timer);
+  }
+
+  /** COMMIT(X) — a sync op on a listened action was REDUCED (journal.ts
+   *  J1–J7). Written inside the op's `_atomically` block, so it and every
+   *  reaction line of the op reach a reader together or not at all. */
+  function _markSyncApplied(action: A): void {
+    if (!_syncJournal) return;
+    const a = action as {
+      type?: string;
+      _syncOp?: boolean;
+      _syncTs?: unknown;
+      _syncId?: unknown;
+    };
+    if (
+      !a._syncOp || typeof a._syncTs !== "number" ||
+      typeof a._syncId !== "string"
+    ) return;
+    const type = a.type ?? "";
+    if (!_listenedTypes.has(type)) return;
+    const c = type.slice(0, type.indexOf(":"));
+    if (!_syncCellSet.has(c) || _quarantinedSkip(c)) return;
+    _journalAppend(
+      {
+        type: SYNC_APPLIED_TYPE,
+        payload: { cell: c, id: a._syncId, ts: a._syncTs },
+        only: [c],
+      },
+      Date.now(),
+      { clock: "sync", cell: c },
+    );
+  }
+
+  /** INTENT(X) — see journal.ts J3: after the op's value is issued, before
+   *  its row is inserted. A refused append is reported and the op goes on:
+   *  the next boot finds it uncovered and names it (never re-derives it). */
+  function _intendSyncOp(
+    op: { id: string; cell: string; action: string },
+    ts: number,
+  ): void {
+    if (!_listenedTypes.has(`${op.cell}:${op.action}`)) return;
+    if (!_syncCellSet.has(op.cell) || _quarantinedSkip(op.cell)) return;
+    try {
+      journal!.append(
+        {
+          type: SYNC_INTENT_TYPE,
+          payload: { cell: op.cell, id: op.id, ts },
+          only: [op.cell],
+        },
+        Date.now(),
+      );
+      _journalHealth.ok();
+    } catch (e) {
+      _journalHealth.fail(e);
+      reportAioError(
+        createAioError("PERSIST_ERROR", e, { actionType: SYNC_INTENT_TYPE }),
+        _reportOpts,
+      );
+    }
+  }
+
+  function _quarantinedSkip(cell: string): boolean {
+    if (!asyncDb || !getSyncReplayContext(asyncDb)?.quarantined.has(cell)) {
+      return false;
+    }
+    if (!_quarantineSaid.has(cell)) {
+      _quarantineSaid.add(cell);
+      log.warn(
+        `journal: "${cell}" is quarantined — its writes are not journalled ` +
+          `(they cannot be made durable until its log folds; fix its ` +
+          `version/onMigrate and restart). Said once.`,
+      );
+    }
+    return true;
+  }
+  function _journalReaction(
+    next: S,
+    reacted: readonly string[],
+    bySyncOp: boolean,
+    /** A time-travel jump's sync cells (`_jumpSyncCells`), not a reaction. */
+    jump = false,
+    /** The sync cell a server write changed: its line is the state that
+     *  write left (`SyncReaction.write`), not a reaction. */
+    wrote?: string,
+  ): void {
+    const cells: TimeTravelRestore["cells"] = {};
+    const deltas: NonNullable<TimeTravelRestore["deltas"]> = {};
+    const written: [string, unknown][] = [];
+    let withheldKv = false;
+    for (const k of reacted) {
+      const slice = (next as Record<string, unknown>)[k];
+      if (slice === null || typeof slice !== "object") continue;
+      // A redacted cell's state is written to no diagnostic sink, and the
+      // journal is one: made durable by its own save instead, now.
+      if (_syncCellSet.has(k) && _quarantinedSkip(k)) continue;
+      if (redact.redactsCell(k)) {
+        if (_syncCellSet.has(k)) _saveNow({ clock: "sync", cell: k });
+        else withheldKv = true;
+        continue;
+      }
+      if (_syncCellSet.has(k)) {
+        const link = _reactionChain.get(k);
+        const at = _appliedTs.get(k) ?? 0;
+        const payload: SyncReaction = link
+          ? {
+            cell: k,
+            at,
+            ops: diffState(link.state, slice),
+            ...(link.snapshotAt !== undefined
+              ? { baseSnapshotAt: link.snapshotAt }
+              : { base: link.seq }),
+          }
+          : { cell: k, at, state: slice as Record<string, unknown> };
+        // A fold in flight: its snapshot may land before the next line.
+        const inFlight = _captured.get(k);
+        if (inFlight !== undefined && !inFlight.lined) {
+          inFlight.lined = true;
+          if (link) {
+            payload.alsoSnapshot = {
+              at: inFlight.at,
+              ops: diffState(inFlight.state, slice),
+            };
+          }
+        }
+        if (bySyncOp) payload.bySyncOp = true;
+        if (jump) payload.jump = true;
+        if (k === wrote) payload.write = true;
+        _appendOk = true;
+        const seq = _journalAppend(
+          {
+            type: SYNC_REACTION_TYPE,
+            payload,
+            only: [k],
+            v: { [k]: config._cellVersions?.[k] ?? 0 },
+          },
+          Date.now(),
+          { clock: "sync", cell: k },
+        );
+        // A line that did not land cannot be a base: the next one restarts.
+        if (_appendOk) _reactionChain.set(k, { seq, state: slice });
+        else _reactionChain.delete(k);
+        continue;
+      }
+      const kept = _storedSlice(k, slice);
+      if (kept === undefined) {
+        // The shape threw: no line can carry it, and the store's own save
+        // is the one that says so — owed, so the caller hears `unsaved`.
+        if (_shapeThrew) withheldKv = true;
+        continue;
+      }
+      const link = _kvChain.get(k);
+      if (link) {
+        deltas[k] = { base: link.seq, ops: diffState(link.stored, kept) };
+      } else cells[k] = kept as Record<string, unknown>;
+      written.push([k, kept]);
+    }
+    if (withheldKv) _saveNow({ clock: "kv" });
+    if (written.length === 0) return;
+    _appendOk = true;
+    const seq = _journalAppend(
+      {
+        type: TT_RESTORE_TYPE,
+        payload: {
+          cmd: bySyncOp ? LISTENS_TO_SYNC_OP_CMD : LISTENS_TO_CMD,
+          // Empty on purpose — see `TimeTravelRestore.keyframes`: an older
+          // reader must find nothing here to apply.
+          cells: {},
+          ...(Object.keys(cells).length > 0 ? { keyframes: cells } : {}),
+          ...(Object.keys(deltas).length > 0 ? { deltas } : {}),
+        } satisfies TimeTravelRestore,
+        only: written.map(([k]) => k),
+      },
+      Date.now(),
+      { clock: "kv" },
+    );
+    for (const [k, kept] of written) {
+      if (_appendOk) _kvChain.set(k, { seq, stored: kept });
+      else _kvChain.delete(k);
+    }
+  }
+
+  /** Make a write durable by its own save, NOW — for a line the journal
+   *  did not take (a refused append, `_journalAppend`) or may not take (a
+   *  redacted cell's state, `_journalReaction`/`_recordTimeTravel`). A sync
+   *  cell's save is the fold of THAT cell (folding every pending cell would
+   *  restart every other listener's reaction chain, see `SyncReaction`); a
+   *  store-persisted cell's is the store's persist.
+   *
+   *  Coalesced PER CLOCK, never across them: one flag for both let a refused
+   *  sync line's fold swallow the KV line's persist in the same burst, and
+   *  the KV reaction was gone after a SIGKILL (review rev8). One save at a
+   *  time per clock; a request landing while one runs re-runs it when it is
+   *  done (a save reads state when it starts). */
+  type SaveNow = { clock: "kv" } | { clock: "sync"; cell: string };
+  const _saving = {
+    sync: {
+      tail: null as Promise<string | undefined> | null,
+      queued: null as Promise<string | undefined> | null,
+      cells: new Set<string>(),
+    },
+    kv: {
+      tail: null as Promise<string | undefined> | null,
+      queued: null as Promise<string | undefined> | null,
+      cells: new Set<string>(),
+    },
+  };
+  /** Resolves once `what` is durable — the caller's ack waits for it (see
+   *  `_durableFor`). */
+  /** Resolves once `what` is saved — with why it is NOT (the fold's error,
+   *  the store's `lastCycleError()`), or undefined when it is. The caller's
+   *  ack waits for it and carries a failure as `unsaved` (see `_durableFor`,
+   *  action-ack.ts). */
+  function _saveNow(what: SaveNow): Promise<string | undefined> {
+    const f = _saving[what.clock];
+    if (what.clock === "sync") {
+      f.cells.add(what.cell);
+      // A fold flushes only a cell with a write pending — and the line that
+      // did not land may be the one a sync op's own cell owes (its reduced
+      // mark, `SYNC_APPLIED_TYPE`), which no server write announced.
+      syncHandler?.noteServerWrite(what.cell);
+    }
+    // A save that has not started yet reads the state when it does: it
+    // covers this request too.
+    if (f.queued !== null) return _owe(f.queued);
+    const start = (): Promise<string | undefined> => {
+      const cells = [...f.cells];
+      f.cells.clear();
+      // `flushPersist()` never rejects by contract — a refused cycle is
+      // reported inside it and read back through `lastCycleError()`, which
+      // is what `am persist` and `/__aio/health` answer with. So a rejection
+      // HERE is a broken contract, not a refused write, and the one thing it
+      // must not be is silent.
+      const run: Promise<string | undefined> = what.clock === "sync"
+        ? syncHandler!.flushServerWrites(cells)
+        : persistence.flushPersist().then(() =>
+          persistence.lastCycleError()?.message
+        );
+      return run.then(
+        (why) => why === undefined ? undefined : `${PERSIST_REFUSED} ${why}`,
+        (err) => {
+          log.error(
+            `journal: the save that stands in for a journal line threw — ` +
+              `${err}. The verdict is still lastCycleError(); ask \`am ` +
+              `persist\`.`,
+          );
+          return `${PERSIST_REFUSED} ${
+            err instanceof Error ? err.message : String(err)
+          }`;
+        },
+      );
+    };
+    // One save at a time per clock: behind the running one, never beside it.
+    const p: Promise<string | undefined> = f.tail === null
+      ? start()
+      : f.tail.then(() => {
+        f.queued = null;
+        return start();
+      });
+    if (f.tail !== null) f.queued = p;
+    f.tail = p;
+    void p.finally(() => {
+      if (f.tail === p) f.tail = null;
+    });
+    return _owe(p);
+  }
+
+  // ── What an ack waits for ────────────────────────────────────────────
+  // A save that stands in for a journal line is a promise the CALLER is owed:
+  // acked before it lands, a SIGKILL in between lost the write the ack
+  // confirmed (review rev9: 1 in 48 under load). Each such save is owed to
+  // the action whose commit asked for it, and to its async call (whose
+  // caller hears at the method's end). ONE place waits for it for every
+  // caller: `dispatch` (below) for an action, the call settlement
+  // (`_onCallSettle`) for an async call — so a route, an effect or a
+  // serverFn awaiting `cell.method()` waits exactly as a network ack does;
+  // the sync handler waits for a `_syncOp` itself, parked (`durableFor`).
+  // A save that failed reaches the caller as `unsaved` (action-ack.ts).
+  /** The action whose afterAction is running (what `_saveNow` is owed to). */
+  let _owedTo: object | null = null;
+  // Sets: one save (coalesced per clock) answers many requests in one
+  // action, and a spread-append per request was O(n²) for a long burst.
+  const _owedByAction = new WeakMap<object, Set<Promise<string | undefined>>>();
+  const _owedByCall = new Map<string, Set<Promise<string | undefined>>>();
+  /** Actions afterAction has seen — `dispatch` knows at once whether one
+   *  can still come to owe something. */
+  const _afterSeen = new WeakSet<object>();
+  function _owe(p: Promise<string | undefined>): Promise<string | undefined> {
+    const a = _owedTo;
+    if (a !== null) {
+      const owed = _owedByAction.get(a) ?? new Set();
+      _owedByAction.set(a, owed.add(p));
+      const call = _callOf(a as A);
+      if (call !== undefined) {
+        if (_owedByCall.size >= 1024) {
+          _owedByCall.delete(_owedByCall.keys().next().value!);
+        }
+        const byCall = _owedByCall.get(call) ?? new Set();
+        _owedByCall.set(call, byCall.add(p));
+      }
+    }
+    return p;
+  }
+  const _verdict = (
+    owed: Set<Promise<string | undefined>>,
+  ): Promise<string | undefined> =>
+    Promise.all(owed).then((vs) => {
+      const failed = [...new Set(vs.filter((v) => v !== undefined))];
+      return failed.length === 0 ? undefined : failed.join("; ");
+    });
+  /** What must be durable before `action` may be acked, as its verdict;
+   *  undefined when nothing is owed. */
+  function _durableFor(
+    action: object,
+  ): Promise<string | undefined> | undefined {
+    const owed = _owedByAction.get(action);
+    _owedByAction.delete(action);
+    return owed === undefined ? undefined : _verdict(owed);
+  }
+  /** The same for an async call's settlement — its write-sets' saves. */
+  function _durableForCall(callId: string): Promise<unknown> | undefined {
+    const owed = _owedByCall.get(callId);
+    _owedByCall.delete(callId);
+    if (owed === undefined) return undefined;
+    return _verdict(owed).then((why) => {
+      if (why !== undefined) _noteUnsaved(undefined, callId, why);
+    });
+  }
+  const _offCallSettle = _onCallSettle(_durableForCall);
+  bootUndo.push("call settle hook", _offCallSettle);
+
+  /** Top-level keys an action's reduce changed, other than its own cell. */
+  function _reactedKeys(prev: S, next: S, own: string): string[] {
+    const p = prev as Record<string, unknown>;
+    const n = next as Record<string, unknown>;
+    const out: string[] = [];
+    for (const k of Object.keys(n)) if (k !== own && p[k] !== n[k]) out.push(k);
+    return out;
+  }
+
   function _journalAppend(
     entry: Parameters<NonNullable<typeof journal>["append"]>[0],
     ts: number,
     // What makes this write durable without its journal line: the persist
     // flush for a KV cell, the fold for a sync cell (whose state the KV
     // snapshot does not hold, so a persist flush would close nothing).
-    compensate: () => Promise<void> = () => persistence.flushPersist(),
+    save: SaveNow = { clock: "kv" },
   ): number {
     try {
       const v = _journalVersions(entry.type, entry.payload, entry.origin);
+      _atomicOwed?.push(save);
       const seq = journal!.append(v ? { ...entry, v } : entry, ts);
       _journalHealth.ok();
       return seq;
     } catch (e) {
+      _appendOk = false;
       _journalHealth.fail(e);
       reportAioError(
         createAioError("PERSIST_ERROR", e, { actionType: entry.type }),
         _reportOpts,
       );
-      if (!_journalFlushPending) {
-        _journalFlushPending = true;
-        // `flushPersist()` never rejects by contract — a refused cycle is
-        // reported inside it and read back through `lastCycleError()`, which
-        // is what `am persist` and `/__aio/health` answer with. So a
-        // rejection HERE is a broken contract, not a refused write, and the
-        // one thing it must not be is silent.
-        compensate().catch((err) => {
-          log.error(
-            `journal: the compensating flush itself threw — ${err}. The ` +
-              `verdict is still lastCycleError(); ask \`am persist\`.`,
-          );
-        }).finally(() => {
-          _journalFlushPending = false;
-        });
-      }
+      _saveNow(save);
       // The counter already advanced; the timeline keeps the same seq so its
       // entries and the journal's lines stay aligned for replay.
       return journal!.currentSeq();
@@ -3080,14 +4284,11 @@ async function _runPhases<S, A, E>(
     payload: unknown,
     origin: string | undefined,
   ): Record<string, number> | undefined {
-    const cells = type === TT_RESTORE_TYPE
-      ? Object.keys(
-        (payload as Partial<TimeTravelRestore> | undefined)?.cells ?? {},
-      )
-      : [
-        workerPatchCell(type, payload) ??
-          (origin ?? type).slice(0, Math.max(0, (origin ?? type).indexOf(":"))),
-      ];
+    const tt = payload as Partial<TimeTravelRestore> | undefined;
+    const cells = type === TT_RESTORE_TYPE ? _ttStateCells(tt) : [
+      workerPatchCell(type, payload) ??
+        (origin ?? type).slice(0, Math.max(0, (origin ?? type).indexOf(":"))),
+    ];
     const out: Record<string, number> = {};
     let any = false;
     for (const c of cells) {
@@ -3204,7 +4405,29 @@ async function _runPhases<S, A, E>(
         _nestedCall.set(inner, call);
       }
     }
-    return _dispatchCore(action);
+    const r = _dispatchCore(action);
+    // Answered once what its commit owes is durable (see `_owe`) — for every
+    // caller at once. A sync op is waited for by the sync handler, PARKED
+    // under its cell's lock (server-handler.ts `_parked`); waiting here,
+    // unparked, could deadlock two cells' ops on each other's folds.
+    if (
+      action === null || typeof action !== "object" ||
+      (action as { _syncOp?: unknown })._syncOp === true ||
+      (_afterSeen.has(action as object) && !_owedByAction.has(action as object))
+    ) return r;
+    const waited = r.then((v) => {
+      const d = _durableFor(action as object);
+      if (d === undefined) return v;
+      return d.then((why) => {
+        if (why !== undefined) _noteUnsaved(action as object, undefined, why);
+        return v;
+      });
+    });
+    // As handled as the promise it replaces: a refusal (paused, closing)
+    // still rejects for whoever awaits, and is never an unhandled rejection
+    // for a fire-and-forget caller (`_dispatchCore` marks its own the same).
+    waited.catch(() => {/* aio-ok: the rejection is `r`'s, reported there */});
+    return waited;
   }, _dispatchCore) as typeof _dispatchCore;
   bootUndo.push("close dispatch", () => dispatch.close());
   // ONE ceiling for "how long may this async method run" — the effect side and
@@ -3226,6 +4449,26 @@ async function _runPhases<S, A, E>(
 
   // Sync ops apply through the normal dispatch path (late-bound at boot).
   _syncDispatchRef.fn = (a) => dispatch(a as unknown as A);
+  _syncDispatchRef.durableFor = _durableFor;
+  // Paused time travel drops every dispatch — for a sync op, that was a
+  // PERMANENT op-rejected, and the client threw the op (a reconnecting
+  // client's whole offline queue) away. It is HELD instead: not persisted,
+  // not acked, answered with `sync-err`, which the client meets by retrying
+  // its catch-up (pending ops included) every 2 s — so the ops land on
+  // resume. Dev-only (time travel is), and the client says why each time.
+  //
+  // Same for a SHUTDOWN: dispatch closes first (the drain), the sockets last,
+  // and an op arriving in between was refused for good — the client pruned
+  // the edit, so every deploy/restart lost the edits in flight. Held, the
+  // client keeps it and resends it to the next server.
+  _syncDispatchRef.heldBecause = () =>
+    tt?.paused === true
+      ? "time travel is paused — sync ops are held (not applied, not " +
+        "dropped) and resent until it resumes"
+      : dispatch.phase() !== "open"
+      ? "the server is shutting down — sync ops are held (not applied, not " +
+        "dropped): the client keeps them and resends them to the next server"
+      : undefined;
 
   const freezeEnabled = config.freezeState ?? !prod;
   // `freezeState: false (prod default)` on its own read as "state is not
@@ -3510,7 +4753,15 @@ async function _runPhases<S, A, E>(
       await persistence.flushPersist();
       // Sync cells' server-origin writes debounce into their snapshot — a
       // clean exit must not leave the last write inside that window.
-      await syncHandler?.flushServerWrites();
+      const unfolded = await syncHandler?.flushServerWrites();
+      // What a clean stop covers: every value this run issued (input is
+      // closed by now) — read AFTER the folds, which take values of their
+      // own, so the next run's first value continues the range. Only a run
+      // that SAVES: with persist off no store holds a store-persisted
+      // listener's reactions, so there is nothing to vouch for.
+      const cleanTo = asyncDb && shouldPersist && _cleanRunFrom !== undefined
+        ? await issuedThrough(asyncDb).catch(() => undefined)
+        : undefined;
       // The manager never rejects (the loop has to survive a bad window), so
       // the verdict is read back — and on the LAST flush there is no next
       // window to fix it in. A clean-looking exit that dropped every write
@@ -3522,7 +4773,16 @@ async function _runPhases<S, A, E>(
         log.error(
           `shutdown: the FINAL persist was refused — ${failed.message}`,
         );
-      } else if (shouldPersist) {
+      } else if (
+        !unfolded && cleanTo !== undefined && _cleanRunFrom !== undefined &&
+        asyncDb
+      ) {
+        // Every record is saved: say so, for the next boot (`CLEAN_STOP_ROW`).
+        await recordCleanStop(asyncDb, _cleanRunFrom, cleanTo).catch((e) =>
+          log.warn(`shutdown: could not record the clean stop — ${e}`)
+        );
+      }
+      if (!failed && shouldPersist) {
         // A clean verdict from the HANDLE is not a fact about the disk. Delete
         // the database out from under a running app (a cleared tmp dir, a
         // container volume that was not really persistent, `am remove --data
@@ -3602,9 +4862,15 @@ async function _runPhases<S, A, E>(
    *  `tests/shutdown-worker-cell-durability.test.ts` pins this end to end with
    *  a real worker (libraryMode runs worker cells in-isolate, so an in-process
    *  test cannot reach this path). */
+  /** Aborted when this app's shutdown begins — see `shutdown`. */
+  const _stopCtl = new AbortController();
   const shutdown = async (): Promise<void> => {
+    // FIRST, before anything awaits: boot steps still in flight (the Electron
+    // launch) read this and refuse to start what the shutdown would miss.
+    _stopCtl.abort();
     await workerPool.close();
     await _shutdownRuntime();
+    _offCallSettle();
     // A closed app owns nothing: release THIS app's cells so they can bind
     // again. Without it a cell def stayed claimed for the life of the process,
     // so two `testServer()` blocks in one file failed with "already bound" even
@@ -3743,6 +5009,94 @@ async function _runPhases<S, A, E>(
   const token = _keyRes.key;
   const clientCounter = { value: 0 };
   const udsRef = { current: null as UDSHandle | null };
+
+  // A boot over an older build's data re-derived what that build never
+  // recorded (the reactions of its sync ops). Written down NOW, before any
+  // input — as stamped state lines and then the marker that retires the old
+  // tail, or (no journal) by saving the store and folding each changed sync
+  // cell. Only then is the store stamped as this build's: a crash before
+  // that re-derives again, from the same data.
+  // Every op this boot placed (see `_unmarked`) is committed now, before any
+  // input — in ONE line with the reaction lines this boot re-derived for the
+  // in-flight ones (journal.ts J1): a kill between would read as "covered"
+  // next boot with the reactions nowhere. Over a legacy tail the same line
+  // carries the recovery's state lines and marker (below).
+  const _commitPlaced = (): void => {
+    for (const { cell, id, ts } of _unmarked) {
+      _journalAppend(
+        { type: SYNC_APPLIED_TYPE, payload: { cell, id, ts }, only: [cell] },
+        Date.now(),
+        { clock: "sync", cell },
+      );
+    }
+    if (_rederivedCells.size > 0) {
+      _journalReaction(state, [..._rederivedCells], true);
+    }
+  };
+  if (_unmarked.length > 0 && journal && _legacyBoot === null) {
+    _atomically(_commitPlaced);
+  }
+  if (journal) {
+    for (const k of _rederivedCells) {
+      if (_syncCellSet.has(k)) syncHandler?.noteServerWrite(k);
+    }
+  }
+  let _legacySaved = true;
+  // An older build's crashed tail (`_legacyBoot`): its CALLS were replayed
+  // above, their reactions with them — on a sync listener, in no fold yet.
+  // Written down now, before any input, as stamped state lines closed by
+  // the marker that retires the old lines (see `LEGACY_RECOVERED_TYPE`).
+  if (_legacyBoot !== null && asyncDb && journal) {
+    const was = _legacyBoot as Record<string, unknown>;
+    const now = state as Record<string, unknown>;
+    const changed = Object.keys(now).filter((k) =>
+      k in (initialState as Record<string, unknown>) && now[k] !== was[k]
+    );
+    for (const c of syncCellIds) {
+      const { rows } = await asyncDb.query<{ ts: number | null }>(
+        "SELECT MAX(server_ts) AS ts FROM sync_ops WHERE cell = ?",
+        [c],
+      );
+      _appliedTs.set(c, rows[0]?.ts ?? 0);
+    }
+    _appendOk = true;
+    // ONE line (J1): the commits of the ops this boot placed, the state it
+    // recovered, and the marker — a kill that kept the commits without the
+    // rest would read as "this build's data, covered" next boot, with the
+    // recovered state in no record.
+    _atomically(() => {
+      _commitPlaced();
+      if (changed.length > 0) _journalReaction(state, changed, false);
+      _journalAppend(
+        {
+          type: LEGACY_RECOVERED_TYPE,
+          payload: { cells: changed },
+          only: Object.keys(initialState as Record<string, unknown>),
+        },
+        Date.now(),
+      );
+    });
+    _legacySaved = _appendOk;
+    if (_legacySaved) {
+      log.info(
+        `journal: recorded the state this boot recovered from the older ` +
+          `build's journal (${changed.join(", ") || "nothing changed"})`,
+      );
+    }
+  }
+  // This op-log is now this build's: its reactions are recorded from here
+  // on. Never over a legacy recovery that did not land — the next boot
+  // recovers again, from the same data.
+  if (_legacySaved && asyncDb && syncCellIds.length > 0) {
+    await stampReactions(
+      asyncDb,
+      _marking ? REACTIONS_MARKED : REACTIONS_FORMAT,
+    );
+  }
+
+  // From here every op on a listened action journals its intent before its
+  // row (journal.ts J3) — installed before the transport takes any input.
+  if (_marking) syncHandler!.setOpIssueHook?.(_intendSyncOp);
 
   // Resolved BEFORE the transport is set up so an invalid `tls` shape fails at
   // boot, where it can name the config key, not at the first handshake.
@@ -4166,6 +5520,7 @@ async function _runPhases<S, A, E>(
     setElectronProc: (proc) => {
       _electronProc = proc;
     },
+    stopSignal: _stopCtl.signal,
     setDiscoveryStop: (stop) => {
       discoveryRef.stop = stop;
     },

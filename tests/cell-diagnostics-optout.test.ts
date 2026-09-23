@@ -136,7 +136,7 @@ Deno.test("an opted-out cell's actions stay out of actions.jsonl", async () => {
     singleton: false,
     port,
     baseDir: dir,
-    diagnostics: { actionLog: true },
+    diagnostics: { dev: { actionLog: true } },
     // deno-lint-ignore no-explicit-any
   } as any);
   try {

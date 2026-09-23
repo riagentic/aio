@@ -31,7 +31,7 @@
  * are the same, only the rendition changes.
  */
 import type { GlobalFlags } from "./am-types.ts";
-import { detectMode, out, outError } from "./am-output.ts";
+import { detectMode, out, outError, say } from "./am-output.ts";
 import {
   agentBrief,
   BRIEF_SECTIONS,
@@ -130,7 +130,7 @@ export function cmdAgent(args: string[], flags: GlobalFlags): void {
   }
 
   // The brief, as text, whoever is reading. See the module note above.
-  console.log(agentBrief({ version: VERSION, task, level }));
+  say(agentBrief({ version: VERSION, task, level }));
 }
 
 /** `--task=<slug>`, or undefined. A bare `am agent <slug>` is accepted too —

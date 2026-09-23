@@ -50,10 +50,13 @@ Deno.test("electron closed: outside a restart the window still owns the app", ()
   assertEquals(closed, {
     line: "electron closed (code 0) — shutting down",
     stop: true,
+    crashed: false,
+    exitCode: 0,
   });
   const killed = electronClosedPlan({ code: 137, signal: "SIGKILL" }, base);
   assertEquals(killed.stop, true);
   assertStringIncludes(killed.line, "signal SIGKILL");
+  assertEquals([killed.crashed, killed.exitCode], [true, 1]);
   const kept = electronClosedPlan({ code: 0, signal: null }, {
     ...base,
     keepServer: true,

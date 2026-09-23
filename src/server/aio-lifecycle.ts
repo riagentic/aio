@@ -15,10 +15,11 @@ import {
   type AioMeta,
   electronMetaPolicy,
   electronProfileName,
+  electronStderrTail,
   launchElectron,
   SandboxRefusal,
 } from "../electron/electron.ts";
-import { appDirs } from "./app-dirs.ts";
+import { appDirs, registeredProfile } from "./app-dirs.ts";
 import type { ServerHandle } from "./server-types.ts";
 import type { UDSHandle } from "./uds.ts";
 import type { TlsCert } from "./tls.ts";
@@ -68,23 +69,70 @@ import { count } from "../diagnostics/fmt.ts";
  *  what it is, and stop nothing — the relaunch opens the next window. */
 export function electronClosedPlan(
   s: Pick<Deno.CommandStatus, "code" | "signal">,
-  ctx: { keepServer: boolean; restarting: boolean; url: string },
-): { line: string; stop: boolean } {
+  ctx: {
+    keepServer: boolean;
+    restarting: boolean;
+    url: string;
+    /** This app's own shutdown already began — it killed the window. */
+    stopping?: boolean;
+  },
+): { line: string; stop: boolean; crashed: boolean; exitCode: 0 | 1 } {
   const how = s.signal ? `signal ${s.signal}` : `code ${s.code ?? 0}`;
   if (ctx.restarting) {
     return {
       line: `electron closed (${how}) — restarting, the relaunched app ` +
         `opens the next window`,
       stop: false,
+      crashed: false,
+      exitCode: 0,
     };
   }
+  const crashed = !ctx.stopping && electronExitIsCrash(s);
   if (ctx.keepServer) {
     return {
-      line: `electron closed (${how}) — server still running at ${ctx.url}`,
+      line: `electron ${crashed ? "crashed" : "closed"} (${how}) — server ` +
+        `still running at ${ctx.url}`,
       stop: false,
+      crashed,
+      exitCode: 0,
     };
   }
-  return { line: `electron closed (${how}) — shutting down`, stop: true };
+  return crashed
+    ? {
+      line: `electron crashed (${how}) — shutting down (state is drained ` +
+        `and saved as on any stop), exit 1`,
+      stop: true,
+      crashed,
+      exitCode: 1,
+    }
+    : {
+      line: `electron closed (${how}) — shutting down`,
+      stop: true,
+      crashed,
+      exitCode: 0,
+    };
+}
+
+/** Signals that mean "someone asked the window to end" — not a crash. A
+ *  Ctrl-C reaches the whole foreground group (the window dies of SIGINT while
+ *  the app is only starting its own stop), aio's own shutdown and a session
+ *  logout send SIGTERM, a closed terminal SIGHUP. The shell re-raises each
+ *  after its cleanup (tmplPreloadWrite), so they arrive here as signals. */
+const ELECTRON_STOP_SIGNALS: ReadonlySet<string> = new Set([
+  "SIGTERM",
+  "SIGINT",
+  "SIGHUP",
+]);
+
+/** Did the window END BADLY — killed by any other signal (SIGTRAP: Chromium
+ *  refused by the display, SIGSEGV, SIGABRT, SIGKILL: the OOM killer) or a
+ *  non-zero exit code? A window closed by its user exits 0. Pure.
+ *  @decider */
+export function electronExitIsCrash(
+  s: Pick<Deno.CommandStatus, "code" | "signal">,
+): boolean {
+  if (s.signal) return !ELECTRON_STOP_SIGNALS.has(s.signal);
+  return (s.code ?? 0) !== 0;
 }
 
 /** What a LAUNCH that never produced a window means for this process — pure,
@@ -349,6 +397,11 @@ export interface LifecycleDeps<S, A> {
   libraryMode?: boolean;
   // Electron
   setElectronProc: (proc: Deno.ChildProcess | null) => void;
+  /** Aborted the moment THIS app's shutdown begins. The Electron launch is
+   *  async (icon, lookup, maybe a first-run install) and resolves on its own
+   *  schedule; without this a SIGTERM mid-boot was followed by "launching
+   *  Electron" and a window — and installers — that outlived the app. */
+  stopSignal?: AbortSignal;
   /** Register the LAN-discovery responder stopper (called on shutdown). */
   setDiscoveryStop: (stop: (() => void) | null) => void;
   /** App lock — used to stamp discovery metadata for LAN discovery. */
@@ -447,6 +500,7 @@ export function startLifecycle<S, A>(deps: LifecycleDeps<S, A>): void {
     ui,
     keepServer: configKeepServer,
     setElectronProc,
+    stopSignal,
     log,
   } = deps;
   noteLifecycle({ libraryMode: !!libraryMode });
@@ -841,6 +895,16 @@ export function startLifecycle<S, A>(deps: LifecycleDeps<S, A>): void {
       localUrl,
     ));
   } else if (useElectron) {
+    // SIGHUP is a STOP for a desktop app, like SIGTERM — graceful, through
+    // the one shutdown path. Its default (terminate on the spot) skipped that
+    // path entirely, and a closed terminal during a first-run Electron
+    // install then left the installer running: it has its own session
+    // (`runInstaller`), so the hangup never reached it, and only the shutdown
+    // abort kills it. A SIGHUP the operator IGNORED (`nohup`) stays ignored:
+    // registering a listener would otherwise turn it back on (`mayTakeSighup`).
+    if (!libraryMode && !hasProcessListener("SIGHUP") && mayTakeSighup()) {
+      installProcessListener("SIGHUP", () => void stopProcess(0));
+    }
     const meta: AioMeta = {
       title,
       width: windowSizeOf(cli, ui).width?.value,
@@ -858,7 +922,12 @@ export function startLifecycle<S, A>(deps: LifecycleDeps<S, A>): void {
       // directory — the shared cache is what answered
       // net::ERR_CACHE_READ_FAILURE and left the second window blank. Same
       // key as the lock, so there is one answer to "which instance is this".
-      profileName: electronProfileName(appId, title, appDirs(appId).home),
+      profileName: electronProfileName(
+        appId,
+        title,
+        appDirs(appId).home,
+        registeredProfile(appId),
+      ),
     };
     const electronUrl = token ? `${localUrl}?token=${token}` : localUrl;
     // NOT distDir — that can be the binary's embedded VFS copy, which this
@@ -948,9 +1017,24 @@ export function startLifecycle<S, A>(deps: LifecycleDeps<S, A>): void {
           udsConfig && { ...udsConfig, defaultIcon },
           distDir,
           cdpPort(),
+          stopSignal,
         )
       )
       .then((proc) => {
+        // Shutdown began while the launch was in flight: refuse. A proc that
+        // was spawned in the last instant is killed here — the orchestrator's
+        // electron phase already ran (or will find nothing registered).
+        if (stopSignal?.aborted) {
+          if (proc) {
+            try {
+              proc.kill("SIGTERM");
+            } catch {
+              /* aio-ok: the window already exited — nothing to kill */
+            }
+            log.info("shutdown began during boot — Electron not launched");
+          }
+          return;
+        }
         if (!proc) {
           // Electron unavailable (auto-install failed / offline). The app
           // keeps serving — it is identical over WS — but it does NOT quietly
@@ -980,17 +1064,32 @@ export function startLifecycle<S, A>(deps: LifecycleDeps<S, A>): void {
         }
         setElectronProc(proc);
         proc.status
-          .then((s) => {
+          .then(async (s) => {
             setElectronProc(null);
             const plan = electronClosedPlan(s, {
               keepServer: !!keepServer,
               restarting: isRestarting(),
               url,
+              stopping: !!stopSignal?.aborted,
             });
-            log.info(plan.line);
+            if (plan.crashed) {
+              // A crash exits NON-zero and says why — it used to exit 0
+              // through the same graceful stop, so a window the display
+              // refused looked, to a launcher or a test, like a user closing
+              // it. The shutdown itself is unchanged: drain + persist.
+              const tail = await electronStderrTail(proc);
+              log.error(
+                plan.line +
+                  (tail.length
+                    ? ` — last Electron stderr: ${
+                      tail.map((l) => JSON.stringify(l)).join(" · ")
+                    }`
+                    : " — Electron wrote nothing to stderr"),
+              );
+            } else log.info(plan.line);
             // This exits the PROCESS, so every app in it stops here —
             // including one still writing its final snapshot.
-            if (plan.stop) stopProcess(0);
+            if (plan.stop) stopProcess(plan.exitCode);
           })
           .catch((e) => log.error(`electron status: ${e}`));
       })
@@ -1085,7 +1184,9 @@ export function _resetLifecycleFacts(): void {
  *  handover (which exits rather than spawning a successor for the same
  *  reason). `INVOCATION_ID` is set by systemd, `SUPERVISOR_PROCESS_NAME` by
  *  supervisord; `AIO_SUPERVISED=1` is the explicit spelling the generated unit
- *  carries for any other supervisor. */
+ *  carries for any other supervisor.
+ *
+ *  @decider */
 export function isServiceSupervised(
   env: (name: string) => string | undefined = envGet,
 ): boolean {
@@ -1321,4 +1422,31 @@ export async function requestRestart(
     );
   }
   return plan;
+}
+
+/** May this process take SIGHUP over — i.e. did whoever started it NOT
+ *  choose to ignore it (`nohup`)? A listener would switch an ignored SIGHUP
+ *  back on, so this answers "yes" only when that provably is not the case:
+ *   - Linux: exact — `SigIgn` in `/proc/self/status`, bit 0 = SIGHUP.
+ *   - elsewhere (macOS has no procfs, and its `ps` has no `sigignore`):
+ *     only when stdout is a terminal. `nohup` always takes stdout OFF the
+ *     terminal (to `nohup.out`, or wherever it was redirected) — measured on
+ *     macOS 14: `nohup` → isatty(1) false, SIGHUP SIG_IGN. So a nohup'd app
+ *     is never re-armed; the price is that a piped, non-nohup run
+ *     (`… | tee`) keeps SIGHUP's default instead of the graceful stop.
+ *  Both probes injected for tests.
+ *  @decider */
+export function mayTakeSighup(
+  status: () => string | null = () => {
+    try {
+      return Deno.readTextFileSync("/proc/self/status");
+    } catch {
+      return null; // aio-ok: no procfs (macOS, Windows) — the TTY rule decides
+    }
+  },
+  stdoutIsTerminal: () => boolean = () => Deno.stdout.isTerminal(),
+): boolean {
+  const m = /^SigIgn:\s*([0-9a-f]+)$/m.exec(status() ?? "");
+  if (m) return (BigInt("0x" + m[1]) & 1n) === 0n;
+  return stdoutIsTerminal();
 }

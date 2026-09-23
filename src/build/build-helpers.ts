@@ -61,7 +61,9 @@ export async function chmodIfSupported(
 
 /** Slugify a string for use as binary/app name. The transform is THE one in
  *  `single-instance-lock.ts` — an app's binary name and its lock id must not be
- *  able to disagree about what its name reduces to. Only the fallback differs. */
+ *  able to disagree about what its name reduces to. Only the fallback differs.
+ *
+ *  @decider */
 export function slugify(s: string): string {
   return slugifyName(s, "myapp");
 }

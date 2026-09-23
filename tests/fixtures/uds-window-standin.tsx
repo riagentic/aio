@@ -10,9 +10,9 @@
 // path a packaged desktop app ships with: `am` → the socket → the trojan → a
 // UI client over UDS → back.
 //
-// The socket is found the way `am` finds it — in the lock dir the app's
-// `AIO_APPS_DIR` scopes — never from the Electron main-script argument, which
-// is an implementation detail of the launcher.
+// The socket is found the way `am` finds it — through the app's lock, in the
+// lock dir its `AIO_APPS_DIR` scopes — never from the Electron main-script
+// argument, which is an implementation detail of the launcher.
 import { lockDir } from "../../src/server/single-instance-lock.ts";
 import { useLocal } from "../../src/air.ts";
 import { testUI } from "../../src/testing/ui-test.ts";
@@ -38,19 +38,25 @@ function Counter() {
 }
 
 async function findSocket(): Promise<string> {
+  // The LOCK names the socket (`socketPath`) — which is the only way to find
+  // it when the path was too long for the lock dir and the app bound it in
+  // the hashed `/tmp/aio` fallback instead.
   const dir = lockDir();
   const deadline = Date.now() + 30_000;
   while (Date.now() < deadline) {
     try {
       for (const e of Deno.readDirSync(dir)) {
-        if (e.name.endsWith(".sock") && !e.name.endsWith(".http.sock")) {
-          return join(dir, e.name);
-        }
+        if (!e.name.endsWith(".lock")) continue;
+        try {
+          const lock = JSON.parse(Deno.readTextFileSync(join(dir, e.name)));
+          const p = lock?.socketPath;
+          if (typeof p === "string" && Deno.lstatSync(p).isSocket) return p;
+        } catch { /* half-written, or its socket not bound yet */ }
       }
     } catch { /* not created yet */ }
     await new Promise((r) => setTimeout(r, 100));
   }
-  throw new Error(`no app socket appeared in ${dir}`);
+  throw new Error(`no app lock naming a bound socket appeared in ${dir}`);
 }
 
 // The HANDLE form: the three-argument `testUI(App, name, fn)` REGISTERS a

@@ -20,12 +20,13 @@ import {
   entrySubpath,
 } from "../entries.ts";
 import type { GlobalFlags } from "./am-types.ts";
-import { detectMode, fail, out } from "./am-output.ts";
+import { detectMode, fail, out, sayErr } from "./am-output.ts";
 import { reservedAppNameError } from "./am-utils.ts";
 import { resolve } from "@std/path";
 import { colorEnabled } from "../diagnostics/color.ts";
 import { styleWith } from "../diagnostics/fmt.ts";
 import { PATH_PIN_PREFIX } from "../server/framework-pin.ts";
+import { LOCAL_PIN_FILE } from "../server/deno-json.ts";
 import { appHome, type AppMeta } from "../server/app-dirs.ts";
 import { resolveAppId } from "../server/single-instance-lock.ts";
 import { GIT_NO_PROMPT_ENV } from "../server/git-noninteractive.ts";
@@ -148,7 +149,7 @@ export function parseCreateArgs(args: string[]): CreateOpts {
       // One vocabulary: the headless role is spelled `server` everywhere.
       // `service` is the deprecated alias — accepted, loudly renamed.
       if ((v as string) === "service") {
-        console.error(
+        sayErr(
           "am create: warning: --target=service is now --target=server (one " +
             "vocabulary — the headless role is `server`); scaffolding a " +
             "server app.",
@@ -980,6 +981,214 @@ export function scaffold(
   return files;
 }
 
+/** One undo step. Best-effort by design: a path that cannot be put back
+ *  must not keep the rest behind, and the caller rethrows the ORIGINAL
+ *  failure — which is the one worth reading. But never SILENT: a step that
+ *  fails lands `path` in `failed`, and the caller names every one ("undo
+ *  incomplete") — a user's overwritten deno.json that could not be restored
+ *  is the one thing they must hear about. `absentOk`: a remove of a path the
+ *  failure never got as far as creating is not a failed undo. */
+async function undoStep(
+  failed: Set<string>,
+  path: string,
+  step: () => Promise<unknown>,
+  absentOk = false,
+): Promise<void> {
+  try {
+    await step();
+  } catch (e) {
+    // NotADirectory: a path under a FILE (`src/app.ts/boom`) never existed.
+    const absent = e instanceof Deno.errors.NotFound ||
+      e instanceof Deno.errors.NotADirectory;
+    if (absentOk && absent) return;
+    failed.add(path);
+  }
+}
+
+/** What `am create` put on disk, recorded AS it is put there, so a failure
+ *  half-way can take back exactly that — and nothing else.
+ *
+ *  A failed create used to exit 1 and leave the half-scaffold behind: a
+ *  `deno.json` and a `.gitignore` in a directory the user then had to clean by
+ *  hand (and `--force` into an existing directory left its files overwritten).
+ *  Every path here is one this code wrote or created; nothing is found by
+ *  listing or globbing a directory, so undo can never reach content it did
+ *  not make. @internal */
+export class ScaffoldLedger {
+  /** Paths create brought into existence, in creation order. */
+  readonly made: string[] = [];
+  /** Files that existed and were about to change → their bytes before. */
+  readonly saved = new Map<string, Uint8Array>();
+  /** Symlinks that existed and were about to change → their target before. */
+  readonly savedLinks = new Map<string, string>();
+  /** EMPTY real directories create replaced (a `dep/aio` someone made by
+   *  hand) — recreated, empty, on undo. */
+  readonly emptyDirs: string[] = [];
+
+  /** Record `path` BEFORE something changes or creates it. */
+  async touch(path: string): Promise<void> {
+    if (this.made.includes(path) || this.saved.has(path)) return;
+    if (this.savedLinks.has(path)) return;
+    const st = await Deno.lstat(path).catch(() => null);
+    if (!st) this.made.push(path);
+    else if (st.isSymlink) this.savedLinks.set(path, await Deno.readLink(path));
+    else if (st.isFile) this.saved.set(path, await Deno.readFile(path));
+    // An existing DIRECTORY is the user's: it is never removed, only its
+    // tracked contents are.
+  }
+
+  /** Make `path` itself a REGULAR file before create writes it.
+   *
+   *  `--force` into a directory where `deno.json` was a symlink to a file
+   *  outside it wrote THROUGH the link; the undo then restored the link and
+   *  left the outside file corrupted. Now that link is recorded (undo puts it
+   *  back) and replaced by a plain copy of what it pointed at. This guards the
+   *  FINAL component only: a write under a symlinked parent directory, or into
+   *  a hard-linked file, still reaches the shared file, exactly as `--force`
+   *  always did. What protects those is `touch` — the bytes are saved by the
+   *  path written and restored by the same path, so an undo puts back every
+   *  file it overwrote, wherever the path led. A dangling link becomes an
+   *  absent path. */
+  async detach(path: string): Promise<void> {
+    await this.touch(path);
+    const st = await Deno.lstat(path).catch(() => null);
+    if (!st?.isSymlink) return;
+    const bytes = await Deno.readFile(path).catch(() => null);
+    await Deno.remove(path);
+    if (bytes) await Deno.writeFile(path, bytes);
+  }
+
+  /** `mkdir -p`, recording every level that did not exist. */
+  async mkdirp(path: string): Promise<void> {
+    const missing: string[] = [];
+    for (let p = path;; p = resolve(p, "..")) {
+      if (await Deno.lstat(p).then(() => true, () => false)) break;
+      missing.unshift(p);
+      if (resolve(p, "..") === p) break;
+    }
+    for (const p of missing) await this.touch(p);
+    await Deno.mkdir(path, { recursive: true });
+  }
+
+  /** Put everything back: saved files and links restored, made paths
+   *  removed newest-first. A made directory is removed only once empty —
+   *  except the target itself when create made it, which holds nothing but
+   *  what create wrote. Best-effort per path, so one stuck file cannot keep
+   *  the rest behind; the caller still reports the ORIGINAL failure.
+   *  Returns every path it could NOT put back (empty = a whole undo). */
+  async undo(target: string): Promise<string[]> {
+    const failed = new Set<string>();
+    const step = (p: string, f: () => Promise<unknown>, absentOk = false) =>
+      undoStep(failed, p, f, absentOk);
+    for (const [p, bytes] of this.saved) {
+      await step(p, () => Deno.writeFile(p, bytes));
+    }
+    for (const [p, to] of this.savedLinks) {
+      await step(p, () => Deno.remove(p), true);
+      await step(p, () => Deno.symlink(to, p));
+    }
+    for (const p of this.emptyDirs) {
+      await step(p, () => Deno.remove(p), true);
+      await step(p, () => Deno.mkdir(p));
+    }
+    if (this.made.includes(target)) {
+      await step(target, () => Deno.remove(target, { recursive: true }), true);
+      // Levels ABOVE the target it made (`am create a/b`): only if empty.
+      for (const p of this.made.slice(0, this.made.indexOf(target)).reverse()) {
+        await step(p, () => Deno.remove(p), true);
+      }
+      return [...failed];
+    }
+    for (const p of [...this.made].reverse()) {
+      await step(p, () => Deno.remove(p), true);
+    }
+    return [...failed];
+  }
+}
+
+/** Write the scaffold into `dir` — files, the `dep/aio` link, the pin — and on
+ *  ANY failure undo exactly what was written, then rethrow (the caller's error
+ *  and exit 1 are unchanged). @internal */
+export async function writeScaffold(
+  dir: string,
+  files: Record<string, string>,
+  opts: { aioPath?: string; pinnedVersion?: string } = {},
+  ledger: ScaffoldLedger = new ScaffoldLedger(),
+): Promise<void> {
+  const { aioPath, pinnedVersion } = opts;
+  try {
+    await ledger.mkdirp(dir);
+    for (const [rel, content] of Object.entries(files)) {
+      const path = resolve(dir, rel);
+      // Nested paths (src/app.ts) need their parent dir created first.
+      await ledger.mkdirp(resolve(path, ".."));
+      await ledger.detach(path);
+      await Deno.writeTextFile(path, content);
+    }
+
+    // Source mode: link dep/aio → the aio checkout. The app's deno.json is
+    // relative (./dep/aio/…), so only this symlink is machine-specific
+    // (gitignored — re-created by `am link` or re-running create elsewhere).
+    if (aioPath) {
+      const link = resolve(dir, "dep/aio");
+      await ledger.mkdirp(resolve(dir, "dep"));
+      await ledger.touch(link);
+      await Deno.symlink(aioPath, link).catch(async (e) => {
+        if (!(e instanceof Deno.errors.AlreadyExists)) throw e;
+        // A LINK already there (a --force re-run) is replaced — recorded by
+        // `touch` above, so undo restores it. An EMPTY real directory is
+        // replaced too (it always was; it holds nothing) and recorded so undo
+        // recreates it. Anything else at dep/aio — a vendored copy, a file —
+        // is the user's: `am link` calls that state "blocked"; so does create.
+        const st = await Deno.lstat(link);
+        if (!st.isSymlink) {
+          const empty = st.isDirectory &&
+            (await Array.fromAsync(Deno.readDir(link))).length === 0;
+          if (!empty) {
+            throw new Error(
+              `${link} exists and is not a symlink — it is not create's to ` +
+                `replace. Move it aside (or drop --force) and re-run.`,
+            );
+          }
+          ledger.emptyDirs.push(link);
+        }
+        await Deno.remove(link);
+        await Deno.symlink(aioPath, link);
+      });
+    }
+
+    // Record the pin IN the app, committed with the code — the whole point.
+    if (pinnedVersion) {
+      // Everything writePin / syncFrameworkDeps may create or change.
+      await ledger.touch(resolve(dir, ".aio"));
+      for (
+        const f of [LOCAL_PIN_FILE, "deno.json", "deno.jsonc", ".gitignore"]
+      ) {
+        await ledger.detach(resolve(dir, f));
+      }
+      await writePin(dir, pinnedVersion);
+      // …and pin the framework's OWN dependencies to what that version
+      // declares. The scaffold writes ranges (`immer@^10`); the framework pins
+      // exact (`immer@10.2.0`), and `dep/aio/**` resolves through THIS map —
+      // so without this a brand-new app would be half-pinned from birth (see
+      // syncFrameworkDeps in am-versions.ts).
+      if (aioPath) await syncFrameworkDeps(dir, aioPath);
+    }
+  } catch (e) {
+    const left = await ledger.undo(dir);
+    if (left.length === 0) throw e;
+    // The original failure stays the headline; what could not be put back
+    // follows it — on stderr now, and in the error the caller reports (the
+    // json `error` doc included).
+    const incomplete = `undo incomplete — not put back: ${left.join(", ")}`;
+    sayErr(`am create: ${incomplete}`);
+    throw new Error(
+      `${e instanceof Error ? e.message : String(e)}\n  ${incomplete}`,
+      { cause: e },
+    );
+  }
+}
+
 export async function cmdCreate(
   args: string[],
   flags: GlobalFlags,
@@ -1024,9 +1233,29 @@ export async function cmdCreate(
   // refusal is issued OUTSIDE the try: `fail()` does not return, and the
   // catch-all that absorbs "directory doesn't exist" would absorb it too.
   let occupied = false;
+  let notDir = false;
   try {
     occupied = [...Deno.readDirSync(dir)].length > 0 && !opts.force;
-  } catch { /* doesn't exist — good */ }
+  } catch (e) {
+    // ABSENT is the good case. A FILE there used to be read as absent too, so
+    // create went on to provision a framework worktree (a shared side effect)
+    // and only then died on its own mkdir. Refuse first, like `occupied`.
+    if (e instanceof Deno.errors.PermissionDenied) {
+      fail(
+        `'${opts.name}' exists but cannot be read (permission denied) — ` +
+          `create will not scaffold into a directory it cannot inspect`,
+        mode,
+      );
+    }
+    notDir = !(e instanceof Deno.errors.NotFound);
+  }
+  if (notDir) {
+    fail(
+      `'${opts.name}' already exists and is not a directory — pick another ` +
+        `name, or move it out of the way`,
+      mode,
+    );
+  }
   if (occupied) {
     fail(
       `'${opts.name}' already exists and is not empty — pick another name or pass --force`,
@@ -1085,7 +1314,7 @@ export async function cmdCreate(
     }
   } else if (repoRoot() && !flags.json) {
     // --jsr from a source checkout: the pinned version must actually be on JSR.
-    console.error(
+    sayErr(
       `⚠ --jsr pins jsr:${PKG}@${VERSION} — make sure that version is published, ` +
         `or the app's deno task dev won't resolve.`,
     );
@@ -1100,38 +1329,7 @@ export async function cmdCreate(
     opts.target,
     opts.css,
   );
-  await Deno.mkdir(dir, { recursive: true });
-  for (const [rel, content] of Object.entries(files)) {
-    const path = resolve(dir, rel);
-    // Nested paths (src/app.ts) need their parent dir created first.
-    await Deno.mkdir(resolve(path, ".."), { recursive: true });
-    await Deno.writeTextFile(path, content);
-  }
-
-  // Source mode: link dep/aio → the aio checkout. The app's deno.json is
-  // relative (./dep/aio/…), so only this symlink is machine-specific (gitignored
-  // — re-created by `am link` or re-running create on another machine).
-  if (aioPath) {
-    await Deno.mkdir(resolve(dir, "dep"), { recursive: true });
-    await Deno.symlink(aioPath, resolve(dir, "dep/aio")).catch(async (e) => {
-      // Already exists (e.g. --force re-run): replace it.
-      if (e instanceof Deno.errors.AlreadyExists) {
-        await Deno.remove(resolve(dir, "dep/aio")).catch(() => {});
-        await Deno.symlink(aioPath!, resolve(dir, "dep/aio"));
-      } else throw e;
-    });
-  }
-
-  // Record the pin IN the app, committed with the code — the whole point.
-  if (pinnedVersion) {
-    await writePin(dir, pinnedVersion);
-    // …and pin the framework's OWN dependencies to what that version declares.
-    // The scaffold writes ranges (`immer@^10`); the framework pins exact
-    // (`immer@10.2.0`), and `dep/aio/**` resolves through THIS map — so without
-    // this a brand-new app would be half-pinned from birth (see
-    // syncFrameworkDeps in am-versions.ts).
-    if (aioPath) await syncFrameworkDeps(dir, aioPath);
-  }
+  await writeScaffold(dir, files, { aioPath, pinnedVersion });
 
   // Format what was just written, BEFORE the first commit.
   //

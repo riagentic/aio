@@ -16,7 +16,10 @@
     "patch-10k": 6.8,
     "memory-boot-1k": 2.2,
     "proxy-array-10k": 75,
-    "overlay-write-loop-10k": 96
+    "overlay-write-loop-10k": 96,
+    "ssr-provider-stream-10k": 46,
+    "ssr-provider-ttfb": 1,
+    "ssr-fragment-nest-ratio": 1.0
   },
   "measured-2026-07-31": {
     "proxy-array-10k": 30.2
@@ -38,5 +41,11 @@
   "measured-2026-09-20": {
     "note": "NEW metric overlay-write-loop-10k: one async sweep that reads and writes every key of a 10k-key map. Added with the incremental read-your-writes overlay (a field report measured the quadratic version at 70.7 s of structuredClone inside a 150 s profile). Measured p10 47.96 ms on this tree, 19 200 ms before the fix — ~400x. Floor 96 = 2x p10, per the policy above.",
     "overlay-write-loop-10k": 47.96
+  },
+  "measured-2026-09-23": {
+    "note": "NEW metrics ssr-provider-stream-10k / ssr-provider-ttfb: a 10k-node page under a root Provider, streamed (p10 of three runs: 22.2-23.0 ms; first chunk 0.012-0.015 ms, where the Fragment-buffering writer took ~18 ms). stream-10k floor = 2x p10. ttfb floor 1 ms, NOT 2x: 2x of 0.015 ms is timer noise on a slower box, while the regression it guards is ~1000x (a buffered Fragment waits for the whole page) — 1 ms catches that with room on any machine. NEW metric ssr-fragment-nest-ratio: 60 nested Fragments timed against the same chain of <span>s in one sample (best of 3 each), so the floor is machine-independent and TIGHT, not 2x: p10 0.74-0.80 across five runs, floor 1.0 (~1.3x). Planted and measured: the helper-generator Fragment writer (+60% absolute) reads 1.31; a CPU plant in the Fragment branch costing +40% absolute (1.07 -> 1.50 ms) reads 1.06-1.10 in three of three runs; both trip. A +15% plant reads 0.92 and passes. For the record, 1.0.9's buffered Fragment measures ~1.1 on this ratio and 1.45-1.50 ms absolute, the inlined streamed one 1.00-1.05 ms.",
+    "ssr-provider-stream-10k": 22.6,
+    "ssr-provider-ttfb": 0.014,
+    "ssr-fragment-nest-ratio": 0.77
   }
 }

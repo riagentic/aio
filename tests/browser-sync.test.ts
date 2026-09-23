@@ -20,6 +20,7 @@ import {
 import { getCellSignal } from "../src/state/state-signals.ts";
 import { normalizeSyncConfig } from "../src/sync/types.ts";
 import type { CellDef, Msg } from "../src/state/cell-types.ts";
+import { FakeTime } from "@std/testing/time";
 
 // In-memory localStorage (tests must not touch the real disk-backed one).
 function shimLocalStorage(): void {
@@ -384,5 +385,135 @@ Deno.test("browser-sync: booting without usable localStorage is LOUD", async () 
     _resetCellRegistry();
     if (prev) Object.defineProperty(globalThis, "localStorage", prev);
     else delete (globalThis as Record<string, unknown>).localStorage;
+  }
+});
+
+Deno.test("browser-sync: a burst of sync-err frames runs ONE retry loop and says the reason once", async () => {
+  // A server holding ops (time travel paused) answers every op frame with
+  // `sync-err`. Each one used to schedule its own retry: N ops typed while
+  // paused → N loops, each re-sending the whole queue every 2s, and a
+  // console.error per frame per cycle.
+  const time = new FakeTime();
+  const errs: string[] = [];
+  const orig = console.error;
+  console.error = (...a: unknown[]) => void errs.push(a.join(" "));
+  try {
+    const { sent } = setup();
+    await time.tickAsync(10);
+    // The boot catch-up is answered: no request is outstanding.
+    handleSyncMessage("sync-res", {
+      mode: "incremental",
+      ops: [],
+      lowWater: {},
+      lastServerTs: {},
+      reqId: 1,
+    });
+    await time.tickAsync(10);
+    // The retry's request reads the op buffer (async) before it sends.
+    const settle = async () => {
+      for (let i = 0; i < 20; i++) await time.runMicrotasks();
+    };
+    const reqs = () => sent.filter((r) => r.includes('"t":"sync-req"')).length;
+    const reason = "time travel is paused — sync ops are held";
+    for (let i = 0; i < 10; i++) handleSyncMessage("sync-err", { reason });
+    const before = reqs();
+    await time.tickAsync(2_100);
+    await settle();
+    assertEquals(reqs() - before, 1, "one retry for the whole burst");
+    // The retry is answered the same way — still one loop, still one line.
+    for (let i = 0; i < 3; i++) handleSyncMessage("sync-err", { reason });
+    await time.tickAsync(2_100);
+    await settle();
+    assertEquals(reqs() - before, 2, "one retry per cycle");
+    assertEquals(
+      errs.filter((e) => e.includes(reason)).length,
+      1,
+      errs.join("\n"),
+    );
+    // A sync that lands ends the episode: the next failure is news again.
+    handleSyncMessage("sync-res", {
+      mode: "incremental",
+      ops: [],
+      lowWater: {},
+      lastServerTs: {},
+    });
+    await time.tickAsync(10);
+    handleSyncMessage("sync-err", { reason });
+    assertEquals(
+      errs.filter((e) => e.includes(reason)).length,
+      2,
+      errs.join("\n"),
+    );
+  } finally {
+    console.error = orig;
+    _resetBrowserSync();
+    _resetCellRegistry();
+    time.restore();
+  }
+});
+
+Deno.test("browser-sync: a sync-ack carrying `unsaved` warns, once per op", async () => {
+  const warned: string[] = [];
+  const orig = console.warn;
+  console.warn = (...a: unknown[]) => void warned.push(a.join(" "));
+  try {
+    setup();
+    await new Promise((r) => setTimeout(r, 10));
+    const ack = (opId: string, unsaved?: string) =>
+      handleSyncMessage("sync-ack", {
+        cell: "bs-todos",
+        opId,
+        serverHlc: [1, 0, "server"],
+        serverTs: 1,
+        ...(unsaved !== undefined ? { unsaved } : {}),
+      });
+    ack("op-1", "persist failed: disk says no");
+    ack("op-1", "persist failed: disk says no"); // a lost ack's retransmit
+    ack("op-2");
+    await new Promise((r) => setTimeout(r, 10));
+    const said = warned.filter((w) => w.includes("NOT SAVED"));
+    assertEquals(said, [
+      "[aio:sync] op op-1 on bs-todos NOT SAVED — persist failed: disk says no",
+    ]);
+  } finally {
+    console.warn = orig;
+    _resetBrowserSync();
+    _resetCellRegistry();
+  }
+});
+
+// A long-lived tab: the "already said" set is bounded (1024), oldest first —
+// so it cannot grow for ever, and an op evicted from it is said again.
+Deno.test("browser-sync: the once-per-op `unsaved` memory is bounded, oldest out first", async () => {
+  const warned: string[] = [];
+  const orig = console.warn;
+  console.warn = (...a: unknown[]) => void warned.push(a.join(" "));
+  try {
+    setup();
+    await new Promise((r) => setTimeout(r, 10));
+    const ack = (opId: string) =>
+      handleSyncMessage("sync-ack", {
+        cell: "bs-todos",
+        opId,
+        serverHlc: [1, 0, "server"],
+        serverTs: 1,
+        unsaved: "persist failed: full",
+      });
+    const ops = Array.from({ length: 1025 }, (_, i) => `op-${i}`);
+    assertEquals(ops.length, 1025);
+    for (const op of ops) ack(op);
+    const before = warned.filter((w) => w.includes("NOT SAVED")).length;
+    assertEquals(before, 1025);
+    ack("op-1024"); // still remembered: silent
+    ack("op-0"); // evicted by the 1025th: said again
+    await new Promise((r) => setTimeout(r, 10));
+    const again = warned.filter((w) => w.includes("NOT SAVED")).slice(before);
+    assertEquals(again, [
+      "[aio:sync] op op-0 on bs-todos NOT SAVED — persist failed: full",
+    ]);
+  } finally {
+    console.warn = orig;
+    _resetBrowserSync();
+    _resetCellRegistry();
   }
 });

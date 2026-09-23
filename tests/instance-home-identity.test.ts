@@ -23,7 +23,7 @@ import {
   writeLock,
 } from "../src/server/single-instance-lock.ts";
 import { _resetAppDirs, appHome } from "../src/server/app-dirs.ts";
-import { resolveSocketPath } from "../src/server/paths.ts";
+import { _fallbackSocketName, resolveSocketPath } from "../src/server/paths.ts";
 import { acquireSingletonLock } from "../src/server/aio-run-helpers.ts";
 import { registerRuntime } from "../src/server/shutdown.ts";
 import { setLogger } from "../src/diagnostics/logger-api.ts";
@@ -71,8 +71,18 @@ Deno.test({
       // The socket is named by the lock this process holds — but two locks of
       // one appId are held here, so the first registered wins; what matters is
       // that it is a TAGGED name, never the default instance's socket.
+      // Under a long runtime dir the tagged path does not fit and the hashed
+      // fallback is used; it must still differ from the DEFAULT instance's.
       const sock = resolveSocketPath(id);
-      assert(sock.includes(`${id}@`), sock);
+      const untagged = join(lockDir(), `${id}.sock`);
+      if (join(lockDir(), `${a.key}.sock`).length <= 100) {
+        assert(sock.includes(`${id}@`), sock);
+      } else {
+        assert(
+          !sock.endsWith(_fallbackSocketName(id, untagged, ".sock")),
+          `the default instance's fallback socket: ${sock}`,
+        );
+      }
 
       // Discovery: both listed, each with its home, id from the lock's data.
       const seen = instances(id);

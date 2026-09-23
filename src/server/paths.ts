@@ -4,6 +4,7 @@
 import { dirname, fromFileUrl, join, resolve } from "@std/path";
 import {
   _chooseLockDir,
+  hash8,
   heldLockKey,
   lockDir,
 } from "./single-instance-lock.ts";
@@ -181,7 +182,9 @@ export function resolveKvPath(appId: string): string | undefined {
  *  linux/mac, a named pipe on windows (`\\.\pipe\aio-<lockKey>`, hosted by
  *  Deno, see `win-pipe.ts`); every layer above the socket is the same.
  *  `--transport=ws` still forces WS on every OS. `os` is a parameter so the
- *  decision is a table, not a belief about the machine the tests run on. */
+ *  decision is a table, not a belief about the machine the tests run on.
+ *
+ *  @decider */
 export function resolveTransport(
   transport: "uds" | "ws" | "auto" | undefined,
   useElectron: boolean,
@@ -254,9 +257,25 @@ export function resolveSocketPath(
     log.warn(
       `UDS path is ${sockPath.length} chars (limit ~108) — using ${fallbackDir} fallback`,
     );
-    return join(fallbackDir, `${appId}${suffix}`);
+    return join(fallbackDir, _fallbackSocketName(appId, sockPath, suffix));
   }
   return sockPath;
+}
+
+/** The fallback socket's NAME: a readable prefix of the appId plus a hash of
+ *  the WHOLE path it replaces — the lock dir (so the `AIO_APPS_DIR` scope),
+ *  the lock key (so `@<hash8(home)>`), the kind. It was `<appId><suffix>`,
+ *  which dropped both: two instances of one appId (two homes, two scopes)
+ *  shared `/tmp/aio/<appId>.sock`, and the second unlinked the first's live
+ *  socket at bind. Any appId past ~13 chars under a scoped runtime dir takes
+ *  this branch, so real apps did. Short enough for the ~108-byte limit under
+ *  `/tmp/aio-u<uid>`. Pure. @internal */
+export function _fallbackSocketName(
+  appId: string,
+  intended: string,
+  suffix: string,
+): string {
+  return `${appId.slice(0, 40)}-${hash8(intended)}${suffix}`;
 }
 
 /** Find a free port in the private/ephemeral range 49152–65535 by attempting to bind */
@@ -289,7 +308,9 @@ export function findFreePort(): number {
  *  and means "pick a free one", the same as saying nothing.
  *
  *  THE one reader — `am` calls this too, so the operator's environment cannot
- *  mean one port to the app and another to the tool inspecting it. */
+ *  mean one port to the app and another to the tool inspecting it.
+ *
+ *  @decider */
 export function envPort(): number | undefined {
   let raw: string | undefined;
   try {

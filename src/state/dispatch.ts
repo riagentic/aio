@@ -36,7 +36,9 @@ export type PerfCheck = boolean | "on" | "off";
  *  One function rather than a `!== "off"` test at each site, because the two
  *  sites that had it (`dispatch`, `composeCellsWiring`) are the two that would
  *  have disagreed the moment a second spelling arrived — `false !== "off"` is
- *  true, so a boolean would have read as ON at both. */
+ *  true, so a boolean would have read as ON at both.
+ *
+ *  @decider */
 export function perfCheckOn(v: PerfCheck | undefined): boolean {
   return v !== "off" && v !== false;
 }
@@ -101,8 +103,13 @@ function methodBudgetKey(effect: unknown): string | null {
  *  Internal action types (`cell:__exec`, `cell:__set*`, `cell:__destroy`) and
  *  non-namespaced ones are excluded: they name no method, so no per-method
  *  budget can legitimately be declared for them (`aio.run` validates the keys
- *  against the real method lists). A miss is just `undefined` — lookup only. */
-function budgetKeyFor(effect: unknown, actionType?: string): string | null {
+ *  against the real method lists). A miss is just `undefined` — lookup only.
+ *
+ *  @decider */
+export function budgetKeyFor(
+  effect: unknown,
+  actionType?: string,
+): string | null {
   const fromEffect = methodBudgetKey(effect);
   if (fromEffect) return fromEffect;
   if (typeof actionType !== "string") return null;
@@ -368,6 +375,12 @@ export function _budgetMissCount(cell: string): boolean {
   return _countBudgetMiss(cell);
 }
 
+/** THE dispatch loop — reduce, commit, run effects, re-enter — for every
+ *  runtime: the server, the standalone/Android runtime and worker cells all
+ *  build their dispatch here, so a method behaves identically wherever it is
+ *  hosted.
+ *
+ *  @decider */
 export function createDispatch<S, A, E>(
   deps: DispatchDeps<S, A, E>,
 ): DispatchFn<A> {
@@ -676,7 +689,10 @@ export function createDispatch<S, A, E>(
                 `(the method ignored its abort signal past the drain deadline)`
               : `dispatch after close() — '${t}' ignored (further drops of ` +
                 `this type suppressed; ${closedDropCount} dropped so far)` +
-                (_inUserStopHook
+                // A client's frame (a sync op, a UI call) arriving on a
+                // socket that is still open is not the hook's doing — the
+                // flag only says WHEN, not WHO.
+                (_inUserStopHook && a?._syncOp !== true && a?._source !== "UI"
                   ? `\n  This came from your \`onStop\` hook. onStop runs ` +
                     `AFTER the final persist, so a write from it could not ` +
                     `be saved even if it were admitted — call the plain ` +

@@ -13,8 +13,8 @@
 // way `lock-dir-private.test.ts` does it — a preferred path that exists and is
 // not a directory reaches the same branch for the same reason.
 import { assert, assertEquals, assertStringIncludes } from "@std/assert";
-import { assertThrows } from "@std/assert";
-import { resolveSocketPath } from "../src/server/paths.ts";
+import { assertMatch, assertNotEquals, assertThrows } from "@std/assert";
+import { _fallbackSocketName, resolveSocketPath } from "../src/server/paths.ts";
 import { selfUid } from "../src/server/dir-permissions.ts";
 import { dropTempDir, tempDir } from "../src/testing/temp-dir.ts";
 
@@ -30,7 +30,7 @@ Deno.test({
     const base = await tempDir("aio-sockfb-ok-");
     try {
       const p = resolveSocketPath(LONG, undefined, "linux", base);
-      assertEquals(p, `${base}/aio/${LONG}.sock`);
+      assertMatch(p, new RegExp(`^${base}/aio/s{40}-[0-9a-f]{8}\\.sock$`));
       assertEquals(Deno.statSync(`${base}/aio`).mode! & 0o777, 0o700);
     } finally {
       await dropTempDir(base);
@@ -79,6 +79,56 @@ Deno.test({
       assertStringIncludes(e.message, "control socket");
       assertStringIncludes(e.message, `${base}/aio`);
     } finally {
+      await dropTempDir(base);
+    }
+  },
+});
+
+// The fallback NAME was `<appId><suffix>` — so two instances of one appId
+// (two homes, or two `AIO_APPS_DIR` scopes) shared `/tmp/aio/<appId>.sock`,
+// and the second unlinked the first's live socket at bind. Any appId past
+// ~13 characters under a scoped runtime dir lands here.
+Deno.test("socket fallback name: hashes the whole intended path, fits the limit", () => {
+  const a = _fallbackSocketName(
+    LONG,
+    "/run/aio-scopeA/" + LONG + ".sock",
+    ".sock",
+  );
+  const b = _fallbackSocketName(
+    LONG,
+    "/run/aio-scopeB/" + LONG + ".sock",
+    ".sock",
+  );
+  const h = _fallbackSocketName(
+    LONG,
+    "/run/aio-scopeA/" + LONG + "@0badf00d.sock",
+    ".sock",
+  );
+  assertNotEquals(a, b, "two scopes, one name");
+  assertNotEquals(a, h, "two homes, one name");
+  assert(
+    `/tmp/aio-u4294967295/${a.replace(".sock", ".http.sock")}`.length <= 100,
+  );
+});
+
+Deno.test({
+  name: "socket fallback: two AIO_APPS_DIR scopes of one appId get two sockets",
+  ignore: !POSIX,
+  fn: async () => {
+    const base = await tempDir("aio-sockfb-2-");
+    const prev = Deno.env.get("AIO_APPS_DIR");
+    try {
+      const at = (apps: string) => {
+        Deno.env.set("AIO_APPS_DIR", `${base}/${apps}`);
+        return resolveSocketPath(LONG, undefined, "linux", base);
+      };
+      const one = at("one");
+      const two = at("two");
+      assertNotEquals(one, two);
+      assert(one.startsWith(`${base}/aio/`) && two.startsWith(`${base}/aio/`));
+    } finally {
+      if (prev === undefined) Deno.env.delete("AIO_APPS_DIR");
+      else Deno.env.set("AIO_APPS_DIR", prev);
       await dropTempDir(base);
     }
   },

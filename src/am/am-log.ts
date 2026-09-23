@@ -13,6 +13,7 @@
  * reader: for the lifetime of an `am` process every framework log line goes to
  * STDERR, whatever level it carries. A human still sees it; `jq` never does.
  */
+import { sayErr } from "./am-output.ts";
 import { getLogDir, setLogger } from "../diagnostics/logger-api.ts";
 import type { LogSink } from "../diagnostics/logger-types.ts";
 import { now } from "../diagnostics/logger-types.ts";
@@ -27,7 +28,7 @@ export const AM_STDERR_SINK: LogSink = {
   },
   pub(lvl, cat, msg, data) {
     if (lvl !== "info" && lvl !== "warn" && lvl !== "error") return;
-    console.error(
+    sayErr(
       formatText({ ts: now(), lvl, cat, msg, ...(data ? { data } : {}) }),
     );
   },

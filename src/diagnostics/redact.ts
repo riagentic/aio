@@ -54,7 +54,9 @@ export const noRedaction: Redactor = Object.assign(() => false, {
  *  pattern like `"vault:unlockWith"` matches the first and not the second, so
  *  checking the type alone would have redacted the arguments and then written
  *  the same passphrase out again as a mutation value. `origin` is the
- *  originating action type of a write-set; either one matching redacts both. */
+ *  originating action type of a write-set; either one matching redacts both.
+ *
+ *  @decider */
 export function isRedactedAction(
   redact: Redactor,
   type: string,

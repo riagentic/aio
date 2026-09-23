@@ -33,9 +33,13 @@ import { makeRedactor } from "../diagnostics/redact.ts";
 import { parseCli } from "./aio-cli.ts";
 import { resolveAppId } from "./single-instance-lock.ts";
 import { VALID_AIO_CONFIG_KEYS } from "./config.ts";
-import { appDirs } from "./app-dirs.ts";
+import { appDirs, registeredProfile } from "./app-dirs.ts";
 import type { AioApp, AioConfig, AioUser, CellsConfig } from "./aio-types.ts";
 import type { CellFieldFilter } from "../state/cell-types.ts";
+import {
+  persistFilterOf,
+  persistingCellIds,
+} from "../state/cell-persist-filter.ts";
 import { setDiagnosticsOptOut } from "../diagnostics/diagnostics-optout.ts";
 
 /** Whose app is running this code — for the logger, the diagnostic bus and
@@ -118,6 +122,10 @@ export type BuildLegacyConfigInput = {
   onRestore: ((state: unknown) => unknown) | undefined;
   autoGetUIState: ((s: unknown, user?: unknown) => unknown) | undefined;
   autoGetDBState: (s: unknown) => unknown;
+  /** From `composeCellsWiring` — `persistingCellIds(composed)`, the restore
+   *  half of the persist rule. Absent (a harness that bridges a bare
+   *  composition), it is asked of the SAME decider — never re-derived here. */
+  persistingCellIds?: Set<string>;
   cellPatchStrategies: Map<
     string,
     import("../state/state-filter.ts").CellPatchStrategy
@@ -142,6 +150,7 @@ export function buildLegacyConfig(
     onRestore,
     autoGetUIState,
     autoGetDBState,
+    persistingCellIds: persisting = persistingCellIds(composed),
     cellPatchStrategies,
     cellFilterFieldsMap,
     cellReportOpts: _cellReportOpts,
@@ -474,12 +483,12 @@ export function buildLegacyConfig(
     // getter resolves it (aio-composition.ts buildDBStateGetter), so journal
     // replay reads nested excludes the way the snapshot writes them.
     _cellPersist: Object.fromEntries(
-      composed.cells.map((c) => [c.__aio.id, c.__aio.persist ?? "all"]),
+      composed.cells.map((c) => [c.__aio.id, persistFilterOf(c)]),
     ),
     // Cells whose `onPersist` SHAPES the stored slice — a shape names no fields,
     // so journal replay round-trips these through the store instead.
     _cellPersistShaped: composed.cells
-      .filter((c) => c.__aio.persistTransform && c.__aio.persist !== "none")
+      .filter((c) => c.__aio.persistTransform && persisting.has(c.__aio.id))
       .map((c) => c.__aio.id),
     // Cell id → the `visible` filter a door that screens VALUES with NO CLIENT
     // in hand must apply. The flags below flatten a dot path to its top-level
@@ -561,9 +570,7 @@ export function buildLegacyConfig(
       return out;
     })(),
     // Everything that is not explicitly `persist: "none"` reaches the store.
-    _persistingCellIds: composed.cells
-      .filter((f) => f.__aio.persist !== "none")
-      .map((f) => f.__aio.id),
+    _persistingCellIds: [...persisting],
     _cellMigrations: (() => {
       const m = new Map<
         string,
@@ -598,6 +605,17 @@ export function buildLegacyConfig(
         if (f.__aio.onRestore) m.set(f.__aio.id, f.__aio.onRestore);
       }
       return m.size > 0 ? m : undefined;
+    })(),
+    // What each cell `listensTo` — the upgrade replay names a sync cell whose
+    // reactions to a store-persisted cell no record held (aio-boot.ts).
+    _cellForeignActions: (() => {
+      const m: Record<string, string[]> = {};
+      for (const f of composed.cells) {
+        if (f.__aio.foreignActions.length > 0) {
+          m[f.__aio.id] = [...f.__aio.foreignActions];
+        }
+      }
+      return m;
     })(),
     _cellVersions: (() => {
       const v: Record<string, number> = {};
@@ -663,7 +681,7 @@ export async function initLogger(
   // Read, never acquire: this is only "is someone else there", and the real
   // decision still belongs to `acquireSingletonLock`.
   if (logger) {
-    const held = readLock(lockKey(appId, dirs.home));
+    const held = readLock(lockKey(appId, dirs.home, registeredProfile(appId)));
     const live = held !== null && isLockOwnerAlive(held) &&
       held.pid !== Deno.pid;
     await logger.init({ rotate: !live });

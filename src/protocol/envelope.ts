@@ -133,7 +133,9 @@ const KIND_SET: ReadonlySet<string> = new Set(FRAME_KINDS);
 export const IGNORABLE: ReadonlySet<Kind | string> = new Set(["x"]);
 
 /** True when `t` is a reserved-ignorable kind — routers check this in their
- *  default arm and skip without logging. ONE decider for the tier. */
+ *  default arm and skip without logging. ONE decider for the tier.
+ *
+ *  @decider */
 export function isIgnorableKind(t: string): boolean {
   return IGNORABLE.has(t);
 }
@@ -338,6 +340,14 @@ export type AckPayload = {
    *  carries it — re-sending cannot change that answer. Additive within v3: an
    *  older server omits it and an older client ignores it. */
   retryAfterMs?: number;
+  /** Beside `ok: true`: the call ran, but what it wrote could not be saved
+   *  (a failed stand-in save — "persist failed: …"). The same sentence every
+   *  door carries (WS, UDS, trojan, sync-ack). Additive: an older server
+   *  omits it; the browser warns with it. */
+  unsaved?: string;
+  /** Beside `ok: true`: the call ran on fewer arguments than its method
+   *  declares (see `shortCallSentence`, server/action-ack.ts). Additive. */
+  short?: string;
 };
 // The CRDT frames — "op", "sync-req", "sync-res", "sync-ack", "op-rejected",
 // "sync-err" — deliberately have NO payload type here. Their shapes live in

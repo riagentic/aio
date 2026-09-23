@@ -40,12 +40,13 @@ import {
   processStartToken,
   writeLock,
 } from "../src/server/single-instance-lock.ts";
+import { dropTempDir, tempDir } from "../src/testing/temp-dir.ts";
 
 /** Pin AIO_APPS_DIR (and therefore lockDir) to a throwaway root, and RESTORE
  *  whatever the suite had — never delete it. */
 async function withAppsDir<T>(fn: (root: string) => Promise<T>): Promise<T> {
   const prev = Deno.env.get("AIO_APPS_DIR");
-  const root = await Deno.makeTempDir({ prefix: "aio-am-verb-" });
+  const root = await tempDir("aio-am-verb-");
   Deno.env.set("AIO_APPS_DIR", root);
   _resetTargetGuess();
   try {
@@ -54,7 +55,7 @@ async function withAppsDir<T>(fn: (root: string) => Promise<T>): Promise<T> {
     if (prev === undefined) Deno.env.delete("AIO_APPS_DIR");
     else Deno.env.set("AIO_APPS_DIR", prev);
     _resetTargetGuess();
-    await Deno.remove(root, { recursive: true }).catch(() => {});
+    await dropTempDir(root);
   }
 }
 

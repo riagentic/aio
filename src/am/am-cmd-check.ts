@@ -24,7 +24,7 @@
  */
 import { isAbsolute, relative, resolve } from "@std/path";
 import type { GlobalFlags } from "./am-types.ts";
-import { detectMode, out, outError } from "./am-output.ts";
+import { detectMode, fail, out, outError, sayErr } from "./am-output.ts";
 import { projectRoot } from "./am-cmd-process.ts";
 import {
   BLOCKING_CATEGORIES,
@@ -55,8 +55,8 @@ export async function cmdCheck(
 ): Promise<void> {
   const mode = detectMode(flags);
   const root = projectRoot();
-  const entryRel = flags.entry ?? args.find((a) => !a.startsWith("-")) ??
-    UI_ENTRY;
+  const named = flags.entry ?? args.find((a) => !a.startsWith("-"));
+  const entryRel = named ?? UI_ENTRY;
   const baseDir = resolveAppDir(
     root,
     resolveEntryPath(readDenoJsonSync(root)?.config),
@@ -66,6 +66,14 @@ export async function cmdCheck(
   try {
     Deno.statSync(entry);
   } catch {
+    // An entry the caller NAMED and that is not there is a typo, not a
+    // server-only app: the "nothing checked" pass below is for the DEFAULT
+    // entry being absent. `am check src/Ap.tsx` used to exit 0 through it —
+    // the very advice the warning gives, followed with one wrong letter, and
+    // CI green for looking at nothing.
+    if (named !== undefined) {
+      fail(`am check: no such file ${entry} (the entry you passed)`, mode);
+    }
     // A server-only app has no client graph, and that is not a failure — it is
     // the whole point of `client: "server-only"`. Saying "checked nothing" out
     // loud beats exiting 0 in a way indistinguishable from "checked and clean".
@@ -77,7 +85,7 @@ export async function cmdCheck(
     // the mode that suppressed this was `--json` — which is CI, the one reader
     // who most needs to know the gate looked at nothing.
     {
-      console.error(
+      sayErr(
         `warning: am check: NOTHING CHECKED — no UI entry at ${entry}.\n` +
           `  A server-only app has no client graph and this is correct for it.\n` +
           `  Otherwise the entry is elsewhere: pass it (\`am check path/App.tsx\`)\n` +
@@ -108,7 +116,7 @@ export async function cmdCheck(
   // must never be indistinguishable from a gate that looked and was happy.
   const appImports = readAppDenoImports(baseDir);
   if (appImports === null) {
-    console.error(
+    sayErr(
       `warning: am check: no deno.json or deno.jsonc readable for ${baseDir} —\n` +
         `  the deno.json import check was SKIPPED (the client graph below was\n` +
         `  still walked). Deno resolves this app through some config; run\n` +
@@ -164,13 +172,13 @@ export async function cmdCheck(
     );
   } else {
     if (blocking.length) {
-      console.error(
+      sayErr(
         `\n${blocking.length} module error(s) — this app type-checks and will ` +
           `NOT bundle:\n${blocking.map(line).join("\n")}\n`,
       );
     }
     if (warnings.length) {
-      console.error(
+      sayErr(
         `${warnings.length} warning(s):\n${warnings.map(line).join("\n")}\n`,
       );
     }

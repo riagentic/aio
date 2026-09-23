@@ -317,7 +317,9 @@ export const CSP_META_IGNORES: readonly string[] = [
  *  nothing while looking like one that denies everything.
  *
  *  ONE decider: the generator emits what this returns, and nothing else
- *  decides what a document may carry. */
+ *  decides what a document may carry.
+ *
+ *  @decider */
 export function metaDeliverableCsp(policy: string): string | null {
   const kept = policy
     .split(";")

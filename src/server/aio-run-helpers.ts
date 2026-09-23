@@ -17,13 +17,18 @@ import type { ComposedCells } from "../state/cell.ts";
 import type { ServerHandle } from "./server-types.ts";
 import {
   AppLock,
+  claimHome,
   instances,
+  isHold,
   lockDir,
   type LockMeta,
+  printable,
 } from "./single-instance-lock.ts";
 import { resolve } from "@std/path";
+import { appDirs, homeOwnerError, homeRequested } from "./app-dirs.ts";
 import { runtimeCount } from "./shutdown.ts";
 import { launchElectronClient } from "../electron/electron.ts";
+import { electronExitIsCrash } from "./aio-lifecycle.ts";
 import { getLogger, log } from "../diagnostics/logger-api.ts";
 import { snapshotCellsError, snapshotShapeError } from "./server-static.ts";
 import { findUnserializable, PersistSerializeError } from "./persist-guard.ts";
@@ -507,7 +512,17 @@ export function _alreadyRunningMessage(o: {
   /** The data home the RUNNING instance recorded in its lock, when it knows
    *  one. Usually `home` — but not always, see {@linkcode _alreadyRunningMessage}. */
   otherHome?: string;
+  /** The `am` op holding the lock (`LockData.maintenance`), when it is one:
+   *  then there is no app to stop — only an operation to wait for. */
+  maintenanceOp?: string;
 }): string {
+  if (o.maintenanceOp !== undefined) {
+    return `[AIO] ${o.maintenanceOp} is running on ${o.appId}${
+      o.pid > 0 ? ` (pid ${o.pid})` : ""
+    } — wait for it to finish, then start again. It holds the app's lock ` +
+      `so the app cannot start while its data is copied or swapped` +
+      `${o.takeover ? "; --takeover does not interrupt it" : ""}.`;
+  }
   const where = o.port > 0 ? ` at http://localhost:${o.port}` : "";
   const who = o.pid > 0 ? ` (pid ${o.pid})` : "";
   // The home of the instance that HOLDS the lock, which is the one the reader
@@ -563,7 +578,7 @@ export async function acquireSingletonLock(
   meta: LockMeta = {},
 ): Promise<AppLock | null> {
   if (singletonMode === false) return null;
-  const appLock = new AppLock(appId, home);
+  const appLock = new AppLock(appId, home, meta.profile);
   const result = await appLock.acquire(port, takeover, meta);
   if (!result.ok) {
     const ex = result.existing;
@@ -574,16 +589,57 @@ export async function acquireSingletonLock(
       home: appLock.home,
       otherHome: ex.home,
       takeover,
+      maintenanceOp: isHold(ex)
+        ? (typeof ex.maintenance === "object" && ex.maintenance?.op) || "am"
+        : undefined,
     });
     // Alone in the process: the refusal IS the exit, and a clean one-line
     // error beats a stack trace. With a sibling app already running (D2 —
     // an app plus its admin panel), `Deno.exit(1)` would take THAT app down
     // through `unload` with no Phase 1–7 and no final persist — so the
     // refusal is thrown to the caller instead, and the sibling keeps running.
-    if (runtimeCount() > 0) throw new Error(msg);
-    log.error(msg);
+    // Printed: lock-file text (`home`, `op`) reaches a terminal here.
+    if (runtimeCount() > 0) throw new Error(printable(msg, true));
+    log.error(printable(msg, true));
     Deno.exit(1);
   }
+  // The lock dir is scoped by AIO_APPS_DIR; the DATA is not always (an app
+  // that names its folder). The claim in the home itself is what makes one
+  // home one process, whichever scope each was started in.
+  const claim = claimHome(appLock.home, { appId, port, key: appLock.key });
+  // …and, holding it, who the folder belongs to: resolveAppDirs read
+  // meta.json before the lock, and a racing first boot could stamp it since.
+  const owner = claim.ok
+    ? homeOwnerError(
+      appDirs(appId),
+      appId,
+      meta.profile,
+      !homeRequested(appId),
+    )
+    : null;
+  if (!claim.ok || owner) {
+    if (claim.ok) claim.close();
+    appLock.release();
+    const h = claim.ok ? undefined : claim.holder;
+    const msg = owner ?? (
+      `${appId} is already running from ${appLock.home}` +
+      (h?.pid
+        ? ` (pid ${h.pid}${h.lockDir ? `, its lock in ${h.lockDir}` : ""})`
+        : "") +
+      (h?.lockDir && h.lockDir !== lockDir()
+        ? ` — under a different AIO_APPS_DIR scope (--instance) than this ` +
+          `one, which cannot isolate an app whose folder is fixed ` +
+          `(aio.run({ appDir })).`
+        : ` — another process holds this data folder.`) +
+      ` Two processes would write one database, so this one does not ` +
+      `start.\n  fix: stop that instance, or give this one its own folder ` +
+      `(--profile=<name> or --home=<dir>).`
+    );
+    if (runtimeCount() > 0) throw new Error(printable(msg, true));
+    log.error(printable(msg, true));
+    Deno.exit(1);
+  }
+  appLock.attach(claim.close);
   const foreign = instances(appId).filter((i) =>
     i.pid !== Deno.pid && resolve(i.home ?? "") !== appLock.home
   );
@@ -611,7 +667,15 @@ export async function handleThinClient(
   const proc = await launchElectronClient(log, serverUrl || undefined);
   if (proc) {
     const status = await proc.status;
-    log.info(`electron closed (code ${status.code ?? 0})`);
+    const how = status.signal
+      ? `signal ${status.signal}`
+      : `code ${status.code ?? 0}`;
+    if (electronExitIsCrash(status)) {
+      log.error(`electron crashed (${how}) — exit 1`);
+      setRunning(false);
+      Deno.exit(1);
+    }
+    log.info(`electron closed (${how})`);
   }
   setRunning(false);
   Deno.exit(0);
@@ -625,9 +689,12 @@ import {
 import type { Redactor } from "../diagnostics/redact.ts";
 import { getLogDir } from "../diagnostics/logger-api.ts";
 import {
+  DEV_DEFAULTS,
   type DiagnosticsOptions,
   resolveOptions as resolveDiagOptions,
 } from "../diagnostics/types.ts";
+import { diagnosticsConfigProblems } from "./config.ts";
+import { teachMessage } from "../diagnostics/error.ts";
 import { createVitalsSystem } from "../vitals/mod.ts";
 
 /** Initialize diagnostics + vitals from config — returns hooks and vitals system */
@@ -642,6 +709,22 @@ export function initDiagAndVitals(
   vitalsSystem: VitalsSystem | undefined;
   diagResolvedOpts: DiagnosticsOptions | false;
 } {
+  // A switch written where nothing reads it is said out loud — see
+  // `diagnosticsConfigProblems` (config.ts) for why it warns, not refuses.
+  const problems = diagnosticsConfigProblems(
+    diagConfig,
+    Object.keys(DEV_DEFAULTS),
+  );
+  if (problems.length > 0) {
+    log.warn(
+      teachMessage(
+        problems.join("\n  "),
+        "move each switch under `dev:` (and/or `prod:`) — until then aio " +
+          "runs on its defaults for that mode",
+        "docs/debugging/troubleshooting.md",
+      ),
+    );
+  }
   // `true`/omitted → defaults on ({}); `false` → off; object → tuned.
   const diagOn = diagConfig !== false;
   const diagCfg = (diagConfig === true || diagConfig == null) ? {} : diagConfig;

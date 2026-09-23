@@ -20,9 +20,10 @@ import { dec, enc } from "../src/protocol/envelope.ts";
 import { createServer } from "../src/server/server.ts";
 import { freePort } from "../src/testing/server-test.ts";
 import { resolveSocketPath } from "../src/server/paths.ts";
-import { removePid, writePid } from "../src/am/am-utils.ts";
+import { writePid } from "../src/am/am-utils.ts";
 import { trojanGet } from "../src/am/am-http.ts";
 import { tempDir } from "../src/testing/temp-dir.ts";
+import { dropFixtureLock } from "./fixture-lock-helper.ts";
 
 async function socketDir(prefix: string): Promise<string> {
   return join(await tempDir(prefix), "s.sock");
@@ -438,7 +439,7 @@ Deno.test("am: a dead socket falls through to the TCP wire, not to an error", as
     );
     assertEquals((r.data as typeof appState).count, 42);
   } finally {
-    removePid(appId);
+    dropFixtureLock(appId);
     await server.shutdown();
     await Deno.remove(dir, { recursive: true });
   }
@@ -456,8 +457,9 @@ Deno.test("sockets: the transport and HTTP listeners never share a path", () => 
   const ndjson = resolveSocketPath("some-app");
   const http = resolveSocketPath("some-app", "http");
   assert(ndjson !== http, "two listeners cannot share one socket path");
-  assert(ndjson.endsWith("/some-app.sock"));
-  assert(http.endsWith("/some-app.http.sock"));
+  // `-<hash8>` when a long runtime dir pushes it into the `/tmp` fallback.
+  assert(/\/some-app(-[0-9a-f]{8})?\.sock$/.test(ndjson), ndjson);
+  assert(/\/some-app(-[0-9a-f]{8})?\.http\.sock$/.test(http), http);
 
   // The >100-char fallback keeps them apart too. A name long enough to trip it
   // is the only way to reach that branch, and it is exactly where a dropped

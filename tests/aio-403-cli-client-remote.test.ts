@@ -2,16 +2,27 @@
 // Bug 1: wss:// URLs were downgraded to ws: (only https: mapped to wss:).
 // Bug 2: ?token= in the URL was silently dropped (only opts.token was read),
 //        while the server's own share link uses the ?token= form.
+// The token is now SENT as `Authorization: Bearer` — a URL is what lands in
+// proxy logs and in the client's own "cannot reach <url>" line — so these
+// read the credential where the server does (bearer, else query) and pin that
+// it no longer rides in the URL.
 import { within } from "./within.ts";
 import { assert, assertEquals } from "@std/assert";
 import { connectCli } from "../src/server/cli-client.ts";
+import { bearerToken } from "../src/server/server-auth.ts";
+
+/** The credential a request presented, and whether it was in the URL. */
+const presented = (req: Request) => ({
+  token: bearerToken(req) ?? new URL(req.url).searchParams.get("token"),
+  inUrl: new URL(req.url).searchParams.has("token"),
+});
 
 Deno.test("aio-403: connectCli preserves ?token= from the share-link URL", async () => {
   let seenToken: string | null = null;
+  let inUrl = true;
 
   const server = Deno.serve({ hostname: "127.0.0.1", port: 0 }, (req) => {
-    const url = new URL(req.url);
-    seenToken = url.searchParams.get("token");
+    ({ token: seenToken, inUrl } = presented(req));
     if (seenToken !== "sesame") {
       return new Response("unauthorized", { status: 401 });
     }
@@ -32,6 +43,7 @@ Deno.test("aio-403: connectCli preserves ?token= from the share-link URL", async
   }
 
   assertEquals(seenToken, "sesame");
+  assertEquals(inUrl, false, "the token must not ride in the URL");
   assertEquals(state.counter.count, 3);
 
   app.close();
@@ -42,7 +54,7 @@ Deno.test("aio-403: connectCli opts.token wins over URL token", async () => {
   let seenToken: string | null = null;
 
   const server = Deno.serve({ hostname: "127.0.0.1", port: 0 }, (req) => {
-    seenToken = new URL(req.url).searchParams.get("token");
+    seenToken = presented(req).token;
     const { socket, response } = Deno.upgradeWebSocket(req);
     socket.onopen = () =>
       socket.send(JSON.stringify({ v: 2, t: "state", d: { ok: true } }));

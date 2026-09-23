@@ -26,7 +26,7 @@
 import { basename, join } from "@std/path";
 import type { AppDirs } from "./app-dirs.ts";
 import { ensureAppDirs } from "./app-dirs.ts";
-import { isProcessAlive, readLock } from "./single-instance-lock.ts";
+import { isLockOwnerAlive, readLock } from "./single-instance-lock.ts";
 
 export type MoveOutcome = "moved" | "skipped-exists" | "failed";
 
@@ -353,8 +353,13 @@ export function migrateLegacyLayout(opts: {
 
   // A live instance holds these databases open — moving them under a running
   // writer is how you get a half-written state file and a very confused app.
+  // …a live instance OTHER than this process: the boot runs this after
+  // taking the lock itself, so the owner the lock names may be the caller —
+  // refusing that refused every boot. Compared by pid, never waived by a
+  // flag: this reads the DEFAULT-home lock, and a boot from another home
+  // (appDir) holds a different one while the default-home app may be live.
   const lock = readLock(appId);
-  if (lock && isProcessAlive(lock.pid)) {
+  if (lock && lock.pid !== Deno.pid && isLockOwnerAlive(lock)) {
     return {
       moves: [],
       refused:

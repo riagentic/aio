@@ -230,13 +230,58 @@ Deno.serve((req) => {
 
 ### renderToStream()
 
-Streaming SSR -- yields HTML chunks as an async generator. The route
-(`routePath` / `routeSearch`) is read once, when the stream starts, so a
-response keeps its own request's route even while another request sets the
-signals before this stream has finished. Its `useId` sequence, its `<head>` and
-its `<select>` scopes are its own for the same reason. Pass any object that
-identifies the response -- the `Request` -- and `collectHead(req)` gives you
-that render's head back, whatever else was streaming at the time:
+Streaming SSR -- yields HTML chunks as an async generator.
+
+**The route contract.** `routePath` / `routeSearch` are ONE pair of signals
+shared by every request in the process. The only safe way to use them on a
+server that handles requests concurrently: **every request sets the route and
+calls `renderToStream()` / `renderToString()` in one synchronous step — no
+`await` between the set and the call, on ANY request.** Then each render takes
+its own request's route when it is called, and keeps it however long its body
+takes and whatever else the handler awaits before sending it.
+
+When any request breaks that — sets the route, then awaits, then renders —
+another request's render can read the route it left behind: a stream re-reads
+the route once, at the end of the synchronous turn it was called in (so that
+code creating the stream first and setting the route right after keeps working,
+as in 1.0.9), and two requests resumed by one shared promise (a config or
+session cache) run in ONE turn. No timing can tell the two apart, so the one
+that re-reads may render the other request's route. aio cannot prevent that; it
+says so:
+
+- `[aio] routePath changed after renderToStream() — set it BEFORE the call;
+  under concurrent requests this can render another request's route (<call
+  site>).`
+  — whenever that end-of-turn re-read finds a different route than the call did.
+  Once per call site per process.
+- `[aio] renderToStream(): the route (or another request value) changed after
+  renderToStream() was called, in the same turn as another render's call —
+  this stream keeps the value it was CALLED with. Set routePath before
+  renderToStream(), with no await in between (<call site>).`
+  — the one exception to the re-read: when another top-level render set up in
+  the same turn took a DIFFERENT route, the stream keeps its call-time route
+  (the live one may be that render's). A live route that matches none of them is
+  reported; one that matches another render's is correct concurrent code and
+  says nothing. Renders that took this stream's own route do not count (two
+  streams created before one `routePath.set` both re-read, as in 1.0.9). Once
+  per call site per process.
+- `[aio] routePath changed after renderToStream() was called and before the
+  stream was first read — the stream renders the route it was CALLED with
+  (1.0.9 read it at the first read). …`
+  — a route set after that turn (1.0.9 code that creates the stream, awaits,
+  then sets the route; or another request that set its route and is awaiting
+  before its own render) is never rendered, and is reported at the stream's
+  first read. Once per call site per process.
+
+A stream created inside a server component is settled at its first read, as in
+1.0.9: read during that component call, it is part of the enclosing page; read
+after the page ended, it is a render of its own (its own `useId` sequence and
+keyed head) that takes the route at that first read.
+
+Its `useId` sequence, its `<head>` and its `<select>` scopes are its own. Pass
+any object that identifies the response -- the `Request` -- and
+`collectHead(req)` gives you that render's head back, whatever else was
+streaming at the time:
 
 ```tsx
 import { renderToStream } from "aio/air";

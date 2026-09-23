@@ -4,7 +4,7 @@ import {
   electronProfileName,
   tmplBounds,
 } from "../src/electron/electron-shared.ts";
-import { appHome } from "../src/server/app-dirs.ts";
+import { homedir } from "../src/server/paths.ts";
 import { lockKey, parseLockKey } from "../src/server/single-instance-lock.ts";
 import {
   electronClientScript,
@@ -489,9 +489,14 @@ Deno.test("electronConfigNotes / electronSpecsInText: the app's copies of its El
 // elsewhere, 0 failures in 1674 requests on the same machine.
 Deno.test("electron: a non-default home gets its OWN profile, keyed like the lock", () => {
   const home = "/tmp/fbA-some-other-home";
-  const plain = electronProfileName("wallet", "My Wallet", appHome("wallet"));
+  // The MACHINE default home (`~/.<appId>`, whatever AIO_APPS_DIR says — the
+  // Chromium profile is machine-wide) is untouched: nothing written moves.
+  const plain = electronProfileName(
+    "wallet",
+    "My Wallet",
+    join(homedir(), ".wallet"),
+  );
   const other = electronProfileName("wallet", "My Wallet", home);
-  // The default home is untouched — nothing already written moves.
   assertEquals(plain, "my-wallet");
   // …and any other home carries THE SAME tag the lock key carries. One key
   // for both, or the two answers to "which instance is this" drift apart.

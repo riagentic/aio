@@ -153,7 +153,9 @@ export function hasBothFilterModes(v: unknown): boolean {
  *
  *  `visible:` is deliberately NOT covered: `CellVisibility` allows
  *  `{ forUser }` / `{ publicFields }` with no include/exclude, and
- *  `normalizeUiFilter` already resolves that to "all". */
+ *  `normalizeUiFilter` already resolves that to "all".
+ *
+ *  @decider */
 export function namesNoFilterMode(v: unknown): boolean {
   if (!v || typeof v !== "object" || Array.isArray(v)) return false;
   return !("include" in v) && !("exclude" in v);
@@ -472,7 +474,9 @@ export function normalizeUiFilter(
  *  set is a hard error everywhere — two spellings of one decision must never
  *  race. Used by the server cell factory AND the browser cell stub, so the
  *  key can never mean different things per runtime. `name` is the cell, or
- *  `"cellDefaults"` for the app-level default (its own registry row). */
+ *  `"cellDefaults"` for the app-level default (its own registry row).
+ *
+ *  @decider */
 export function resolveVisibility(
   name: string,
   config: {

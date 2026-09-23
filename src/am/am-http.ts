@@ -13,7 +13,7 @@
 
 import type { Result } from "./am-types.ts";
 import { _discoveredAppTarget, liveLock } from "./am-utils.ts";
-import { isProcessAlive } from "../server/single-instance-lock.ts";
+import { isLockOwnerAlive } from "../server/single-instance-lock.ts";
 import { CLIENT_REPLY_TIMEOUT_MS } from "../server/uds.ts";
 import {
   appKeyPath,
@@ -78,7 +78,7 @@ export function controlEndpoint(
   port: number,
 ): ControlEndpoint {
   const pf = liveLock(appId);
-  if (pf?.socketPath && isProcessAlive(pf.pid)) {
+  if (pf?.socketPath && isLockOwnerAlive(pf)) {
     return {
       kind: "uds",
       socketPath: pf.socketPath,
@@ -702,9 +702,27 @@ export async function probePort(port: number): Promise<PortProbe> {
   return await probeTls(port);
 }
 
+/** A fetch that never got a connection — nothing accepted it. The runtime's
+ *  own words, all three spellings it has used; see {@linkcode fetchError}. */
+const CONNECT_FAILED = /\(Connect\)|Connection refused|ECONNREFUSED/;
+
 /** Map a fetch error to a Result with a descriptive message */
 export function fetchError(e: unknown, port: number, appId?: string): Result {
-  if (e instanceof TypeError && String(e).includes("onnect")) {
+  // Read the CAUSE too. Since Deno 2.9 a refused connection is a bare
+  // "TypeError: fetch failed" with the reason moved into `e.cause` — the same
+  // move `probePort` was bitten by — so this branch never fired and `am
+  // health` against a dead port answered `{"error":"TypeError: fetch
+  // failed"}`, naming neither the port nor what failed.
+  //
+  // And only a CONNECT failure means "not running". Measured on Deno 2.9: a
+  // refused port is `client error (Connect): tcp connect error: Connection
+  // refused`; a LIVE app that drops the socket mid-request is `client error
+  // (SendRequest): connection closed before message completed`. A substring
+  // like "onnect" matches both, and told the operator a running app was not
+  // running.
+  const text = String(e) +
+    (e instanceof Error && e.cause !== undefined ? ` ${String(e.cause)}` : "");
+  if (e instanceof TypeError && CONNECT_FAILED.test(text)) {
     // "app not running" sent one field reporter looking for a crash that did
     // not happen: their compiled app was alive on its Unix socket, with no
     // TCP listener for this probe to reach. When the lock says exactly that,
@@ -717,7 +735,7 @@ export function fetchError(e: unknown, port: number, appId?: string): Result {
     // the trojan does not exist on any wire by design.
     if (appId) {
       const pf = liveLock(appId);
-      if (pf?.socketPath && isProcessAlive(pf.pid)) {
+      if (pf?.socketPath && isLockOwnerAlive(pf)) {
         return {
           ok: false,
           error: `app "${appId}" is running over UDS with no TCP port ` +

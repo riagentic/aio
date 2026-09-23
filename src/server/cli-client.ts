@@ -302,6 +302,13 @@ function assertCliUrl(url: string): void {
   );
 }
 
+/** Deno's `WebSocket` constructor takes `{ headers }` (a Deno extension); the
+ *  DOM typing this file compiles against knows only `protocols`. */
+type DenoWebSocket = new (
+  url: string,
+  opts: { headers: Record<string, string> },
+) => WebSocket;
+
 /** Connect a CLI process to a running aio app as a real client: live state,
  *  method calls, and reconnect with the offline queue — the terminal twin of a
  *  browser client. */
@@ -587,7 +594,8 @@ export function connectCli<S>(
         : "http:";
       const t = token ?? parsed.searchParams.get("token") ?? undefined;
       const res = await fetch(
-        `${scheme}//${parsed.host}/__aio/health${t ? `?token=${t}` : ""}`,
+        `${scheme}//${parsed.host}/__aio/health`,
+        t ? { headers: { authorization: `Bearer ${t}` } } : undefined,
       );
       if (!res.ok) {
         await res.body?.cancel();
@@ -689,11 +697,21 @@ export function connectCli<S>(
     // token: explicit option wins, else the ?token= from the share-link URL
     const token = explicitToken ?? parsed.searchParams.get("token") ??
       undefined;
+    // The credential rides in a HEADER, never the URL: a URL is what ends up
+    // in proxy logs — and in this client's own "cannot reach <url>" line,
+    // which printed every token it retried with. Deno's WebSocket takes
+    // headers; only a runtime that cannot set one falls back to `?token=`.
+    const inHeader = !!token && typeof Deno !== "undefined";
     const wsUrl = `${proto}//${parsed.host}/ws${
-      token ? `?token=${token}` : ""
+      token && !inHeader ? `?token=${token}` : ""
     }`;
+    const shownUrl = wsUrl.replace(/([?&]token=)[^&]*/, "$1…");
 
-    const socket = new WebSocket(wsUrl);
+    const socket = inHeader
+      ? new (WebSocket as unknown as DenoWebSocket)(wsUrl, {
+        headers: { authorization: `Bearer ${token}` },
+      })
+      : new WebSocket(wsUrl);
 
     // The heartbeat the browser client has always sent. Without it the server
     // graded this client by the age of a `vitals-ping` that never arrived, and
@@ -1003,7 +1021,7 @@ export function connectCli<S>(
           : "";
         log.error(
           "cli",
-          `cannot reach ${wsUrl}${
+          `cannot reach ${shownUrl}${
             ev.code === 1008 ? ` (${ev.reason || "unauthorized"})` : ""
           } — check the server is running and the URL/token match its share link (still retrying)${tlsHint}`,
         );

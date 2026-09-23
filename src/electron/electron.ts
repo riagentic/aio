@@ -6,6 +6,7 @@ export { electronMainScript } from "./electron-scripts.ts";
 export { electronClientScript } from "./electron-client-script.ts";
 export { electronMainScriptUDS } from "./electron-uds.ts";
 export {
+  electronStderrTail,
   findElectronBin,
   launchElectron,
   launchElectronClient,

@@ -74,6 +74,10 @@ const _SSR_ROUTE = Symbol("aio.ssrRoute");
 _registerSsrCapture(
   _SSR_ROUTE,
   (): _RouteNow => ({ path: routePath.peek(), search: routeSearch.peek() }),
+  (a, b) => {
+    const x = a as _RouteNow, y = b as _RouteNow;
+    return x.path === y.path && x.search.toString() === y.search.toString();
+  },
 );
 
 /** The render's route snapshot on the server; null everywhere else. */

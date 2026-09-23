@@ -4,7 +4,6 @@ import {
   parseGlobalFlags,
   parsePayload,
   readPid,
-  removePid,
   resolveAmAppId,
   resolvePath,
   resolvePort,
@@ -23,6 +22,7 @@ import { createServer } from "../src/server/server.ts";
 import { join } from "@std/path";
 import { VERSION } from "../src/server/aio.ts";
 import { freePort } from "../src/testing/server-test.ts";
+import { dropFixtureLock } from "./fixture-lock-helper.ts";
 
 // Test app ID — unique per test run
 const TEST_APP = "am-test-" + Deno.pid;
@@ -257,13 +257,13 @@ Deno.test("am: PID file round-trip", () => {
     const read = readPid(TEST_APP);
     assertEquals(read, pf);
   } finally {
-    removePid(TEST_APP);
+    dropFixtureLock(TEST_APP);
     assertEquals(readPid(TEST_APP), null);
   }
 });
 
 Deno.test("am: readPid returns null when no file", () => {
-  removePid(TEST_APP); // ensure clean
+  dropFixtureLock(TEST_APP); // ensure clean
   assertEquals(readPid(TEST_APP), null);
 });
 
@@ -278,7 +278,7 @@ Deno.test("am: resolvePort — falls back to lock file", () => {
   try {
     assertEquals(resolvePort(undefined, TEST_APP), 3000);
   } finally {
-    removePid(TEST_APP);
+    dropFixtureLock(TEST_APP);
   }
 });
 
@@ -286,7 +286,7 @@ Deno.test("am: resolvePort — falls back to lock file", () => {
 // declared — so a tool that answers 8000 is answering with a number it made up.
 // The contract is a refusal that names the failed question.
 Deno.test("am: resolvePort — refuses rather than inventing 8000", () => {
-  removePid(TEST_APP);
+  dropFixtureLock(TEST_APP);
   // The "one running instance" rung is a legitimate answer and owns this case
   // when the machine has exactly one app up; only the invented rung is on trial.
   if (instances().length > 0) return;
@@ -333,7 +333,7 @@ Deno.test("am: resolvePort — an explicit --app never falls back to another app
   } finally {
     Deno.chdir(cwd);
     _resetTargetGuess();
-    removePid(other);
+    dropFixtureLock(other);
     await dropTempDir(bare);
   }
 });
@@ -406,7 +406,7 @@ Deno.test("am: PidFile with status field round-trip", () => {
     writePid(pf);
     assertEquals(readPid(TEST_APP), pf);
   } finally {
-    removePid(TEST_APP);
+    dropFixtureLock(TEST_APP);
   }
 });
 
@@ -427,7 +427,7 @@ Deno.test("am: readPid backward compat — lock without status treated as starte
     assertEquals(pf.pid, 99);
     assertEquals(pf.port, 8000);
   } finally {
-    removePid(TEST_APP);
+    dropFixtureLock(TEST_APP);
   }
 });
 
@@ -440,7 +440,7 @@ Deno.test("am: PidFile status transitions", () => {
     writePid(makePf({ pid: 10, port: 8000, startedAt: 0, status: "stopping" }));
     assertEquals(readPid(TEST_APP)!.status, "stopping");
   } finally {
-    removePid(TEST_APP);
+    dropFixtureLock(TEST_APP);
   }
 });
 
@@ -452,7 +452,7 @@ Deno.test("am: PidFile with trojanPort round-trip", () => {
     assertEquals(loaded.trojanPort, 9001);
     assertEquals(loaded.port, 8000);
   } finally {
-    removePid(TEST_APP);
+    dropFixtureLock(TEST_APP);
   }
 });
 
@@ -462,7 +462,7 @@ Deno.test("am: resolveControlPort returns trojanPort when TLS active", () => {
     assertEquals(resolveControlPort(8000, TEST_APP), 9001);
     assertEquals(resolveControlPort(9999, TEST_APP), 9999); // different main port — no match
   } finally {
-    removePid(TEST_APP);
+    dropFixtureLock(TEST_APP);
   }
 });
 
@@ -471,12 +471,12 @@ Deno.test("am: resolveControlPort falls back to main port without trojanPort", (
     writePid(makePf({ pid: 1234, port: 8000 }));
     assertEquals(resolveControlPort(8000, TEST_APP), 8000);
   } finally {
-    removePid(TEST_APP);
+    dropFixtureLock(TEST_APP);
   }
 });
 
 Deno.test("am: resolveControlPort falls back when no PID file", () => {
-  removePid();
+  dropFixtureLock();
   assertEquals(resolveControlPort(8000), 8000);
 });
 
@@ -909,7 +909,7 @@ Deno.test("am-cli: logs — filter works", async () => {
 // ── am status — no server running ────────────────────────────
 
 Deno.test("am-cli: status — exit code 1 when no server", async () => {
-  removePid();
+  dropFixtureLock();
   const result = await new Deno.Command("deno", {
     args: [
       "run",

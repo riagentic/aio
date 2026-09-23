@@ -5,6 +5,7 @@
 // node/Deno bits out of the browser bundle).
 import { join } from "@std/path";
 import { parse as parseJsonc } from "@std/jsonc";
+import type { LockData } from "../../../src/server/single-instance-lock.ts";
 
 export interface ProjectMeta {
   name: string;
@@ -33,7 +34,11 @@ export interface DiscoveredProject {
     appId: string;
     pid: number;
     port: number;
-    status: "starting" | "started" | "stopping";
+    /** THE lock's status union. One decider: never a hand-copied subset. */
+    status: LockData["status"];
+    /** Set when the holder is `am backup`/`am restore`, not the app — read
+     *  it BEFORE `status` (which then says "starting" for older readers). */
+    maintenance?: LockData["maintenance"];
   } | null;
   /** true when a `.git` dir is present. */
   git: boolean;
@@ -282,7 +287,13 @@ export async function discoverProjects(): Promise<
       path: i.cwd,
       name: existing?.name || meta.name || i.appId,
       meta,
-      running: { appId: i.appId, pid: i.pid, port: i.port, status: i.status },
+      running: {
+        appId: i.appId,
+        pid: i.pid,
+        port: i.port,
+        status: i.status,
+        ...(i.maintenance ? { maintenance: i.maintenance } : {}),
+      },
       git: existing?.git ?? await isDir(join(i.cwd, ".git")),
     });
   }

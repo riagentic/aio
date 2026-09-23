@@ -44,7 +44,7 @@ Deno.test("a booted app leaves the crash artifacts on disk", async () => {
       port: 0,
       baseDir: dir,
       dbPath: ":memory:",
-      diagnostics: { checkpoint: { debounce: 0 }, actionLog: true },
+      diagnostics: { dev: { checkpoint: { debounce: 0 }, actionLog: true } },
     } as never);
     jobs.tick();
     jobs.tick();

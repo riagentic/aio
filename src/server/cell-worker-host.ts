@@ -160,6 +160,7 @@ function bindOwnStateReads(
  *  Never resolves — the worker stays alive as long as its owner does. */
 export function startCellWorkerHost(cell: CellDef): Promise<never> {
   const name = cell.__aio.id;
+  // aio-ok(persist-decider): a worker replica — its slice streams home and the MAIN isolate's host persists it through the filter.
   const composed = composeCells([cell], { perfCheck: false });
   isolatePeerCells(name);
 

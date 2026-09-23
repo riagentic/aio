@@ -5,6 +5,8 @@ import { log } from "./logger-api.ts";
 import { noRedaction, REDACTED } from "./redact.ts";
 import type { Redactor } from "./redact.ts";
 
+import { sweepStaleTmps, uuidTmpAfter } from "./tmp-sweep.ts";
+
 const FILE = "checkpoint.json";
 const TMP = "checkpoint.json.tmp";
 
@@ -12,7 +14,12 @@ const TMP = "checkpoint.json.tmp";
  *  journal and the action log are careful not to keep. It was written at the
  *  process umask (0644/0664), so the one artifact carrying the most was also
  *  the most readable. */
-const MODE: Deno.WriteFileOptions = { mode: 0o600 };
+/** A write that must CREATE its file (O_EXCL): a symlink or file planted at
+ *  the name is refused, never followed, and never reused with a looser mode. */
+const NEW: Deno.WriteFileOptions = { mode: 0o600, createNew: true };
+/** A tmp name no one can predict — a fixed `checkpoint.json.tmp` could be
+ *  pre-planted as a symlink wherever the directory is writable by others. */
+const tmpName = (dir: string): string => `${dir}/${TMP}.${crypto.randomUUID()}`;
 
 /** Withhold the slices of cells that `redactActions` covers.
  *
@@ -40,6 +47,22 @@ export function _redactCheckpointState(
   }
   return touched ? out : state;
 }
+
+/** Which whole cells the checkpoint may hold — the app's restore rule
+ *  (`persistingCellIds`): a `persist: "none"` cell is dropped, every other
+ *  slice is kept exactly as it is in state.
+ *
+ *  It is read back: `onCheckpointRestore` hands it to the app, which returns
+ *  the state to boot on. Written raw, it carried every `persist: "none"` slice
+ *  (a session token, a passphrase) to disk in dev — the one thing that key
+ *  promises never happens — and handed it back on the next boot, while prod
+ *  (checkpoint off) came up without it. Deliberately NOT the store's full
+ *  filter: the restored checkpoint is assigned into live state with no
+ *  `onRestore`, so an `onPersist` shape or a field filter would land there
+ *  as-is. A pure key filter, so it cannot throw. */
+export type CheckpointView = (
+  state: Record<string, unknown>,
+) => Record<string, unknown>;
 
 let _warnedDegraded = false;
 
@@ -116,9 +139,14 @@ export function createCheckpoint(
   dir: string,
   debounceMs: number,
   redact: Redactor = noRedaction,
+  /** The app's persist filter, late-bound (see `setCheckpointView`). */
+  view: () => CheckpointView | null = () => null,
 ) {
   let timer: ReturnType<typeof setTimeout> | null = null;
   let pending: CheckpointData | null = null;
+  // The tmps a crash between a write and its rename left (see
+  // `sweepStaleTmps`) — and the fixed one an older build used.
+  sweepStaleTmps(dir, [uuidTmpAfter(TMP)]);
   // `logger-core.ts` mkdirs the log dir, and the checkpoint shares that path
   // but only ever USED it — so with checkpoints on and the directory not yet
   // created, every write failed NotFound and logged one error, forever: the
@@ -140,10 +168,13 @@ export function createCheckpoint(
     return chain;
   }
 
-  const scrub = (data: CheckpointData): CheckpointData =>
-    !redact.redactsAnyCell()
-      ? data
-      : { ...data, state: _redactCheckpointState(data.state, redact) };
+  const scrub = (data: CheckpointData): CheckpointData => {
+    const v = view();
+    const kept = v ? { ...data, state: v(data.state) } : data;
+    return !redact.redactsAnyCell()
+      ? kept
+      : { ...kept, state: _redactCheckpointState(kept.state, redact) };
+  };
 
   /** One line per DISTINCT failure. The same error every debounce tick is not
    *  more information, it is a log nobody can read. */
@@ -163,19 +194,27 @@ export function createCheckpoint(
 
   function write(data: CheckpointData): Promise<void> {
     return enqueue(async () => {
-      const tmp = `${dir}/${TMP}`;
+      const tmp = tmpName(dir);
       const target = `${dir}/${FILE}`;
       const json = _safeStringify(scrub(data));
       if (!dirReady) {
         await Deno.mkdir(dir, { recursive: true, mode: 0o700 }).catch(() => {});
         dirReady = true;
       }
-      // `mode` only applies at CREATE time, so a leftover tmp from an earlier
-      // crash — or an existing checkpoint written by an older, laxer build —
-      // would keep its old permissions through the rename. Remove both first.
-      await Deno.remove(tmp).catch(() => {});
+      // A fresh, unpredictable tmp CREATED here (`NEW`): its mode is ours,
+      // and nothing planted at the name is followed. A write that fails AFTER
+      // creating it (a full disk, a file-size limit) removes it — else one
+      // leaked per tick; an `AlreadyExists` means the name is not ours.
+      const created = async (e: unknown): Promise<never> => {
+        if (!(e instanceof Deno.errors.AlreadyExists)) {
+          await Deno.remove(tmp).catch(
+            () => {/* aio-ok: never created — the write's error is reported */},
+          );
+        }
+        throw e;
+      };
       try {
-        await Deno.writeTextFile(tmp, json, MODE);
+        await Deno.writeTextFile(tmp, json, NEW);
       } catch (e) {
         // The directory can go away UNDER a live writer — log rotation runs in
         // it, another app booting into the same data dir archives it, an
@@ -183,11 +222,16 @@ export function createCheckpoint(
         // would then fail every write for the rest of the process's life. A
         // NotFound is the one error re-running mkdir can fix, so it is the one
         // error worth a single retry; anything else propagates unchanged.
-        if (!(e instanceof Deno.errors.NotFound)) throw e;
+        if (!(e instanceof Deno.errors.NotFound)) await created(e);
         await Deno.mkdir(dir, { recursive: true, mode: 0o700 }).catch(() => {});
-        await Deno.writeTextFile(tmp, json, MODE);
+        await Deno.writeTextFile(tmp, json, NEW).catch(created);
       }
-      await Deno.rename(tmp, target);
+      await Deno.rename(tmp, target).catch(async (e) => {
+        await Deno.remove(tmp).catch(
+          () => {/* aio-ok: the rename's error is reported */},
+        );
+        throw e;
+      });
     });
   }
 
@@ -219,7 +263,9 @@ export function createCheckpoint(
         // aio-ok: nothing to clear. `mode` applies at CREATE time only, so
         // this is about permissions on a leftover file, not about the write.
       }
-      Deno.writeTextFileSync(path, json, MODE);
+      // CREATE (O_EXCL): whatever appeared at the name since the remove is
+      // refused — reported below — never followed.
+      Deno.writeTextFileSync(path, json, NEW);
     };
     try {
       attempt();
@@ -227,7 +273,7 @@ export function createCheckpoint(
       if (e instanceof Deno.errors.NotFound) {
         try {
           Deno.mkdirSync(dir, { recursive: true, mode: 0o700 });
-          Deno.writeTextFileSync(path, json, MODE);
+          Deno.writeTextFileSync(path, json, NEW);
           return;
         } catch (retry) {
           reportWriteError(retry);
@@ -313,5 +359,28 @@ export function createCheckpoint(
     }
   }
 
-  return { write, writeSync, schedule, flush };
+  /** Replace the file NOW, atomically (tmp → rename), through the view. Boot
+   *  uses it when the checkpoint an older build left holds a cell the app
+   *  says must never be kept: waiting for the first write of this run leaves
+   *  the secret on disk for as long as nothing changes — an app stopped
+   *  before any change kept it forever. */
+  function rewriteNow(data: CheckpointData): void {
+    const tmp = tmpName(dir);
+    // Removed on any failure but one: an `AlreadyExists` means the name was
+    // already taken — by something that is not ours to delete. (A write that
+    // failed after creating it would otherwise leave it behind.)
+    try {
+      Deno.writeTextFileSync(tmp, _safeStringify(scrub(data)), NEW);
+      Deno.renameSync(tmp, `${dir}/${FILE}`);
+    } catch (e) {
+      if (!(e instanceof Deno.errors.AlreadyExists)) {
+        try {
+          Deno.removeSync(tmp);
+        } catch { /* aio-ok: the rename's error is the one reported */ }
+      }
+      reportWriteError(e);
+    }
+  }
+
+  return { write, writeSync, schedule, flush, rewriteNow };
 }

@@ -219,7 +219,9 @@ const DAY_MS = 86_400_000;
  *
  *  Note what is NOT an input: how many versions there are, which is newest,
  *  and which platform this host runs. Those are the three "obvious" rules that
- *  each delete a runtime some app still needs (see the module comment). */
+ *  each delete a runtime some app still needs (see the module comment).
+ *
+ *  @decider */
 export function planElectronPrune(
   entries: readonly CacheEntry[],
   opts: PruneOptions,

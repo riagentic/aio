@@ -396,15 +396,14 @@ Deno.test("#7 kill --stale: every aio lock dir is read, not only this scope", ()
 
 Deno.test({
   name:
-    "#6 am start --home: refused, because am cannot make the child boot there",
+    "#6 am start --home: no longer refused — the child is TOLD (--profile=<dir>)",
   async fn() {
-    // `--home` TARGETS a running instance (docs/clients/app-manager.md). It was
-    // also accepted by `start`, where it did something else entirely: the child
-    // booted in the DEFAULT home (am never forwards the flag — the runtime has
-    // no CLI option for its data home) while am filed the placeholder lock
-    // under the SCOPED key. Result: `am --home=X status` showed
-    // `starting, port 0` forever, `am status` showed the real app, and the
-    // ghost lock never cleared because its pid was genuinely alive.
+    // Until 1.0.10 `--home` could not START an instance: the runtime had no
+    // flag for its data home, so the child booted in the default home while
+    // am filed the placeholder under the scoped key (a ghost `starting, port
+    // 0` lock). The runtime takes `--profile=<dir>` now, and `am start`
+    // forwards it — so the old refusal is gone; this dir has no app, so the
+    // next thing said is the missing entry, not "cannot start one".
     const dir = await Deno.makeTempDir({ prefix: "am-home-start-" });
     try {
       const o = await new Deno.Command(Deno.execPath(), {
@@ -421,10 +420,8 @@ Deno.test({
       }).output();
       const d = new TextDecoder();
       const text = d.decode(o.stdout) + d.decode(o.stderr);
-      assertEquals(o.code, 1, `am start --home must refuse:\n${text}`);
-      assertStringIncludes(text, "cannot start one");
-      assertStringIncludes(text, "AIO_APPS_DIR="); // the way that works
-      assertStringIncludes(text, "appDir"); // and the other one
+      assert(!text.includes("cannot start one"), text);
+      assertStringIncludes(text, "src/app.ts");
     } finally {
       await Deno.remove(dir, { recursive: true }).catch(() => {});
     }

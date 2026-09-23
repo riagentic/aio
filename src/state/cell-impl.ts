@@ -592,7 +592,55 @@ export const CEILING_HEARTBEAT_FRACTION = 0.5;
 
 /** Register a pending call — returns a Promise that resolves when resolveCall()
  *  is called. `method` ("cell:name") picks up any per-method override. */
+/** What a call's SETTLING waits for, per host: the durability a host owes
+ *  the call's writes before its caller may be told it finished (the server's
+ *  stand-in saves — server/aio.ts `_durableFor`). A set, because one process
+ *  can run several apps; unset in the browser, where a call settles as it
+ *  always did. @internal */
+const _callSettleHooks = new Set<
+  (callId: string) => Promise<unknown> | undefined
+>();
+/** Register a host's settle hook (see `_callSettleHooks`); returns the
+ *  unregister. @internal */
+export function _onCallSettle(
+  hook: (callId: string) => Promise<unknown> | undefined,
+): () => void {
+  _callSettleHooks.add(hook);
+  return () => _callSettleHooks.delete(hook);
+}
+function owedBy(callId: string): Promise<unknown> | undefined {
+  if (_callSettleHooks.size === 0) return undefined;
+  const owed = [..._callSettleHooks].map((h) => h(callId)).filter((p) =>
+    p !== undefined
+  );
+  return owed.length === 0 ? undefined : Promise.all(owed);
+}
+
+/** Register an async call's settlement — resolved (or rejected) with the
+ *  method's outcome, once what its writes owe is durable (see
+ *  `_callSettleHooks`). */
 export function registerCall(
+  callId: string,
+  method?: string,
+): Promise<unknown> {
+  const settled = _registerCall(callId, method);
+  if (_callSettleHooks.size === 0) return settled;
+  return settled.then(
+    (v) => {
+      const d = owedBy(callId);
+      return d === undefined ? v : d.then(() => v);
+    },
+    (e) => {
+      const d = owedBy(callId);
+      if (d === undefined) throw e;
+      return d.then(() => {
+        throw e;
+      });
+    },
+  );
+}
+
+function _registerCall(
   callId: string,
   method?: string,
 ): Promise<unknown> {

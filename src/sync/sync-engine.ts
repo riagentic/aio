@@ -1100,11 +1100,25 @@ export function createSyncEngine(deps: SyncEngineDeps): SyncEngine {
     // advanced by a LATER op does not prove an earlier op was seen, so a
     // cursor guard could drop a never-applied op under reordered
     // delivery. The id set only skips provably-applied ops.
-    const isDup = alreadyApplied(op.cell, op.id);
+    //
+    // …plus the SNAPSHOT watermark, which unlike the cursor IS proof: a
+    // snapshot at position S holds every op at or below S (the rule the
+    // catch-up and held-op paths already apply). The id set cannot see an op
+    // whose first copy was held behind a catch-up and then covered by its
+    // snapshot — never folded here, so never marked — and a duplicate of that
+    // broadcast arriving after the snapshot was folded on top of it: applied
+    // twice, on this client only (offline-replay property,
+    // tests/sync/properties/offline-replay.test.ts).
+    const snapTs = _snapshotTs.get(op.cell);
+    const isDup = alreadyApplied(op.cell, op.id) ||
+      (snapTs !== undefined && op.serverTs !== undefined &&
+        op.serverTs <= snapTs);
     const confirmed = deps.getConfirmedState()[op.cell] ?? {};
     let next: SyncReducerResult | undefined = null;
     if (isDup) {
       logDuplicate(op.cell, op.id, "broadcast");
+      markApplied(op.cell, op.id);
+      if (queued) noteFoldedAhead(op.cell, op.id);
     } else {
       next = reduceChecked(confirmed, op.action, op.payload, op.cell);
       // Mark applied only after a fold that actually happened (see

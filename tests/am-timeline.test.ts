@@ -170,3 +170,48 @@ Deno.test("am timeline: TIMELINE_RING is what the ring actually keeps", () => {
   assertEquals(t.entries().length, TIMELINE_RING);
   assertEquals(t.entries()[0]!.seq, 26, "the OLDEST are the ones dropped");
 });
+
+// ── a batch line (one sync op's reduce, server/journal.ts `BATCH_TYPE`) ─────
+
+const BATCH_LINES = [
+  { seq: 1, type: "c:a", payload: {}, ts: 1 },
+  {
+    seq: 3,
+    type: "__aioBatch",
+    fmt: 2,
+    ts: 2,
+    entries: [
+      { seq: 2, type: "c:b", payload: { args: [2] }, ts: 2 },
+      { seq: 3, type: "c:c", payload: { args: [3] }, ts: 2 },
+    ],
+  },
+  { seq: 4, type: "c:d", payload: {}, ts: 4 },
+];
+
+Deno.test("am journal readers: a batch line is its entries — timeline, replay, record", async () => {
+  const text = BATCH_LINES.map((l) => JSON.stringify(l)).join("\n");
+  const parsed = parseJournal(text);
+  assertEquals(parsed.rows.map((r) => [r.seq, r.type]), [
+    [1, "c:a"],
+    [2, "c:b"],
+    [3, "c:c"],
+    [4, "c:d"],
+  ]);
+  assertEquals(parsed.badLines, []);
+  await withJournal(BATCH_LINES, async (path) => {
+    const tl = await capture(() => cmdTimeline([`--from=${path}`], FLAGS)) as {
+      entries: { seq: number; type: string }[];
+    };
+    assertEquals(tl.entries.map((e) => e.type), ["c:a", "c:b", "c:c", "c:d"]);
+    const rp = await capture(() =>
+      cmdReplay([`--from=${path}`, "2..3", "--dry"], FLAGS)
+    ) as { count: number; entries: { seq: number }[] };
+    assertEquals(rp.entries.map((e) => e.seq), [2, 3]);
+  });
+  // A torn batch is ONE torn line, and none of its entries.
+  const torn = text.slice(0, text.indexOf('"c:c"') + 3);
+  const p2 = parseJournal(torn);
+  assertEquals(p2.rows.map((r) => r.seq), [1]);
+  assertEquals(p2.badLines.length, 1);
+  assert(p2.tornTailOnly);
+});

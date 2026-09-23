@@ -14,7 +14,7 @@ import {
   transpile,
 } from "./server-transpile.ts";
 import { setUiRootProbe } from "./server-html-classify.ts";
-import { lockDir } from "./single-instance-lock.ts";
+import { ensureLockDirOf, lockDir } from "./single-instance-lock.ts";
 import { log } from "../diagnostics/logger-api.ts";
 
 /** File extensions that trigger live reload */
@@ -664,6 +664,11 @@ export function createFileWatcher(deps: WatcherDeps): FileWatcher {
   // false if the path is hostile or dir is not writable. lstatSync avoids
   // following symlinks (F-2 defense); createNew:true is O_EXCL atomic.
   function ensureSentinel(): boolean {
+    try {
+      ensureLockDirOf(SENTINEL); // pruned since `lockDir()` cached it
+    } catch {
+      return false; // aio-ok: no private dir for it — falls back as below
+    }
     try {
       const info = Deno.lstatSync(SENTINEL);
       if (!info.isFile) {

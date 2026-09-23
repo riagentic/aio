@@ -72,54 +72,111 @@ export function createActionLog(
   // — or the next test's — time.
   let final = false;
 
+  // Lines waiting for the next write. An append used to queue a write of its
+  // own, so a burst (50 000 actions, a cron gone wild) held one closure and one
+  // pending file write per action: measured 37 000 in flight, heap 25 → 93 MB,
+  // unbounded. Now every line that arrives while a write runs goes out in the
+  // NEXT single write, and at most `max` of them wait — the file keeps the
+  // newest `max` at most anyway, so what is dropped is exactly what the next
+  // truncation would have cut. Said once.
+  let pending: string[] = [];
+  let pendingBytes = 0;
+  let head = 0;
+  let droppedSaid = false;
+  let dropped = 0;
+  /** The write that will carry the lines pending now; null when none is
+   *  queued yet. */
+  let batch: Promise<void> | null = null;
+
+  const drop = (): void => {
+    const b = _enc.encode(pending[head]!).length;
+    pending[head++] = "";
+    pendingBytes -= b;
+    dropped++;
+    if (head > 1024 && head * 2 > pending.length) {
+      pending = pending.slice(head);
+      head = 0;
+    }
+  };
+
+  async function writeBatch(): Promise<void> {
+    batch = null;
+    const lines = pending.slice(head);
+    const bytes = pendingBytes;
+    pending = [];
+    head = 0;
+    pendingBytes = 0;
+    if (dropped > 0 && !droppedSaid) {
+      droppedSaid = true;
+      log.warn(
+        "action-log",
+        `${dropped} action(s) arrived faster than ${path} is written and ` +
+          `were dropped, oldest first — the log keeps the newest ${max} at ` +
+          `most anyway. Said once.`,
+      );
+    }
+    dropped = 0;
+    if (lines.length === 0) return;
+    try {
+      // 0600 like every other payload-retaining sink (journal, checkpoint):
+      // action payloads are user data, and redaction only covers the methods
+      // an app listed. Mode applies on creation; pre-existing files are
+      // tightened once below.
+      await Deno.writeTextFile(path, lines.join(""), {
+        append: true,
+        mode: 0o600,
+      });
+      lineCount += lines.length;
+      byteCount += bytes;
+      if (!modeFixed) {
+        modeFixed = true;
+        try {
+          await Deno.chmod(path, 0o600);
+        } catch {
+          /* Windows, or FS without modes — creation mode did its best */
+        }
+      }
+    } catch (e) {
+      if (writeErrors++ < 3) log.error("action-log", `write failed: ${e}`);
+    }
+  }
+
   async function append(type: string, payload: unknown): Promise<void> {
     if (isActionNoise(type) || final) return;
-    await _enqueue(countExisting);
-    await _enqueue(async () => {
-      let line: string;
-      try {
-        line = JSON.stringify({
-          type,
-          payload: payload ?? {},
-          ts: Date.now(),
-        }) + "\n";
-      } catch {
-        // Circular ref or BigInt — fall back to type-only
-        line = JSON.stringify({ type, payload: {}, ts: Date.now() }) + "\n";
-      }
-      let bytes = _enc.encode(line).length;
-      if (bytes > ACTION_LOG_LINE_BYTES) {
-        line = JSON.stringify({
-          type,
-          payload: {
-            _elided: `payload was ${Math.round(bytes / 1024)}KB — over the ${
-              ACTION_LOG_LINE_BYTES / 1024
-            }KB line cap`,
-          },
-          ts: Date.now(),
-        }) + "\n";
-        bytes = _enc.encode(line).length;
-      }
-      try {
-        // 0600 like every other payload-retaining sink (journal, checkpoint):
-        // action payloads are user data, and redaction only covers the methods
-        // an app listed. Mode applies on creation; pre-existing files are
-        // tightened once below.
-        await Deno.writeTextFile(path, line, { append: true, mode: 0o600 });
-        lineCount++;
-        byteCount += bytes;
-        if (!modeFixed) {
-          modeFixed = true;
-          try {
-            await Deno.chmod(path, 0o600);
-          } catch {
-            /* Windows, or FS without modes — creation mode did its best */
-          }
-        }
-      } catch (e) {
-        if (writeErrors++ < 3) log.error("action-log", `write failed: ${e}`);
-      }
-    });
+    let line: string;
+    try {
+      line = JSON.stringify({
+        type,
+        payload: payload ?? {},
+        ts: Date.now(),
+      }) + "\n";
+    } catch {
+      // Circular ref or BigInt — fall back to type-only
+      line = JSON.stringify({ type, payload: {}, ts: Date.now() }) + "\n";
+    }
+    let bytes = _enc.encode(line).length;
+    if (bytes > ACTION_LOG_LINE_BYTES) {
+      line = JSON.stringify({
+        type,
+        payload: {
+          _elided: `payload was ${Math.round(bytes / 1024)}KB — over the ${
+            ACTION_LOG_LINE_BYTES / 1024
+          }KB line cap`,
+        },
+        ts: Date.now(),
+      }) + "\n";
+      bytes = _enc.encode(line).length;
+    }
+    pending.push(line);
+    pendingBytes += bytes;
+    while (pending.length - head > max || pendingBytes > maxBytes) {
+      if (pending.length - head <= 1) break; // the newest line always goes
+      drop();
+    }
+    if (batch === null) {
+      batch = _enqueue(countExisting).then(() => _enqueue(writeBatch));
+    }
+    await batch;
     // `max` is enforced HERE, on the way in.
     //
     // Truncation used to be reachable only through `flush()`, which runs once
@@ -196,6 +253,7 @@ export function createActionLog(
     // stopped the constructor leaving a file read nobody awaited; forgetting
     // this half turned that fix into a silently unbounded log.)
     await _enqueue(countExisting);
+    if (batch !== null) await batch;
     // The appends are queued writes; the shutdown flush waits for the ones
     // still in flight, or the last lines of a run land in the NEXT process's
     // (or the next test's) time — and a SIGKILLed successor never sees them.

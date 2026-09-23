@@ -1008,10 +1008,17 @@ independent channels:
 ```ts
 cell("settings", {
   state: { theme: "dark", apiKey: "" },
-  persist: { exclude: ["apiKey"] }, // never written to disk
+  persist: { exclude: ["apiKey"] }, // never written to the store
   visible: { exclude: ["apiKey"] }, // never synced to browsers
 });
 ```
+
+Both filter the **state**. A method that receives the secret as an argument
+(`setKey(k)`) still has it in that call's payload, and payloads are written as
+passed to `logs/actions.jsonl` and, with `journal: true`, to the journal. Name
+such methods in `redactActions` to keep their payloads out of both, or set
+`diagnostics: false` on the cell to keep its actions out of the dev logs (see
+[auto-persist](../persistence/auto-persist.md)).
 
 `/__aio/snapshot` (state export/import for tooling) returns **raw, unfiltered
 state**. In multi-user mode (`users`/`resolveUser`) it therefore requires

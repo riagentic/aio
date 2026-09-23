@@ -51,7 +51,9 @@ Rows belong in SQLite. Two ways in, one file (`state.db`):
 - **Bound table** — `db: { contacts: contactsTable }` mirrors a state array into
   a table. Right for datasets that are ALSO the working set (thousands of rows,
   not millions): the array stays in state, so it still counts against the
-  cell-size guardrail.
+  cell-size guardrail. Write it through state, never by SQL: with
+  `journal: true` a direct write to a bound table reads as a foreign save, and
+  the next boot sets the journal aside.
 - **SQL-only table** — declare a table no state array binds to. It is created
   and yours via `app.db`, and its rows never enter state, never serialize on a
   flush, never ride a broadcast. This is the bulk tier.

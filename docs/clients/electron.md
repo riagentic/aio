@@ -40,6 +40,15 @@ freshly scaffolded app pinned nothing (`npm:electron` = whatever was latest at
 install time) — so the same app could run one Chromium in dev and ship another,
 and two apps scaffolded a month apart did not match each other.
 
+**A stop during the first-run install ends the installer too.** The app's
+shutdown kills the installer's whole process tree (`install.js` is a
+grandchild), whether the stop comes from `am stop`, Ctrl-C, SIGTERM, or closing
+the terminal (SIGHUP). So does the app exiting any other way (an exit call or a
+crash). On Linux and macOS the download runs in its own session, so a hangup
+would not reach it directly. A desktop app treats SIGHUP like SIGTERM and stops
+gracefully, and an app started under `nohup` keeps ignoring it. On Windows the
+tree is ended with `taskkill /T /F`.
+
 ### aio decides the Electron, not the app
 
 aio is tested with one Electron, and a **build always ships that one**. The
@@ -106,6 +115,14 @@ await aio.run({
 
 Or use `--keep-server` CLI flag. Useful for apps where the server is the primary
 process and electron is optional.
+
+Without it, the window ending ends the app, through the normal graceful shutdown
+(drained, persisted). The exit code says how the window ended: **0** when it was
+closed (or stopped by SIGTERM / SIGINT / SIGHUP), **1** when it crashed (any
+other signal, such as SIGTRAP when the display refuses the window, or a non-zero
+exit). A crash is logged as an ERROR, `electron crashed (…)`, quoting the
+window's last stderr lines. With `keepServer` a crash is logged the same way and
+the server keeps running.
 
 A local Electron app binds **no TCP port** by default, so there is no
 `localhost` address to open in a browser: the window talks to the server over a
@@ -246,8 +263,17 @@ Or via CLI: `deno task dev --transport=uds`
 Deno ↔ UDS/NDJSON ↔ Electron main (net.connect) ↔ IPC ↔ renderer (window.__aioIPC)
 ```
 
-- Deno writes NDJSON messages to a Unix socket at `/tmp/aio-{slug}.sock` (or
-  `$XDG_RUNTIME_DIR/aio-{slug}.sock`)
+- Deno writes NDJSON messages to a Unix socket in the app's 0700 lock dir
+  (`$XDG_RUNTIME_DIR/aio/`, else `/tmp/aio/`), named after its lock:
+  `{appId}.sock` for the default data home, `{appId}@{hash8(home)}.sock` for any
+  other home — so two instances of one app never share a socket. A path over
+  ~100 bytes falls back to `/tmp/aio/<appId>-<hash>.sock` (`/tmp/aio-u<uid>/`
+  when `/tmp/aio` is not yours; the hash covers scope and home). On Windows it
+  is the named pipe `\\.\pipe\aio-<lockKey>`. A
+  [profile](app-manager.md#profiles-several-copies-of-one-app) is its own
+  instance: `{appId}@{name}.sock` (pipe `\\.\pipe\aio-<appId>@<name>`) and its
+  own Chromium profile, so its window shares no storage, cookies or
+  `window-state.json` with the default one.
 - Electron's main process connects via Node.js `net.connect` and bridges
   messages to the renderer over IPC
 - The renderer accesses the bridge via `window.__aioIPC`

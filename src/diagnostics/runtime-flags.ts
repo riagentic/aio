@@ -51,8 +51,32 @@ export const AIO_RUNTIME_FLAGS: ReadonlySet<string> = new Set(
     "--watch=",
     "--no-watch",
     "--__aio-relaunch-after=",
+    "--profile=",
+    "--home=",
   ].map((f) => (f.endsWith("=") ? f.slice(0, -1) : f)),
 );
+
+/** Runtime flags an APP may also claim for itself (added in 1.0.10, after
+ *  apps could already have their own `--profile`/`--home`). A claimed one is
+ *  the app's: aio does not read it from argv, only from its env variable
+ *  (`AIO_PROFILE`, `AIO_HOME`). */
+export const CLAIMABLE_RUNTIME_FLAGS: ReadonlySet<string> = new Set([
+  "--profile",
+  "--home",
+]);
+
+const _claimed = new Set<string>();
+
+/** Record that the app's own parser declares `name` (`--profile`). Called by
+ *  `aio/cli` `args()` for a spec that declares a claimable flag. @internal */
+export function claimRuntimeFlag(name: string): void {
+  if (CLAIMABLE_RUNTIME_FLAGS.has(name)) _claimed.add(name);
+}
+
+/** Whether the app's own parser claimed `name`. @internal */
+export function runtimeFlagClaimed(name: string): boolean {
+  return _claimed.has(name);
+}
 
 /** The same list in `aio-cli.ts`'s own spelling (value flags carry `=`). */
 export const AIO_RUNTIME_FLAG_SPECS: readonly string[] = [
@@ -89,4 +113,6 @@ export const AIO_RUNTIME_FLAG_SPECS: readonly string[] = [
   "--cdp",
   "--cdp=",
   "--__aio-relaunch-after=",
+  "--profile=",
+  "--home=",
 ];

@@ -1,12 +1,12 @@
 # Every option, one page
 
 > Generated from the source by `deno task update:reference` — do not edit by
-> hand; `check:release` fails when it is stale. 185 entries: the signature, what
+> hand; `check:release` fails when it is stale. 186 entries: the signature, what
 > it does, an example when the source has one, and the file it lives in. The
 > guides explain; this page is for looking a name up.
 
 - [cell options](#cell-options) — 24
-- [aio.run options](#aiorun-options) — 79
+- [aio.run options](#aiorun-options) — 80
 - [aio/air](#aioair) — 82
 
 ## cell options
@@ -445,12 +445,25 @@ tls: "auto",   // a cert on first boot — nothing to install, any OS
 appDir?: string
 ```
 
-Where this app keeps everything it owns. Default `~/.<appId>` — `data/` inside
-it is the whole backup; `logs/` and `launch.json` are disposable.
+`--profile=<name>` puts a copy beside it (`<appDir>-<name>`).
 <sub>src/server/aio-types.ts</sub>
 
 ```ts
 appDir: "./data",   // everything this app writes lives here
+```
+
+### `profiles`
+
+```ts
+profiles?: boolean
+```
+
+Default true. `false`: the app runs from one folder only —
+--profile/AIO_PROFILE/--home refused; AIO_APPS_DIR still moves every app.
+<sub>src/server/aio-types.ts</sub>
+
+```ts
+profiles: false,   // a kiosk/service binary: one data home, always
 ```
 
 ### `dbPath`
@@ -838,10 +851,11 @@ instead of resolving. <sub>src/server/aio-types.ts</sub>
 journal?: boolean
 ```
 
-Durable action journal: every committed action is appended to a durable log; on
-the next boot the actions after the last snapshot are replayed on top of it, so
-a SIGKILL / power cut in the persist debounce window loses NOTHING.
-<sub>src/server/aio-types.ts</sub>
+Action journal: every committed action is appended to a log beside the database;
+on the next boot the actions after the last snapshot are replayed on top of it,
+so a SIGKILL in the persist debounce window loses nothing — a power cut can
+(appends are not fsynced, so it can take the newest lines; see
+docs/persistence/how-it-works.md). <sub>src/server/aio-types.ts</sub>
 
 ### `redactActions`
 

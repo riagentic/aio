@@ -1,6 +1,8 @@
 import {
   AIO_RUNTIME_FLAG_SPECS,
   AIO_RUNTIME_FLAGS,
+  CLAIMABLE_RUNTIME_FLAGS,
+  runtimeFlagClaimed,
 } from "../diagnostics/runtime-flags.ts";
 // CLI parsing — pure functions, no aio.ts internal dependencies
 import { log } from "../diagnostics/logger-api.ts";
@@ -8,6 +10,7 @@ import { teachableError } from "../diagnostics/error.ts";
 import { nearestOf } from "../state/cell-helpers.ts";
 import { removalMessage, removalOf } from "../state/removals.ts";
 import { findFreePort } from "./paths.ts";
+import { profileOf } from "./config-sources.ts";
 import { BUILD_BOOL_FLAGS, BUILD_VALUE_FLAGS } from "../build/build-flags.ts";
 
 /** Framework version — printed by --version, checked in tests.
@@ -24,7 +27,7 @@ import { BUILD_BOOL_FLAGS, BUILD_VALUE_FLAGS } from "../build/build-flags.ts";
  *  annotation is a WIDENING for every consumer — with the literal type,
  *  `VERSION === "1.0.0-alpha76"` was a compile error for having no overlap;
  *  now it is an ordinary comparison. */
-export const VERSION: string = "1.0.9-beta";
+export const VERSION: string = "1.0.10-beta";
 
 /** What `--version` prints: what this artifact IS, and what it was built with.
  *
@@ -107,6 +110,11 @@ export type CliFlags = {
   /** `--no-watch` / `--watch=false` / `--watch=src/ui,src/style.css` — live
    *  reload off, or narrowed. See AioConfig.watch. */
   watch?: false | string[];
+  /** `--profile=<name>`: run from the profile's data home (`~/.<appId>-<name>`).
+   *  Absent when the app claims `--profile` for itself. See homeRequest(). */
+  profile?: string;
+  /** `--home=<dir>`: run from exactly this data home. */
+  home?: string;
 };
 
 // The four accepted aliases (`--kill-existing`, bare `--server-url`,
@@ -177,7 +185,10 @@ export function declareAppFlags(names: readonly string[] | undefined): void {
           `for one that takes a value.`,
       );
     }
-    if (AIO_RUNTIME_FLAGS.has(name.endsWith("=") ? name.slice(0, -1) : name)) {
+    const bare = name.endsWith("=") ? name.slice(0, -1) : name;
+    // `--profile`/`--home` joined aio's vocabulary in 1.0.10; an app that
+    // already had its own keeps it (aio then reads AIO_PROFILE).
+    if (AIO_RUNTIME_FLAGS.has(bare) && !CLAIMABLE_RUNTIME_FLAGS.has(bare)) {
       throw teachableError(
         `appFlags: ${name} is one of aio's own flags`,
         `pick another name — a flag cannot mean two things in one process, ` +
@@ -206,6 +217,61 @@ let _harnessFlags: string[] = [];
 export function declareHarnessFlags(names: readonly string[]): void {
   _harnessFlags = [...new Set([..._harnessFlags, ...names])];
   _parsedDefault = null;
+}
+
+/** Does the APP own `name` (`--profile`) — declared in `appFlags`, or in the
+ *  spec of an `aio/cli` `args()` call? */
+function appClaims(name: string): boolean {
+  return runtimeFlagClaimed(name) || _appFlags.includes(`${name}=`) ||
+    _appFlags.includes(name);
+}
+
+let _claimWarned = false;
+
+/** THE data-home request of this run: `--profile=<name|path>` /
+ *  `AIO_PROFILE` (the flag wins), and `--home=<dir>`, the path-only alias. A
+ *  flag the app claims for itself is left to the app, with one warning when
+ *  it is actually on the command line. */
+export function homeRequest(
+  args: readonly string[] = Deno.args,
+): { profile?: string; home?: string; source?: string } {
+  const cli = parseCli(args);
+  const env = (k: string) => {
+    try {
+      return Deno.env.get(k) || undefined;
+    } catch {
+      return undefined; // no --allow-env: no request by env
+    }
+  };
+  for (const name of ["--profile", "--home"]) {
+    if (
+      !_claimWarned && appClaims(name) &&
+      args.some((a) => a.startsWith(`${name}=`))
+    ) {
+      _claimWarned = true;
+      log.warn(
+        `${name}= on the command line belongs to the app (it declares its ` +
+          `own ${name}) — aio reads its profile from AIO_PROFILE only`,
+      );
+    }
+  }
+  // No AIO_HOME: that variable already names the aio CHECKOUT (installers,
+  // `am link`, run.sh). AIO_PROFILE takes a path as well as a name.
+  const home = cli.home;
+  const picked = profileOf(cli, env("AIO_PROFILE"));
+  const profile = picked?.value;
+  const source = home !== undefined
+    ? `--home=${home}`
+    : picked?.from === "flag"
+    ? `--profile=${profile}`
+    : picked
+    ? `AIO_PROFILE=${profile}`
+    : undefined;
+  return {
+    ...(profile !== undefined ? { profile } : {}),
+    ...(home !== undefined ? { home } : {}),
+    ...(source ? { source } : {}),
+  };
 }
 
 /** Test seam: forget the memoized default parse. @internal */
@@ -424,6 +490,13 @@ function _parseCliUncached(args: readonly string[]): CliFlags {
         );
       }
       r.serverUrl = arg.slice(13);
+    } else if (
+      (arg.startsWith("--profile=") || arg.startsWith("--home=")) &&
+      !appClaims(arg.slice(0, arg.indexOf("=")))
+    ) {
+      const eq = arg.indexOf("=");
+      if (arg.startsWith("--profile=")) r.profile = arg.slice(eq + 1);
+      else r.home = arg.slice(eq + 1);
     } else if (arg === "--takeover") r.takeover = true;
     else if (arg === "--kill-existing") refuseFlag("--kill-existing");
     else if (arg.startsWith("--db-path=")) r.dbPath = arg.slice(10);
@@ -725,7 +798,9 @@ export function cliLine(args: readonly string[]): string {
  *
  *  `serverUrl` as a config key beside `client: "browser"` is already a
  *  `configConflicts` error; this catches the flag, and a client that came
- *  from deno.json rather than config. */
+ *  from deno.json rather than config.
+ *
+ *  @decider */
 export function electronOnlyFlagRefusal(
   cli: Pick<
     CliFlags,

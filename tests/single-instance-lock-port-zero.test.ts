@@ -25,6 +25,7 @@ import {
   readLock,
   writeLock,
 } from "../src/server/single-instance-lock.ts";
+import { dropTempDir, tempDir } from "../src/testing/temp-dir.ts";
 
 const REPO = new URL("../", import.meta.url).pathname.replace(/\/$/, "");
 
@@ -110,7 +111,7 @@ Deno.test({
     // The end-to-end consequence, through a real app and a real graceful
     // close. This is what a developer actually hits: it worked once, and then
     // the app would never boot again.
-    const dir = await Deno.makeTempDir({ prefix: "aio-lock-portzero-" });
+    const dir = await tempDir("aio-lock-portzero-");
     const appId = `portzero-${crypto.randomUUID().slice(0, 8)}`;
     const src = join(dir, "app.ts");
     await Deno.writeTextFile(
@@ -151,7 +152,7 @@ console.log("CLOSED");
     );
     assert(second.includes("BOOTED"), `second run must boot:\n${second}`);
 
-    await Deno.remove(dir, { recursive: true }).catch(() => {});
+    await dropTempDir(dir);
   },
 });
 
@@ -183,7 +184,7 @@ Deno.test({
     // its whole shutdown (see tests/lock-lifetime.test.ts). So the assertion
     // here is: BOTH locks carry the mark, i.e. both are covered by the one
     // process-wide handler.
-    const appsDir = await Deno.makeTempDir({ prefix: "aio-lock-multi-" });
+    const appsDir = await tempDir("aio-lock-multi-");
     const src = join(appsDir, "probe.ts");
     await Deno.writeTextFile(
       src,
@@ -253,7 +254,7 @@ setInterval(() => {}, 1000);
         "no signal handler at all",
     );
 
-    await Deno.remove(appsDir, { recursive: true }).catch(() => {});
+    await dropTempDir(appsDir);
   },
 });
 
@@ -266,7 +267,7 @@ Deno.test({
     // whichever lock released first. So in a two-app process where app A shuts
     // down normally and the process is signalled later, app B — still running,
     // still holding its lock — had no handler left and leaked.
-    const appsDir = await Deno.makeTempDir({ prefix: "aio-lock-unreg-" });
+    const appsDir = await tempDir("aio-lock-unreg-");
     const src = join(appsDir, "probe.ts");
     await Deno.writeTextFile(
       src,
@@ -327,6 +328,6 @@ setInterval(() => {}, 1000);
         "handlers while another lock is still held",
     );
 
-    await Deno.remove(appsDir, { recursive: true }).catch(() => {});
+    await dropTempDir(appsDir);
   },
 });

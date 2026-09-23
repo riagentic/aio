@@ -25,7 +25,13 @@
     "tests/sanitizer-leak-floor.test.ts",
     "tests/docs-truth-gate.test.ts",
     "tests/am-advice-is-runnable.test.ts",
-    "tests/am-surface-rects.test.ts"
+    "tests/am-surface-rects.test.ts",
+    "tests/persist-decider.test.ts",
+    "tests/cell-persist-filter.test.ts",
+    "tests/decider-pins.test.ts",
+    "tests/am-create-undo.test.ts",
+    "tests/am-versions-self-heal.test.ts",
+    "tests/am-fetch-error-refused-only.test.ts"
   ],
   "seam": [
     "tests/ack-async-bare-frame.test.ts",
@@ -33,6 +39,9 @@
     "tests/air-transport-send-throw-queue.test.ts",
     "tests/air-transport-stale-close.test.ts",
     "tests/air-transport-terminal-mismatch.test.ts",
+    "tests/am-exit-code-sweep.test.ts",
+    "tests/am-maintenance-hold.test.ts",
+    "tests/am-starting-lock-has-no-door.test.ts",
     "tests/app-identity-differential.test.ts",
     "tests/audit-regression-pins.test.ts",
     "tests/audit-residual-guards.test.ts",
@@ -42,6 +51,7 @@
     "tests/browser-transport-guards.test.ts",
     "tests/client-transport-refusals.test.ts",
     "tests/foruser-view-differential.test.ts",
+    "tests/hosts.test.ts",
     "tests/hunter-seeds-replay.test.ts",
     "tests/live-first-dom-differential.test.ts",
     "tests/local-transport-decision.test.ts",

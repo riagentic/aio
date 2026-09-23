@@ -15,18 +15,21 @@
  * remove it.
  */
 
-import { join, resolve, SEPARATOR } from "@std/path";
+import { basename, dirname, join, resolve, SEPARATOR } from "@std/path";
 import {
   appDirs,
+  appHome,
   appsRoot,
   installedAppParents,
   installedAppPaths,
   installRoot,
+  profileOfHome,
 } from "../server/app-dirs.ts";
 import type { GlobalFlags } from "./am-types.ts";
 import {
   count,
   detectMode,
+  fail,
   heading,
   hints,
   indent,
@@ -343,11 +346,15 @@ export async function cmdRemove(
     Deno.exit(1);
   }
 
+  // Profiles are separate data homes (`~/.<name>-dev`) and never deleted
+  // here — but they ARE the app's, so they are named, not left to be found.
+  const profiles = profileHomesOf(name);
   if (mode === "json") {
     out({
       removed,
       dataRemoved,
       dataKept: dataRemoved ? null : (hasData ? dataDir : null),
+      profileHomes: profiles,
     }, mode);
     return;
   }
@@ -357,9 +364,36 @@ export async function cmdRemove(
       (hasData && !dataRemoved
         ? `\n\n  KEPT its data: ${dataDir}\n` +
           `  (state, logs, keys, user files — remove with: am remove ${name} --data)`
+        : "") +
+      (profiles.length
+        ? `\n\n  KEPT its profiles' data (never removed by am remove):\n` +
+          profiles.map((p) => `    ${p}`).join("\n")
         : ""),
     mode,
   );
+}
+
+/** The data homes of `name`'s PROFILES: folders beside its home named
+ *  `<home>-<profile>` whose meta.json says they are that profile of this
+ *  app. Never throws — an unreadable parent lists nothing. */
+export function profileHomesOf(name: string): string[] {
+  const home = resolve(appHome(name));
+  const out: string[] = [];
+  try {
+    for (const e of Deno.readDirSync(dirname(home))) {
+      if (!e.isDirectory || !e.name.startsWith(`${basename(home)}-`)) continue;
+      const dir = join(dirname(home), e.name);
+      const p = profileOfHome(name, dir);
+      if (!p) continue;
+      try {
+        const meta = JSON.parse(
+          Deno.readTextFileSync(join(dir, "data", "meta.json")),
+        );
+        if (meta?.appId === name && meta?.profile === p) out.push(dir);
+      } catch { /* aio-ok: no meta.json — not provably this app's profile */ }
+    }
+  } catch { /* aio-ok: parent unreadable — nothing to name */ }
+  return out.sort();
 }
 
 /** `~/app` may hold apps this machine has forgotten about; listing them is how
@@ -408,7 +442,17 @@ export async function cmdInstalled(
         versions,
       });
     }
-  } catch {
+  } catch (e) {
+    // ABSENT is "nothing installed". Anything else — the root is a file, or
+    // unreadable — is a failure, and it used to print the same `apps: []`
+    // (and "does not exist", which was false) with exit 0.
+    if (!(e instanceof Deno.errors.NotFound)) {
+      fail(
+        `cannot read the install root ${root}: ` +
+          (e instanceof Error ? e.message : String(e)),
+        mode,
+      );
+    }
     out(
       mode === "json"
         ? { root, apps: [] }

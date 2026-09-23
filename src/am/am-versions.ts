@@ -32,6 +32,7 @@
  * exact string is the whole mechanism.
  */
 
+import { sayErr } from "./am-output.ts";
 import { electronSpec, testedElectronOf } from "./am-electron.ts";
 import {
   LOCAL_PIN_FILE,
@@ -43,7 +44,8 @@ import {
   compareVersions as compareRawVersions,
   isComparableVersion,
 } from "../server/updates-core.ts";
-import { join } from "@std/path";
+import { basename, join, resolve, SEPARATOR as SEP } from "@std/path";
+import { ageSince } from "../server/single-instance-lock.ts";
 
 /** The moving pin — `origin/main`, refreshed on every link. */
 export const MAIN = "main";
@@ -93,7 +95,11 @@ async function git(
       stdout: "piped",
       stderr: "piped",
       stdin: "null",
-      env: GIT_NO_PROMPT_ENV,
+      // C locale: this module PARSES git's output (`worktree list`, the lock
+      // reason). A translated git wrote `locked initialisiere` where the
+      // parser looked for `initializing`, and a checkout still being written
+      // was torn down as junk.
+      env: { ...GIT_NO_PROMPT_ENV, LC_ALL: "C", LANGUAGE: "C" },
     }).output();
     return {
       ok: p.success,
@@ -261,6 +267,159 @@ export type EnsureResult =
   | { ok: true; path: string; created: boolean; ref: string }
   | { ok: false; error: string };
 
+/** A LOCKED store registration younger than this is an add IN FLIGHT
+ *  (another `am` provisioning right now) and is left alone; older, it is a
+ *  checkout killed mid-`git worktree add`. A real add of the whole framework
+ *  takes seconds. ANY lock counts, whatever its reason says: git TRANSLATES
+ *  the reason it writes (`initializing` → `initialisiere`), so a lock written
+ *  by a localized git — an older `am`, or the user's own — cannot be told
+ *  apart by its words. The store is aio's; its locks mean "being written". */
+export const STALE_INIT_LOCK_MS = 10 * 60_000;
+
+type Registration = {
+  path: string;
+  prunable: boolean;
+  /** Age of the worktree's lock in ms, or null when it is not locked. */
+  lockAgeMs: number | null;
+};
+
+/** `root`'s worktree registrations, with the age of any lock read from git's
+ *  own admin dir (`<common-dir>/worktrees/<id>/locked`). */
+async function registrations(root: string): Promise<Registration[]> {
+  const list = await git(root, ["worktree", "list", "--porcelain"]);
+  if (!list.ok) return [];
+  const common = await git(root, ["rev-parse", "--git-common-dir"]);
+  const lockAge = new Map<string, number>(); // worktree path → lock age
+  if (common.ok) {
+    const admin = join(resolve(root, common.out), "worktrees");
+    const ids = await Array.fromAsync(Deno.readDir(admin)).catch(() => []);
+    for (const e of ids) {
+      const gitdir = await Deno.readTextFile(join(admin, e.name, "gitdir"))
+        .catch(() => null);
+      const lock = await Deno.stat(join(admin, e.name, "locked"))
+        .catch(() => null);
+      if (gitdir === null || lock?.mtime == null) continue;
+      lockAge.set(
+        resolve(gitdir.trim().replace(/[\\/]\.git$/, "")),
+        ageSince(lock.mtime.getTime()),
+      );
+    }
+  }
+  const out: Registration[] = [];
+  for (const block of list.out.split(/\n\s*\n/)) {
+    const path = /^worktree (.+)$/m.exec(block)?.[1];
+    if (!path) continue;
+    const locked = /^locked\b/m.test(block);
+    out.push({
+      path,
+      prunable: /^prunable\b/m.test(block),
+      lockAgeMs: locked ? (lockAge.get(resolve(path)) ?? Infinity) : null,
+    });
+  }
+  return out;
+}
+
+/** The completion marker: written beside a store checkout ONLY after
+ *  `git worktree add` returned. "Has mod.ts" is not "finished" — git writes
+ *  files in sorted order, so mod.ts exists while src/ is still being written
+ *  (measured: a racing `am` got `ok` with 543 of 20000 files). A FILE beside
+ *  the directory, not in it: inside, it would be an untracked file in the
+ *  checkout; and `provisioned()` lists directories only. */
+export function completionMarker(storePath: string): string {
+  return `${storePath}.provisioned`;
+}
+
+/** Tear down a torn store checkout — unregister (`-f -f` takes a locked
+ *  one) and delete — judged by its RESULT: null when `path` is gone, else why
+ *  it is still there. A leftover (a read-only subdir, a busy file) is a torn
+ *  checkout the next `exists()` calls provisioned: ok:true for a broken
+ *  framework, forever. */
+async function tearDown(root: string, path: string): Promise<string | null> {
+  const unregistered = await git(root, [
+    "worktree",
+    "remove",
+    "-f",
+    "-f",
+    path,
+  ]);
+  const deleted = await Deno.remove(path, { recursive: true }).then(
+    () => null,
+    (e: unknown) => e instanceof Deno.errors.NotFound ? null : e,
+  );
+  if (!(await Deno.lstat(path).then(() => true, () => false))) return null;
+  return deleted instanceof Error
+    ? deleted.message
+    : unregistered.ok
+    ? "it is still there"
+    : unregistered.out || "git worktree remove failed";
+}
+
+/** The refusal for a checkout {@linkcode tearDown} could not remove. */
+const stuckError = (path: string, why: string): EnsureResult => ({
+  ok: false,
+  error: `${path} is an incomplete checkout and could not be removed ` +
+    `(${why}) — delete it by hand and re-run.`,
+});
+
+/** The version store, in BOTH spellings: git records the REAL path at add
+ *  time, so a symlinked HOME or AIO_VERSIONS_DIR registers under the resolved
+ *  one, and matching only the literal prefix never pruned — the next add then
+ *  failed on "missing but already registered worktree", every time. */
+async function storePrefixes(): Promise<string[]> {
+  const literal = resolve(versionsDir());
+  const real = await Deno.realPath(literal).catch(() => literal);
+  return [...new Set([literal, real])].map((d) => d + SEP);
+}
+
+/** Drop registrations in `root`'s .git that are dead AND live under the
+ *  version store (`versionsDir()`) — each by its exact path, never anything
+ *  else. Dead is: the directory is gone (`prunable`), or a checkout killed
+ *  mid-`git worktree add` — LOCKED for longer than
+ *  {@linkcode STALE_INIT_LOCK_MS} — whose half-written directory goes too.
+ *
+ *  Not `git worktree prune`: that expires EVERY missing entry at once (gc
+ *  waits three months), and `root` may be the developer's own aio checkout —
+ *  one of THEIR worktrees on an unmounted drive or a moved folder lost its
+ *  registration and read "not a git repository" once it came back. A dead
+ *  entry in the store is aio's own and is re-provisioned on demand; anything
+ *  elsewhere is not aio's to forget. @internal */
+export async function pruneStoreRegistrations(
+  root: string,
+): Promise<{ removed: string[]; stuck: Map<string, string> }> {
+  const stores = await storePrefixes();
+  const removed: string[] = [];
+  /** Store paths whose teardown left them in place → why. */
+  const stuck = new Map<string, string>();
+  for (const r of await registrations(root)) {
+    if (!stores.some((d) => resolve(r.path).startsWith(d))) continue;
+    const killedMidAdd = r.lockAgeMs !== null &&
+      r.lockAgeMs > STALE_INIT_LOCK_MS;
+    if (!r.prunable && !killedMidAdd) continue;
+    if (!r.prunable) {
+      // Killed mid-add — but "killed" is not "torn": git may have finished
+      // writing and died before unlocking. Only POSITIVE evidence deletes.
+      const state = await checkoutState(r.path);
+      if (state === "whole") {
+        await git(r.path, ["worktree", "unlock", r.path]);
+        await markLegacy(r.path);
+        continue;
+      }
+      if (state === "unknown") continue; // never delete what we cannot read
+    }
+    // A store path, by the check above — registration and half-checkout.
+    const why = await tearDown(root, r.path);
+    if (why) {
+      stuck.set(resolve(r.path), why);
+      continue;
+    }
+    removed.push(r.path);
+    await Deno.remove(completionMarker(r.path)).catch(() => {
+      // aio-ok: a dead entry usually never got its marker
+    });
+  }
+  return { removed, stuck };
+}
+
 /**
  * Make `ref` available on disk and return its path.
  *
@@ -293,7 +452,7 @@ export async function ensureVersion(
   }
 
   const path = versionPath(ref);
-  const already = await exists(path);
+  let already = await exists(path);
 
   if (!await isClone(root)) {
     // Nothing to cut a worktree from. Say exactly what to do rather than
@@ -307,6 +466,20 @@ export async function ensureVersion(
         `--aio=<path> at a checkout of ${ref}.`,
     };
   }
+
+  // Dead store entries first (a vanished dir, a checkout killed mid-add), then
+  // THIS version's directory: one without mod.ts is a half-written checkout
+  // (21022 of 30000 files, measured), and returning it as provisioned made the
+  // app build against a torn framework — forever, since a tag is never
+  // re-checked. It is removed and provisioned again below.
+  // A dead entry that could not be removed is refused BY NAME here: left to
+  // `settleStoreDir`, its freshly-touched directory read as an add "in flight".
+  const { stuck } = await pruneStoreRegistrations(root);
+  const stuckWhy = stuck.get(resolve(path));
+  if (stuckWhy) return stuckError(path, stuckWhy);
+  const refused = await settleStoreDir(root, path, ref);
+  if (refused) return refused;
+  already = await exists(path);
 
   // A TAG is immutable: provision once, then never touch it again. That is the
   // whole value — the bytes an app was built against cannot change under it.
@@ -372,6 +545,10 @@ export async function ensureVersion(
     if (sha.ok && sha.out) {
       storeRef = `main-${sha.out}`;
       storePath = versionPath(storeRef);
+      const why = stuck.get(resolve(storePath));
+      if (why) return stuckError(storePath, why);
+      const torn = await settleStoreDir(root, storePath, sha.out);
+      if (torn) return torn;
       if (await exists(storePath)) {
         return { ok: true, path: storePath, created: false, ref: storeRef };
       }
@@ -389,18 +566,7 @@ export async function ensureVersion(
     target,
   ]);
   if (!add.ok) {
-    // A stale registration from a deleted directory is the common cause.
-    await git(root, ["worktree", "prune"]);
-    const retry = await git(root, [
-      "worktree",
-      "add",
-      "--detach",
-      storePath,
-      target,
-    ]);
-    if (!retry.ok) {
-      return { ok: false, error: `git worktree add failed: ${retry.out}` };
-    }
+    return { ok: false, error: `git worktree add failed: ${add.out}` };
   }
   if (!await exists(join(storePath, "mod.ts"))) {
     return {
@@ -409,19 +575,147 @@ export async function ensureVersion(
         `provisioned ${ref} at ${storePath} but it has no mod.ts — not an aio checkout`,
     };
   }
+  // Only NOW is it a version: every file is written and git has unlocked it.
+  await Deno.writeTextFile(completionMarker(storePath), `${target}\n`);
   return { ok: true, path: storePath, created: true, ref: storeRef };
 }
 
-/** Remove a provisioned version (its worktree registration too). */
+/** Is a store checkout whole? `"torn"` only on POSITIVE evidence — mod.ts
+ *  absent, or git lists tracked files missing; `"unknown"` when git cannot
+ *  answer (a moved/re-cloned registering repo, "dubious ownership"), which is
+ *  never a reason to delete. */
+async function checkoutState(
+  path: string,
+): Promise<"whole" | "torn" | "unknown"> {
+  if (!await exists(join(path, "mod.ts"))) return "torn";
+  const missing = await git(path, ["ls-files", "--deleted"]);
+  if (!missing.ok) return "unknown";
+  return missing.out === "" ? "whole" : "torn";
+}
+
+/** Mark a checkout finished that an older `am` (or a killed-after-checkout
+ *  add) left without a marker. Best-effort: an unwritable store only means
+ *  the check runs again next time. */
+async function markLegacy(path: string): Promise<void> {
+  const marker = completionMarker(path);
+  if (await exists(marker)) return;
+  await Deno.writeTextFile(marker, "legacy\n").catch(() => {
+    // aio-ok: re-checked next time; nothing depends on the marker existing
+  });
+}
+
+/** Decide what an EXISTING store directory is, before anyone trusts it:
+ *
+ *  - being written right now — a lock younger than
+ *    {@linkcode STALE_INIT_LOCK_MS}, or a young directory git has not
+ *    registered yet → refused (never torn down under another `am`);
+ *  - finished — its {@linkcode completionMarker} is there and it is unlocked;
+ *  - a LEGACY checkout (an `am` from before the marker, or one whose lock
+ *    went stale) — has mod.ts, and `git ls-files --deleted` finds every
+ *    tracked file PRESENT (content is not compared) → unlocked, marked now
+ *    and kept: a complete old checkout is never torn down. One git cannot
+ *    inspect at all is kept too, with a note;
+ *  - anything else — a torn checkout → unregistered (`-f -f` takes a locked
+ *    one) and deleted, so the caller provisions it afresh.
+ *
+ *  Null = usable or gone; an error result = refused. */
+async function settleStoreDir(
+  root: string,
+  path: string,
+  target: string,
+): Promise<EnsureResult | null> {
+  const st = await Deno.lstat(path).catch(() => null);
+  if (!st) return null;
+  // The lock is read through the checkout's OWN `.git` file, not through
+  // `root`'s registrations: the store is shared by every aio clone on the
+  // machine (the installed one, a dev checkout), and a version another clone
+  // is writing — or wrote — is registered THERE.
+  const gitFile = await Deno.readTextFile(join(path, ".git")).catch(() => null);
+  const gitdirRaw = gitFile
+    ? /^gitdir:\s*(.+)$/m.exec(gitFile)?.[1]
+    : undefined;
+  const gitdir = gitdirRaw ? resolve(path, gitdirRaw.trim()) : null;
+  const lock = gitdir
+    ? await Deno.stat(join(gitdir, "locked")).catch(() => null)
+    : null;
+  // `ageSince`: a stamp from the FUTURE (the clock stepped back) is OLD —
+  // raw subtraction said "started -3600s ago" and refused forever.
+  const since = (t: Date | null | undefined) =>
+    t ? ageSince(t.getTime()) : Infinity;
+  // Locked: git is (or was) writing it. No `.git` file yet: git has just made
+  // the directory and not linked it — young means in flight too.
+  const age = lock ? since(lock.mtime) : gitdir ? null : since(st.mtime);
+  if (age !== null && age <= STALE_INIT_LOCK_MS) {
+    return {
+      ok: false,
+      error: `${path} is being provisioned right now (started ` +
+        `${Math.round(age / 1000)}s ago) — retry in a moment.`,
+    };
+  }
+  const marker = completionMarker(path);
+  const hasMod = await exists(join(path, "mod.ts"));
+  if (!lock && hasMod && await exists(marker)) return null;
+  // Everything else is judged on EVIDENCE, and only positive evidence of a
+  // torn checkout deletes anything. A `git` that cannot answer — the clone
+  // that registered this checkout was moved, re-cloned or reinstalled, or
+  // "dubious ownership" — is NOT evidence: that is exactly how a complete
+  // v1.0.9 checkout was deleted, and with the tag gone upstream (or offline)
+  // it could never come back.
+  const state = hasMod ? await checkoutState(path) : "torn";
+  if (state === "whole") {
+    if (lock) await git(path, ["worktree", "unlock", path]);
+    await markLegacy(path);
+    return null;
+  }
+  if (state === "unknown") {
+    sayErr(
+      `am: note: ${path} has mod.ts but git cannot inspect it (its clone ` +
+        `moved or was re-installed?) — kept as a finished checkout, as ` +
+        `before. \`am pin ${basename(path)}\` after removing it re-provisions.`,
+    );
+    await markLegacy(path);
+    return null;
+  }
+  // Torn. Tear down only what can be provisioned again from `root` —
+  // otherwise refuse, loudly, and leave the directory where it is.
+  const canRebuild = (await git(root, [
+    "rev-parse",
+    "--verify",
+    "--quiet",
+    `${target}^{commit}`,
+  ])).ok;
+  if (!canRebuild) {
+    return {
+      ok: false,
+      error: `${path} is an incomplete checkout (tracked files are missing), ` +
+        `and ${root} does not have ${target} to provision it again — it was ` +
+        `left in place. Fetch the tag (git -C ${root} fetch --tags origin) ` +
+        `and re-run.`,
+    };
+  }
+  const stuck = await tearDown(root, path);
+  if (stuck) return stuckError(path, stuck);
+  await Deno.remove(marker).catch(() => {
+    // aio-ok: a torn checkout usually has no marker
+  });
+  return null;
+}
+
+/** Remove a provisioned version (its worktree registration too). No
+ *  repo-wide `git worktree prune` here: `root` may be the developer's own
+ *  checkout, and that call forgets every worktree of theirs whose directory
+ *  is momentarily missing. `-f -f` removes this one even when locked. */
 export async function removeVersion(
   root: string,
   ref: string,
 ): Promise<boolean> {
   const path = versionPath(ref);
   if (await isClone(root)) {
-    await git(root, ["worktree", "remove", "--force", path]);
-    await git(root, ["worktree", "prune"]);
+    await git(root, ["worktree", "remove", "-f", "-f", path]);
   }
+  await Deno.remove(completionMarker(path)).catch(() => {
+    // aio-ok: a legacy or torn version has none
+  });
   try {
     await Deno.remove(path, { recursive: true });
   } catch { /* already gone */ }

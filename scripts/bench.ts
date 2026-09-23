@@ -357,6 +357,83 @@ const bootOpts = {
   record("overlay-write-loop-10k", "ms/op", samples);
 }
 
+// ── 8. SSR: stream a 10k-node page whose root is a Provider ───────────
+// A Provider renders a Fragment, and the stream writer used to buffer a
+// Fragment WHOLE: the first byte of such a page waited for its last component
+// (measured ~18 ms on this page, vs ~1 ms for an element root). Fragments
+// stream now; `ssr-provider-ttfb` keeps them streaming, and
+// `ssr-provider-stream-10k` keeps the streaming cheap.
+{
+  const { createContext, Fragment, h, renderToStream } = await import(
+    "../src/air.ts"
+  );
+  const Ctx = createContext(0);
+  const Row = (p: { i: number }) =>
+    h("li", { class: "r" }, "item ", String(p.i));
+  const page = () =>
+    h(
+      Ctx.Provider,
+      { value: 1 },
+      h(
+        "div",
+        { id: "app" },
+        ...Array.from({ length: 100 }, (_, j) =>
+          h(
+            "ul",
+            { "data-j": j },
+            ...Array.from({ length: 50 }, (_, i) => h(Row, { i: j * 100 + i })),
+          )),
+      ),
+    );
+  const whole: number[] = [];
+  const first: number[] = [];
+  for (let i = 0; i < 25; i++) { // first 5 are warmup
+    let t0 = performance.now();
+    for await (const _ of renderToStream(page())) { /* drain */ }
+    if (i >= 5) whole.push(performance.now() - t0);
+    const g = renderToStream(page());
+    t0 = performance.now();
+    await g.next();
+    if (i >= 5) first.push(performance.now() - t0);
+    await g.return();
+  }
+  record("ssr-provider-stream-10k", "ms/op", whole);
+  record("ssr-provider-ttfb", "ms", first);
+
+  // A chain of 60 nested Fragments (components returning Fragments, stacked
+  // Providers), as a RATIO to the same chain built of <span>s, timed in the
+  // same sample (each side the best of 3). A ratio is machine-independent, so
+  // its floor can be tight — an absolute ms floor at 2x p10 let a +42%
+  // slowdown of the Fragment path through. Measured ~0.8: a streamed Fragment
+  // costs less than an element (no tag to write). Writing its region through
+  // a helper generator (`yield* _streamRegion()`) cost ~1.3 here, and 1.0.9's
+  // buffered Fragment ~1.1.
+  const Item = (p: { n: number }) => h("li", null, h("b", null, "x"), p.n);
+  const nest = (d: number, tag: unknown): ReturnType<typeof h> =>
+    d === 0
+      ? h(Item, { n: 0 })
+      : h(tag as string, null, nest(d - 1, tag), h(Item, { n: d }));
+  const time = async (tag: unknown) => {
+    const t0 = performance.now();
+    for (let k = 0; k < 10; k++) {
+      for await (const _ of renderToStream(h("div", null, nest(60, tag)))) {
+        /* drain */
+      }
+    }
+    return performance.now() - t0;
+  };
+  const ratio: number[] = [];
+  for (let i = 0; i < 25; i++) { // first 5 are warmup
+    let f = Infinity, e = Infinity;
+    for (let j = 0; j < 3; j++) {
+      f = Math.min(f, await time(Fragment));
+      e = Math.min(e, await time("span"));
+    }
+    if (i >= 5) ratio.push(f / e);
+  }
+  record("ssr-fragment-nest-ratio", "x", ratio);
+}
+
 // ── report ────────────────────────────────────────────────────────────
 const fmt = (v: number) => v >= 100 ? v.toFixed(1) : v.toFixed(3);
 console.log(

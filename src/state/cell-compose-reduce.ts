@@ -887,7 +887,17 @@ export function buildRootReducer(
         }
       }
     }
-    if (listeners) {
+    // A refused SYNC OP has no reactions. Its owner's refusal (validate,
+    // machine guard, disabled cell) is answered `op-rejected` and the op is
+    // deleted from the op-log — so a listener that still reacted kept a
+    // change for an op that, on the origin, on every peer and after the next
+    // boot, never happened (a tally counting a refused add, until a restart
+    // silently took it back). Every other action keeps what 1.0.9 did: its
+    // listeners run whether or not the owner refused (docs/state/
+    // composition.md), and replay re-runs the same decision.
+    const refusedOp = ownerRefusal !== undefined &&
+      (action as { _syncOp?: unknown })._syncOp === true;
+    if (listeners && !refusedOp) {
       for (const listener of listeners) {
         if (disabledCells.has(listener.__aio.id)) continue;
         const result = reduceCell(listener, currentState, action, ctx);

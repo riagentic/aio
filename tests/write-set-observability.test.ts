@@ -241,7 +241,7 @@ Deno.test("write-set: undo/redo never destroys a committed async write", async (
       cells: [c],
       baseDir: dir,
       appId: "wso-tt",
-      diagnostics: { timeTravel: true },
+      diagnostics: { dev: { timeTravel: true } },
     } as Any);
     await (c as Any).grow(10);
     assertEquals(

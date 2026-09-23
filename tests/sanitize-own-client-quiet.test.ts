@@ -77,14 +77,17 @@ Deno.test("sanitize: a REAL trusted field still warns, by name", () => {
       const action: Record<string, unknown> = {
         type: "bare:ok",
         _user: { id: "root", role: "admin" },
+        _syncId: "op-forged",
         payload: { _callId: "x", _origin: "read" },
       };
       sanitizeClientAction(action, via);
       assertEquals(action._user, undefined);
+      assertEquals(action._syncId, undefined);
       assertEquals(action.payload, {});
       assertEquals(warns.length, 1, `${via}: ${warns.join("\n")}`);
       assert(warns[0]!.includes("_user"), warns[0]);
       assert(warns[0]!.includes("payload._origin"), warns[0]);
+      assert(warns[0]!.includes("_syncId"), warns[0]);
       assert(
         !warns[0]!.includes("_callId"),
         `the expected field must not be listed among the forged ones: ${
