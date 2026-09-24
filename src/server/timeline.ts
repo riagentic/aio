@@ -121,20 +121,46 @@ export function diffState(prev: unknown, next: unknown): DiffEntry[] {
     // and every non-plain object — Date, Map, Set, class instances).
     const bothArr = Array.isArray(a) && Array.isArray(b);
     const bothObj = !bothArr && isPlainObj(a) && isPlainObj(b);
-    if (depth < MAX_DEPTH && (bothArr || bothObj)) {
-      const keys = new Set<string>([
-        ...Object.keys(a as object),
-        ...Object.keys(b as object),
-      ]);
+    if (depth < MAX_DEPTH && bothArr) {
+      // An index loop, not a key union: this runs on EVERY commit, and a
+      // one-row edit in a 131k-row array built 131k key strings, a 131k Set
+      // and 131k path strings (≈30 ms, prod included) to find the one index
+      // that moved. Identity is checked BEFORE a key or a path is built, so
+      // an unchanged row costs one `!==`. Output is the key-union walk's —
+      // pinned by tests/timeline-diff-oracle.test.ts against it.
+      const aa = a as unknown[], bb = b as unknown[];
+      const n = Math.max(aa.length, bb.length);
+      for (let i = 0; i < n; i++) {
+        const x = aa[i], y = bb[i];
+        if (x === y) continue; // unchanged (or a hole on both sides)
+        if (out.length >= MAX_DIFF_ENTRIES) {
+          truncated = true; // a REAL change is being dropped
+          break;
+        }
+        const k = String(i);
+        segs.push(k);
+        walk(x, y, path ? `${path}.${k}` : k, dotted, depth + 1);
+        segs.pop();
+      }
+      return;
+    }
+    if (depth < MAX_DEPTH && bothObj) {
+      const ao = a as Record<string, unknown>,
+        bo = b as Record<string, unknown>;
+      const keys = new Set<string>([...Object.keys(ao), ...Object.keys(bo)]);
       for (const k of keys) {
+        // Unchanged keys are skipped BEFORE the cap check, so the "truncated"
+        // marker means a real change was dropped — never merely that more
+        // (identical) keys followed the 200th change.
+        if (ao[k] === bo[k]) continue;
         if (out.length >= MAX_DIFF_ENTRIES) {
           truncated = true;
           break;
         }
         segs.push(k);
         walk(
-          (a as Record<string, unknown>)[k],
-          (b as Record<string, unknown>)[k],
+          ao[k],
+          bo[k],
           path ? `${path}.${k}` : k,
           dotted || k.includes("."),
           depth + 1,

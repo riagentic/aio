@@ -120,7 +120,7 @@ Deno.test("aio26: connection-scoped state is reset when the socket reconnects", 
   const fnIdx = script.indexOf("function connectUDS()");
   assertEquals(fnIdx > -1, true, "script must define connectUDS");
   assertEquals(
-    script.slice(fnIdx, connectIdx).includes("buf = ''"),
+    script.slice(fnIdx, connectIdx).includes("lineBuf.reset()"),
     true,
     "connectUDS must reset the read buffer before connecting",
   );

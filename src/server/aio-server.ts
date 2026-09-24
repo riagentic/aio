@@ -420,6 +420,7 @@ export async function setupTransport<S, A>(
   // (`BudgetLedger`), and the broadcasters' `getUIState` below is the identity
   // `warnBigFullState` records breaches under, so each is bound to it.
   const _startedAt = Date.now();
+  // No race: aio.ts always passes `_budgetLedger`; the fallback serves a bare caller only.
   const _budgets = deps.budgets ?? budgetsFor();
   const _measureAndReportBudgets = () => {
     _budgets.measureCellStates(getState());

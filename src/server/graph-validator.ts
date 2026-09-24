@@ -1,6 +1,6 @@
 // src/graph-validator.ts
-import { dirname, fromFileUrl, join, resolve } from "@std/path";
-import { readDenoJsonSync } from "./deno-json.ts";
+import { fromFileUrl, join, resolve, toFileUrl } from "@std/path";
+import { locateDenoJsonAbove } from "./deno-json.ts";
 import { resolveShare, type ShareRoot } from "./app-dirs.ts";
 import { ESBUILD_SPEC } from "../build/esbuild-shared.ts";
 import {
@@ -519,8 +519,11 @@ export type ProdGraphCheck = (
 ) => Promise<{ errors: GraphError[]; ms: number; cached: boolean }>;
 
 /** Build a {@link ProdGraphCheck} for the app whose UI lives under
- *  `absBaseDir`. Resolution mirrors the build's: deno.json is the app's own
- *  (or its parent's), the framework is wherever THIS module runs from. */
+ *  `absBaseDir`. Resolution mirrors the build's: the project root is the
+ *  directory of the nearest deno.json above the UI (`locateDenoJsonAbove`, the
+ *  same walk the runtime reads its identity with, and the directory
+ *  `deno task build` runs in), the framework is wherever THIS module runs
+ *  from. */
 export function createProdGraphCheck(opts: {
   absBaseDir: string;
   /** The shell the app will really run in — the evaluation presents its UA. */
@@ -547,9 +550,14 @@ async function prodGraphErrors(opts: {
   debug?: (msg: string) => void;
 }): Promise<GraphError[]> {
   const { absBaseDir, uiEntry } = opts;
-  const dj = readDenoJsonSync(absBaseDir) ??
-    readDenoJsonSync(resolve(absBaseDir, ".."));
-  const root = dj ? dirname(dj.path) : absBaseDir;
+  // ONE decider for "project root" (remote-desktop field report §1): this used to look
+  // in the UI folder and ONE folder up only, so an entry at `src/agent/app.ts`
+  // got root = src/agent/, no imports and no node_modules — esbuild could not
+  // resolve `immer` from a release-pinned framework (which has no
+  // node_modules of its own) and the dev server served the diagnostic page for
+  // an app the real build compiles fine.
+  const dj = locateDenoJsonAbove(toFileUrl(join(absBaseDir, "/")));
+  const root = dj ? resolve(fromFileUrl(dj.dir)) : absBaseDir;
   const config = dj?.config ?? {};
   const frameworkBase = new URL("..", import.meta.url);
   const isRemote = frameworkBase.protocol !== "file:";
@@ -610,13 +618,26 @@ async function prodGraphErrors(opts: {
           `end of ${uiEntry}.`,
       );
     }
-    return refusal(
-      `\`deno task build\` would fail on this graph — esbuild: ${
-        bundle.errors.join("; ")
-      }`,
-      "the prod bundle is built from the same files dev serves; whatever " +
-        "esbuild cannot resolve here, the build cannot either.",
-    );
+    // The claim "`deno task build` would fail" is only true when this bundle
+    // was resolved the way the build resolves it — from the app's own
+    // deno.json. With none found there is no build to speak for: say what
+    // WAS tried instead of predicting a build failure that may not happen.
+    const esb = bundle.errors.join("; ");
+    return dj
+      ? refusal(
+        `\`deno task build\` would fail on this graph — esbuild (project ` +
+          `root ${root}): ${esb}`,
+        "the prod bundle is built from the same files dev serves; whatever " +
+          "esbuild cannot resolve here, the build cannot either.",
+      )
+      : refusal(
+        `the client bundle cannot be built: no deno.json or deno.jsonc in ` +
+          `${absBaseDir} or the four folders above it, so it was bundled ` +
+          `from ${absBaseDir} with no imports and no node_modules — ` +
+          `esbuild: ${esb}`,
+        "run the app from a project whose deno.json sits at most four " +
+          "folders above the UI entry (the build runs from that folder).",
+      );
   }
   const verdict = await judgeClientBundle(bundle, root, { shell: opts.shell });
   opts.debug?.(

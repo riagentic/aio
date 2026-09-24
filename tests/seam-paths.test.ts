@@ -22,6 +22,7 @@ import { assert, assertEquals } from "@std/assert";
 import { join, relative } from "@std/path";
 import { stopChild } from "./stop-child.ts";
 import { childCoverageDir } from "../src/testing/temp-dir.ts";
+import { permissiveUmask } from "./permissive-umask.ts";
 
 const ROOT = new URL("..", import.meta.url).pathname;
 const dec = new TextDecoder();
@@ -212,198 +213,207 @@ const mode = async (p: string) => (await Deno.stat(p)).mode! & 0o777;
 Deno.test({
   name: "seam: an app writes under its two homes and nowhere else",
   ignore: Deno.build.os === "windows", // POSIX modes + $XDG_RUNTIME_DIR
-  async fn() {
-    const sb = await sandbox();
-    const port = freePort();
-    const proc = spawnApp(sb, [`--port=${port}`]);
+  fn: () =>
+    permissiveUmask(async () => {
+      const sb = await sandbox();
+      const port = freePort();
+      const proc = spawnApp(sb, [`--port=${port}`]);
 
-    let log = "";
-    const drain = async (s: ReadableStream<Uint8Array>) => {
-      for await (const c of s) log += dec.decode(c);
-    };
-    drain(proc.stdout).catch(() => {});
-    drain(proc.stderr).catch(() => {});
+      let log = "";
+      const drain = async (s: ReadableStream<Uint8Array>) => {
+        for await (const c of s) log += dec.decode(c);
+      };
+      drain(proc.stdout).catch(() => {});
+      drain(proc.stderr).catch(() => {});
 
-    try {
-      await waitFor(async () => {
-        const r = await fetch(`http://localhost:${port}/__aio/trojan/state`);
-        return r.ok ? await r.json() : null;
-      });
-      // Dispatch for real: a method that persists, journals, and broadcasts.
-      const r = await fetch(`http://localhost:${port}/__aio/trojan/dispatch`, {
-        method: "POST",
-        headers: { "content-type": "application/json", "X-AIO": "1" },
-        body: JSON.stringify({ type: "probe:inc", payload: {} }),
-      });
-      const body = await r.text(); // read once — the message must not re-read it
-      assert(r.ok, `dispatch failed: ${r.status} ${body}`);
+      try {
+        await waitFor(async () => {
+          const r = await fetch(`http://localhost:${port}/__aio/trojan/state`);
+          return r.ok ? await r.json() : null;
+        });
+        // Dispatch for real: a method that persists, journals, and broadcasts.
+        const r = await fetch(
+          `http://localhost:${port}/__aio/trojan/dispatch`,
+          {
+            method: "POST",
+            headers: { "content-type": "application/json", "X-AIO": "1" },
+            body: JSON.stringify({ type: "probe:inc", payload: {} }),
+          },
+        );
+        const body = await r.text(); // read once — the message must not re-read it
+        assert(r.ok, `dispatch failed: ${r.status} ${body}`);
 
-      // SIGTERM, not kill: the graceful path is the one that flushes, and a
-      // flush that lands in the wrong directory is exactly what this catches.
-      await stopChild(proc, {
-        label: "the app under test (persist + journal)",
-        log: () => log,
-      });
+        // SIGTERM, not kill: the graceful path is the one that flushes, and a
+        // flush that lands in the wrong directory is exactly what this catches.
+        await stopChild(proc, {
+          label: "the app under test (persist + journal)",
+          log: () => log,
+        });
 
-      // ① durable: the app's home exists and holds the state
-      assert(
-        (await Deno.stat(join(sb.appHome, "data", "state.db"))).isFile,
-        `no state.db under ${sb.appHome}/data — where did it go?\n${
-          log.slice(-2000)
-        }`,
-      );
+        // ① durable: the app's home exists and holds the state
+        assert(
+          (await Deno.stat(join(sb.appHome, "data", "state.db"))).isFile,
+          `no state.db under ${sb.appHome}/data — where did it go?\n${
+            log.slice(-2000)
+          }`,
+        );
 
-      // ② + ③: everything created inside the sandbox is under one of the two
-      // homes. This is the whole gate in one assertion.
-      const stray = strays(sb);
-      assertEquals(
-        stray,
-        [],
-        `an aio app must write ONLY under ~/.${APP_ID} and ` +
-          `$XDG_RUNTIME_DIR/aio — these appeared elsewhere:\n  ${
-            stray.join("\n  ")
-          }\n${log.slice(-2000)}`,
-      );
+        // ② + ③: everything created inside the sandbox is under one of the two
+        // homes. This is the whole gate in one assertion.
+        const stray = strays(sb);
+        assertEquals(
+          stray,
+          [],
+          `an aio app must write ONLY under ~/.${APP_ID} and ` +
+            `$XDG_RUNTIME_DIR/aio — these appeared elsewhere:\n  ${
+              stray.join("\n  ")
+            }\n${log.slice(-2000)}`,
+        );
 
-      const t = tmpStrays(sb);
-      assertEquals(
-        t.ours,
-        [],
-        `nothing of ours belongs in shared /tmp. New entries this run: ${
-          t.all.join(", ") || "(none)"
-        }`,
-      );
+        const t = tmpStrays(sb);
+        assertEquals(
+          t.ours,
+          [],
+          `nothing of ours belongs in shared /tmp. New entries this run: ${
+            t.all.join(", ") || "(none)"
+          }`,
+        );
 
-      // ⑤ modes — the part that makes the location matter. $HOME is 0755 on
-      // most distros, so "moved it into the home directory" is not privacy.
-      assertEquals(
-        await mode(join(sb.appHome, "data")),
-        0o700,
-        "data/ holds auth.db, the TLS key and app.key — owner-only",
-      );
-      assertEquals(
-        await mode(join(sb.run, "aio")),
-        0o700,
-        "the runtime dir holds the control socket — owner-only, or any local " +
-          "user can connect and dispatch into this app",
-      );
-      // The journal records action payloads verbatim (passphrases included —
-      // see redactActions), so it is a secret file, not a log.
-      const journal = join(sb.appHome, "data", "journal");
-      assert(
-        await Deno.stat(journal).catch(() => null),
-        "the journal was never written — the mode assertion below proves nothing",
-      );
-      assertEquals(await mode(journal), 0o600, "the journal is owner-only");
-      // `app.key` and `data/tls` only exist under --expose; the second test
-      // covers those.
-    } finally {
-      // Belt and braces: the stop above already ran on the happy path; this
-      // is the one that runs when an assertion threw first. Bounded too — a
-      // cleanup that hangs hides the assertion that failed.
-      await stopChild(proc, { label: "cleanup", graceMs: 5_000 }).catch(
-        () => {},
-      );
-      await Deno.remove(sb.root, { recursive: true }).catch(() => {});
-    }
-  },
+        // ⑤ modes — the part that makes the location matter. $HOME is 0755 on
+        // most distros, so "moved it into the home directory" is not privacy.
+        assertEquals(
+          await mode(join(sb.appHome, "data")),
+          0o700,
+          "data/ holds auth.db, the TLS key and app.key — owner-only",
+        );
+        assertEquals(
+          await mode(join(sb.run, "aio")),
+          0o700,
+          "the runtime dir holds the control socket — owner-only, or any local " +
+            "user can connect and dispatch into this app",
+        );
+        // The journal records action payloads verbatim (passphrases included —
+        // see redactActions), so it is a secret file, not a log.
+        const journal = join(sb.appHome, "data", "journal");
+        assert(
+          await Deno.stat(journal).catch(() => null),
+          "the journal was never written — the mode assertion below proves nothing",
+        );
+        assertEquals(await mode(journal), 0o600, "the journal is owner-only");
+        // `app.key` and `data/tls` only exist under --expose; the second test
+        // covers those.
+      } finally {
+        // Belt and braces: the stop above already ran on the happy path; this
+        // is the one that runs when an assertion threw first. Bounded too — a
+        // cleanup that hangs hides the assertion that failed.
+        await stopChild(proc, { label: "cleanup", graceMs: 5_000 }).catch(
+          () => {},
+        );
+        await Deno.remove(sb.root, { recursive: true }).catch(() => {});
+      }
+    }),
 });
 
 Deno.test({
   name: "seam: the secrets --expose creates are unreachable by other users",
   ignore: Deno.build.os === "windows",
-  async fn() {
-    // `app.key` and the TLS private key only exist on the exposed path — which
-    // is precisely the path where the mode matters, because it is the one that
-    // assumes a hostile network. Asserted by POLLING the filesystem rather than
-    // by talking to the app: TLS moves the control endpoint to a second port,
-    // and this test is about files, not transport.
-    const sb = await sandbox();
-    const port = freePort();
-    const proc = spawnApp(sb, ["--expose", `--port=${port}`]);
-    let log = "";
-    const drain = async (s: ReadableStream<Uint8Array>) => {
-      for await (const c of s) log += dec.decode(c);
-    };
-    drain(proc.stdout).catch(() => {});
-    drain(proc.stderr).catch(() => {});
+  fn: () =>
+    permissiveUmask(async () => {
+      // `app.key` and the TLS private key only exist on the exposed path — which
+      // is precisely the path where the mode matters, because it is the one that
+      // assumes a hostile network. Asserted by POLLING the filesystem rather than
+      // by talking to the app: TLS moves the control endpoint to a second port,
+      // and this test is about files, not transport.
+      const sb = await sandbox();
+      const port = freePort();
+      const proc = spawnApp(sb, ["--expose", `--port=${port}`]);
+      let log = "";
+      const drain = async (s: ReadableStream<Uint8Array>) => {
+        for await (const c of s) log += dec.decode(c);
+      };
+      drain(proc.stdout).catch(() => {});
+      drain(proc.stderr).catch(() => {});
 
-    const appKey = join(sb.appHome, "data", "app.key");
-    const tlsDir = join(sb.appHome, "data", "tls");
-    try {
-      // Wait for the FILES, not for the directory that will hold them.
-      // `data/tls/` is created before openssl writes into it, so waiting on
-      // the directory and then stopping the child raced the write: under a
-      // loaded full-suite run the app was killed between `mkdir tls/` and
-      // `tls-cert.pem`, and the assertion below read "no such file" as a
-      // security failure. What this test is about is the MODE of those files,
-      // which cannot be checked before they exist.
-      await waitFor(async () => {
-        const found = await Promise.all(
-          [appKey, join(tlsDir, "tls-key.pem"), join(tlsDir, "tls-cert.pem")]
-            .map((p) => Deno.stat(p).catch(() => null)),
+      const appKey = join(sb.appHome, "data", "app.key");
+      const tlsDir = join(sb.appHome, "data", "tls");
+      try {
+        // Wait for the FILES, not for the directory that will hold them.
+        // `data/tls/` is created before openssl writes into it, so waiting on
+        // the directory and then stopping the child raced the write: under a
+        // loaded full-suite run the app was killed between `mkdir tls/` and
+        // `tls-cert.pem`, and the assertion below read "no such file" as a
+        // security failure. What this test is about is the MODE of those files,
+        // which cannot be checked before they exist.
+        await waitFor(async () => {
+          const found = await Promise.all(
+            [appKey, join(tlsDir, "tls-key.pem"), join(tlsDir, "tls-cert.pem")]
+              .map((p) => Deno.stat(p).catch(() => null)),
+          );
+          return found.every(Boolean) ? true : null;
+        });
+        await stopChild(proc, {
+          label: "the app under test (--expose)",
+          log: () => log,
+        });
+
+        assertEquals(
+          await mode(appKey),
+          0o600,
+          "app.key IS the credential for an exposed app",
         );
-        return found.every(Boolean) ? true : null;
-      });
-      await stopChild(proc, {
-        label: "the app under test (--expose)",
-        log: () => log,
-      });
+        assertEquals(
+          await mode(tlsDir),
+          0o700,
+          "data/tls holds the private key",
+        );
+        const keyMode = await mode(join(tlsDir, "tls-key.pem"));
+        assertEquals(
+          keyMode & 0o077,
+          0,
+          `the TLS private key is reachable by group/other ` +
+            `(${
+              keyMode.toString(8)
+            }) — openssl writes with the process umask, ` +
+            `so the mode has to be stated where the key is created`,
+        );
+        // The cert is public by definition; only its existence matters here.
+        assert(await Deno.stat(join(tlsDir, "tls-cert.pem")));
 
-      assertEquals(
-        await mode(appKey),
-        0o600,
-        "app.key IS the credential for an exposed app",
-      );
-      assertEquals(
-        await mode(tlsDir),
-        0o700,
-        "data/tls holds the private key",
-      );
-      const keyMode = await mode(join(tlsDir, "tls-key.pem"));
-      assertEquals(
-        keyMode & 0o077,
-        0,
-        `the TLS private key is reachable by group/other ` +
-          `(${keyMode.toString(8)}) — openssl writes with the process umask, ` +
-          `so the mode has to be stated where the key is created`,
-      );
-      // The cert is public by definition; only its existence matters here.
-      assert(await Deno.stat(join(tlsDir, "tls-cert.pem")));
+        // The machine-wide root. Its private key can mint a trusted certificate
+        // for EVERY aio app on this machine for the next ten years, and a person
+        // is being asked to put its public half in their browser — which makes it
+        // the most sensitive file the framework writes, more than any one app's
+        // leaf key. openssl writes with the process umask, so the mode has to be
+        // stated where the key is created, and proven here.
+        const caDir = join(sb.root, "home", ".aio", "ca");
+        assertEquals(await mode(caDir), 0o700, "the root CA dir is owner-only");
+        const rootKeyMode = await mode(join(caDir, "aio-root-key.pem"));
+        assertEquals(
+          rootKeyMode & 0o077,
+          0,
+          `the aio root key is reachable by group/other ` +
+            `(${rootKeyMode.toString(8)})`,
+        );
 
-      // The machine-wide root. Its private key can mint a trusted certificate
-      // for EVERY aio app on this machine for the next ten years, and a person
-      // is being asked to put its public half in their browser — which makes it
-      // the most sensitive file the framework writes, more than any one app's
-      // leaf key. openssl writes with the process umask, so the mode has to be
-      // stated where the key is created, and proven here.
-      const caDir = join(sb.root, "home", ".aio", "ca");
-      assertEquals(await mode(caDir), 0o700, "the root CA dir is owner-only");
-      const rootKeyMode = await mode(join(caDir, "aio-root-key.pem"));
-      assertEquals(
-        rootKeyMode & 0o077,
-        0,
-        `the aio root key is reachable by group/other ` +
-          `(${rootKeyMode.toString(8)})`,
-      );
-
-      // Exposing an app must not expose it on the FILESYSTEM either.
-      const stray = strays(sb);
-      assertEquals(
-        stray,
-        [],
-        `strays under --expose:\n  ${stray.join("\n  ")}\n${log.slice(-2000)}`,
-      );
-      const t = tmpStrays(sb);
-      assertEquals(t.ours, [], `ours in /tmp: ${t.all.join(", ")}`);
-    } finally {
-      // Belt and braces: the stop above already ran on the happy path; this
-      // is the one that runs when an assertion threw first. Bounded too — a
-      // cleanup that hangs hides the assertion that failed.
-      await stopChild(proc, { label: "cleanup", graceMs: 5_000 }).catch(
-        () => {},
-      );
-      await Deno.remove(sb.root, { recursive: true }).catch(() => {});
-    }
-  },
+        // Exposing an app must not expose it on the FILESYSTEM either.
+        const stray = strays(sb);
+        assertEquals(
+          stray,
+          [],
+          `strays under --expose:\n  ${stray.join("\n  ")}\n${
+            log.slice(-2000)
+          }`,
+        );
+        const t = tmpStrays(sb);
+        assertEquals(t.ours, [], `ours in /tmp: ${t.all.join(", ")}`);
+      } finally {
+        // Belt and braces: the stop above already ran on the happy path; this
+        // is the one that runs when an assertion threw first. Bounded too — a
+        // cleanup that hangs hides the assertion that failed.
+        await stopChild(proc, { label: "cleanup", graceMs: 5_000 }).catch(
+          () => {},
+        );
+        await Deno.remove(sb.root, { recursive: true }).catch(() => {});
+      }
+    }),
 });

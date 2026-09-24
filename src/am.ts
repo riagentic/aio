@@ -94,8 +94,11 @@ import { cmdEval } from "./am/am-cmd-eval.ts";
 import { cmdLab } from "./am/am-cmd-lab.ts";
 import {
   adoptRunningHome,
+  ambiguousHomeError,
   amProfileHome,
+  appIsAmbiguous,
   argsForHandler,
+  componentLabels,
   parseGlobalFlags,
   resolveAmAppId,
   splitAppProfile,
@@ -314,6 +317,14 @@ export function sameFile(a: string, b: string): boolean {
   return a === b || real(a) === real(b);
 }
 
+/** The process verbs whose first positional names a COMPONENT (`processPlan`). */
+const PLAN_VERBS: ReadonlySet<string> = new Set([
+  "start",
+  "stop",
+  "restart",
+  "status",
+]);
+
 /** Verbs whose first positional may name the target as `myapp@dev`. */
 const PROFILE_POSITIONAL_VERBS: ReadonlySet<string> = new Set([
   "start",
@@ -410,12 +421,40 @@ async function main(): Promise<void> {
       }
     }
   }
+  // `help` / `--version` act on no app, so they bind no home: in a project
+  // that declares components there is no ONE app to bind it for, and asking
+  // refused them (remote-desktop field report §2).
+  const meta = flags.help || command === "help" ||
+    /^--?(version|V)$/i.test(command) || command === "version";
   // `--profile=<name|path>` (and its path-only alias `--home=<dir>`) target
   // that instance's data home. Bound here, once, before any command resolves
   // a lock — see `targetHome`.
-  if (flags.home !== undefined || flags.profile !== undefined) {
+  if (meta) {
+    // nothing to bind — see above
+  } else if (flags.home !== undefined || flags.profile !== undefined) {
     if (flags.home === "") {
       outError("--home needs a directory: --home=<dir>", detectMode(flags));
+      Deno.exit(1);
+    }
+    // A profile is ONE app's instance. A process verb whose positional names
+    // a component (`am stop agent --profile=dev`) has named it — the same
+    // target as `agent@dev`. With no component named in a project of several,
+    // there is no one app: refused HERE with the fix, never through
+    // `resolveAmAppId`'s refusal, which recommends `am stop | am status` —
+    // the very commands being refused.
+    if (appIsAmbiguous(flags.app) && PLAN_VERBS.has(command)) {
+      const labels = componentLabels();
+      const i = args.findIndex((a) => !a.startsWith("-"));
+      if (i !== -1 && labels.includes(args[i]!)) {
+        flags.app = args[i]!;
+        args.splice(i, 1);
+      }
+    }
+    if (appIsAmbiguous(flags.app)) {
+      outError(
+        ambiguousHomeError(flags, componentLabels()),
+        detectMode(flags),
+      );
       Deno.exit(1);
     }
     const appId = resolveAmAppId(flags.app);
@@ -428,10 +467,16 @@ async function main(): Promise<void> {
       Deno.exit(1);
     }
     targetHome(appId, t.home!, t.profile);
-  } else {
+  } else if (!appIsAmbiguous(flags.app)) {
     // No `--home`: follow the instance that is actually running, if there is
     // exactly one. Bound in the same place and for the same reason — before
     // any command resolves a lock or a directory. See `adoptRunningHome`.
+    //
+    // LAZY in a project that declares components and got no `--app`: there is
+    // no one app to follow, and resolving one here refused EVERY command —
+    // `help`, and the project-wide `am start | stop | restart | status` the
+    // refusal itself recommends (remote-desktop field report §2). A verb that acts on one
+    // app still resolves it itself, and is refused there with the named fix.
     adoptRunningHome(resolveAmAppId(flags.app));
   }
   // `am <anything> --help` answers with usage, never with a command result.

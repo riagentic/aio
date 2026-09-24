@@ -187,7 +187,10 @@ await aio.run({ appId: "remote-agent" /* … */ });
 Without it all three run as the project's app: the second one started on a
 machine refuses with "Already running", and apps that never meet share one data
 directory. The fleet build asks each host-built binary which appId it runs under
-and warns when differently named targets answer the same.
+and warns when differently named targets answer the same. `am` reads identity
+the same way: a component's app id is the one its entry runs under, never its
+`name` — two components without their own `appId` are one app, and `am start`
+refuses them up front instead of waiting on a name nothing runs under.
 
 The label is what you pass to `--targets=agent,relay`, what names the artifact
 group in the summary, and what the manifest records. A label that IS a target
@@ -613,6 +616,17 @@ aio handles this for you:
   "compile": { "include": ["assets/model.bin", "data/"] }
   ```
 
+- **`*.server.ts` modules the entry can load are embedded automatically** — even
+  one reached through an opaque `import(url)` the module graph cannot see. "Can
+  load" is: in the entry's module graph, under the entry's own directory, or in
+  the same directory as a module the graph reaches. A repo with several targets
+  (a relay in `src/server/`, an agent in `src/agent/`) therefore ships each
+  binary with only its own server code; the log lists the ones it left out. A
+  module loaded opaquely from anywhere else goes in `compile.include`. A folder
+  that is ANOTHER target's entry folder (`src/agent/` under a web entry in
+  `src/`) belongs to that target: its `*.server.ts` ship elsewhere only when
+  this entry's graph reaches them.
+
 The compile log prints what it embedded (`[compile] embedding N data asset(s)`).
 Compiled binaries are **fully portable** — they serve the embedded `dist/` and
 run their WASM from any directory (an AppImage mount included); they never need
@@ -635,7 +649,7 @@ import {
 const args = compileArgs({
   hasDist: true, // embed dist/ (the browser bundle)
   workerInclude: dbWorkerInclude(), // ← the SQLite worker
-  assets: await assetIncludes(Deno.cwd()), // ← .wasm + compile.include + deno.json
+  assets: await assetIncludes(Deno.cwd(), "src/app.ts"), // ← .wasm + the entry's *.server.ts + compile.include + deno.json
   v8Flags: await v8FlagsArg(Deno.cwd()), // ← build.v8Flags
   excludes: [],
   out: "myapp",
@@ -944,11 +958,13 @@ says so.
 
 A standalone APK writes its state through **`AioNativeStore`**, a native
 key/value store the shell injects into the page. Every change goes to a file
-under the app's own `filesDir`, written **temp file → `fsync` → atomic rename**,
-and the write call does not return until that is done. So the change is on the
-disk before the method that made it returns: a swipe-away, an OOM kill or a
-crash in the same instant cannot lose it, and a crash _during_ the write leaves
-the previous value whole rather than a torn one.
+under the app's own `filesDir`, written **temp file → `fsync` → atomic rename →
+`fsync` of the directory** (so the rename itself survives a power cut; a
+filesystem that refuses a directory `fsync` is logged once, tag `aio`), and the
+write call does not return until that is done. So the change is on the disk
+before the method that made it returns: a swipe-away, an OOM kill or a crash in
+the same instant cannot lose it, and a crash _during_ the write leaves the
+previous value whole rather than a torn one.
 
 This replaces `localStorage`, which a WebView commits to disk on its own
 schedule. Measured on an API 35 emulator with `examples/counter`: a `SIGKILL`
@@ -972,10 +988,11 @@ each time. If it grows large enough to be felt, aio says so once rather than
 letting the app feel mysteriously heavy:
 
 ```
-[aio] ⚠ a durable save took 41ms — the whole state is written and fsync'd on
-  every change, so this cost is paid per keystroke. Keep less of it:
+[aio] ⚠ a durable save took 41ms for 1.2 MB — the whole state is written and
+  fsync'd on every change, so this cost is paid per keystroke. Fix:
   `persist: "none"` on a cell whose state need not survive a restart, or
-  `persist: { exclude: ["big"] }` on the fields that need not.
+  `persist: { exclude: ["big"] }` on the fields that need not — see
+  docs/persistence/big-data.md#legitimately-large-state.
 ```
 
 Those are the same [`persist` filters](../persistence/auto-persist.md) the
@@ -992,6 +1009,30 @@ The bridge is a security surface: `addJavascriptInterface` hands its methods to
 `dev:android` build open a server's pages and never get the bridge at all; their
 state lives on the server anyway. If a page from any other origin somehow loads,
 the shell removes the bridge and logs it.
+
+**An `<iframe>` is the exception.** `addJavascriptInterface` injects the bridge
+into every _frame_ too, and the removal above watches the main frame only — so a
+third-party page an app embeds in an `<iframe>` can call `AioNativeStore` and
+read or overwrite the app's saved state. Embed only content you trust, or open
+it outside the app with a plain link. The page says so the moment such a frame
+appears (`[aio] ⚠ security: this page embeds an <iframe> from …`, once per
+origin); closing it natively is on the roadmap.
+
+**A restore that fails never costs the saved state.** If the state on disk
+cannot be used at boot, the app does not write over it:
+
+- **unreadable** (the native read failed — an IO error, an OOM on a large
+  state): the file is left exactly as it is and **nothing is saved for the rest
+  of that run**; a restart reads it again. Said at boot and on the first refused
+  save (`console.error`, logcat).
+- **corrupt** (it reads, but is not valid state): the raw text is copied
+  byte-for-byte to `<key>.corrupt-<ms>` in the same store and read back before
+  anything else is written; the app then starts from its initial state, and the
+  boot line names the copy. If the copy cannot be made, it falls back to the
+  refusal above.
+- **nothing stored** is a first run, and saves normally.
+
+The same rule holds for `localStorage` in a browser preview.
 
 In a desktop browser the same bundle finds no such object and falls back to
 `localStorage`, which is all a preview can offer — the boot line names it and
@@ -1143,6 +1184,26 @@ the build reaches for, or that step quietly does nothing:
 | `MainActivity.kt`     | `return !url.startsWith("https://appassets.androidplatform.net/")` — rewritten so dev navigation stays in the WebView                                                                                                                                                                                                                                              |
 | `AndroidManifest.xml` | `{{APPLICATION_ID}}`, `{{APP_NAME}}`, `{{ICON_ATTR}}`, `{{CLEARTEXT_ATTR}}` and `{{CAMERA_PERMISSION}}` — `{{CLEARTEXT_ATTR}}` becomes `android:usesCleartextTraffic="true"` for a dev or `--remote` build and nothing for a standalone one; `{{CAMERA_PERMISSION}}` becomes the CAMERA declaration only with [`android: { camera: true }`](#the-camera-is-opt-in) |
 | `MainActivity.kt`     | `{{CAMERA_DECLARED}}` — the same flag, so the WebView's refusal cannot disagree with the manifest                                                                                                                                                                                                                                                                  |
+
+A replacement `MainActivity.kt` also replaces two things the template's activity
+does in `onCreate`, and the build **warns** when an overlay drops either:
+
+- **The durable store** (standalone APK only). Without it the page falls back to
+  `localStorage` and a change can be lost on a kill right after it (see
+  [State survives a kill](#state-survives-a-kill)). Copy `class AioNativeStore`
+  from aio's `android-template/app/src/main/java/aio/app/MainActivity.kt` and
+  install it under the exact JS name the page looks for — for a standalone APK
+  only, as the template does (`TALKS_TO_SERVER` false), and keep the template's
+  `onPageStarted` removal of it:
+
+  ```kotlin
+  addJavascriptInterface(AioNativeStore(File(filesDir, "aio-store")), "AioNativeStore")
+  ```
+
+- **The insets frame** (every APK). targetSdk 35 draws edge-to-edge, so a
+  WebView set as the content view draws under the status bar. Keep the
+  template's `FrameLayout` + `setOnApplyWindowInsetsListener` block from the end
+  of its `onCreate` (see [The system bars](#the-system-bars)).
 
 ### The page is a secure origin, so `ws://` is blocked
 

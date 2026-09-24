@@ -166,10 +166,21 @@ export function childEnv(
 let _childApps: string | undefined;
 function _childAppsDir(): string {
   if (_childApps) return _childApps;
-  _childApps = aioTestDir("spawned-apps-");
+  const dir = _childApps = aioTestDir("spawned-apps-");
   // The parent resolves locks, sockets and homes through the same variable.
-  Deno.env.set("AIO_APPS_DIR", _childApps);
-  return _childApps;
+  Deno.env.set("AIO_APPS_DIR", dir);
+  // …and removes it when the process ends: one per standalone run
+  // (check:mutations runs each test that way) piled up in `check:orphans`.
+  globalThis.addEventListener("unload", () => {
+    try {
+      Deno.removeSync(dir, { recursive: true });
+    } catch {
+      // aio-ok: exit-time cleanup of a dir only this process made — "already
+      // gone" is the goal, and a child still holding it is check:orphans' to
+      // name, not a line here on every run.
+    }
+  });
+  return dir;
 }
 
 /** Spawn a long-running process; drain stderr in the background so it can't

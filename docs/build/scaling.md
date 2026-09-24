@@ -204,6 +204,13 @@ both correctly.
 An explicit `vitals.pressure` still **wins** — it is the more specific
 instruction.
 
+`cellState` is read by both size seams: the full-state frame line and the
+persist lines (it moves the 1 MB warn, and lifts the 16 MB hard line when
+declared above it). A whole-state frame also trips `payload`, so an app that is
+big on purpose declares both — every size message prints the exact line to
+paste, sized to what it measured
+([Legitimately large state](../persistence/big-data.md#legitimately-large-state)).
+
 Sizes are **UTF-8 bytes** — what the wire and the disk carry, and what `"1MB"`
 says. Non-ASCII text is up to 3 bytes per character, so a cell holding 900 000
 characters of Japanese is 2.7 MB against a `"1MB"` budget. The same unit is used
@@ -254,18 +261,22 @@ can see — worse than having none, because the app believes it has one.
 
 | Setting                | Value                        | Why                                 |
 | ---------------------- | ---------------------------- | ----------------------------------- |
-| `ui.forUser`           | filter aggressively          | Each client only gets what it needs |
+| `visible`              | `exclude` / `forUser`        | Each client only gets what it needs |
 | `persist: { exclude }` | exclude caches, derived data | Less to write on each persist cycle |
+| `budgets`              | `cellState` + `payload`      | Declare a size that is on purpose   |
 
-Move large collections to SQLite and query on demand.
+Move large collections to SQLite and query on demand. What each limit governs,
+measured costs per transport, and the patterns for a working set that is big on
+purpose:
+[Legitimately large state](../persistence/big-data.md#legitimately-large-state).
 
 ### Many concurrent clients (>100)
 
 | Setting              | Value              | Why                                                                                                                                                                                     |
 | -------------------- | ------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `ui.forUser`         | per-user filtering | Less data per broadcast                                                                                                                                                                 |
+| `visible.forUser`    | per-user filtering | Less data per broadcast                                                                                                                                                                 |
 | `syncIntervalMs`     | raise to 100-200ms | Batches rapid _background_ state changes into fewer broadcasts — a client's own action still flushes immediately ([interactive priority](../persistence/delta.md#broadcast-throttling)) |
-| `fullStateThreshold` | raise to 512-1024  | Sends full state when delta is almost as large                                                                                                                                          |
+| `fullStateThreshold` | raise to 0.8–0.9   | A ratio (default 0.5): a delta is sent whole only when almost as large as the state                                                                                                     |
 
 ### High-frequency actions (>10/sec)
 

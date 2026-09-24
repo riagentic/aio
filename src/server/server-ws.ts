@@ -32,7 +32,11 @@ import { log } from "../diagnostics/logger-api.ts";
 import { INFLIGHT } from "../state/dispatch.ts";
 import { inServerOrigin } from "../state/call-origin.ts";
 import { parseTTCommand } from "../diagnostics/time-travel.ts";
-import { originVerdict, rawStateControlAllowed } from "./server-auth.ts";
+import {
+  originVerdict,
+  rawStateControlAllowed,
+  requestHost,
+} from "./server-auth.ts";
 import type { ClientLogEntry } from "../air/dom-inspector-types.ts";
 import type { VitalsSystem } from "../vitals/mod.ts";
 import { VERSION } from "./aio-cli.ts";
@@ -46,6 +50,8 @@ import { bytes, count } from "../diagnostics/fmt.ts";
 import { flushAllUrgent } from "./broadcast-coalescer.ts";
 import { WS_BUFFER_HIGH_WATER, wsWriteBacklog } from "./write-backlog.ts";
 import { userMemoKey } from "./aio-run-helpers.ts";
+import { warnBigFullState } from "./server-broadcast.ts";
+import { LARGE_STATE_DOC } from "../state/budgets.ts";
 
 /** A whole state is about to be sent to ONE client outside the broadcast
  *  loop (connect, `subs`, `resync`). It will be serialized from the CURRENT
@@ -124,6 +130,25 @@ export function effectiveMaxMessage(
  *  is unit-tested rather than reasoned about. */
 export function peerFrameCeiling(userAgent: string): number | undefined {
   return /^Deno\//i.test(userAgent.trim()) ? WS_RUNTIME_MAX_MESSAGE : undefined;
+}
+
+/** What is said when a frame is refused for a Deno peer's ceiling — to the
+ *  log, the client log and the peer. Pure, so the hint and the chapter link
+ *  are pinned by tests/large-state-hints.test.ts without a 64 MiB frame. */
+export function peerCeilingMessage(
+  kind: string,
+  size: number,
+  ceiling: number,
+  clientIndex: number | string,
+): string {
+  return `ws: a ${kind} frame of ${bytes(size)} is over the ${
+    bytes(ceiling)
+  } message ceiling of client ${clientIndex}'s runtime (a Deno peer — ` +
+    `connectCli, am, another aio server) — NOT sent: writing it kills the ` +
+    `connection, and the reconnect gets the same frame. This client has no ` +
+    `state until the app's is smaller. Fix: this ceiling cannot be raised — ` +
+    `keep bulk rows in db: tables and page them into state, or hide the big ` +
+    `cell from this client (visible) — see ${LARGE_STATE_DOC}.`;
 }
 
 /** Is this socket error the runtime refusing an oversized message? Defined in
@@ -936,7 +961,11 @@ export function createWsManager(deps: WsDeps): WsManager {
         filterStateBySubs(deps.getUIState(meta.user), meta.subscriptions),
       );
       if (!meta.lastFullJsonStale && msg === meta.lastFullJson) return;
-      socket.send(encRaw("state", msg));
+      const frame = encRaw("state", msg);
+      socket.send(frame);
+      // Metered like the connect frame: a whole view re-sent on a user change
+      // is paid in full, so it counts toward `payload` and PRESSURE.
+      deps.vitalsSystem?.pressureMonitor?.onBroadcast(meta.id, utf8Size(frame));
       meta.lastFullJson = msg;
       meta.lastFullJsonStale = false;
       meta.needsFull = false;
@@ -1115,7 +1144,7 @@ export function createWsManager(deps: WsDeps): WsManager {
       // Electron shell) had to be remembered for the other. 400 is an Origin
       // that does not parse (`null` included), 403 a foreign one.
       const verdict = originVerdict(origin, {
-        hostHeader: req.headers.get("host"),
+        hostHeader: requestHost(req),
         secure: deps.secure === true,
         allowedOrigins: deps.allowedOrigins,
       });
@@ -1284,15 +1313,7 @@ export function createWsManager(deps: WsDeps): WsManager {
         if (typeof data === "string" && overUtf8(data, peerCeiling)) {
           const size = utf8Size(data);
           const kind = /^\{"v":\d+,"t":"([^"]+)"/.exec(data)?.[1] ?? "frame";
-          const msg =
-            `ws: a ${kind} frame of ${bytes(size)} is over the ${
-              bytes(peerCeiling)
-            } message ceiling of client ` +
-            `${meta.index}'s runtime (a Deno peer — connectCli, am, another ` +
-            `aio server) — NOT sent: writing it kills the connection, and the ` +
-            `reconnect gets the same frame. This client has no state until ` +
-            `the app's is smaller: move bulk rows to db: tables or files ` +
-            `(docs/persistence/big-data.md).`;
+          const msg = peerCeilingMessage(kind, size, peerCeiling, meta.index);
           // Once per socket for the log — the round repeats every change —
           // and once for the peer, which only needs telling that it is stuck.
           if (refused++ === 0) {
@@ -1411,8 +1432,22 @@ export function createWsManager(deps: WsDeps): WsManager {
       try {
         const uiState = deps.getUIState(meta.user);
         const msg = JSON.stringify(uiState);
-        socket.send(encRaw("state", msg));
+        // The size guardrail, on the frame every WS client gets FIRST. The
+        // broadcaster checked only the frames IT sends (a debt, a patch that
+        // flipped to full) and the UDS accept path had its own call — so a
+        // browser app whose big cell only ever changed by small patches, with
+        // persist off, pushed 12.5 MB on every connect and never said so
+        // (measured). `deps.getUIState` is the app's latch owner, as on UDS.
+        warnBigFullState(msg, () => uiState, deps.getUIState);
+        const frame = encRaw("state", msg);
+        socket.send(frame);
         meta.lastFullJson = msg;
+        // …and METERED for pressure, like every frame the broadcaster sends
+        // (`_meterSent`): the biggest frame a client ever gets bypassed the
+        // `payload` budget, so a 12 MB state tripped PRESSURE only if a
+        // broadcast later flipped to full — never on connect, where it is paid.
+        const pressure = deps.vitalsSystem?.pressureMonitor;
+        if (pressure) pressure.onBroadcast(meta.id, utf8Size(frame));
         // A client that DID get its initial state ends the episode. Without
         // this, five failures spread over the whole life of the process left
         // the app reporting degraded forever, however many clients connected
@@ -2348,7 +2383,10 @@ export function createWsManager(deps: WsDeps): WsManager {
         meta.needsFull = false; // it holds the current state — no debt
         return;
       }
-      socket.send(encRaw("state", msg));
+      const frame = encRaw("state", msg);
+      socket.send(frame);
+      // Metered: a `subs`/`resync` re-send is a whole view, paid in full.
+      deps.vitalsSystem?.pressureMonitor?.onBroadcast(meta.id, utf8Size(frame));
       meta.lastFullJson = msg;
       meta.lastFullJsonStale = false; // exact again: the client holds this text
       // …and the debt is PAID. `needsFull` is set by the broadcaster when a
@@ -2370,7 +2408,10 @@ export function createWsManager(deps: WsDeps): WsManager {
       const msg = JSON.stringify(
         filterStateBySubs(deps.getUIState(meta.user), meta.subscriptions),
       );
-      socket.send(encRaw("state", msg));
+      const frame = encRaw("state", msg);
+      socket.send(frame);
+      // Metered: a resync is a whole view, paid in full.
+      deps.vitalsSystem?.pressureMonitor?.onBroadcast(meta.id, utf8Size(frame));
       meta.lastFullJson = msg;
       meta.lastFullJsonStale = false; // exact again: the client holds this text
       // …and the debt is PAID. `needsFull` is set by the broadcaster when a

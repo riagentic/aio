@@ -113,11 +113,211 @@ export function _trackEnd(
   return deps;
 }
 
+// ── Read scope ───────────────────────────────────────────────────────
+// An opaque object naming WHOSE values a read may see right now — null
+// everywhere but inside a server render given its own route (air/vdom-ssr.ts
+// `_ssrIn`), where the route signals answer with that render's route.
+//
+// A read under a scope NEVER touches the global state of what it reads: a
+// computed read there evaluates its function in a tracking frame of its own
+// and caches the result PER SCOPE (`_scopedValue`) — its global cache, its
+// dependency links, its dirty flag and its version are the global's alone. So
+// a module-level `computed(() => routePath.value)` can neither leak one
+// render's route into the next render or the global, nor serve the global
+// into a render, nor lose (to a render that branched differently) a link an
+// effect over it depends on. The flush runs subscribers with no scope: an
+// effect is never part of a render. With no scope ever entered (every browser,
+// every render without a route) the cost is one comparison per computed read.
+let _readScope: object | null = null;
+
+/** @internal Enter a read scope; returns the previous one, which the caller
+ *  MUST restore in a `finally`. */
+export function _enterReadScope(scope: object | null): object | null {
+  const prev = _readScope;
+  _readScope = scope;
+  return prev;
+}
+
+/** @internal The read scope in effect (null: the globals). */
+export function _readScopeNow(): object | null {
+  return _readScope;
+}
+
+/** A value derived under one read scope, with what it read: plain signals by
+ *  version, computeds by the `stamp` of their own entry in the same scope. An
+ *  evaluation that THREW is an entry too — never fresh (re-evaluated on every
+ *  read, as a global computed that threw is), but holding what it read before
+ *  the throw: the sources whose change can make it succeed. */
+type ScopedEntry = {
+  value: unknown;
+  error?: { thrown: unknown };
+  deps: SignalImpl<unknown>[];
+  versions: number[];
+  stamp: number;
+};
+let _scopedStamps = 0;
+
+/** The entry's value — or what its evaluation threw, rethrown. */
+function _scopedValue(e: ScopedEntry): unknown {
+  if (e.error) throw e.error.thrown;
+  return e.value;
+}
+
+/** A dependency's freshness mark within `scope` — settling a computed's own
+ *  scoped entry first, so the mark compared is the one a re-read would see
+ *  (one that threw is re-evaluated, so its mark is new every time). */
+function _scopedMark(d: SignalImpl<unknown>, scope: object): number {
+  return d instanceof ComputedImpl
+    ? (d as ComputedImpl<unknown>)._scopedEntry(scope).stamp
+    : d._version;
+}
+
+/** Still what a re-evaluation in `scope` would produce? */
+function _scopedFresh(e: ScopedEntry, scope: object): boolean {
+  if (e.error) return false;
+  for (let i = 0; i < e.deps.length; i++) {
+    let mark: number;
+    try {
+      mark = _scopedMark(e.deps[i]!, scope);
+    } catch {
+      return false; // a cycle found on the way: re-evaluate (and throw)
+    }
+    if (mark !== e.versions[i]) return false;
+  }
+  return true;
+}
+
+/** Evaluate `fn` in `scope` in a tracking frame of its own; the entry — a
+ *  throw included (see `ScopedEntry`). */
+function _scopedEval(fn: () => unknown, scope: object): ScopedEntry {
+  const deps = _trackStart();
+  _scopedFrames.add(deps);
+  let value: unknown;
+  let error: ScopedEntry["error"];
+  try {
+    value = fn();
+  } catch (thrown) {
+    error = { thrown };
+  } finally {
+    _trackEnd(deps);
+  }
+  const list = [...deps];
+  return {
+    value,
+    error,
+    deps: list,
+    versions: error ? [] : list.map((d) => _scopedMark(d, scope)),
+    stamp: ++_scopedStamps,
+  };
+}
+
+/** The tracking frames `_scopedEval` opened — a read tracked by one of these
+ *  is a scoped derivation's, never a subscriber's. */
+const _scopedFrames = new WeakSet<Set<SignalImpl<unknown>>>();
+
+/** Per subscriber frame: the scoped entries already walked into it. An entry
+ *  is one evaluation in one scope, so a re-evaluation (a write mid-render) is
+ *  a new entry and is walked again; a frame is a fresh Set per run. */
+const _walked = new WeakMap<Set<SignalImpl<unknown>>, WeakSet<ScopedEntry>>();
+let _walks = 0;
+
+/** @internal How many scoped entries `_trackScoped` has walked (a test pins
+ *  that each is walked once per subscriber frame). */
+// aio-ok: test seam — tests/signal-scope-differential.test.ts pins one walk per entry per frame
+export function _scopedWalksNow(): number {
+  return _walks;
+}
+
+/** Put a scoped read's entry `e` into the tracking frame open now. A scoped
+ *  derivation's frame takes its deps as they are. A SUBSCRIBER's frame (an
+ *  effect or a component tracking from inside a render — `renderToString(v,
+ *  {route})` called from one) takes, transitively, every SOURCE this scope's
+ *  evaluation read: the global computed it also holds may branch elsewhere
+ *  (on the route), be unsettled, or have thrown, and would never pass on the
+ *  write that changes what this scope saw. Each entry is walked once per
+ *  frame — a frame reading many computeds over one shared subtree walks the
+ *  subtree once. */
+function _trackScoped(
+  tracker: Set<SignalImpl<unknown>>,
+  e: ScopedEntry,
+  scope: object,
+): void {
+  if (_scopedFrames.has(tracker)) {
+    for (const d of e.deps) tracker.add(d);
+    return;
+  }
+  let seen = _walked.get(tracker);
+  if (seen === undefined) {
+    seen = new WeakSet();
+    _walked.set(tracker, seen);
+  }
+  const todo = [e];
+  for (let next = todo.pop(); next !== undefined; next = todo.pop()) {
+    if (seen.has(next)) continue;
+    seen.add(next);
+    _walks++;
+    for (const d of next.deps) {
+      tracker.add(d);
+      const child = d instanceof ComputedImpl
+        ? _scopedComputeds.get(scope)?.get(d)
+        : undefined;
+      if (child !== undefined) todo.push(child);
+    }
+  }
+}
+
+/** Told of each effect whose first run happened for a caller inside a read
+ *  scope (the effect itself ran on the global route), with `reads(targets)`:
+ *  did that run depend on one of `targets` — directly, or through the
+ *  computeds (and trackedMemos) it read? air/router-core.ts names one that
+ *  read the route there. Observe-only. */
+type ScopedEffectHook = (
+  reads: (targets: readonly object[]) => boolean,
+) => void;
+let _scopedEffectHook: ScopedEffectHook | null = null;
+
+/** @internal Install the hook above (router-core, once). */
+export function _setScopedEffectHook(fn: ScopedEffectHook | null): void {
+  _scopedEffectHook = fn;
+}
+
+/** Does `deps` reach one of `targets` through the global computed graph? A
+ *  signal is matched by its subscriber set (a callable shares its instance's).
+ *  A computed is known by its `_deps` set, never by `instanceof ComputedImpl`:
+ *  this runs from `effect()`, and naming the class here would pull all of
+ *  `computed` into every bundle that uses only signals and effects. */
+function _reaches(
+  deps: Iterable<SignalImpl<unknown>>,
+  targets: readonly object[],
+): boolean {
+  const want = new Set(
+    targets.map((s) => (s as { _subscribers?: unknown })._subscribers),
+  );
+  const seen = new Set<unknown>();
+  const todo = [...deps];
+  for (let d = todo.pop(); d !== undefined; d = todo.pop()) {
+    if (seen.has(d)) continue;
+    seen.add(d);
+    if (want.has(d._subscribers)) return true;
+    const inner = (d as { _deps?: unknown })._deps;
+    if (inner instanceof Set) {
+      for (const x of inner as Set<SignalImpl<unknown>>) todo.push(x);
+    }
+  }
+  return false;
+}
+
+/** Per scope: each computed's entry. Weak on the scope — a render's entries
+ *  go with the render. */
+const _scopedComputeds = new WeakMap<object, Map<object, ScopedEntry>>();
+
 /** Read signals without tracking — reads inside fn() will NOT create
  *  subscriptions in the current tracking context. */
 export function untrack<T>(fn: () => T): T {
   const savedLen = _trackStack.length;
   const throwaway = new Set<SignalImpl<unknown>>();
+  // Under a read scope nobody subscribes through it: a derivation's frame.
+  if (_readScope !== null) _scopedFrames.add(throwaway);
   _trackStack.push(throwaway);
   let result: T;
   try {
@@ -235,7 +435,17 @@ function _flush(): void {
   // everything it queues; a subscriber that really is server code re-enters
   // through the front door, because its dispatch runs the method body inside
   // `inServerOrigin` again. (tests/access-origin-boundaries.test.tsx)
-  outsideServerOrigin(_flushSubscribers);
+  if (_readScope === null) outsideServerOrigin(_flushSubscribers);
+  else {
+    // …and out of any read scope, for the same reason: a subscriber is not
+    // part of the render whose component wrote the signal ("Read scope").
+    const scope = _enterReadScope(null);
+    try {
+      outsideServerOrigin(_flushSubscribers);
+    } finally {
+      _enterReadScope(scope);
+    }
+  }
 }
 
 function _flushSubscribers(): void {
@@ -635,6 +845,16 @@ class ComputedImpl<T> {
     if (this._disposed) return this._cached as T;
     const tracker = _currentTracker();
     if (tracker) tracker.add(this as unknown as SignalImpl<unknown>);
+    if (_readScope !== null) {
+      const scope = _readScope;
+      const e = this._scopedEntry(scope);
+      // A SUBSCRIBER tracking it from inside a render must hear every write
+      // that changes what the render read (`_trackScoped`).
+      if (tracker && !_scopedFrames.has(tracker)) {
+        _trackScoped(tracker, e, scope);
+      }
+      return _scopedValue(e) as T;
+    }
     if (this._dirty) this._recompute();
     return this._cached as T;
   }
@@ -646,8 +866,39 @@ class ComputedImpl<T> {
 
   peek(): T {
     if (this._disposed) return this._cached as T;
+    if (_readScope !== null) {
+      return _scopedValue(this._scopedEntry(_readScope)) as T;
+    }
     if (this._dirty) this._recompute();
     return this._cached as T;
+  }
+
+  /** @internal This computed's value in read scope `scope` — evaluated once
+   *  per scope while what it read is unchanged, and never through the global
+   *  slot (see "Read scope"). */
+  _scopedEntry(scope: object): ScopedEntry {
+    let byScope = _scopedComputeds.get(scope);
+    if (byScope === undefined) {
+      byScope = new Map();
+      _scopedComputeds.set(scope, byScope);
+    }
+    const hit = byScope.get(this);
+    if (hit !== undefined && _scopedFresh(hit, scope)) return hit;
+    const self = this as unknown as ComputedImpl<unknown>;
+    if (_computing.has(self)) {
+      throw new Error(
+        "[aio:signal] Circular dependency in computed — it (directly or via other computeds) reads its own value. Break the cycle by deriving from source signals only.",
+      );
+    }
+    _computing.add(self);
+    let entry: ScopedEntry;
+    try {
+      entry = _scopedEval(this._fn, scope);
+    } finally {
+      _computing.delete(self);
+    }
+    byScope.set(this, entry);
+    return entry;
   }
 
   private _recompute(): void {
@@ -846,6 +1097,8 @@ export function effect(fn: () => void | CleanupFn): CleanupFn {
   let cleanup: CleanupFn | void;
   let unsubs: CleanupFn[] = [];
   let disposed = false;
+  /** Set only for a first run created inside a read scope: what it read. */
+  let firstDeps: Set<SignalImpl<unknown>> | null | undefined;
 
   const sub: Subscriber = {
     prepare: () => {
@@ -894,6 +1147,7 @@ export function effect(fn: () => void | CleanupFn): CleanupFn {
           }
         } finally {
           _trackEnd(deps);
+          if (firstDeps === null) firstDeps = deps;
           // Re-subscribe on EVERY exit path, including the throw. This used
           // to sit after the try, so an effect body that threw once had
           // already dropped every old subscription and never took a new one:
@@ -941,7 +1195,23 @@ export function effect(fn: () => void | CleanupFn): CleanupFn {
   // renderer's teardown of the failed render could not reach it. An effect
   // nobody can dispose must not outlive the call that failed to create it.
   try {
-    sub.execute();
+    if (_readScope === null) sub.execute();
+    else {
+      // An effect is never part of a render — its FIRST run included. Run
+      // under a render's route, it would subscribe to what the RENDER's route
+      // reads (another branch of a conditional), and a write to what the
+      // global route reads would never reach it ("Read scope").
+      const scope = _enterReadScope(null);
+      firstDeps = null;
+      try {
+        sub.execute();
+      } finally {
+        _enterReadScope(scope);
+      }
+      const deps = firstDeps ?? new Set<SignalImpl<unknown>>();
+      firstDeps = undefined;
+      _scopedEffectHook?.((targets) => _reaches(deps, targets));
+    }
   } catch (e) {
     dispose();
     throw e;
@@ -1014,14 +1284,44 @@ export function trackedMemo<K, V>(
       // comparison is against the value a miss would read now. Without this
       // — and before a computed carried a stamp at all — a hit over a
       // computed compared `undefined` to `undefined` and was fresh forever.
-      if (d instanceof ComputedImpl) d.peek();
+      // …and a dependency that THROWS now is not fresh: the miss recomputes,
+      // throws, and still subscribes the caller to what it read (a hit that
+      // threw from here subscribed it to nothing, for good).
+      if (d instanceof ComputedImpl) {
+        try {
+          d.peek();
+        } catch {
+          return false;
+        }
+      }
       if (d._version !== e.versions[i]) return false;
     }
     return true;
   };
 
+  /** Per read scope: its own entries, never the global cache's. */
+  const scoped = new WeakMap<object, Map<unknown, ScopedEntry>>();
+
   return (arg: K): V => {
     const k = keyOf(arg);
+    if (_readScope !== null) {
+      const scope = _readScope;
+      let byKey = scoped.get(scope);
+      if (byKey === undefined) {
+        byKey = new Map();
+        scoped.set(scope, byKey);
+      }
+      let e = byKey.get(k);
+      if (e === undefined || !_scopedFresh(e, scope)) {
+        // A throw is an entry that is never fresh; what it read before the
+        // throw still subscribes the caller (the global miss below does too).
+        e = _scopedEval(() => compute(arg), scope);
+        byKey.set(k, e);
+      }
+      const tracker = _currentTracker();
+      if (tracker) _trackScoped(tracker, e, scope);
+      return _scopedValue(e) as V;
+    }
     const hit = cache.get(k);
     if (hit && fresh(hit)) {
       // THE point of this function: put the recorded reads into the scope that
@@ -1037,13 +1337,22 @@ export function trackedMemo<K, V>(
     }
     // Miss: compute in a scope of its OWN, so the reads are recorded exactly
     // once and replayed deliberately — never leaked into the caller's scope
-    // twice, and never lost if `compute` throws.
+    // twice, and never lost if `compute` throws: a throw caches nothing, and
+    // the reads made before it are replayed into the caller's scope, so the
+    // caller re-runs when one of them changes. (Until 1.0.11 a throw dropped
+    // them: an effect or a component whose memo threw once never ran again.)
     const deps = _trackStart();
     let value: V;
+    let ok = false;
     try {
       value = compute(arg);
+      ok = true;
     } finally {
       _trackEnd(deps);
+      if (!ok) {
+        const tracker = _currentTracker();
+        if (tracker) { for (const d of deps) tracker.add(d); }
+      }
     }
     const list = [...deps];
     const entry: Entry = {

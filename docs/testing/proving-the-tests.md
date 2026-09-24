@@ -26,11 +26,11 @@ were not subtle:
 Three gates now check the tests, and the code they claim to cover. They answer
 different questions:
 
-| Gate                          | Question                                        | Kind    | Cost   |
-| ----------------------------- | ----------------------------------------------- | ------- | ------ |
-| `deno task check:mutations`   | Would a test NOTICE if this invariant broke?    | dynamic | ~30 s  |
-| `deno task check:vacuous`     | Can this test pass without asserting anything?  | static  | ~0.3 s |
-| `deno task check:dead-wiring` | Does anything in `src/` ever reach this export? | static  | ~0.3 s |
+| Gate                          | Question                                        | Kind    | Cost    |
+| ----------------------------- | ----------------------------------------------- | ------- | ------- |
+| `deno task check:mutations`   | Would a test NOTICE if this invariant broke?    | dynamic | ~35 min |
+| `deno task check:vacuous`     | Can this test pass without asserting anything?  | static  | ~0.3 s  |
+| `deno task check:dead-wiring` | Does anything in `src/` ever reach this export? | static  | ~0.3 s  |
 
 All three are in `deno task check:release`. `check:vacuous` and
 `check:dead-wiring` also run inside the ordinary suite

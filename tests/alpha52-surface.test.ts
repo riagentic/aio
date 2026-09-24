@@ -14,6 +14,7 @@ import { call } from "../src/state/cell-impl.ts";
 import { AIO_ENTRY_PATHS, SERVER_ONLY_AIO_SYMBOLS } from "../src/entries.ts";
 import { checkPlatformSafety } from "../src/server/graph-validator.ts";
 import { freePort } from "../src/testing/cell-test.ts";
+import { permissiveUmask } from "./permissive-umask.ts";
 
 // ── helper: capture console.warn (the browser-graph hint channel) ────────
 function captureWarn<T>(fn: () => T): { result: T; warns: string[] } {
@@ -194,33 +195,34 @@ Deno.test("key default: exposed + no auth + key undecided → behaves as key: tr
   });
 });
 
-Deno.test("key default: the defaulted `true` resolves to a persisted, owner-only key", () => {
-  const tmp = Deno.makeTempDirSync({ prefix: "aio-keydef-" });
-  const prev = Deno.env.get("AIO_APPS_DIR");
-  Deno.env.set("AIO_APPS_DIR", tmp);
-  try {
-    const { key } = defaultAppKeyConfig({
-      expose: true,
-      perUserAuth: false,
-      key: undefined,
-    });
-    const r = resolveAppKey("keydef-app", key);
-    assert(r.key && r.key.length > 0, "a key is generated");
-    assertEquals(r.persisted, true);
-    // 0600 — the share link may carry it, the filesystem must not.
-    const path = join(tmp, "keydef-app", "data", "app.key");
-    const st = Deno.statSync(path);
-    if (st.mode !== null && Deno.build.os !== "windows") {
-      assertEquals(st.mode & 0o077, 0, "app.key is owner-only");
+Deno.test("key default: the defaulted `true` resolves to a persisted, owner-only key", () =>
+  permissiveUmask(async () => {
+    const tmp = Deno.makeTempDirSync({ prefix: "aio-keydef-" });
+    const prev = Deno.env.get("AIO_APPS_DIR");
+    Deno.env.set("AIO_APPS_DIR", tmp);
+    try {
+      const { key } = defaultAppKeyConfig({
+        expose: true,
+        perUserAuth: false,
+        key: undefined,
+      });
+      const r = resolveAppKey("keydef-app", key);
+      assert(r.key && r.key.length > 0, "a key is generated");
+      assertEquals(r.persisted, true);
+      // 0600 — the share link may carry it, the filesystem must not.
+      const path = join(tmp, "keydef-app", "data", "app.key");
+      const st = Deno.statSync(path);
+      if (st.mode !== null && Deno.build.os !== "windows") {
+        assertEquals(st.mode & 0o077, 0, "app.key is owner-only");
+      }
+      // stable across restarts ("one key, use forever")
+      assertEquals(resolveAppKey("keydef-app", key).key, r.key);
+    } finally {
+      if (prev === undefined) Deno.env.delete("AIO_APPS_DIR");
+      else Deno.env.set("AIO_APPS_DIR", prev);
+      Deno.removeSync(tmp, { recursive: true });
     }
-    // stable across restarts ("one key, use forever")
-    assertEquals(resolveAppKey("keydef-app", key).key, r.key);
-  } finally {
-    if (prev === undefined) Deno.env.delete("AIO_APPS_DIR");
-    else Deno.env.set("AIO_APPS_DIR", prev);
-    Deno.removeSync(tmp, { recursive: true });
-  }
-});
+  }));
 
 // ═════════════════════════════════════════════════════════════════════
 // 3. `access` without `visible` REFUSES on exposed / multi-user apps

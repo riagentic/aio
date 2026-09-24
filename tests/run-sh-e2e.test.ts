@@ -16,6 +16,7 @@ import {
   REPO_ROOT,
   waitForHttp,
 } from "./e2e-app-harness.ts";
+import { permissiveUmask } from "./permissive-umask.ts";
 
 const GATE = Deno.env.get("AIO_ONBOARD_E2E") === "1";
 const dec = new TextDecoder();
@@ -66,71 +67,72 @@ async function sandbox(): Promise<
 Deno.test({
   name: "run.sh in an app repo: production build + the artifact serves the app",
   ignore: !GATE,
-  fn: async () => {
-    const { env, root } = await sandbox();
-    const dir = await makeApp("counter", "run-sh-");
-    const port = freePort();
-    const proc = new Deno.Command("sh", {
-      args: [join(REPO_ROOT, "run.sh"), "--", `--port=${port}`],
-      cwd: dir,
-      env,
-      stdout: "piped",
-      stderr: "piped",
-    }).spawn();
-    let log = "";
-    const drain = async (s: ReadableStream<Uint8Array>) => {
-      for await (const c of s) log += dec.decode(c);
-    };
-    drain(proc.stdout).catch(() => {});
-    drain(proc.stderr).catch(() => {});
-    try {
-      // Compile + boot: generous deadline, the compile dominates.
-      const body = await waitForHttp(
-        `http://127.0.0.1:${port}/__aio/health`,
-        240_000,
-      ).catch((e) => {
-        throw new Error(`${e}\n--- run.sh output ---\n${log.slice(-4000)}`);
-      });
-      assert(body.includes('"status"'), `health answered oddly: ${body}`);
-      // It really is the PRODUCTION artifact, not a dev server: the page shell
-      // must be the prod one (bundled app.js, no dev import map).
-      const page = await (await fetch(`http://127.0.0.1:${port}/`)).text();
-      assert(page.includes("app.js"), "prod shell serves the bundle");
-      assert(!page.includes("importmap"), "no dev import map in prod");
-
-      // The launcher prepared a private unpack dir before exec'ing. Asserted
-      // on the compile target because the WIRING is what regresses — an
-      // AppImage would then unpack into it instead of shared /tmp.
-      const printed = await new Deno.Command("deno", {
-        args: [
-          "run",
-          "-A",
-          join(REPO_ROOT, "src", "build.ts"),
-          "--print-app-tmpdir",
-        ],
+  fn: () =>
+    permissiveUmask(async () => {
+      const { env, root } = await sandbox();
+      const dir = await makeApp("counter", "run-sh-");
+      const port = freePort();
+      const proc = new Deno.Command("sh", {
+        args: [join(REPO_ROOT, "run.sh"), "--", `--port=${port}`],
         cwd: dir,
         env,
         stdout: "piped",
-        stderr: "null",
-      }).output();
-      const payload = dec.decode(printed.stdout).trim();
-      assert(
-        payload.startsWith(join(root, "apps")),
-        `the unpack dir must sit under the app's own home, got ${payload}`,
-      );
-      const st = await Deno.stat(payload);
-      assert(st.isDirectory, `run.sh did not create ${payload}`);
-      assertEquals(
-        st.mode! & 0o777,
-        0o700,
-        "the unpack dir must be owner-only",
-      );
-    } finally {
-      await kill(proc);
-      await Deno.remove(dir, { recursive: true }).catch(() => {});
-      await Deno.remove(root, { recursive: true }).catch(() => {});
-    }
-  },
+        stderr: "piped",
+      }).spawn();
+      let log = "";
+      const drain = async (s: ReadableStream<Uint8Array>) => {
+        for await (const c of s) log += dec.decode(c);
+      };
+      drain(proc.stdout).catch(() => {});
+      drain(proc.stderr).catch(() => {});
+      try {
+        // Compile + boot: generous deadline, the compile dominates.
+        const body = await waitForHttp(
+          `http://127.0.0.1:${port}/__aio/health`,
+          240_000,
+        ).catch((e) => {
+          throw new Error(`${e}\n--- run.sh output ---\n${log.slice(-4000)}`);
+        });
+        assert(body.includes('"status"'), `health answered oddly: ${body}`);
+        // It really is the PRODUCTION artifact, not a dev server: the page shell
+        // must be the prod one (bundled app.js, no dev import map).
+        const page = await (await fetch(`http://127.0.0.1:${port}/`)).text();
+        assert(page.includes("app.js"), "prod shell serves the bundle");
+        assert(!page.includes("importmap"), "no dev import map in prod");
+
+        // The launcher prepared a private unpack dir before exec'ing. Asserted
+        // on the compile target because the WIRING is what regresses — an
+        // AppImage would then unpack into it instead of shared /tmp.
+        const printed = await new Deno.Command("deno", {
+          args: [
+            "run",
+            "-A",
+            join(REPO_ROOT, "src", "build.ts"),
+            "--print-app-tmpdir",
+          ],
+          cwd: dir,
+          env,
+          stdout: "piped",
+          stderr: "null",
+        }).output();
+        const payload = dec.decode(printed.stdout).trim();
+        assert(
+          payload.startsWith(join(root, "apps")),
+          `the unpack dir must sit under the app's own home, got ${payload}`,
+        );
+        const st = await Deno.stat(payload);
+        assert(st.isDirectory, `run.sh did not create ${payload}`);
+        assertEquals(
+          st.mode! & 0o777,
+          0o700,
+          "the unpack dir must be owner-only",
+        );
+      } finally {
+        await kill(proc);
+        await Deno.remove(dir, { recursive: true }).catch(() => {});
+        await Deno.remove(root, { recursive: true }).catch(() => {});
+      }
+    }),
 });
 
 Deno.test({

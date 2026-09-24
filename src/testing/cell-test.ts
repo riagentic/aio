@@ -27,10 +27,12 @@ import {
   _armTestStrict,
   _DISPOSE_DRAIN_MS,
   _observedCall,
+  _watchInitFailures,
   _watchUnobservedCalls,
 } from "./test-strict.ts";
 // Server-touching, so NOT in test-strict.ts — see boot-refusals.ts.
 import {
+  _armBootScope,
   _callAcrossWorkerBoundary,
   _isolateWorkerCellsInProcess,
   _refuseUnsafeCells,
@@ -377,6 +379,27 @@ function _matchRefusal(
   return err;
 }
 
+/** Cells already told that `testCell` skips their `onInit` — once each. */
+const _onInitSkippedSaid = new WeakSet<object>();
+
+/** `testCell` is a pure reducer harness: it composes the one cell and runs
+ *  its methods; it never boots it, so `onInit` never runs. An `onInit` that
+ *  throws, or that starts the work the test then asserts on, was green and
+ *  silent here. What it runs is unchanged (additive: a test that relies on a
+ *  plain reducer keeps passing); what changes is that it is SAID, once per
+ *  cell, with where to go instead. A warning, not a failure. */
+function _sayOnInitSkipped(f: { __aio: { id: string } }): void {
+  const meta = f.__aio as { id: string; onInit?: unknown };
+  if (typeof meta.onInit !== "function" || _onInitSkippedSaid.has(f)) return;
+  _onInitSkippedSaid.add(f);
+  console.warn(
+    `[aio] \u26a0 testCell: cell "${meta.id}" declares onInit, and onInit ` +
+      `does not run under testCell — it tests methods against the initial ` +
+      `state, without booting the cell. Use bootCells([${meta.id}]) or ` +
+      `testUI to run onInit (and anything it starts).`,
+  );
+}
+
 export function testCell<
   F extends CellDef<string, Creators, Creators, Record<string, unknown>>,
 >(
@@ -410,6 +433,7 @@ export function testCell(
     // Reset shared runtime state for test isolation — prevents bleed from prior runs
     _resetAioRuntime();
     _resetHead();
+    _sayOnInitSkipped(f);
 
     // Every boot refusal a real `aio.run()` performs, BEFORE anything runs.
     // `bootCells` and `testUI` have called this for a while; `testCell` — the
@@ -998,12 +1022,13 @@ export function testCell(
           const key = keys[Math.floor(next() * keys.length)]!;
           actions.push(key);
           try {
-            send[key]!();
+            _asFuzzCall(key, () => send[key]!());
           } catch {
             // aio-ok: see `randomActions` below — a refused transition is the
             // designed outcome of a fuzz, not a fault to report.
           }
         }
+        _fuzzSummary("fuzz", n);
         return { seed, actions };
       },
       randomActions: (n) => {
@@ -1012,7 +1037,7 @@ export function testCell(
           const key = keys[Math.floor(Math.random() * keys.length)];
           if (key) {
             try {
-              send[key]!();
+              _asFuzzCall(key, () => send[key]!());
             } catch {
               // aio-ok: this IS the fuzzer. `randomActions` calls methods in
               // random order, from whatever state the previous one left, and
@@ -1025,6 +1050,7 @@ export function testCell(
             }
           }
         }
+        _fuzzSummary("randomActions", n);
       },
       runEffects: () => {
         for (const eff of lastEffects) {
@@ -1151,6 +1177,7 @@ export async function bootCells(
   // clock nothing advances means no schedule ever fires. Tests want the
   // virtual clock (that is what `advance(ms)` drives); an app must not get it.
   standalone._useVirtualSchedules();
+  _armBootScope(standalone._installBootScope);
   // Hermetic: reset any prior runtime state so these cells start pristine —
   // including module-level `signal()`s, which are state a test writes just as
   // easily as a cell and which nothing used to restore.
@@ -1175,7 +1202,10 @@ export async function bootCells(
   // Before composing, because an `onInit` that reaches for a server-only
   // module runs during the boot and has to see the stub too.
   setServerImportStubs(opts.stub);
-  await standalone.aio.run({
+  // An `onInit` that throws fails the test at settle()/dispose() — recorded
+  // during the boot, handed to the ledger below (test-strict.ts).
+  const inits = _watchInitFailures(cells);
+  const booted = await standalone.aio.run({
     appId: "bootcells",
     // deno-lint-ignore no-explicit-any
     cells: cells as any,
@@ -1184,7 +1214,7 @@ export async function bootCells(
     localFirst: opts.localFirst,
     // The app's budgets, so the harness measures what production measures.
     perfBudget: opts.perfBudget,
-  });
+  }).finally(() => inits.restore());
   // A failing async method NOBODY awaited must not pass for silence — the same
   // ledger `testCell` keeps, so the same app code cannot pass one harness and
   // fail the other (see test-strict.ts). Installed after the boot, because it
@@ -1194,6 +1224,7 @@ export async function bootCells(
   // (identity-checked) runs first at teardown.
   const unisolate = _isolateWorkerCellsInProcess(cells);
   const ledger = _watchUnobservedCalls(cells, _callAcrossWorkerBoundary);
+  ledger.adopt(inits.take());
   /** Drain until nothing is in flight.
    *
    *  Microtask ticks alone were not enough, and `advance()` is where that
@@ -1325,6 +1356,11 @@ export async function bootCells(
     ledger.restore();
     unisolate();
     standalone._resetState();
+    // AFTER the reset (its onDestroy dispatches still belong to this boot):
+    // from here this boot's dispatch refuses, loudly. The cells are module
+    // singletons, so a call an `onInit` started and nobody awaited would
+    // otherwise commit into the NEXT test's boot (feedback cc §2).
+    standalone._retire(booted);
     // The process-global half — without this a hung call sits in `_pending`
     // for the rest of the process and every later settle() burns its whole
     // budget on it (see the boot note above).
@@ -1375,3 +1411,21 @@ export {
 } from "./server-test.ts";
 import { count } from "../diagnostics/fmt.ts";
 import { setServerImportStubs } from "../state/server-import.ts";
+import {
+  _asFuzzCall,
+  _takeFuzzShortCalls,
+} from "../state/cell-methods-internals.ts";
+
+/** ONE line per fuzz run in place of the per-method short-call warning: a
+ *  fuzzer passes no arguments by design (see `_asFuzzCall`), so each method
+ *  it hit that declares some is counted, not warned. */
+function _fuzzSummary(what: "fuzz" | "randomActions", n: number): void {
+  const skipped = _takeFuzzShortCalls();
+  if (skipped === 0) return;
+  console.info(
+    `[aio:test] ${what}(${n}): ${
+      count(skipped, "call")
+    } passed fewer arguments than the method declares — by design (a fuzz ` +
+      `sends no payload), so the short-call warning was not printed for them.`,
+  );
+}

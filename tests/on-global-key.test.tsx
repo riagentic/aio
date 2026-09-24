@@ -48,6 +48,7 @@ testUI(App, "a bare key does not fire while you are typing", async (ui) => {
   // The bug in every app that has shipped one: a `h` shortcut that triggers
   // mid-word in a note field.
   hits.set([]);
+  // aio-ok: press swallowed on purpose — asserts the bare `h` shortcut does NOT fire mid-word in a field
   await ui.field.press("h");
   await ui.settle();
   assertEquals(hits(), []);

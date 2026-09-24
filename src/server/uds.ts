@@ -6,9 +6,12 @@
 // WS-only and are rejected loudly.
 
 import { compactPatches } from "../state/patch-compact.ts";
+import { LARGE_STATE_DOC } from "../state/budgets.ts";
 import { writeClientLog } from "./client-log.ts";
 import { log } from "../diagnostics/logger-api.ts";
 import { warnBigFullState } from "./server-broadcast.ts";
+import { decidePatchOrFull } from "./patch-or-full.ts";
+import { createLineReader } from "../protocol/line-reader.ts";
 import {
   udsWriteBacklog as _writeBacklog,
   WRITE_QUEUE_WARN,
@@ -596,7 +599,9 @@ export function createUDSListener(
       for (const [conn, client] of clientMap) {
         try {
           if (force) {
+            // A force round always sends: nothing may dedup against either memo.
             client.lastFullJson = undefined;
+            client.queuedJson = undefined;
           }
 
           // Patch-based path: filter patches by client subscriptions and send $patches
@@ -619,17 +624,31 @@ export function createUDSListener(
 
             if (allOps.length > 0) {
               const patchJson = JSON.stringify(allOps);
-              // Size guard: if patches exceed full state, send full state instead
-              const fullJson = _snapshot(client, verdict);
-              if (
-                fullJson && patchJson.length > fullJson.length * fullThreshold
-              ) {
+              // Size guard: a patch over `fullThreshold` of the full state
+              // sends the full state instead. The WS decider, shared
+              // (patch-or-full.ts): the view is serialized only when the
+              // estimate — the last full text this client was queued or
+              // sent — cannot answer. It used to be serialized EVERY patch
+              // round just to compare lengths: 16 ms a round at 12.5 MB.
+              const { sendFull, fullJson } = decidePatchOrFull(
+                patchJson.length,
+                (client.queuedJson ?? client.lastFullJson)?.length,
+                fullThreshold,
+                () => _snapshot(client, verdict),
+              );
+              if (sendFull && fullJson) {
                 debug(
                   `uds: patch payload (${patchJson.length}B) > ${
                     Math.round(fullThreshold * 100)
                   }% of full state (${fullJson.length}B) — sending full state`,
                 );
-                if (fullJson !== client.lastFullJson) {
+                // Compared with what the peer will hold once its queue
+                // drains (`queuedJson`), never `lastFullJson`: a patch round
+                // that skipped the serialization leaves the landed text
+                // describing an OLDER state, and a state that serializes
+                // back to it would read as already delivered (the WS
+                // "stale memo" loss). `queuedJson` is undefined = unknown.
+                if (fullJson !== client.queuedJson) {
                   const fj = fullJson;
                   full++;
                   client.queuedJson = fj;
@@ -641,7 +660,9 @@ export function createUDSListener(
               } else {
                 const fj = fullJson;
                 patch++;
-                client.queuedJson = fj; // undefined when the snapshot failed
+                // The post-patch text when this round measured it; otherwise
+                // undefined — unknown, so nothing dedups against it.
+                client.queuedJson = fj;
                 sendTo(
                   conn,
                   encRaw("patches", patchJson),
@@ -671,7 +692,9 @@ export function createUDSListener(
             }
             continue;
           }
-          if (json === client.lastFullJson) continue; // no change
+          // No change: the peer already holds (or has queued) exactly this.
+          // `queuedJson`, not `lastFullJson` — see the threshold path above.
+          if (json === client.queuedJson) continue;
           const j = json;
           full++;
           client.queuedJson = j;
@@ -837,7 +860,8 @@ function _handleUDSConn(
 ): void {
   const decoder = new TextDecoder();
   const MAX_BUF = udsFrameCeiling(maxFrameBytes);
-  let buf = "";
+  // Linear in the bytes read, however a frame is chunked (line-reader.ts).
+  const lineBuf = createLineReader();
 
   // This connection's native-dialog host — set once its peer (an Electron
   // main process) announces `caps: ["dialog"]` in a `type` frame. Every action
@@ -970,16 +994,23 @@ function _handleUDSConn(
       while (true) {
         const { value, done } = await reader.read();
         if (done) break;
-        buf += decoder.decode(value, { stream: true });
-        if (buf.length > MAX_BUF && !buf.includes("\n")) {
+        const lines = lineBuf.push(decoder.decode(value, { stream: true }));
+        // No frame ended and the unfinished one is past the ceiling — the
+        // exact condition the carried-string check expressed.
+        if (lines.length === 0 && lineBuf.pending() > MAX_BUF) {
           log.error(
             "uds",
-            `client buffer exceeded ${MAX_BUF}B without newline — closing`,
+            `a frame from client #${
+              clientMap.get(conn)?.index ?? "?"
+            } passed the ${MAX_BUF}-byte UDS frame ceiling without ending — ` +
+              `closing the connection (the window reconnects; the frame is ` +
+              `lost). Fix: send bulk data as a file or blob upload, not a ` +
+              `method argument, or raise aio.run({ wsLimits: { ` +
+              `maxMessageBytes: N } }) — the UDS ceiling follows it, never ` +
+              `below 10 MB — see ${LARGE_STATE_DOC}.`,
           );
           break;
         }
-        const lines = buf.split("\n");
-        buf = lines.pop()!;
         for (const line of lines) {
           if (!line) continue;
 

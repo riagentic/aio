@@ -41,6 +41,7 @@ import {
   beginPolicyCall,
   type ConcurrencyMode,
   createPolicyStore,
+  releaseQueueTail,
   setQueueTail,
 } from "./method-policy.ts";
 import { isDeliberateRejection, rejectionLine } from "./method-rejection.ts";
@@ -155,6 +156,42 @@ function refuseUncloneableEffect<T>(
     );
   }
   return eff;
+}
+
+/** How many method bodies are running SYNCHRONOUSLY right now (a sync body,
+ *  or an async body up to its first `await`). Nonzero ⇔ the current stack is
+ *  inside a dispatch's method call, where a throw fails THAT call and the
+ *  dispatcher catches it. Zero ⇔ a timer, a listener, a microtask — code no
+ *  dispatcher is under, where a throw is uncaught and ends the process. */
+let _bodyDepth = 0;
+function inBody<T>(fn: () => T): T {
+  _bodyDepth++;
+  try {
+    return fn();
+  } finally {
+    _bodyDepth--;
+  }
+}
+
+/** `s.$do(...)` from a callback that outlived its method — a `setTimeout`, a
+ *  listener, a stashed reference a later method calls. A sync method's
+ *  effects were already classified and returned, so the call pushed into a
+ *  list nobody read; a transaction's write-set was already published (or
+ *  dropped), so the effect was buffered into nothing. Both ran NOTHING and
+ *  said nothing. Now: the effect still runs nothing, and the refusal is
+ *  logged by name, dev and prod alike. It is also THROWN when the late call
+ *  sits inside another method body (the stashed-`$do` case) — that fails the
+ *  calling method visibly and its dispatcher catches it. From a timer or a
+ *  listener there is no dispatcher to catch it, and an uncaught throw would
+ *  end the process (1.0.10 was a silent no-op there, not a crash). */
+function refuseLateDo(cellName: string, methodKey: string): void {
+  const msg = `[${cellName}] ${methodKey}(): s.$do(...) called after the ` +
+    `method returned — from code that outlived ${methodKey}() (a callback, ` +
+    `or a later method holding a stashed s.$do), so the effect would run ` +
+    `nowhere. Call s.$do(...) inside ${methodKey}() (await ` +
+    `the work first), or dispatch a method from the callback and $do there.`;
+  log.error("cell", msg);
+  if (_bodyDepth > 0) throw new Error(msg);
 }
 
 /** Validate + self-resolve one `$do` argument — the shared gate for the sync
@@ -355,6 +392,33 @@ const _shortCallWarned = new Set<string>();
 export function _resetShortCallWarnings(): void {
   _shortCallWarned.clear();
 }
+/** The method a fuzzer (`randomActions` / `fuzz` in testing/cell-test.ts) is
+ *  calling right now, bare-named, or null. A fuzz calls every method with NO
+ *  payload BY DESIGN, so the warning below — whose advice is "add a default"
+ *  — would be the harness disagreeing with this checker, once per method, and
+ *  following it would hide real misuse. Exactly that call (that key, zero
+ *  arguments) is counted instead of warned, and the fuzzer prints ONE summary
+ *  line per run; any other short call, including one a fuzzed method makes to
+ *  another method with arguments missing, still warns. */
+let _fuzzKey: string | null = null;
+let _fuzzShortCalls = 0;
+/** @internal Run `call` (one no-payload fuzz call of `key`) marked as such. */
+export function _asFuzzCall<T>(key: string, call: () => T): T {
+  const outer = _fuzzKey;
+  _fuzzKey = key;
+  try {
+    return call();
+  } finally {
+    _fuzzKey = outer;
+  }
+}
+/** @internal How many fuzz calls skipped the short-call warning since the
+ *  last take — the fuzzer's one summary line. */
+export function _takeFuzzShortCalls(): number {
+  const n = _fuzzShortCalls;
+  _fuzzShortCalls = 0;
+  return n;
+}
 function _warnShortCall(
   cell: string,
   key: string,
@@ -364,6 +428,11 @@ function _warnShortCall(
   if (typeof fn !== "function") return;
   const required = Math.max(0, fn.length - 1); // minus the state draft
   if (supplied >= required) return;
+  if (supplied === 0 && _fuzzKey !== null && _fuzzKey === key) {
+    _fuzzKey = null; // one call: a nested call of the same key still warns
+    _fuzzShortCalls++;
+    return;
+  }
   const id = `${cell}:${key}|${supplied}`;
   if (_shortCallWarned.has(id)) return;
   _shortCallWarned.add(id);
@@ -553,7 +622,11 @@ export function buildMethodsReducer(
     args: unknown[],
   ): ReturnType<CellReduceFn> => {
     const captured: Effect[] = [];
+    // Set once the body has returned (or thrown): `captured` is classified
+    // and gone, so a later `$do` must refuse, not push into it.
+    let returned = false;
     const doFn = (...effects: unknown[]) => {
+      if (returned) return refuseLateDo(prefix, key);
       if (effects.length === 0) {
         throw new Error(
           `[${prefix}] ${key}(): s.$do() called with no effect — pass one or ` +
@@ -601,12 +674,19 @@ export function buildMethodsReducer(
     // A method body IS server code: what it calls on another cell bypasses
     // `access:` exactly as it does over a socket, where a cell→cell call never
     // reaches the network gate. See call-origin.ts.
-    let result: unknown = inServerOrigin(() =>
-      fn(
-        box.draft as Parameters<SyncMethod<Record<string, unknown>>>[0],
-        ...args,
-      )
-    );
+    let result: unknown;
+    try {
+      result = inServerOrigin(() =>
+        inBody(() =>
+          fn(
+            box.draft as Parameters<SyncMethod<Record<string, unknown>>>[0],
+            ...args,
+          )
+        )
+      );
+    } finally {
+      returned = true;
+    }
     // `return s` must hand back the real draft, not the wrapper (snapshotReturn
     // relies on isDraft) — also when `s` came back from a sibling, which was
     // handed its own chain view of the same draft (see cell-call.ts).
@@ -764,7 +844,9 @@ export function buildMethodsExecutor(
   // "warn" (report loudly, commit anyway). There is no silent third option.
   const onConflict =
     (typeof txConfig === "object" ? txConfig?.conflict : undefined) ?? "abort";
-  let serializeTail: Promise<unknown> = Promise.resolve();
+  /** The last serialized transactional call still running, or null — then
+   *  the next one starts NOW (see the `serialize` branch below). */
+  let serializeTail: Promise<unknown> | null = null;
   /** Methods already told that time travel paused them mid-flight. */
   const ttPausedWarned = new Set<string>();
 
@@ -842,7 +924,16 @@ export function buildMethodsExecutor(
         );
         return;
       }
-      const settlePolicy = decision.settle;
+      /** Runs once this call's outcome is final (committed, or refused) —
+       *  the instant its caller hears. The one-at-a-time branches below free
+       *  their slot here, not when the call's trailing cleanup settles: the
+       *  caller's NEXT call, made right after `await`, must not wait behind
+       *  bookkeeping and so start after a call made later than it. */
+      let onSettled: (() => void) | null = null;
+      const settlePolicy = (o: Parameters<typeof decision.settle>[0]) => {
+        decision.settle(o);
+        onSettled?.();
+      };
 
       // Transactional methods: reads see a STABLE snapshot captured
       // at entry (an `await` never changes them), and writes buffer + commit
@@ -1091,6 +1182,13 @@ export function buildMethodsExecutor(
                 `one or more schedule.*/own.* effects.`,
             );
           }
+          // A transaction's effects publish with its write-set; once the call
+          // has settled (published, or dropped on abort) the buffer is never
+          // read again. A non-transactional call sends at the call, so it has
+          // no buffer to lose.
+          if (transactional && batcher.closed()) {
+            return refuseLateDo(name, _method);
+          }
           const resolved = effects.map((e) =>
             // materializeValue: a payload referencing the live proxy
             // (`payload: { args: [s.items] }`) becomes plain data — a Proxy
@@ -1168,9 +1266,11 @@ export function buildMethodsExecutor(
         // inside this body is still the server calling itself. See
         // call-origin.ts.
         return inServerOrigin(() =>
-          (method as AsyncMethod<Record<string, unknown>>)(
-            proxy as Parameters<AsyncMethod<Record<string, unknown>>>[0],
-            ..._args,
+          inBody(() =>
+            (method as AsyncMethod<Record<string, unknown>>)(
+              proxy as Parameters<AsyncMethod<Record<string, unknown>>>[0],
+              ..._args,
+            )
           )
         )
           .then(async (value) => {
@@ -1417,15 +1517,31 @@ export function buildMethodsExecutor(
       // writing. The dispatch loop cannot tell — a cell's `execute` returns
       // nothing — so its drain would sail past a streaming method and seal the
       // queue under it.
+      //
+      // Nothing ahead → run NOW, in call order. Chaining on an already-settled
+      // promise still deferred the start a microtask, so a call dispatched
+      // right after this one (a sync method) ran FIRST (field report
+      // a desktop map app §2).
       if (transactional && serialize) {
-        serializeTail = serializeTail.then(runOnce, runOnce);
-        trackPending(serializeTail, prefix, appScope);
+        const mine = serializeTail
+          ? serializeTail.then(runOnce, runOnce)
+          : runOnce();
+        serializeTail = mine;
+        const free = () => {
+          if (serializeTail === mine) serializeTail = null;
+        };
+        onSettled = free;
+        mine.then(free, free);
+        trackPending(mine, prefix, appScope);
       } else if (decision.kind === "queue") {
         // `concurrency: "queue"` — one at a time, per METHOD. Reuses the same
         // chaining the transactional serialize mutex uses, because it is the
         // same operation and a second implementation could only drift from it.
-        const next = decision.after.then(runOnce, runOnce);
+        const next = decision.after
+          ? decision.after.then(runOnce, runOnce)
+          : runOnce();
         setQueueTail(prefix, _method, next, policyStore);
+        onSettled = () => releaseQueueTail(prefix, _method, next, policyStore);
         trackPending(next, prefix, appScope);
       } else {
         trackPending(runOnce(), prefix, appScope);

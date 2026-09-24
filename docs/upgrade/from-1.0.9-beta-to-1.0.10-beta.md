@@ -189,8 +189,14 @@ one flag — see
   addresses a running instance by its hash tag. A start `am` refuses before the
   app boots (foreign folder, another owner) writes nothing into that folder; its
   log is left beside it, `.<folder>.am-start-<pid>.log`.
-- **Mixed versions:** a 1.0.9 `am` sees `myapp@dev` locks as the app "running
-  from 2 data homes" and refuses bare verbs — use this version's `am`.
+- **Mixed versions — upgrade `am` before you run a profile.** A 1.0.9 `am` does
+  not know profiles, and what its bare verbs do depends on what runs: with the
+  default instance up its bare verbs target that instance (correct); with ONLY
+  `myapp@dev` up it takes the profile AS the app — a 1.0.9 `am stop myapp` stops
+  `myapp@dev` and `am state` reads its data, with no warning; with two profiles
+  and no default it refuses ("running from 2 data homes"). No lock naming can
+  hide a profile from 1.0.9 without hiding it from 1.0.10's `am` too (both match
+  `<appId>@…` the same way), so the fix is `am upgrade`.
 - **An `appDir` named like a profile keys like one.** `appDir: "~/.myapp-q1"`
   (the default home plus `-<valid name>`) is now `myapp@q1` — lock, socket,
   `am instances` row — instead of `myapp@<hash8>`. Same folder, same data; a

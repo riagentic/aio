@@ -1,6 +1,7 @@
 // Startup linter — validates config and src/ before running
 // Extracted from aio.ts. Checks state, config, App.tsx, imports, dependencies.
 import { UI_ENTRY } from "./app-files.ts";
+import { isCompiled } from "./paths.ts";
 import {
   aioOwnSpecAdvice,
   isAioOwnSpec,
@@ -133,11 +134,18 @@ export async function lint(
   // The same rule applies to the REASON. It was written as
   // `--client=server-only` whatever the client actually was, so a `cli` app
   // read its own boot report being told about a flag it had not passed.
+  //
+  // And a compiled binary carries no component SOURCE at all (the UI, if any,
+  // is the embedded bundle), so "no App.tsx" there was a claim about a file
+  // the binary could never have — said by a server target whose App.tsx was
+  // bundled. It names the reason only.
   if (headless) {
-    const hasUi = await exists(join(baseDir, uiEntry));
     const why = headlessClient ? ` — --client=${headlessClient}` : "";
+    const hasUi = !isCompiled() && await exists(join(baseDir, uiEntry));
     r.ok.push(
-      hasUi
+      isCompiled()
+        ? `headless (not serving a UI${why})`
+        : hasUi
         ? `headless (${uiEntry} present, not served${why})`
         : `headless (no ${uiEntry})`,
     );

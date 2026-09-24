@@ -27,7 +27,7 @@ export const TEMPLATES = [
 ] as const;
 export type Template = (typeof TEMPLATES)[number];
 
-/** THE build targets: what `am create --target=` accepts, and what the help
+/** THE build targets: what `am create --client=` (alias `--target=`) accepts, and what the help
  *  offers. `am-cmd-create.ts` re-exports this as its own — the same shape
  *  TEMPLATES uses above, and for the same reason. The help line USED to omit
  *  `--target` entirely while the usage line (printed on misuse) listed all
@@ -94,7 +94,8 @@ function briefLines(
  *  Same fix as TEMPLATES and TARGETS above: one home, interpolated. */
 export const CREATE_FLAGS: readonly string[] = [
   `--template=<${TEMPLATES.join("|")}>`,
-  `--target=<${TARGETS.join("|")}>`,
+  `--client=<${TARGETS.join("|")}>`,
+  `--target=<${TARGETS.join("|")}> (old spelling of --client)`,
   "--css=tailwind",
   "--aio-version=<v>",
   "--mirror[=<path>]",
@@ -157,7 +158,7 @@ Onboard:
 }
                           what each --template= gives you:
 ${briefLines(BRIEF_TEMPLATES, "                            ")}
-                          --target picks what \`deno task dev\`/\`compile\`
+                          --client picks what \`deno task dev\`/\`compile\`
                           produce by default, and what each one needs:
 ${briefLines(BRIEF_TARGETS, "                            ")}
                           --aio-version pins the framework (a release tag, or
@@ -210,8 +211,9 @@ Process (singleton — one instance per app identity):
                           running. In a project that declares COMPONENTS —
                           several entries in one repo — plain "am start" starts
                           all of them and "am start <label>" starts one.
-  stop [component]        Graceful shutdown (SIGTERM → SIGKILL). Stops the
-                          whole project when it declares components.
+  stop [component]        Graceful shutdown (SIGTERM → SIGKILL); waits until
+                          the process is gone (--no-wait: return at once). Stops
+                          the whole project when it declares components.
   stop --all              Stop EVERY app of this project, declared or not —
                           scoped to instances whose cwd is under this project
                           root, so another project's app is never touched
@@ -463,6 +465,7 @@ Flags: --app=X  --port=N  --entry=<path>  --wait[=N]  --no-wait  --json  --quiet
 --home: the path-only alias of --profile
 --timeout: ms to wait for a live client (surface/trigger; default 8000)
 --entry: override entry point (default: deno.json "entry" > src/app.ts)
---wait: start/stop block until complete (start 10s, stop 11s) — start does this by
-        default; --no-wait returns the moment the child is spawned.
+--wait: start/stop block until complete (start 10s, stop 11s) — both do this by
+        default; --no-wait returns the moment the child is spawned / the
+        shutdown is asked for.
         state polls every Ns.`;

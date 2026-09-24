@@ -45,7 +45,7 @@ it was necessary. It was not. Three answers, by when the work should happen:
 ```ts
 // 1. From a cell, as it initialises — dispatch through the app handle.
 onInit(app) {
-  app.dispatch({ type: "projects:scan" });   //  in the log, cancellable
+  app.dispatch({ type: "projects:scan", payload: { args: [] } }); // in the log, cancellable
 },
 
 // 2. Once, after every cell is bound and the app is serving.

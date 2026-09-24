@@ -17,6 +17,7 @@ import { assertMatch, assertNotEquals, assertThrows } from "@std/assert";
 import { _fallbackSocketName, resolveSocketPath } from "../src/server/paths.ts";
 import { selfUid } from "../src/server/dir-permissions.ts";
 import { dropTempDir, tempDir } from "../src/testing/temp-dir.ts";
+import { permissiveUmask } from "./permissive-umask.ts";
 
 const POSIX = Deno.build.os !== "windows";
 // A name long enough that the socket path cannot fit in the lock dir — the
@@ -26,42 +27,44 @@ const LONG = "s".repeat(120);
 Deno.test({
   name: "socket fallback: the directory is created 0700",
   ignore: !POSIX,
-  fn: async () => {
-    const base = await tempDir("aio-sockfb-ok-");
-    try {
-      const p = resolveSocketPath(LONG, undefined, "linux", base);
-      assertMatch(p, new RegExp(`^${base}/aio/s{40}-[0-9a-f]{8}\\.sock$`));
-      assertEquals(Deno.statSync(`${base}/aio`).mode! & 0o777, 0o700);
-    } finally {
-      await dropTempDir(base);
-    }
-  },
+  fn: () =>
+    permissiveUmask(async () => {
+      const base = await tempDir("aio-sockfb-ok-");
+      try {
+        const p = resolveSocketPath(LONG, undefined, "linux", base);
+        assertMatch(p, new RegExp(`^${base}/aio/s{40}-[0-9a-f]{8}\\.sock$`));
+        assertEquals(Deno.statSync(`${base}/aio`).mode! & 0o777, 0o700);
+      } finally {
+        await dropTempDir(base);
+      }
+    }),
 });
 
 Deno.test({
   name: "socket fallback: a directory that is not ours is never used",
   ignore: !POSIX || selfUid() === null,
-  fn: async () => {
-    const base = await tempDir("aio-sockfb-theirs-");
-    try {
-      // Unusable for a reason a test can create; the production case is
-      // "another uid owns it", and both land on the same branch.
-      await Deno.writeTextFile(`${base}/aio`, "not a directory");
-      const p = resolveSocketPath(LONG, "http", "linux", base);
-      assert(
-        !p.startsWith(`${base}/aio/`),
-        `placed a control socket in a directory it could not make private: ${p}`,
-      );
-      assertStringIncludes(p, `${base}/aio-u${selfUid()}/`);
-      assert(p.endsWith(".http.sock"), p);
-      assertEquals(
-        Deno.statSync(`${base}/aio-u${selfUid()}`).mode! & 0o777,
-        0o700,
-      );
-    } finally {
-      await dropTempDir(base);
-    }
-  },
+  fn: () =>
+    permissiveUmask(async () => {
+      const base = await tempDir("aio-sockfb-theirs-");
+      try {
+        // Unusable for a reason a test can create; the production case is
+        // "another uid owns it", and both land on the same branch.
+        await Deno.writeTextFile(`${base}/aio`, "not a directory");
+        const p = resolveSocketPath(LONG, "http", "linux", base);
+        assert(
+          !p.startsWith(`${base}/aio/`),
+          `placed a control socket in a directory it could not make private: ${p}`,
+        );
+        assertStringIncludes(p, `${base}/aio-u${selfUid()}/`);
+        assert(p.endsWith(".http.sock"), p);
+        assertEquals(
+          Deno.statSync(`${base}/aio-u${selfUid()}`).mode! & 0o777,
+          0o700,
+        );
+      } finally {
+        await dropTempDir(base);
+      }
+    }),
 });
 
 Deno.test({

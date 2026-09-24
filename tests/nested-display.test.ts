@@ -96,6 +96,7 @@ Deno.test("nestedDisplayEnv: DISPLAY alone without a cookie on file, DISPLAY + X
       XAUTHORITY: file,
     });
     // Owner-only: the cookie is the key to the display.
+    // aio-ok(umask): the cookie file is written by THIS test with mode 0o600 above — no code under test sets this mode.
     assertEquals((Deno.statSync(file).mode ?? 0) & 0o077, 0);
   } finally {
     Deno.removeSync(file);

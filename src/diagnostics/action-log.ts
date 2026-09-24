@@ -261,5 +261,57 @@ export function createActionLog(
     await truncateIfNeeded();
   }
 
-  return { append, truncateIfNeeded, flush };
+  /** Rewrite the lines already on disk whose payload `hide` withholds, with
+   *  the payload replaced by `replacement` — the type and the sequence stay.
+   *  For what an OLDER build wrote under a rule this one has tightened (a
+   *  cell that is now `persist: "none"`): new lines are withheld on the way
+   *  in, and without this the old ones sat in the file until rotation cut
+   *  them. Atomic (tmp → rename, 0600), and only when a line changes.
+   *  Resolves to the number of lines rewritten. */
+  function scrub(
+    hide: (type: string, payload: unknown) => boolean,
+    replacement: unknown,
+  ): Promise<number> {
+    let changed = 0;
+    return _enqueue(async () => {
+      let text: string;
+      try {
+        text = await Deno.readTextFile(path);
+      } catch (e) {
+        if (e instanceof Deno.errors.NotFound) return;
+        throw e;
+      }
+      const out = text.split("\n").map((l) => {
+        if (!l) return l;
+        let rec: { type?: unknown; payload?: unknown };
+        try {
+          rec = JSON.parse(l);
+        } catch {
+          return l; // aio-ok: a torn line is not ours to judge — kept as is
+        }
+        if (
+          typeof rec?.type !== "string" ||
+          JSON.stringify(rec.payload) === JSON.stringify(replacement) ||
+          !hide(rec.type, rec.payload)
+        ) return l;
+        changed++;
+        return JSON.stringify({ ...rec, payload: replacement });
+      });
+      if (changed === 0) return;
+      const tmp = `${path}.${crypto.randomUUID()}.tmp`;
+      try {
+        await Deno.writeTextFile(tmp, out.join("\n"), {
+          mode: 0o600,
+          createNew: true,
+        });
+        await Deno.rename(tmp, path);
+      } catch (e) {
+        await Deno.remove(tmp).catch(() => {/* aio-ok: never written */});
+        throw e;
+      }
+      counted = false; // the byte count moved — recount on the next append
+    }).then(() => changed);
+  }
+
+  return { append, truncateIfNeeded, flush, scrub };
 }

@@ -90,6 +90,25 @@ instead of twenty-six lines of prose. Anything that greps the log for a field
 name gains; anything that grepped for the literal string `"  web       http…"`
 should grep for `web=` instead.
 
+### A direct `build.ts` call builds ONE fleet target — or is refused
+
+_(Added after release: this guide first shipped without it.)_
+
+`deno run -A …/build.ts <flags>` now resolves the fleet target its build flags
+name — by the EXACT flag set in `TARGETS` (`src/build-all.ts`) — and runs the
+fleet for it, so the artifact lands in `dist/` with the version stamp and the
+manifest entry like `deno task build`. A flag set that names no target is
+refused (`✗ <flags> is not a build target.`) instead of building an untracked
+artifact in the project root. The old spellings that break:
+
+| Was                            | Is                                      |
+| ------------------------------ | --------------------------------------- |
+| `build.ts --compile --android` | `build.ts --android` (target `android`) |
+
+Since 1.0.11-beta the refusal names the nearest target
+(`Did you mean --android (target "android")?`). Simplest in a script:
+`deno task build --targets=android` (or `am build android`).
+
 ## New
 
 ### `bytes`, `dur`, `count` on `aio`

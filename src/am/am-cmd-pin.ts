@@ -39,9 +39,10 @@ import {
   ensureVersion,
   knownTags,
   LATEST,
-  latestTag,
+  latestRelease,
   linkTo,
   MAIN,
+  offMainNote,
   parseVersion,
   pinnedMinDeno,
   provisioned,
@@ -83,6 +84,11 @@ export type PinInfo = {
   drift: boolean;
   available: string[];
   latest: string | null;
+  /** Provisioned releases NEWER than `latest` that the clone's origin/main
+   *  does not contain — why `available` can outrank `latest`. */
+  offMain: string[];
+  /** That, as one sentence with the way out; null when nothing disagrees. */
+  latestNote: string | null;
   /** Releases between the pin and `latest` (0 = current). null when the pin is
    *  not an orderable release (unpinned, `main-<sha>`, a path pin) — those are
    *  deliberate choices, not staleness. */
@@ -100,6 +106,7 @@ export async function pinInfo(appDir: string, root: string): Promise<PinInfo> {
     : null;
   const tags = sortVersions(await knownTags(root));
   const cur = pinned ? parseVersion(pinned) : null;
+  const { latest, offMain } = await latestRelease(root);
   return {
     pinned,
     linkedPath,
@@ -108,7 +115,9 @@ export async function pinInfo(appDir: string, root: string): Promise<PinInfo> {
     // Unpinned apps can't drift — there is nothing to disagree with.
     drift: pinned !== null && linkedPath !== null && linkedRef !== pinned,
     available: await provisioned(),
-    latest: await latestTag(root),
+    latest,
+    offMain,
+    latestNote: offMainNote(root, offMain),
   };
 }
 
@@ -182,6 +191,12 @@ function render(info: PinInfo, tags: string[]): string {
       `${count(info.behind, "release")} behind ${info.latest}.`,
       "This app keeps building as pinned — nothing changes until you move it.",
       "am pin latest",
+    ),
+    info.latestNote !== null &&
+    block(
+      "info",
+      `Newer than latest: ${info.offMain.join(", ")}.`,
+      info.latestNote,
     ),
   ].filter((b): b is string => typeof b === "string");
 
@@ -439,7 +454,10 @@ export async function cmdPin(
     const crossMajor = args.includes("--major");
     const current = pinned ? parseVersion(pinned) : null;
     const major = crossMajor || !current ? undefined : current.major;
-    const l = await latestTag(root, { major });
+    const rel = await latestRelease(root, { major });
+    const l = rel.latest;
+    const why = offMainNote(root, rel.offMain);
+    if (why) sayErr(`am: note: ${why}`);
     if (!l) {
       outError(
         major === undefined

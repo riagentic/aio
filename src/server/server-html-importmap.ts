@@ -1,7 +1,7 @@
 // Browser import map generation — npm packages → esm.sh CDN URLs.
 
-import { readDenoJsonSync } from "./deno-json.ts";
-import { dirname, join, resolve } from "@std/path";
+import { locateDenoJsonAbove, readDenoJsonSync } from "./deno-json.ts";
+import { dirname, fromFileUrl, join, resolve, toFileUrl } from "@std/path";
 import { CDN } from "./server-html-constants.ts";
 import { log } from "../diagnostics/logger-api.ts";
 
@@ -13,9 +13,8 @@ const WORKSPACE_MAX_DEPTH = 8;
 /** Read the app's `deno.json`/`deno.jsonc` imports — THE input to the browser
  *  import map, and (for `am check`) THE statement of what DENO can resolve.
  *
- *  Scaffolded apps keep the config at the project root (`baseDir/..`); flat
- *  apps (entry next to the config) and repo examples run from cwd. First
- *  readable config wins, and in a Deno workspace the root's imports are merged
+ *  The config is the NEAREST one at or above `baseDir` (up to four parents —
+ *  `locateDenoJsonAbove`), else the one in cwd. In a Deno workspace the root's imports are merged
  *  under the member's — exactly what Deno itself resolves with.
  *
  *  `null` means NOTHING was readable — a different fact from `{}` ("read it,
@@ -35,18 +34,23 @@ const WORKSPACE_MAX_DEPTH = 8;
 export function readAppDenoImports(
   baseDir: string,
 ): Record<string, string> | null {
-  const absBaseDir = resolve(baseDir);
-  const candidates = [
-    join(absBaseDir, ".."),
-    absBaseDir,
-    Deno.cwd(),
-  ];
-  for (const dir of candidates) {
-    const found = readConfigDir(dir);
-    if (!found) continue;
-    return withWorkspaceImports(dir, ownImports(found.config));
+  // THE walk (`locateDenoJsonAbove`, nearest of the dir and four parents) —
+  // the same decider the runtime and the prod-bundle graph check use. This
+  // used to look at `baseDir/..` and `baseDir` only, so an entry two folders
+  // deep (`src/agent/app.ts`, the layout docs/build/targets.md recommends)
+  // got a browser import map with none of the app's npm packages while the
+  // graph check, reading the same project, found its config fine.
+  const located = locateDenoJsonAbove(toFileUrl(join(resolve(baseDir), "/")));
+  if (located) {
+    return withWorkspaceImports(
+      fromFileUrl(located.dir),
+      ownImports(located.config),
+    );
   }
-  return null;
+  // Repo examples run from cwd with no config above the entry.
+  const cwd = Deno.cwd();
+  const found = readConfigDir(cwd);
+  return found ? withWorkspaceImports(cwd, ownImports(found.config)) : null;
 }
 
 /** The config in `dir` — BOTH names Deno accepts, read the way Deno reads

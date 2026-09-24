@@ -9,6 +9,7 @@ import {
   readDenoJsonSync,
 } from "../server/deno-json.ts";
 import { isProcessAlive } from "../server/single-instance-lock.ts";
+import { resolveEntryPath } from "../server/paths.ts";
 import { dirname, fromFileUrl, isAbsolute, join, relative } from "@std/path";
 import { artifactName } from "./platforms.ts";
 import { BUILD_STAMP_FILE } from "./build-version.ts";
@@ -20,7 +21,7 @@ import {
   physicalMemoryBytes,
 } from "../server/heap-policy.ts";
 import type { BuildConfig } from "./build-config.ts";
-import { HEY, NO, OK } from "../diagnostics/fmt.ts";
+import { HEY, NO } from "../diagnostics/fmt.ts";
 import { compiled } from "./build-say.ts";
 import { electronStagingDir, freshElectronStaging } from "./build-electron.ts";
 import { writeWindowsIcon } from "./build-helpers.ts";
@@ -551,6 +552,139 @@ export function unservableAssetRefs(opts: {
   return out;
 }
 
+/** Which `*.server.ts` a binary compiled from `entry` embeds. Pure.
+ *
+ *  Field report (a remote-desktop app, §4): every binary embedded EVERY `*.server.ts` in the
+ *  repo, so a public relay shipped the agent's input-injection and capture
+ *  code and each desktop app shipped the relay's. A server module ships when
+ *  the entry can load it:
+ *   1. it is in the entry's module graph (static or analysable dynamic
+ *      import — `deno info` lists both);
+ *   2. it lives under the entry's own directory (the app's dir — a registry
+ *      there may load it through an opaque specifier the graph cannot see);
+ *   3. it sits in the same directory as a module the graph reaches (a shared
+ *      loader beside its plugins, same reason).
+ *  Everything else is `skipped` — the caller prints it, so an opaque load from
+ *  elsewhere is one `compile.include` line away and never a silent mystery.
+ *  `graph` null (unreadable) ⇒ embed all: a bigger binary beats a broken one.
+ *
+ *  `siblingEntries` (optional — additive): the OTHER build targets' entries.
+ *  A candidate whose nearest enclosing target directory is a SIBLING's — not
+ *  this entry's — ships only when this entry's graph reaches it. Without it,
+ *  rule 2 handed the `am create` shape (web `src/app.ts`, agent
+ *  `src/agent/app.ts`) the agent's server code: `src/agent/` is "under" the
+ *  web entry's `src/`. A sibling at the project root owns nothing (its dir is
+ *  every target's), and a sibling sharing this entry's dir changes nothing.
+ *  All paths root-relative, `/`-separated. */
+export function serverModulePlan(opts: {
+  candidates: readonly string[];
+  graph: readonly string[] | null;
+  entry: string;
+  siblingEntries?: readonly string[];
+}): { embed: string[]; skipped: string[] } {
+  const norm = (p: string) => p.split("\\").join("/").replace(/^\.\//, "");
+  if (!opts.graph) return { embed: [...opts.candidates], skipped: [] };
+  const dirOf = (p: string) => {
+    const i = p.lastIndexOf("/");
+    return i < 0 ? "" : p.slice(0, i);
+  };
+  const reached = new Set(opts.graph.map(norm));
+  const graphDirs = new Set([...reached].map(dirOf));
+  const appDir = dirOf(norm(opts.entry));
+  const under = (p: string) => appDir === "" || p.startsWith(appDir + "/");
+  const inDir = (p: string, d: string) => p.startsWith(d + "/");
+  const depth = (d: string) => d === "" ? 0 : d.split("/").length;
+  const siblingDirs = (opts.siblingEntries ?? []).map((e) => dirOf(norm(e)))
+    .filter((d) => d !== "" && d !== appDir);
+  /** The nearest target dir holding `c` is a sibling's, not this entry's. */
+  const siblingOwns = (c: string) => {
+    const own = under(c) ? depth(appDir) : -1;
+    return siblingDirs.some((d) => inDir(c, d) && depth(d) > own);
+  };
+  const embed: string[] = [];
+  const skipped: string[] = [];
+  for (const c of opts.candidates.map(norm)) {
+    if (siblingOwns(c)) {
+      (reached.has(c) ? embed : skipped).push(c);
+      continue;
+    }
+    (reached.has(c) || under(c) || graphDirs.has(dirOf(c)) ? embed : skipped)
+      .push(c);
+  }
+  return { embed, skipped };
+}
+
+/** The entries of the project's OTHER build targets (deno.json
+ *  `build.targets`, object form — a target without its own `entry` compiles
+ *  the project's), root-relative. Read here rather than handed down by the
+ *  fleet so a single-target build (`--targets=web`) scopes exactly as the
+ *  fleet does. A deno.json that does not parse is reported by
+ *  `assetIncludes`' own `compile.include` read, so this answers `[]`. */
+async function siblingTargetEntries(
+  root: string,
+  entry: string,
+): Promise<string[]> {
+  let cfg: Record<string, unknown>;
+  try {
+    cfg = (await readDenoJson(root))?.config ?? {};
+  } catch {
+    return []; // aio-ok: said by assetIncludes' compile.include read below
+  }
+  const targets = (cfg.build as { targets?: unknown } | undefined)?.targets;
+  if (!targets || typeof targets !== "object" || Array.isArray(targets)) {
+    return [];
+  }
+  const norm = (p: string) => p.split("\\").join("/").replace(/^\.\//, "");
+  const own = norm(entry);
+  const out = new Set<string>();
+  for (const t of Object.values(targets as Record<string, unknown>)) {
+    const override = (t as { entry?: unknown } | null)?.entry;
+    const e = norm(
+      resolveEntryPath(
+        cfg,
+        typeof override === "string" ? override : undefined,
+      ),
+    );
+    if (e !== own) out.add(e);
+  }
+  return [...out];
+}
+
+/** Root-relative local files in `entry`'s module graph (`deno info`, which
+ *  lists analysable dynamic imports too), or null when it cannot be read. */
+export async function localModuleGraph(
+  root: string,
+  entry: string,
+): Promise<string[] | null> {
+  try {
+    const p = await new Deno.Command("deno", {
+      args: ["info", "--json", entry],
+      cwd: root,
+      stdout: "piped",
+      stderr: "null",
+    }).output();
+    if (!p.success) return null;
+    const j = JSON.parse(new TextDecoder().decode(p.stdout)) as {
+      modules?: Array<{ local?: string }>;
+    };
+    // `deno info` reports each module's REAL path. A root reached through a
+    // symlink (a linked checkout, `~/apps/x -> /srv/x`) made every one of
+    // them `../<real>/…` against the link, so the whole graph read as outside
+    // the project and a sibling `*.server.ts` the entry imports was left out
+    // of the binary — which then dies at the import. Compare real to real.
+    const base = await Deno.realPath(root);
+    return (j.modules ?? []).flatMap((m) => {
+      if (!m.local) return [];
+      const rel = relative(base, m.local);
+      return rel.startsWith("..") || isAbsolute(rel)
+        ? []
+        : [rel.split("\\").join("/")];
+    });
+  } catch {
+    return null;
+  }
+}
+
 /** `--include` args for the app's runtime DATA ASSETS that `deno compile` can't
  *  trace — anything loaded via `Deno.readFile(new URL("./x", import.meta.url))`
  *  is invisible to the module graph, so it's missing from the binary/AppImage
@@ -560,9 +694,18 @@ export function unservableAssetRefs(opts: {
  *   2. every `*.server.ts` / `*.server.tsx` (zero-config — see below);
  *   3. any extra paths the app declares in deno.json `compile.include`
  *      (files or dirs, relative to the project root — for data files, models…).
- *  Returns flat `["--include", "&lt;relpath&gt;", …]` args (deduped, root-relative). */
-export async function assetIncludes(root: string): Promise<string[]> {
+ *  Returns flat `["--include", "&lt;relpath&gt;", …]` args (deduped, root-relative).
+ *
+ *  `entry` (root-relative, optional — additive): the module this binary is
+ *  compiled from. Given one, only the `*.server.ts` that entry can REACH ship —
+ *  see {@link serverModulePlan}. Without it every `*.server.ts` in the tree is
+ *  embedded, as before. */
+export async function assetIncludes(
+  root: string,
+  entry?: string,
+): Promise<string[]> {
   const rels: string[] = [];
+  const serverMods: string[] = [];
   const seen = new Set<string>();
   const add = (rel: string) => {
     const norm = rel.split("\\").join("/");
@@ -612,11 +755,46 @@ export async function assetIncludes(root: string): Promise<string[]> {
         // declared: the naming convention IS the registration. Same treatment
         // `.wasm` gets above, for the same reason, and the cost of including a
         // module the graph already had is a duplicate the VFS de-dupes.
-        add(relative(root, join(dir, e.name)));
+        //
+        // …but only for the binary that can load it. A repo with several
+        // targets (relay + agent + control) must not ship the agent's input
+        // injection inside the public relay — `serverModulePlan` decides.
+        serverMods.push(
+          relative(root, join(dir, e.name)).split("\\").join("/"),
+        );
       }
     }
   };
   await walk(root, 0);
+  if (entry === undefined) serverMods.forEach(add);
+  else {
+    entry = relative(root, isAbsolute(entry) ? entry : join(root, entry));
+    const graph = await localModuleGraph(root, entry);
+    if (!graph) {
+      console.warn(
+        `${HEY} could not read ${entry}'s module graph — embedding every ` +
+          `*.server.ts in the project (the binary may carry other targets' ` +
+          `server code)`,
+      );
+    }
+    const plan = serverModulePlan({
+      candidates: serverMods,
+      graph,
+      entry,
+      siblingEntries: await siblingTargetEntries(root, entry),
+    });
+    plan.embed.forEach(add);
+    if (plan.skipped.length) {
+      // A warning, not a progress line: a module left out here that the app
+      // DOES load (opaquely) is a binary that dies at runtime, and the fix is
+      // one config line — so it must not scroll past with the build output.
+      console.warn(
+        `${HEY} not embedding ${plan.skipped.length} *.server.ts ${entry} cannot ` +
+          `reach: ${plan.skipped.join(", ")} — if it loads one through an ` +
+          `opaque specifier, add it to deno.json "compile": { "include": [] }`,
+      );
+    }
+  }
 
   // 2) declarative deno.json `compile.include` — files/dirs the app wants
   //    embedded (any asset kind). Kept inside the project (no traversal out),
@@ -1042,7 +1220,7 @@ export async function runDenoCompile(
   // Embed the app's runtime data assets (.wasm + declared compile.include) —
   // deno compile can't trace `Deno.readFile(new URL(…, import.meta.url))`, so
   // without this a WASM app runs degraded in the binary/AppImage.
-  const assets = await assetIncludes(root);
+  const assets = await assetIncludes(root, configEntry);
   const v8Flags = await v8FlagsArg(root);
   if (v8Flags.length) console.log(`${v8Flags[0]}`);
   if (assets.length) {
@@ -1398,7 +1576,11 @@ ${systemdEnvAssignment("HOME", home)}
 WantedBy=multi-user.target
 `;
   await Deno.writeTextFile(serviceFile, unit);
-  console.log(`${OK} ${serviceFile}`);
+  // Under the fleet this path is STAGED — it is moved to
+  // `dist/<name>-<version>.service` next — so it must not read as the
+  // artifact (`✓ …/app.service` named a file gone by the build's end). The
+  // one "this file now exists" line says which of the two it is.
+  compiled(serviceFile, cfg.root ?? Deno.cwd());
   // Under the fleet (every CLI build) these files are about to be renamed into
   // `dist/` as `<name>-<version>…`, so steps naming them here would name files
   // that no longer exist — the fleet prints them after placement instead

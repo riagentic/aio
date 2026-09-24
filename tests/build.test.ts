@@ -825,26 +825,45 @@ Deno.test("appimageEnv: extract-and-run is always set (FUSE-less hosts)", () => 
   assertEquals(env.PATH, Deno.env.get("PATH"));
 });
 
-Deno.test("appimageEnv: the tool unpacks somewhere private, never /tmp", () => {
-  // Extract-and-run names its directory after a digest of the AppImage and
-  // creates it 0755 — so the default left a world-readable, predictably-named
-  // copy of the packaging tool in /tmp on every build, at a path another user
-  // could create first. Same rule a packaged app gets at launch (AppDirs.app).
-  const env = appimageEnv("x86_64");
-  assert(env.TMPDIR, "a private TMPDIR must be chosen for the unpack");
-  assert(
-    !env.TMPDIR.startsWith("/tmp/") && env.TMPDIR !== "/tmp",
-    `must not stage in shared /tmp, got ${env.TMPDIR}`,
-  );
-  const mode = Deno.statSync(env.TMPDIR).mode;
-  if (Deno.build.os !== "windows") {
-    assertEquals(
-      mode! & 0o777,
-      0o700,
-      `the unpack dir must be owner-only, got ${(mode! & 0o777).toString(8)}`,
-    );
-  }
-});
+Deno.test("appimageEnv: the tool unpacks somewhere private, never /tmp", () =>
+  permissiveUmask(async () => {
+    // Extract-and-run names its directory after a digest of the AppImage and
+    // creates it 0755 — so the default left a world-readable, predictably-named
+    // copy of the packaging tool in /tmp on every build, at a path another user
+    // could create first. Same rule a packaged app gets at launch (AppDirs.app).
+    // A fresh cache root: the unpack dir must be CREATED here, under 022 — a
+    // dir an earlier build already narrowed would pass with no chmod at all
+    // (and the real ~/.cache is not a test's to touch).
+    const cache = await tempDir("aio-appimage-cache-");
+    const prev = Deno.env.get("XDG_CACHE_HOME");
+    Deno.env.set("XDG_CACHE_HOME", cache);
+    try {
+      const env = appimageEnv("x86_64");
+      assert(env.TMPDIR, "a private TMPDIR must be chosen for the unpack");
+      assert(
+        env.TMPDIR.startsWith(cache),
+        `the unpack dir must sit under the tool cache, got ${env.TMPDIR}`,
+      );
+      assert(
+        !env.TMPDIR.startsWith("/tmp/") && env.TMPDIR !== "/tmp",
+        `must not stage in shared /tmp, got ${env.TMPDIR}`,
+      );
+      const mode = Deno.statSync(env.TMPDIR).mode;
+      if (Deno.build.os !== "windows") {
+        assertEquals(
+          mode! & 0o777,
+          0o700,
+          `the unpack dir must be owner-only, got ${
+            (mode! & 0o777).toString(8)
+          }`,
+        );
+      }
+    } finally {
+      if (prev === undefined) Deno.env.delete("XDG_CACHE_HOME");
+      else Deno.env.set("XDG_CACHE_HOME", prev);
+      await dropTempDir(cache);
+    }
+  }));
 
 Deno.test("appimageEnv: every appimagetool invocation uses it", async () => {
   // A second packaging site that hand-rolled its env would silently lose the
@@ -1202,6 +1221,7 @@ import {
   stampedVersion,
   VERSION_STAMP,
 } from "../src/protocol/protocol-version.ts";
+import { permissiveUmask } from "./permissive-umask.ts";
 
 Deno.test("versionStamp: assigns the building aio version to the shared global", () => {
   const stamp = versionStamp("9.9.9-test");

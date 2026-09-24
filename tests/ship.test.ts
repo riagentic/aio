@@ -30,6 +30,7 @@ import { inferTarget, notRunnableExit } from "../src/testing/internal.ts";
 import { dropTempDir, tempDir } from "../src/testing/temp-dir.ts";
 import type { DataContract, ShipManifest } from "../src/build/ship.ts";
 import { manifestUrl } from "../src/server/updates-core.ts";
+import { permissiveUmask } from "./permissive-umask.ts";
 
 const bin = (s: string) => new TextEncoder().encode(s);
 
@@ -1193,66 +1194,75 @@ async function runShip(
 
 Deno.test({
   name: "ship keygen: never writes a private key inside a git work tree",
-  fn: async () => {
-    // The registry's root (aioTestRoot()) can itself sit inside a git work
-    // tree (e.g. a dotfiles-managed home tmp dir) — this test asserts about
-    // being OUTSIDE one, so it must stay raw.
-    // aio-ok(temp-dirs): must not be under a git work tree — see above.
-    const dir = await Deno.makeTempDir({ prefix: "aio-keygen-" });
-    const home = join(dir, "home");
-    const repo = join(dir, "repo");
-    try {
-      await Deno.mkdir(join(repo, ".git"), { recursive: true }); // a work tree
-      // 1. The old flow, spelled as a path: refused, with the risk and the fix.
-      const refused = await runShip(
-        ["keygen", "--out=./release-key.json"],
-        { cwd: repo, home },
-      );
-      assertEquals(refused.code, 1, refused.stderr);
-      assert(refused.stderr.includes("git work tree"), refused.stderr);
-      assert(refused.stderr.includes("--out="), refused.stderr);
-      await assertRejects(() => Deno.stat(join(repo, "release-key.json")));
+  fn: () =>
+    permissiveUmask(async () => {
+      // The registry's root (aioTestRoot()) can itself sit inside a git work
+      // tree (e.g. a dotfiles-managed home tmp dir) — this test asserts about
+      // being OUTSIDE one, so it must stay raw.
+      // aio-ok(temp-dirs): must not be under a git work tree — see above.
+      const dir = await Deno.makeTempDir({ prefix: "aio-keygen-" });
+      const home = join(dir, "home");
+      const repo = join(dir, "repo");
+      try {
+        await Deno.mkdir(join(repo, ".git"), { recursive: true }); // a work tree
+        // 1. The old flow, spelled as a path: refused, with the risk and the fix.
+        const refused = await runShip(
+          ["keygen", "--out=./release-key.json"],
+          { cwd: repo, home },
+        );
+        assertEquals(refused.code, 1, refused.stderr);
+        assert(refused.stderr.includes("git work tree"), refused.stderr);
+        assert(refused.stderr.includes("--out="), refused.stderr);
+        await assertRejects(() => Deno.stat(join(repo, "release-key.json")));
 
-      // 2. The default: written OUTSIDE the tree, 0600, and stdout carries the
-      //    PUBLIC half only — a pipe cannot leak the private key by accident.
-      const ok = await runShip(["keygen"], { cwd: repo, home });
-      assertEquals(ok.code, 0, ok.stderr);
-      const doc = JSON.parse(ok.stdout) as {
-        keyPath: string;
-        publicKey: JsonWebKey;
-      };
-      assert(!doc.keyPath.startsWith(repo), `outside the repo: ${doc.keyPath}`);
-      assert(doc.keyPath.startsWith(home), doc.keyPath);
-      assert(!ok.stdout.includes('"d"'), "no private scalar on stdout");
-      assertEquals(doc.publicKey.key_ops, ["verify"]);
-      const st = await Deno.stat(doc.keyPath);
-      if (st.mode !== null) assertEquals(st.mode & 0o777, 0o600);
-      const pair = JSON.parse(await Deno.readTextFile(doc.keyPath)) as {
-        privateKey: JsonWebKey;
-      };
-      assert(pair.privateKey.d, "the file holds the real private key");
+        // 2. The default: written OUTSIDE the tree, 0600, and stdout carries the
+        //    PUBLIC half only — a pipe cannot leak the private key by accident.
+        const ok = await runShip(["keygen"], { cwd: repo, home });
+        assertEquals(ok.code, 0, ok.stderr);
+        const doc = JSON.parse(ok.stdout) as {
+          keyPath: string;
+          publicKey: JsonWebKey;
+        };
+        assert(
+          !doc.keyPath.startsWith(repo),
+          `outside the repo: ${doc.keyPath}`,
+        );
+        assert(doc.keyPath.startsWith(home), doc.keyPath);
+        assert(!ok.stdout.includes('"d"'), "no private scalar on stdout");
+        assertEquals(doc.publicKey.key_ops, ["verify"]);
+        const st = await Deno.stat(doc.keyPath);
+        if (st.mode !== null) assertEquals(st.mode & 0o777, 0o600);
+        const pair = JSON.parse(await Deno.readTextFile(doc.keyPath)) as {
+          privateKey: JsonWebKey;
+        };
+        assert(pair.privateKey.d, "the file holds the real private key");
 
-      // 3. …and it never silently replaces the key users already pinned.
-      const second = await runShip(["keygen"], { cwd: repo, home });
-      assertEquals(second.code, 1, second.stdout);
-      assert(second.stderr.includes("already exists"), second.stderr);
-      assertEquals(
-        (JSON.parse(await Deno.readTextFile(doc.keyPath)) as {
-          privateKey: { d?: string };
-        }).privateKey.d,
-        pair.privateKey.d,
-        "the existing key is untouched",
-      );
+        // 3. …and it never silently replaces the key users already pinned.
+        const second = await runShip(["keygen"], { cwd: repo, home });
+        assertEquals(second.code, 1, second.stdout);
+        assert(second.stderr.includes("already exists"), second.stderr);
+        assertEquals(
+          (JSON.parse(await Deno.readTextFile(doc.keyPath)) as {
+            privateKey: { d?: string };
+          }).privateKey.d,
+          pair.privateKey.d,
+          "the existing key is untouched",
+        );
 
-      // 4. The explicit CI path still prints the pair — and says so.
-      const piped = await runShip(["keygen", "--stdout"], { cwd: repo, home });
-      assertEquals(piped.code, 0, piped.stderr);
-      assert((JSON.parse(piped.stdout) as { privateKey: unknown }).privateKey);
-      assert(piped.stderr.includes("PRIVATE"), piped.stderr);
-    } finally {
-      await dropTempDir(dir);
-    }
-  },
+        // 4. The explicit CI path still prints the pair — and says so.
+        const piped = await runShip(["keygen", "--stdout"], {
+          cwd: repo,
+          home,
+        });
+        assertEquals(piped.code, 0, piped.stderr);
+        assert(
+          (JSON.parse(piped.stdout) as { privateKey: unknown }).privateKey,
+        );
+        assert(piped.stderr.includes("PRIVATE"), piped.stderr);
+      } finally {
+        await dropTempDir(dir);
+      }
+    }),
 });
 
 Deno.test("gitWorkTreeOf: finds the tree from a nested path, .git file or dir", async () => {

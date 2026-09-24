@@ -946,7 +946,8 @@ export function _prepareLockDir(
  *
  *  Exported because `resolveSocketPath`'s long-path fallback places a control
  *  socket in a shared `/tmp` too and must ask the SAME question — it used to
- *  mkdir + chmod and hope, which is the half that does not hold. @internal */
+ *  mkdir + chmod and hope, which is the half that does not hold. @internal
+ *  @decider */
 export function _chooseLockDir(base: string, scope: string): string {
   const preferred = join(base, "aio" + scope);
   const first = _prepareLockDir(preferred);
@@ -1277,7 +1278,8 @@ export function ownerIdentity(
  *  Fails SAFE in the only direction that is safe: when either token is
  *  unavailable (an old lock, Windows, a pid we cannot read) this falls back to
  *  liveness — which is exactly the old behaviour, never worse. When both are
- *  known and they DIFFER, the pid was recycled and the answer is no. */
+ *  known and they DIFFER, the pid was recycled and the answer is no.
+ *  @decider */
 export function isLockOwnerAlive(
   lock: { pid: number; startToken?: string; startEpoch?: number },
 ): boolean {
@@ -1439,7 +1441,11 @@ function publishExclusive(path: string, text: string): boolean {
     // A filesystem without hard links: fall back to an exclusive create. The
     // content goes in with ONE write call; readers treat a short/empty file
     // as "being written" for a grace period (see `acquire`), never as dead.
-    const fd = Deno.openSync(path, { createNew: true, write: true });
+    // `mode` as the tmp above has it: the record names the owner's pid,
+    // cwd and home, and this branch used to create it at the umask default
+    // (0644 — every local user reads it) while the link path gave 0600.
+    const excl = { createNew: true, write: true, mode: 0o600 };
+    const fd = Deno.openSync(path, excl);
     try {
       fd.writeSync(new TextEncoder().encode(text));
     } finally {
@@ -1689,7 +1695,8 @@ export function removeLockIfOwner(
 }
 
 /** Write lock file — an atomic whole-file replace (never a half-written file a
- *  reader could take for a dead lock), under the lock's mutex. */
+ *  reader could take for a dead lock), under the lock's mutex.
+ *  @decider */
 export function writeLock(data: LockData): void {
   const key = lockKey(data.appId, data.home, data.profile);
   withLockMutex(key, () => replaceAtomic(lockPath(key), JSON.stringify(data)));
@@ -1707,7 +1714,8 @@ export function writeLock(data: LockData): void {
  *  and the same start identity when both carry one ({@linkcode sameRecord})
  *  — and `next` is applied to the CURRENT record, so what the owner wrote
  *  since (its status, its bound port, its socket) is kept. Under the key's mutex. True when
- *  written; false = the lock changed, nothing written — the caller says so. */
+ *  written; false = the lock changed, nothing written — the caller says so.
+ *  @decider */
 export function replaceLockIf(
   expected: LockData | null,
   next: LockData | ((now: LockData) => LockData),

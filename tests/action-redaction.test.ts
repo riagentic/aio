@@ -18,6 +18,7 @@ import { makeRedactor, REDACTED } from "../src/diagnostics/redact.ts";
 import { createJournal } from "../src/server/journal.ts";
 import { createTimeline } from "../src/server/timeline.ts";
 import { purgeDisabledArtifacts } from "../src/diagnostics/mod.ts";
+import { permissiveUmask } from "./permissive-umask.ts";
 
 const SECRET = "correct-horse-battery-staple";
 
@@ -85,41 +86,46 @@ Deno.test("redactor: naming one METHOD still redacts only that method", () => {
   assert(!r("notes:add"));
 });
 
-Deno.test("journal: a redacted action keeps its sequence, loses its payload", async () => {
-  const dir = await Deno.makeTempDir({ prefix: "aio-redact-j-" });
-  try {
-    const path = `${dir}/app.journal`;
-    const j = createJournal(path, { redact: makeRedactor(["vault:*"]) });
-    j.append({ type: "vault:unlock", payload: { args: [SECRET] } }, 1000);
-    const seq = j.append(
-      { type: "notes:add", payload: { args: ["hi"] } },
-      1001,
-    );
+Deno.test("journal: a redacted action keeps its sequence, loses its payload", () =>
+  permissiveUmask(async () => {
+    const dir = await Deno.makeTempDir({ prefix: "aio-redact-j-" });
+    try {
+      const path = `${dir}/app.journal`;
+      const j = createJournal(path, { redact: makeRedactor(["vault:*"]) });
+      j.append({ type: "vault:unlock", payload: { args: [SECRET] } }, 1000);
+      const seq = j.append(
+        { type: "notes:add", payload: { args: ["hi"] } },
+        1001,
+      );
 
-    const raw = await Deno.readTextFile(path);
-    assert(!raw.includes(SECRET), `the secret reached disk:\n${raw}`);
-    const lines = raw.trim().split("\n").map((l) => JSON.parse(l));
-    // Replay ordering is the journal's whole job — redaction must not disturb it.
-    assertEquals(lines.map((l) => l.seq), [1, 2]);
-    assertEquals(seq, 2);
-    assertEquals(lines[0].type, "vault:unlock", "the action still happened");
-    assertEquals(lines[0].ts, 1000);
-    assertEquals(lines[0].payload, REDACTED);
-    assertEquals(
-      lines[1].payload.args[0],
-      "hi",
-      "unlisted actions are untouched",
-    );
+      const raw = await Deno.readTextFile(path);
+      assert(!raw.includes(SECRET), `the secret reached disk:\n${raw}`);
+      const lines = raw.trim().split("\n").map((l) => JSON.parse(l));
+      // Replay ordering is the journal's whole job — redaction must not disturb it.
+      assertEquals(lines.map((l) => l.seq), [1, 2]);
+      assertEquals(seq, 2);
+      assertEquals(lines[0].type, "vault:unlock", "the action still happened");
+      assertEquals(lines[0].ts, 1000);
+      assertEquals(lines[0].payload, REDACTED);
+      assertEquals(
+        lines[1].payload.args[0],
+        "hi",
+        "unlisted actions are untouched",
+      );
 
-    // Owner-only: a world-readable copy of recent payloads is a leak of its own.
-    if (Deno.build.os !== "windows") {
-      const mode = (await Deno.stat(path)).mode! & 0o777;
-      assertEquals(mode, 0o600, "the journal must not be group/world readable");
+      // Owner-only: a world-readable copy of recent payloads is a leak of its own.
+      if (Deno.build.os !== "windows") {
+        const mode = (await Deno.stat(path)).mode! & 0o777;
+        assertEquals(
+          mode,
+          0o600,
+          "the journal must not be group/world readable",
+        );
+      }
+    } finally {
+      await Deno.remove(dir, { recursive: true });
     }
-  } finally {
-    await Deno.remove(dir, { recursive: true });
-  }
-});
+  }));
 
 // ── Sink 2: the timeline (memory, `am timeline`) ─────────────────────
 

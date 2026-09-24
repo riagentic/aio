@@ -305,6 +305,23 @@ async function settleOutput(proc: Deno.ChildProcess): Promise<void> {
   if (t !== undefined) clearTimeout(t);
 }
 
+/** One apps dir per standalone test process, removed when it exits — a fresh
+ *  one per spawn, never removed, piled up in `check:orphans`. */
+let _e2eApps: string | undefined;
+function _e2eAppsDir(): string {
+  if (_e2eApps) return _e2eApps;
+  const dir = _e2eApps = aioTestDir("e2e-apps-");
+  globalThis.addEventListener("unload", () => {
+    try {
+      Deno.removeSync(dir, { recursive: true });
+    } catch {
+      // aio-ok: exit-time cleanup of a dir only this process made — "already
+      // gone" is the goal; a child still holding it is check:orphans' to name.
+    }
+  });
+  return dir;
+}
+
 export function spawnServer(dir: string, port: number): Deno.ChildProcess {
   const proc = new Deno.Command(Deno.execPath(), {
     // DISPLAY comes from the nested test display, not the developer's session:
@@ -322,7 +339,7 @@ export function spawnServer(dir: string, port: number): Deno.ChildProcess {
     // used; `??` so the runner's own pin still wins.
     env: {
       DENO_COVERAGE_DIR: _childCovDir,
-      AIO_APPS_DIR: Deno.env.get("AIO_APPS_DIR") ?? aioTestDir("e2e-apps-"),
+      AIO_APPS_DIR: Deno.env.get("AIO_APPS_DIR") ?? _e2eAppsDir(),
       ...testDisplayEnv(),
     },
     args: [

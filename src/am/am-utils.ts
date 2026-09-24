@@ -89,9 +89,13 @@ function components(): Component[] {
 
 function refuseAmbiguousApp(labels: string[]): never {
   const list = labels.join(", ");
+  // EVERY component's spelling, and every project-wide verb — "Pick one:
+  // --app=web" named one of two, and the whole-project line left out restart.
+  const pick = labels.map((l) => `--app=${l}`).join(" | ");
+  const whole = "am start | am stop | am restart | am status";
   const msg = `this project has several components (${list}) and this ` +
-    `command acts on one — pick one with --app=${labels[0]}, or manage the ` +
-    `project as a whole with am start | am stop | am status`;
+    `command acts on one — pick one with ${pick}, or manage the ` +
+    `project as a whole with ${whole}`;
   // Through THE failure path, so a scripted caller gets `{"error": …}` on
   // stdout like every other refusal instead of a human line it cannot parse.
   // `resolveAmAppId` is called too deep to be handed the parsed flags, so the
@@ -104,8 +108,8 @@ function refuseAmbiguousApp(labels: string[]): never {
     sayErr(
       `[am] ✗ this project has several components (${list}) and this command ` +
         `acts on one.\n` +
-        `    Pick one:  --app=${labels[0]}\n` +
-        `    Or manage the project as a whole: am start | am stop | am status`,
+        `    Pick one:  ${pick}\n` +
+        `    Or manage the project as a whole: ${whole}`,
     );
     Deno.exit(1);
   }
@@ -135,6 +139,38 @@ function startCommandFor(id: string): string | null {
   } catch {
     return null; // no id to infer here — the ambiguity message is the true one
   }
+}
+
+/** Whether `resolveAmAppId(flag)` has no ONE app to name — no `--app`, in a
+ *  project that declares components — and would refuse. Asked BEFORE a
+ *  command runs, so the refusal lands only on a command that acts on one app:
+ *  `help`, `--version` and the project-wide `start | stop | restart | status`
+ *  (see `processPlan`) have no app to resolve, and resolving one eagerly
+ *  refused them all — the refusal's own "am stop | am status" included. */
+export function appIsAmbiguous(flag?: string): boolean {
+  return !flag && components().length > 0;
+}
+
+/** This project's component labels — none for a single-app repo. */
+export function componentLabels(): string[] {
+  return components().map((c) => c.label);
+}
+
+/** The refusal for `--profile` / `--home` with no ONE app to target: a
+ *  profile is one app's instance, and a project of several components has no
+ *  one app until `--app` names it. It must NOT recommend the project-wide
+ *  `am stop | am status` — this refusal is what those very commands answer
+ *  with a `--profile` beside them. Pure. */
+export function ambiguousHomeError(
+  opts: { profile?: string; home?: string },
+  labels: readonly string[],
+): string {
+  const flag = opts.profile !== undefined
+    ? `--profile=${opts.profile}`
+    : `--home=${opts.home}`;
+  return `${flag} targets ONE app's instance, and this project has several ` +
+    `components (${labels.join(", ")}) — name the one: ` +
+    `--app=${labels[0]} ${flag}`;
 }
 
 export function resolveAmAppId(flag?: string): string {

@@ -108,7 +108,7 @@ Deno.test("SSR stream 1.0.9: a stream first read INSIDE a component call is part
   assertEquals(said, []);
 });
 
-Deno.test("SSR stream 1.0.9: create, await, set the route — the call's route is rendered, and said once per call site", async () => {
+Deno.test("SSR stream 1.0.9: create, await, set the route — the call's route is rendered, and said per call site with a count", async () => {
   const said = await warnings(async () => {
     const lateAfterAwait = async (p: string) => {
       routePath.set("/old");
@@ -120,9 +120,10 @@ Deno.test("SSR stream 1.0.9: create, await, set the route — the call's route i
     assertEquals(await lateAfterAwait("/new"), "<main>path=/old</main>");
     assertEquals(await lateAfterAwait("/new2"), "<main>path=/old</main>");
   });
-  assertEquals(said.length, 1, said.join("\n"));
+  assertEquals(said.length, 2, said.join("\n"));
   assertStringIncludes(said[0]!, BEFORE_PULL);
   assertStringIncludes(said[0]!, "air-ssr-stream-1-0-9-compat.test.ts");
+  assertStringIncludes(said[1]!, "[2 times at this call site; 0 more since");
 });
 
 Deno.test("SSR stream 1.0.9: the correct concurrent shape — set, call, await; the next request sets and calls — says nothing", async () => {

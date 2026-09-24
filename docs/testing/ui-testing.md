@@ -263,6 +263,34 @@ unsigned connection receives. A filter that throws or returns a non-object fails
 closed, as the broadcast does: the cell reads its declared state, and the error
 is logged naming it.
 
+### Presence: `onConnect` → an access-gated method
+
+The standard presence pattern: a connection hook marks the user online in a cell
+whose `access` refuses that method to the network. A client must never set its
+own presence.
+
+```ts
+const presence = cell("presence", {
+  state: { online: 0 },
+  access: (_user, method) => method !== "mark", // the network may not call it
+  methods: { mark: (s, d: number) => void (s.online += d) },
+});
+aio.run({
+  cells: [presence],
+  onConnect: () => void presence.mark(1),
+  onDisconnect: () => void presence.mark(-1),
+});
+```
+
+`testUI` accepts this, and it should. `onConnect`/`onDisconnect` are **server
+origin**, like `onInit` or a schedule: they are the app's own server code, not a
+call from a socket. Under `testUI` the server shares the isolate with the
+harness, which marks the UI's calls as network calls and checks `access` on
+them. Without the server-origin scope the hook's own `mark(1)` would be refused
+as "an anonymous UI". Outside `testUI` the scope is a pass-through, so tests and
+production decide the same way. A call to `presence.mark` from the UI is still
+refused. The pinned case is `tests/access-conn-hook-origin.test.tsx`.
+
 ### Modified clicks, and the viewport
 
 `click`, `dblclick` and `hover` take the same modifier bag `press` does, so a

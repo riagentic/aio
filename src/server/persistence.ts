@@ -28,6 +28,11 @@ import {
 } from "./persist-guard.ts";
 import { bytes } from "../diagnostics/fmt.ts";
 import { overUtf8, utf8Size } from "../protocol/utf8-size.ts";
+import {
+  type BudgetLedger,
+  budgetsFor,
+  cellSizeFix,
+} from "../state/budgets.ts";
 
 // ── Per-cell size guardrails ─────────────────────────────────────────
 //
@@ -45,8 +50,9 @@ import { overUtf8, utf8Size } from "../protocol/utf8-size.ts";
 // 2.7 MB on disk and on every frame. Counting is skipped entirely for a cell
 // that cannot be over the warn threshold whatever it holds (`overUtf8`), so
 // the common flush pays a length comparison and nothing else.
-// A config knob (`persist: { warnBytes, hardBytes }`) lands in alpha53; until
-// then these exported constants are the single source of truth.
+// The knob is the app's declared `budgets.cellState` (see `_guardCellSize`):
+// it moves the warn line, and lifts the hard line when it is set above it.
+// These constants are aio's own defaults for an app that declared nothing.
 
 /** Warn threshold: a cell whose serialized state exceeds this gets ONE warning
  *  per process naming the cell, the size and the right tier. Chosen to match
@@ -58,15 +64,13 @@ export const PERSIST_CELL_WARN_BYTES = 1024 * 1024; // 1 MiB
  *  app in this regime is degraded on every flush and every broadcast, so it
  *  stays loud until fixed. */
 export const PERSIST_CELL_HARD_BYTES = 16 * 1024 * 1024; // 16 MiB
-/** The tier guide every size guardrail points at. */
-export const BIG_DATA_DOC = "docs/persistence/big-data.md";
 
-/** The teachable part, shared by warn and hard messages (and mirrored at the
- *  broadcast seam in server-broadcast.ts). */
-export const CELL_SIZE_TIER_HINT =
+/** What an oversized cell COSTS — the first half of the warn and hard
+ *  messages; the fix half is `cellSizeFix` (state/budgets.ts), shared with
+ *  the broadcast seam. */
+export const CELL_SIZE_COST =
   `Cell state is the reactive working set — it is serialized on every ` +
-  `persist flush and broadcast to every client. Bulk rows belong in db: ` +
-  `tables, binaries in files — see ${BIG_DATA_DOC}.`;
+  `persist flush and broadcast to every client.`;
 
 // The framework's ONE byte spelling. This used to round KB to whole numbers,
 // so the same slice read `214KB` here and `214.3 KB` in `am top`.
@@ -140,6 +144,12 @@ export interface PersistenceConfig {
    *  still accepts commits through the open fd, so "the write succeeded" is
    *  not a fact about the disk without it. */
   dbFile?: string;
+  /** THIS app's declared budgets (`aio.run({ budgets })`). A declared
+   *  `cellState` replaces the warn threshold and, when larger, the hard one —
+   *  the same number the broadcast seam already honours, so one declaration
+   *  quiets both. Absent ⇒ the ledger of the app booting now (`budgetsFor()`,
+   *  read once, here, at construction). */
+  budgets?: BudgetLedger;
 }
 
 /** Persistence manager API — debounced state persistence to KV and/or SQLite. */
@@ -344,24 +354,40 @@ export function createPersistenceManager(
   // Size guardrail bookkeeping: one WARN per cell per process; the HARD
   // overrun deliberately has no such set — it reports on every flush.
   const _warnedBigCells = new Set<string>();
+  // The app's own number, when it declared one. A working set that is big ON
+  // PURPOSE (a catalog, a document) declares `budgets: { cellState }`, and
+  // that has to quiet THIS warning too — the broadcast seam honoured it and
+  // persist did not, so the one knob every message offered only half-worked.
+  // The hard line is only ever LIFTED by a declaration, never lowered: an app
+  // declaring "20MB" is not an error on every flush at 17MB.
+  // No race: bootStorage always passes the app's ledger; the fallback serves a bare caller only.
+  const _budgets = cfg.budgets ?? budgetsFor();
+  const _declared = _budgets.declared().cellState;
+  const _warnAt = _declared ?? PERSIST_CELL_WARN_BYTES;
+  const _hardAt = Math.max(PERSIST_CELL_HARD_BYTES, _declared ?? 0);
   /** The size the guardrail judges: UTF-8 bytes, counted only for a cell whose
    *  JSON could possibly be over the warn threshold. Below that the code-unit
    *  length is returned — it is a LOWER bound on the byte size, and both are
    *  under every threshold, so no verdict can differ. */
   function _guardBytes(json: string): number {
-    return overUtf8(json, PERSIST_CELL_WARN_BYTES)
-      ? utf8Size(json)
-      : json.length;
+    return overUtf8(json, _warnAt) ? utf8Size(json) : json.length;
   }
   function _guardCellSize(cellName: string, size: number): void {
-    if (size > PERSIST_CELL_HARD_BYTES) {
+    // Recorded against a DECLARED budget (a no-op when none was): `/health`
+    // must see a persist-side breach even with no client connected.
+    if (size > _warnAt) {
+      _budgets.record("cellState", size, `cell "${cellName}"`);
+    }
+    if (size > _hardAt) {
       // Loud on EVERY flush, and the write still happens: refusing it would
       // turn "too big" into data loss, which is strictly worse.
       const err = new Error(
         `persist: cell "${cellName}" serializes to ${_fmtBytes(size)} — over ` +
-          `the ${_fmtBytes(PERSIST_CELL_HARD_BYTES)} hard limit. The write ` +
-          `is NOT dropped (state is never lost), but every flush and every ` +
-          `broadcast now pays this size. ${CELL_SIZE_TIER_HINT}`,
+          `the ${_fmtBytes(_hardAt)} hard limit${
+            _hardAt > PERSIST_CELL_HARD_BYTES ? " (your cellState budget)" : ""
+          }. The write is NOT dropped (state is never lost), but every flush ` +
+          `and every broadcast now pays this size. ${CELL_SIZE_COST} ` +
+          cellSizeFix(size, _declared !== undefined),
       );
       log.error(err.message);
       // `{ fatal: false }` — this message SAYS "The write is NOT dropped
@@ -374,13 +400,14 @@ export function createPersistenceManager(
       // `_reportPersistError`); this half of the pair had not.
       _reportPersistError(err, { fatal: false });
     } else if (
-      size > PERSIST_CELL_WARN_BYTES && !_warnedBigCells.has(cellName)
+      size > _warnAt && !_warnedBigCells.has(cellName)
     ) {
       _warnedBigCells.add(cellName);
       log.warn(
         `persist: cell "${cellName}" serializes to ${_fmtBytes(size)} ` +
-          `(warn threshold ${_fmtBytes(PERSIST_CELL_WARN_BYTES)}). ` +
-          CELL_SIZE_TIER_HINT,
+          `(warn threshold ${_fmtBytes(_warnAt)}${
+            _declared !== undefined ? ", your cellState budget" : ""
+          }). ${CELL_SIZE_COST} ` + cellSizeFix(size, _declared !== undefined),
       );
     }
   }

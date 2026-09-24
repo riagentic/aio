@@ -70,6 +70,40 @@ Deno.test("onStop: a drop from anywhere else does not blame onStop", async () =>
   assertEquals(msg.includes("onStop"), false);
 });
 
+Deno.test("onStop: a method called from the hook is refused — its reducer never runs", async () => {
+  let reduced = 0;
+  const dispatch = createDispatch<
+    { n: number },
+    { type: string },
+    { type: string }
+  >({
+    reduce: (s) => {
+      reduced++;
+      return { state: s, effects: [] };
+    },
+    execute: () => {},
+    getState: () => ({ n: 0 }),
+    setState: () => {},
+    onDone: () => {},
+    log: { debug: () => {}, warn: () => {}, error: () => {} },
+    debug: false,
+  });
+  dispatch.close();
+  await dispatch.drain(50);
+  _setUserStopHookActive(true);
+  try {
+    dispatch({ type: "wallet:lockVault" }).catch(() => {});
+  } finally {
+    _setUserStopHookActive(false);
+  }
+  await new Promise((r) => setTimeout(r, 10));
+  assertEquals(
+    reduced,
+    0,
+    "onStop's dispatch moved state after the final persist",
+  );
+});
+
 Deno.test("onStop: the hook still runs, and a plain call inside it works", async () => {
   let plainRan = false;
   let locked = false;

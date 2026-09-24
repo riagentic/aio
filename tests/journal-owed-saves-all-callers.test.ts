@@ -116,6 +116,24 @@ if (MODE === "route") {
   out.trojan = await trojan("dispatch", { type: "kv:add", payload: { args: ["BAD3"] } });
   op("s1", "BAD4");
   out.syncAck = (await waitFor((f) => f.t === "sync-ack" && f.d.opId === "s1", "sync-ack")).d;
+} else if (MODE === "syncfold") {
+  // The stand-in save for THIS call fails where the KV verdict cannot see
+  // it: a sync cell's save is its fold into sync_snapshots, and a trigger
+  // refuses that one row. lastPersistError() stays clear, so the reply's
+  // "unsaved" can only come from the call's own owed save.
+  const { DatabaseSync } = await import("node:sqlite");
+  const d = new DatabaseSync(DIR + "/data/state.db");
+  d.exec("PRAGMA busy_timeout = 5000");
+  for (const op of ["INSERT", "UPDATE"]) {
+    d.exec("CREATE TRIGGER owed_fault_" + op + " BEFORE " + op + " ON sync_snapshots " +
+      "WHEN NEW.cell = 'notes' BEGIN SELECT RAISE(ABORT, 'fold fault'); END");
+  }
+  refuseAppends();
+  out.trojan = await trojan("dispatch", { type: "notes:add", payload: { args: ["F1"] } });
+  out.health = await fetch(base + "/__aio/health", { headers: { "X-AIO": "1" } })
+    .then((r) => r.json()).then((h) => h.persist);
+  d.exec("DROP TRIGGER owed_fault_INSERT; DROP TRIGGER owed_fault_UPDATE");
+  d.close();
 } else if (MODE === "paused") {
   await trojan("tt", { cmd: "pause" });
   op("h1", "held");
@@ -210,4 +228,23 @@ Deno.test("owed saves: a sync op sent while time travel is paused is held, then 
   assertEquals(out.ack.opId, "h2");
   assertEquals(expected.notes, ["held", "queued"]);
   assertEquals(recovered.notes, ["held", "queued"]);
+});
+
+Deno.test("owed saves: the trojan reply's `unsaved` is THIS call's failed save, not only the store's last verdict", async () => {
+  // Every fixture above fails the KV store too, so the `lastPersistError()`
+  // fallback answered `unsaved` on its own and the per-call verdict
+  // (server-trojan.ts `_dispatchUnsaved`) could vanish unseen. Here only the
+  // call's own stand-in save (a sync cell's fold) fails.
+  const { out } = await go("syncfold");
+  assert(out.trojan.ok, JSON.stringify(out.trojan));
+  assertEquals(
+    out.health?.ok,
+    true,
+    `the store verdict is clear: ${JSON.stringify(out.health)}`,
+  );
+  assertMatch(
+    String(out.trojan.unsaved),
+    /^persist failed: .*fold fault/,
+    JSON.stringify(out.trojan),
+  );
 });

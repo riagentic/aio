@@ -1072,6 +1072,10 @@ cell("search", {
 trigger, so there is one mechanism and not two that can disagree. Declaring both
 for one method is refused.
 
+Aborting does not undo work the other side already did. For rate-limited or paid
+APIs, use `"queue"` (or `"first"`) and re-check freshness at the start of the
+method.
+
 `"first"` resolves the second caller with the **running call's result**, not
 `undefined`. Resolving it with nothing is the bug that report shipped, and the
 difference between a policy and a silent drop.

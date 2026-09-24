@@ -158,7 +158,10 @@ for (const [name, fixture] of FIXTURES) {
         if (boot > 1) {
           // Stamped by the first: this data is this build's now, and what
           // it named is not named again.
-          assert(!/older aio build|are in no record/.test(log), log);
+          assert(
+            !/older aio build|are in no record|cannot tell/.test(log),
+            log,
+          );
           continue;
         }
         assert(/last run by an older aio build/.test(log), log);

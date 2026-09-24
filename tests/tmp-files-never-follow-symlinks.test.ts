@@ -10,6 +10,7 @@ import { join } from "@std/path";
 import { createJournal } from "../src/server/journal.ts";
 import { createCheckpoint } from "../src/diagnostics/checkpoint.ts";
 import { dropTempDir, tempDir } from "../src/testing/temp-dir.ts";
+import { permissiveUmask } from "./permissive-umask.ts";
 
 const VICTIM = "victim — must never be written through a planted link";
 
@@ -41,45 +42,47 @@ async function withPlanted(
   }
 }
 
-Deno.test("journal: compaction, its base and its watermark never follow a planted tmp symlink", async () => {
-  if (Deno.build.os === "windows") return;
-  await withPlanted(
-    ["journal.tmp", "journal.base.tmp", "journal.wm.tmp"],
-    (dir) => {
-      const path = join(dir, "journal");
-      const j = createJournal(path, {});
-      j.append({ type: "c:a", payload: { args: ["secret"] } }, 1);
-      j.append({ type: "c:b", payload: { args: ["secret"] } }, 2);
-      j.setWatermark(1); // compaction + the legacy `.wm` side file
-      j.close();
-      assertEquals(Deno.statSync(path).mode! & 0o777, 0o600);
-      assertEquals(Deno.statSync(path + ".wm").mode! & 0o777, 0o600);
-      const stray = [...Deno.readDirSync(dir)].filter((e) =>
-        e.isFile && e.name.includes(".tmp")
-      );
-      assertEquals(stray.map((e) => e.name), [], "no tmp left behind");
-    },
-  );
-});
+Deno.test("journal: compaction, its base and its watermark never follow a planted tmp symlink", () =>
+  permissiveUmask(async () => {
+    if (Deno.build.os === "windows") return;
+    await withPlanted(
+      ["journal.tmp", "journal.base.tmp", "journal.wm.tmp"],
+      (dir) => {
+        const path = join(dir, "journal");
+        const j = createJournal(path, {});
+        j.append({ type: "c:a", payload: { args: ["secret"] } }, 1);
+        j.append({ type: "c:b", payload: { args: ["secret"] } }, 2);
+        j.setWatermark(1); // compaction + the legacy `.wm` side file
+        j.close();
+        assertEquals(Deno.statSync(path).mode! & 0o777, 0o600);
+        assertEquals(Deno.statSync(path + ".wm").mode! & 0o777, 0o600);
+        const stray = [...Deno.readDirSync(dir)].filter((e) =>
+          e.isFile && e.name.includes(".tmp")
+        );
+        assertEquals(stray.map((e) => e.name), [], "no tmp left behind");
+      },
+    );
+  }));
 
-Deno.test("checkpoint: write, rewriteNow and the crash-path writeSync never follow a planted symlink", async () => {
-  if (Deno.build.os === "windows") return;
-  await withPlanted(["checkpoint.json.tmp"], async (dir) => {
-    const cp = createCheckpoint(dir, 0);
-    const data = (ts: number) => ({
-      ts,
-      state: { a: { n: ts } },
-      recentActions: [],
-      cells: {},
+Deno.test("checkpoint: write, rewriteNow and the crash-path writeSync never follow a planted symlink", () =>
+  permissiveUmask(async () => {
+    if (Deno.build.os === "windows") return;
+    await withPlanted(["checkpoint.json.tmp"], async (dir) => {
+      const cp = createCheckpoint(dir, 0);
+      const data = (ts: number) => ({
+        ts,
+        state: { a: { n: ts } },
+        recentActions: [],
+        cells: {},
+      });
+      await cp.write(data(1));
+      cp.rewriteNow(data(2));
+      cp.writeSync(data(3));
+      const file = join(dir, "checkpoint.json");
+      assertEquals(JSON.parse(Deno.readTextFileSync(file)).ts, 3);
+      assertEquals(Deno.statSync(file).mode! & 0o777, 0o600);
     });
-    await cp.write(data(1));
-    cp.rewriteNow(data(2));
-    cp.writeSync(data(3));
-    const file = join(dir, "checkpoint.json");
-    assertEquals(JSON.parse(Deno.readTextFileSync(file)).ts, 3);
-    assertEquals(Deno.statSync(file).mode! & 0o777, 0o600);
-  });
-});
+  }));
 
 // The names above are unpredictable, so a link planted at `<file>.tmp` is
 // never where the write goes — which alone proves nothing about `createNew`.

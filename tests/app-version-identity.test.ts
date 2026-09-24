@@ -26,17 +26,22 @@ console.log(JSON.stringify({ version: v?.appVersion ?? null }));
 async function versionSeenBy(
   opts: { cwd: string; projectDir: string },
 ): Promise<string | undefined> {
+  const own = Deno.env.get("AIO_APPS_DIR")
+    ? undefined
+    : aioTestDir("ver-probe-");
   const r = await new Deno.Command(Deno.execPath(), {
     args: ["run", "-A", join(opts.projectDir, "src", "app.ts")],
     cwd: opts.cwd,
     // The probe boots a real app with a unique appId; without a pin it resolves
     // its home to `~/.ver-probe-<hash>` and leaves it there.
     env: {
-      AIO_APPS_DIR: Deno.env.get("AIO_APPS_DIR") ?? aioTestDir("ver-probe-"),
+      AIO_APPS_DIR: own ?? Deno.env.get("AIO_APPS_DIR")!,
     },
     stdout: "piped",
     stderr: "piped",
-  }).output();
+  }).output().finally(() =>
+    own ? Deno.remove(own, { recursive: true }) : undefined
+  );
   const out = new TextDecoder().decode(r.stdout);
   const line = out.split("\n").find((l) => l.startsWith('{"version"'));
   if (!line) {

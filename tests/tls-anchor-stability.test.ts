@@ -26,6 +26,7 @@ import {
 import { log } from "../src/diagnostics/logger.ts";
 import { tempDir } from "../src/testing/temp-dir.ts";
 import { pinnedTest } from "../src/testing/env-pin.ts";
+import { permissiveUmask } from "./permissive-umask.ts";
 
 // The machine-wide root is MACHINE-wide, so a test that does not relocate it
 // writes trust material into the developer's real home — and would then be
@@ -196,21 +197,27 @@ test({
 test({
   name: "tls: the CA private key is owner-only",
   ignore: SKIP || Deno.build.os === "windows",
-  fn: async () => {
-    const dir = await Deno.makeTempDir({ prefix: "aio-tls-perm-" });
-    try {
-      const t = await loadOrCreateCert(dir, undefined, undefined, "perm-app");
-      // This key can mint a trusted certificate for EVERY aio app on this
-      // machine, for the next ten years, and a person is being asked to put
-      // its public half in their browser. It is the most sensitive file the
-      // framework writes.
-      const caKey = aioRootPaths().keyPath;
-      assertEquals((await Deno.stat(caKey)).mode! & 0o777, 0o600);
-      assertEquals((await Deno.stat(t.keyPath)).mode! & 0o777, 0o600);
-    } finally {
-      await Deno.remove(dir, { recursive: true });
-    }
-  },
+  fn: () =>
+    permissiveUmask(async () => {
+      const dir = await Deno.makeTempDir({ prefix: "aio-tls-perm-" });
+      // A root of its own, minted HERE under 022: the sandbox's root was made
+      // by an earlier test at the caller's umask, and a 077 one would hide a
+      // key written with no mode.
+      Deno.env.set("AIO_APPS_DIR", join(dir, "apps"));
+      try {
+        const t = await loadOrCreateCert(dir, undefined, undefined, "perm-app");
+        // This key can mint a trusted certificate for EVERY aio app on this
+        // machine, for the next ten years, and a person is being asked to put
+        // its public half in their browser. It is the most sensitive file the
+        // framework writes.
+        const caKey = aioRootPaths().keyPath;
+        assertEquals((await Deno.stat(caKey)).mode! & 0o777, 0o600);
+        assertEquals((await Deno.stat(t.keyPath)).mode! & 0o777, 0o600);
+      } finally {
+        Deno.env.set("AIO_APPS_DIR", SANDBOX);
+        await Deno.remove(dir, { recursive: true });
+      }
+    }),
 });
 
 test("tls: sansCover is exact, not approximate", () => {

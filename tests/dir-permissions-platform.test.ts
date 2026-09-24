@@ -89,6 +89,7 @@ Deno.test("the platform decides, never a null mode", () => {
 // ── the measurement (Windows only) ───────────────────────────────────────────
 
 Deno.test({
+  // aio-ok(umask): Windows-only measurement (no umask there); every other mode here is a literal fed to a pure function.
   name: "MEASURED on Windows: stat().mode is 0o40666, not null, for every dir",
   ignore: !WINDOWS,
   fn() {

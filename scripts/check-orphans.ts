@@ -348,10 +348,57 @@ for (const { dir: root, requirePrefix } of scratchRoots()) {
   } catch { /* no such root */ }
 }
 
+// A process still running inside a DELETED test directory. Its test removed
+// the temp root — lock file included — while the app lived on, so the lock
+// scan above cannot see it: eight test apps ran for up to 14 h each, one per
+// mutation run, while this gate reported only "ownerless dirs". A deleted cwd
+// under a scratch root has no owner by definition; it is read twice, 2 s
+// apart, so a test that drops its dir a moment before stopping its child is
+// not a false alarm.
+{
+  const roots = scratchRoots();
+  const underRoot = (cwd: string) =>
+    roots.some(({ dir, requirePrefix }) =>
+      cwd.startsWith(`${dir}/${requirePrefix ? "aio-" : ""}`)
+    );
+  const deletedCwds = () => {
+    const out = new Map<number, string>();
+    try {
+      for (const p of Deno.readDirSync("/proc")) {
+        const pid = Number(p.name);
+        if (!(pid > 0) || pid === Deno.pid) continue;
+        try {
+          const cwd = Deno.readLinkSync(`/proc/${pid}/cwd`);
+          if (cwd.endsWith(" (deleted)") && underRoot(cwd)) out.set(pid, cwd);
+        } catch { /* aio-ok: not ours, or gone — only our own can be judged */ }
+      }
+    } catch { /* aio-ok: no /proc (macOS) — the lock scan is all there is */ }
+    return out;
+  };
+  const first = deletedCwds();
+  if (first.size) {
+    await new Promise((r) => setTimeout(r, 2000));
+    for (const [pid, cwd] of deletedCwds()) {
+      if (!first.has(pid) || orphans.some((o) => o.pid === pid)) continue;
+      // A test RUNNER that chdir'd into its own temp dir is not an app (the
+      // lock scan above exempts runners alike).
+      if (/\bdeno(\S*)? test\b/.test(cmdlineOf(pid))) continue;
+      orphans.push({
+        pid,
+        appId: "(its test dir was deleted)",
+        port: 0,
+        dir: cwd,
+      });
+    }
+  }
+}
+
 for (const o of orphans) {
   console.error(
     `ORPHAN  pid ${o.pid}  ${o.appId}${o.port ? ` :${o.port}` : ""}\n` +
-      `        ${cmdlineOf(o.pid)}\n        lock: ${o.dir}`,
+      `        ${cmdlineOf(o.pid)}\n        ${
+        o.dir.endsWith(" (deleted)") ? "cwd" : "lock"
+      }: ${o.dir}`,
   );
 }
 // ── New lock dirs: what THIS run left in the runtime dir ─────────────────

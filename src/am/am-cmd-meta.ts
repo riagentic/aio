@@ -26,7 +26,7 @@ import {
 import type { Style } from "../diagnostics/fmt.ts";
 import { repoRoot } from "./am-cmd-create.ts";
 import { resolve } from "@std/path";
-import { GIT_NO_PROMPT_ENV } from "../server/git-noninteractive.ts";
+import { gitEnvFor, isClone } from "./am-versions.ts";
 
 const PKG = "@riagentic/aio";
 
@@ -139,6 +139,20 @@ export function dirtyLines(porcelain: string): string[] {
   );
 }
 
+/** The refusal for a `git`-updated install that is not a clone of aio — a
+ *  tarball copy, a folder with mod.ts — or null. Without it, git WALKED UP:
+ *  a plain install inside any enclosing repo (a dotfiles repo at `~`) had
+ *  `am upgrade` fetch into THAT repo and `git checkout --force <tag>` there. */
+async function notCloneRefusal(root: string): Promise<string | null> {
+  if (await isClone(root)) return null;
+  const oneLiner = Deno.build.os === "windows"
+    ? "irm https://raw.githubusercontent.com/riagentic/aio/main/install.ps1 | iex"
+    : "curl -fsSL https://raw.githubusercontent.com/riagentic/aio/main/install.sh | sh";
+  return `AIO at ${root} is not a git clone of aio — am upgrade updates a ` +
+    `clone with git, and never runs git anywhere else. Reinstall with:\n` +
+    `  ${oneLiner}`;
+}
+
 export async function cmdUpdate(
   args: string[],
   flags: GlobalFlags,
@@ -204,6 +218,12 @@ export async function cmdUpdate(
       );
       Deno.exit(1);
     }
+    // Refused BEFORE am is reinstalled from it, not after.
+    const refused = await notCloneRefusal(canonical);
+    if (refused) {
+      outError(refused, mode);
+      Deno.exit(1);
+    }
     const code = await runDeno(installFromArgv(canonical));
     if (code !== 0) {
       outError(`reinstall from ${canonical} failed (deno exit ${code})`, mode);
@@ -215,13 +235,20 @@ export async function cmdUpdate(
     root = canonical;
   }
   if (root) {
+    const refused = await notCloneRefusal(root);
+    if (refused) {
+      outError(refused, mode);
+      Deno.exit(1);
+    }
     const git = async (args: string[], capture = false) => {
       const o = await new Deno.Command("git", {
         args: ["-C", root, ...args],
         stdout: capture ? "piped" : "inherit",
         stderr: capture ? "null" : "inherit",
         stdin: "null",
-        env: GIT_NO_PROMPT_ENV,
+        // Pinned to `root` (see gitCeiling), never an enclosing repo nor one
+        // an inherited GIT_DIR names (a hook) — see gitEnvFor.
+        ...gitEnvFor(root),
       }).output();
       return {
         code: o.code,

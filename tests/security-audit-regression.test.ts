@@ -15,6 +15,7 @@ import { freePort } from "../src/testing/server-test.ts";
 import { filterPatchesByStrategy } from "../src/state/state-filter.ts";
 import { REPORT_LIMITS } from "../src/server/report.ts";
 import type { Patch } from "immer";
+import { permissiveUmask } from "./permissive-umask.ts";
 
 const BASE_CFG = {
   title: "sec",
@@ -248,40 +249,44 @@ Deno.test("_exposeOf: a non-loopback host IS exposure", () => {
 
 // ── 4. the app key was written to a world-readable log ───────────────────────
 
-Deno.test("logs: the app log and its directory are owner-only", async () => {
-  if (Deno.build.os === "windows") return; // no POSIX mode
-  const { AioLogger } = await import("../src/diagnostics/logger-core.ts");
-  const dir = await Deno.makeTempDir();
-  // A loose directory is the realistic case — $HOME is 0755 on stock distros,
-  // and the log used to land at whatever the umask allowed (0664 here).
-  await Deno.chmod(dir, 0o755);
-  const logger = new AioLogger({ dir, level: "info", console: false });
-  await logger.init();
-  logger.pub("info", "test", "share: https://host/?token=THE-APP-KEY");
-  await logger.flush();
-  const st = await Deno.stat(logger.path("app"));
-  assertEquals(
-    (st.mode ?? 0) & 0o777,
-    0o600,
-    "the app log carries share links and boot secrets — it must be owner-only",
-  );
-  logger.onStop(); // the heartbeat interval is the logger's
-  await logger.flush();
-  await Deno.remove(dir, { recursive: true });
-});
+Deno.test("logs: the app log and its directory are owner-only", () =>
+  permissiveUmask(async () => {
+    if (Deno.build.os === "windows") return; // no POSIX mode
+    const { AioLogger } = await import("../src/diagnostics/logger-core.ts");
+    const dir = await Deno.makeTempDir();
+    // A loose directory is the realistic case — $HOME is 0755 on stock distros,
+    // and the log used to land at whatever the umask allowed (0664 here).
+    await Deno.chmod(dir, 0o755);
+    const logger = new AioLogger({ dir, level: "info", console: false });
+    await logger.init();
+    logger.pub("info", "test", "share: https://host/?token=THE-APP-KEY");
+    await logger.flush();
+    const st = await Deno.stat(logger.path("app"));
+    assertEquals(
+      (st.mode ?? 0) & 0o777,
+      0o600,
+      "the app log carries share links and boot secrets — it must be owner-only",
+    );
+    logger.onStop(); // the heartbeat interval is the logger's
+    await logger.flush();
+    await Deno.remove(dir, { recursive: true });
+  }));
 
-Deno.test("app dirs: home, data and logs are all 0700", async () => {
-  if (Deno.build.os === "windows") return;
-  const { appDirs, ensureAppDirs } = await import("../src/server/app-dirs.ts");
-  const base = await Deno.makeTempDir();
-  const dirs = appDirs("sec-dirs-test", `${base}/home`);
-  ensureAppDirs(dirs);
-  for (const d of [dirs.home, dirs.data, dirs.logs]) {
-    const st = await Deno.stat(d);
-    assertEquals((st.mode ?? 0) & 0o777, 0o700, `${d} is not owner-only`);
-  }
-  await Deno.remove(base, { recursive: true });
-});
+Deno.test("app dirs: home, data and logs are all 0700", () =>
+  permissiveUmask(async () => {
+    if (Deno.build.os === "windows") return;
+    const { appDirs, ensureAppDirs } = await import(
+      "../src/server/app-dirs.ts"
+    );
+    const base = await Deno.makeTempDir();
+    const dirs = appDirs("sec-dirs-test", `${base}/home`);
+    ensureAppDirs(dirs);
+    for (const d of [dirs.home, dirs.data, dirs.logs]) {
+      const st = await Deno.stat(d);
+      assertEquals((st.mode ?? 0) & 0o777, 0o700, `${d} is not owner-only`);
+    }
+    await Deno.remove(base, { recursive: true });
+  }));
 
 // ── 6. feedback.report() was anonymous, unrated and uncapped ─────────────────
 

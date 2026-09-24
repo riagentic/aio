@@ -124,8 +124,10 @@ export async function buildCli(cfg: BuildConfig): Promise<void> {
   );
 
   // Embed app data assets (.wasm + declared compile.include) — a CLI app can
-  // load WASM server-side too, and deno compile can't trace those reads.
-  const assets = await assetIncludes(root);
+  // load WASM server-side too, and deno compile can't trace those reads. The
+  // entry scopes the `*.server.ts` walk to what THIS binary can load (remote-desktop
+  // report §4) — the same rule the app compile follows.
+  const assets = await assetIncludes(root, cliEntry);
   const v8Flags = await v8FlagsArg(root);
   if (v8Flags.length) console.log(`${v8Flags[0]}`);
 

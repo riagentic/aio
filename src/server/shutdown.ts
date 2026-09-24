@@ -346,6 +346,17 @@ export interface ShutdownRefs {
   /** Phase 0 — the app quiesces its own producers while dispatch still works.
    *  See `AioConfig.onStopping`, which owns the contract. */
   onStopping: (() => void | Promise<void>) | undefined;
+  /** Phase 0b — close the `worker: true` cells' threads: each aborts and
+   *  drains its own in-flight methods and streams their last writes home. It
+   *  runs HERE, in the one sequence every shutdown path takes (`app.close()`,
+   *  a signal, the update handover): after `onStopping`, which may still call
+   *  a worker cell (the contract says it may dispatch, and a worker cell's
+   *  producers can only be stopped by calling it), and before dispatch
+   *  closes, so the writes it streams home still land. Closed later — or not
+   *  at all, as the update handover once did — a worker cell's calls go
+   *  straight to its thread (`route` bypasses the closed main loop) and start
+   *  new work for the whole drain. */
+  closeWorkers?: () => Promise<void>;
   onStop: (() => void | Promise<void>) | undefined;
   appLock: { release: () => void } | null;
   /** This app's hold on the process-wide SIGXFSZ guard (`holdFileSizeGuard`).
@@ -419,6 +430,9 @@ export function createShutdownOrchestrator(
     // depend on app code finishing.
     if (refs.onStopping) {
       await phase(log, "hook onStopping", gate, () => refs.onStopping!());
+    }
+    if (refs.closeWorkers) {
+      await phase(log, "close worker cells", gate, () => refs.closeWorkers!());
     }
     await phase(log, "mark shutting down", gate, () => refs.setShuttingDown());
     await phase(log, "close dispatch", gate, () => refs.dispatch.close());

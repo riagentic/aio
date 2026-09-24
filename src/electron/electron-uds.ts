@@ -8,6 +8,8 @@ import {
   BACKOFF_MAX_MS,
   backoffDelay,
 } from "../protocol/transport-shared.ts";
+import { createLineReader } from "../protocol/line-reader.ts";
+import { redactUrlToken, redactUrlTokenSource } from "../diagnostics/redact.ts";
 import {
   type AioMeta,
   type ShellConfig,
@@ -103,6 +105,10 @@ const HTTP_SOCK = ${JSON.stringify(opts.httpSocketPath ?? "")};
 // proxies to when this app has no socket and no dist/. Same handler, same
 // bytes, over TCP instead of a socket path.
 const HTTP_URL = ${JSON.stringify(url)};
+// What a log line may show of a URL: never its ?token= (diagnostics/redact.ts
+// — the same redactor, as source, because this script cannot import it).
+const _shownUrl = ${redactUrlTokenSource()};
+const HTTP_URL_SHOWN = ${JSON.stringify(redactUrlToken(url))};
 const FORCE_PROTOCOL = ${JSON.stringify(!!opts.forceProtocol)};
 const FROM_DISK = !!(BASE_DIR && fs.existsSync(path.join(BASE_DIR, 'app.js')));
 // Disk wins when a bundle is there: the page needs no server at all (the
@@ -115,7 +121,7 @@ const FROM_SOCKET = !FROM_DISK && !!HTTP_SOCK;
 const FROM_HTTP = !FROM_DISK && !FROM_SOCKET && FORCE_PROTOCOL;
 const USE_PROTOCOL = FROM_DISK || FROM_SOCKET || FROM_HTTP;
 if (FROM_HTTP) {
-  console.warn('[aio:electron] AIO_ELECTRON_PROTOCOL=1 — the window loads aio://app/ (the packaged path) proxied to ' + HTTP_URL);
+  console.warn('[aio:electron] AIO_ELECTRON_PROTOCOL=1 — the window loads aio://app/ (the packaged path) proxied to ' + HTTP_URL_SHOWN);
 }
 // machine U11 — never silent: when a dist dir was given but its app.js is
 // missing, the window silently falls back from disk (aio://) to HTTP. Say so.
@@ -254,7 +260,13 @@ ${tmplRendererDiagnostics(true)}
   const BACKOFF_BASE_MS = ${BACKOFF_BASE_MS}, BACKOFF_MAX_MS = ${BACKOFF_MAX_MS};
   const backoffDelay = ${backoffDelay.toString()};
   const SOCK = ${JSON.stringify(socketPath)};
-  let buf = '', retry = 0, lastFullState = null;
+  // The socket's line reader — linear in the bytes read, however a frame is
+  // chunked (\`buf += chunk; buf.split\` rescanned the whole carried frame on
+  // every chunk: quadratic on a multi-MB state). Embedded from its tested
+  // source, like backoffDelay above.
+  const createLineReader = ${createLineReader.toString()};
+  const lineBuf = createLineReader();
+  let retry = 0, lastFullState = null;
   // The connection's \`proto\` hello and \`cfg\` frame, cached like the snapshot.
   // The server writes both ONCE, at accept (uds.ts) — and this socket belongs
   // to the main process, so it outlives every document the window shows. A
@@ -497,7 +509,7 @@ ${tmplRendererDiagnostics(true)}
       _relayHealth('up', 'the failed navigation left the old document in place');
     }
     _pump();
-    console.warn('[aio:electron] navigation to ' + failedUrl + ' failed (' + code + ' ' + desc +
+    console.warn('[aio:electron] navigation to ' + _shownUrl(failedUrl) + ' failed (' + code + ' ' + desc +
       ') — the previous document stays and keeps its bridge');
   });
 
@@ -582,7 +594,7 @@ ${tmplRendererDiagnostics(true)}
     // the "proto" hello — so a crash-mid-write silently destroyed the version
     // gate and handed the renderer one undecodable line. The buffer is
     // per-connection; reset it with the connection.
-    buf = '';
+    lineBuf.reset();
     sock = connect(SOCK);
     sock.setEncoding('utf8');
     sock.on('connect', () => {
@@ -596,10 +608,7 @@ ${tmplRendererDiagnostics(true)}
       if (!closing && rendererReady) { win.webContents.send('__aio:open'); _pump(); }
     });
     sock.on('data', (chunk) => {
-      buf += chunk;
-      const lines = buf.split('\\n');
-      buf = lines.pop();
-      for (const line of lines) {
+      for (const line of lineBuf.push(chunk)) {
         if (!line || closing) continue;
         // v2 envelope: cache the latest full-state frame for late renderers.
         // Classify by the frame's DECODED kind, never by a substring: any
@@ -739,7 +748,7 @@ ${tmplRendererDiagnostics(true)}
         return refuseWindow('sandbox: false — this app has not opted in. The APP decides the Chromium sandbox of a window it opens, not the page: add aio.run({ electron: { unsandboxedChildWindows: true } }) if this page really must run unsandboxed.');
       }
       const sandbox = payload.sandbox === false ? false: true;
-      console.warn('[aio:electron] openWindow → ' + u.href + (sandbox ? '': ' (sandbox DISABLED by app request)'));
+      console.warn('[aio:electron] openWindow → ' + _shownUrl(u.href) + (sandbox ? '': ' (sandbox DISABLED by app request)'));
       const child = new BrowserWindow({
         width: 1100,
         height: 800,

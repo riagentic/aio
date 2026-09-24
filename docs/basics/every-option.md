@@ -1563,7 +1563,7 @@ Navigates to `to` on mount. Replace=true by default (no history entry).
 ### `renderToStream`
 
 ```ts
-renderToStream(vnode: VNode | string | number | null, key?: object): AsyncGenerator<string, void, unknown>
+renderToStream(vnode: VNode | string | number | null, key?: object, opts?: { route?; search? }): AsyncGenerator<string, void, unknown>
 ```
 
 Streaming SSR — async generator yielding HTML chunks.
@@ -1572,7 +1572,7 @@ Streaming SSR — async generator yielding HTML chunks.
 ### `renderToString`
 
 ```ts
-renderToString(vnode: VNode | string | number | null): string
+renderToString(vnode: VNode | string | number | null, opts?: { route?; search? }): string
 ```
 
 Render a VNode tree to an HTML string (no DOM required).

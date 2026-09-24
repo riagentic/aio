@@ -180,6 +180,58 @@ export function readFrameworkPin(dir: string): Promise<FrameworkPin> {
   return Promise.resolve(readFrameworkPinSync(dir));
 }
 
+/** How far above a starting directory an app's own config is looked for:
+ *  the directory itself and four parents, NEAREST wins. Four, because the
+ *  documented layouts put an entry up to `src/<component>/app.ts` below the
+ *  project root, and a bound stops a walk that would otherwise adopt some
+ *  unrelated ancestor's config. */
+const APP_CONFIG_WALK = ["./", "../", "../../", "../../../", "../../../../"];
+
+/** THE walk up to an app's own `deno.json`/`deno.jsonc` — the one decider of
+ *  "which config (and so which project root) does this app belong to".
+ *  `from` is a URL whose `./` is the starting directory: a module's own URL
+ *  (its folder), or a directory URL ending in `/`. URLs, not paths, so the
+ *  same walk reads a compiled binary's VFS.
+ *
+ *  Two askers, one walk: the runtime (`appDenoJsonLocated`, from the main
+ *  module) and the dev server's prod-bundle check (`graph-validator.ts`, from
+ *  the UI directory). They once disagreed — the graph check looked one level
+ *  up only — and every app with an entry two folders deep (`src/agent/app.ts`,
+ *  as docs/build/targets.md recommends) was served the diagnostic page.
+ *
+ *  A file that EXISTS but does not parse is said out loud and the walk
+ *  continues: an unrelated malformed file in some ancestor is not this app's
+ *  problem to die on, and silently walking past it is how a `//` comment once
+ *  made the runtime adopt a parent's identity. */
+export function locateDenoJsonAbove(
+  from: URL,
+): { config: Record<string, unknown>; dir: URL } | undefined {
+  for (const up of APP_CONFIG_WALK) {
+    for (const name of DENO_JSON_NAMES) {
+      const url = new URL(`${up}${name}`, from);
+      let text: string;
+      try {
+        text = Deno.readTextFileSync(url);
+      } catch {
+        continue; // nothing at this level — keep walking up
+      }
+      try {
+        return {
+          config: parseDenoJson(text, url.pathname),
+          dir: new URL(up, from),
+        };
+      } catch (e) {
+        log.warn(
+          `config: ignoring ${url.pathname} — ${
+            e instanceof Error ? e.message.split("\n")[0] : String(e)
+          }`,
+        );
+      }
+    }
+  }
+  return undefined;
+}
+
 /** {@linkcode readDenoJson}, synchronously — for the boot paths that run
  *  before any await and for `Deno.readTextFileSync` callers. */
 export function readDenoJsonSync(

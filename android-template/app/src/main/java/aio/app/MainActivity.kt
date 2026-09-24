@@ -59,7 +59,8 @@ private const val STORE_GLOBAL = "AioNativeStore"
  * So: a real file, written durably.
  *   1. the bytes go to `<name>.tmp`,
  *   2. `fd.sync()` — they are ON the disk, not in a page cache,
- *   3. `renameTo` puts them under the real name in one atomic step.
+ *   3. `renameTo` puts them under the real name in one atomic step,
+ *   4. the directory is fsync'd, so that rename survives a power cut too.
  * A reader therefore sees the whole previous value or the whole new one,
  * never half of either: a torn state file is worse than a lost change. `set`
  * returns only once step 3 is done, so the page's method has already survived
@@ -134,12 +135,45 @@ private class AioNativeStore(private val dir: File) {
                 out.fd.sync()
             }
             if (!tmp.renameTo(target)) throw IOException("rename " + tmp.name + " -> " + target.name + " failed")
+            syncDir()
             true
         } catch (e: Exception) {
             tmp.delete()
             android.util.Log.e("aio", "native store WRITE failed for $key: $e " +
                 "— THIS CHANGE IS NOT SAVED")
             false
+        }
+    }
+
+    /** Step 4: fsync the DIRECTORY, so the rename itself is on disk.
+     *
+     *  `fd.sync()` made the new bytes durable, but the name pointing at them
+     *  is a directory entry, and a power cut before the directory is flushed
+     *  can bring back the OLD name (the previous value, or no file at all on
+     *  a first write). `android.system.Os` is the platform's own fsync on a
+     *  directory fd, available from API 21 (minSdk is 24) — `FileChannel.open`
+     *  on a directory needs API 26, and `FileInputStream` refuses one.
+     *
+     *  A filesystem that refuses fsync on a directory (EINVAL on some FUSE /
+     *  sdcardfs mounts) does not undo anything: the rename happened and the
+     *  contents are durable, only the power-cut window stays open. So `set`
+     *  still answers true — but not in silence: one logcat warning per
+     *  process, naming what is lost, rather than one per keystroke. */
+    private var dirSyncRefusedSaid = false
+    private fun syncDir() {
+        var fd: java.io.FileDescriptor? = null
+        try {
+            fd = android.system.Os.open(dir.absolutePath, android.system.OsConstants.O_RDONLY, 0)
+            android.system.Os.fsync(fd)
+        } catch (e: Exception) {
+            if (!dirSyncRefusedSaid) {
+                dirSyncRefusedSaid = true
+                android.util.Log.w("aio", "native store: this filesystem refused fsync on " +
+                    "$dir ($e) — every change is still written and fsync'd, but a power " +
+                    "cut right after one can bring back the previous value")
+            }
+        } finally {
+            if (fd != null) try { android.system.Os.close(fd) } catch (ignored: Exception) {}
         }
     }
 

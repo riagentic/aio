@@ -17,6 +17,7 @@ import { assertEquals, assertStringIncludes } from "@std/assert";
 import { privateDirRefusal, selfUid } from "../src/server/dir-permissions.ts";
 import { _prepareLockDir } from "../src/server/single-instance-lock.ts";
 import { dropTempDir, tempDir } from "../src/testing/temp-dir.ts";
+import { permissiveUmask } from "./permissive-umask.ts";
 
 const POSIX = Deno.build.os !== "windows";
 
@@ -71,84 +72,92 @@ Deno.test("the rule: owner-only, and OURS", () => {
 Deno.test({
   name: "an unusable lock dir falls back to one we own, loudly",
   ignore: !POSIX,
-  fn: async () => {
-    const base = await Deno.makeTempDir({ prefix: "aio-lockdir-" });
-    try {
-      // Unusable for a reason a test can actually create: the preferred path
-      // exists and is not a directory. The production case is "another uid
-      // owns it", which needs a second account; both reach the same branch.
-      await Deno.writeTextFile(`${base}/aio`, "not a directory");
-      const { code, stdout, stderr } = await new Deno.Command(Deno.execPath(), {
-        args: [
-          "eval",
-          `import { lockDir } from "${
-            new URL("../src/server/single-instance-lock.ts", import.meta.url)
-              .href
-          }";
+  fn: () =>
+    permissiveUmask(async () => {
+      const base = await Deno.makeTempDir({ prefix: "aio-lockdir-" });
+      try {
+        // Unusable for a reason a test can actually create: the preferred path
+        // exists and is not a directory. The production case is "another uid
+        // owns it", which needs a second account; both reach the same branch.
+        await Deno.writeTextFile(`${base}/aio`, "not a directory");
+        const { code, stdout, stderr } = await new Deno.Command(
+          Deno.execPath(),
+          {
+            args: [
+              "eval",
+              `import { lockDir } from "${
+                new URL(
+                  "../src/server/single-instance-lock.ts",
+                  import.meta.url,
+                )
+                  .href
+              }";
            const d = lockDir();
            console.log("DIR=" + d);
            console.log("MODE=" + (Deno.statSync(d).mode! & 0o777).toString(8));`,
-        ],
-        // AIO_APPS_DIR scopes the directory NAME (`aio-<slug>`), and the
-        // suite sets it. Blank it so the preferred path is plain `<base>/aio`.
-        env: { XDG_RUNTIME_DIR: base, AIO_APPS_DIR: "" },
-        stdout: "piped",
-        stderr: "piped",
-      }).output();
-      const out = new TextDecoder().decode(stdout);
-      const err = new TextDecoder().decode(stderr);
-      assertEquals(code, 0, out + err);
-      // It did NOT use the unusable path…
-      assertStringIncludes(out, "DIR=");
-      const dir = /DIR=(.*)/.exec(out)![1]!.trim();
-      assertEquals(
-        dir.endsWith("/aio"),
-        false,
-        `used the unusable path: ${dir}`,
-      );
-      // …it used a uid-scoped sibling, and narrowed it.
-      assertStringIncludes(dir, "/aio-u");
-      assertStringIncludes(out, "MODE=700");
-      // And it SAID so — a control socket moving is not a silent detail.
-      assertStringIncludes(err + out, "not a directory");
-    } finally {
-      await Deno.remove(base, { recursive: true });
-    }
-  },
+            ],
+            // AIO_APPS_DIR scopes the directory NAME (`aio-<slug>`), and the
+            // suite sets it. Blank it so the preferred path is plain `<base>/aio`.
+            env: { XDG_RUNTIME_DIR: base, AIO_APPS_DIR: "" },
+            stdout: "piped",
+            stderr: "piped",
+          },
+        ).output();
+        const out = new TextDecoder().decode(stdout);
+        const err = new TextDecoder().decode(stderr);
+        assertEquals(code, 0, out + err);
+        // It did NOT use the unusable path…
+        assertStringIncludes(out, "DIR=");
+        const dir = /DIR=(.*)/.exec(out)![1]!.trim();
+        assertEquals(
+          dir.endsWith("/aio"),
+          false,
+          `used the unusable path: ${dir}`,
+        );
+        // …it used a uid-scoped sibling, and narrowed it.
+        assertStringIncludes(dir, "/aio-u");
+        assertStringIncludes(out, "MODE=700");
+        // And it SAID so — a control socket moving is not a silent detail.
+        assertStringIncludes(err + out, "not a directory");
+      } finally {
+        await Deno.remove(base, { recursive: true });
+      }
+    }),
 });
 
 Deno.test({
   name: "the ordinary case still uses the shared directory",
   ignore: !POSIX,
-  fn: async () => {
-    // The fallback must be the exception: one directory per machine is what
-    // lets `am` see every app of this user.
-    const base = await Deno.makeTempDir({ prefix: "aio-lockdir-ok-" });
-    try {
-      const { code, stdout } = await new Deno.Command(Deno.execPath(), {
-        args: [
-          "eval",
-          `import { lockDir } from "${
-            new URL("../src/server/single-instance-lock.ts", import.meta.url)
-              .href
-          }";
+  fn: () =>
+    permissiveUmask(async () => {
+      // The fallback must be the exception: one directory per machine is what
+      // lets `am` see every app of this user.
+      const base = await Deno.makeTempDir({ prefix: "aio-lockdir-ok-" });
+      try {
+        const { code, stdout } = await new Deno.Command(Deno.execPath(), {
+          args: [
+            "eval",
+            `import { lockDir } from "${
+              new URL("../src/server/single-instance-lock.ts", import.meta.url)
+                .href
+            }";
            const d = lockDir();
            console.log("DIR=" + d + " MODE=" +
              (Deno.statSync(d).mode! & 0o777).toString(8));`,
-        ],
-        // AIO_APPS_DIR scopes the directory NAME (`aio-<slug>`), and the
-        // suite sets it. Blank it so the preferred path is plain `<base>/aio`.
-        env: { XDG_RUNTIME_DIR: base, AIO_APPS_DIR: "" },
-        stdout: "piped",
-        stderr: "null",
-      }).output();
-      const out = new TextDecoder().decode(stdout);
-      assertEquals(code, 0, out);
-      assertStringIncludes(out, `DIR=${base}/aio MODE=700`);
-    } finally {
-      await Deno.remove(base, { recursive: true });
-    }
-  },
+          ],
+          // AIO_APPS_DIR scopes the directory NAME (`aio-<slug>`), and the
+          // suite sets it. Blank it so the preferred path is plain `<base>/aio`.
+          env: { XDG_RUNTIME_DIR: base, AIO_APPS_DIR: "" },
+          stdout: "piped",
+          stderr: "null",
+        }).output();
+        const out = new TextDecoder().decode(stdout);
+        assertEquals(code, 0, out);
+        assertStringIncludes(out, `DIR=${base}/aio MODE=700`);
+      } finally {
+        await Deno.remove(base, { recursive: true });
+      }
+    }),
 });
 
 Deno.test({
@@ -202,32 +211,33 @@ Deno.test({
 Deno.test({
   name: "a lock dir that is somebody else's SYMLINK is refused",
   ignore: !POSIX || selfUid() === null,
-  fn: async () => {
-    const base = await tempDir("aio-lockdir-link-");
-    try {
-      const target = `${base}/theirs`;
-      Deno.mkdirSync(target, { mode: 0o700 });
-      const dir = `${base}/aio`;
-      Deno.symlinkSync(target, dir);
-      const theirLink = { ...Deno.lstatSync(dir), uid: selfUid()! + 1 };
-      const refusal = _prepareLockDir(dir, {
-        lstat: () => theirLink as Deno.FileInfo,
-      });
-      assertStringIncludes(
-        refusal ?? "",
-        "symbolic link",
-        "a control socket directory somebody else redirected was accepted",
-      );
-      assertStringIncludes(refusal ?? "", `uid ${selfUid()! + 1}`);
-      // A link WE made is not somebody else's: the target's own mode and
-      // owner still decide, exactly as before.
-      assertEquals(_prepareLockDir(dir), null);
-      // …and a plain directory is untouched by any of this.
-      Deno.removeSync(dir);
-      assertEquals(_prepareLockDir(dir), null);
-      assertEquals(Deno.statSync(dir).mode! & 0o777, 0o700);
-    } finally {
-      await dropTempDir(base);
-    }
-  },
+  fn: () =>
+    permissiveUmask(async () => {
+      const base = await tempDir("aio-lockdir-link-");
+      try {
+        const target = `${base}/theirs`;
+        Deno.mkdirSync(target, { mode: 0o700 });
+        const dir = `${base}/aio`;
+        Deno.symlinkSync(target, dir);
+        const theirLink = { ...Deno.lstatSync(dir), uid: selfUid()! + 1 };
+        const refusal = _prepareLockDir(dir, {
+          lstat: () => theirLink as Deno.FileInfo,
+        });
+        assertStringIncludes(
+          refusal ?? "",
+          "symbolic link",
+          "a control socket directory somebody else redirected was accepted",
+        );
+        assertStringIncludes(refusal ?? "", `uid ${selfUid()! + 1}`);
+        // A link WE made is not somebody else's: the target's own mode and
+        // owner still decide, exactly as before.
+        assertEquals(_prepareLockDir(dir), null);
+        // …and a plain directory is untouched by any of this.
+        Deno.removeSync(dir);
+        assertEquals(_prepareLockDir(dir), null);
+        assertEquals(Deno.statSync(dir).mode! & 0o777, 0o700);
+      } finally {
+        await dropTempDir(base);
+      }
+    }),
 });

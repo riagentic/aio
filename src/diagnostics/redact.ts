@@ -164,3 +164,35 @@ export function makeRedactor(patterns: readonly string[] = []): Redactor {
     },
   );
 }
+
+/** A credential in a URL's query: `?token=…` / `&token=…`, up to the next
+ *  parameter, fragment, whitespace or quote — so a URL quoted inside a longer
+ *  log line is cut at its own end, not the line's. */
+const URL_TOKEN = /([?&]token=)[^&#\s'"`]*/g;
+
+/** What a token becomes in anything a human or a log file reads. */
+const TOKEN_MASK = "…";
+
+/** The ONE redactor for a token-bearing URL on its way to a log line.
+ *
+ *  A share link (`http://host:port/?token=<key>`) is a credential: whoever
+ *  holds the text holds the app. Logs are copied into bug reports, CI output
+ *  and terminal scrollback, so every line that SHOWS a URL shows this instead,
+ *  and the URL that is USED (loaded, dialled, passed as argv) stays intact.
+ *  The share-link lines at `--expose` boot are the only place a token is
+ *  printed on purpose — tests/no-token-in-logs.test.ts holds that list.
+ *
+ *  @decider */
+export function redactUrlToken(text: string): string {
+  return text.replace(URL_TOKEN, `$1${TOKEN_MASK}`);
+}
+
+/** {@linkcode redactUrlToken} as JavaScript SOURCE — a function expression —
+ *  for the generated Electron main scripts, which run outside Deno and cannot
+ *  import it. Built from the same pattern and mask, so the two cannot drift
+ *  (tests/no-token-in-logs.test.ts evaluates it against the TS original). */
+export function redactUrlTokenSource(): string {
+  return `((s) => String(s).replace(new RegExp(${
+    JSON.stringify(URL_TOKEN.source)
+  }, 'g'), ${JSON.stringify(`$1${TOKEN_MASK}`)}))`;
+}

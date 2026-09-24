@@ -21,10 +21,13 @@ import {
 } from "../state/cell-defaults.ts";
 import { composeCells } from "../state/cell-compose.ts";
 import { refuseUnsafeComposition } from "../server/aio-composition.ts";
+import { syncListensMismatches } from "../server/aio-cells-bridge.ts";
+import { log } from "../diagnostics/logger-api.ts";
 import { validateWorkerCells } from "../server/cell-worker-pool.ts";
 import type { CellDef, CellEntry } from "../state/cell-types.ts";
 import { _cloneAcrossWorkerBoundary } from "../state/cell-impl.ts";
 import { AsyncLocalStorage } from "node:async_hooks";
+import type { BootScope } from "../standalone-air.ts";
 import { attachMeta, makeUnboundGuard } from "../state/cell-catalog.ts";
 import { getRegisteredCells } from "../state/cell-reactive.ts";
 import { _openScopeDepth } from "../state/signal.ts";
@@ -72,6 +75,9 @@ export function _refuseUnsafeCells(
   applyCellDefaults(composed, opts.cellDefaults);
   applyLocalFirst(composed, opts.localFirst === true);
   refuseUnsafeComposition(composed);
+  // …and the boot WARNINGS decided on the same composition: the same line
+  // `aio.run` says (aio-cells-bridge.ts `buildLegacyConfig`).
+  for (const line of syncListensMismatches(composed.cells)) log.warn(line);
 }
 
 /** The worker-cell half of the boot gate, for every harness — including
@@ -138,6 +144,24 @@ export function _callAcrossWorkerBoundary(
 // queued from inside the method's scope.
 
 const _workerScope = new AsyncLocalStorage<string>();
+
+/** The standalone runtime's "whose boot is this code running for" scope
+ *  (`BootScope` in standalone-air.ts), backed by `AsyncLocalStorage` so it
+ *  survives `await`. Installed by every in-process harness before it boots —
+ *  the harness is where boots come and go in one process, and a call a
+ *  disposed boot started must not commit into the next one. Installed once and
+ *  left: with one boot alive it only ever answers "that boot".
+ *  @internal */
+export function _armBootScope(
+  install: (scope: BootScope) => void,
+): void {
+  install(_bootScope);
+}
+const _bootAls = new AsyncLocalStorage<Parameters<BootScope["run"]>[0]>();
+const _bootScope: BootScope = {
+  run: (fence, fn) => _bootAls.run(fence, fn),
+  get: () => _bootAls.getStore(),
+};
 
 /** Refuse, while a `worker: true` cell's method runs in process, what a real
  *  worker refuses: reading another cell's state, and calling any cell's

@@ -2,6 +2,12 @@
 
 One guide per version migration. Find your current version and follow the steps.
 
+**Upgrading an app is `am pin --latest`**, run in the app's directory: it checks
+the app's source for removed APIs, then moves the pin to the newest release in
+the app's major. `am upgrade` is a different verb — bare, it updates `am`
+itself; `am upgrade <app>` rebuilds and reinstalls an INSTALLED app from its
+recorded source, and does not move any app's pin.
+
 From alpha65 on, every guide ends with a **`## Retire`** section: the
 workarounds an app may still carry for bugs that are now fixed, each with the
 version that fixed it — so "nothing told us we could delete it" stops being a
@@ -20,6 +26,21 @@ app, that is a bug in aio, not a step you missed.
 - **[The aio restructure (alpha27+)](restructure.md)** — every restructure
   breaking change with before → after recipes (methods-only cells, instances,
   SQLite-only persistence, `aio/extras`, wire catalog)
+- [1.0.10-beta → **1.0.11-beta**](from-1.0.10-beta-to-1.0.11-beta.md) — nothing
+  is removed and the surface does not move. **Action:** an exposed HTTPS app
+  reached by a name not in its certificate now needs `allowedOrigins` (the
+  HTTP/2 Host gate was off); a binary embeds only the `*.server.ts` its entry
+  can load; a test that leaked a call into the next test, or whose `onInit`
+  threw, now fails. A late `s.$do` is refused by name. `am stop` waits;
+  `am restart` never leaves an app down. Size warnings name the fix and
+  `cellState` governs persist too. New warnings: a server render that reads a
+  route another request set, a `listensTo` pair where one cell syncs and the
+  other does not. Route warnings repeat with a count instead of once per
+  process. No log line carries the app key any more.
+  `renderToStream(v, { route })` — options in the KEY slot — now throws a
+  `TypeError` at the first read (pass them third). A page is 79 KB gzipped,
+  from 77. An `am` from 1.0.9 or earlier can act on a running profile as if it
+  were the app: upgrade `am` first.
 - [1.0.9-beta → **1.0.10-beta**](from-1.0.9-beta-to-1.0.10-beta.md) — nothing is
   removed, and the public surface does not move. A streamed page takes its route
   when `renderToStream()` is called, so a handler that awaits before sending the

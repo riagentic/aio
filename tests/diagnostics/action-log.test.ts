@@ -1,5 +1,6 @@
 import { assert, assertEquals } from "@std/assert";
 import { createActionLog } from "../../src/diagnostics/action-log.ts";
+import { permissiveUmask } from "../permissive-umask.ts";
 
 const TEST_DIR = await Deno.makeTempDir();
 
@@ -70,18 +71,23 @@ Deno.test("action-log: skips the __exec marker, keeps the write-set", async () =
   await alog.flush();
 });
 
-Deno.test("action-log: actions.jsonl is 0600 — payloads are user data, like every other retaining sink", async () => {
-  if (Deno.build.os === "windows") return;
-  const path = `${TEST_DIR}/actions-mode.jsonl`;
-  // Pre-existing world-readable file (what every install before the fix has) —
-  // the first append tightens it, matching the journal/checkpoint contract.
-  await Deno.writeTextFile(path, "", { mode: 0o644 });
-  const alog = createActionLog(path, 100);
-  await alog.append("notes:add", { text: "private" });
-  const mode = (await Deno.stat(path)).mode! & 0o777;
-  assertEquals(mode, 0o600, "action payloads must not be group/world readable");
-  await alog.flush();
-});
+Deno.test("action-log: actions.jsonl is 0600 — payloads are user data, like every other retaining sink", () =>
+  permissiveUmask(async () => {
+    if (Deno.build.os === "windows") return;
+    const path = `${TEST_DIR}/actions-mode.jsonl`;
+    // Pre-existing world-readable file (what every install before the fix has) —
+    // the first append tightens it, matching the journal/checkpoint contract.
+    await Deno.writeTextFile(path, "", { mode: 0o644 });
+    const alog = createActionLog(path, 100);
+    await alog.append("notes:add", { text: "private" });
+    const mode = (await Deno.stat(path)).mode! & 0o777;
+    assertEquals(
+      mode,
+      0o600,
+      "action payloads must not be group/world readable",
+    );
+    await alog.flush();
+  }));
 
 Deno.test("action-log: a burst is written in batches, waits for at most `max` lines, and says once what it dropped", async () => {
   const path = `${TEST_DIR}/actions-burst.jsonl`;

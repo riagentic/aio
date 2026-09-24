@@ -5,7 +5,12 @@
 import type { DiagEvent } from "./types.ts";
 import { DIAG_THROTTLE_MS, formatDiagEvent } from "./diag-formatter.ts";
 import { log } from "../diagnostics/logger-api.ts";
-import { type BudgetLedger, budgetsFor } from "../state/budgets.ts";
+import {
+  type BudgetLedger,
+  budgetsFor,
+  declareLargeState,
+  LARGE_STATE_DOC,
+} from "../state/budgets.ts";
 
 /** Above this many live throttle keys, sweep the expired ones (they are
  *  keyed per client, so the set grows with connections, not with code). */
@@ -42,6 +47,7 @@ export function createPressureMonitor(
   config: PressureMonitorConfig,
 ): PressureMonitorAPI {
   const payloadThreshold = config.payloadThreshold ?? DEFAULT_PAYLOAD_THRESHOLD;
+  // No race: createVitalsSystem always passes its app's; the fallback serves a bare caller only.
   const budgets = config.budgets ?? budgetsFor();
   const rateThreshold = config.rateThreshold ?? DEFAULT_RATE_THRESHOLD;
   const bandwidthThreshold = config.bandwidthThreshold ??
@@ -126,8 +132,12 @@ export function createPressureMonitor(
             detail: {
               bytesPerSec: Math.round(bps),
               trigger: clientId,
-              hint:
-                "reduce state size, raise syncIntervalMs, or use cell-level ui filters",
+              // `ui:` was renamed `visible:` in alpha70 — a hint naming a key
+              // that no longer exists is a door painted on a wall.
+              hint: `find the cell with \`am cost\`; send less per change ` +
+                `(narrow what each client reads with visible, page bulk rows ` +
+                `from db: tables) or raise syncIntervalMs to batch — see ` +
+                LARGE_STATE_DOC,
             },
             timestamp: now,
           }, `bandwidth:${clientId}`);
@@ -158,7 +168,12 @@ export function createPressureMonitor(
         detail: {
           payloadBytes: bytes,
           trigger: clientId,
-          hint: "large state delta — check cell sizes at /__aio/vitals",
+          // Both doors: the fix, and — for a payload that is big on purpose —
+          // the budget that makes this aio's business no longer.
+          hint: `find the cell with \`am cost\`; keep bulk rows in db: ` +
+            `tables and page them into state, or if this payload is ` +
+            `intended declare it: ${declareLargeState(bytes)} — see ` +
+            `${LARGE_STATE_DOC}`,
         },
         timestamp: now,
       }, `payload:${clientId}`);

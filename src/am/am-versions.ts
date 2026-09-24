@@ -44,7 +44,7 @@ import {
   compareVersions as compareRawVersions,
   isComparableVersion,
 } from "../server/updates-core.ts";
-import { basename, join, resolve, SEPARATOR as SEP } from "@std/path";
+import { basename, dirname, join, resolve, SEPARATOR as SEP } from "@std/path";
 import { ageSince } from "../server/single-instance-lock.ts";
 
 /** The moving pin — `origin/main`, refreshed on every link. */
@@ -85,6 +85,79 @@ import {
   looksLikeAuthChallenge,
 } from "../server/git-noninteractive.ts";
 
+/** The `GIT_CEILING_DIRECTORIES` value that pins git to `cwd`: its PARENT,
+ *  symlinks resolved (git's discovery walks the real path, so the ceiling must
+ *  name the real parent too). With it, git in a directory that is not itself
+ *  a repo's top level fails instead of walking up into an enclosing repo.
+ *  THE one spelling — every `am` git call on aio's own checkouts uses it. */
+export function gitCeiling(cwd: string): string {
+  try {
+    return dirname(Deno.realPathSync(cwd));
+  } catch {
+    return dirname(resolve(cwd));
+  }
+}
+
+/** The variables that make git address a repo OTHER than the one its cwd is
+ *  in: git's own `git rev-parse --local-env-vars` list (what git itself clears
+ *  before it runs in a submodule), plus `GIT_NAMESPACE` and
+ *  `GIT_QUARANTINE_PATH`. `tests/am-git-env.test.ts` pins it as a superset of
+ *  the installed git's list. */
+export const GIT_REPO_ENV_VARS: readonly string[] = [
+  "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+  "GIT_CONFIG",
+  "GIT_CONFIG_PARAMETERS",
+  "GIT_CONFIG_COUNT",
+  "GIT_OBJECT_DIRECTORY",
+  "GIT_DIR",
+  "GIT_WORK_TREE",
+  "GIT_IMPLICIT_WORK_TREE",
+  "GIT_GRAFT_FILE",
+  "GIT_INDEX_FILE",
+  "GIT_NO_REPLACE_OBJECTS",
+  "GIT_REPLACE_REF_BASE",
+  "GIT_PREFIX",
+  "GIT_SHALLOW_FILE",
+  "GIT_COMMON_DIR",
+  "GIT_NAMESPACE",
+  "GIT_QUARANTINE_PATH",
+];
+
+/** THE spawn environment for every `git` that `am` runs — spread into the
+ *  options: `new Deno.Command("git", { …, ...gitEnvFor(cwd) })`.
+ *
+ *  `GIT_CEILING_DIRECTORIES` stops git walking UP into an enclosing repo, but
+ *  git never walks at all when the environment already names a repo: inside
+ *  a hook, or `git rebase --exec` in a linked worktree, git exports `GIT_DIR`
+ *  (and `GIT_INDEX_FILE`, `GIT_WORK_TREE`, …), and an `am` run from there
+ *  fetched, tagged and checked out in THAT repo instead of its own. So the
+ *  inherited environment is copied minus {@linkcode GIT_REPO_ENV_VARS} and
+ *  passed with `clearEnv: true` — `Deno.Command`'s `env` only MERGES over the
+ *  parent's, it cannot unset — plus the no-prompt guard (`GIT_NO_PROMPT_ENV`)
+ *  and, when `cwd` is given, the ceiling that pins git to it (`gitCeiling`).
+ *  `cwd: null` keeps discovery open (`am create` asks whether the new folder
+ *  is inside a repo) and the caller's own ceiling, if any. Case-insensitive
+ *  on the names: Windows environment keys are. */
+export function gitEnvFor(
+  cwd: string | null,
+  extra: Record<string, string> = {},
+): { clearEnv: true; env: Record<string, string> } {
+  const drop = new Set(GIT_REPO_ENV_VARS);
+  const env: Record<string, string> = {};
+  for (const [k, v] of Object.entries(Deno.env.toObject())) {
+    if (!drop.has(k.toUpperCase())) env[k] = v;
+  }
+  return {
+    clearEnv: true,
+    env: {
+      ...env,
+      ...GIT_NO_PROMPT_ENV,
+      ...(cwd !== null ? { GIT_CEILING_DIRECTORIES: gitCeiling(cwd) } : {}),
+      ...extra,
+    },
+  };
+}
+
 async function git(
   cwd: string,
   args: string[],
@@ -99,7 +172,13 @@ async function git(
       // reason). A translated git wrote `locked initialisiere` where the
       // parser looked for `initializing`, and a checkout still being written
       // was torn down as junk.
-      env: { ...GIT_NO_PROMPT_ENV, LC_ALL: "C", LANGUAGE: "C" },
+      //
+      // PINNED to `cwd`: every directory this module runs git in is a repo's
+      // top level (the install clone, a store worktree). Without the ceiling a
+      // plain `AIO_HOME` inside ANY enclosing repo (`~/tmp/.git`, a dotfiles
+      // repo at `~`) had git walk up and fetch, prune and add worktrees THERE.
+      // And an inherited GIT_DIR (a hook) is stripped — see gitEnvFor.
+      ...gitEnvFor(cwd, { LC_ALL: "C", LANGUAGE: "C" }),
     }).output();
     return {
       ok: p.success,
@@ -119,9 +198,25 @@ const exists = async (p: string): Promise<boolean> => {
   }
 };
 
-/** Is `root` a git clone we can cut worktrees from? A tarball copy is not. */
+/** Is `root` a git clone we can cut worktrees from? A tarball copy is not —
+ *  and neither is a plain directory that merely sits INSIDE some other repo:
+ *  `rev-parse --git-dir` walked up and said yes, and `am` then fetched into
+ *  and cut worktrees from the enclosing repo (a `FETCH_HEAD` appeared in
+ *  `~/tmp/.git`). A clone is an aio checkout (`mod.ts`, the identity
+ *  `resolveAioRoot` uses) whose OWN top level is `root`. */
 export async function isClone(root: string): Promise<boolean> {
-  return (await git(root, ["rev-parse", "--git-dir"])).ok;
+  let dir: string;
+  try {
+    dir = await Deno.realPath(root);
+  } catch {
+    return false;
+  }
+  if (!await exists(join(dir, ".git")) || !await exists(join(dir, "mod.ts"))) {
+    return false;
+  }
+  const top = await git(dir, ["rev-parse", "--show-toplevel"]);
+  if (!top.ok) return false;
+  return await Deno.realPath(top.out).then((t) => t === dir, () => false);
 }
 
 /** Every version tag the clone knows, newest first. */
@@ -151,6 +246,42 @@ export async function latestTag(
   opts: { major?: number } = {},
 ): Promise<string | null> {
   return newestVersion(await knownTags(root), opts)?.raw ?? null;
+}
+
+/** THE "latest" every `am` report gives — {@link latestTag}, the newest
+ *  release on `root`'s origin/main — PLUS the provisioned releases newer than
+ *  it, which that origin/main does not contain. `am pin` printed
+ *  `"latest": "v1.0.8-beta"` beside `v1.0.9-beta` in `available`, and
+ *  `am fix` sealed the older one, with no word why (llama §2b): the store
+ *  is shared by every clone on the machine, `root`'s origin/main may simply
+ *  not have been fetched since. Offline, a stale origin/main and a tag that
+ *  was never released look the same — so the answer stays the merged tag (an
+ *  orphaned tag must never be "latest"), and the disagreement is SAID
+ *  ({@link offMainNote}) instead of shown silently side by side. */
+export async function latestRelease(
+  root: string,
+  opts: { major?: number } = {},
+): Promise<{ latest: string | null; offMain: string[] }> {
+  const latest = await latestTag(root, opts);
+  const top = latest ? parseVersion(latest) : null;
+  const offMain = sortVersions(await provisioned())
+    .filter((v) =>
+      (opts.major === undefined || v.major === opts.major) &&
+      (!top || compareVersions(v, top) > 0)
+    )
+    .map((v) => v.raw);
+  return { latest, offMain };
+}
+
+/** Why a newer provisioned release is not "latest" — one line, or null when
+ *  nothing disagrees. Pure. */
+export function offMainNote(root: string, offMain: string[]): string | null {
+  if (offMain.length === 0) return null;
+  return `${
+    offMain.join(", ")
+  } provisioned but not on origin/main as ${root} ` +
+    `knows it — \`git -C ${root} fetch origin main\` if it was released ` +
+    `since, then \`am pin latest\``;
 }
 
 // ── Version ordering ────────────────────────────────────────

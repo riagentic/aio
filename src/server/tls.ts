@@ -262,13 +262,16 @@ export function aioRootPaths(): { certPath: string; keyPath: string } {
  *  untidy. These constraints are marked CRITICAL and cover both name types a
  *  server certificate can carry, so this root can only ever speak for loopback,
  *  `.local`, and the RFC1918 ranges an aio app is actually reachable on. Steal
- *  the key and openssl, rustls, NSS and Go all refuse the forgery — measured,
- *  not hoped (`tests/tls-anchor-stability.test.ts`, `tests/x509.test.ts`).
+ *  the key and openssl and rustls refuse the forgery — measured on every run,
+ *  not hoped (`openssl verify` in `tests/x509.test.ts`; Deno's rustls client in
+ *  `tests/tls-verifier-claims.test.ts`). NSS and Go refuse it too, measured by
+ *  hand in the 1.0.8-beta round (2026-09-21; the table is in `todo.md`) —
+ *  nothing in tests/ runs them.
  *
- *  KNOWN LIMIT, measured with a verifier none of those tests used: RFC 5280
- *  §6.1 starts path validation AFTER the trust anchor and does not process the
- *  anchor's own extensions, so a validator that follows it to the letter never
- *  sees these constraints. Java's `CertPathValidator` is one — it accepts a
+ *  KNOWN LIMIT, measured by hand (2026-09-21) with a verifier no test runs:
+ *  RFC 5280 §6.1 starts path validation AFTER the trust anchor and does not
+ *  process the anchor's own extensions, so a validator that follows it to the
+ *  letter never sees these constraints. Java's `CertPathValidator` is one — it accepts a
  *  `DNS:www.google.com` leaf issued under this root and rejects the same leaf
  *  the moment the constraints sit on an intermediate instead. Closing that
  *  needs a name-constrained issuing intermediate between the root and the
@@ -285,14 +288,16 @@ export function aioRootPaths(): { certPath: string; keyPath: string } {
  *  that installed this root. That they can read that directory already means
  *  they can read the home directory, which is the larger problem; that is why
  *  the intermediate is scheduled rather than rushed (`todo.md`), not why it is
- *  unnecessary. Every other verifier is now measured from its own OS, each
- *  against a control: openssl, rustls, NSS and Go, macOS Security.framework
- *  14.8.9, and Windows CryptoAPI on Win11 26200 all refuse a forged public
- *  name under this root and all accept the legitimate `localhost` leaf. Java
- *  is the outlier, not the rule. Android/Conscrypt 2.5.2 was measured the
- *  same way (TrustManagerImpl, with an intermediate control): it joins the
- *  Java row — ignores anchor name constraints and anchor EKU, enforces both
- *  on an intermediate. See `tests/x509-conscrypt.test.ts`.
+ *  unnecessary. Every other verifier was measured by hand from its own OS in
+ *  the 1.0.8-beta round (2026-09-21), each against a control: openssl, rustls,
+ *  NSS and Go, macOS Security.framework 14.8.9, and Windows CryptoAPI on Win11
+ *  26200 all refuse a forged public name under this root and all accept the
+ *  legitimate `localhost` leaf (openssl and rustls are re-probed on every run,
+ *  see above; the rest are not). Java is the outlier, not the rule.
+ *  Android/Conscrypt 2.5.2 was measured the same way (TrustManagerImpl, with
+ *  an intermediate control) and HAS a probe, `tests/x509-conscrypt.test.ts`
+ *  (skipped without a JDK and the jar): it is the other outlier — ignores
+ *  anchor name constraints and anchor EKU, enforces both on an intermediate.
  *
  *  macOS differs in the other half: it does NOT apply a trust anchor's
  *  extendedKeyUsage (Windows and openssl do), which is why the root also
@@ -346,7 +351,8 @@ const _saidUnderConstrained = new Set<string>();
  *  root written before the rfc822Name/URI bases existed constrains DNS and IP
  *  only, and every other name type is therefore UNRESTRICTED: with that key a
  *  thief mints an S/MIME certificate for any address on any verifier that
- *  skips the anchor's extendedKeyUsage, which macOS does (measured, 14.8.9).
+ *  skips the anchor's extendedKeyUsage, which macOS does (measured by hand on
+ *  14.8.9, 2026-09-21; no test runs macOS).
  *
  *  The person is told exactly what to delete and what to re-run, because the
  *  fix costs them a `am trust` and nothing else. */

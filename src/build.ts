@@ -25,6 +25,7 @@ import { appDirs, installRoot } from "./server/app-dirs.ts";
 import { BUILD_VERSION_ENV } from "./server/app-version.ts";
 import { forwardedToFleet, targetForFlags, TARGETS } from "./build-all.ts";
 import { keepInDistStaging } from "./build/dist-staging.ts";
+import { notATargetMessage } from "./build/build-target-hint.ts";
 import { appIdFromConfig, slugify } from "./server/single-instance-lock.ts";
 import { ensureEmbeddedBundle, runBundle } from "./build/build-bundle.ts";
 import { buildClient } from "./build/build-client.ts";
@@ -33,6 +34,7 @@ import { buildAndroid } from "./build/build-android.ts";
 import { buildIos } from "./build/build-ios.ts";
 import { runDenoCompile, writeServiceFile } from "./build/build-compile.ts";
 import { buildElectron } from "./build/build-electron.ts";
+import { bakesElectronVersion } from "./build/electron-bake.ts";
 import {
   reportElectronDrift,
   resolveElectronVersion,
@@ -112,7 +114,16 @@ export async function build(cfg?: BuildConfig): Promise<void> {
   // by the launcher from the embedded dist/. Without this file the binary and
   // the checkout could run two different Electrons, and a desktop app has no
   // business asking its user to `deno task install:electron`.
-  if (doCompile && !doCli && !doClient && !doAndroid && !doIos) {
+  if (
+    bakesElectronVersion({
+      doCompile,
+      doCli,
+      doClient,
+      doAndroid,
+      doIos,
+      doHeadless: cfg.doHeadless,
+    })
+  ) {
     const version = await resolveElectronVersion(root);
     await reportElectronDrift(root, (m) => console.warn(`${HEY} ${m}`));
     await Deno.mkdir(dist, { recursive: true });
@@ -207,7 +218,7 @@ export async function build(cfg?: BuildConfig): Promise<void> {
  * const args = compileArgs({
  *   hasDist: true,
  *   workerInclude: dbWorkerInclude(),
- *   assets: await assetIncludes(Deno.cwd()),
+ *   assets: await assetIncludes(Deno.cwd(), "src/app.ts"),
  *   v8Flags: await v8FlagsArg(Deno.cwd()),
  *   excludes: [],
  *   out: "myapp",
@@ -328,15 +339,7 @@ if (import.meta.main) {
     );
     const buildFlagsGiven = Deno.args.filter((a) => buildVocabulary.has(a));
     if (!target && buildFlagsGiven.length > 0) {
-      console.error(
-        `${NO} ${buildFlagsGiven.join(" ")} is not a build target.\n` +
-          `  Every build goes through the fleet, so one artifact is one name, ` +
-          `one version and one manifest entry.\n` +
-          `  Targets: ${Object.keys(TARGETS).join(", ")}\n` +
-          `  Run:     deno task build --targets=<name>   (or \`am build <name>\`)\n` +
-          `  If this came from a pre-alpha52 \`compile:*\` task, \`am fix ` +
-          `--migrate-tasks\` rewrites them into the targets they encoded.`,
-      );
+      console.error(`${NO} ${notATargetMessage(buildFlagsGiven, TARGETS)}`);
       Deno.exit(1);
     }
     if (target) {

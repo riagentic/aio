@@ -16,6 +16,7 @@ import {
   _armTestStrict,
   _DISPOSE_DRAIN_MS,
   _recordCalls,
+  _watchInitFailures,
   _watchUnobservedCalls,
   type CallFailureLedger,
 } from "./test-strict.ts";
@@ -23,6 +24,7 @@ import { closeWindow } from "./close-window.ts";
 import { repairProxiedSiblings } from "./happy-dom-repair.ts";
 // Server-touching, so NOT in test-strict.ts — see boot-refusals.ts.
 import {
+  _armBootScope,
   _callAcrossWorkerBoundary,
   _isolateWorkerCellsInProcess,
   _refuseUnsafeCells,
@@ -1708,6 +1710,7 @@ async function _buildTestUI(
     // Opt into virtual time BEFORE anything registers a schedule — the same
     // runtime ships on Android, where the default must be real timers.
     standalone._useVirtualSchedules();
+    _armBootScope(standalone._installBootScope);
     advanceSchedules = standalone._advanceSchedules;
     fireDueSchedules = standalone._fireDueSchedules;
     // Hermetic by default: cells are module singletons, so both their signal
@@ -1754,6 +1757,10 @@ async function _buildTestUI(
     // tested it. A claim with no test is this project's most reliable source
     // of bugs, so the claim is now the mechanism.
     partial.restore.push(_useServerOriginScope());
+    // An `onInit` that throws fails the test at settle()/dispose() — recorded
+    // during the boot, handed to the ledger below (test-strict.ts).
+    const inits = _watchInitFailures(cells);
+    partial.restore.push(() => inits.restore());
     standaloneApp = await standalone.aio.run({
       appId: "testui",
       cells,
@@ -1774,8 +1781,15 @@ async function _buildTestUI(
     // instead of the initial one, which is rarely what a test means).
     if (opts.seed) standalone._seedState(opts.seed);
     seedState = standalone._seedState;
-    // Dispose does a state-only reset (keeps the registry so re-mounts boot).
-    resetRuntime = standalone._resetState;
+    // Dispose does a state-only reset (keeps the registry so re-mounts boot),
+    // then retires this boot: the cells are module singletons, so a call an
+    // `onInit` started and nobody awaited would otherwise commit into the NEXT
+    // test's mount (feedback cc §2) — the same fence `bootCells` closes.
+    const booted = standaloneApp;
+    resetRuntime = () => {
+      standalone._resetState();
+      standalone._retire(booted);
+    };
     // A failing async method NOBODY awaited must not pass for silence — the
     // same ledger `testCell` keeps, so the same app code cannot pass one
     // harness and fail the other (see test-strict.ts). `onClick={() =>
@@ -1804,6 +1818,7 @@ async function _buildTestUI(
     // push order), so each identity-checked undo finds its own wrapper.
     const unisolate = _isolateWorkerCellsInProcess(cells);
     ledger = _watchUnobservedCalls(cells, _callAcrossWorkerBoundary);
+    ledger.adopt(inits.take());
     partial.restore.push(() => ledger?.restore());
     partial.restore.push(unisolate);
     // The call ring a failure trace reads. Installed beside the ledger and

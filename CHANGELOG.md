@@ -1,5 +1,392 @@
 # Changelog
 
+## v1.0.11-beta — what 1.0.10 claimed, each claim broken on purpose and caught (2026-09-24)
+
+> **Additive only — nothing is removed and nothing changes shape.** Three
+> changes can need an app's attention (see **Action** in
+> [the upgrade guide](docs/upgrade/from-1.0.10-beta-to-1.0.11-beta.md)): an
+> exposed HTTPS app reached by a name not in its certificate now needs
+> `allowedOrigins` (the HTTP/2 Host gate was off); a binary embeds only the
+> `*.server.ts` its entry can load; a test that leaked a call into the next
+> test, or whose `onInit` threw, now fails. The rest: route-on-render for SSR,
+> every size warning with a fix and a chapter, `persist: "none"` scrubbed from
+> every copy, one shutdown order, `am restart` that never leaves an app down,
+> every open field-report item, three bug hunts — and the release gate proves
+> it: 263 new mutation-ledger rows, each breaking its enforcing line and
+> requiring a test to go red.
+
+### Release gate
+
+- **1.0.10's claims are in the mutation ledger**, and 1.0.11's with them. 263
+  new rows: the instance lock and profiles, crash replay never counting twice,
+  the upgrade boot said once, `am` failing with exit 1 and an error document,
+  the one persist decider, the `persist: "none"` scrub, the CLI token header,
+  the Electron crash exit, `unsaved` at every door, the SSR route. Each breaks
+  its line in a scratch copy and requires its test to go red; `check:release`
+  runs them all.
+- **`check:release` cannot lose a lane quietly.** A test pins `test:hosts`,
+  `test:ssr-soak`, `test:sync`, `check:dead-wiring` (which carries the persist
+  decider) and `check:mutations`, and that only the lab may report SKIPPED.
+- **New tests where a mutation survived:** `am remove --data` keeps profile
+  homes; the `persist: "none"` scrub runs and is said on the first boot only;
+  the CLI health probe sends the key as Bearer, never in the URL; `am dispatch`
+  reports `unsaved` for its own call's failed save even when the store's last
+  save was fine; an interleaved-streams test that did not guard what its name
+  said now does.
+
+### Logs
+
+- **No log line carries the app key.** "Electron not installed", the Electron
+  shell's forced-`aio://`, failed-load and open-window lines, the thin client's
+  launch line, `--server-url`'s "connecting to" and the CLI client's "a
+  DIFFERENT app" refusal printed `?token=<key>`. One redactor now prints
+  `?token=…`; a source gate fails any new log call that splices a token, with
+  the two `share:` lines as its only allowed sites.
+
+### Sync
+
+- **A `listensTo` pair across the sync line is named at boot** — one line per
+  pair, naming both cells and what each does differently. `aio.run` and every
+  test harness say the same line. Mixed pairs stay supported.
+
+### SSR
+
+- **Route on render:** `renderToString(v, { route, search })` /
+  `renderToStream(v, key, { route, search })` give a server render its own route
+  — every read it makes: components, route signals as children or attributes,
+  module-level `computed`s over them (evaluated once per render, never leaking
+  one render's route and never disturbing the global's cache or subscribers),
+  nested renders and every later stream pull — and never render from or write
+  the global `routePath` / `routeSearch`, so no await anywhere can make it
+  render another request's page. A malformed route, or the options in
+  `renderToStream`'s key slot, throw a `TypeError`. Optional; omitted, a render
+  routes by the globals as before. The recommended form in the route contract.
+  Effects and `watch`es created during such a render run on the global route.
+  Pinned by a seeded differential (`tests/signal-scope-differential.test.ts`):
+  the same program with and without route renders reading its graph must give
+  the global side identical effect and watch logs, order included. The route
+  scope costs the client bundle about 1–2 KB gzipped: a page now downloads 79 KB
+  gz (was quoted 77), measured by `check:bundle-size`; the global signal path is
+  unchanged within benchmark noise.
+- **A server render that reads a route set outside its synchronous step says
+  so** — another request's (set, await a shared promise, render: 1.0.10 rendered
+  the other page silently), or its own after an await. Said at the first route
+  read, naming the call site; pages that never read the route, and a write in
+  the render's own step (a tracer's `run()` included), are never told.
+  Best-effort: a request that inherited this one's route stamp is not seen (the
+  gaps are listed in docs/ui/air-advanced.md). Every route warning now repeats
+  at the 1st, 2nd, 4th … hit with a count instead of once per process.
+  Observe-only; nothing renders differently.
+- **An effect or `watch` created during a route render that reads
+  `routePath`/`routeSearch` (directly or through a `computed`/`trackedMemo`) is
+  named** — it runs on the global route, so a value it writes for the page is
+  the global route's, not the render's. The warning names the call site and says
+  to derive render values with `computed()` or `useRoute()` instead; the text is
+  the same in dev and prod, and it repeats with a count. An effect or `computed`
+  that calls such a render re-runs when anything the render read changes,
+  including a source only the render's route branch reads.
+
+### Signals
+
+- **A `trackedMemo` that threw no longer unsubscribes its readers for good.**
+  Since 1.0.10 (and before), an effect or a component whose `trackedMemo` threw
+  once (through a computed that threw, or on a signal value it guards against)
+  never ran or re-rendered again, even after the value it read recovered. The
+  throw dropped the reads it had recorded, and so did a later hit over a
+  computed that still threw. A throw now caches nothing and subscribes the
+  reader to what the memo read before it threw, so the reader re-runs when the
+  value recovers. This holds inside a route render too.
+
+### Large state
+
+- **Every state-size warning and error says what to do and where to read more.**
+  The persist warn and hard lines, the full-state frame on WS and UDS, the
+  Deno-peer frame ceiling, the terminal client's too-large loop, the PRESSURE
+  lines, the dev-freeze notice and the UDS inbound ceiling each end with one
+  `Fix:` line and link the new chapter
+  [Legitimately large state](docs/persistence/big-data.md#legitimately-large-state).
+  The fix names the exact budget to paste, sized to what was measured, e.g.
+  `aio.run({ budgets: { cellState: "19MB", payload: "19MB" } })`. Same text in
+  dev and prod.
+- **Persist honours a declared `budgets.cellState`.** It moves the 1 MB warn,
+  lifts the 16 MB hard line when declared above it, and records a breach on
+  `/health`. Before, only the broadcast warning read it.
+- **The frame every WS client gets on connect is size-checked.** An app with
+  persist off pushed a 12.5 MB state on every connect with no warning at all.
+- **Big state costs less per edit.** The timeline diff checks row identity
+  before building keys: a one-row edit at 131k rows costs 0.6 ms a commit, not
+  38 ms, in prod too. UDS and WS choose patch vs full with one shared decider,
+  so a UDS patch round no longer serializes the whole view (23 → 0.2 ms at 14.7
+  MB). The Electron main process, the server's UDS reader and the CLI client
+  read lines in linear time (a 12.5 MB frame: 396 → 5 ms).
+- **The journal's state diff skips unchanged rows before building a path** (a
+  one-row edit at 131k rows: 131k paths → 7, 12 → 0.8 ms).
+- **Every whole view a WS client is sent counts toward `payload` and PRESSURE**
+  — on connect, `resync`, `subs` and a user change, not just broadcast rounds.
+  The UDS transport has no pressure monitor (the docs now say so).
+- **A per-cell size line suggests `cellState` only**; `payload` is suggested by
+  the frame-level lines, sized from the frame — the declaration a line prints
+  now really quiets it. Each app's pressure monitor records into its own budget
+  ledger, and a guard test fails any new ambient `budgetsFor()` read.
+- **A UDS window is no longer skipped** when its state reverts to the last full
+  text after a patch round.
+- **Each app's persistence judges cell size by its own `cellState`**, even when
+  two apps boot at once in one process.
+- **Standalone apps:** a slow durable save and a full localStorage quota report
+  the state size, a `Fix:` line and the chapter; a save that failed for another
+  reason no longer claims a quota.
+- **New chapter:** what each limit governs, the measured cost over WS and UDS,
+  remote vs local clients, and patterns for a large working set.
+  `docs/build/scaling.md` no longer calls `fullStateThreshold` a byte count (it
+  is a 0–1 ratio) or names the removed `ui.forUser`.
+
+### Dev server and security
+
+- **An entry two folders deep (`src/agent/app.ts`) pinned to a release no longer
+  makes dev serve the diagnostic page.** The dev bundle check finds the project
+  root with the same walk up to `deno.json` the runtime uses (it looked one
+  folder up only), and says "`deno task build` would fail" only when it resolved
+  the way the build does.
+- **An exposed TLS app reached by a name in its own certificate needs no
+  config.** The Host gate accepts every DNS name the served certificate covers
+  (a `*.example.com` wildcard covers one label), over HTTP/2 and HTTP/1.1 alike
+  — an attacker's rebinding name cannot be in your certificate. Any other name
+  gets a 403 that names `aio.run({ allowedOrigins: ["<name>"] })`.
+- **One project-root decider for the browser import map too**, so a nested
+  entry's page keeps its npm packages; the WebSocket Origin check reads the host
+  the same way as the Host gate.
+- **The Host (DNS-rebinding) gate works over HTTP/2.** With no `Host` header the
+  name comes from the request URL (Deno builds it from `:authority`), so a
+  foreign name over h2 gets 403 instead of passing. A same-origin POST over h2
+  is no longer refused as cross-origin, and neither is a login, signup or logout
+  POST from the app's own page.
+
+### Persistence and secrets
+
+- **`persist: "none"` is scrubbed from every copy of the store:** the
+  `<db>.snapshot`, the update's pre-migration backup and `am backup` copies are
+  scrubbed in place, a snapshot a crash cut off is deleted, and a quarantined
+  damaged database is kept and named in a warning. `logs/actions.jsonl` no
+  longer carries such a cell's call arguments, and lines an older build wrote
+  are rewritten once, in place. A byte scan of the whole app home after the
+  first boot finds the value nowhere.
+- **Store copies are scrubbed even after a crash that followed the live scrub:**
+  each copy is checked once, and again only when it changes.
+- **The instance lock file is 0600 on filesystems without hard links too** (it
+  was left to the umask, usually 0644).
+
+### Shutdown and workers
+
+- **One shutdown order for every path:** `onStopping` → worker cells drain and
+  close → dispatch closes. An update install now uses the same `shutdown()` and
+  no longer skips the worker pool. A `worker: true` cell's own dispatch closes
+  at shutdown like the main one: work it starts during the drain is refused with
+  `DISPATCH_DRAINING`, running methods still finish writing, and a closed worker
+  refuses new calls by name.
+- **A shutdown that fails during an update handover is logged** ("update
+  handover FAILED") instead of swallowed.
+- **`s.$do(...)` called after its method returned is refused by name and runs
+  nothing** — a callback that outlived a sync method, a stashed `s.$do`, a
+  `transaction: true` method's `$do` after it settled. All three used to do
+  nothing, silently. From a timer or listener it is a named ERROR log (never a
+  throw that would end the process); called inside another method's body it also
+  throws there, failing that method. Same in dev and prod.
+
+### Standalone and Android
+
+- **A failed restore can no longer overwrite saved state.** An unreadable native
+  file (or localStorage key) is left untouched and nothing is saved that run,
+  said at boot and on the first refused save. Corrupt data is copied
+  byte-for-byte to `<key>.corrupt-<ms>` and read back before any write.
+- **A corrupt saved state is set aside once**, and the starting state is written
+  straight away — before, every launch that ended before a save added another
+  full-size `.corrupt-<ms>` copy until the quota was full.
+- **The Android native store fsyncs its directory after the atomic rename**, so
+  a power cut cannot undo a saved change. A filesystem that refuses it is logged
+  once.
+- **A third-party `<iframe>` in a standalone APK is reported**, once per origin
+  (`AioNativeStore` reaches every frame); the risk is in the Android targets
+  doc.
+
+### Testing
+
+- **A call from a disposed `bootCells` or `testUI` boot can no longer write into
+  the next test.** Each boot is fenced at dispose; a late commit (e.g. one an
+  `onInit` started) is refused loudly, naming the action and the boot site (cc
+  §2).
+- **The fence also covers calls through another cell's handle** (a `bootstrap()`
+  that calls sibling methods), a disposed boot's drain no longer overwrites the
+  live boot's reads, and a harness nested inside another hands the cells back to
+  the outer one when it closes.
+- **An `onInit` that throws fails the `bootCells`/`testUI` test** (at
+  `settle()`/dispose, or at the mount) — it used to be only logged, and the test
+  passed. `testCell`, which does not run `onInit`, says so once per cell. The
+  still-booting refusal names `app.dispatch` as the first fix.
+- **`randomActions` / `t.fuzz` no longer warn per method** about short calls —
+  fuzz calls pass no payload by design, so they are summed in one line per run.
+  A real short call still warns (cc §3).
+- **The test runner fails a `press` a window key binding swallowed** in this
+  repo (apps keep the warning); every shard's environment comes from one pure
+  `shardEnv`.
+- **Every file-permission test can fail.** Under umask 077 an owner-only
+  assertion stayed green with its mode deleted. Mode tests now force umask 022
+  and check it took; a ratchet rejects a new one that does not — checked per
+  test, not per file.
+
+### App manager (`am`)
+
+- **`am start` / `am restart` no longer call a live socket-only app "not
+  responding", exit 1.** The wait re-reads the child's lock every tick and
+  follows its rewrite from `{port: N}` to `{port: 0, socketPath}` (cc §1, a
+  desktop map app's report).
+- **`am` never runs git in a repository that is not aio's or the app's own.**
+  Every git call is bounded by `GIT_CEILING_DIRECTORIES`; a clone must have its
+  own `.git`, `mod.ts` and a matching top level. `am upgrade` refuses a plain
+  aio copy that sits inside another repo, and `am fix` initializes submodules
+  only in the app's own repo.
+- **`am fix` leaves a nested app alone** when its import map gets `aio` through
+  another app's `dep/aio` — no own pin, no dangling link, no stray tasks, and it
+  says so (llama §2).
+- **"latest" has one decider, and it explains itself:** a provisioned release
+  newer than the newest tag on the clone's origin/main is named, with a hint to
+  `git fetch`. `am pin --json` gains `offMain` and `latestNote`.
+- **`am` no longer refuses every command in a project with several components.**
+  `am help`, `--version` and the project-wide
+  `am start | stop |
+  restart | status` the refusal recommends now work; a verb
+  that acts on one app is still refused and names `--app=<component>`
+  (remote-desktop report §2).
+- **`am restart` never leaves an app down.** It replays the `--entry` the app
+  was started with, and checks it can start again BEFORE stopping; if it cannot,
+  the app stays up and the message says so.
+- **A component's app id is the one it runs under** (its entry's `appId`, then
+  the project's), never its target `name` — so two components without their own
+  `appId` are refused up front as one app, instead of `am start` waiting on a
+  name nothing runs under. A failed project start names what is up, what failed
+  and what was never tried; the refusal lists every `--app=` spelling and names
+  `am restart`; `--profile` without a component asks for `--app=<component>`.
+- **`am start --app=<component>` starts that component** — its entry, not the
+  project's default one under the component's id (which ran the free edition
+  registered as PRO, "starting" forever). By label or by the component's app id;
+  `am start <label>` already did this. A component whose entry computes its
+  `appId` (through a helper) is refused with the reason: `am` reads the id as
+  written in `aio.run()`.
+- **`am stop` waits until the process is gone** (11 s, then SIGKILL; exit 1 if
+  it survives that). It used to exit 0 while the app was still alive, and a
+  start right after hit "Already running". `--no-wait` keeps the old return.
+- **`am` git calls ignore an inherited `GIT_DIR` / `GIT_WORK_TREE` /
+  `GIT_INDEX_FILE`** (git sets them in hooks), so `am` run from a hook never
+  reads or writes another repo. `am fix` knows its own `dep/aio` behind a
+  symlink. A socket-only `am start` names its socket, not "port 0".
+- **An `am` failure prints exactly one error document**, in JSON and text mode;
+  `am backup` holds only its own app's lock.
+
+### Build
+
+- **A compiled binary embeds only the `*.server.ts` its own entry can load:**
+  modules in its graph, anything under the entry's folder, and siblings of a
+  module the graph reaches (for opaque `import(url)` loaders). A repo with
+  several targets no longer ships one target's server code — input injection,
+  say — inside another's binary; the CLI target follows the same rule. The build
+  lists what it left out; a module loaded opaquely from elsewhere goes in
+  `compile.include`. `assetIncludes(root, entry?)` gains an optional entry;
+  without one it behaves as before (remote-desktop report §4).
+- **Each target's binary embeds only its own server code in the `am create`
+  shape too** — a folder that is another target's entry folder belongs to that
+  target — and with a symlinked project root. The "not embedding" line is a
+  warning. `manifest.json` records each artifact's size on disk (after the
+  service unit's rewrite), and a staged unit is no longer printed with a ✓ on a
+  path the fleet moved. A headless binary no longer carries
+  `dist/electron.json`.
+- **An `android/…/MainActivity.kt` overlay that drops `AioNativeStore`**
+  (standalone APKs) or the SDK-35 insets frame gets a loud build warning naming
+  what is lost and the exact line to add. Before, the APK quietly fell back to
+  `localStorage` (remote-desktop report §5). `fitsSystemWindows="true"` in the
+  overlay's `res/` XML counts as handling the insets.
+- **A direct `build.ts` flag set that names no target says which is nearest:**
+  `✗ --compile --android is not a build target.` is followed by
+  `Did you mean
+  --android (target "android")?`. The alpha72→alpha73 upgrade
+  guide now says a direct `build.ts` call builds one fleet target or is refused
+  (remote-desktop report §6).
+
+### Logs
+
+- **A blown budget is one warning, at one level.** The console said WARN and the
+  same report reached `error.log` as an ERROR with a full stack; the file now
+  gets WARN too. The header rounds its duration (`95.9ms`, not
+  `95.9382579999999ms`), and so does the loop `degraded` line.
+- **A headless server says less, and nothing false.** It no longer announces
+  which look a page would get, and a compiled binary no longer claims its
+  bundled `App.tsx` is missing — it names only why it serves no UI.
+
+### Field reports (a desktop agent app, a desktop map app)
+
+- **`concurrency: "queue"` (and `serialize`) start calls in call order.** With
+  nothing queued, a queued call was still deferred a microtask, so a sync call
+  dispatched after it ran first and it read the later state. It now runs at
+  once, and its slot frees when its outcome is delivered.
+- **An old dev checkpoint logs INFO when the app has no `onCheckpointRestore`**
+  — nothing will apply it. The WARN comes only when the hook is about to receive
+  hours-old state.
+- **aiol and `am agent` name the `*.server.ts` suffix** in every server-import
+  fix: a plain `import()` is bundled; `await import("./x.server.ts")` is not.
+  The server-only dynamic-import check now covers every module a cell or
+  component reaches, not only the cell file.
+- **No more false "Multiple instances of Three.js"**: the build-time bundle
+  check's stand-in `window` remembers what a module writes, and an unset
+  `__marker` reads as absent — so a library's "loaded before?" guard stays
+  quiet.
+- **`am trigger` resolves a handle the way testUI does**: a bare name or
+  `Component:name` that matches exactly one live element works from any depth;
+  several matches are refused with each candidate's full path.
+- **`am create --client=`** is the spelling (as in deno.json and
+  `deno task dev`); `--target=` stays as an alias, and the two disagreeing is
+  refused.
+- **`deno task doctor` warns when `deno.lock` is missing entries for aio's own
+  tools** — checked against a copy, never the lock itself — and `am fix` now
+  caches those tools, so its run fills them in.
+- **docs:** `concurrency: "newest"` notes that aborting does not undo work the
+  other side already did — use `"queue"`/`"first"` for paid or rate-limited
+  APIs.
+
+### Release gate and docs
+
+- **A skipped onboarding lab shows ⚠, never ✓**, and the verdict says
+  "releasable (lab SKIPPED — no docker/podman)". The CI mirror also requires
+  `check:api`, `check:bundle-size` and the ratchets.
+- **The proof matrix marks a row STALE** when its commit is not in the tagged
+  history. The README states what is proven, and where.
+- The TLS docs and comments claim only what the verifier checks; the 1.0.9
+  upgrade guide's profile note is corrected.
+- **`check:orphans` sees an app whose test deleted its home.** The lock scan
+  could not: the lock went with the directory. A process still running inside a
+  deleted test directory is now an orphan, with its pid and command line. It
+  found eight: under the planted "profile not forwarded" mutation, the
+  `am --profile` test's child booted bare and its cleanup stopped only the
+  profile — each ran for up to 14 hours. That cleanup now stops every instance,
+  and the mutation is proven to leave nothing running.
+- **Test temp dirs no longer pile up.** Four helpers made a directory per probe
+  or per process and never removed it, and `dropTempDir` gave up on a Chromium
+  profile its helpers were still writing (it now retries for ~2 s; the sync
+  browser e2e uses it too).
+- **Every mutation-ledger row runs, and each one bites.** The first full run
+  found a row whose planted change did not type-check, and one that survived:
+  the generation-fence test now requires the retired boot's OWN late write to be
+  refused by name, not only its late handle call. Gate ceilings scale with the
+  CPU fence (12 ÷ usable cores), so a narrow fence is slow, never "hung".
+- **Every item of the v1 bar now has a planted-bug row, not only a test.** New
+  rows: the standalone store writing the whole state, a lock deleted or replaced
+  without comparing it to what was judged, a method called from `onStop` being
+  admitted (with a new test that its reducer never runs), the window-hygiene
+  gate losing `cleanup()` aliases, and the packaged AppImage's three doors — CSP
+  meta, no default TCP port, `/__aio/snapshot` closed — each broken in turn and
+  caught by booting the real artifact.
+- **`check:mutations` has a 60-minute ceiling** (347 rows take ~36 min on four
+  workers); 20 minutes read a slow ledger as a hang. Two load-sensitive tests
+  now wait for what they check: a spawned process's exec, and a sync listener's
+  fold, which may land before the kill.
+
 ## v1.0.10-beta — a lock two instances cannot share, a crash that cannot count twice, and a streamed page that keeps its own route (2026-09-23)
 
 > **The public surface is additive only** — optional `LockData.maintenance`

@@ -25,7 +25,7 @@ import {
   _STRING_FALSE_ATTRS,
 } from "./prop-write.ts";
 import {
-  _ssrLateRouteSiteOnce,
+  _ssrRenderCurrent,
   _ssrRenderEnter,
   _ssrRenderEpoch,
   _ssrRenderFinish,
@@ -33,10 +33,21 @@ import {
   _ssrRenderOf,
   _ssrRenderSetUp,
   _ssrRenderStart,
+  _ssrRouteContext,
+  _ssrRouteForeign,
+  _ssrRouteSaidAt,
+  _ssrRouteWrites,
+  _ssrRouteWrittenSince,
   SSR_RENDER_KEY,
+  SSR_ROUTE_KEY,
   type SsrRender,
+  type SsrRoute,
 } from "./ssr-render.ts";
-import type { Signal } from "../state/signal.ts";
+import {
+  _enterReadScope,
+  _readScopeNow,
+  type Signal,
+} from "../state/signal.ts";
 import type { ComponentFn, VNode } from "./vdom-types.ts";
 import {
   _hasRawHtml,
@@ -309,6 +320,32 @@ export function _ssrProvide(id: symbol, value: unknown): boolean {
   return true;
 }
 
+/** The explicit route a scope carries, or null (it routes by the globals). */
+function _routeOfScope(scope: SsrContexts): SsrRoute | null {
+  return (scope?.get(SSR_ROUTE_KEY) as SsrRoute | undefined) ?? null;
+}
+
+/** @internal Run `fn` — any read a render makes: a component call, a signal
+ *  child, a signal attribute — with the route signals answering for the
+ *  scope's route (the signals' read scope, state/signal.ts). Every writer
+ *  routes its reads through here; a scope with no explicit route reads the
+ *  globals, exactly as before. */
+export function _ssrIn<T>(scope: SsrContexts, fn: () => T): T {
+  const route = _routeOfScope(scope);
+  if (route === _readScopeNow()) return fn();
+  const prev = _enterReadScope(route);
+  try {
+    return fn();
+  } finally {
+    _enterReadScope(prev);
+  }
+}
+
+/** @internal The explicit route the read in progress answers for, or null. */
+export function _ssrRouteNow(): SsrRoute | null {
+  return _readScopeNow() as SsrRoute | null;
+}
+
 /** @internal Run `fn` as a server render step that sees `visible`; returns its
  *  result and the scope its output renders in (`visible` plus whatever a
  *  Provider in `fn` provided). Shared by all three writers so there is one
@@ -327,7 +364,8 @@ export function _ssrScoped<T>(
   const prevRender = _ssrRenderEnter(_ssrRenderOf(visible));
   let out: T;
   try {
-    out = fn();
+    // …in the route it was given, if it was given one (see `_ssrIn`).
+    out = _ssrIn(visible, fn);
   } finally {
     _ssrCall = prev;
     _ssrRenderEnter(prevRender);
@@ -417,11 +455,12 @@ function _siteOf(site: Error): string {
  *  said — once per call site, observe-only, dev and prod alike. */
 function _warnLateRouteAt(site: Error): void {
   const at = _siteOf(site);
-  if (!_ssrLateRouteSiteOnce(at)) return;
+  const more = _ssrRouteSaidAt(at);
+  if (more === null) return;
   console.warn(
     "[aio] routePath changed after renderToStream() — set it BEFORE the " +
       "call; under concurrent requests this can render another request's " +
-      `route (${at}).`,
+      `route (${at}).${more}`,
   );
 }
 
@@ -431,12 +470,44 @@ function _warnLateRouteAt(site: Error): void {
  *  (observe-only, dev and prod alike). */
 function _warnRouteBeforePullAt(site: Error): void {
   const at = _siteOf(site);
-  if (!_ssrLateRouteSiteOnce("pull " + at)) return;
+  const more = _ssrRouteSaidAt("pull " + at);
+  if (more === null) return;
   console.warn(
     "[aio] routePath changed after renderToStream() was called and before " +
       "the stream was first read — the stream renders the route it was " +
       "CALLED with (1.0.9 read it at the first read). Set routePath before " +
-      `renderToStream(), with no await in between (${at}).`,
+      `renderToStream(), with no await in between (${at}).${more}`,
+  );
+}
+
+/** @internal Record, at a top-level render's call, whether the route it is
+ *  about to read was last set by ANOTHER async context than the call's (see
+ *  air/ssr-render.ts, "Who set the route"). Costs a stack capture only when
+ *  it was. */
+export function _ssrRouteAtCall(render: SsrRender): void {
+  const ctx = _ssrRouteContext();
+  render.routeCtx = ctx;
+  render.routeSince = _ssrRouteWrites();
+  render.routeForeign = _ssrRouteForeign(ctx) ? new Error() : null;
+}
+
+/** @internal A component of the executing render READ the route. Said once
+ *  per render, when its call found the route set outside its synchronous
+ *  step; a render that never reads the route is never told. */
+export function _ssrRouteRead(): void {
+  const r = _ssrRenderCurrent();
+  const site = r?.routeForeign;
+  if (!r || !site) return;
+  r.routeForeign = null;
+  const at = _siteOf(site);
+  const more = _ssrRouteSaidAt("read " + at);
+  if (more === null) return;
+  console.warn(
+    "[aio] this server render read the route, and the route was set outside " +
+      "this render's synchronous step (another request, or this one after " +
+      "an await) — it can be another request's page. Set routePath and call " +
+      "renderToStream()/renderToString() in one synchronous step, with no " +
+      `await in between (${at}).${more}`,
   );
 }
 
@@ -474,12 +545,13 @@ function _ssrSameTurnCheck(
       continue;
     }
     const at = _siteOf(site);
-    if (!_ssrLateRouteSiteOnce("turn " + at)) return;
+    const more = _ssrRouteSaidAt("turn " + at);
+    if (more === null) return;
     console.warn(
       "[aio] renderToStream(): the route (or another request value) changed " +
         "after renderToStream() was called, in the same turn as another " +
         "render's call — this stream keeps the value it was CALLED with. " +
-        `Set routePath before renderToStream(), with no await in between (${at}).`,
+        `Set routePath before renderToStream(), with no await in between (${at}).${more}`,
     );
     return;
   }
@@ -544,6 +616,15 @@ export function _ssrStreamSettler(
             fresh.set(id, now);
           }
           out = fresh;
+          // The route is re-read: a change is said just below (the late
+          // warning covers it), and an unchanged one written since by this
+          // call's own step (1.0.9's create-then-set) is this request's.
+          const r = _ssrRenderOf(scope);
+          if (
+            r && (changed || _ssrRouteWrittenSince(r.routeCtx, r.routeSince))
+          ) {
+            r.routeForeign = null;
+          }
           if (changed) _warnLateRouteAt(site);
         } catch (e) {
           error = { e }; // thrown from the first pull, where 1.0.9 threw it
@@ -607,21 +688,108 @@ export function _ssrRootScope(render: SsrRender): SsrContexts {
   return scope;
 }
 
-/** Render a VNode tree to an HTML string (no DOM required). */
+/** The optional last argument of `renderToString` / `renderToStream`,
+ *  spelled inline in both public signatures (no extra exported name):
+ *  `route` — the path this render routes by (`useRoute`, `<Route>`,
+ *  `<Link>`'s active state and the route signals read it instead of
+ *  `routePath`, for the whole render: nested renders and later stream pulls
+ *  included; a pathname — pass the query as `search`); `search` — the query
+ *  that goes with it (a copy is taken; needs `route`). */
+export type SsrRenderOptions = { route?: string; search?: URLSearchParams };
+
+/** @internal Validate a render's options; its explicit route, or null for
+ *  the global one. Throws on a malformed option — never guesses. */
+export function _ssrRouteOf(
+  opts: SsrRenderOptions | undefined,
+): SsrRoute | null {
+  if (opts === undefined) return null;
+  if (opts === null || typeof opts !== "object") {
+    throw new TypeError(
+      `[aio] render options must be an object ({ route, search }), got ` +
+        `${opts === null ? "null" : typeof opts}`,
+    );
+  }
+  const { route, search } = opts;
+  if (route === undefined) {
+    if (search !== undefined) {
+      throw new TypeError(
+        "[aio] render options: `search` needs `route` — an explicit route " +
+          "is the path AND its query; without `route` the render reads the " +
+          "global routePath/routeSearch",
+      );
+    }
+    return null;
+  }
+  // A PATHNAME: "/" first, never "//" (a protocol-relative URL), no scheme
+  // (which has no leading "/"), no query or fragment. Anything else is a
+  // route no request could have — a relative path, an absolute URL, a
+  // `url.href` passed where `url.pathname` was meant — refused, not guessed.
+  if (
+    typeof route !== "string" || !route.startsWith("/") ||
+    route.startsWith("//") || /[?#]/.test(route)
+  ) {
+    throw new TypeError(
+      `[aio] render options: \`route\` must be a pathname — "/" first, not ` +
+        `"//", no query (pass it as \`search\`) — like \`url.pathname\`; got ` +
+        `${JSON.stringify(route)}`,
+    );
+  }
+  if (search !== undefined && !(search instanceof URLSearchParams)) {
+    throw new TypeError(
+      "[aio] render options: `search` must be a URLSearchParams",
+    );
+  }
+  return Object.freeze({ path: route, search: new URLSearchParams(search) });
+}
+
+/** @internal The scope a render with an explicit route starts in: the
+ *  enclosing call's (nested) or its own (top-level), plus the route. Reads
+ *  no request value from the globals, and takes part in none of the checks
+ *  that exist because of them (it cannot race). */
+export function _ssrExplicitScope(
+  render: SsrRender,
+  route: SsrRoute,
+): SsrContexts {
+  if (_ssrCall) {
+    const m = new Map(_ssrCall.visible ?? []);
+    m.set(SSR_ROUTE_KEY, route);
+    return m;
+  }
+  const scope = new Map<symbol, unknown>([
+    [SSR_ROUTE_KEY, route],
+    [SSR_RENDER_KEY, render],
+  ]);
+  _ssrRenderSetUp(render);
+  return scope;
+}
+
+/** Render a VNode tree to an HTML string (no DOM required).
+ *
+ *  `opts.route` (and `opts.search`) route this render explicitly — the
+ *  concurrency-safe form: it never renders from the global `routePath` /
+ *  `routeSearch` and never writes them (a read still subscribes to them).
+ *  Omitted, it routes by the globals (1.x). */
 export function renderToString(
   vnode: VNode | string | number | null,
+  opts?: { route?: string; search?: URLSearchParams },
 ): string {
+  const route = _ssrRouteOf(opts);
   // Every top-level call renders into state of its OWN — the id sequence, the
   // <head> and the <select> stack — so a render that overlaps another (this
   // one called from inside a streamed component, or from a request handler
   // while a stream is mid-flight) can neither read nor reset the other's.
   const render = _ssrRenderNew("string");
-  const scope = _ssrRootScope(render);
+  const scope = route
+    ? _ssrExplicitScope(render, route)
+    : _ssrRootScope(render);
   const isTopLevel = _ssrRenderOf(scope) === render;
-  if (isTopLevel) _ssrRenderStart(render);
+  if (isTopLevel) {
+    if (!route) _ssrRouteAtCall(render);
+    _ssrRenderStart(render);
+  }
   _ssrDepth++;
   try {
-    return _rts(vnode, { n: 0 }, scope);
+    return _ssrIn(scope, () => _rts(vnode, { n: 0 }, scope));
   } finally {
     _ssrDepth--;
     if (isTopLevel) _ssrRenderFinish(render);

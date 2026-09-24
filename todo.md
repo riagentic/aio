@@ -14,6 +14,31 @@ is frozen — additive only, bugfix-only through beta; 1.0.0 = boring.
 
 ---
 
+## DONE — 1.0.11-beta (agreed 2026-09-23: close what 1.0.10 opened, no new theme)
+
+From an outside review of 1.0.10, checked by MUTATION, not by reading: every
+1.0.10 claim broken on purpose in a scratch copy, its test required to go red.
+Surface after this: frozen again — 1.0.11 adds exactly one optional parameter.
+
+- [x] **Mutation audit of 1.0.10** → 97 ledger rows in `check:mutations` (lock,
+      profiles, crash replay, upgrade boot, `am` exits, persist decider and
+      scrub, CLI token header, Electron crash exit, `unsaved` at every door, SSR
+      route). Survivors got tests; `check:release` cannot lose a lane.
+- [x] **Cross-sync boot warning** — the 1.0.10 item above was ticked but never
+      built; the audit found it. One line per `listensTo` pair across the sync
+      line, `aio.run` and every harness alike.
+- [x] **No app key in a log line** — one redactor, a source gate that follows
+      copies, 7 sites fixed.
+- [x] **`persist: "none"` scrub said once**, second boot silent (pinned).
+- [x] **Route on render** — `renderToString(v, { route })`,
+      `renderToStream(v, key, { route })`: every route read of that render,
+      computeds and `trackedMemo` included, routes by it; the global signal
+      graph is never disturbed (pinned by a seeded differential fuzzer). The
+      global-route form keeps a best-effort warning for the shared-promise race.
+
+Out of 1.x (v2): delete the global `routePath`, explicit `cell()` registry,
+persist spelling collapse, `kind: replicated | authoritative`.
+
 ## DONE — 1.0.10-beta blueprint (agreed 2026-09-22, shipped in 1.0.10-beta)
 
 From an outside code-and-docs review, checked against HEAD. Already done and
@@ -53,10 +78,11 @@ each documented where a user meets it; not open items:
 - [refused] Unkeyed `collectHead()` under concurrent streaming can still hand
   out another page's head or an empty one (as 1.0.9); `collectHead(req)` is
   exact. Deno's `enterWith` leaks across requests, so no ALS fix exists.
-- [refused] `routePath` is one process-wide signal: set it and render in one
-  synchronous step. `renderToStream(); routePath.set(); renderToString()` in one
-  step keeps the call's route with NO warning (indistinguishable from two
-  correct requests on a shared promise).
+- [refused → answered in 1.0.11 by route on render] `routePath` is one
+  process-wide signal: set it and render in one synchronous step.
+  `renderToStream(); routePath.set(); renderToString()` in one step keeps the
+  call's route with NO warning (indistinguishable from two correct requests on a
+  shared promise).
 - [refused] `journal: true` with listened sync ops costs ~5–10% ops/s (up to
   ~30% with MB-sized listener state); journal off is unchanged.
 - [refused] Data last run by 1.0.9 re-derives no `listensTo` reaction of a sync
@@ -672,11 +698,6 @@ friction list, kept because the kata says each item is fixed or written down:
   `_writeProp` call it, so the server can no longer emit
   `<div x onload=alert(1)="1">` where the client throws. Pinned by
   `tests/air-ssr-attr-name.test.ts`.
-- Windows, carried from the pipe round: `drain()`'s timeout can act on a REUSED
-  handle value (wants `DuplicateHandle`), and `socketFetch` has no timeout, so
-  six never-read responses can block the rest.
-- `libraryMode` takes no `AppLock`, so it gets no SIGXFSZ listener — an embedded
-  app still dies on a write past `ulimit -f`.
 - The always-on timeline estimator still reads ~4.3× low for one huge value
   among small rows (fixing it costs an O(n) scan in production).
 - A per-account session ceiling (60 logins in 3 s are all accepted today), and
@@ -996,10 +1017,6 @@ They are temporary; the findings are summarised above.
       `.katana/` / docs, then delete them here; delete the per-app reports left
       in `feedback/` once each item is in resolved/refused (back them up first —
       `feedback/` is gitignored, and `check:report-dirs` keeps it that way).
-- [ ] Release 1.0.3-beta: surfaces are prepared (version triple, CHANGELOG,
-      upgrade guide, `update:api`, `update:docs`, `check:release --fast` green).
-      Remaining before a tag: the heavy `check:release` (`test:onboard`,
-      `test:build`, mutation gate) and the push — only when asked.
 
 **Answered, no work queued:** a one-file `deno run` build is feasible (measured:
 2 MB, 560 KB gz) but today fails to boot — the SQLite worker file and the page
@@ -1057,8 +1074,8 @@ defects fixed, see CHANGELOG). Still open, from the same audit:
 
 The page grew 71 → 81 KB gz across three hunt rounds (+26 KB minified, all
 fixes; itemised in `tests/bundle-size.test.ts`). Measure message prose vs code
-in the metafile, and move dev-only diagnostics to the dev-only chunk already
-discussed below before raising the ceiling again.
+in the metafile before raising the ceiling again (the dev-only diagnostics
+already moved to the dev-only chunk).
 
 ### ~~The read-your-writes overlay is QUADRATIC in an async method~~ — DONE (measured 2026-09-21)
 
@@ -2000,25 +2017,7 @@ thirteen findings that had been read and not written down (see the audit note in
   test about the fake, and it goes green on exactly the changes that break the
   real thing.
 
-#### 11 · The dev audits ship to production (raised at 1.0.0-beta, not paid down)
-
-1.0.0-beta raised the page ceiling 63 → 67 KB gz, and about half of that is
-**dev-only diagnostics that production downloads and never runs** — the contrast
-audit, the `#id`-selector audit, the untracked-lifecycle-read check, and the
-message prose that makes the child-desync warning actionable. Every one of them
-answers a top-of-report finding, so the trade was taken deliberately and
-itemised in `tests/bundle-size.test.ts`. It is still a trade.
-
-Paying it down means a dev-only chunk: `await import()` the audits from the one
-dev-guarded call site in `renderer-flush`, so esbuild emits them separately and
-a production page never fetches them. The cost is a chunk-aware reader in three
-places (the prod static route, the dist sweep, the Electron AppDir copy) — which
-is exactly the trade `feedback/refused.md` declined once for the sync engine.
-The difference worth weighing: this chunk is fetched by NOBODY in production,
-where the sync engine's was fetched by everybody who used sync.
-
-Not decided in a hurry at release time. Decide it with a measurement of the
-three-reader cost, not an argument.
+#### ~~11 · The dev audits ship to production~~ — DONE (dev-only chunk, `tests/bundle-dev-chunk.test.ts`)
 
 #### 12 · Smaller, each named once
 

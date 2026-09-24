@@ -84,3 +84,33 @@ Deno.test("headless: an unknown client attributes the choice to nobody", async (
     assertEquals(line.includes("--client"), false, "invented a flag");
   });
 });
+
+Deno.test("headless in a compiled binary: names the reason, never a missing component", async () => {
+  // A binary carries no component SOURCE (the UI, if any, is the embedded
+  // bundle), so "no App.tsx" was a claim about a file it could never have —
+  // said by a server target whose App.tsx had been bundled. `APPIMAGE` is one
+  // of `isCompiled()`'s own signals.
+  const prev = Deno.env.get("APPIMAGE");
+  Deno.env.set("APPIMAGE", "/tmp/x.AppImage");
+  try {
+    await withApp(false, async (dir) => {
+      const r = await lint(
+        STATE,
+        CONFIG,
+        dir,
+        false,
+        true,
+        true,
+        "App.tsx",
+        "server-only",
+      );
+      assertEquals(
+        headlessLine(r.ok),
+        "headless (not serving a UI — --client=server-only)",
+      );
+    });
+  } finally {
+    if (prev === undefined) Deno.env.delete("APPIMAGE");
+    else Deno.env.set("APPIMAGE", prev);
+  }
+});

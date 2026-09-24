@@ -189,6 +189,21 @@ testCell(door, "cannot open when already open", (t) => {
 });
 ```
 
+### What `testCell` will not run: `onInit`
+
+`testCell` composes the one cell and runs its methods against its initial state;
+it never boots the cell, so **`onInit` does not run** — not the work it starts,
+and not a throw in it. A cell that declares `onInit` says so once, the first
+time `testCell` meets it:
+
+```
+[aio] ⚠ testCell: cell "projects" declares onInit, and onInit does not run under testCell — …
+```
+
+It is a warning, not a failure: testing methods without the boot is what
+`testCell` is for. To run `onInit` (and fail on it), use `bootCells([projects])`
+or `testUI`.
+
 ### What `testCell` will not run: schedules and `own()`
 
 `testCell` drives the composed reducer and executor directly. It owns no clock
@@ -254,9 +269,14 @@ It also keeps the app's clock and ceilings honest:
   its method, as on a real server; later timers still wait for `advance`.
 - **`perfBudget.methods[m].timeout` is the call ceiling here too**: pass the
   app's `perfBudget` and `await cell.method()` gives up when the app would.
-- **A cell method called straight from `onInit` throws**, as `aio.run` does —
-  methods are bound after every cell's `__init`. Use `app.dispatch(...)` there,
-  or `onStart` (docs/state/lifecycle.md).
+- **An `onInit` that throws fails the test** at the next `settle()` or
+  `dispose()` (in `bootCells` and `testUI` alike). `aio.run` reports it as
+  `INIT_ERROR` and boots the other cells without it; a test does not pass on
+  that. The commonest cause: a cell method called straight from `onInit` is
+  refused, as `aio.run` refuses it — methods are bound after every cell's
+  `__init`. Dispatch it there
+  (`app.dispatch({ type: "projects:scan", payload: { args: [] } })`), or call it
+  from `onStart` (docs/state/lifecycle.md).
 
 ## TestContext API
 

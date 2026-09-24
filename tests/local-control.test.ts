@@ -38,6 +38,7 @@ import {
   trojanPost,
 } from "../src/am/am-http.ts";
 import { freePort } from "../src/testing/server-test.ts";
+import { permissiveUmask } from "./permissive-umask.ts";
 
 const WINDOWS = Deno.build.os === "windows";
 
@@ -63,44 +64,49 @@ const trojanReq = (key?: string, path = "/__aio/trojan/state") =>
 
 // ── The credential file ──────────────────────────────────────────────────────
 
-Deno.test("control key: minted 0600 in the 0700 data dir, fresh at every boot", async () => {
-  await withAppsDir(async () => {
-    const appId = "ctl-mint";
-    const a = mintControlKey(appId);
-    assert(a.error === undefined, `mint must succeed: ${a.error}`);
-    assertEquals(a.path, controlKeyPath(appId));
-    assertEquals(a.key.length, 64, "256 bits, hex");
+Deno.test("control key: minted 0600 in the 0700 data dir, fresh at every boot", () =>
+  permissiveUmask(async () => {
+    await withAppsDir(async () => {
+      const appId = "ctl-mint";
+      const a = mintControlKey(appId);
+      assert(a.error === undefined, `mint must succeed: ${a.error}`);
+      assertEquals(a.path, controlKeyPath(appId));
+      assertEquals(a.key.length, 64, "256 bits, hex");
 
-    const st = Deno.statSync(a.path);
-    const dirSt = Deno.statSync(
-      controlKeyPath(appId).replace(/.control\.key$/, ""),
-    );
-    if (!WINDOWS) {
-      assertEquals((st.mode! & 0o777).toString(8), "600", "file is owner-only");
-      assertEquals(
-        (dirSt.mode! & 0o777).toString(8),
-        "700",
-        "data dir is owner-only",
+      const st = Deno.statSync(a.path);
+      const dirSt = Deno.statSync(
+        controlKeyPath(appId).replace(/.control\.key$/, ""),
       );
-    }
-    assertEquals(Deno.readTextFileSync(a.path).trim(), a.key);
+      if (!WINDOWS) {
+        assertEquals(
+          (st.mode! & 0o777).toString(8),
+          "600",
+          "file is owner-only",
+        );
+        assertEquals(
+          (dirSt.mode! & 0o777).toString(8),
+          "700",
+          "data dir is owner-only",
+        );
+      }
+      assertEquals(Deno.readTextFileSync(a.path).trim(), a.key);
 
-    // Per BOOT: a copy taken from an earlier run must be dead.
-    const b = mintControlKey(appId);
-    assert(b.error === undefined);
-    assert(b.key !== a.key, "every boot mints a new credential");
-    if (!WINDOWS) {
-      assertEquals(
-        (Deno.statSync(b.path).mode! & 0o777).toString(8),
-        "600",
-        "an overwrite keeps 0600 (writeTextFile's mode applies at create only)",
-      );
-    }
-    removeControlKey(appId);
-    assertEquals(readControlKey(appId).key, undefined);
-    return;
-  });
-});
+      // Per BOOT: a copy taken from an earlier run must be dead.
+      const b = mintControlKey(appId);
+      assert(b.error === undefined);
+      assert(b.key !== a.key, "every boot mints a new credential");
+      if (!WINDOWS) {
+        assertEquals(
+          (Deno.statSync(b.path).mode! & 0o777).toString(8),
+          "600",
+          "an overwrite keeps 0600 (writeTextFile's mode applies at create only)",
+        );
+      }
+      removeControlKey(appId);
+      assertEquals(readControlKey(appId).key, undefined);
+      return;
+    });
+  }));
 
 Deno.test("control key: refuses a data dir other users can read", () => {
   // The pure rule, pinned. Reachable when the 0700 cannot be applied — a dir

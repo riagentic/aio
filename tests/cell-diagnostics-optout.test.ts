@@ -1,11 +1,11 @@
 // `cell({ diagnostics: false })` — the key that means what `persist` does not.
 //
 // A field report read `persist: "none"` as also keeping the cell out of
-// `logs/actions.jsonl` (report 2 §7). It does not, and the refusal in
-// `feedback/refused.md` says why: `persist` is about the STATE STORE, the
-// journal is a dev diagnostic that is off in production and lives in the app's
-// own data directory, and making one key silently mean two things is worse
-// than the surprise. What was owed was a separate, explicitly named option.
+// `logs/actions.jsonl` (report 2 §7). What was owed was a separate, explicitly
+// named option for the whole cell — this one. (Since 1.0.11 `persist: "none"`
+// withholds the cell's PAYLOADS from the log, because its arguments are the
+// secret it must never keep — `tests/persist-none-scrub-once.test.ts`; the
+// action LINE stays, and removing it is this key's job.)
 //
 // THE BOUNDARY IS THE WHOLE DESIGN, so it is what these tests pin:
 //   in   — the action journal, the state-diff debug log, the checkpoint's

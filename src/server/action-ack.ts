@@ -93,7 +93,7 @@ export function _dispatchShort(action: unknown): string | undefined {
 // ── `unsaved`: applied, acked — and NOT durable ─────────────────────────
 // A write whose journal line could not be written (a refused append, a
 // redacted cell's state) is made durable by a SAVE instead, and every ack
-// waits for it (aio.ts `_durableFor`). When that save fails, the call still
+// waits for it (`_durableFor`, below). When that save fails, the call still
 // ran — `ok: true` stays true — but the caller is told the write is not on
 // disk, in the same `unsaved` field and sentence the trojan reply already
 // carries (`PERSIST_REFUSED`). One note per action (or per async call, whose
@@ -118,7 +118,8 @@ export function _noteUnsaved(
 }
 
 /** The `unsaved` sentence for `action`'s ack, if its stand-in save failed —
- *  keyed by the frame object, or by the async call id it carries. */
+ *  keyed by the frame object, or by the async call id it carries.
+ *  @decider */
 export function _dispatchUnsaved(action: unknown): string | undefined {
   if (!action || typeof action !== "object") return undefined;
   const direct = _unsavedNotes.get(action);
@@ -129,4 +130,34 @@ export function _dispatchUnsaved(action: unknown): string | undefined {
   const v = _unsavedCalls.get(call);
   _unsavedCalls.delete(call);
   return v;
+}
+
+// ── What an ack waits for ────────────────────────────────────────────────
+// The saves an action's commit OWES (aio.ts `_owe` records them per action,
+// per boot) are read here, once, by every door that acks: dispatch, the sync
+// handler (`durableFor`), the trojan jump. Moved out of aio.ts's closure so
+// the one decider is a function a test can hold still.
+
+/** The verdict of a set of owed saves: `undefined` when every one landed,
+ *  else each distinct failure sentence, joined. */
+export function _owedVerdict(
+  owed: Set<Promise<string | undefined>>,
+): Promise<string | undefined> {
+  return Promise.all(owed).then((vs) => {
+    const failed = [...new Set(vs.filter((v) => v !== undefined))];
+    return failed.length === 0 ? undefined : failed.join("; ");
+  });
+}
+
+/** What must be durable before `action` may be acked, as its verdict —
+ *  `undefined` when nothing is owed. Read-and-clear: the entry is taken, so
+ *  a second ack of the same frame waits for nothing it already waited for.
+ *  @decider */
+export function _durableFor(
+  owedByAction: WeakMap<object, Set<Promise<string | undefined>>>,
+  action: object,
+): Promise<string | undefined> | undefined {
+  const owed = owedByAction.get(action);
+  owedByAction.delete(action);
+  return owed === undefined ? undefined : _owedVerdict(owed);
 }

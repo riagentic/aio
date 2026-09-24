@@ -12,8 +12,8 @@
 //    the patch is clearly below the patch-vs-full threshold.
 import { assert, assertEquals } from "@std/assert";
 import { join } from "@std/path";
+import { LARGE_STATE_DOC } from "../src/state/large-state-doc.ts";
 import {
-  BIG_DATA_DOC,
   createPersistenceManager,
   PERSIST_CELL_HARD_BYTES,
   PERSIST_CELL_WARN_BYTES,
@@ -91,7 +91,7 @@ Deno.test("persist guard: >1MB cell warns ONCE, naming cell + tier doc; data per
     );
     assertEquals(warns.length, 1, "exactly one warning");
     assert(warns[0]!.msg.includes("db: tables"), "names the bulk-rows tier");
-    assert(warns[0]!.msg.includes(BIG_DATA_DOC), "points at the tier doc");
+    assert(warns[0]!.msg.includes(LARGE_STATE_DOC), "points at the tier doc");
 
     // Still persisted in full — a guardrail must never drop a write.
     const stored = await kv.getMulti<Record<string, unknown>>("app-state");
@@ -125,7 +125,7 @@ Deno.test("persist guard: >16MB cell errors on EVERY flush — and is still pers
       logs.filter((l) => l.level === "error" && l.msg.includes(`cell "huge"`));
     assertEquals(errs().length, 1, "hard overrun reported");
     assert(errs()[0]!.msg.includes("NOT dropped"), "says the write survives");
-    assert(errs()[0]!.msg.includes(BIG_DATA_DOC), "points at the tier doc");
+    assert(errs()[0]!.msg.includes(LARGE_STATE_DOC), "points at the tier doc");
 
     // Loud does not mean lost: the row is there, in full.
     const stored = await kv.getMulti<Record<string, unknown>>("app-state");

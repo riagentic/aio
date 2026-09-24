@@ -826,7 +826,7 @@ Android, CLI, server binaries.
 const NEW_STEPS =
   `0. **check** deno --version (≥2.9) · am version · no am? curl -fsSL
    https://raw.githubusercontent.com/riagentic/aio/main/install.sh | sh
-1. **create** am create <name> [--template=T] [--target=X] [--css=tailwind]   → ./<name> (cd first;
+1. **create** am create <name> [--template=T] [--client=X] [--css=tailwind]   → ./<name> (cd first;
    no --dir). Pins the newest release (deno.json "aioVersion", dep/aio symlink, git init).
    --aio-version=<tag|main> pick a version · --mirror[=<path>] live aio checkout (framework dev) ·
    --jsr JSR imports · --force non-empty dir
@@ -894,7 +894,7 @@ ${show(APP_TS)}`;
 
 const NEW_MIN = `## BUILD A NEW APP — the steps
 
-1. am create <name> [--template=counter|todo|cli|canvas|assets] [--target=electron|…] → cd <name>
+1. am create <name> [--template=counter|todo|cli|canvas|assets] [--client=electron|…] → cd <name>
 2. deno task check && deno task lint — the scaffold test imports the template cell: rewrite
    tests/cell.test.ts in the SAME step you replace src/cell.ts
 3. am start --client=server-only — daemon, survives your shell (NO: deno task dev from a tool shell)
@@ -1028,7 +1028,7 @@ ${show(APP_TSX)}
   timers or after an await subscribe to nothing.
 - per-tab state: useLocal / useSignal (NO: signal() inside a body). sig.update(fn); .peek() untracked.
 - name every control: aria-label or t="x" — that name is ui.XButton in testUI and am surface.
-- server-only code (*.server.ts, Deno.*) never statically imported by a component: await import().
+- server-only code (Deno.*): in a *.server.ts, via await import("./x.server.ts"); plain import() bundles.
 - more: am agent --task=ui`;
 
 const DATA = `## DATA — persistence tiers, privacy, auth, sync, server edge
@@ -1201,7 +1201,7 @@ NO: widen a type, delete an assertion, try/catch-swallow, sleep-and-retry, pkill
 | --- | --- | --- |
 | feature dead, tests green | cell never imported / not in cells | import it; heed warning |
 | click does nothing | guard line or unawaited rejection | am timeline; am logs |
-| blank page / import refused | static import of *.server.ts or Deno.* in the UI | await import(); am check |
+| blank page / import refused | UI reaches Deno.* code (import/import()) | make it *.server.ts; am check |
 | TypeError: read only / only a getter | state mutated outside a method | call a method; useLocal |
 | notes.state.x is undefined | the cell IS the state | notes.x · notes.sel() |
 | UI stale, state right | read in handler/onMount/after await | read in the body |

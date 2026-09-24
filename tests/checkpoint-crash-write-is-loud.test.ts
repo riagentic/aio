@@ -16,6 +16,7 @@ import {
   readCheckpoint,
 } from "../src/diagnostics/checkpoint.ts";
 import type { CheckpointData } from "../src/diagnostics/types.ts";
+import { permissiveUmask } from "./permissive-umask.ts";
 
 const data = (): CheckpointData => ({
   ts: Date.now(),
@@ -107,28 +108,29 @@ Deno.test("crash checkpoint: a directory that vanished is re-created and the wri
   }
 });
 
-Deno.test("crash checkpoint: owner-only permissions survive the retry", async () => {
-  if (Deno.build.os === "windows") return;
-  const base = await Deno.makeTempDir({ prefix: "cp-mode-" });
-  const dir = `${base}/logs`;
-  try {
-    const cp = createCheckpoint(dir, 0);
-    cp.writeSync(data());
-    await Deno.remove(dir, { recursive: true });
-    cp.writeSync(data());
+Deno.test("crash checkpoint: owner-only permissions survive the retry", () =>
+  permissiveUmask(async () => {
+    if (Deno.build.os === "windows") return;
+    const base = await Deno.makeTempDir({ prefix: "cp-mode-" });
+    const dir = `${base}/logs`;
+    try {
+      const cp = createCheckpoint(dir, 0);
+      cp.writeSync(data());
+      await Deno.remove(dir, { recursive: true });
+      cp.writeSync(data());
 
-    const st = await Deno.stat(`${dir}/checkpoint.json`);
-    assertEquals(
-      (st.mode ?? 0) & 0o777,
-      0o600,
-      "the checkpoint holds FULL state — the retry must not widen its mode",
-    );
-    const dirSt = await Deno.stat(dir);
-    assertEquals((dirSt.mode ?? 0) & 0o777, 0o700);
-  } finally {
-    await Deno.remove(base, { recursive: true }).catch(() => {});
-  }
-});
+      const st = await Deno.stat(`${dir}/checkpoint.json`);
+      assertEquals(
+        (st.mode ?? 0) & 0o777,
+        0o600,
+        "the checkpoint holds FULL state — the retry must not widen its mode",
+      );
+      const dirSt = await Deno.stat(dir);
+      assertEquals((dirSt.mode ?? 0) & 0o777, 0o700);
+    } finally {
+      await Deno.remove(base, { recursive: true }).catch(() => {});
+    }
+  }));
 
 Deno.test("crash checkpoint: writeSync never throws, whatever the disk says", async () => {
   const base = await Deno.makeTempDir({ prefix: "cp-throw-" });

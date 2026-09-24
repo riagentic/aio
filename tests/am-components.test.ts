@@ -139,8 +139,47 @@ Deno.test("plan: no argument means the whole project", async () => {
     if (one.kind === "one") assertEquals(one.component.appId, "agent");
 
     // Flags naming an instance win — "this one" is never widened to "all".
-    assertEquals(processPlan([], { app: "relay" }, dir).kind, "single");
     assertEquals(processPlan([], { port: 8000 }, dir).kind, "single");
+  } finally {
+    await Deno.remove(dir, { recursive: true });
+  }
+});
+
+Deno.test("plan: --app=<component> is that component — its id AND its entry", async () => {
+  // `am start --app=pro` ran the project's DEFAULT entry under PRO's id: the
+  // free app, registered as PRO, "starting" forever (field report, a
+  // two-edition app). By label or by the component's app id, it is the
+  // component; an explicit --entry (the component loop's own re-entry, or the
+  // user's choice) is never re-mapped.
+  const dir = await project({
+    build: {
+      targets: {
+        electron: {},
+        pro: { kind: "electron", entry: "src/pro/app.ts" },
+      },
+    },
+  }, {
+    "src/app.ts": entry("anat"),
+    "src/pro/app.ts": entry("anat-pro"),
+  });
+  try {
+    for (const app of ["pro", "anat-pro"]) {
+      const plan = processPlan([], { app }, dir);
+      assertEquals(plan.kind, "one", app);
+      if (plan.kind === "one") {
+        assertEquals(plan.component.appId, "anat-pro");
+        assert(
+          plan.component.entry.endsWith("src/pro/app.ts"),
+          plan.component.entry,
+        );
+      }
+    }
+    assertEquals(
+      processPlan([], { app: "anat-pro", entry: "src/pro/app.ts" }, dir).kind,
+      "single",
+      "the component loop re-enters with an entry — never re-mapped",
+    );
+    assertEquals(processPlan([], { app: "stranger" }, dir).kind, "single");
   } finally {
     await Deno.remove(dir, { recursive: true });
   }
@@ -211,7 +250,9 @@ Deno.test("plan: a component AND --app is a contradiction, not a refinement", as
 // ── Identity, which is what makes them separable at all ─────────────────────
 
 Deno.test("components: entries that resolve to ONE identity are refused", async () => {
-  // No appId in either entry, and target labels that slug to the same thing.
+  // No appId in either entry: both run as the PROJECT's app ("one-app") —
+  // a target's "name" renames the binary, not the app, so it separates
+  // nothing.
   const dir = await project({
     appId: "one-app",
     build: {
@@ -226,7 +267,7 @@ Deno.test("components: entries that resolve to ONE identity are refused", async 
     assertEquals(cs.length, 2);
     const conflict = componentConflict(cs);
     assert(conflict, "two apps under one identity must not be startable");
-    assert(conflict.includes("same"), conflict);
+    assert(conflict.includes('"one-app" ← a, b'), conflict);
     // The consequence and the fix, not just the fact.
     assert(conflict.includes("lock"), conflict);
     assert(conflict.includes("appId"), conflict);

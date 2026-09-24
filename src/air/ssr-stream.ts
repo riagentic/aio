@@ -34,6 +34,7 @@ import {
   _ssrRenderOf,
   _ssrRenderStart,
   type SsrRender,
+  type SsrRoute,
 } from "./ssr-render.ts";
 import {
   _fallbackHtml,
@@ -41,8 +42,13 @@ import {
   _regionHtml,
   _renderPropsHtml as _renderProps,
   _ssrComponent,
+  _ssrExplicitScope,
+  _ssrIn,
   _ssrRootEpoch,
   _ssrRootScope,
+  _ssrRouteAtCall,
+  _ssrRouteNow,
+  _ssrRouteOf,
   _ssrScoped,
   _ssrStreamSettler,
   _ssrTextareaText,
@@ -200,10 +206,17 @@ function _regionSync(
  * exactly this render's head back, however many other renders overlapped it.
  * Omitted, nothing changes: the render is still its own, and `collectHead()`
  * answers for the most recent one.
+ *
+ * @param opts `opts.route` (and `opts.search`) route this render explicitly —
+ * the concurrency-safe form: every route read in it, nested renders and later
+ * pulls included, sees that route; the global `routePath` / `routeSearch` are
+ * never written and never rendered from (a read still subscribes to them).
+ * Omitted, it routes by the globals (1.x).
  */
 export function renderToStream(
   vnode: VNode | string | number | null,
   key?: object,
+  opts?: { route?: string; search?: URLSearchParams },
 ): AsyncGenerator<string, void, unknown> {
   // The ROUTE is taken NOW, before the first pull, while the handler that
   // called this is still the one running. As an `async function*` it waited
@@ -224,11 +237,37 @@ export function renderToStream(
   // snapshot that throws) is thrown from the FIRST PULL, exactly where the
   // generator function threw it — never at the call.
   try {
-    if (_inSsrCall()) return _renderStream(vnode, key, null);
+    // `renderToString(v, { route })` takes its options second; the natural
+    // slip here puts them in the KEY slot, where they would name the head
+    // and route nothing — the global route, silently. Refused.
+    if (
+      opts === undefined && key !== null && typeof key === "object" &&
+      (Object.getPrototypeOf(key) === Object.prototype ||
+        Object.getPrototypeOf(key) === null) &&
+      (Object.hasOwn(key, "route") || Object.hasOwn(key, "search"))
+    ) {
+      throw new TypeError(
+        "[aio] renderToStream: options are the 3rd argument " +
+          "(renderToStream(vnode, key, { route })) — the 2nd is the key " +
+          "collectHead(key) answers for; pass `undefined` if you have none",
+      );
+    }
+    const route = _ssrRouteOf(opts);
+    // Inside a component call: its own route, or the enclosing render's
+    // explicit one — kept for a pull that comes after that page ended.
+    if (_inSsrCall()) {
+      return _renderStream(vnode, key, null, route ?? _ssrRouteNow());
+    }
     const render = _ssrRenderNew("stream");
+    if (route) {
+      // Nothing to snapshot, nothing to settle: the route is the caller's.
+      const scope = _ssrExplicitScope(render, route);
+      return _renderStream(vnode, key, { render, settle: () => scope }, route);
+    }
+    _ssrRouteAtCall(render);
     const scope = _ssrRootScope(render);
     const settle = _ssrStreamSettler(scope, _ssrRootEpoch(), new Error());
-    return _renderStream(vnode, key, { render, settle });
+    return _renderStream(vnode, key, { render, settle }, null);
   } catch (e) {
     return _failedStream(e);
   }
@@ -249,6 +288,7 @@ async function* _renderStream(
   vnode: VNode | string | number | null,
   key: object | undefined,
   early: { render: SsrRender; settle: (pull: boolean) => SsrContexts } | null,
+  route: SsrRoute | null,
 ): AsyncGenerator<string, void, unknown> {
   // Pulled from inside a server component call, a stream is part of the
   // enclosing page (1.0.9's rule, decided here and nowhere else).
@@ -257,8 +297,15 @@ async function* _renderStream(
   if (key) _ssrRenderBindKey(key, render);
   // The request values this page renders with: the call's, plus any write in
   // the call's own synchronous turn (1.0.9's create-then-set) — never later.
-  const scope = early && !nested ? early.settle(true) : _ssrRootScope(render);
+  const scope = early && !nested
+    ? early.settle(true)
+    : route
+    ? _ssrExplicitScope(render, route)
+    : _ssrRootScope(render);
   const isTopLevel = _ssrRenderOf(scope) === render;
+  // A stream created inside a component call and read after that page ended
+  // is its own render, set up here: its route check is taken here too.
+  if (isTopLevel && render !== early?.render && !route) _ssrRouteAtCall(render);
   if (isTopLevel) _ssrRenderStart(render);
   // SAY that a server render is in progress, for the whole stream. Every hook
   // that asks `_isSsrRendering()` took the client branch here, because only
@@ -345,7 +392,10 @@ async function* _stream(
 
   // Signal child — its current value, as the text the client will bind.
   if (vnode.tag === _SignalText) {
-    yield _escapeHtml(_sigText((vnode._sig as Signal<unknown>).peek()));
+    yield _ssrIn(
+      scope,
+      () => _escapeHtml(_sigText((vnode._sig as Signal<unknown>).peek())),
+    );
     return 1;
   }
 
@@ -364,11 +414,12 @@ async function* _stream(
     } catch (thrown) {
       if (thrown !== _LAZY_PENDING) throw thrown;
       const nodes: SsrNodes = { n: 0 };
-      const html = _fallbackHtml(
-        fallback,
-        nodes,
-        (v, n) => _renderSync(v, n, scope),
-      );
+      const html = _ssrIn(scope, () =>
+        _fallbackHtml(
+          fallback,
+          nodes,
+          (v, n) => _renderSync(v, n, scope),
+        ));
       if (html !== "") yield html;
       return nodes.n;
     }
@@ -464,11 +515,12 @@ async function* _stream(
       if (!fallback) throw error;
       const nodes: SsrNodes = { n: 0 };
       const fb = _ssrScoped(scope, () => fallback(error as Error));
-      const html = _fallbackHtml(
-        fb.out,
-        nodes,
-        (v, n) => _renderSync(v, n, fb.scope),
-      );
+      const html = _ssrIn(fb.scope, () =>
+        _fallbackHtml(
+          fb.out,
+          nodes,
+          (v, n) => _renderSync(v, n, fb.scope),
+        ));
       if (html !== "") yield html;
       return nodes.n;
     }
@@ -479,18 +531,26 @@ async function* _stream(
   // Element — yield opening tag, children, closing tag
   const tag = vnode.tag as string;
   const selfClosing = VOID_ELEMENTS.has(tag);
-  const ownValue = resolveSignalProp(
-    vnode.props.value ?? vnode.props.defaultValue,
-  );
   const render = _ssrRenderOf(scope);
-  yield `<${tag}${
-    _renderProps(
-      ssrOptionProps(render, tag, vnode.props, vnode.children, ownValue),
-      tag,
-    )
-  }>`;
+  // Every signal the element reads (its value, its attributes, a textarea's
+  // text) is read in the render's route — before the yield, never across it.
+  const { ownValue, open, areaText } = _ssrIn(scope, () => {
+    const ownValue = resolveSignalProp(
+      vnode.props.value ?? vnode.props.defaultValue,
+    );
+    return {
+      ownValue,
+      open: `<${tag}${
+        _renderProps(
+          ssrOptionProps(render, tag, vnode.props, vnode.children, ownValue),
+          tag,
+        )
+      }>`,
+      areaText: selfClosing ? null : _ssrTextareaText(vnode),
+    };
+  });
+  yield open;
   if (selfClosing) return 1;
-  const areaText = _ssrTextareaText(vnode);
   const inSelect = ssrOpenSelect(render, tag, ownValue);
   try {
     if (_hasRawHtml(vnode.props)) {
