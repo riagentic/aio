@@ -32,7 +32,9 @@ import { count } from "../diagnostics/fmt.ts";
 
 /** A trigger request from the server (a "ui-trigger" frame payload). */
 export type UITriggerRequest = {
-  /** Element path on the surface, e.g. "App/TodoAdd:AddButton" */
+  /** Element path on the surface, e.g. "App/TodoAdd:AddButton" — or, as in
+   *  testUI, a name that addresses ONE live element: "AddButton",
+   *  "App:AddButton", "TodoAdd:AddButton" (see `resolveLivePath`). */
   path: string;
   /** Action to perform — the full `testUI` action set (both tiers behave
    *  identically). */
@@ -120,16 +122,95 @@ export function getMeasuredSurfaces(
   return { roots: live.map(serializeSurface), measured };
 }
 
-function findByPath(path: string): UIElementInfo | undefined {
-  for (const root of getLiveSurfaces()) {
-    const stack: UISurfaceNode[] = [root];
-    while (stack.length) {
-      const n = stack.pop()!;
-      for (const e of n.elements) if (e.path === path) return e;
-      stack.push(...n.children);
-    }
+/** Every element on the live surface, tree order. */
+function liveElements(): UIElementInfo[] {
+  const out: UIElementInfo[] = [];
+  const walk = (n: UISurfaceNode): void => {
+    out.push(...n.elements);
+    n.children.forEach(walk);
+  };
+  getLiveSurfaces().forEach(walk);
+  return out;
+}
+
+/** A component segment as a person types it: `ModelSelect` names every
+ *  instance (`ModelSelect#2`, `Row[7]`); a qualified segment names only itself. */
+const segMatches = (typed: string, seg: string): boolean =>
+  typed === seg ||
+  typed === seg.replace(/#\d+$/, "").replace(/\[[^\]]*\]$/, "");
+
+/** Does `prefix` (`App`, `ModelSelect`, `App/ModelSelect#2`) name components
+ *  on `componentPath`, in order? Paths split safely on `/` — keys are encoded. */
+function prefixNames(prefix: string, componentPath: string): boolean {
+  const segs = componentPath.split("/");
+  let i = 0;
+  for (const typed of prefix.split("/")) {
+    while (i < segs.length && !segMatches(typed, segs[i]!)) i++;
+    if (i++ >= segs.length) return false;
   }
-  return undefined;
+  return true;
+}
+
+/** What an `am trigger` path addresses — the rule testUI's `ui.<handle>` uses
+ *  (report a desktop agent app §3: `App:opencode-model` missed an element that lived in
+ *  `App/ModelSelect:opencode-model`, while testUI reached it by name):
+ *    1. the exact path, when it is on screen;
+ *    2. else the element NAME alone (`opencode-model`), or a name under a
+ *       component prefix (`App:…`, `ModelSelect:…`) whose components lie on
+ *       the element's path in order — resolved only when exactly ONE live
+ *       element matches. Several → `ambiguous`, never a guess.
+ *  Parse-free on purpose: a name can itself contain `:`, so each candidate is
+ *  tested as "`path` ends with `:<its name>`" instead of splitting the input. */
+export function resolveLivePath(
+  path: string,
+  elements: readonly UIElementInfo[] = liveElements(),
+): { el: UIElementInfo } | { ambiguous: UIElementInfo[] } | undefined {
+  const live = elements.filter((e) => e._el);
+  const exact = live.find((e) => e.path === path);
+  if (exact) return { el: exact };
+  const hits = live.filter((e) => {
+    if (path === e.name) return true;
+    if (!path.endsWith(`:${e.name}`)) return false;
+    const prefix = path.slice(0, -(e.name.length + 1));
+    const own = e.path.slice(0, -(e.name.length + 1));
+    return prefix.length > 0 && prefixNames(prefix, own);
+  });
+  if (hits.length === 1) return { el: hits[0]! };
+  return hits.length > 1 ? { ambiguous: hits } : undefined;
+}
+
+function findByPath(path: string): UIElementInfo | undefined {
+  const r = resolveLivePath(path);
+  return r && "el" in r ? r.el : undefined;
+}
+
+/** A miss or an ambiguity, as the reply a caller can self-correct from. */
+function unresolved(
+  path: string,
+  base: { path: string; action: string },
+  what = "element",
+): UITriggerResult {
+  const r = resolveLivePath(path);
+  if (r && "ambiguous" in r) {
+    return {
+      ...base,
+      ok: false,
+      error: `${what} "${path}" matches ${r.ambiguous.length} elements on ` +
+        `the live surface — address one by its full path (listed in available)`,
+      available: r.ambiguous.map((e) => e.path),
+    };
+  }
+  return {
+    ...base,
+    ok: false,
+    error: what === "element"
+      ? `element not found on the live surface`
+      : `${what} "${path}" not found on the live surface`,
+    // `window` is a real address and does not appear on the surface, so a
+    // miss that lists only elements hides the one answer for a key that
+    // belongs to no element.
+    available: what === "element" ? [WINDOW_PATH, ...allPaths()] : allPaths(),
+  };
 }
 
 function allPaths(): string[] {
@@ -216,17 +297,7 @@ export async function runUITrigger(
       return { ...base, ok: true, surface: getSerializedSurfaces() };
     }
     const info = findByPath(req.path);
-    if (!info || !info._el) {
-      return {
-        ...base,
-        ok: false,
-        error: `element not found on the live surface`,
-        // `window` is a real address and does not appear on the surface, so a
-        // miss that lists only elements hides the one answer for a key that
-        // belongs to no element.
-        available: [WINDOW_PATH, ...allPaths()],
-      };
-    }
+    if (!info || !info._el) return unresolved(req.path, base);
     if (
       req.action === "type" && cleared === req.path &&
       !takesCharacters(info._el)
@@ -273,12 +344,7 @@ export async function runUITrigger(
     } else if (req.action === "dragTo") {
       const dst = findByPath(req.text ?? "");
       if (!dst || !dst._el) {
-        return {
-          ...base,
-          ok: false,
-          error: `dragTo target "${req.text}" not found on the live surface`,
-          available: allPaths(),
-        };
+        return unresolved(req.text ?? "", base, "dragTo target");
       }
       triggerDragTo(info._el, dst._el);
     } else {

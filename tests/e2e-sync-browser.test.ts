@@ -6,7 +6,11 @@
 import { assert, assertEquals } from "@std/assert";
 import { testDisplayEnv } from "../src/testing/test-display.ts";
 import { stopChild } from "./stop-child.ts";
-import { childCoverageDir } from "../src/testing/temp-dir.ts";
+import {
+  childCoverageDir,
+  dropTempDir,
+  tempDir,
+} from "../src/testing/temp-dir.ts";
 const _childCovDir = childCoverageDir();
 
 const ROOT = new URL("..", import.meta.url).pathname;
@@ -151,7 +155,7 @@ export default function App() {
     const profiles: string[] = [];
     const tabs: Deno.ChildProcess[] = [];
     const openTab = async () => {
-      const profile = await Deno.makeTempDir({ prefix: "aio-sync-prof-" });
+      const profile = await tempDir("aio-sync-prof-");
       profiles.push(profile);
       tabs.push(
         new Deno.Command(BROWSER!, {
@@ -280,7 +284,7 @@ export default function App() {
         await stopChild(t, { quiet: true });
       }
       for (const pr of profiles) {
-        await Deno.remove(pr, { recursive: true }).catch(() => {});
+        await dropTempDir(pr); // retries: Chromium writes it after the kill
       }
       await stopChild(proc, { quiet: true });
       // Takes the child's app home with it — it lives at `${dir}/home`.

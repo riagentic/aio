@@ -22,6 +22,7 @@ import {
 } from "../src/server/single-instance-lock.ts";
 import { getLogger, setLogger } from "../src/diagnostics/logger-api.ts";
 import type { LogSink } from "../src/diagnostics/logger-types.ts";
+import { permissiveUmask } from "./permissive-umask.ts";
 
 const REPO = join(import.meta.dirname!, "..");
 const url = (p: string) => JSON.stringify(toFileUrl(join(REPO, p)).href);
@@ -324,13 +325,14 @@ Deno.test("boundUnixSockets: a path keeps its double spaces and tabs", async () 
 Deno.test({
   name: "lock dir: a UDS bind recreates a lock dir pruned under it, 0700",
   ignore: Deno.build.os === "windows",
-  async fn() {
-    const dir = await scratch("lk-");
-    const rt = await shortRuntime();
-    try {
-      const r = await child(
-        dir,
-        `const m = await import(${LOCK});
+  fn: () =>
+    permissiveUmask(async () => {
+      const dir = await scratch("lk-");
+      const rt = await shortRuntime();
+      try {
+        const r = await child(
+          dir,
+          `const m = await import(${LOCK});
          const u = await import(${url("src/server/uds.ts")});
          const d = m.lockDir();
          Deno.removeSync(d); // a sibling's exit prune, after we cached it
@@ -340,14 +342,14 @@ Deno.test({
          c.close();
          h.shutdown();
          console.log(JSON.stringify({ mode: Deno.statSync(d).mode & 0o777 }));`,
-        rt,
-      );
-      assertEquals(r, { mode: 0o700 });
-    } finally {
-      await dropTempDir(dir);
-      await Deno.remove(rt, { recursive: true }); // made by this test above
-    }
-  },
+          rt,
+        );
+        assertEquals(r, { mode: 0o700 });
+      } finally {
+        await dropTempDir(dir);
+        await Deno.remove(rt, { recursive: true }); // made by this test above
+      }
+    }),
 });
 
 Deno.test("removeLockIfOwner: another start identity is another owner", () => {
@@ -417,6 +419,7 @@ Deno.test("instances(): a lock re-published after it was judged dead is kept", a
 // prune opened. Every bind re-checks it (ours, 0700, not a link).
 Deno.test({
   name: "lock dir: a UDS bind re-checks an EXISTING dir — 0700, or refused",
+  // aio-ok(umask): the dir is chmod'ed 0755 first and must END 0700 — chmod ignores the umask, so none can fake the re-check.
   ignore: Deno.build.os === "windows",
   async fn() {
     const dir = await scratch("lk2-");
@@ -598,6 +601,7 @@ Deno.test("am start placeholder: never over a live owner, or the child's own", a
 // chmod 0700 (or to refuse).
 Deno.test({
   name: "UDS bind: a caller-chosen socket dir keeps its mode",
+  // aio-ok(umask): the dir is chmod'ed 0755 and must KEEP it — a restrictive umask cannot produce 0755, only break it.
   ignore: Deno.build.os === "windows",
   async fn() {
     const { createUDSListener } = await import("../src/server/uds.ts");

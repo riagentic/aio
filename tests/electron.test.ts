@@ -162,8 +162,9 @@ Deno.test("electron: UDS script — NDJSON protocol", () => {
     "/tmp/test.sock",
     {},
   );
-  // Uses newline-delimited JSON over UDS
-  assertStringIncludes(s, "split('\\n')");
+  // Uses newline-delimited JSON over UDS, read by the shared linear reader
+  // (protocol/line-reader.ts, embedded by source — tests/line-reader.test.ts).
+  assertStringIncludes(s, "lineBuf.push(chunk)");
   assertStringIncludes(s, "json + '\\n'");
 });
 

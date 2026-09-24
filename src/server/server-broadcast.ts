@@ -29,9 +29,10 @@ import type { VitalsSystem } from "../vitals/mod.ts";
 import type { AioUser } from "./aio.ts";
 import { log } from "../diagnostics/logger-api.ts";
 import { bytes } from "../diagnostics/fmt.ts";
-import { budgetsFor } from "../state/budgets.ts";
+import { budgetsFor, cellSizeFix } from "../state/budgets.ts";
 import { rawStateControlAllowed } from "./server-auth.ts";
 import { overUtf8, utf8Size } from "../protocol/utf8-size.ts";
+import { decidePatchOrFull } from "./patch-or-full.ts";
 
 /** Payload stats per client — tracked for vitals/trojan introspection */
 export type PayloadStats = Map<
@@ -388,34 +389,23 @@ export function createBroadcaster(deps: BroadcastDeps): Broadcaster {
           );
           if (allOps.length > 0) {
             const patchJson = JSON.stringify(allOps);
-            // Serialize the full state ONLY when the decision needs it. The
-            // patch-vs-full comparison used to stringify the ENTIRE state per
-            // client on EVERY patch round — with a 10MB cell, a 50-byte patch
-            // cost a 10MB serialization each broadcast. The last computed
-            // full-json length (refreshed on every round that does compute
-            // one, and on every full send) stands in as the estimate: when
-            // the patch is clearly below the threshold against it, send the
-            // patch without measuring. The estimate can be stale, but only
-            // ever in the SAFE direction — a patch is always a correct frame;
-            // the worst case is a patch larger than an ideal full resend,
-            // never a wrong state. Any patch near the threshold recomputes
-            // (and thereby refreshes) the real number.
-            const knownLen = meta.lastFullJson?.length;
-            if (
-              knownLen === undefined ||
-              patchJson.length > knownLen * fullStateThreshold
-            ) {
-              fullJsonForTracking = fullFor(meta);
-            }
-            // Send full state when the patch payload exceeds the configured
-            // fraction of the full-state size (default 0.5 → patch > 50%).
-            // Previously this compared against 100% of full state, so the
-            // user-set `fullStateThreshold` had no effect.
-            if (
-              fullJsonForTracking &&
-              patchJson.length >
-                fullJsonForTracking.length * fullStateThreshold
-            ) {
+            // Serialize the full state ONLY when the decision needs it — the
+            // shared decider (patch-or-full.ts, also the UDS transport's). The
+            // comparison used to stringify the ENTIRE state per client on
+            // EVERY patch round — with a 10MB cell, a 50-byte patch cost a
+            // 10MB serialization each broadcast. The last computed full-json
+            // length stands in as the estimate. Send full state when the
+            // patch payload exceeds the configured fraction of the full-state
+            // size (default 0.5 → patch > 50%); this used to compare against
+            // 100%, so the user-set `fullStateThreshold` had no effect.
+            const decision = decidePatchOrFull(
+              patchJson.length,
+              meta.lastFullJson?.length,
+              fullStateThreshold,
+              () => fullFor(meta),
+            );
+            fullJsonForTracking = decision.fullJson;
+            if (decision.sendFull && fullJsonForTracking) {
               debug?.(
                 `broadcast: patch payload (${patchJson.length}B) > ${
                   fullStateThreshold * 100
@@ -1106,6 +1096,7 @@ export function warnBigFullState(
 ): void {
   const latch = _latchFor(owner);
   // The owner's OWN budgets — a second app's `cellState` is not this app's limit.
+  // No race: every src caller passes a `getUIState` bound synchronously to its app's ledger (aio-server.ts).
   const budgets = budgetsFor(owner);
   // `aio.run({ budgets: { cellState } })` replaces aio's own number. The
   // hard-coded 1 MiB is a guess that has to serve every app, and a field
@@ -1177,17 +1168,19 @@ export function warnBigFullState(
     const fresh = offenders.filter(([cellName]) => !latch.warned.has(cellName));
     if (fresh.length === 0) return;
     for (const [cellName] of fresh) latch.warned.add(cellName);
+    const declared = budgets.declared().cellState !== undefined;
     log.warn(
       "broadcast",
       `a full-state frame is ${bytes(size)} — over ` +
         `the ${bytes(limit)} budget${
-          budgets.declared().cellState !== undefined
-            ? " you declared (aio.run({ budgets: { cellState } }))"
-            : ""
+          declared ? " you declared (aio.run({ budgets: { cellState } }))" : ""
         }. Largest cell(s): ${
           fresh.map(([c, n]) => `"${c}" (${bytes(n)})`).join(", ")
-        }. Cell state is pushed to every client on change — bulk rows belong ` +
-        `in db: tables, binaries in files — see docs/persistence/big-data.md.`,
+        }. Cell state is pushed to every client on change (a whole-state ` +
+        `frame on connect, and again whenever a patch would be larger). ` +
+        // Sized off the FRAME: this line compares the whole frame with the
+        // budget, so only a declaration at least that big quiets it.
+        cellSizeFix(size, declared, "frame"),
     );
   } catch { /* observe-only */ }
 }

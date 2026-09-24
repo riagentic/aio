@@ -24,6 +24,7 @@
  */
 
 import { overUtf8, utf8Size } from "../protocol/utf8-size.ts";
+import { LARGE_STATE_DOC } from "./large-state-doc.ts";
 
 /** What an app may declare. Values are human strings or plain numbers.
  *
@@ -263,4 +264,69 @@ export function setBudgets(b: ResolvedBudgets): BudgetLedger {
  *  its boot took. */
 export function resetBudgets(): void {
   _current = createBudgetLedger({});
+}
+
+// ── What every state-size message says ────────────────────────────────
+//
+// Six places measure state size (persist, the broadcast seam on both
+// transports, a Deno peer's frame ceiling, the pressure monitor, the dev
+// freeze). Each used to say "bulk rows belong in db: tables" and stop — right
+// for the app that put 83,000 rows in a cell by accident, a wall for the app
+// whose working set IS that big on purpose: the one knob that quiets the
+// warning (`budgets.cellState`) was named nowhere. So every message ends with
+// ONE fix line built here — both doors, the size to declare, the chapter —
+// and the text is identical in dev and prod (no gate reads the mode).
+
+export { LARGE_STATE_DOC };
+
+/** A `cellState` budget worth declaring for a cell measured at `bytes`: ×1.5
+ *  headroom, rounded UP to a whole MB (never below 2MB — declaring aio's own
+ *  1MB default changes nothing). Pure. */
+export function suggestCellStateBudget(bytes: number): string {
+  const mb = Math.ceil((Math.max(0, bytes) * 1.5) / SIZE_UNITS.mb!);
+  return `${Math.max(2, mb)}MB`;
+}
+
+/** The declaration that quiets EVERY size line for a whole-state FRAME
+ *  measured at `bytes`. Both keys, because the lines read different ones: persist and the
+ *  full-state seam read `cellState`, the pressure monitor reads `payload`, and
+ *  a whole-state frame trips both — declaring one left the other warning
+ *  (measured: a 12.5 MB cell with `cellState: "20MB"` still printed PRESSURE
+ *  on every connect). Pure. */
+export function declareLargeState(bytes: number): string {
+  const n = suggestCellStateBudget(bytes);
+  return `aio.run({ budgets: { cellState: "${n}", payload: "${n}" } })`;
+}
+
+/** The declaration that quiets a line measuring ONE cell: `cellState` only.
+ *  A `payload` sized from one cell cannot cover the whole-state frame the
+ *  pressure monitor measures — three 1.2MB cells got `payload: "2MB"` and a
+ *  3.6MB frame kept printing PRESSURE — and that line names `payload` itself,
+ *  sized from the frame it measured. Pure. */
+export function declareCellState(bytes: number): string {
+  return `aio.run({ budgets: { cellState: "${
+    suggestCellStateBudget(bytes)
+  }" } })`;
+}
+
+/** The one-line fix a cell-size message ends with. `declared` — the app
+ *  already set `budgets.cellState`, so the door is to raise THAT, not to learn
+ *  it exists. `scope` — what `bytes` measured: one `"cell"` (persist) gets
+ *  `cellState` only; the whole `"frame"` (the full-state seam) gets both keys,
+ *  since that same frame is what trips `payload`. */
+export function cellSizeFix(
+  bytes: number,
+  declared: boolean,
+  scope: "cell" | "frame" = "cell",
+): string {
+  // Sized from what was measured: a per-cell size never sizes `payload`.
+  const declaration = scope === "frame"
+    ? declareLargeState(bytes)
+    : declareCellState(bytes);
+  return declared
+    ? `Fix: keep bulk rows in db: tables and page them into state, or raise ` +
+      `the cellState budget you declared — see ${LARGE_STATE_DOC}.`
+    : `Fix: keep bulk rows in db: tables and page them into state; if this ` +
+      `size is intended, declare it: ${declaration} — see ` +
+      `${LARGE_STATE_DOC}.`;
 }

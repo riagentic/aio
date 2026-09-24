@@ -196,6 +196,17 @@ export async function buildAndroid(cfg: BuildConfig): Promise<void> {
     );
   }
 
+  // An app's own MainActivity.kt replaces the template's WHOLE — including the
+  // durable store and the SDK-35 insets frame. Say what it dropped, loudly:
+  // the store's loss is a change lost on the next kill, with nothing said.
+  if (overlaid.includes(MAIN_ACTIVITY)) {
+    for (
+      const w of await ownActivityWarnings(androidDir, overlaid, {
+        standalone: !talksToServer(serverOpts),
+      })
+    ) console.warn(`${HEY} ${w}`);
+  }
+
   // Pin Gradle to the resolved JDK so its toolchain resolver can't wander off to
   // a JRE it mis-detected — the root of the "[JAVA_COMPILER]" toolchain error.
   await _pinJdk(androidDir, jdk);
@@ -642,6 +653,95 @@ export function safeDevUrl(devUrl: string): string {
     );
   }
   return parsed.href;
+}
+
+/** What an app's own `android/…/MainActivity.kt` drops of the template's.
+ *  Pure — `sources` is every Kotlin/Java file the overlay supplied, joined.
+ *
+ *  Field report (a remote-desktop app, §5): the overlay replaces the template's activity
+ *  whole, and nothing said the page had fallen back to `localStorage` — which
+ *  the template's own comment measured losing a change on a kill 122 ms after
+ *  it. Two things are checked, each only where it applies:
+ *   - the durable store — a STANDALONE APK only (a client/dev APK never gets
+ *     it, by design): the page looks for the JS global `"AioNativeStore"`, so
+ *     the overlay must inject one under that exact name;
+ *   - the insets frame — every APK: targetSdk 35 draws edge-to-edge, and
+ *     without a listener the page draws under the status bar. */
+export function ownActivityLosses(
+  sources: string,
+  opts: {
+    standalone: boolean;
+    /** Every XML file the overlay put under `res/`, joined. An activity that inflates a
+     *  layout whose root sets `android:fitsSystemWindows="true"` (or a theme
+     *  item doing the same) HAS insets handling — its Kotlin just never says
+     *  the word, and reading only .kt/.java warned it falsely. */
+    resXml?: string;
+  },
+): string[] {
+  const where = "aio's android-template/app/src/main/java/aio/app/" +
+    "MainActivity.kt";
+  const out: string[] = [];
+  if (
+    opts.standalone &&
+    !(/addJavascriptInterface\s*\(/.test(sources) &&
+      sources.includes('"AioNativeStore"'))
+  ) {
+    out.push(
+      `your android/…/MainActivity.kt does not install AioNativeStore, so ` +
+        `this standalone APK keeps its state in the WebView's localStorage — ` +
+        `a change can be LOST on a kill right after it (fsync + atomic rename ` +
+        `is what the store adds). Copy class AioNativeStore from ${where} and ` +
+        `add, in onCreate: addJavascriptInterface(AioNativeStore(File(` +
+        `filesDir, "aio-store")), "AioNativeStore") — see docs/build/` +
+        `targets.md "Adding native Android code".`,
+    );
+  }
+  if (
+    !/setOnApplyWindowInsetsListener|fitsSystemWindows/.test(sources) &&
+    !FITS_SYSTEM_WINDOWS_XML.test(opts.resXml ?? "")
+  ) {
+    out.push(
+      `your android/…/MainActivity.kt (and its res/ XML) sets no ` +
+        `window-insets handling, so on Android 15+ (targetSdk 35 is ` +
+        `edge-to-edge) the page draws UNDER the status and navigation bars. ` +
+        `Wrap the WebView in a FrameLayout that takes the system-bar insets ` +
+        `as padding — the frame at the end of onCreate in ${where} — or set ` +
+        `android:fitsSystemWindows="true" on your layout's root.`,
+    );
+  }
+  return out;
+}
+
+/** `fitsSystemWindows` turned ON in XML — the layout attribute
+ *  (`android:fitsSystemWindows="true"`) or a theme item
+ *  (`<item name="android:fitsSystemWindows">true</item>`). `"false"` is not
+ *  insets handling, so it does not count. */
+const FITS_SYSTEM_WINDOWS_XML =
+  /fitsSystemWindows(?:\s*=\s*"true"|"\s*>\s*true\s*<)/;
+
+/** {@link ownActivityLosses} over an overlaid build tree: every overlaid
+ *  Kotlin/Java source, and every overlaid resource XML (layouts and themes are
+ *  where `fitsSystemWindows` usually lives). `overlaid` is the list
+ *  `_overlay` returned — paths relative to `androidDir`. */
+export async function ownActivityWarnings(
+  androidDir: string,
+  overlaid: readonly string[],
+  opts: { standalone: boolean },
+): Promise<string[]> {
+  const read = (re: RegExp) =>
+    Promise.all(
+      overlaid.filter((f) => re.test(f)).map((f) =>
+        Deno.readTextFile(join(androidDir, f))
+      ),
+    );
+  const [code, xml] = await Promise.all([
+    read(/\.(kt|java)$/),
+    read(/^app\/src\/main\/res\/.+\.xml$/),
+  ]);
+  return ownActivityLosses(code.join("\n"), {
+    standalone: opts.standalone,
+    resXml: xml.join("\n"),
+  });
 }
 
 async function _applyDevUrl(

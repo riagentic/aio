@@ -129,7 +129,7 @@ can break it. A pinned app builds against its own worktree forever.
 
 It never overrides a pin you chose — an app held at an older release stays
 there. `--dry-run` reports the seal and writes nothing. Change it any time with
-`am pin <version>` (or `am pin latest`, which stays within your major).
+`am pin <version>` (or `am pin --latest`, which stays within your major).
 
 `am fix` also reports how far behind the pin is — an advisory, never a change. A
 pin is a promise, not a prison: the app keeps building exactly as pinned, and
@@ -223,17 +223,17 @@ to `deno.json` as a dev convenience.
 
 ## Global flags
 
-| Flag           | Effect                                                                                                                                                                                                                  |
-| -------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `--app=X`      | Target a specific app by ID (default: from `deno.json` `appId`)                                                                                                                                                         |
-| `--port=N`     | Target a specific TCP port. Normally unneeded: `am` reads the port — or the socket — from the app's lock file (see "Which transport")                                                                                   |
-| `--wait[=N]`   | `start` blocks by DEFAULT (10s; `--no-wait` opts out). `stop` returns at once unless given `--wait`, whose default is 11s — the graceful budget of 8s plus the exit watchdog's slack. state: poll every Ns (default 2s) |
-| `--no-wait`    | `start` only: return as soon as the child is spawned, before it has picked a port. The old default, kept for a script that genuinely wants the spawn                                                                    |
-| `--json`       | Force JSON output                                                                                                                                                                                                       |
-| `--quiet`      | Suppress output (exit code only)                                                                                                                                                                                        |
-| `--profile=X`  | Start or target profile `X` of the app — a name (`~/.<appId>-X`, key `<appId>@X`) or a path. `am start myapp@X` is the short form. See [Profiles](#profiles-several-copies-of-one-app)                                  |
-| `--home=DIR`   | The path form of `--profile`: start or target the instance whose data home is `DIR`. `am start --home` starts one there (1.0.9 refused). See [Profiles](#profiles-several-copies-of-one-app)                            |
-| `--timeout=MS` | `surface`/`trigger`: how long to wait for the live client (default 8000; must exceed the server's own 5000 ms client wait)                                                                                              |
+| Flag           | Effect                                                                                                                                                                                                                                                                                                          |
+| -------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `--app=X`      | Target a specific app by ID (default: from `deno.json` `appId`)                                                                                                                                                                                                                                                 |
+| `--port=N`     | Target a specific TCP port. Normally unneeded: `am` reads the port — or the socket — from the app's lock file (see "Which transport")                                                                                                                                                                           |
+| `--wait[=N]`   | `start` blocks by DEFAULT (10s; `--no-wait` opts out). `stop` blocks by DEFAULT too, until the process is gone (11s — the graceful budget of 8s plus the exit watchdog's slack — then SIGKILL; exit 1 if it survives even that; `--no-wait` returns once the signal is sent). state: poll every Ns (default 2s) |
+| `--no-wait`    | `start`: return as soon as the child is spawned, before it has picked a port. `stop`: return once the stop is sent, before the process is gone                                                                                                                                                                  |
+| `--json`       | Force JSON output                                                                                                                                                                                                                                                                                               |
+| `--quiet`      | Suppress output (exit code only)                                                                                                                                                                                                                                                                                |
+| `--profile=X`  | Start or target profile `X` of the app — a name (`~/.<appId>-X`, key `<appId>@X`) or a path. `am start myapp@X` is the short form. See [Profiles](#profiles-several-copies-of-one-app)                                                                                                                          |
+| `--home=DIR`   | The path form of `--profile`: start or target the instance whose data home is `DIR`. `am start --home` starts one there (1.0.9 refused). See [Profiles](#profiles-several-copies-of-one-app)                                                                                                                    |
+| `--timeout=MS` | `surface`/`trigger`: how long to wait for the live client (default 8000; must exceed the server's own 5000 ms client wait)                                                                                                                                                                                      |
 
 A value `am` cannot act on is refused before any verb runs, never guessed:
 `--app=` and `--entry=` with nothing after the `=` are errors (an unset shell
@@ -348,7 +348,7 @@ deno task am start --no-wait      # return as soon as it is spawned (no port yet
 deno task am start --wait=30      # start with 30s timeout
 deno task am start --port=9000    # start on specific port
 deno task am stop                 # graceful shutdown — exit 1 if state did NOT reach disk
-deno task am stop --wait          # stop and block until dead (default 11s)
+deno task am stop --no-wait       # return once the stop is sent (stop waits by default)
 deno task am stop --all           # every app OF THIS PROJECT (refused outside one —
                                   # no deno.json above the cwd means no project; an
                                   # app launched inside a NESTED project is that
@@ -412,11 +412,11 @@ before the restart, if that port is still free. If something else has taken it,
 a `note:` says so and the app picks a free one. `--port=N` or a declared port
 still wins, and the port restart reuses is never written into the launch record.
 
-`start` WAITS by default (`--no-wait` opts out); `stop` returns immediately
-unless you pass `--wait[=N]`. `restart` always waits for stop internally, then
-spawns and returns immediately. `stop` tries graceful shutdown via trojan API,
-falls back to SIGTERM, escalates to SIGKILL after timeout. Kill sequence:
-SIGTERM -> wait 2s -> SIGKILL.
+`start` and `stop` both WAIT by default (`--no-wait` opts out; since 1.0.11 for
+`stop`, which used to return while the process was still alive). `restart`
+always waits for stop internally, then spawns and returns immediately. `stop`
+tries graceful shutdown via trojan API, falls back to SIGTERM, escalates to
+SIGKILL after timeout. Kill sequence: SIGTERM -> wait 2s -> SIGKILL.
 
 ### A project that is more than one app (components)
 
@@ -814,7 +814,7 @@ build against whatever version happened to be installed. The pin fixes that:
 am pin                    # what this app asks for, what it's linked to, what's available
 am pin v1.0.0-alpha38     # switch: provision that version, relink, record it
 am pin main               # follow the branch tip (a moving target, re-synced on every `am fix`)
-am pin latest           # newest release
+am pin --latest           # newest release in this app's major (`am pin latest` is the same)
 am pin /path/to/aio       # LOCAL-DEV pin: follow a framework checkout on this machine
 ```
 
@@ -840,10 +840,10 @@ Every later `am fix` keeps linking that checkout, which is the workflow for
 developing an app against a work-in-progress framework. The one pin reader
 prefers the local override and says so once per process
 (`aio: local path pin → /abs/checkout`); a dangling override (no `mod.ts` at the
-path) fails loudly instead of falling back. Pinning a release (`am pin latest`,
-`am pin v…`) **removes** `.aio/pin.local`, so the release really is what runs. A
-legacy `aioVersion: "path:…"` in `deno.json` is still read, with a one-time
-warning telling you to move it (`am pin <that path>`).
+path) fails loudly instead of falling back. Pinning a release
+(`am pin --latest`, `am pin v…`) **removes** `.aio/pin.local`, so the release
+really is what runs. A legacy `aioVersion: "path:…"` in `deno.json` is still
+read, with a one-time warning telling you to move it (`am pin <that path>`).
 
 Inside a path-pinned app, the installed `am` **delegates** to the pinned
 checkout's own am (announced on stderr; `AIO_AM_NO_DELEGATE=1` opts out) — so am
@@ -854,6 +854,10 @@ files, so your edits apply immediately. Plain `am upgrade` returns to the
 released am; it never git-mutates a dev checkout it happens to be running from.
 First switch, when the installed am is a release that predates this verb: run
 the checkout's own am once — `cd <checkout> && deno task am upgrade .`
+
+`am create app --client=electron` picks the default shell for `deno task dev` /
+`compile` — the same word as deno.json's `client` (`--target=` is the old
+spelling, still accepted; the two disagreeing is refused).
 
 `am create` pins the **newest release** by default;
 `am create app --aio-version=main` opts into the tip. The clone → build path is
@@ -934,7 +938,14 @@ A restore **moves** the data it replaces to `data.replaced-<stamp>` rather than
 deleting it, so restoring the wrong archive is recoverable. The name is never
 reused: a second restore within the same second gets `data.replaced-<stamp>-2`.
 A `data.restoring-*` left by a killed restore is named on the next restore
-(never deleted for you).
+(never deleted for you). The copy goes to that `data.restoring-*` sibling first,
+so a failed or interrupted copy never touches `data/`; the swap after it is two
+renames (`data/` → `data.replaced-*`, then the copy → `data/`), not one atomic
+step — a process killed between them leaves `data/` missing and the previous
+data in `data.replaced-*`. Both verbs also refuse an instance running on the
+same home from another lock scope (booted under another `AIO_APPS_DIR`,
+`--instance`, an appDir app), which this `am`'s lock dir cannot see: the data
+folder's own OS lock names it ("… under another lock scope — stop it first").
 
 ## UI inspection and interaction (dev mode)
 
@@ -954,6 +965,12 @@ deno task am trigger App:Stage keyDown ArrowLeft    # HOLD a key (games, drag) �
 deno task am trigger App:Stage keyUp ArrowLeft      # … then release it — press is a tap
 deno task am trigger window press "Escape"         # a WINDOW-level key (onGlobalKey)
 ```
+
+A path need not be exact, as in `testUI`: a bare name (`opencode-model`) or a
+name under components on its path (`App:opencode-model`,
+`ModelSelect:opencode-model` for `App/ModelSelect:opencode-model`) resolves when
+exactly ONE live element matches. Several → refused, with the candidates' full
+paths in `available`.
 
 `window` is the address for a key that belongs to no element. `onGlobalKey`
 registers on the document, so nothing on the surface owns the binding — and
@@ -1460,7 +1477,7 @@ am feedback my-app --create      # …and start it from a template
 ```
 
 The location is outside the version store (`$AIO_FEEDBACK_DIR` overrides it, and
-`XDG_DATA_HOME` is respected), so `am pin latest` and pruning an old version
+`XDG_DATA_HOME` is respected), so `am pin --latest` and pruning an old version
 cannot delete it.
 
 Do **not** write findings into `dep/aio/feedback/`. That path is inside the

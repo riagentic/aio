@@ -64,7 +64,12 @@ import {
 } from "../src/air.ts";
 import { renderToStream } from "../src/air/ssr-stream.ts";
 import { _isSsrRendering, renderToString } from "../src/air/vdom-ssr.ts";
-import { _ssrRenderCurrent } from "../src/air/ssr-render.ts";
+import {
+  _ssrRenderCurrent,
+  _ssrRouteContext,
+  _ssrRouteWrites,
+} from "../src/air/ssr-render.ts";
+import { AsyncLocalStorage } from "node:async_hooks";
 import { _resetHead } from "../src/air/head.ts";
 import {
   _setDocument,
@@ -72,7 +77,8 @@ import {
   hydrate,
   setDevMode,
 } from "../src/air/aio-renderer.ts";
-import { signal } from "../src/state/signal.ts";
+import { computed, effect, signal, trackedMemo } from "../src/state/signal.ts";
+import { watch } from "../src/state/watch.ts";
 import type { VNode } from "../src/air/vdom-types.ts";
 import { fuzzEnvInt } from "./fuzz-seed.ts";
 
@@ -1438,9 +1444,11 @@ async function drainText(g: AsyncGenerator<string>): Promise<string> {
   return out;
 }
 
-// Once per CALL SITE: a handler that sets the route after its call is one
-// mistake, however many requests run through it.
-Deno.test("SSR stream: the late-route warning is said once per call site, not once per request", async () => {
+// Per CALL SITE, with a count: a handler that sets the route after its call is
+// one mistake, however many requests run through it — said the 1st, 2nd, 4th,
+// 8th … time, each repeat saying how often and how many went unsaid, so a busy
+// handler is never silent for good (it once was: "once per call site").
+Deno.test("SSR stream: the late-route warning is counted per call site — said at the 1st, 2nd, 4th … hit, never silent for good", async () => {
   _resetHead();
   const Path = () => h("main", null, `path=${useRoute().path}`);
   const lateSet = (path: string) => {
@@ -1449,11 +1457,15 @@ Deno.test("SSR stream: the late-route warning is said once per call site, not on
     return drainText(body);
   };
   const said = await warnings(async () => {
-    assertEquals(await lateSet("/one"), "<main>path=/one</main>");
-    assertEquals(await lateSet("/two"), "<main>path=/two</main>");
-    assertEquals(await lateSet("/three"), "<main>path=/three</main>");
+    for (const p of ["/one", "/two", "/three", "/four", "/five"]) {
+      assertEquals(await lateSet(p), `<main>path=${p}</main>`);
+    }
   });
-  assertEquals(said.filter((l) => l.includes(LATE)).length, 1, said.join("\n"));
+  const late = said.filter((l) => l.includes(LATE));
+  assertEquals(late.length, 3, said.join("\n"));
+  assert(!late[0]!.includes("times at this call site"), late[0]);
+  assertStringIncludes(late[1]!, "[2 times at this call site; 0 more since");
+  assertStringIncludes(late[2]!, "[4 times at this call site; 1 more since");
 });
 
 // The search half of the route counts too: a query set after the call is a
@@ -1471,9 +1483,9 @@ Deno.test("SSR stream: a query (routeSearch) set after the call is a route chang
   assertEquals(said.filter((l) => l.includes(LATE)).length, 1, said.join("\n"));
 });
 
-// The same-turn warning is once per CALL SITE (per `_resetHead` in a test),
-// like the others: a process-wide slot would be burnt by the first site.
-Deno.test("SSR stream: the same-turn warning is said once per call site", async () => {
+// The same-turn warning is counted per CALL SITE (per `_resetHead` in a
+// test), like the others: a process-wide slot would be burnt by the first site.
+Deno.test("SSR stream: the same-turn warning is counted per call site", async () => {
   _resetHead();
   const Path = () => h("main", null, `path=${useRoute().path}`);
   const strayTwice = async () => {
@@ -1489,9 +1501,1014 @@ Deno.test("SSR stream: the same-turn warning is said once per call site", async 
     await strayTwice();
     await strayTwice();
   });
+  const turn = said.filter((l) => l.includes(SAME_TURN));
+  assertEquals(turn.length, 2, said.join("\n"));
+  assertStringIncludes(turn[1]!, "[2 times at this call site; 0 more since");
+});
+
+// ── The route contract, pinned: two overlapping streams + one shared promise ──
+// docs/ui/air-advanced.md "The route contract": `routePath` is ONE signal for
+// the whole process; every request must set it and call the render in one
+// synchronous step. This pins what 1.0.11 does in exactly the shape that
+// contract is about — two requests, each streaming, both resumed by one shared
+// promise (a config or session cache). Changing any line below is changing
+// the contract: update the docs and the upgrade guide with it.
+const READ = "set outside this render's synchronous step";
+Deno.test("SSR route contract (1.0.11, documented): two overlapping streams + a shared promise — which page each renders, and what is said", async () => {
+  const Two = () =>
+    h(
+      "div",
+      null,
+      h(Route, { path: "/a", element: h("i", null, "PAGE-A") }),
+      h(Route, { path: "/b", element: h("i", null, "PAGE-B") }),
+    );
+  const PAGE_A = "<div><i>PAGE-A</i><!----></div>";
+  const PAGE_B = "<div><!----><i>PAGE-B</i></div>";
+  const page = () => renderToStream(h(Two, null) as VNode);
+  /** Correct: resumed, set, call — one step. Hands the body over a turn later. */
+  const correct = async (shared: Promise<void>, path: string) => {
+    await shared;
+    routePath.set(path);
+    const body = page();
+    await Promise.resolve();
+    return drainText(body);
+  };
+  /** Breaks the contract: set, THEN await the shared promise, then call. */
+  const setThenAwait = async (shared: Promise<void>, path: string) => {
+    routePath.set(path);
+    await shared;
+    return drainText(page());
+  };
+  /** Breaks it the other way: resumed, set, await, then call. */
+  const awaitThenCall = async (shared: Promise<void>, path: string) => {
+    await shared;
+    routePath.set(path);
+    await Promise.resolve();
+    return drainText(page());
+  };
+  type Handler = (shared: Promise<void>, path: string) => Promise<string>;
+  /** A for /a (always correct, first in line on the promise), B for /b. */
+  const overlap = async (b: Handler) => {
+    const shared = Promise.withResolvers<void>();
+    const reqA = correct(shared.promise, "/a");
+    const reqB = b(shared.promise, "/b");
+    shared.resolve();
+    return await Promise.all([reqA, reqB]);
+  };
+
+  // 1. Both correct: each its own page, nothing said.
+  let got: string[] = [];
+  let said = await warnings(async () => void (got = await overlap(correct)));
+  assertEquals(got, [PAGE_A, PAGE_B]);
+  assertEquals(said, []);
+
+  // 2. B set /b before awaiting; A resumed first and set /a; B's call then
+  //    took /a. B renders A's page — no route check can see it (the value
+  //    never changes after B's call), so it is caught by WHO set it: B's own
+  //    context last wrote /b, the route it reads was written by A's. Said at
+  //    B's first route read, naming B's call site. (1.0.10: silent.)
+  said = await warnings(async () => void (got = await overlap(setThenAwait)));
   assertEquals(
-    said.filter((l) => l.includes(SAME_TURN)).length,
-    1,
-    said.join("\n"),
+    got,
+    [PAGE_A, PAGE_A],
+    "B renders A's page (1.0.9/1.0.10 alike)",
   );
+  assertEquals(said.length, 1, said.join("\n"));
+  assertStringIncludes(said[0]!, READ);
+  assertStringIncludes(said[0]!, "air-ssr-soak.test.ts");
+
+  // 3. B sets /b after A's call, in A's turn, and awaits before its own: A's
+  //    end-of-turn re-read (1.0.9's create-then-set window) takes /b. A —
+  //    correct on its own — renders B's page, and that is said by the late
+  //    warning, naming A's call site (see "a route that changed before the
+  //    stream settled…"); the read check stays quiet (one line, not two).
+  // 4. The same overlap again, through the same handlers in the same process:
+  //    the same mis-render, said again WITH the count — every route warning
+  //    is said at the 1st, 2nd, 4th … hit per call site (1.0.10: once, then
+  //    silent for the life of the process). (One `warnings()` span: it resets
+  //    the per-site counts.)
+  let again: string[] = [];
+  said = await warnings(async () => {
+    got = await overlap(awaitThenCall);
+    again = await overlap(awaitThenCall);
+  });
+  assertEquals(got, [PAGE_B, PAGE_B], "A renders B's page");
+  assertEquals(again, [PAGE_B, PAGE_B], "…every time");
+  assertEquals(said.length, 2, said.join("\n"));
+  assertStringIncludes(said[0]!, LATE);
+  assertStringIncludes(said[0]!, "air-ssr-soak.test.ts");
+  assertStringIncludes(said[1]!, LATE);
+  assertStringIncludes(said[1]!, "[2 times at this call site; 0 more since");
+});
+
+// The read check under a real server: handlers that set in their synchronous
+// prefix leave their async-context token on Deno.serve's accept loop, so every
+// later request STARTS with another request's token (measured). That is what
+// makes "the context never set the route" unknowable — and why the check is
+// gated on the render READING the route: a page that does not read it cannot
+// render the wrong one, and is never told.
+Deno.test("SSR route contract over HTTP: correct handlers and pages that never read the route are never warned", async () => {
+  _resetHead();
+  const r = rng(SEED ^ 0x52454144);
+  const Routed = () => h("main", null, `path=${useRoute().path}`);
+  const Plain = () => h("p", null, "no route read here");
+  const pause = (ms: number) => new Promise((res) => setTimeout(res, ms));
+  const serverErrors: string[] = [];
+  const said = await warnings(async () => {
+    const { server, port } = serveOnFreePort(async (req) => {
+      try {
+        const u = new URL(req.url);
+        const wait = Number(u.searchParams.get("w"));
+        let body: AsyncGenerator<string> | string;
+        if (u.pathname.startsWith("/page")) {
+          // The contract: set and call in one synchronous step, no await.
+          routePath.set(u.pathname);
+          body = u.searchParams.has("s")
+            ? renderToString(h(Routed, null) as VNode)
+            : renderToStream(h(Routed, null) as VNode);
+          await pause(wait); // the body is handed over later: allowed
+        } else {
+          await pause(wait); // never sets the route, never reads it
+          body = u.searchParams.has("s")
+            ? renderToString(h(Plain, null) as VNode)
+            : renderToStream(h(Plain, null) as VNode);
+        }
+        return new Response(
+          typeof body === "string" ? body : await drainText(body),
+        );
+      } catch (e) {
+        serverErrors.push(String(e));
+        return new Response("error", { status: 500 });
+      }
+    });
+    try {
+      for (let round = 0; round < 3; round++) {
+        const urls = Array.from({ length: 400 }, (_, i) => {
+          const q = `w=${r.n(4)}${r.n(2) ? "&s" : ""}`;
+          return i % 4 === 3 ? `/plain?${q}` : `/page${round}-${i}?${q}`;
+        });
+        const got = await Promise.all(
+          urls.map((u) =>
+            fetch(`http://127.0.0.1:${port}${u}`).then((res) => res.text())
+          ),
+        );
+        assertEquals(got.length, urls.length);
+        assertEquals(urls.length, 400);
+        urls.forEach((u, i) => {
+          const want = u.startsWith("/page")
+            ? `<main>path=${u.slice(0, u.indexOf("?"))}</main>`
+            : "<p>no route read here</p>";
+          assertEquals(got[i], want, `FUZZ_SEED=${SEED}: ${u}`);
+        });
+      }
+    } finally {
+      await server.shutdown();
+    }
+  });
+  assertEquals(serverErrors, []);
+  assertEquals(
+    said,
+    [],
+    "a correct handler or a page that never reads the route was warned",
+  );
+});
+
+// Which context wrote the route, in the shapes the read check must tell
+// apart. A write inside a helper AFTER its await lands in the helper's own
+// continuation — not the handler's — which is exactly "this one after an
+// await": said. The 1.0.9 create-then-set step writes in the call's own
+// context during its turn: the stream renders that write, and it is the late
+// warning's to say when it changed the route (one line, never two), nobody's
+// when it did not.
+Deno.test("SSR route contract: a route written after an await is said on read; create-then-set in the call's own step is not the read check's", async () => {
+  const Routed = () => h("main", null, `path=${useRoute().path}`);
+  const writeLater = async (p: string) => {
+    await Promise.resolve();
+    routePath.set(p); // in the helper's continuation, not the caller's
+  };
+  // (a) The handler's own context last wrote /a; the helper wrote /b after an
+  //     await; the render reads /b — set outside its synchronous step.
+  let out = "";
+  let said = await warnings(async () => {
+    routePath.set("/a");
+    await writeLater("/b");
+    out = await drainText(renderToStream(h(Routed, null) as VNode));
+  });
+  assertEquals(out, "<main>path=/b</main>");
+  assertEquals(said.length, 1, said.join("\n"));
+  assertStringIncludes(said[0]!, READ);
+  // (b) Same, then 1.0.9's create-then-set with the SAME value in the call's
+  //     own step: the stream renders its own write. Nothing to say.
+  said = await warnings(async () => {
+    routePath.set("/a");
+    await writeLater("/b");
+    const body = renderToStream(h(Routed, null) as VNode);
+    routePath.set("/b");
+    out = await drainText(body);
+  });
+  assertEquals(out, "<main>path=/b</main>");
+  assertEquals(said, []);
+  // (c) …and with a DIFFERENT value: the late warning says it, once; the read
+  //     check does not say it a second time.
+  said = await warnings(async () => {
+    routePath.set("/a");
+    await writeLater("/b");
+    const body = renderToStream(h(Routed, null) as VNode);
+    routePath.set("/c");
+    out = await drainText(body);
+  });
+  assertEquals(out, "<main>path=/c</main>");
+  assertEquals(said.length, 1, said.join("\n"));
+  assertStringIncludes(said[0]!, LATE);
+  // (d) …and when the change comes from ANOTHER context, in the call's turn
+  //     (a request resumed with it): still the late warning's alone.
+  said = await warnings(async () => {
+    const go = Promise.withResolvers<void>();
+    const other = (async () => {
+      await go.promise; // this context predates everything below
+      routePath.set("/d");
+    })();
+    routePath.set("/a");
+    await writeLater("/b");
+    go.resolve(); // its write lands in this turn, before the stream settles
+    const body = renderToStream(h(Routed, null) as VNode);
+    await Promise.resolve(); // the turn ends: the other write, then the settle
+    out = await drainText(body);
+    await other;
+  });
+  assertEquals(out, "<main>path=/d</main>");
+  assertEquals(said.length, 1, said.join("\n"));
+  assertStringIncludes(said[0]!, LATE);
+});
+
+// A tracer's active span (OpenTelemetry's `startActiveSpan`, any library's
+// `AsyncLocalStorage.run()`) around the route write: the write's stamp is
+// dropped from the context when `run()` returns, so the render right after it
+// sees the token from BEFORE the write. Correct code — set and render in one
+// synchronous step — and never told.
+Deno.test("SSR route contract: a route set inside another library's run() and rendered in the same step is not warned", async () => {
+  const tracer = new AsyncLocalStorage<string>();
+  const Routed = () => h("main", null, `path=${useRoute().path}`);
+  const said = await warnings(async () => {
+    routePath.set("/before"); // this context holds a token of its own
+    await Promise.resolve();
+    tracer.run("span", () => routePath.set("/string"));
+    assertEquals(
+      renderToString(h(Routed, null) as VNode),
+      "<main>path=/string</main>",
+    );
+    await Promise.resolve();
+    tracer.run("span", () => {
+      routePath.set("/stream");
+      routeSearch.set(new URLSearchParams("q=1"));
+    });
+    assertEquals(
+      await drainText(renderToStream(h(Routed, null) as VNode)),
+      "<main>path=/stream</main>",
+    );
+  });
+  assertEquals(said, []);
+});
+
+// The one shape of "another request" the check cannot see, pinned so a change
+// is a decision: B wrote its route in the synchronous part of its turn, and A
+// started AFTER that — so A's context inherited B's token (on a real server,
+// through the accept loop). A resumes from the shared promise and sets /a in
+// the same tick B then renders in: A's write looks like B's own step.
+// Documented in docs/ui/air-advanced.md "The route contract" (best-effort).
+Deno.test("SSR route contract: row 2 when A inherited B's token — B renders A's page, unsaid (the documented gap)", async () => {
+  const Two = () =>
+    h(
+      "div",
+      null,
+      h(Route, { path: "/a", element: h("i", null, "PAGE-A") }),
+      h(Route, { path: "/b", element: h("i", null, "PAGE-B") }),
+    );
+  let got: string[] = [];
+  const said = await warnings(async () => {
+    const shared = Promise.withResolvers<void>();
+    const reqB = (async () => {
+      routePath.set("/b"); // leaks into this (the caller's) context
+      await shared.promise.then(() => {}); // one hop: A resumes first
+      return drainText(renderToStream(h(Two, null) as VNode));
+    })();
+    const reqA = (async () => { // started after: inherits B's token
+      await shared.promise;
+      routePath.set("/a");
+      const body = renderToStream(h(Two, null) as VNode);
+      await Promise.resolve();
+      return drainText(body);
+    })();
+    shared.resolve();
+    got = await Promise.all([reqA, reqB]);
+  });
+  assertEquals(got, [
+    "<div><i>PAGE-A</i><!----></div>",
+    "<div><i>PAGE-A</i><!----></div>",
+  ]);
+  assertEquals(said, []);
+});
+
+// A write keeps no earlier write alive: a static-site loop over many pages,
+// each set and rendered in one step, leaves ONE token behind, holding ids
+// only — never the chain of every page.
+Deno.test("SSR route stamps: retention is bounded over a long synchronous loop", async () => {
+  const Routed = () => h("main", null, `path=${useRoute().path}`);
+  const pages = Array.from({ length: 5000 }, (_, i) => `/p${i}`);
+  assertEquals(pages.length, 5000);
+  const said = await warnings(async () => {
+    for (const p of pages) {
+      routePath.set(p);
+      assertEquals(
+        renderToString(h(Routed, null) as VNode),
+        `<main>path=${p}</main>`,
+      );
+    }
+    const last = _ssrRouteContext();
+    assert(last !== undefined, "the loop's writes are stamped");
+    // Every object reachable from the token: nothing but itself and its list.
+    const reach = new Set<object>();
+    const walk = (o: unknown) => {
+      if (o === null || typeof o !== "object" || reach.has(o)) return;
+      reach.add(o);
+      for (const v of Object.values(o)) walk(v);
+    };
+    walk(last);
+    assertEquals(reach.size, 1, "the token holds ids only, no earlier token");
+    assert(last.id >= pages.length, "every page's write was stamped");
+  });
+  assertEquals(said, []);
+});
+
+// ── Route on render: `renderToStream(v, key, { route })` ──────────────────
+// The concurrency-safe form: the render is GIVEN its route, so it neither
+// reads nor writes the global `routePath` / `routeSearch`, and nothing can
+// race it — not a shared promise, not an await anywhere in the handler.
+
+const TwoPages = () =>
+  h(
+    "div",
+    null,
+    h(Route, { path: "/a", element: h("i", null, "PAGE-A") }),
+    h(Route, { path: "/b", element: h("i", null, "PAGE-B") }),
+  );
+const EXPLICIT_A = "<div><i>PAGE-A</i><!----></div>";
+const EXPLICIT_B = "<div><!----><i>PAGE-B</i></div>";
+
+/** The global route, and how many times anything wrote it. */
+const globalRoute = () => ({
+  path: routePath.peek(),
+  search: routeSearch.peek().toString(),
+  writes: _ssrRouteWrites(),
+});
+
+Deno.test("SSR explicit route: the row-2 shape (two streams + a shared promise, awaits everywhere) — each its own page, nothing said, the global untouched", async () => {
+  let got: string[] = [];
+  let before = globalRoute();
+  let after = before;
+  const said = await warnings(async () => {
+    routePath.set("/global");
+    before = globalRoute();
+    const shared = Promise.withResolvers<void>();
+    // Every await the global contract forbids, on both sides.
+    const req = async (path: string, wait: Promise<unknown>) => {
+      await shared.promise;
+      const body = renderToStream(h(TwoPages, null) as VNode, undefined, {
+        route: path,
+      });
+      await wait;
+      return drainText(body);
+    };
+    const reqB = (async () => {
+      await shared.promise.then(() => {});
+      return req("/b", Promise.resolve());
+    })();
+    const reqA = req("/a", new Promise((r) => setTimeout(r, 1)));
+    shared.resolve();
+    got = await Promise.all([reqA, reqB]);
+    after = globalRoute();
+  });
+  assertEquals(got, [EXPLICIT_A, EXPLICIT_B]);
+  assertEquals(said, []);
+  assertEquals(after, before, "an explicit render wrote the global route");
+});
+
+Deno.test("SSR explicit route: renderToString routes by it too, query included, and the route signals read it inside the render", () => {
+  const Direct = () => {
+    const r = useRoute();
+    return h(
+      "p",
+      null,
+      `${r.path}|${r.search.get("q")}|${routePath.value}|${routePath()}|` +
+        `${routePath.peek()}|${routeSearch.value.get("q")}|` +
+        `${routeSearch.peek().get("q")}`,
+    );
+  };
+  routePath.set("/global");
+  routeSearch.set(new URLSearchParams("q=global"));
+  try {
+    const before = globalRoute();
+    assertEquals(
+      renderToString(h(Direct, null) as VNode, {
+        route: "/mine",
+        search: new URLSearchParams("q=mine"),
+      }),
+      "<p>/mine|mine|/mine|/mine|/mine|mine|mine</p>",
+    );
+    // Outside a component call the signals are the globals, as always.
+    assertEquals(routePath.value, "/global");
+    assertEquals(routeSearch.peek().get("q"), "global");
+    assertEquals(globalRoute(), before);
+    // Omitted: exactly the global route (1.x).
+    assertEquals(
+      renderToString(h(Direct, null) as VNode),
+      "<p>/global|global|/global|/global|/global|global|global</p>",
+    );
+  } finally {
+    routePath.set("/");
+    routeSearch.set(new URLSearchParams());
+  }
+});
+
+Deno.test("SSR explicit route: nested renders and streams inherit it — also a stream read after the page ended; a nested route of its own wins", async () => {
+  const Path = () => h("b", null, useRoute().path);
+  let late: AsyncGenerator<string> | null = null;
+  const Outer = () =>
+    h(
+      "div",
+      null,
+      h(Path, null),
+      renderToString(h(Path, null) as VNode), // nested, no route: inherits
+      renderToString(h(Path, null) as VNode, { route: "/own" }), // its own
+      (() => {
+        late = renderToStream(h(Path, null) as VNode); // read after the page
+        return null;
+      })(),
+    );
+  routePath.set("/global");
+  try {
+    const said = await warnings(async () => {
+      assertEquals(
+        await drainText(
+          renderToStream(h(Outer, null) as VNode, undefined, {
+            route: "/page",
+          }),
+        ),
+        "<div><b>/page</b>&lt;b&gt;/page&lt;/b&gt;&lt;b&gt;/own&lt;/b&gt;<!----></div>",
+      );
+      routePath.set("/moved"); // the global moves before the late read
+      assert(late !== null);
+      assertEquals(await drainText(late), "<b>/page</b>");
+    });
+    assertEquals(said, []);
+  } finally {
+    routePath.set("/");
+  }
+});
+
+Deno.test("SSR explicit route: malformed options are refused, never guessed", async () => {
+  const P = () => h("b", null, "x");
+  const bad: [unknown, RegExp][] = [
+    [{ search: new URLSearchParams("q=1") }, /`search` needs `route`/],
+    [{ route: "/p?q=1" }, /must be a pathname/],
+    [{ route: 7 }, /must be a pathname/],
+    [{ route: "" }, /must be a pathname/],
+    [{ route: "about" }, /must be a pathname/],
+    [{ route: "https://x/a" }, /must be a pathname/],
+    [{ route: "//evil/a" }, /must be a pathname/],
+    [{ route: "/p#h" }, /must be a pathname/],
+    [{ route: "/p", search: "q=1" }, /must be a URLSearchParams/],
+    [null, /must be an object/],
+  ];
+  assertEquals(bad.length, 10);
+  for (const [opts, why] of bad) {
+    let threw: unknown = null;
+    try {
+      renderToString(h(P, null) as VNode, opts as { route?: string });
+    } catch (e) {
+      threw = e;
+    }
+    assert(
+      threw instanceof TypeError && why.test(threw.message),
+      String(threw),
+    );
+    // A stream says it at its first pull, like every other set-up error.
+    const g = renderToStream(
+      h(P, null) as VNode,
+      undefined,
+      opts as {
+        route?: string;
+      },
+    );
+    let pulled: unknown = null;
+    try {
+      await g.next();
+    } catch (e) {
+      pulled = e;
+    }
+    assert(
+      pulled instanceof TypeError && why.test(pulled.message),
+      String(pulled),
+    );
+  }
+});
+
+// The old call forms compile unchanged, and the new ones type-check (a
+// compile-time test: `deno check` of this file is the assertion).
+Deno.test("SSR explicit route: every 1.x call form still type-checks", async () => {
+  const P = () => h("b", null, "x");
+  const req = new Request("http://localhost/");
+  const forms: (string | AsyncGenerator<string>)[] = [
+    renderToString(h(P, null) as VNode),
+    renderToString(h(P, null) as VNode, { route: "/p" }),
+    renderToString(h(P, null) as VNode, {
+      route: "/p",
+      search: new URLSearchParams(),
+    }),
+    renderToStream(h(P, null) as VNode),
+    renderToStream(h(P, null) as VNode, req),
+    renderToStream(h(P, null) as VNode, req, { route: "/p" }),
+    renderToStream(h(P, null) as VNode, undefined, { route: "/p" }),
+  ];
+  assertEquals(forms.length, 7);
+  for (const f of forms) {
+    assertEquals(typeof f === "string" ? f : await drainText(f), "<b>x</b>");
+  }
+  _resetHead();
+});
+
+// Route on render under a real server: every handler awaits before AND after
+// its render call — the shape the global contract forbids — and every page is
+// its own, nothing is said, and the global route is never touched.
+Deno.test("SSR explicit route over HTTP: 400 overlapping requests x3, awaits anywhere — every page its own, nothing said", async () => {
+  _resetHead();
+  const r = rng(SEED ^ 0x45585052);
+  const Routed = () =>
+    h("main", null, `path=${useRoute().path} q=${useRoute().search.get("q")}`);
+  const pause = (ms: number) => new Promise((res) => setTimeout(res, ms));
+  const serverErrors: string[] = [];
+  routePath.set("/global");
+  const before = globalRoute();
+  let after = before;
+  const said = await warnings(async () => {
+    routePath.set("/global");
+    const { server, port } = serveOnFreePort(async (req) => {
+      try {
+        const u = new URL(req.url);
+        const [w1, w2] = (u.searchParams.get("w") ?? "0.0").split(".").map(
+          Number,
+        );
+        await pause(w1!); // a session read BEFORE the render: fine now
+        const opts = { route: u.pathname, search: u.searchParams };
+        const body = u.searchParams.has("s")
+          ? renderToString(h(Routed, null) as VNode, opts)
+          : renderToStream(h(Routed, null) as VNode, req, opts);
+        await pause(w2!);
+        return new Response(
+          typeof body === "string" ? body : await drainText(body),
+        );
+      } catch (e) {
+        serverErrors.push(String(e));
+        return new Response("error", { status: 500 });
+      }
+    });
+    try {
+      for (let round = 0; round < 3; round++) {
+        const urls = Array.from(
+          { length: 400 },
+          (_, i) =>
+            `/p${round}-${i}?q=${i}&w=${r.n(4)}.${r.n(4)}${r.n(2) ? "&s" : ""}`,
+        );
+        const got = await Promise.all(
+          urls.map((u) =>
+            fetch(`http://127.0.0.1:${port}${u}`).then((res) => res.text())
+          ),
+        );
+        assertEquals(urls.length, 400);
+        assertEquals(got.length, urls.length);
+        urls.forEach((u, i) => {
+          const path = u.slice(0, u.indexOf("?"));
+          assertEquals(
+            got[i],
+            `<main>path=${path} q=${i}</main>`,
+            `FUZZ_SEED=${SEED}: ${u}`,
+          );
+        });
+      }
+    } finally {
+      await server.shutdown();
+    }
+    after = globalRoute();
+  });
+  assertEquals(serverErrors, []);
+  assertEquals(said, []);
+  assertEquals(after.writes, before.writes + 1, "only the test's own write");
+  assertEquals(after.path, "/global");
+});
+
+/** A signal as a child — what JSX `{signal}` compiles to. */
+const asChild = (sig: unknown) => sig as VNode;
+
+// Every read a render makes answers for its route — not only a component
+// body's: a signal as a child, as an attribute, as a textarea's value, inside
+// a boundary's fallback. They are read by the writer itself, outside any
+// component call, in the string writer and in every stream pull.
+Deno.test("SSR explicit route: a route signal as a child, an attribute or a fallback renders the render's route", async () => {
+  const Boom = (): never => {
+    throw new Error("boom");
+  };
+  const page = () =>
+    h(
+      "p",
+      null,
+      asChild(routePath),
+      "|",
+      h("a", { href: routePath, title: routeSearch }),
+      h("textarea", { value: routePath }),
+      h(
+        ErrorBoundary,
+        { fallback: () => h("i", null, asChild(routePath)) },
+        h(Boom, null),
+      ),
+    ) as VNode;
+  const want = '<p>/x|<a href="/x" title="q=1"></a>' +
+    "<textarea>/x</textarea><i>/x</i></p>";
+  routePath.set("/global");
+  routeSearch.set(new URLSearchParams("q=global"));
+  try {
+    const opts = { route: "/x", search: new URLSearchParams("q=1") };
+    const said = await warnings(async () => {
+      routePath.set("/global");
+      routeSearch.set(new URLSearchParams("q=global"));
+      assertEquals(renderToString(page(), opts), want);
+      assertEquals(
+        await drainText(renderToStream(page(), undefined, opts)),
+        want,
+      );
+    });
+    assertEquals(said, []);
+  } finally {
+    routePath.set("/");
+    routeSearch.set(new URLSearchParams());
+  }
+});
+
+// A module-level computed over the route is shared by every render and by the
+// global: a value it derived inside one render must not reach the next render
+// or the global, and a value derived globally must not reach a render. Nested
+// computeds, the query, a trackedMemo, and the effects over them (which must
+// keep their subscription and see the global) included.
+Deno.test("SSR explicit route: module-scope computeds, trackedMemo and effects over the route are right in every render and globally", async () => {
+  const sect = computed(() => routePath.value);
+  const deep = computed(() => `${sect.value}!`);
+  const query = computed(() => routeSearch.value.get("q") ?? "-");
+  const memo = trackedMemo((k: string) => `${routePath.value}${k}`);
+  const seen: string[] = [];
+  const bump = signal(0);
+  const stops = [
+    effect(() => void seen.push(`sect:${sect.value}`)),
+    effect(() => {
+      bump.value; // a component writes it mid-render: this runs in the flush
+      seen.push(`fx:${routePath.value}`);
+    }),
+  ];
+  const Show = () => {
+    bump.set(bump.peek() + 1);
+    return h(
+      "b",
+      null,
+      `${sect.value} ${deep.value} ${query.value} ${memo("~")}`,
+    );
+  };
+  const page = () => h("p", null, h(Show, null), asChild(sect)) as VNode;
+  try {
+    routePath.set("/g");
+    routeSearch.set(new URLSearchParams("q=g"));
+    assertEquals([sect.value, deep.value, query.value, memo("~")], [
+      "/g",
+      "/g!",
+      "g",
+      "/g~",
+    ]); // clean global caches, before any render
+    seen.length = 0;
+    let during: string[] = [];
+    const said = await warnings(async () => {
+      routePath.set("/g");
+      routeSearch.set(new URLSearchParams("q=g"));
+      for (const [route, q] of [["/x", "1"], ["/y", "2"]] as const) {
+        const opts = { route, search: new URLSearchParams(`q=${q}`) };
+        const want = `<p><b>${route} ${route}! ${q} ${route}~</b>${route}</p>`;
+        assertEquals(renderToString(page(), opts), want);
+        assertEquals(
+          await drainText(renderToStream(page(), undefined, opts)),
+          want,
+        );
+        // …and nothing of it outside the render.
+        assertEquals([sect.value, deep.value, query.value, memo("~")], [
+          "/g",
+          "/g!",
+          "g",
+          "/g~",
+        ]);
+      }
+      assertEquals(
+        renderToString(page()),
+        "<p><b>/g /g! g /g~</b>/g</p>",
+        "a global render after explicit ones",
+      );
+      during = [...seen];
+    });
+    assertEquals(said, []);
+    // The effects ran in the flush with the GLOBAL route, and never re-ran
+    // for a render's route.
+    assert(during.length > 0, "the component's write flushed the effect");
+    assertEquals(during.filter((l) => l !== "fx:/g"), [], during.join(","));
+    // …and kept their subscriptions: the next global write reaches both.
+    routePath.set("/g");
+    seen.length = 0;
+    routePath.set("/g2");
+    assertEquals(seen.sort(), ["fx:/g2", "sect:/g2"]);
+    // …even when the LAST evaluation of the computed was inside a render (no
+    // global read in between): its link to the route survived that render.
+    renderToString(page(), { route: "/z" });
+    seen.length = 0;
+    routePath.set("/g3");
+    assert(seen.includes("sect:/g3"), seen.join(","));
+  } finally {
+    for (const stop of stops) stop();
+    routePath.set("/");
+    routeSearch.set(new URLSearchParams());
+  }
+});
+
+// `renderToString(v, { route })` takes its options second, so the natural
+// slip is `renderToStream(v, { route })` — options in the KEY slot, which
+// would route nothing. Refused at the first pull, like every set-up error.
+Deno.test("SSR explicit route: renderToStream with the options in the key slot is refused", async () => {
+  const P = () => h("b", null, useRoute().path);
+  const slips: object[] = [
+    { route: "/p" },
+    { search: new URLSearchParams("q=1") },
+    Object.assign(Object.create(null), { route: "/p" }),
+  ];
+  assertEquals(slips.length, 3);
+  for (const slip of slips) {
+    let threw: unknown = null;
+    try {
+      await renderToStream(h(P, null) as VNode, slip).next();
+    } catch (e) {
+      threw = e;
+    }
+    assert(
+      threw instanceof TypeError &&
+        /options are the 3rd argument/.test(threw.message),
+      String(threw),
+    );
+  }
+  // A key that merely HAS such a field (a class instance, a Request) is a key.
+  class Key {
+    route = "/not-options";
+  }
+  routePath.set("/g");
+  try {
+    assertEquals(
+      await drainText(renderToStream(h(P, null) as VNode, new Key())),
+      "<b>/g</b>",
+    );
+  } finally {
+    routePath.set("/");
+    _resetHead();
+  }
+});
+
+// A long run of writes inside another library's run(), after a write of the
+// render's own step: still the render's own step, whatever the run's length.
+Deno.test("SSR route contract: a long run of writes in the render's own step is never warned", async () => {
+  const tracer = new AsyncLocalStorage<string>();
+  const Routed = () => h("main", null, `path=${useRoute().path}`);
+  const said = await warnings(async () => {
+    await Promise.resolve();
+    routePath.set("/first"); // this step's own write, same tick as the run
+    tracer.run("span", () => {
+      for (let i = 0; i < 40; i++) routePath.set(`/w${i}`);
+    });
+    assertEquals(
+      renderToString(h(Routed, null) as VNode),
+      "<main>path=/w39</main>",
+    );
+  });
+  assertEquals(said, []);
+});
+
+// A render never touches the GLOBAL side of what it reads. A computed that
+// branches on the route read the other branch inside a render; if that read
+// had gone through the computed's global cache, its global link to the branch
+// the global route takes would be gone — and every effect, `watch` and later
+// `peek()` over it would miss the next write, silently (review round 3).
+Deno.test("SSR explicit route: a render reading a computed that branches on the route leaves its global subscribers intact", async () => {
+  const a = signal(1);
+  const b = signal(100);
+  const page = computed(() => routePath.value === "/" ? a.value : b.value);
+  const tens = computed(() => a.value * 10);
+  const seenFx: number[] = [];
+  const seenWatch: number[] = [];
+  let inRender: (() => void) | null = null;
+  const seenInRender: number[] = [];
+  const App = () => {
+    // An effect CREATED during the render is a global subscriber too.
+    // `tens` is read by nothing else: the render's read is its first.
+    inRender ??= effect(() => void seenInRender.push(tens.value));
+    return h("p", null, String(page.value));
+  };
+  const stops = [
+    effect(() => void seenFx.push(page.value)),
+    watch(page, (v: number) => void seenWatch.push(v)),
+  ];
+  routePath.set("/");
+  try {
+    const said = await warnings(async () => {
+      routePath.set("/");
+      assertEquals(
+        renderToString(h(App, null) as VNode, { route: "/other" }),
+        "<p>100</p>",
+      );
+      assertEquals(
+        await drainText(
+          renderToStream(h(App, null) as VNode, undefined, { route: "/x" }),
+        ),
+        "<p>100</p>",
+      );
+      a.set(2);
+      assertEquals(page.peek(), 2);
+      assertEquals(page.value, 2);
+      a.set(3);
+    });
+    assertEquals(said, []);
+    assertEquals(seenFx, [1, 2, 3], "the effect over the computed");
+    assertEquals(seenWatch, [2, 3], "the watch over the computed");
+    // Created in the render, over a computed nothing had read globally: the
+    // later writes still reach it.
+    assertEquals(seenInRender, [10, 20, 30], "the effect created in a render");
+  } finally {
+    for (const stop of stops) stop();
+    (inRender as (() => void) | null)?.();
+    routePath.set("/");
+  }
+});
+
+// Per render, a computed is evaluated once, however many times it is read —
+// also when renders interleave (two streams pulled in turn), and a global
+// read after them costs nothing: the global cache was never touched.
+Deno.test("SSR explicit route: a computed is evaluated once per render per computed, interleaved streams included", async () => {
+  const n = signal(5);
+  let calls = 0;
+  const c = computed(() => {
+    calls++;
+    return n.value * 2;
+  });
+  const Many = () =>
+    h(
+      "ul",
+      null,
+      ...Array.from({ length: 5 }, () =>
+        h(() => h("li", null, String(c.value)), null)),
+    );
+  c.value;
+  calls = 0;
+  for (let i = 0; i < 10; i++) {
+    renderToString(h(Many, null) as VNode, { route: "/x" });
+  }
+  assertEquals(calls, 10, "10 renders × 5 reads");
+  const s1 = renderToStream(h(Many, null) as VNode, undefined, { route: "/a" });
+  const s2 = renderToStream(h(Many, null) as VNode, undefined, { route: "/b" });
+  calls = 0;
+  let d1 = false, d2 = false;
+  while (!d1 || !d2) {
+    if (!d1) d1 = (await s1.next()).done === true;
+    if (!d2) d2 = (await s2.next()).done === true;
+  }
+  assertEquals(calls, 2, "2 interleaved streams × 5 reads");
+  calls = 0;
+  assertEquals(c.value, 10);
+  assertEquals(calls, 0, "the global cache was never touched");
+  // A write between two reads of one render is seen by the next read.
+  let mid = 0;
+  const Mid = () => {
+    const first = c.value;
+    n.set(6);
+    mid = c.value;
+    return h("i", null, `${first}/${mid}`);
+  };
+  assertEquals(
+    renderToString(h(Mid, null) as VNode, { route: "/m" }),
+    "<i>10/12</i>",
+  );
+  n.set(5);
+  _resetHead();
+});
+
+// A trackedMemo read by an explicit-route render that an EFFECT drives: a
+// compute that throws must keep the effect subscribed through the render's
+// read scope too, so the page recovers (review round 5).
+Deno.test("SSR explicit route: an effect rendering a page whose memo threw re-renders when it recovers", () => {
+  for (const via of ["computed", "memo"] as const) {
+    const src = signal(1);
+    const dbl = computed(() => {
+      if (src.value === 3) throw new Error("boom");
+      return src.value * 2;
+    });
+    const memo = trackedMemo((k: number) => dbl.value + k);
+    const C = () =>
+      h("i", null, String(via === "computed" ? dbl.value : memo(0)));
+    const out: string[] = [];
+    const stop = effect(() => {
+      try {
+        out.push(renderToString(h(C, null) as VNode, { route: "/a" }));
+      } catch (e) {
+        out.push(`ERR ${(e as Error).message}`);
+      }
+    });
+    try {
+      for (const v of [2, 3, 4]) src.set(v);
+      assertEquals(out, [
+        "<i>2</i>",
+        "<i>4</i>",
+        "ERR boom",
+        "<i>8</i>",
+      ], via);
+    } finally {
+      stop();
+    }
+  }
+});
+
+// An effect or watch CREATED during an explicit-route render runs on the
+// GLOBAL route. One that reads the route (to write a value the page shows)
+// would put the global route's value into this render — said, per call site
+// with a count. Reading no route, or created in a render without a route:
+// nothing to say.
+Deno.test("SSR explicit route: an effect or watch created in the render that reads the route is named", async () => {
+  const title = signal("?");
+  const fx = () => effect(() => void title.set(`t:${routePath.value}`)); // ONE call site
+  const stops: (() => void)[] = [];
+  const Reads = () => {
+    stops.push(fx());
+    return h("p", null, asChild(title));
+  };
+  const Watches = () => {
+    stops.push(watch(routePath, () => {}));
+    return h("p", null, "w");
+  };
+  const Quiet = () => {
+    stops.push(effect(() => void title.peek()));
+    return h("p", null, "q");
+  };
+  const said = await warnings(async () => {
+    routePath.set("/g");
+    assertEquals(
+      renderToString(h(Reads, null) as VNode, { route: "/r" }),
+      "<p>t:/g</p>",
+      "the global route's value, as the warning says",
+    );
+    renderToString(h(Reads, null) as VNode, { route: "/r2" });
+    renderToString(h(Watches, null) as VNode, { route: "/r" });
+    renderToString(h(Quiet, null) as VNode, { route: "/r" });
+    renderToString(h(Reads, null) as VNode); // no route of its own
+  });
+  const named = said.filter((l) => l.includes("created during a render"));
+  assertEquals(named.length, 3, said.join("\n"));
+  assertStringIncludes(named[0]!, "air-ssr-soak.test.ts");
+  assertStringIncludes(named[1]!, "[2 times at this call site; 0 more since");
+  assert(
+    !named[2]!.includes("times at this call site"),
+    "the watch: its own site",
+  );
+  for (const s of stops) s();
+});
+
+// The route read THROUGH a computed (two deep), a watch over one, or a
+// trackedMemo is the same mistake — named; an effect over a computed that
+// never reaches the route is not.
+Deno.test("SSR explicit route: an effect or watch created in the render that reads the route through a computed is named", async () => {
+  const title = signal("?");
+  const isAdmin = computed(() => routePath.value.startsWith("/admin"));
+  const label = computed(() => (isAdmin.value ? "admin" : "user"));
+  const byRoute = trackedMemo((k: number) => `${routePath.value}#${k}`);
+  const other = signal(1);
+  const dbl = computed(() => other.value * 2);
+  const stops: (() => void)[] = [];
+  const Page = () => {
+    stops.push(effect(() => void title.set(label.value)));
+    stops.push(watch(isAdmin, (v) => void title.set(String(v))));
+    stops.push(effect(() => void title.set(byRoute(1))));
+    stops.push(effect(() => void title.set(String(dbl.value))));
+    return h("p", null, "x");
+  };
+  const said = await warnings(async () => {
+    routePath.set("/");
+    renderToString(h(Page, null) as VNode, { route: "/admin/x" });
+  });
+  const named = said.filter((l) => l.includes("created during a render"));
+  assertEquals(named.length, 3, said.join("\n"));
+  for (const s of stops) s();
 });

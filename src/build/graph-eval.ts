@@ -38,19 +38,47 @@ const drop = ${JSON.stringify(NOT_IN_A_BROWSER)};
 for (const k of drop) { try { delete globalThis[k]; } catch {} }
 // A permissive DOM stand-in: any property is an object you can read from and
 // call. Enough for module-scope feature reads; nothing is rendered.
-const stub = (name) => new Proxy(function () {}, {
-  get(_, p) {
-    if (p === Symbol.toPrimitive) return () => "";
-    if (p === "readyState") return "loading";
-    if (p === "toString") return () => "[stub " + name + "]";
-    if (p === "then") return undefined;
-    return stub(name + "." + String(p));
-  },
-  apply() { return stub(name + "()"); },
-  construct() { return stub("new " + name); },
-  set() { return true; },
-  has() { return true; },
-});
+//
+// It REMEMBERS what is written: a later read of a property the module set
+// returns the stored value, and a child stub is one object per path (so
+// \`document.body.x = 1; document.body.x\` reads 1). And a never-written
+// \`__marker\` (a leading "__": \`__THREE__\`, \`__VUE__\`, \`__SENTRY__\`) reads
+// as ABSENT — undefined, and false for \`in\` — as it does in a fresh tab.
+// Those names are "was I loaded before?" guards; answering "yes" to all of
+// them made three.js print "Multiple instances of Three.js being imported"
+// on every check and dev boot (field report (a desktop map app) §3). Every OTHER
+// unwritten name stays permissive (a truthy callable stub, \`in\` → true):
+// \`window.addEventListener(…)\` / \`document.createElement(…)\` at module
+// scope must not become a false refusal.
+const isMarker = (p) => typeof p === "string" && p.startsWith("__");
+const stub = (name) => {
+  const written = new Map();
+  const children = new Map();
+  return new Proxy(function () {}, {
+    get(_, p) {
+      if (written.has(p)) return written.get(p);
+      if (p === Symbol.toPrimitive) return () => "";
+      if (p === "readyState") return "loading";
+      if (p === "toString") return () => "[stub " + name + "]";
+      if (p === "then") return undefined;
+      if (isMarker(p)) return undefined;
+      let c = children.get(p);
+      if (!c) children.set(p, c = stub(name + "." + String(p)));
+      return c;
+    },
+    apply() { return stub(name + "()"); },
+    construct() { return stub("new " + name); },
+    set(_, p, v) { written.set(p, v); return true; },
+    deleteProperty(t, p) {
+      written.delete(p);
+      children.delete(p);
+      // A proxy may not report deleting the target's non-configurable
+      // \`prototype\` — that is a TypeError of the stub's own making.
+      return Object.getOwnPropertyDescriptor(t, p)?.configurable !== false;
+    },
+    has(_, p) { return written.has(p) || !isMarker(p); },
+  });
+};
 for (const k of ["window", "document", "navigator", "location", "localStorage", "sessionStorage", "history"]) {
   if (!(k in globalThis)) globalThis[k] = stub(k);
 }

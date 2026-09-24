@@ -204,23 +204,24 @@ const html = renderToString(
 );
 ```
 
-**A routed app** renders the route in `routePath` — set it from the request
-before rendering. `<Route>`, `useRoute` and `<Link>` need no runtime on the
-server, and context Providers (the route context, your own) reach their children
-exactly as they do in the browser:
+**A routed app** passes the request's route to the render. `<Route>`, `useRoute`
+and `<Link>` need no runtime on the server, and context Providers (the route
+context, your own) reach their children exactly as they do in the browser:
 
 ```tsx
-import { collectHead, renderToString, routePath, routeSearch } from "aio/air";
+import { collectHead, renderToString } from "aio/air";
 import App from "./App.tsx";
 
-Deno.serve((req) => {
+Deno.serve(async (req) => {
   const url = new URL(req.url);
-  // Both signals, or `useRoute().search` is empty on the server and full in
-  // the browser — a page that hydrates into different markup than it shipped.
-  // `routePath` is the PATHNAME only: the query lives in `routeSearch`.
-  routePath.set(url.pathname);
-  routeSearch.set(url.searchParams);
-  const body = renderToString(<App />);
+  // …await a session, a database read — anywhere: the route is the render's.
+  // The path AND the query, or `useRoute().search` is empty on the server and
+  // full in the browser — a page that hydrates into different markup than it
+  // shipped. `route` is the PATHNAME only: the query goes in `search`.
+  const body = renderToString(<App />, {
+    route: url.pathname,
+    search: url.searchParams,
+  });
   return new Response(
     `<!doctype html><head>${collectHead()}</head><body>${body}</body>`,
     { headers: { "content-type": "text/html; charset=utf-8" } },
@@ -228,32 +229,89 @@ Deno.serve((req) => {
 });
 ```
 
+Omit the options and the render routes by the global `routePath` / `routeSearch`
+signals instead — the 1.x form
+(`routePath.set(url.pathname);
+routeSearch.set(url.searchParams); renderToString(<App />)`),
+which is safe only under the route contract below.
+
 ### renderToStream()
 
 Streaming SSR -- yields HTML chunks as an async generator.
 
-**The route contract.** `routePath` / `routeSearch` are ONE pair of signals
-shared by every request in the process. The only safe way to use them on a
-server that handles requests concurrently: **every request sets the route and
-calls `renderToStream()` / `renderToString()` in one synchronous step — no
-`await` between the set and the call, on ANY request.** Then each render takes
-its own request's route when it is called, and keeps it however long its body
-takes and whatever else the handler awaits before sending it.
+**The route contract.** Give every render its route:
+
+```tsx
+renderToStream(<App />, req, { route: url.pathname, search: url.searchParams });
+renderToString(<App />, { route: url.pathname, search: url.searchParams });
+```
+
+A render given its route routes by it alone — every read the render makes:
+`useRoute`, `<Route>`, `<Link>`/`<NavLink>` active state, the route signals read
+in a component (`routePath.value`, `routePath()`, `.peek()`) or placed in the
+markup as a child or an attribute (`<a href={routePath}>`), and any `computed` /
+`trackedMemo` over them evaluated while it renders — in nested renders and in
+every later pull of a stream included. It never renders from the global
+`routePath` / `routeSearch` and never writes them (a read inside it still
+subscribes to them — tracking only; the value is the render's). A module-level
+`computed` over the route is recomputed for each such render and never carries
+one render's route into another render or into the global, and never disturbs
+the global's own cache or subscriptions (a computed read inside a render is
+evaluated once per render, however often it is read). Effects are not part of a
+render: one that runs because a component wrote a signal sees the global and
+keeps its subscription, and an effect or `watch` CREATED during a render runs
+every pass on the global route, its first included — so it subscribes to what
+the global route reads, never to the branch the render took. One that reads
+`routePath` / `routeSearch` on that first pass (directly, or through a
+`computed` or `trackedMemo` over them) is named in a warning (once per call
+site, then with a count): whatever it writes for the page is the global route's
+— derive render values with `computed` or `useRoute` instead. An effect or
+`computed` that itself CALLS a render given a route re-runs whenever anything
+that render read changes. Nothing can race it: await anything, anywhere, in any
+number of concurrent requests, and say nothing. What it cannot cover is work a
+component starts and finishes LATER (after an `await` inside a `useResource`
+fetcher, a timer): that runs outside the render and reads the globals.
+
+`route` is a pathname like `url.pathname` — `/` first, not `//`, no scheme, no
+`?` or `#` (the query goes in `search`); anything else is refused with a
+`TypeError`, as is `search` without `route`. The options are the THIRD argument
+of `renderToStream` (the second is the key `collectHead(key)` answers for):
+`renderToStream(<App />, { route })` is refused rather than silently routing by
+the global.
+
+Without options a render reads the globals — the 1.x form, kept for
+compatibility. `routePath` / `routeSearch` are ONE pair of signals shared by
+every request in the process. The only safe way to use them on a server that
+handles requests concurrently: **every request sets the route and calls
+`renderToStream()` / `renderToString()` in one synchronous step — no `await`
+between the set and the call, on ANY request.** Then each render takes its own
+request's route when it is called, and keeps it however long its body takes and
+whatever else the handler awaits before sending it.
 
 When any request breaks that — sets the route, then awaits, then renders —
-another request's render can read the route it left behind: a stream re-reads
-the route once, at the end of the synchronous turn it was called in (so that
-code creating the stream first and setting the route right after keeps working,
-as in 1.0.9), and two requests resumed by one shared promise (a config or
-session cache) run in ONE turn. No timing can tell the two apart, so the one
-that re-reads may render the other request's route. aio cannot prevent that; it
-says so:
+another request's render can read the route it left behind, or it can read
+another request's. aio cannot prevent that (the signals are shared, and a stream
+re-reads the route once, at the end of the synchronous turn it was called in, so
+that code creating the stream first and setting the route right after keeps
+working as in 1.0.9 — and two requests resumed by one shared promise run in ONE
+turn). What it does is say so. Every server-side write to `routePath` /
+`routeSearch` stamps the writing async context; these are the cases it reports,
+each naming the render's call site:
 
+- `[aio] this server render read the route, and the route was set outside
+  this render's synchronous step (another request, or this one after an await)
+  — it can be another request's page. …`
+  — the render's own async context wrote the route earlier, but the LAST write
+  came from a different one: another request (the classic case — a request sets
+  its route, awaits a shared config or session promise, and renders after
+  another request resumed from the same promise and set its own), or a helper of
+  this request that wrote it after an `await`. Said at the render's first route
+  READ (`useRoute`, `<Route>`, `<Link>`/`<NavLink>`'s active state) — a page
+  that never reads the route cannot render the wrong one and is never told.
 - `[aio] routePath changed after renderToStream() — set it BEFORE the call;
   under concurrent requests this can render another request's route (<call
   site>).`
   — whenever that end-of-turn re-read finds a different route than the call did.
-  Once per call site per process.
 - `[aio] renderToStream(): the route (or another request value) changed after
   renderToStream() was called, in the same turn as another render's call —
   this stream keeps the value it was CALLED with. Set routePath before
@@ -263,15 +321,43 @@ says so:
   (the live one may be that render's). A live route that matches none of them is
   reported; one that matches another render's is correct concurrent code and
   says nothing. Renders that took this stream's own route do not count (two
-  streams created before one `routePath.set` both re-read, as in 1.0.9). Once
-  per call site per process.
+  streams created before one `routePath.set` both re-read, as in 1.0.9).
 - `[aio] routePath changed after renderToStream() was called and before the
   stream was first read — the stream renders the route it was CALLED with
   (1.0.9 read it at the first read). …`
   — a route set after that turn (1.0.9 code that creates the stream, awaits,
   then sets the route; or another request that set its route and is awaiting
   before its own render) is never rendered, and is reported at the stream's
-  first read. Once per call site per process.
+  first read.
+
+Each is said the 1st, 2nd, 4th, 8th … time its call site hits it, and every
+repeat carries the count
+(`[N times at this call site; M more since the last
+warning]`) — quiet under
+load, never silent for good. Observe-only, the same in dev and prod; what is
+rendered does not change.
+
+A write made in the render's own synchronous step is never reported, even inside
+another library's `AsyncLocalStorage.run()` (a tracer's active span), which
+drops the write's stamp when it returns: a write made in the same microtask from
+the render's own stamp counts as the render's.
+
+What is NOT caught reliably (best-effort):
+
+- the classic case above when the OTHER request started after this one's route
+  write and inherited its stamp — on `Deno.serve`, a write in a handler's
+  synchronous prefix is inherited by every request accepted after it — and
+  resumed in the same microtask this render is called in: its write then looks
+  like this render's own step;
+- a render in a request that never writes the route: its async context carries
+  no stamp (nothing to compare) or one another request left on the accept loop,
+  so it is told only sometimes;
+- a component that reads `routePath.value` directly instead of through the
+  router.
+
+The contract above is the whole defence there. On runtimes without
+`node:async_hooks` (a browser) the write stamp is off; the three route-change
+warnings still apply.
 
 A stream created inside a server component is settled at its first read, as in
 1.0.9: read during that component call, it is part of the enclosing page; read
@@ -288,10 +374,12 @@ import { renderToStream } from "aio/air";
 import App from "./App.tsx";
 
 Deno.serve((req) => {
+  const url = new URL(req.url);
+  const route = { route: url.pathname, search: url.searchParams };
   const stream = new ReadableStream({
     async start(controller) {
       const enc = new TextEncoder();
-      for await (const chunk of renderToStream(<App />, req)) {
+      for await (const chunk of renderToStream(<App />, req, route)) {
         controller.enqueue(enc.encode(chunk));
       }
       controller.close();

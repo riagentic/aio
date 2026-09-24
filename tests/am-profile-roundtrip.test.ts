@@ -9,6 +9,23 @@ import { dropTempDir, tempDir } from "../src/testing/temp-dir.ts";
 
 const REPO = new URL("..", import.meta.url).pathname.replace(/\/$/, "");
 
+/** Last resort: SIGKILL whatever still runs a file under `dir` — a stop that
+ *  missed an instance must not leave it running after its home is deleted. */
+async function reapUnder(dir: string): Promise<void> {
+  const o = await new Deno.Command("ps", {
+    args: ["-axo", "pid=,args="],
+    stdout: "piped",
+    stderr: "null",
+  }).output();
+  for (const line of new TextDecoder().decode(o.stdout).split("\n")) {
+    const m = line.trim().match(/^(\d+)\s+(.*)$/);
+    if (!m || !m[2]!.includes(`${dir}/`) || Number(m[1]) === Deno.pid) continue;
+    try {
+      Deno.kill(Number(m[1]), "SIGKILL");
+    } catch { /* gone between ps and kill */ }
+  }
+}
+
 Deno.test({
   name: "am --profile: start, list, bare stop spares it, pr@dev stops it",
   ignore: Deno.build.os === "windows",
@@ -125,6 +142,12 @@ await aio.run({ cells: [c], appId: "pr", persist: false, client: "server-only" }
       await am("stop", `--home=${join(dir, "custom-home")}`, "--json")
         .catch(() => {});
       await am("stop", "pr@dev", "--json").catch(() => {});
+      // The app's OWN home too: when the profile is lost (check:mutations
+      // plants exactly that) the child boots bare, and a stop that names
+      // only the profile left it running for good — eight of them, each
+      // alive for hours, one per mutation run.
+      await am("stop", "--wait", "--json").catch(() => {});
+      await reapUnder(dir);
       await dropTempDir(dir);
     }
   },

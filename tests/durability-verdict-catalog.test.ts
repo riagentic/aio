@@ -622,7 +622,10 @@ Deno.test("am stop: a refused final write is `unsaved` + exit 1; a landed one is
   const app = fakeApp(appId);
   try {
     app.state.refusing = true;
-    const r = await runAm(() => cmdStop([], flagsFor(app.port, appId)));
+    // `--no-wait`: the fake app answers forever, and the verdict is what
+    // this pins — not the (default) wait for a process that has no pid.
+    const noWait = { ...flagsFor(app.port, appId), noWait: true };
+    const r = await runAm(() => cmdStop([], noWait));
     assertEquals(r.code, 1, `exit 1 through data loss, got ${r.code}`);
     const doc = JSON.parse(r.logs.at(-1)!) as {
       unsaved?: string;
@@ -632,7 +635,7 @@ Deno.test("am stop: a refused final write is `unsaved` + exit 1; a landed one is
     assertEquals(doc.unsaved, `${PERSIST_REFUSED} ${app.reason}`);
 
     app.state.refusing = false;
-    const ok = await runAm(() => cmdStop([], flagsFor(app.port, appId)));
+    const ok = await runAm(() => cmdStop([], noWait));
     assertEquals(ok.code, null);
     assert(
       !("unsaved" in JSON.parse(ok.logs.at(-1)!)),

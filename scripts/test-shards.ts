@@ -147,6 +147,77 @@ export function portSliceFor(i: number, n: number): string {
   return `${first + i * span}-${first + (i + 1) * span - 1}`;
 }
 
+/** Shard `i` of `n`'s environment — the three things that keep two shards
+ *  from sharing anything: its own data home, its own port slice (below the
+ *  OS ephemeral range, so `freePort()` in two shards can never be handed the
+ *  same port), and its own `XDG_RUNTIME_DIR` — lock dirs, sockets, the
+ *  registry — so a shard never writes into the developer's real one and
+ *  cannot see another shard's locks.
+ *
+ *  The real-window shard is the ONE exception to the runtime dir: its
+ *  Electron needs the session's display/dbus sockets there, so it inherits.
+ *  Every other shard MUST have one: `runtimeDir === null` there is a runner
+ *  bug, and it throws rather than quietly letting the shard share the real
+ *  dir (which is what made two shards' locks see each other). Pure. */
+export function shardEnv(
+  i: number,
+  n: number,
+  runtimeDir: string | null,
+  opts: { home: string; realWindow: boolean },
+): Record<string, string> {
+  if (!opts.realWindow && !runtimeDir) {
+    throw new Error(
+      `test-shards: shard ${i} has no private XDG_RUNTIME_DIR — only the ` +
+        `real-window shard may inherit the session's`,
+    );
+  }
+  return {
+    AIO_APPS_DIR: opts.home,
+    AIO_TEST_PORT_SLICE: portSliceFor(i, n),
+    ...(opts.realWindow ? {} : { XDG_RUNTIME_DIR: runtimeDir! }),
+  };
+}
+
+/** The dev warning a `press`/`keyDown` into a field prints when a window key
+ *  binding skipped it (`ignoreInInput`) and NOTHING ran — src/air/ui-trigger.ts
+ *  `warnKeySwallowedByInput`. */
+export const SWALLOWED_PRESS = "window key handlers skip inputs by design";
+
+/** The marker a test file carries when it swallows a press ON PURPOSE (it is
+ *  asserting that the binding does NOT fire): `// aio-ok: press swallowed on
+ *  purpose — <why>`. The reason is required — a bare marker is not one. */
+export const SWALLOW_OK =
+  /\/\/\s*aio-ok:\s*press swallowed on purpose\s*—\s*\S/;
+
+/** The test files in one shard's log that printed {@link SWALLOWED_PRESS}
+ *  without carrying {@link SWALLOW_OK}. Pure.
+ *
+ *  For users the warning stays a warning — the surface is frozen, and a
+ *  passing test of theirs must not start failing. In THIS repo it is a
+ *  failure: a `ui.Field.press("Enter")` whose shortcut ran zero times passes
+ *  every assertion after it, so a test that does it without saying why is a
+ *  test that tests nothing. Output is attributed to the file whose
+ *  `running N tests from ./<file>` header precedes it — a shard runs its
+ *  files one after another, and deno prints every test's console output
+ *  (stdout or stderr alike) under that header. */
+export function swallowedPresses(
+  log: string,
+  source: (file: string) => string,
+): string[] {
+  // deno-lint-ignore no-control-regex
+  const lines = log.replace(/\x1b\[[0-9;]*m/g, "").split("\n");
+  const out = new Set<string>();
+  let file = "";
+  for (const l of lines) {
+    const m = /^running \d+ tests? from \.\/(.+)$/.exec(l.trim());
+    if (m) file = m[1]!;
+    else if (l.includes(SWALLOWED_PRESS) && !SWALLOW_OK.test(source(file))) {
+      out.add(file || "(before any test file)");
+    }
+  }
+  return [...out];
+}
+
 /** The cores a test run may use, and the command prefix that holds it there.
  *
  *  The run used to take the whole machine: 16 shards, each spawning apps,
@@ -420,7 +491,8 @@ if (import.meta.main) {
     // cannot see each other's locks. Short (`/tmp/xdg-shard-XXXX`): socket
     // paths are built under it. Not for the real-window shard 0, whose
     // Electron needs the session's display/dbus sockets there.
-    const runtime = i === 0 && windowed.size > 0
+    const realWindow = i === 0 && windowed.size > 0;
+    const runtime = realWindow
       ? null
       // A FIXED short base: `makeTempDir` follows TMPDIR, which on macOS is
       // `/var/folders/…/T/` — long enough to push socket paths past the limit.
@@ -442,13 +514,7 @@ if (import.meta.main) {
         ...list,
       ],
       cwd: ROOT,
-      // Its own port slice, below the OS ephemeral range (32768+): freePort()
-      // draws from it, so two shards can never be handed the same port.
-      env: {
-        AIO_APPS_DIR: home,
-        AIO_TEST_PORT_SLICE: portSliceFor(i, shards.length),
-        ...(runtime ? { XDG_RUNTIME_DIR: runtime } : {}),
-      },
+      env: shardEnv(i, shards.length, runtime, { home, realWindow }),
       stdin: "null",
       stdout: "piped",
       stderr: "piped",
@@ -463,10 +529,27 @@ if (import.meta.main) {
     if (runtime) left = await dropShardRuntime(runtime);
     else pruneDeadLockDir(home);
     const dec = new TextDecoder();
-    const text = dec.decode(stdout) + dec.decode(stderr) +
+    const out = dec.decode(stdout) + dec.decode(stderr);
+    // A press the harness only WARNED about fails the run here (see
+    // `swallowedPresses`): read each named file's source once, for its marker.
+    const swallowed = swallowedPresses(out, (f) => {
+      try {
+        return Deno.readTextFileSync(join(ROOT, f));
+      } catch {
+        return ""; // aio-ok: an unreadable file carries no marker — it fails
+      }
+    });
+    const text = out +
       (left.length
         ? `\nFAILED | shard runtime dir ${runtime} still holds live lock ` +
           `dirs (a process outlived its test): ${left.join(", ")}\n`
+        : "") +
+      (swallowed.length
+        ? `\nFAILED | a press was swallowed by an input and no handler ran ` +
+          `(${SWALLOWED_PRESS}) in: ${swallowed.join(", ")} — press on the ` +
+          `window (\`ui.window.press(…)\`), or, when the test asserts the ` +
+          `binding does NOT fire, mark the file \`// aio-ok: press ` +
+          `swallowed on purpose — <why>\`\n`
         : "");
     await Deno.writeTextFile(log, text);
     const secs = Math.round((performance.now() - t0) / 1000);
@@ -475,14 +558,26 @@ if (import.meta.main) {
       .match(/^(ok|FAILED) \| .*$/m)?.[0] ?? `exit ${code}`;
     console.log(
       `${
-        code === 0 ? "✓" : "✗"
+        code === 0 && swallowed.length === 0 ? "✓" : "✗"
       } shard ${i}  ${list.length} files  ${secs}s  ${summary}`,
     );
     let times: Record<string, number> = {};
     try {
       times = junitTimes(await Deno.readTextFile(junit));
     } catch { /* a shard that died before writing its report */ }
-    return { i, code, failed, log, times, left: left.length > 0 };
+    return {
+      i,
+      code,
+      failed: swallowed.length
+        ? [
+          ...failed,
+          `swallowed press (no handler ran): ${swallowed.join(", ")}`,
+        ]
+        : failed,
+      log,
+      times,
+      left: left.length > 0 || swallowed.length > 0,
+    };
   }));
 
   // Remember what each file cost, for the next run's balance.

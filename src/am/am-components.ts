@@ -26,10 +26,13 @@
  * built for several shells (`["server", "electron"]`, what `am create`
  * writes), and it must keep behaving exactly as it does today.
  */
-import { join, resolve } from "@std/path";
+import { join, resolve, toFileUrl } from "@std/path";
 import { normalizeTargets } from "../build-all.ts";
 import { readDenoJsonSync } from "../server/deno-json.ts";
-import { resolveAppId } from "../server/single-instance-lock.ts";
+import {
+  appIdFromConfig,
+  resolveAppId,
+} from "../server/single-instance-lock.ts";
 import { DEFAULT_ENTRY } from "../server/app-files.ts";
 
 /** One runnable thing in this repo. */
@@ -73,6 +76,42 @@ export function entryDeclarations(
   }
 }
 
+/** The app id the RUNTIME gives `entry` when `am` launches it from `root`
+ *  (`deno run <entry>`, cwd = root) — the rung order of `resolveAppId` in
+ *  src/server/single-instance-lock.ts: the entry's own `aio.run({ appId })`,
+ *  else the project's deno.json `appId` > `title` > `name` (the SAME
+ *  `appIdFromConfig`), else the entry's directory (its parent when the entry
+ *  sits in `src/`). A target's `name` is NOT a rung: it renames the binary,
+ *  not the app (docs/build/targets.md) — reading it here had `am` wait on an
+ *  id nothing ran under while two entries without an appId booted as ONE app,
+ *  and `componentConflict` never saw the clash. `tests/am-components-identity`
+ *  pins this against the runtime's own answer. */
+export function componentAppId(
+  root: string,
+  entry: string,
+  declared?: string,
+): string {
+  if (declared) return resolveAppId(declared);
+  let fromCfg: string | null = null;
+  try {
+    fromCfg = appIdFromConfig(
+      readDenoJsonSync(root)?.config as
+        | { appId?: string; title?: string; name?: string }
+        | undefined,
+    );
+  } catch {
+    /* aio-ok: no/unreadable deno.json — the runtime falls through too */
+  }
+  if (fromCfg) return fromCfg;
+  // The runtime reads it off `Deno.mainModule` — a URL, so the SAME split of
+  // the same (percent-encoded) pathname, or a space in a folder name is two
+  // ids for one app.
+  const parts = toFileUrl(resolve(entry)).pathname.split("/").filter(Boolean);
+  parts.pop(); // the entry file itself
+  const dir = parts.pop();
+  return resolveAppId((dir === "src" ? parts.pop() : dir) ?? "aio-app");
+}
+
 /** The components this project declares, in declaration order.
  *
  *  EMPTY for an ordinary single-app repo — including one that builds several
@@ -102,7 +141,7 @@ export function projectComponents(root: string): Component[] {
     byEntry.set(abs, {
       label: t.name,
       entry: abs,
-      appId: resolveAppId(declared.appId ?? t.appName ?? t.name),
+      appId: componentAppId(root, abs, declared.appId),
       declaresAppId: declared.appId !== undefined,
       ...(declared.port !== undefined ? { port: declared.port } : {}),
     });
@@ -132,8 +171,11 @@ export function componentConflict(components: Component[]): string | null {
     `${lines.join("\n")}\n` +
     `They would share one lock file, one data directory and one port — the ` +
     `second to start refuses to bind, and nothing tells you why.\n` +
-    `fix: give each entry its own identity — aio.run({ appId: "relay" }) — ` +
-    `or a distinct "name" on its build target.`;
+    `fix: give each entry its own identity — aio.run({ appId: "relay" }). ` +
+    `A target's "name" does not: it renames the binary, not the app. ` +
+    `am reads the appId as WRITTEN in each entry's aio.run(): one computed at ` +
+    `run time (appId: edition.appId, a helper's) is invisible to it — write ` +
+    `it literally there: aio.run({ appId: "relay", ...options }).`;
 }
 
 /** The port a component runs on, or undefined when it declares none.
@@ -187,7 +229,7 @@ export type ProcessPlan =
  *  the caller decides what to do with it. */
 export function processPlan(
   args: string[],
-  opts: { app?: string; port?: number },
+  opts: { app?: string; port?: number; entry?: string },
   root = Deno.cwd(),
 ): ProcessPlan {
   const label = args.find((a) => !a.startsWith("-"));
@@ -203,6 +245,25 @@ export function processPlan(
           `"${label}" names a component and --app/--port names an instance — ` +
           `pass one or the other`,
       };
+    }
+    // `--app=<label>` (or the component's own app id) naming a DECLARED
+    // component is that component — its identity AND its entry. As a plain
+    // single-app start it ran the project's default entry under the
+    // component's id: the free app, registered as PRO (field report, a
+    // two-edition app).
+    // An explicit `--entry` is already a resolved component (the component
+    // loop below re-enters `am start` with `app` + `entry`), or the user's own
+    // choice — never re-mapped.
+    if (
+      opts.app !== undefined && opts.port === undefined &&
+      opts.entry === undefined
+    ) {
+      const components = projectComponents(root);
+      const c = componentByLabel(components, opts.app) ??
+        components.find((x) => x.appId === opts.app);
+      if (c && !componentConflict(components)) {
+        return { kind: "one", component: c, components };
+      }
     }
     return { kind: "single" };
   }

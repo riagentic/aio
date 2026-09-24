@@ -73,12 +73,17 @@ Deno.test("temp-dir: ONE root, the same one test-strict already used", async () 
       d.startsWith(root),
       `tempDir() made ${d}, which is not under the test root ${root}`,
     );
-    assertEquals(
-      aioTestDir("probe-").startsWith(root),
-      true,
-      "…and so does " +
-        "test-strict, which is the point: one root, one sweep, one ls",
-    );
+    const probe = aioTestDir("probe-");
+    try {
+      assertEquals(
+        probe.startsWith(root),
+        true,
+        "…and so does " +
+          "test-strict, which is the point: one root, one sweep, one ls",
+      );
+    } finally {
+      await dropTempDir(probe);
+    }
   } finally {
     await dropTempDir(d);
   }

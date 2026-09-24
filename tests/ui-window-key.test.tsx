@@ -53,6 +53,7 @@ testUI(Palette, "am: an input would have swallowed it", async (ui) => {
   // press: `triggerPress` warns when a binding was listening and the field
   // swallowed the key (see ui-press-input-swallow-warning.test.tsx, which
   // pins the message and, just as hard, every case that must stay silent).
+  // aio-ok: press swallowed on purpose — the trap itself, asserted to fire nothing before the `window` address is shown to
   await ui.field.press("Escape");
   assertEquals(ui.count.text, "0", "…and the binding did not fire");
 

@@ -79,6 +79,16 @@ export const CLAIMS: {
       "screencapture). A killed Gatekeeper-held launch poisons that copy",
     auto: false,
   },
+  {
+    target: "windows",
+    env: "exe-doors",
+    how:
+      "NO GATE — the packaged app's doors (CSP <meta> in the shell, no TCP " +
+      "listen socket, the snapshot route off) are asserted by test:hosts on " +
+      "the LINUX packaged Electron only. Nothing runs them against the " +
+      "Windows exe",
+    auto: false,
+  },
   { target: "soak", env: "72h", how: "deno task soak:72h", auto: true },
   {
     target: "android",
@@ -161,14 +171,59 @@ export async function recordProof(
   await Deno.writeTextFile(FILE, JSON.stringify(entries, null, 2) + "\n");
 }
 
-function ageDays(iso: string): number {
-  return Math.floor((Date.now() - Date.parse(iso)) / 86_400_000);
+function ageDays(iso: string, now = Date.now()): number {
+  return Math.floor((now - Date.parse(iso)) / 86_400_000);
+}
+
+/** A row older than this is stale. */
+export const STALE_DAYS = 90;
+
+/** What one proven row is worth today. Pure — the caller answers whether the
+ *  row's commit still exists.
+ *
+ *  `gone`: the commit the gate ran against is not in this repository any more
+ *  (a history rewrite, a squash, a clone without it). The row still says a
+ *  gate passed, but nobody can name the code it passed on — which is exactly
+ *  the "a memory, not evidence" state this file exists to end, so it prints
+ *  as stale, never as ✓, however recent its date. */
+export function rowStatus(
+  entry: Pick<ProofEntry, "date" | "commit">,
+  commitExists: boolean,
+  now = Date.now(),
+): { state: "ok" | "old" | "gone"; age: number } {
+  const age = ageDays(entry.date, now);
+  if (!commitExists) return { state: "gone", age };
+  return { state: age > STALE_DAYS ? "old" : "ok", age };
+}
+
+/** Is `commit` in the TAGGED history of the repo `proof-matrix.json` lives
+ *  in — a commit object that some tag contains? Existing is not enough: an
+ *  amended draft of a release commit still sits in the object store, on no
+ *  ref, and a row naming it printed ✓ for code no release ever shipped. No
+ *  git at all counts as unknown and answers true: a tarball checkout cannot
+ *  judge, and must not call every row stale for it. */
+export function commitExists(commit: string, cwd = dirname(FILE)): boolean {
+  try {
+    const run = (args: string[]) =>
+      new Deno.Command("git", {
+        args,
+        cwd,
+        stdout: "piped",
+        stderr: "null",
+      }).outputSync();
+    const git = (args: string[]) => run(args).success;
+    if (!git(["rev-parse", "--git-dir"])) return true;
+    if (!git(["cat-file", "-e", `${commit}^{commit}`])) return false;
+    const tags = run(["tag", "--contains", commit]);
+    return tags.success && tags.stdout.length > 0;
+  } catch {
+    return true; // aio-ok: no git binary — cannot judge (see above)
+  }
 }
 
 if (import.meta.main) {
   const entries = await load();
   const require = Deno.args.includes("--require");
-  const STALE_DAYS = 90;
   const missing: string[] = [];
   const stale: string[] = [];
   const noGate: string[] = [];
@@ -187,19 +242,29 @@ if (import.meta.main) {
       else noGate.push(label.trim());
       continue;
     }
-    const age = ageDays(hit.date);
-    const mark = age > STALE_DAYS ? "!" : "✓";
-    if (age > STALE_DAYS) stale.push(label.trim());
+    const { state, age } = rowStatus(hit, commitExists(hit.commit));
+    if (state !== "ok") stale.push(label.trim());
+    const why = state === "gone"
+      ? "  STALE: commit in no tagged history — the proven code cannot be named"
+      : state === "old"
+      ? `  STALE: ${age}d old`
+      : "";
     console.log(
-      `  ${mark} ${label} ${hit.date} @${hit.commit}${
-        age > STALE_DAYS ? `  (${age}d old)` : ""
-      }${hit.detail ? `  ${hit.detail}` : ""}`,
+      `  ${
+        state === "ok" ? "✓" : "!"
+      } ${label} ${hit.date} @${hit.commit}${why}${
+        hit.detail ? `  ${hit.detail}` : ""
+      }`,
     );
   }
   console.log(
-    `\n  ${entries.length}/${CLAIMS.length} proven` +
+    `\n  ${
+      CLAIMS.length - missing.length - stale.length - noGate.length
+    }/${CLAIMS.length} proven` +
       (missing.length ? ` · ${missing.length} never run` : "") +
-      (stale.length ? ` · ${stale.length} older than ${STALE_DAYS}d` : "") +
+      (stale.length
+        ? ` · ${stale.length} stale (older than ${STALE_DAYS}d, or commit gone)`
+        : "") +
       (noGate.length ? ` · ${noGate.length} with NO GATE to prove them` : ""),
   );
   console.log(

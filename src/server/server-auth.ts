@@ -5,6 +5,7 @@ const _encoder = new TextEncoder();
 import type { AioUser } from "./aio.ts";
 import { parseCookies } from "./route.ts";
 import { slugify } from "./single-instance-lock.ts";
+import { certSubjectAltNames } from "./x509.ts";
 
 // Constant-time string comparison — prevents timing attacks on token auth
 // Compares full length even on mismatch to avoid leaking token length
@@ -800,16 +801,95 @@ export function _resetMachineHostname(): void {
   _machineHost = undefined;
 }
 
+/** The name the client says it reached this server as — THE input to
+ *  {@link hostAllowed} and to the same-origin half of `originVerdict`.
+ *
+ *  HTTP/1.1 carries it in `Host`. HTTP/2 does NOT: the name travels in the
+ *  `:authority` pseudo-header, which Deno does not surface as a header at all
+ *  but builds `req.url` from. Reading `Host` alone (remote-desktop field report §3)
+ *  handed the gate `null` — "a non-browser client, allow" — for EVERY h2
+ *  request, so the DNS-rebinding gate was off for any TLS client that
+ *  negotiated h2, i.e. every browser; and a same-origin POST over h2 was
+ *  judged cross-origin ("no Host header"). Measured on Deno 2.9: an h2
+ *  request has no `host` key and `req.url` = `https://<:authority>/…`; an
+ *  HTTP/1.0 request with no Host gets a synthesised `localhost` URL, which
+ *  the gate allows exactly as it allowed the missing header before.
+ *
+ *  `Host` wins when present: on HTTP/1.1 Deno derives the URL from it anyway,
+ *  so the two only differ when the header is absent. */
+export function requestHost(req: Request): string | null {
+  const h = req.headers.get("host");
+  if (h !== null) return h;
+  try {
+    return new URL(req.url).host || null;
+  } catch {
+    return null;
+  }
+}
+
+/** The DNS names the TLS certificate this app SERVES vouches for — read once,
+ *  at server setup, and handed to {@link hostAllowed} as `certNames`.
+ *
+ *  Why the gate trusts them: until the Host gate learned to read HTTP/2's
+ *  `:authority` (v1.0.11), every h2 request — every browser on TLS — skipped
+ *  it, so an exposed TLS app reached by its own name (`nas.local`,
+ *  `myapp.example.com`) worked with no `allowedOrigins`. A name in the
+ *  certificate is one the operator already declared as this app's name, and
+ *  an attacker's rebinding domain cannot be in it (they would need our key or
+ *  our CA to put it there). So those apps keep working, and a foreign name is
+ *  still refused.
+ *
+ *  Lower-cased, trailing dot dropped. A certificate the reader cannot parse
+ *  is said out loud, never read as "no names": the operator learns that their
+ *  own name now needs `allowedOrigins`. Reuses THE SAN reader (`x509.ts`). */
+export function certHostNames(certPem: string | undefined): string[] {
+  if (!certPem) return [];
+  try {
+    return (certSubjectAltNames(certPem)?.dns ?? [])
+      .map((d) => d.trim().toLowerCase().replace(/\.$/, ""))
+      .filter((d) => d !== "");
+  } catch (e) {
+    log.warn(
+      "auth",
+      `could not read the DNS names in this app's TLS certificate ` +
+        `(${
+          e instanceof Error ? e.message : String(e)
+        }) — the Host gate will ` +
+        `not admit them by themselves. If this app is reached by a domain ` +
+        `name, name it: aio.run({ allowedOrigins: ["<that name>"] }).`,
+    );
+    return [];
+  }
+}
+
+/** Does a certificate DNS name cover `name`? Exact, or an RFC 6125 wildcard:
+ *  `*.example.com` covers exactly ONE extra left-most label (`a.example.com`,
+ *  never `example.com` nor `a.b.example.com`). A wildcard over a bare
+ *  top-level label (`*.com`, `*`) covers nothing — no real CA issues one, and
+ *  it would turn the gate off. */
+export function certNameCovers(pattern: string, name: string): boolean {
+  if (!pattern.startsWith("*.")) return pattern === name;
+  const base = pattern.slice(2);
+  if (!base.includes(".") || base.includes("*")) return false;
+  const dot = name.indexOf(".");
+  return dot > 0 && name.slice(dot + 1) === base;
+}
+
 /** May this server answer a request that says it was reached as `hostHeader`?
  *
  *  Allowed: no Host at all (a non-browser client — there is no name to rebind),
  *  any IP literal, `localhost` and `*.localhost`, the address this app is bound
- *  to, this machine's own hostname, and anything the app listed in
- *  `allowedOrigins` (hostname, `host:port`, full origin, or `"*"`).
+ *  to, this machine's own hostname, any DNS name in the TLS certificate this
+ *  app serves (`certNames`, see {@link certHostNames}), and anything the app
+ *  listed in `allowedOrigins` (hostname, `host:port`, full origin, or `"*"`).
  *  Everything else is a foreign domain pointed at this server. */
 export function hostAllowed(
   hostHeader: string | null,
-  opts: { bindHost?: string; allowedOrigins?: string[] },
+  opts: {
+    bindHost?: string;
+    allowedOrigins?: string[];
+    certNames?: readonly string[];
+  },
 ): boolean {
   if (hostHeader === null || hostHeader.trim() === "") return true;
   const raw = hostHeader.trim().toLowerCase();
@@ -820,6 +900,7 @@ export function hostAllowed(
   const bind = opts.bindHost?.trim().toLowerCase();
   if (bind && bind !== "0.0.0.0" && bind !== "::" && bind === name) return true;
   if (name === _machineHostname()) return true;
+  if (opts.certNames?.some((p) => certNameCovers(p, name))) return true;
   return allowlistAdmits(opts.allowedOrigins, {
     hostname: name,
     hostPort: raw,
@@ -1042,7 +1123,7 @@ export function crossOriginRefusal(
   const byPosition = !opts.exposed || (opts.peerLocal && !opts.authConfigured);
   if (!ambientCookie && !byPosition) return null;
   const verdict = originVerdict(origin, {
-    hostHeader: req.headers.get("host"),
+    hostHeader: requestHost(req),
     secure: opts.secure,
     allowedOrigins: opts.allowedOrigins,
   });
@@ -1096,13 +1177,17 @@ const HOST_WARN_MAX = 32;
 export function hostRefusal(
   req: Request,
   addr: Deno.Addr | undefined,
-  opts: { bindHost?: string; allowedOrigins?: string[] },
+  opts: {
+    bindHost?: string;
+    allowedOrigins?: string[];
+    certNames?: readonly string[];
+  },
 ): Response | null {
   // A Unix socket / named pipe carries no meaningful authority in `Host` (the
   // URL is synthesised as `http://app<target>`), and it is same-machine,
   // same-user by construction — there is no DNS to rebind.
   if (addr?.transport === "unix") return null;
-  const hostHeader = req.headers.get("host");
+  const hostHeader = requestHost(req);
   if (hostAllowed(hostHeader, opts)) return null;
   _reportHostRefusal(hostHeader);
   const bind = opts.bindHost && opts.bindHost !== "0.0.0.0" &&
@@ -1112,7 +1197,9 @@ export function hostRefusal(
   return new Response(
     `Forbidden — Host "${hostHeader}" is not a name this app is served as.\n\n` +
       `This app answers to localhost, to any IP address it is bound on${bind}` +
-      `, and to whatever is listed in allowedOrigins. A request whose Host is ` +
+      `${
+        opts.certNames?.length ? ", to the names in its TLS certificate" : ""
+      }, and to whatever is listed in allowedOrigins. A request whose Host is ` +
       `some other domain is the shape of a DNS-rebinding attack: a page on ` +
       `that domain would become same-origin with this app and could read raw ` +
       `state and dispatch actions with no credential.\n\n` +

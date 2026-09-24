@@ -11,10 +11,12 @@ import {
   type Target,
   TARGETS,
 } from "./am-cmd-create.ts";
-import { fromFileUrl, join, resolve } from "@std/path";
+import { dirname, fromFileUrl, join, resolve } from "@std/path";
 import { parse as parseJsonc } from "@std/jsonc";
 import { refOfLink } from "../server/framework-pin.ts";
 import { resolveEntryPath } from "../server/paths.ts";
+import { aioToolEntries } from "../server/lock-coverage.ts";
+import { readDenoJson } from "../server/deno-json.ts";
 import type { GlobalFlags } from "./am-types.ts";
 import { detectMode, out, outError, say } from "./am-output.ts";
 import {
@@ -26,9 +28,11 @@ import {
 import {
   compareVersions,
   ensureVersion,
+  gitEnvFor,
   knownTags,
-  latestTag,
+  latestRelease,
   MAIN,
+  offMainNote,
   parseVersion,
   pinnedFrameworkPath,
   readPin,
@@ -45,7 +49,6 @@ import {
   installElectronIn,
   testedElectronFor,
 } from "./am-electron.ts";
-import { GIT_NO_PROMPT_ENV } from "../server/git-noninteractive.ts";
 
 // fixed/would-fix/ok = safe auto-repairs; advise = a suggestion we DON'T apply
 // (it touches committed source or app logic); manual = a hard blocker am fix
@@ -368,11 +371,13 @@ async function run(
   cmd: string,
   args: string[],
   cwd: string,
+  spawn?: { clearEnv?: boolean; env?: Record<string, string> },
 ): Promise<{ ok: boolean; err: string }> {
   try {
     const o = await new Deno.Command(cmd, {
       args,
       cwd,
+      ...spawn,
       stdout: "null",
       stderr: "piped",
     }).output();
@@ -383,6 +388,22 @@ async function run(
   } catch (e) {
     return { ok: false, err: e instanceof Error ? e.message : String(e) };
   }
+}
+
+/** What the cache repair loads: the app entry first, then aio's tool entry
+ *  points that are on disk (a `dep/aio` path appears once the link exists).
+ *  @internal exported for tests/doctor-lock-coverage.test.ts */
+export async function cacheTargets(
+  dir: string,
+  entry: string,
+): Promise<string[]> {
+  const found = await readDenoJson(dir).catch(() => null);
+  const tools: string[] = [];
+  for (const e of aioToolEntries(found?.config)) {
+    if (e === entry) continue;
+    if (e.startsWith("jsr:") || await exists(join(dir, e))) tools.push(e);
+  }
+  return [entry, ...tools];
 }
 
 async function resolveEntry(dir: string): Promise<string | null> {
@@ -408,6 +429,38 @@ async function resolveEntry(dir: string): Promise<string | null> {
   }
   const entry = resolveEntryPath(cfg);
   return (await exists(join(dir, entry))) ? entry : null;
+}
+
+/** The `dep/aio` directory an import-map path resolves `aio` THROUGH, as an
+ *  absolute path — or null when the path has no `dep/aio` segment (a registry
+ *  spec, the app's own vendoring). This app's own layout is exactly
+ *  `resolve(dir, "dep", "aio")`; anything else is another app's (a nested
+ *  app consuming its parent's `../dep/aio`). Anchored to a path segment: a
+ *  substring test would misread "../vendor-dep/aio-core/mod.ts". Pure. */
+export function depAioProvider(dir: string, spec: string): string | null {
+  if (!(spec.startsWith(".") || spec.startsWith("/"))) return null;
+  const m = /(^|\/)dep\/aio(\/|$)/.exec(spec);
+  if (!m) return null;
+  return resolve(dir, spec.slice(0, m.index + m[1]!.length) + "dep/aio");
+}
+
+/** Whether `provider` (from {@linkcode depAioProvider}) is `dir`'s OWN
+ *  `dep/aio` — compared by the app folder's REAL path. `dir` is `Deno.cwd()`,
+ *  which is already the real path, so an absolute import-map path spelled
+ *  through a symlink (`/home/me/link/app/dep/aio` for `/data/app`) failed a
+ *  `resolve()` comparison and this app's own framework was classified as a
+ *  PARENT's — its pin, link and tasks then left unrepaired. `dep/aio` itself
+ *  is not resolved (it is a link to the framework); the folder holding
+ *  `dep/` is. A path that does not exist falls back to `resolve()`. */
+export function isOwnDepAio(dir: string, provider: string): boolean {
+  const real = (p: string) => {
+    try {
+      return Deno.realPathSync(p);
+    } catch {
+      return resolve(p); // aio-ok: not on disk — the lexical answer is all there is
+    }
+  };
+  return real(dirname(dirname(provider))) === real(dir);
 }
 
 export async function cmdFix(
@@ -541,14 +594,21 @@ export async function cmdFix(
   // Recognize HOW the app consumes aio, so we only take actions that fit it.
   const aioSpec = imports["aio"] ?? "";
   const isPath = aioSpec.startsWith(".") || aioSpec.startsWith("/");
+  // A `dep/aio` path that is NOT this app's own `./dep/aio` is ANOTHER app's
+  // framework — a nested app (`client/` inside a repo) consuming its parent's
+  // through `../dep/aio`. Its pin, link and task paths belong to that app:
+  // treating it as this app's layout pinned whatever `latest` said (not the
+  // parent's pin), made `client/dep/aio` — a link nothing imports — and added
+  // tasks naming `./dep/aio/...` paths that do not exist here (llama §2).
+  const depProvider = depAioProvider(dir, aioSpec);
   const aioMode = /^(jsr:|npm:|https?:)/.test(aioSpec)
     ? "registry" // JSR/npm/URL pin — no symlink, nothing to link
     : isPath
-    // Anchored to a path segment: a substring test would misread a sibling
-    // vendoring like "../vendor-dep/aio-core/mod.ts" as the dep/aio layout.
-    ? (/(^|\/)dep\/aio(\/|$)/.test(aioSpec)
+    ? (depProvider === null
+      ? "custom" // some other relative/absolute path — user's own vendoring
+      : isOwnDepAio(dir, depProvider)
       ? "dep" // the dep/aio layout (am create default, or a linked clone)
-      : "custom") // some other relative/absolute path — user's own vendoring
+      : "parent") // another app's dep/aio — its pin, its link, its tasks
     : "unknown";
   add(
     "aio consumption mode",
@@ -559,6 +619,9 @@ export async function cmdFix(
       ? `custom path (${aioSpec}) — left as the app declares it`
       : aioMode === "dep"
       ? "dep/aio layout"
+      : aioMode === "parent"
+      ? `provided by ${depProvider} (${aioSpec}) — pin, link and tasks ` +
+        `left alone; they are that app's (run am fix / am pin there)`
       : 'no "aio" import — is this an aio app?',
   );
 
@@ -642,12 +705,17 @@ export async function cmdFix(
           );
         }
       } else {
-        const want = await latestTag(install) ?? MAIN;
+        const rel = await latestRelease(install);
+        const want = rel.latest ?? MAIN;
+        // A newer PROVISIONED release that is not `latest` is said, not
+        // silently passed over (llama §2b).
+        const why = offMainNote(install, rel.offMain);
+        const also = why ? ` — note: ${why}` : "";
         if (dry) {
           add(
             "aio version pin",
             "would-fix",
-            `unpinned — would record "aioVersion": "${want}" in deno.json`,
+            `unpinned — would record "aioVersion": "${want}" in deno.json${also}`,
           );
         } else {
           const res = await ensureVersion(install, want);
@@ -662,7 +730,7 @@ export async function cmdFix(
               "fixed",
               `was unpinned — recorded "aioVersion": "${res.ref}" in ` +
                 `deno.json so every future clone rebuilds against this ` +
-                `exact framework (change it with \`am pin <version>\`)`,
+                `exact framework (change it with \`am pin <version>\`)${also}`,
             );
           }
         }
@@ -679,16 +747,17 @@ export async function cmdFix(
       if (cur) {
         const behind = sortVersions(await knownTags(install))
           .filter((t) => compareVersions(t, cur) > 0).length;
+        const rel = await latestRelease(install);
+        const why = offMainNote(install, rel.offMain);
         if (behind > 0) {
           add(
             "aio version freshness",
             "advise",
-            `${count(behind, "release")} behind ${await latestTag(
-              install,
-            )} — ` +
-              `\`am pin latest\` moves it (it checks for removed APIs first)`,
+            `${count(behind, "release")} behind ${rel.latest} — ` +
+              `\`am pin latest\` moves it (it checks for removed APIs first)` +
+              (why ? ` — note: ${why}` : ""),
           );
-        }
+        } else if (why) add("aio version freshness", "advise", why);
       }
     }
     if (!root) {
@@ -838,7 +907,20 @@ export async function cmdFix(
   }
 
   // 4 — git submodules (uninitialized on a shallow/plain clone)
-  if (await exists(join(dir, ".gitmodules"))) {
+  // ONLY in the app's own repo: `dir` must be a git top level, and every git
+  // call is pinned to it (gitEnvFor: the ceiling, and never a repo an
+  // inherited GIT_DIR names — a hook). A `.gitmodules` in a folder that is
+  // not its own repo — a nested app, a tarball copy inside some other repo —
+  // had git walk up and `submodule update --init` the ENCLOSING repo.
+  const ownRepo = await exists(join(dir, ".git"));
+  if (await exists(join(dir, ".gitmodules")) && !ownRepo) {
+    add(
+      "git submodules initialized",
+      "advise",
+      ".gitmodules here, but this folder is not its own git repo — left " +
+        "alone (submodules belong to the repo that owns them)",
+    );
+  } else if (await exists(join(dir, ".gitmodules"))) {
     // Only act when a submodule is genuinely uninitialized (status line
     // prefixed '-'). Running update unconditionally could reset a submodule the
     // developer deliberately checked out to a different commit.
@@ -850,7 +932,7 @@ export async function cmdFix(
         stdout: "piped",
         stderr: "null",
         stdin: "null",
-        env: GIT_NO_PROMPT_ENV,
+        ...gitEnvFor(dir),
       }).output();
       uninit = o.code === 0 &&
         new TextDecoder().decode(o.stdout).split("\n").some((l) =>
@@ -861,12 +943,17 @@ export async function cmdFix(
       "git submodules initialized",
       uninit,
       async () => {
-        const r = await run("git", [
-          "submodule",
-          "update",
-          "--init",
-          "--recursive",
-        ], dir);
+        const r = await run(
+          "git",
+          [
+            "submodule",
+            "update",
+            "--init",
+            "--recursive",
+          ],
+          dir,
+          gitEnvFor(dir),
+        );
         if (!r.ok) throw new Error(r.err || "git submodule failed");
       },
     );
@@ -1165,6 +1252,12 @@ export async function cmdFix(
         );
       }
     }
+  } else if (aioMode === "parent") {
+    add(
+      "standard deno tasks",
+      "ok",
+      "left alone — the framework is another app's (see aio consumption mode)",
+    );
   } else {
     add(
       "standard deno tasks",
@@ -1175,22 +1268,31 @@ export async function cmdFix(
 
   // Warm the dependency cache (safe — populates the local cache, surfaces any
   // remaining resolution error). Advises rather than fails on error.
+  //
+  // The app's entry AND aio's own tool entry points (am, build, aiol, doctor,
+  // the test harness — `aioToolEntries`, the ONE list `deno task doctor`
+  // checks the lock against). Caching only the entry left a committed
+  // deno.lock without the framework tooling's dependency entries, so two
+  // clones of one commit could resolve aio's build/test tools differently
+  // (report a desktop map app §5) — and doctor's "run `am fix`" has to be the repair.
   const entry = await resolveEntry(dir);
+  const toCache = entry ? await cacheTargets(dir, entry) : [];
+  const spelled = `deno cache ${toCache.join(" ")}`;
   if (entry && noDownload) {
     add(
       "dependencies cached",
       "advise",
-      `skipped (--no-download) — run \`deno cache ${entry}\` when online`,
+      `skipped (--no-download) — run \`${spelled}\` when online`,
     );
   } else if (entry && !dry) {
-    const r = await run("deno", ["cache", entry], dir);
+    const r = await run("deno", ["cache", ...toCache], dir);
     add(
       "dependencies cached",
       r.ok ? "fixed" : "advise",
-      r.ok ? entry : `deno cache failed: ${r.err}`,
+      r.ok ? toCache.join(" ") : `deno cache failed: ${r.err}`,
     );
   } else if (entry) {
-    add("dependencies cached", "would-fix", `deno cache ${entry}`);
+    add("dependencies cached", "would-fix", spelled);
   }
 
   // Advisory: the app's IDENTITY is pinned somewhere (source — never

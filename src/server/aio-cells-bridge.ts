@@ -139,6 +139,67 @@ export type BuildLegacyConfigInput = {
   appRef: { current: AioApp<Record<string, unknown>, unknown> | null };
 };
 
+/** One line per `listensTo` pair whose two cells disagree on `sync` — a
+ *  listener reacting to a source's actions where exactly one of the two syncs.
+ *
+ *  SUPPORTED, so a warning and never a refusal: the reaction is journalled
+ *  and resolved across both save clocks (journal.ts J6/J7). What the line
+ *  states is what the app's user sees differently, read off the code:
+ *  • sync listener, plain source — the reaction is no op in the listener's
+ *    log: it is a server-origin write, durable once folded into the
+ *    listener's snapshot (≤ 500 ms; at commit only under `journal: true`,
+ *    aio.ts `_afterAction`) and pushed to its clients from there.
+ *  • plain listener, sync source — a tab applies the source's call at once
+ *    and queues it offline, but a tab folds an op through its OWN cell only
+ *    (browser-sync.ts), so the listener changes only once the server has
+ *    applied the op: it lags while the client is offline, and an op the
+ *    server refuses triggers no reaction. The reaction is saved in the
+ *    listener's store, not in the source's op-log.
+ *
+ *  Pure over the defs (after `applyLocalFirst`, which decides `sync`). A pair
+ *  is said once however many of the source's actions the listener takes.
+ *  Shared with the in-process harnesses (testing/boot-refusals.ts), so
+ *  `aio.run`, `testServer`, `bootCells` and `testUI` say the same line.
+ *  @internal */
+export function syncListensMismatches(
+  cells: readonly CellDef[],
+): string[] {
+  const byId = new Map(cells.map((c) => [c.__aio.id, c]));
+  const said = new Set<string>();
+  const out: string[] = [];
+  for (const listener of cells) {
+    const l = listener.__aio.id;
+    for (const type of listener.__aio.foreignActions ?? []) {
+      const ci = type.indexOf(":");
+      if (ci <= 0) continue;
+      const s = type.slice(0, ci);
+      const source = byId.get(s);
+      if (!source || s === l) continue;
+      const lSync = !!listener.__aio.syncConfig;
+      if (lSync === !!source.__aio.syncConfig || said.has(`${l}\0${s}`)) {
+        continue;
+      }
+      said.add(`${l}\0${s}`);
+      out.push(
+        lSync
+          ? `listensTo: "${l}" (sync: true) listens to "${s}" (not sync) — ` +
+            `supported, but "${l}"'s reaction is no op in its op-log: it is a ` +
+            `server write, durable once folded into "${l}"'s snapshot (within ` +
+            `500 ms; at commit only with journal: true) and pushed to its ` +
+            `clients from there (said once per pair)`
+          : `listensTo: "${l}" (not sync) listens to "${s}" (sync: true) — ` +
+            `supported, but a tab applies a "${s}" call at once (and queues ` +
+            `it offline) while "${l}" reacts only on the server, once the op ` +
+            `arrives there: "${l}" lags "${s}" while a client is offline, ` +
+            `never reacts to an op the server refuses, and its reaction is ` +
+            `saved in "${l}"'s store, not in "${s}"'s op-log (said once per ` +
+            `pair)`,
+      );
+    }
+  }
+  return out;
+}
+
 /** Build an AioConfig from composed cells + CellsConfig (the v0.5 cells-based API) */
 export function buildLegacyConfig(
   input: BuildLegacyConfigInput,
@@ -158,6 +219,10 @@ export function buildLegacyConfig(
     appRef,
   } = input;
   const scope = scopeOf(fc, logger);
+  // A `listensTo` pair across the sync line — supported, said once per boot.
+  inAppScope(scope, () => {
+    for (const line of syncListensMismatches(composed.cells)) log.warn(line);
+  });
   // `cell({ diagnostics: false })` — this cell's actions stay out of the
   // on-disk dev diagnostics. Registered HERE, beside the other per-cell facts
   // pulled off `composed.cells`, rather than threaded through
@@ -639,6 +704,11 @@ const _loggerOf = new WeakMap<CellsConfig, AioLogger>();
 /** Initialize structured logger from CellsConfig */
 export async function initLogger(
   fc: CellsConfig,
+  /** The persist decider's answer (`persistingCellIds`) and every declared
+   *  cell: a cell outside it is `persist: "none"`, and debug.log keeps its
+   *  actions' arguments — which ARE its state — out, like every other sink
+   *  that retains payloads on disk. */
+  persist?: { persisting: ReadonlySet<string>; cells: readonly string[] },
 ): Promise<AioLogger | null> {
   const appId = resolveAppId(fc.appId);
   // Tri-state on purpose: the flag used to be spread only when TRUTHY, which
@@ -667,7 +737,13 @@ export async function initLogger(
       // wrote a redacted method's arguments — and the diff values it produced —
       // in cleartext (`docs/persistence/where-files-live.md` promises they are
       // kept nowhere).
-      redact: makeRedactor(fc.redactActions),
+      // …and a `persist: "none"` cell is withheld whole (a bare cell name):
+      // at `level: "debug"` its method's arguments reached debug.log in
+      // cleartext.
+      redact: makeRedactor([
+        ...(fc.redactActions ?? []),
+        ...(persist?.cells.filter((c) => !persist.persisting.has(c)) ?? []),
+      ]),
     })
     : null;
   // Do NOT rotate the logs of an app that is already running. `logger.init()`

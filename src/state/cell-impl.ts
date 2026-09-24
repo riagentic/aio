@@ -1825,6 +1825,8 @@ export function createBatcher(
     close: () => {
       closed = true;
     },
+    /** Whether `close()` has run — the owning call has settled. */
+    closed: (): boolean => closed,
     /** Unflushed mutations of the current batch — the live proxy overlays
      *  these on reads (read-your-writes). */
     pending: () => batch.mutations,

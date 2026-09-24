@@ -405,3 +405,8 @@ The table is also printed to the renderer console, so it arrives in
    much. `clone` high means too many/large effects returned from reducer.
 5. **Phase breakdown** is also available in the time-travel panel (dev mode) on
    every action's `PerfMetric`, and in `perf.log`.
+6. **Big state is a size question, not a time one** -- a write inside a 100k-row
+   array costs time proportional to the array, and a whole-state frame is paid
+   on every connect. The size limits, what each costs per transport (measured),
+   and how to hold a large working set on purpose:
+   [Legitimately large state](../persistence/big-data.md#legitimately-large-state).

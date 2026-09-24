@@ -9,7 +9,7 @@
 </p>
 
 <p align="center">
-  <code>v1.0.10-beta</code> · <a href="LICENSE">MIT</a> ·
+  <code>v1.0.11-beta</code> · <a href="LICENSE">MIT</a> ·
   <a href="docs/content.md">Docs</a> ·
   <a href="docs/basics/quickstart.md">Quickstart</a> ·
   <a href="CHANGELOG.md">Changelog</a>
@@ -58,11 +58,13 @@ rest:
 - 📦 **One binary** — `deno task compile`
 
 Proven where: every release is gate-built and booted on Linux — server, browser,
-Electron AppImage, and the one-line install on a fresh Ubuntu container — and
-its Windows scripts run under Wine. The desktop packages were run by hand on a
-real Windows 11 and a real macOS 14 (Intel) machine for this release; those, an
-Android device and iOS are not yet automated release gates.
-`deno task check:proof` prints what has actually been measured.
+Electron AppImage, and the one-line install on a fresh Ubuntu container. The
+Windows exe under Wine (`test:wine`) is an opt-in gate, not run for every
+release. The desktop packages have been driven by hand on a real Windows 11 and
+a real macOS 14 (Intel) machine in earlier betas; that, the packaged Windows
+exe's security doors, an Android device and iOS have no automated gate.
+`deno task check:proof` prints what has actually been run, when, and at which
+commit — and marks a row stale when that commit is no longer in the repo.
 
 ## 🧠 The idea
 
@@ -142,7 +144,7 @@ screen, `am trigger` acts on it.
 | 🚚 **Ship**    | browser · Electron · Android · iOS client · CLI · service · signed updates  |
 | 🛠️ **Operate** | `am` — status, health, logs, state, dispatch, pins, installs                |
 
-A whole client — renderer, protocol, offline queue, CRDT merge — is **77 KB
+A whole client — renderer, protocol, offline queue, CRDT merge — is **79 KB
 gzipped**, 67 KB brotli. `deno task bench:bundle` prints it, and
 `tests/bundle-size.test.ts` keeps this sentence true — both numbers.
 
@@ -169,10 +171,12 @@ Installs what is missing, builds, starts it. Nothing to read first.
 ## 🏗️ Built with aio
 
 The examples here are small on purpose; the apps built with aio so far are not.
-There are over thirty — public ones like
-[Claude Control](https://github.com/riagentic/cc), mdview and llama-master, and
-private ones such as a trading platform, a 3D CAD editor and an e-shop. Their
-bug reports shaped much of the framework.
+More than 20 apps across many categories — desktop tools, local AI and NLP
+front-ends, developer utilities, document viewers, web shops and trading
+software — run on aio today: public ones like
+[Claude Control](https://github.com/riagentic/cc), mdview, llama-master, spacy
+and fixable, and private ones such as a trading platform, a 3D CAD editor and an
+e-shop. Their bug reports shaped much of the framework.
 
 ## 🎯 Honestly
 
@@ -183,10 +187,11 @@ bug reports shaped much of the framework.
   `1.0.1-beta`, … and the first stable is the same triple without the suffix
   ([why](docs/basics/semver-policy.md)).
 - 📏 **What is measured, and what is not.** Every release is gate-built and
-  booted on Linux, in a fresh container, and under Wine. A real Windows or macOS
-  machine, a physical Android device and iOS are **not** release gates yet —
-  `deno task check:proof` prints exactly what has been run. The suite is large;
-  it is still one machine's opinion.
+  booted on Linux and in a fresh container. Wine is an opt-in gate, not run for
+  every release. A real Windows or macOS machine (driven by hand in earlier
+  betas), a physical Android device and iOS are **not** release gates yet —
+  `deno task check:proof` prints exactly what has been run, and when. The suite
+  is large; it is still one machine's opinion.
 - 🧑‍🔬 **Real apps run on it** (listed above). Their field reports drove most of
   what changed since alpha52, and they still find bugs — the first beta was
   re-cut the same evening for one. Expect rough edges; please report them.

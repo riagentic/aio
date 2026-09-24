@@ -8,7 +8,13 @@
 // directly — ONE `routePath`, one `navigate`, on every target.
 
 import { Listeners } from "../state/listeners.ts";
-import { type Signal, signal } from "../state/signal.ts";
+import { _ssrRouteSaidAt, _ssrRouteWritten } from "./ssr-render.ts";
+import {
+  _readScopeNow,
+  _setScopedEffectHook,
+  type Signal,
+  signal,
+} from "../state/signal.ts";
 import type {
   LinkProps,
   RouteProps,
@@ -73,6 +79,95 @@ export const routePath: Signal<string> = signal<string>(_rPath);
 export const routeSearch: Signal<URLSearchParams> = signal<URLSearchParams>(
   _rSearch,
 );
+
+// Every write — `.set()`, and `.update()` which calls it — stamps the writer's
+// async context, so a server render can tell whether the route it reads was
+// set in its own synchronous step (air/ssr-render.ts, "Who set the route").
+// Observe-only: the write itself is the prototype's, unchanged.
+//
+// And every READ — `.value`, `routePath()`, `.get()`, `.peek()` — made inside
+// a render given its own route (`renderToString(v, { route })`: the signals'
+// read scope, see state/signal.ts) answers with that route, never the global:
+// such a render never renders from it and never writes it. A tracked read
+// still SUBSCRIBES through the prototype getter (tracking only — the value is
+// the render's), so an effect over the route keeps its link; a computed read
+// in a render is evaluated for that render alone (state/signal.ts, "Read
+// scope"). With no read scope (the browser, a render without a route) the
+// read is the prototype's, unchanged.
+/** The read scope air/vdom-ssr.ts enters: an explicit route (it is the only
+ *  one ever entered). */
+type SsrRouteLike = { path: string; search: URLSearchParams };
+for (
+  const [sig, pick] of [
+    [routePath, (r: { path: string }) => r.path],
+    [routeSearch, (r: { search: URLSearchParams }) => r.search],
+  ] as [
+    Signal<unknown>,
+    (r: { path: string; search: URLSearchParams }) => unknown,
+  ][]
+) {
+  const proto = Object.getPrototypeOf(sig) as object;
+  const value = Object.getOwnPropertyDescriptor(proto, "value")!;
+  const peek = (proto as { peek(): unknown }).peek;
+  Object.defineProperty(sig, "value", {
+    configurable: true,
+    get(this: Signal<unknown>): unknown {
+      const global = value.get!.call(this); // tracks, in every scope
+      const r = _readScopeNow() as SsrRouteLike | null;
+      return r !== null ? pick(r) : global;
+    },
+    set(this: Signal<unknown>, v: unknown): void {
+      value.set!.call(this, v);
+    },
+  });
+  Object.defineProperty(sig, "peek", {
+    configurable: true,
+    writable: true,
+    value: function (this: Signal<unknown>): unknown {
+      const r = _readScopeNow() as SsrRouteLike | null;
+      return r !== null ? pick(r) : peek.call(this);
+    },
+  });
+}
+// An effect or watch CREATED during a render given its own route runs on the
+// GLOBAL route (state/signal.ts, "Read scope") — so one that reads the route
+// and writes a value the page shows puts the global route's value into the
+// render, silently. Said, per call site with a count, when its first run read
+// the route. Observe-only; dev and prod alike.
+_setScopedEffectHook((reads) => {
+  if (!reads([routePath, routeSearch])) return;
+  const frames = (new Error().stack ?? "").split("\n").slice(1);
+  const at = frames.find((f) =>
+    !/state\/signal\.ts|state\/watch\.ts|air\/router-core\.ts/.test(f)
+  )?.trim() ?? "unknown";
+  const more = _ssrRouteSaidAt("effect " + at);
+  if (more === null) {
+    return;
+  }
+  console.warn(
+    "[aio] an effect (or watch) created during a render given its own route " +
+      "read routePath/routeSearch — it runs on the GLOBAL route, never the " +
+      "render's, so a value it writes for the page is the global route's. " +
+      "Derive render values with computed() or useRoute() instead " +
+      `(${at}).${more}`,
+  );
+});
+
+for (const sig of [routePath, routeSearch] as Signal<unknown>[]) {
+  const write = sig.set;
+  Object.defineProperty(sig, "set", {
+    configurable: true,
+    writable: true,
+    value: function (
+      this: Signal<unknown>,
+      next: unknown,
+      opts?: { force?: boolean },
+    ): void {
+      _ssrRouteWritten();
+      write.call(this, next, opts);
+    },
+  });
+}
 
 export function _rSync(): void {
   _rPath = _relative(location.pathname);

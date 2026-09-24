@@ -51,6 +51,7 @@ import {
   restartBlockedReason,
 } from "./dev-restart.ts";
 import { count } from "../diagnostics/fmt.ts";
+import { redactUrlToken } from "../diagnostics/redact.ts";
 
 /** What the Electron window's exit means for the process that launched it —
  *  pure, so the decision is a unit test rather than a window on a display.
@@ -776,6 +777,7 @@ export function startLifecycle<S, A>(deps: LifecycleDeps<S, A>): void {
       `--expose: ${reach}; per-user token auth is the only thing in front of it`,
     );
     for (const [t, u] of Object.entries(users)) {
+      // aio-ok(token-log): share link — the operator copies this URL
       log.info(
         `share (${u.id}/${u.role}): ${share.url}?token=${t}${share.note}`,
       );
@@ -784,6 +786,7 @@ export function startLifecycle<S, A>(deps: LifecycleDeps<S, A>): void {
     log.warn(
       `--expose: ${reach}; the app key is the only thing in front of it`,
     );
+    // aio-ok(token-log): share link — the operator copies this URL
     log.info(`share: ${share.url}?token=${token}${share.note}`);
     log.info(`key file: ${appKeyPath(appId)} (owner-only)`);
     // Friendly pairing: the aio client enters this code once to pull the
@@ -1051,15 +1054,9 @@ export function startLifecycle<S, A>(deps: LifecycleDeps<S, A>): void {
           // decide. `openExternalBestEffort` would refuse in a test anyway; the
           // point of not calling it is that a desktop app staying a desktop app
           // is a rule, not a side effect of the environment.
-          log.error(
-            "Electron not installed and auto-install failed — this app is a " +
-              "desktop app and will NOT be opened in a browser instead",
-          );
-          log.error(
-            `install it with: deno task install:electron (then re-run). The ` +
-              `server is up meanwhile at ${electronUrl} — open it yourself, ` +
-              `or run with --client=browser if that is what you want.`,
-          );
+          for (const line of electronMissingLines(electronUrl)) {
+            log.error(line);
+          }
           return;
         }
         setElectronProc(proc);
@@ -1449,4 +1446,19 @@ export function mayTakeSighup(
   const m = /^SigIgn:\s*([0-9a-f]+)$/m.exec(status() ?? "");
   if (m) return (BigInt("0x" + m[1]) & 1n) === 0n;
   return stdoutIsTerminal();
+}
+
+/** What the log says when a desktop app's Electron could not be found or
+ *  installed. The URL is the one the window WOULD have loaded — under a key it
+ *  carries `?token=`, and a log line is not where a credential goes (the
+ *  share-link lines are the one place it is printed on purpose), so it is
+ *  shown redacted. Pure, so the no-token promise is tested without a launch. */
+export function electronMissingLines(electronUrl: string): string[] {
+  return [
+    "Electron not installed and auto-install failed — this app is a " +
+    "desktop app and will NOT be opened in a browser instead",
+    `install it with: deno task install:electron (then re-run). The ` +
+    `server is up meanwhile at ${redactUrlToken(electronUrl)} — open it ` +
+    `yourself, or run with --client=browser if that is what you want.`,
+  ];
 }

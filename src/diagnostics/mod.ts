@@ -20,6 +20,19 @@ import { isRedactedAction, noRedaction, REDACTED } from "./redact.ts";
 import { actionOrigin } from "./action-kind.ts";
 import type { Redactor } from "./redact.ts";
 import { isDiagnosticsOptOut } from "./diagnostics-optout.ts";
+import { WORKER_PATCH_ACTION } from "../state/cell-compose-reduce.ts";
+
+/** The cell an action belongs to: the `cell:` prefix of its type, or — for a
+ *  `worker: true` cell's patch batch, whose type names no cell — the cell in
+ *  its payload. */
+function actionCell(type: string, payload: unknown): string | undefined {
+  if (type === WORKER_PATCH_ACTION) {
+    const c = (payload as { cell?: unknown } | null | undefined)?.cell;
+    return typeof c === "string" && c !== "" ? c : undefined;
+  }
+  const i = type.indexOf(":");
+  return i > 0 ? type.slice(0, i) : undefined;
+}
 
 /** Lifecycle hooks returned by initDiagnostics for the runtime to call */
 export type DiagnosticsHooks = {
@@ -94,6 +107,34 @@ export function purgeDisabledArtifacts(
   return removed;
 }
 
+/** A checkpoint older than this is worth a WARN when it is about to be
+ *  handed to `onCheckpointRestore` (see `staleCheckpointWarning`). */
+export const CHECKPOINT_STALE_MS = 3600_000;
+
+/** `42s` under two minutes, `Nm` after — the snapshot's age as a boot line
+ *  reads it. */
+function fmtCheckpointAge(ageMs: number): string {
+  return ageMs < 120_000
+    ? `${Math.round(ageMs / 1000)}s`
+    : `${Math.round(ageMs / 60_000)}m`;
+}
+
+/** The warning for a checkpoint about to be handed to `onCheckpointRestore`,
+ *  or null while it is fresh. Only the restore site calls it — the one place
+ *  that knows a hook exists — so an app with no hook never sees a WARN about
+ *  a snapshot nothing will apply (field report (a desktop agent app) §1). Pure. */
+export function staleCheckpointWarning(
+  ts: number,
+  now: number = Date.now(),
+): string | null {
+  const age = now - ts;
+  return age > CHECKPOINT_STALE_MS
+    ? `checkpoint: handing a ${
+      fmtCheckpointAge(age)
+    }-old diagnostic snapshot to onCheckpointRestore — consider starting fresh (delete logs/checkpoint.json)`
+    : null;
+}
+
 /** Initialize the diagnostics subsystem. Returns null if disabled. */
 export function initDiagnostics(
   config: DiagnosticsConfig,
@@ -118,28 +159,31 @@ export function initDiagnostics(
   // ── Checkpoint (read early, before cells init) ──
   let recovered: CheckpointData | null = null;
   let cpView: CheckpointView | null = null;
+  /** Is `cell` one that must never be kept (`persist: "none"`)? Asked of the
+   *  view — the app's restore rule, built from `persistingCellIds` — so every
+   *  sink below follows the ONE persist decider rather than restating it.
+   *  `logs/actions.jsonl` wrote such a cell's arguments (the token its
+   *  `setToken(t)` was called with) in cleartext, in 1.0.11, on every call. */
+  const unkept = (cell: string | undefined): boolean =>
+    cell !== undefined && cpView !== null && !(cell in cpView({ [cell]: 0 }));
   let cpWriter: ReturnType<typeof createCheckpoint> | null = null;
   if (opts.checkpoint) {
     recovered = readCheckpoint(logDir);
     if (recovered) {
-      const age = Date.now() - recovered.ts;
-      const ageSec = Math.round(age / 1000);
       // AIO-417: don't imply automatic recovery — a diagnostic
       // checkpoint is only applied if the app provides an `onCheckpointRestore`
       // hook. The old "found state from Xs ago" read as "state was recovered".
-      if (age > 3600_000) {
-        log.warn(
-          "checkpoint",
-          `diagnostic snapshot is ${
-            Math.round(age / 60_000)
-          }m old — applied only via onCheckpointRestore; consider starting fresh`,
-        );
-      } else {
-        log.info(
-          "checkpoint",
-          `diagnostic snapshot from ${ageSec}s ago (applied only if onCheckpointRestore is set)`,
-        );
-      }
+      // INFO at any age: this point cannot know whether a hook exists, and
+      // without one nothing applies the snapshot — a WARN that asks for no
+      // action, on every boot, is noise. The WARN for an OLD snapshot belongs
+      // where it is about to be applied: `staleCheckpointWarning`, called by
+      // the restore step (aio-boot.ts) only when the hook is set.
+      log.info(
+        "checkpoint",
+        `diagnostic snapshot from ${
+          fmtCheckpointAge(Date.now() - recovered.ts)
+        } ago (applied only if onCheckpointRestore is set)`,
+      );
     }
     const debounce = typeof opts.checkpoint === "object"
       ? (opts.checkpoint.debounce ?? 5000)
@@ -255,7 +299,10 @@ export function initDiagnostics(
     // replayed, and dropping a cell from it would be silent data loss dressed
     // as a privacy feature. Nor does it touch persistence: a cell that must
     // keep its STATE off disk says `persist: "none"`, and making one key mean
-    // both is exactly the conflation this key exists to end.
+    // both is exactly the conflation this key exists to end. (A
+    // `persist: "none"` cell's PAYLOADS are withheld separately — see `unkept`
+    // — because its arguments are the state it must never keep; the line
+    // itself stays, which is what `diagnostics: false` removes.)
     const quiet = isDiagnosticsOptOut(action.type);
     if (diffEnabled && prev !== next && !quiet) {
       observe("state-diff", () => {
@@ -267,7 +314,7 @@ export function initDiagnostics(
           // theatre"), and so does the checkpoint; this sink printed
           // `vault: key ""→"hunter2"` in cleartext. The changed KEYS stay — what
           // moved is not the secret.
-          const hide = redact.redactsCell(d.cell);
+          const hide = redact.redactsCell(d.cell) || unkept(d.cell);
           log.debug(
             "state-diff",
             formatDiff(
@@ -289,11 +336,13 @@ export function initDiagnostics(
         // The write-set of a redacted method carries the same secret as its
         // arguments, under a DIFFERENT type — the ORIGIN decides too, exactly
         // as it does for the journal and the timeline.
+        // …and a `persist: "none"` cell's actions carry the values it must
+        // never keep: its arguments ARE its state.
         const hide = isRedactedAction(
           redact,
           action.type,
           actionOrigin(action.type, action.payload),
-        );
+        ) || unkept(actionCell(action.type, action.payload));
         actionLog!.append(action.type, hide ? REDACTED : action.payload);
       });
     }
@@ -348,6 +397,26 @@ export function initDiagnostics(
           Object.keys(kept).length !== Object.keys(recovered.state).length
         ) cpWriter.rewriteNow(recovered);
       }
+      // …and so is what an older build wrote to the action log for a cell
+      // that is now `persist: "none"`: new lines are withheld on the way in
+      // (`afterAction`), the old ones are rewritten here, once, in place.
+      actionLog?.scrub(
+        (type, payload) => unkept(actionCell(type, payload)),
+        REDACTED,
+      ).then(
+        (n) =>
+          n > 0 && log.info(
+            "action-log",
+            `withheld the payload of ${n} line(s) an older build wrote for ` +
+              `persist:"none" cell(s) — rewritten in place`,
+          ),
+        (e) =>
+          log.error(
+            "action-log",
+            `could not rewrite the payloads an older build wrote for ` +
+              `persist:"none" cell(s) — they may still be in the log: ${e}`,
+          ),
+      );
     },
     setHealthGetter: (fn) => {
       healthGetter = fn;

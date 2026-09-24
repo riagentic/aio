@@ -97,16 +97,26 @@ export function tempDirSync(prefix: string): string {
 
 /** Remove a temp dir now. Best effort: a directory a live child still holds
  *  stays registered and the exit sweep tries again, so a failure here is never
- *  the difference between clean and leaked. */
+ *  the difference between clean and leaked.
+ *
+ *  Retried for up to ~2 s: a just-killed Chromium's helpers keep writing its
+ *  profile for a moment, the recursive remove then fails "not empty", and
+ *  half-deleted `aio-test-browser-*` profiles piled up in `check:orphans`. */
 export async function dropTempDir(dir: string): Promise<void> {
-  try {
-    await Deno.remove(dir, { recursive: true });
-    registry.delete(dir);
-    pruneLockDirsOf(dir);
-  } catch {
-    // aio-ok: still in use (a child's cwd, an open handle) or already gone.
-    // Neither is worth a line here, and neither is a leak: the dir stays
-    // registered, so the exit sweep tries again and SAYS SO if it also fails.
+  for (let i = 0;; i++) {
+    try {
+      await Deno.remove(dir, { recursive: true });
+      registry.delete(dir);
+      pruneLockDirsOf(dir);
+      return;
+    } catch (e) {
+      // aio-ok: already gone, or still in use (a child's cwd, an open handle)
+      // after the retries. Neither is worth a line here, and neither is a
+      // leak: the dir stays registered, so the exit sweep tries again and
+      // SAYS SO if it also fails.
+      if (e instanceof Deno.errors.NotFound || i >= 20) return;
+      await new Promise((r) => setTimeout(r, 100));
+    }
   }
 }
 

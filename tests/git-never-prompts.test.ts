@@ -18,6 +18,8 @@ const SPAWN = /new Deno\.Command\(\s*"git"/g;
 // chars covers the largest current site (gitLsRemote, whose options carry a
 // ~700-char comment) with room to spare.
 const WINDOW = 1500;
+const RUN_GIT = /\brun\(\s*"git"/g;
+const isAm = (p: string) => p === "src/am.ts" || p.startsWith("src/am/");
 
 async function* tsFiles(dir: string): AsyncGenerator<string> {
   for await (const e of Deno.readDir(dir)) {
@@ -27,7 +29,7 @@ async function* tsFiles(dir: string): AsyncGenerator<string> {
   }
 }
 
-Deno.test("src: every spawned git carries GIT_NO_PROMPT_ENV and a null stdin", async () => {
+Deno.test("src: every spawned git carries GIT_NO_PROMPT_ENV (am: gitEnvFor) and a null stdin", async () => {
   const offenders: string[] = [];
   for await (const path of tsFiles("src")) {
     const raw = await Deno.readTextFile(path);
@@ -38,10 +40,26 @@ Deno.test("src: every spawned git carries GIT_NO_PROMPT_ENV and a null stdin", a
       /`(?:[^`\\]|\\.)*`/g,
       (m) => m.replace(/[^\n]/g, " "),
     );
+    // `am-cmd-fix`'s `run("git", …)` helper spawns git too.
+    if (isAm(path)) {
+      for (const m of src.matchAll(RUN_GIT)) {
+        const line = src.slice(0, m.index).split("\n").length;
+        if (!src.slice(m.index, m.index + WINDOW).includes("gitEnvFor(")) {
+          offenders.push(`${path}:${line} — run("git") without gitEnvFor(cwd)`);
+        }
+      }
+    }
     for (const m of src.matchAll(SPAWN)) {
       const opts = src.slice(m.index, m.index + WINDOW);
       const line = src.slice(0, m.index).split("\n").length;
-      if (!opts.includes("GIT_NO_PROMPT_ENV")) {
+      // `am` spawns through `gitEnvFor` (src/am/am-versions.ts), which
+      // carries GIT_NO_PROMPT_ENV AND strips an inherited GIT_DIR & co. — a
+      // hook's environment otherwise pointed am's git at ANOTHER repo.
+      if (isAm(path)) {
+        if (!opts.includes("gitEnvFor(")) {
+          offenders.push(`${path}:${line} — missing ...gitEnvFor(cwd)`);
+        }
+      } else if (!opts.includes("GIT_NO_PROMPT_ENV")) {
         offenders.push(`${path}:${line} — missing env: GIT_NO_PROMPT_ENV`);
       }
       if (!/stdin:\s*"null"/.test(opts)) {

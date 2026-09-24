@@ -10,6 +10,7 @@ import { classifyElectronLine } from "./electron-renderer-log.ts";
 import { isCompiled } from "../server/paths.ts";
 import { DENO_JSON_NAMES, parseDenoJson } from "../server/deno-json.ts";
 import { HEY } from "../diagnostics/fmt.ts";
+import { redactUrlToken } from "../diagnostics/redact.ts";
 import { spawnInheritingOrNull } from "../server/no-console.ts";
 import {
   bakedElectronVersion,
@@ -1394,6 +1395,8 @@ export async function launchElectronClient(
   const bin = await findElectronBin(log);
   if (!bin) return null;
   const args = url ? [`--server-url=${url}`] : [];
-  log.info(`launching aio client${url ? ` → ${url}` : ""}`);
+  // argv carries the URL as given (it is the user's own input, and the client
+  // needs it); the LOG line does not carry its token.
+  log.info(`launching aio client${url ? ` → ${redactUrlToken(url)}` : ""}`);
   return spawnElectron(bin, electronClientScript(), args);
 }

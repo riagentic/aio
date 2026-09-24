@@ -364,8 +364,22 @@ export function startCellWorkerHost(cell: CellDef): Promise<never> {
       // work. The method registries live in THIS isolate — the main thread's
       // abortAllInflight cannot see them — so the abort+drain must run here,
       // while `closing` is still false so the final writes stream home.
+      //
+      // …and THIS isolate's loop closes too (open → draining → sealed), as
+      // the main one does. Its patches reach home flagged in-flight
+      // (cell-worker-pool.ts), so the main loop cannot tell a running
+      // method's last write from NEW work this thread starts on its own —
+      // an `own` watcher dispatching through the `app` its `onInit` captured
+      // kept landing commits for the whole drain (measured: 20 of them),
+      // where the same watcher on the main isolate is refused. The refusal
+      // happens here, where the difference is still visible, with the main
+      // loop's own words (`DISPATCH_DRAINING`); sealed after the drain, a
+      // write that ignored its abort is reported LOST, not silently dropped.
+      dispatch.close();
       abortAllInflight();
+      const deadline = Date.now() + WORKER_CLOSE_DRAIN_MS;
       await settlePending(WORKER_CLOSE_DRAIN_MS);
+      await dispatch.drain(Math.max(1, deadline - Date.now()));
       closing = true; // stop streaming BEFORE teardown mutates the slice
       composed.destroyAll({
         dispatch: (a: Msg) => void dispatch(a),

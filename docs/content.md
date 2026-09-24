@@ -60,7 +60,7 @@
 
 ## UI — AIR renderer — components, signals, routing, forms
 
-- [Rendering & UI](ui/README.md) — AIO uses AIR — a built-in signal-based renderer (77 KB gzipped with the
+- [Rendering & UI](ui/README.md) — AIO uses AIR — a built-in signal-based renderer (79 KB gzipped with the
 - [AIR Advanced Patterns](ui/air-advanced.md) — SSR, portals, islands, code splitting, virtual scrolling, dimensions, deferred
 - [AIR Animation](ui/air-animation.md) — CSS-first declarative transitions for enter/exit animations, imperative spring
 - [AIR vs React vs Best-in-Class — Full Comparison](ui/air-comparison.md) — Reference frameworks: React 19, Solid.js 1.9 (signal pioneer), Svelte
@@ -166,10 +166,10 @@
 
 ## Upgrade guides — version-to-version migration notes
 
-- [Upgrade Guides](upgrade/README.md) — every one, newest first (85 pages)
+- [Upgrade Guides](upgrade/README.md) — every one, newest first (86 pages)
+- [Upgrading from 1.0.10-beta to 1.0.11-beta](upgrade/from-1.0.10-beta-to-1.0.11-beta.md) — Nothing is removed and nothing changes shape.
 - [Upgrading from 1.0.9-beta to 1.0.10-beta](upgrade/from-1.0.9-beta-to-1.0.10-beta.md) — Nothing is removed and nothing changes shape; the surface only grows (the
 - [Upgrading from 1.0.8-beta to 1.0.9-beta](upgrade/from-1.0.8-beta-to-1.0.9-beta.md) — Nothing breaks; the testing surface gains pressed, expanded, richer checked, and
-- [Upgrading from 1.0.7-beta to 1.0.8-beta](upgrade/from-1.0.7-beta-to-1.0.8-beta.md) — removals and no changed signatures.
 - [The aio restructure — alpha27/alpha28 breaking changes](upgrade/restructure.md) — This guide tracks every breaking change of the restructure
 
 ## Design specs — decision records — background, not manuals

@@ -281,8 +281,13 @@ function privateCopy(v: unknown): unknown {
 export type PolicyDecision =
   /** Run it. `settle` records the outcome for `first` / `ttl`. */
   | { kind: "run"; settle: (o: CallOutcome) => void }
-  /** Run it AFTER `after`. `settle` as above. */
-  | { kind: "queue"; after: Promise<unknown>; settle: (o: CallOutcome) => void }
+  /** Run it AFTER `after` — or NOW when `after` is undefined (nothing of
+   *  this method is queued or running). `settle` as above. */
+  | {
+    kind: "queue";
+    after: Promise<unknown> | undefined;
+    settle: (o: CallOutcome) => void;
+  }
   /** Do not run: adopt this outcome instead (a `first` dedup or a `ttl` hit). */
   | { kind: "adopt"; outcome: Promise<CallOutcome>; why: "first" | "ttl" };
 
@@ -362,7 +367,12 @@ export function beginPolicyCall(
   };
 
   if (mode === "queue") {
-    const after = queueTail.get(key) ?? Promise.resolve();
+    // No tail = nothing of this method is queued or running: it runs NOW, in
+    // call order. An empty tail used to be `Promise.resolve()`, and chaining
+    // on it still deferred the start a microtask — so `const p = c.read();
+    // await c.set("b")` ran the SET first and the queued read saw "b", where
+    // every other concurrency mode saw "a" (field report (a desktop map app) §2).
+    const after = queueTail.get(key);
     // The tail is per METHOD, not per arguments: "queue" means this method
     // runs one at a time, and a per-argument tail would let two different
     // arguments interleave — which is the thing being asked for the opposite
@@ -379,7 +389,28 @@ export function setQueueTail(
   tail: Promise<unknown>,
   store: PolicyStore = _defaultStore,
 ): void {
-  current(store).queueTail.set(`${prefix}:${method}`, tail);
+  const queueTail = current(store).queueTail;
+  const key = `${prefix}:${method}`;
+  queueTail.set(key, tail);
+  // Settled and still the tail → the queue is empty again, so the next call
+  // runs at once (see `decide`). Both outcomes: a failed call frees it too.
+  const clear = () => {
+    if (queueTail.get(key) === tail) queueTail.delete(key);
+  };
+  tail.then(clear, clear);
+}
+
+/** The queued call whose tail is `tail` has its outcome: if nothing queued
+ *  behind it, the queue is empty now and the next call runs at once. */
+export function releaseQueueTail(
+  prefix: string,
+  method: string,
+  tail: Promise<unknown>,
+  store: PolicyStore = _defaultStore,
+): void {
+  const queueTail = current(store).queueTail;
+  const key = `${prefix}:${method}`;
+  if (queueTail.get(key) === tail) queueTail.delete(key);
 }
 
 /** Clear everything, in every cell's store — teardown, and between tests. */

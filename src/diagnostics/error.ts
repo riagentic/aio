@@ -562,8 +562,11 @@ export function generateTip(err: AioError): string | undefined {
     case "INIT_ERROR":
       return `Tip: Cell "${
         err.context.cellName ?? "?"
-      }" onInit threw. Check for missing dependencies or invalid initial state. ` +
-        `\`am logs\` shows what ran before it; see docs/state/lifecycle.md.`;
+      }" onInit threw; the other cells kept booting without it. To start ` +
+        `work from onInit, dispatch it — \`app.dispatch({ type: "<cell>:<method>", ` +
+        `payload: { args: [] } })\` — since methods are bound only after every ` +
+        `cell's init; or call the method from onStart. \`am logs\` shows what ` +
+        `ran before it; see docs/state/lifecycle.md.`;
     case "DESTROY_ERROR":
       return `Tip: Cell "${
         err.context.cellName ?? "?"
@@ -760,7 +763,9 @@ export function formatErrorBox(err: AioError): string {
     c.effectType && `effect ${c.effectType}`,
     c.hookName && `hook ${c.hookName}`,
     c.machineState && `machine ${c.machineState}`,
-    c.duration != null && `${c.duration}ms`,
+    // Rounded like the message beside it: a raw `performance.now()` delta
+    // printed `95.9382579999999ms` one line above "95.9ms".
+    c.duration != null && `${+c.duration.toFixed(1)}ms`,
     // Joined PLAIN and dimmed once, at the end: a `dim(" · ")` between plain
     // parts emits a reset after each separator, so everything past the first
     // one lost its dim — the classic nested-escape bug.

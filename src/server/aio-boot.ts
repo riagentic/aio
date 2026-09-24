@@ -41,8 +41,9 @@ import { isCompiled, resolveKvPath } from "./paths.ts";
 import { prodRequested } from "./aio-cli.ts";
 import { SYNC_VERSION_UNKNOWN } from "../sync/compact.ts";
 import { applyStatePatch } from "../sync/state-patch.ts";
-import { dirname, join, resolve, SEPARATOR } from "@std/path";
+import { basename, dirname, join, resolve, SEPARATOR } from "@std/path";
 import { appDirs, appsDirEnv } from "./app-dirs.ts";
+import type { BudgetLedger } from "../state/budgets.ts";
 import {
   AioError,
   createAioError,
@@ -54,6 +55,7 @@ import { makeRedactor } from "../diagnostics/redact.ts";
 import { migrateSchema, PERSIST_SCHEMA_VERSION } from "./persist-schema.ts";
 import type { Log } from "../diagnostics/logger-api.ts";
 import type { CheckpointData, DiagnosticsHooks } from "../diagnostics/mod.ts";
+import { staleCheckpointWarning } from "../diagnostics/mod.ts";
 import type { ServerSyncHandler } from "../sync/server-handler.ts";
 import { cloneState } from "../state/immutable.ts";
 import {
@@ -1164,6 +1166,12 @@ export interface BootConfig<S> {
    *  See docs/persistence/where-files-live.md. */
   appDir?: string;
 
+  /** THIS app's budget ledger (`setBudgets(...)` in aio.ts). Handed to the
+   *  persistence manager explicitly: boot awaits between the app's
+   *  `setBudgets` and the manager's construction, and a second app booting in
+   *  the same process sets ITS ledger in that gap — so a `budgetsFor()` read
+   *  there judged this app's cells by the other app's `cellState`. */
+  budgets?: BudgetLedger;
   /** Override the SQLite file (":memory:" for hermetic tests). Default:
    *  `~/.<appId>/data/state.db` (see app-dirs.ts) unless overridden. */
   dbPath?: string;
@@ -1329,6 +1337,246 @@ async function scrubStaleSlices(
   // out of the WAL and truncates that too.
   await db.execute("VACUUM");
   await db.execute("PRAGMA wal_checkpoint(TRUNCATE)");
+}
+
+/** The copies of the store aio keeps OUTSIDE the live file, each of which may
+ *  hold a `persist: "none"` slice an older build wrote — found after the live
+ *  file was scrubbed, when the slice survived intact in every one of them.
+ *
+ *  - `<db>.snapshot` — the rolling snapshot `checkIntegrityOnBoot` restores
+ *    (`db.snapshot(path)`, VACUUM INTO): a byte-for-byte older store.
+ *  - `<data>/backups/**` — the pre-migration copy `updates` takes before it
+ *    installs (updates-runtime.ts).
+ *  - `<home>/backups/**` — `am backup`'s default destination.
+ *
+ *  Each is scrubbed IN PLACE rather than re-taken or deleted: a snapshot or a
+ *  backup is a point in time (a rollback restores the store the old build ran
+ *  on, not this one's), and only the slice that must not be kept goes.
+ *
+ *  Two kinds are NOT rewritten, and each is said: a quarantined database
+ *  (`<db>.corrupt-*`) is the damaged original kept for a recovery tool — a
+ *  rewrite could destroy what is being recovered — so it is named in a
+ *  warning; and a `<db>.snapshot.tmp-*` is a snapshot a crash cut off before
+ *  it was verified, which nothing ever installs — it is deleted.
+ *
+ *  INDEPENDENT OF THE LIVE FILE. This ran only on a boot whose live store
+ *  still held a stale slice — so a crash between the live scrub and this one
+ *  (or a copy put back later) left every copy holding the slice for good: the
+ *  next boot found the live file clean and never looked again. Now every boot
+ *  of an app with a `persist: "none"` cell checks each copy it has not already
+ *  verified — cheaply: a copy is verified once, and recorded by its file
+ *  signature (mtime, size, inode) in the live store's `scrubbedCopiesKey`
+ *  row, only AFTER it was found clean or scrubbed. A crash at any point
+ *  leaves the unrecorded copies to the next boot; a copy that changed is
+ *  checked again; a different set of `persist: "none"` cells voids the record.
+ *  `force` (the live file had stale slices — the cells' set just changed, or
+ *  an older build ran) checks every copy regardless. */
+async function scrubStoreCopies(
+  dbPath: string,
+  dirs: { data: string; home: string },
+  persistKey: string,
+  staleOf: (stored: Record<string, unknown>) => string[],
+  log: Log,
+  verified: {
+    kv: SkvInstance;
+    key: string;
+    /** The declared `persist: "none"` cells — what "clean" was judged by. */
+    none: readonly string[];
+    force: boolean;
+  },
+): Promise<void> {
+  const none = [...verified.none].sort();
+  const prior = verified.force
+    ? null
+    : await verified.kv.get<ScrubbedCopies>(verified.key);
+  const was = prior && JSON.stringify(prior.none) === JSON.stringify(none)
+    ? prior.files
+    : {};
+  const seen: Record<string, string> = {};
+  const sigOf = (p: string): string | null => {
+    try {
+      const st = Deno.statSync(p);
+      return `${st.mtime?.getTime() ?? 0}:${st.size}:${st.ino ?? ""}`;
+    } catch {
+      return null;
+    }
+  };
+  /** Verified before, and unchanged since — recorded again, not reopened. */
+  const known = (p: string): boolean => {
+    const sig = sigOf(p);
+    if (sig === null || was[p] !== sig) return false;
+    seen[p] = sig;
+    return true;
+  };
+  const record = (p: string) => {
+    const sig = sigOf(p);
+    if (sig !== null) seen[p] = sig;
+  };
+  const { snapshotPathFor } = await import("./db-integrity.ts");
+  const snapshot = snapshotPathFor(dbPath);
+  const dbDir = dirname(resolve(dbPath));
+  const dbName = basename(dbPath);
+  const lstat = (p: string) => {
+    try {
+      return Deno.lstatSync(p);
+    } catch {
+      return null;
+    }
+  };
+  const copies: string[] = lstat(snapshot)?.isFile ? [snapshot] : [];
+  const quarantined: string[] = [];
+  for (const e of readDirOrEmpty(dbDir)) {
+    if (!e.isFile) continue;
+    if (e.name.startsWith(`${dbName}.snapshot.tmp-`)) {
+      const p = join(dbDir, e.name);
+      // Unforced, only one a crash surely left: under `singleton: false` a
+      // sibling instance may be writing a fresh one right now. FORCED (a cell
+      // just became persist:"none"), every one goes, fresh or not — on
+      // purpose: a torn file from before the change may hold the secret, and
+      // deleting a sibling's in-flight one costs it that one snapshot (its
+      // `snapshot()` rejects at the rename); the live store is untouched.
+      if (!verified.force && !tornLongAgo(p)) continue;
+      try {
+        Deno.removeSync(p);
+        log.info(
+          `persist: removed ${p} — a snapshot a crash cut off before it was ` +
+            `verified (nothing installs it), which may hold the ` +
+            `persist:"none" slice(s) just scrubbed`,
+        );
+      } catch (err) {
+        log.error(`persist: could not remove the torn snapshot ${p}: ${err}`);
+      }
+    } else if (
+      e.name.startsWith(`${dbName}.corrupt-`) && !/-(wal|shm)$/.test(e.name)
+    ) quarantined.push(join(dbDir, e.name));
+  }
+  for (const root of [join(dirs.data, "backups"), join(dirs.home, "backups")]) {
+    const walk = (d: string) => {
+      for (const e of readDirOrEmpty(d)) {
+        const p = join(d, e.name);
+        if (e.isDirectory) walk(p);
+        else if (!e.isFile || /-(wal|shm|journal)$/.test(e.name)) continue;
+        else if (e.name.includes(".corrupt-")) quarantined.push(p);
+        else if (isSqliteFile(p)) copies.push(p);
+      }
+    };
+    walk(root);
+  }
+  for (const p of copies) {
+    if (known(p)) continue; // verified before, unchanged since
+    try {
+      const gone = await scrubCopy(p, persistKey, staleOf);
+      // Recorded only once clean: a copy that failed is tried (and said)
+      // again next boot, never marked done.
+      record(p);
+      if (gone.length) {
+        log.info(
+          `persist: removed the persist:"none" slice(s) ${gone.join(", ")} ` +
+            `from the copy ${p} too — overwritten, not just unlinked`,
+        );
+      }
+    } catch (err) {
+      log.error(
+        `persist: could not scrub the copy ${p} — it may still hold the ` +
+          `persist:"none" slice(s) an older build wrote. Delete it (or ` +
+          `take it again) if it is not needed: ${err}`,
+      );
+    }
+  }
+  for (const p of quarantined) {
+    if (known(p)) continue; // said once already, and unchanged since
+    record(p);
+    log.warn(
+      `persist: ${p} is a damaged copy of the store an earlier recovery ` +
+        `quarantined, kept untouched for a recovery tool — it may still hold ` +
+        `the persist:"none" slice(s) an older build wrote. Delete it (with ` +
+        `its -wal/-shm) once you no longer need it.`,
+    );
+  }
+  const next: ScrubbedCopies = { none, files: seen };
+  if (JSON.stringify(next) !== JSON.stringify(prior)) {
+    await verified.kv.set(verified.key, next);
+  }
+}
+
+/** The live-store row naming the copies verified free of `persist: "none"`
+ *  slices — see `scrubStoreCopies`. Outside the snapshot's key space (`:` is
+ *  not the store's separator), so no restore, store-gen trigger or journal
+ *  watermark ever reads it. */
+const scrubbedCopiesKey = (appId: string): string =>
+  `${appId}:__scrubbed_copies`;
+type ScrubbedCopies = { none: string[]; files: Record<string, string> };
+
+/** A torn snapshot old enough that no live writer can still own it. */
+function tornLongAgo(p: string): boolean {
+  try {
+    const m = Deno.statSync(p).mtime?.getTime();
+    return m !== undefined && Date.now() - m > 60 * 60_000;
+  } catch {
+    return false;
+  }
+}
+
+function readDirOrEmpty(d: string): Deno.DirEntry[] {
+  try {
+    return [...Deno.readDirSync(d)];
+  } catch {
+    return [];
+  }
+}
+
+/** Does `p` start with SQLite's 16-byte header magic? */
+function isSqliteFile(p: string): boolean {
+  let f: Deno.FsFile | undefined;
+  try {
+    f = Deno.openSync(p, { read: true });
+    const b = new Uint8Array(16);
+    return f.readSync(b) === 16 &&
+      new TextDecoder().decode(b) === "SQLite format 3\0";
+  } catch {
+    return false;
+  } finally {
+    f?.close();
+  }
+}
+
+/** Scrub one copy of the store in place: the stale slices out of BOTH layouts
+ *  (a copy an older build took may hold either), with `secure_delete` and a
+ *  `VACUUM` so no freed page keeps them. Its journal mode is left as it was
+ *  (`PRAGMA journal_mode` with no value only reads it). Returns the slices
+ *  removed; a copy that holds none is not written. */
+async function scrubCopy(
+  path: string,
+  persistKey: string,
+  staleOf: (stored: Record<string, unknown>) => string[],
+): Promise<string[]> {
+  const db = createDB(path, { pragmas: ["PRAGMA journal_mode"] });
+  try {
+    const { rows } = await db.query(
+      "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'aio_kv'",
+    );
+    if (rows.length === 0) return [];
+    const kv = sqliteKv(db);
+    const single = await kv.get<Record<string, unknown>>(persistKey);
+    const multi = await kv.getMulti<Record<string, unknown>>(persistKey);
+    const inSingle = single && typeof single === "object"
+      ? staleOf(single)
+      : [];
+    const inMulti = multi ? staleOf(multi) : [];
+    if (inSingle.length === 0 && inMulti.length === 0) return [];
+    await db.execute("PRAGMA secure_delete = 1");
+    if (inMulti.length) await kv.setMulti(persistKey, {}, inMulti);
+    if (inSingle.length) {
+      const rest = { ...single };
+      for (const k of inSingle) delete rest[k];
+      await kv.set(persistKey, rest);
+    }
+    await db.execute("VACUUM");
+    await db.execute("PRAGMA wal_checkpoint(TRUNCATE)");
+    return [...new Set([...inSingle, ...inMulti])];
+  } finally {
+    await db.close();
+  }
 }
 
 /** A stored document minus the declared cells that must never come back
@@ -1871,6 +2119,44 @@ export async function bootStorage<S>(
               )
             );
         }
+        // The live file is only one copy: a snapshot or a backup taken under
+        // an older build holds the same bytes. Checked on EVERY boot (each
+        // copy once, until it changes) — not only when the live file was
+        // stale, which a crash after the live scrub would never be again.
+        const persisting = new Set(cfg.persistingCellIds);
+        const none = Object.keys(initialState as Record<string, unknown>)
+          .filter((k) => !persisting.has(k));
+        if (
+          none.length > 0 && openedDbPath && openedDbPath !== ":memory:" &&
+          !openedDbPath.startsWith("file::memory:")
+        ) {
+          await scrubStoreCopies(
+            openedDbPath,
+            appDirs(appId, cfg.appDir),
+            persistKey,
+            (stored) => {
+              const keep = restorableSlices(
+                stored,
+                cfg.persistingCellIds!,
+                initialState as Record<string, unknown>,
+              );
+              return Object.keys(stored).filter((k) => !(k in keep));
+            },
+            log,
+            {
+              kv: kvDb,
+              key: scrubbedCopiesKey(appId),
+              none,
+              force: stale.length > 0,
+            },
+          ).catch((e) =>
+            log.error(
+              `persist: could not check the store's copies for the ` +
+                `persist:"none" slice(s) an older build may have left in ` +
+                `them — they may still hold those bytes: ${e}`,
+            )
+          );
+        }
         migrated = kept;
       }
       // This boot's own store writes (a layout adopted, a legacy store
@@ -2268,6 +2554,11 @@ export async function bootStorage<S>(
   if (diagHooks?.getRecoveredState() && onCheckpointRestore) {
     try {
       const raw = diagHooks.getRecoveredState()!;
+      // The hook is about to get this state — THE point where an old
+      // snapshot is worth a WARN (with no hook nothing applies it: INFO only,
+      // in diagnostics/mod.ts).
+      const stale = staleCheckpointWarning(raw.ts);
+      if (stale) log.warn(stale);
       // …and what comes BACK is the restore half of the same rule: a
       // checkpoint an older build wrote raw still holds `persist: "none"`
       // slices, and the app's hook would hand them straight back.
@@ -2444,6 +2735,7 @@ export async function bootStorage<S>(
     persistKey,
     persistMode,
     persistMs: persistDebounceMs,
+    budgets: cfg.budgets,
     getState,
     // Dev (observe-only): say at WRITE time what the next boot will not
     // restore — see `restoreDropWatcher`.

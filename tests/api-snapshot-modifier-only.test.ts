@@ -169,18 +169,41 @@ Deno.test("no reviewed entry helps without a declared return type, or with a cha
   }
 });
 
-Deno.test("renderToStream's reviewed entry names the digest the snapshot carries", async () => {
-  const entry = MODIFIER_REVIEWED.find((r) => r.symbol === "renderToStream")!;
-  assert(entry.reason.length > 40);
-  const snapshot = JSON.parse(
-    await Deno.readTextFile(
-      new URL("../docs/api-snapshot.json", import.meta.url),
-    ),
-  );
-  assertEquals(
-    snapshot.entries[entry.entry].symbols.renderToStream.sig,
-    entry.newSig,
-  );
+// The reviewed entry records the 1.0.10 change (async function* → a plain
+// function), so it must name the digest the 1.0.10 SNAPSHOT carried. The
+// current snapshot has moved on by an additive change (1.0.11's optional
+// `opts` parameter), which check:api judges on its own — this entry must not
+// be what excuses it, and the next test's end-to-end diff pins that it only
+// ever matches its exact two digests.
+const TAGGED_1_0_10 = await new Deno.Command("git", {
+  args: ["rev-parse", "-q", "--verify", "refs/tags/v1.0.10-beta"],
+  cwd: new URL("..", import.meta.url).pathname,
+  stdout: "null",
+  stderr: "null",
+}).output().then((o) => o.success, () => false);
+
+Deno.test({
+  name:
+    "renderToStream's reviewed entry names the digest the 1.0.10 snapshot carried",
+  // aio-ok: a checkout without the v1.0.10-beta tag (a `git archive` copy)
+  // has no 1.0.10 snapshot to read; the entry is then checked by the diff test.
+  ignore: !TAGGED_1_0_10,
+  fn: async () => {
+    const entry = MODIFIER_REVIEWED.find((r) => r.symbol === "renderToStream")!;
+    assert(entry.reason.length > 40);
+    const o = await new Deno.Command("git", {
+      args: ["show", "v1.0.10-beta:docs/api-snapshot.json"],
+      cwd: new URL("..", import.meta.url).pathname,
+      stdout: "piped",
+      stderr: "piped",
+    }).output();
+    assert(o.success, new TextDecoder().decode(o.stderr));
+    const snapshot = JSON.parse(new TextDecoder().decode(o.stdout));
+    assertEquals(
+      snapshot.entries[entry.entry].symbols.renderToStream.sig,
+      entry.newSig,
+    );
+  },
 });
 
 Deno.test("the alternatives are computed only for a declared return type, and never written", async () => {

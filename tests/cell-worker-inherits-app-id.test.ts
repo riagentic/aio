@@ -54,6 +54,7 @@ async function probe(
   opts: { entry: string; cwd: string; chdir?: string },
 ): Promise<{ main: string; worker: { id: string; inWorker: boolean } }> {
   const port = await freePort();
+  const apps = aioTestDir("wk-appid-");
   const r = await new Deno.Command(Deno.execPath(), {
     args: [
       "run",
@@ -65,12 +66,12 @@ async function probe(
     ],
     cwd: opts.cwd,
     env: {
-      AIO_APPS_DIR: aioTestDir("wk-appid-"),
+      AIO_APPS_DIR: apps,
       ...(opts.chdir ? { PROBE_CHDIR: opts.chdir } : {}),
     },
     stdout: "piped",
     stderr: "piped",
-  }).output();
+  }).output().finally(() => Deno.remove(apps, { recursive: true }));
   const out = new TextDecoder().decode(r.stdout);
   const line = out.split("\n").find((l) => l.startsWith("IDPROBE "));
   if (!line) {

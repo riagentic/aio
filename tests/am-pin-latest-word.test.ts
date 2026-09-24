@@ -93,6 +93,9 @@ Deno.test("am pin: an unknown ref names BOTH words, not just `main`", async () =
   // under test — the message it produces is the whole point.
   const dir = await Deno.makeTempDir({ prefix: "aio-pinword-" });
   await new Deno.Command("git", { args: ["init", "-q", dir] }).output();
+  // An aio checkout (mod.ts) — a bare repo that is not aio's is refused as
+  // "not a clone" before any ref is resolved (tests/am-versions-no-walk-up).
+  await Deno.writeTextFile(`${dir}/mod.ts`, "export {};\n");
   try {
     const r = await ensureVersion(dir, "newest");
     assertEquals(r.ok, false);

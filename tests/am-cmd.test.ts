@@ -542,18 +542,46 @@ Deno.test("am: cmdStop — SIGTERM fallback stops an unresponsive child", async 
   }
 });
 
-Deno.test("am: cmdStop — without --wait returns immediately as stopping", async () => {
+Deno.test("am: cmdStop — --no-wait returns immediately as stopping", async () => {
   const app = `am-cmd-stop-async-${Deno.pid}`;
+  const child = spawnChild();
+  writePid(makePf(app, { pid: child.pid, port: 1 }));
+  try {
+    const { logs } = await capture(() =>
+      cmdStop([], { json: true, app, noWait: true } as GlobalFlags)
+    );
+    assertEquals(JSON.parse(logs[0]!).status, "stopping");
+    assertEquals(readPid(app)?.status, "stopping", "lock marked stopping");
+  } finally {
+    await killProcess(child.pid, 0);
+    dropFixtureLock(app);
+    await child.status;
+  }
+});
+
+// `am stop` returned the moment the shutdown was ASKED for — exit 0 while the
+// process was still alive, so a binary started right after hit "Already
+// running". It now waits by default (as `am start` does), up to the stop
+// budget then SIGKILL, and says "stopped" only once the process is gone.
+Deno.test("am: cmdStop — by default waits until the process is gone", async () => {
+  const app = `am-cmd-stop-default-${Deno.pid}`;
   const child = spawnChild();
   writePid(makePf(app, { pid: child.pid, port: 1 }));
   try {
     const { logs } = await capture(() =>
       cmdStop([], { json: true, app } as GlobalFlags)
     );
-    assertEquals(JSON.parse(logs[0]!).status, "stopping");
-    assertEquals(readPid(app)?.status, "stopping", "lock marked stopping");
+    const doc = JSON.parse(logs.at(-1)!);
+    assertEquals(doc.status, "stopped");
+    assertEquals(
+      doc.pid,
+      child.pid,
+      "the stopped document still names the pid",
+    );
+    assertEquals(isProcessAlive(child.pid), false, "exit 0 on a live process");
+    assertEquals(readPid(app), null, "lock removed");
   } finally {
-    await killProcess(child.pid, 0);
+    await killProcess(child.pid, 0).catch(() => {});
     dropFixtureLock(app);
     await child.status;
   }

@@ -16,6 +16,7 @@
 // (100 lines with `max: 10` became 50).
 
 import { assert, assertEquals } from "@std/assert";
+import { permissiveUmask } from "../permissive-umask.ts";
 import {
   _redactCheckpointState,
   createCheckpoint,
@@ -30,13 +31,17 @@ import {
 
 const SECRET = "correct-horse-battery-staple";
 
-async function withDir(fn: (dir: string) => Promise<void>): Promise<void> {
-  const dir = await Deno.makeTempDir({ prefix: "aio-sink-" });
-  try {
-    await fn(dir);
-  } finally {
-    await Deno.remove(dir, { recursive: true });
-  }
+// Under 022: at a restrictive umask a forgotten mode, and the `0o664` "lax
+// file" fixtures below, would all come out 0600 and every check pass anyway.
+function withDir(fn: (dir: string) => Promise<void>): Promise<void> {
+  return permissiveUmask(async () => {
+    const dir = await Deno.makeTempDir({ prefix: "aio-sink-" });
+    try {
+      await fn(dir);
+    } finally {
+      await Deno.remove(dir, { recursive: true });
+    }
+  });
 }
 
 const modeOf = async (p: string) => (await Deno.stat(p)).mode! & 0o777;

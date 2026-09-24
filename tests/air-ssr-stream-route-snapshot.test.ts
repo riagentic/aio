@@ -37,12 +37,17 @@ const App = C(() =>
 );
 
 /** What the handler does: set the route from the request, start the stream,
- *  and write its first chunk. The rest is pulled later. */
-async function startRequest(url: string) {
+ *  AWAIT something (a session read — `before`), and only then write its first
+ *  chunk. The rest is pulled later. The await is the load-bearing part: a
+ *  stream that pulled in the same turn it was created read the right route
+ *  even when renderToStream() read it lazily, at the first pull — so this test
+ *  could not tell the snapshot from its absence. */
+async function startRequest(url: string, before: Promise<void>) {
   const u = new URL(url, "http://localhost");
   routePath.set(u.pathname);
   routeSearch.set(u.searchParams);
   const gen = renderToStream(h(App, null));
+  await before;
   let out = "";
   const first = await gen.next();
   if (!first.done) out += first.value;
@@ -51,6 +56,9 @@ async function startRequest(url: string) {
     return out;
   };
 }
+
+/** Past the end of the current turn (every settle microtask has run). */
+const nextTurn = () => new Promise<void>((r) => setTimeout(r, 0));
 
 Deno.test("SSR route snapshot: two interleaved streams each render their own request's route", async () => {
   const prevPath = routePath.peek();
@@ -73,8 +81,15 @@ Deno.test("SSR route snapshot: two interleaved streams each render their own req
       expectB,
     );
 
-    const finishA = await startRequest("/p/42?tab=info");
-    const finishB = await startRequest("/about");
+    // A is created, then awaits; B arrives (its own turn) and sets the route
+    // before A has pulled anything. Only then do both hand their bodies over.
+    const session = Promise.withResolvers<void>();
+    const startA = startRequest("/p/42?tab=info", session.promise);
+    await nextTurn();
+    const startB = startRequest("/about", session.promise);
+    await nextTurn();
+    session.resolve();
+    const [finishA, finishB] = await Promise.all([startA, startB]);
     // A third request moves the signals again before either finishes.
     routePath.set("/nowhere");
     routeSearch.set(new URLSearchParams("tab=x"));

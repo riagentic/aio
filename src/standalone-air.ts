@@ -64,6 +64,8 @@ import type { blocking as ServerBlocking } from "./state/blocking.ts";
 import { blockingServerOnly } from "./state/blocking-reason.ts";
 import { showDesktopNotification } from "./browser/desktop-notify.ts";
 import { notifyPayload } from "./state/notify.ts";
+import { LARGE_STATE_DOC } from "./state/large-state-doc.ts";
+import { utf8Size } from "./protocol/utf8-size.ts";
 import type { AioUser } from "./protocol/protocol-types.ts";
 
 // Re-exports for user code
@@ -423,6 +425,31 @@ export function draft<S, E>(
 // ── Internal state (singleton) ──
 
 const _listeners = new Listeners<unknown>();
+/** The one fix line both standalone state-size messages end with (a slow
+ *  durable save, a full localStorage quota) — the shape of `cellSizeFix`
+ *  (state/budgets.ts), for a runtime that has no server and no `db:` tier. */
+const STANDALONE_STATE_FIX =
+  `Fix: \`persist: "none"\` on a cell whose state need not survive a ` +
+  `restart, or \`persist: { exclude: ["big"] }\` on the fields that need ` +
+  `not — see ${LARGE_STATE_DOC}.`;
+
+/** A saved state's size for a message: UTF-8 bytes, one decimal. */
+function _mb(json: string | undefined): string {
+  if (json === undefined) return "?";
+  const n = utf8Size(json);
+  return n < 1024 * 1024
+    ? `${(n / 1024).toFixed(1)} KB`
+    : `${(n / 1024 / 1024).toFixed(1)} MB`;
+}
+
+/** A storage write refused for space — every engine's spelling of it. */
+function _isQuotaError(e: unknown): boolean {
+  const name = (e as { name?: unknown } | null)?.name;
+  const code = (e as { code?: unknown } | null)?.code;
+  return name === "QuotaExceededError" ||
+    name === "NS_ERROR_DOM_QUOTA_REACHED" || code === 22 || code === 1014;
+}
+
 let _state: unknown = null;
 /** THIS runtime's cell names — late-bound by `bootStandalone`, exactly like the
  *  server's `getCellNames`. `close()` aborts and waits for ITS OWN cells: the
@@ -431,6 +458,114 @@ let _state: unknown = null;
  *  Undefined (a raw `initStandalone`, no cells) has nothing to scope. */
 let _standaloneCells: Set<string> | undefined;
 let _app: AioApp | null = null;
+/** Boots so far — a number for the refusal below to name. */
+let _bootCount = 0;
+/** App → its fence. `_retire(app)` closes it; its dispatch then refuses (see
+ *  `_refuseDeadGeneration`). A WeakMap so a retired app is still collected. */
+const _fences = new WeakMap<object, BootFence>();
+
+/** One boot's fence: `dead` once a harness retires it, plus what the refusal
+ *  names (which boot, booted where). */
+type BootFence = { dead: boolean; boot: number; site: string };
+
+/** @internal A continuation-local "whose boot is this code running for" — an
+ *  `AsyncLocalStorage` on a server-side runtime, installed by the in-process
+ *  harness (`src/testing/boot-refusals.ts`); this module is in the browser
+ *  bundle and cannot import `node:async_hooks`. Uninstalled it is a
+ *  pass-through, which is right where only one boot ever exists (a page, the
+ *  Android process): the reduce fence below is all those need.
+ *
+ *  Why a scope and not only the reduce fence: a method a disposed boot started
+ *  that calls ANOTHER method through the cell handle (`c.add(...)`, not
+ *  `s.$call`) does not reach its own dead dispatch — the handle is bound to
+ *  the CURRENT app, so the call committed into the next boot's state, said
+ *  nothing (the field report's `bootstrap()` calling siblings). The reduce and
+ *  executor of every boot run inside its fence, so an async body carries it
+ *  across `await`s, and the handle send refuses a caller whose fence is dead. */
+export type BootScope = {
+  run: <T>(fence: BootFence, fn: () => T) => T;
+  get: () => BootFence | undefined;
+};
+let _bootScope: BootScope | null = null;
+/** @internal */
+export function _installBootScope(scope: BootScope | null): void {
+  _bootScope = scope;
+}
+const _inBoot = <T>(fence: BootFence, fn: () => T): T =>
+  _bootScope ? _bootScope.run(fence, fn) : fn();
+/** Refuse a handle call made by code a retired boot started. */
+function _refuseCallFromDeadBoot(type: string): void {
+  const caller = _bootScope?.get();
+  if (caller?.dead) _refuseDeadGeneration(type, caller.site, caller.boot);
+}
+
+/** @internal A harness's dispose: THIS app is over. Explicit and per app, not
+ *  a module-wide generation bumped by `_resetState()`: two harnesses can be
+ *  alive at once (an inner `testUI` opened and closed inside an outer one), and
+ *  the inner teardown must not kill the outer app — only its own. */
+export function _retire(app: unknown): void {
+  const f = app && typeof app === "object" ? _fences.get(app) : undefined;
+  if (f) f.dead = true;
+  // A harness NESTED inside another (an inner testUI opened and closed while
+  // the outer one lives) re-bound the shared cell handles to its own boot;
+  // retiring it left them pointing at a dead boot, so every later call of the
+  // STILL-LIVE outer harness was refused as a torn-down runtime's. The boot
+  // below it on the stack takes the handles back — its own dispatch, its own
+  // state in the signals.
+  const i = _liveBoots.findIndex((b) => b.app === app);
+  if (i < 0) return;
+  const wasTop = i === _liveBoots.length - 1;
+  _liveBoots.splice(i, 1);
+  if (wasTop) _liveBoots[_liveBoots.length - 1]?.restore();
+}
+
+/** Boots not yet retired, oldest first — see `_retire`. */
+const _liveBoots: { app: object; restore: () => void }[] = [];
+
+/** Where a handle bound to `app` sends: `app` itself — unless it has been
+ *  retired while an OUTER boot still lives (nested harnesses share the cell
+ *  handles, and the inner one bound them last). Code a dead boot started is
+ *  refused before this (`_refuseCallFromDeadBoot`), and with no live boot a
+ *  dead one's reduce fence refuses — so this only ever routes the live outer
+ *  harness's own calls. */
+function _liveFor<A extends object>(app: A): A {
+  if (!_fences.get(app)?.dead) return app;
+  return (_liveBoots[_liveBoots.length - 1]?.app as A | undefined) ?? app;
+}
+
+/** The first stack frame outside aio's own runtime — the test (or app line)
+ *  that booted this instance. One capture per boot, for the refusal below. */
+function _bootSite(): string {
+  const frames = (new Error().stack ?? "").split("\n").slice(1);
+  const own =
+    /\/src\/(standalone-air|testing\/|state\/|air\/)|ext:|node:|jsr\.io|deno\.land/;
+  const site = frames.find((f) => !own.test(f)) ?? frames[frames.length - 1];
+  return site?.trim().replace(/^at /, "") ?? "(unknown)";
+}
+
+/** A dispatch into a runtime that has been torn down. `bootCells` resets
+ *  this module between tests, and the cells are
+ *  module singletons: a method a lifecycle hook started (`onInit` →
+ *  `bootstrap()`) outlives the reset and its commit reaches the per-cell
+ *  signals the NEXT test's boot reads — one test's write in another's state
+ *  (feedback cc §2). A write from a dead boot is never the one wanted, so it
+ *  is refused, loudly, naming the action and the boot it belongs to. A live
+ *  app never resets, so this never fires outside a harness; dev and prod run
+ *  the identical check. */
+function _refuseDeadGeneration(
+  type: string,
+  bootSite: string,
+  boot: number,
+): never {
+  const msg = `[aio] \u2717 "${type}" was dispatched into a torn-down ` +
+    `runtime (boot #${boot}, booted at ${bootSite}; ${_bootCount} since) — a ` +
+    `call that outlived its test's dispose(), typically one an onInit or a ` +
+    `schedule started. REFUSED: it would have written into a later boot's ` +
+    `state. Await it (or \`await h.settle()\`) before dispose, or give it an ` +
+    `abort path (\`s.$signal\`).`;
+  console.error(msg);
+  throw new Error(msg);
+}
 
 // Owned resources (`own.set`) acquired in this runtime. Lazily created so the
 // module stays side-effect-free, and disposed by _resetState() so a test that
@@ -661,8 +796,28 @@ export type _PersistStore = {
    *  developer reading devtools/logcat can see which one this run picked. */
   readonly describe: string;
   read(key: string): string | null;
+  /** The boot restore's read, which — unlike `read` — tells "nothing stored
+   *  yet" (`{ raw: null }`) apart from "something IS stored and could not be
+   *  read back" (`{ unreadable }`, a sentence saying why). A throw means the
+   *  same as `unreadable`. The difference decides whether the app may write
+   *  at all: a first run must, and a run that could not read what is there
+   *  must never write over it. */
+  restore(key: string): { raw: string | null } | { unreadable: string };
   write(key: string, value: string): void;
 };
+
+/** `read` in terms of `restore`: one answer to "what is stored", so the two
+ *  can never disagree. An unreadable value reads as null, loudly. */
+function _readVia(
+  restore: _PersistStore["restore"],
+): _PersistStore["read"] {
+  return (k) => {
+    const r = restore(k);
+    if ("raw" in r) return r.raw;
+    console.error(`[aio] \u26a0 persistence: ${r.unreadable}`);
+    return null;
+  };
+}
 
 /** THE decider for "which store does this standalone runtime persist to".
  *
@@ -703,79 +858,78 @@ export function _pickPersistStore(g: {
       // overlaid bridge that omits it must not stop the app from booting on
       // the store that does work — and the line still names the store.
     }
+    const nativeRestore: _PersistStore["restore"] = (k) => {
+      const v = native.get(k);
+      if (typeof v === "string") return { raw: v };
+      // `null` is "never written" OR "written, and the read threw"
+      // (MainActivity.kt catches the read and logs it). Ask BEFORE anything
+      // else — before adoption, and even when there is nothing to adopt:
+      // the second meaning booted the app from its initial state, and its
+      // first dispatch wrote that over the real file. `has` is a stat, not
+      // a read; an older/overlaid bridge without it behaves as before, and
+      // a `has` that throws answers "present", the side that overwrites
+      // nothing.
+      let present: boolean;
+      try {
+        present = typeof native.has === "function" && native.has(k) === true;
+      } catch {
+        present = true; // it exists and could not tell — do not overwrite
+      }
+      if (present) {
+        return {
+          unreadable: `the native store HAS "${k}" on disk but could not ` +
+            `read it back (see logcat, tag "aio"). REFUSING to adopt the ` +
+            `older localStorage copy over it, or to write anything over it.`,
+        };
+      }
+      // ADOPT what the previous build wrote.
+      //
+      // Every standalone APK before this one persisted through
+      // `localStorage`. Android keeps an app's data across an upgrade, so
+      // after the user installs the new build their state is still on the
+      // device — in the store this one no longer reads. Without this the
+      // app would come up EMPTY on first launch after an upgrade: the
+      // silent data loss this whole change exists to end, reintroduced by
+      // the change itself.
+      //
+      // One-way and one-time: the value is copied into the durable store,
+      // so the next boot is a plain native read. The old copy is left where
+      // it is — it costs nothing and it is the only thing a downgrade could
+      // fall back to. If the copy fails, the value is still RETURNED and
+      // the failure is loud: running on the data beats losing it, and the
+      // next boot simply tries again.
+      // (Only into a store that is genuinely empty for this key — the
+      // `has` check above already returned when it is not: adopting over a
+      // value that IS on disk would replace the app's real state with the
+      // pre-upgrade copy `localStorage` keeps forever, and call it success.)
+      const old = g.localStorage?.getItem?.(k);
+      if (typeof old !== "string") return { raw: null };
+      try {
+        if (native.set(k, old) === false) {
+          throw new Error(`the native store refused the write`);
+        }
+        console.info(
+          `[aio] persistence: adopted "${k}" from localStorage into the ` +
+            `native store — this app was upgraded from a build that used ` +
+            `localStorage, and its state has been moved to durable storage.`,
+        );
+      } catch (e) {
+        console.error(
+          `[aio] ⚠ persistence: found "${k}" in localStorage but could NOT ` +
+            `copy it into the native store (${e}). Running on the ` +
+            `localStorage copy for now — nothing is lost, but until this ` +
+            `succeeds a kill right after a change can still lose it.`,
+        );
+      }
+      return { raw: old };
+    };
     return {
       kind: "native",
       durable: true,
       describe: `native file store${where} (fsync + atomic rename on every ` +
         `change — a kill right after a change cannot lose it)`,
-      read: (k) => {
-        const v = native.get(k);
-        if (typeof v === "string") return v;
-        // ADOPT what the previous build wrote.
-        //
-        // Every standalone APK before this one persisted through
-        // `localStorage`. Android keeps an app's data across an upgrade, so
-        // after the user installs the new build their state is still on the
-        // device — in the store this one no longer reads. Without this the
-        // app would come up EMPTY on first launch after an upgrade: the
-        // silent data loss this whole change exists to end, reintroduced by
-        // the change itself.
-        //
-        // One-way and one-time: the value is copied into the durable store,
-        // so the next boot is a plain native read. The old copy is left where
-        // it is — it costs nothing and it is the only thing a downgrade could
-        // fall back to. If the copy fails, the value is still RETURNED and
-        // the failure is loud: running on the data beats losing it, and the
-        // next boot simply tries again.
-        const old = g.localStorage?.getItem?.(k);
-        if (typeof old !== "string") return null;
-        // …but ONLY into a store that is genuinely empty for this key.
-        //
-        // `native.get` answers null for "nothing written yet" AND for
-        // "written, and this read failed" (MainActivity.kt catches the read
-        // and logs it). Adopting on the second meaning is the worst outcome
-        // this file has: the app's real state is on disk, intact, and the
-        // pre-upgrade copy that `localStorage` still holds — forever, because
-        // adoption never clears it — is written straight over it, and the
-        // console says it succeeded. `has` is a stat, not a read, so it
-        // separates the two; an older/overlaid bridge without it behaves
-        // exactly as before, and a `has` that throws answers "present", which
-        // is the side that overwrites nothing.
-        let present: boolean;
-        try {
-          present = typeof native.has === "function" && native.has(k) === true;
-        } catch {
-          present = true; // it exists and could not tell — do not overwrite
-        }
-        if (present) {
-          console.error(
-            `[aio] ⚠ persistence: the native store HAS "${k}" on disk but ` +
-              `could not read it back (see logcat, tag "aio"). REFUSING to ` +
-              `adopt the older localStorage copy over it — that would ` +
-              `replace this app's state with a snapshot from before it was ` +
-              `upgraded. Nothing has been overwritten; restart the app.`,
-          );
-          return null;
-        }
-        try {
-          if (native.set(k, old) === false) {
-            throw new Error(`the native store refused the write`);
-          }
-          console.info(
-            `[aio] persistence: adopted "${k}" from localStorage into the ` +
-              `native store — this app was upgraded from a build that used ` +
-              `localStorage, and its state has been moved to durable storage.`,
-          );
-        } catch (e) {
-          console.error(
-            `[aio] ⚠ persistence: found "${k}" in localStorage but could NOT ` +
-              `copy it into the native store (${e}). Running on the ` +
-              `localStorage copy for now — nothing is lost, but until this ` +
-              `succeeds a kill right after a change can still lose it.`,
-          );
-        }
-        return old;
-      },
+      read: _readVia(nativeRestore),
+      restore: nativeRestore,
       write: (k, v) => {
         // `false` = the native side caught an IO error and already logged it.
         // Throwing here puts it in front of the developer twice rather than
@@ -796,6 +950,9 @@ export function _pickPersistStore(g: {
       describe: "localStorage (the host commits it to disk on its own " +
         "schedule — a crash within a second of a change can lose it)",
       read: (k) => ls.getItem(k),
+      // A throwing getItem (a SecurityError, a quota-corrupted profile)
+      // propagates: the caller reads a throw as "unreadable".
+      restore: (k) => ({ raw: ls.getItem(k) }),
       write: (k, v) => ls.setItem(k, v),
     };
   }
@@ -804,12 +961,82 @@ export function _pickPersistStore(g: {
     durable: false,
     describe: "NONE — no native store and no localStorage on this host",
     read: () => null,
+    restore: () => ({ raw: null }),
     write: () => {
       throw new Error(
         "no storage on this host (no native store, no localStorage)",
       );
     },
   };
+}
+
+/** The slice of `Document` the iframe watch reads. */
+type _IframeDoc = {
+  baseURI?: string;
+  location?: { origin?: string };
+  documentElement?: unknown;
+  querySelectorAll?(
+    sel: string,
+  ): ArrayLike<{ getAttribute(n: string): string | null }>;
+};
+let _stopIframeWatch: (() => void) | null = null;
+
+/** Warn when a standalone APK's page embeds a frame from ANOTHER origin.
+ *
+ *  `addJavascriptInterface` injects `AioNativeStore` into every frame of the
+ *  WebView, and `onPageStarted` (which removes it from a foreign page) fires
+ *  for the MAIN frame only — so a third-party `<iframe>` the app embeds can
+ *  call `AioNativeStore.get/set` and read or overwrite the app's saved state.
+ *  Closing that is native work (todo.md); until then an app that does it is
+ *  told, once per origin, the moment the frame appears. Returns a stop fn.
+ *  @internal */
+export function _watchForeignIframes(
+  doc: _IframeDoc | undefined,
+  say: (msg: string) => void,
+): () => void {
+  if (!doc || typeof doc.querySelectorAll !== "function") return () => {};
+  const pageOrigin = doc.location?.origin ?? "";
+  const said = new Set<string>();
+  const scan = () => {
+    const frames = doc.querySelectorAll!("iframe[src]");
+    for (let i = 0; i < frames.length; i++) {
+      const src = frames[i]!.getAttribute("src") ?? "";
+      let origin: string;
+      try {
+        origin = new URL(src, doc.baseURI ?? pageOrigin).origin;
+      } catch {
+        continue; // aio-ok: an unparseable src loads nothing to expose
+      }
+      // "null" = about:blank / data: / srcdoc — no third party behind it.
+      if (origin === "null" || origin === pageOrigin || said.has(origin)) {
+        continue;
+      }
+      said.add(origin);
+      say(
+        `[aio] \u26a0 security: this page embeds an <iframe> from ${origin}. ` +
+          `In a standalone APK the native state store (AioNativeStore) is ` +
+          `injected into EVERY frame, so that page can read and overwrite ` +
+          `this app's saved state. Embed only content you trust, or open it ` +
+          `outside the app (a plain link) — see docs/build/targets.md.`,
+      );
+    }
+  };
+  scan();
+  const MO = (globalThis as {
+    MutationObserver?: new (cb: () => void) => {
+      observe(t: unknown, o: Record<string, unknown>): void;
+      disconnect(): void;
+    };
+  }).MutationObserver;
+  if (typeof MO !== "function" || !doc.documentElement) return () => {};
+  const mo = new MO(scan);
+  mo.observe(doc.documentElement, {
+    childList: true,
+    subtree: true,
+    attributes: true,
+    attributeFilter: ["src"],
+  });
+  return () => mo.disconnect();
 }
 
 /** Drop the slices of a restored blob that this app would never WRITE.
@@ -835,6 +1062,81 @@ function restorableOnly(
   return out;
 }
 
+/** The boot restore, with the one rule that keeps it from losing data: a
+ *  value that IS stored and cannot be used is never written over.
+ *
+ *  - nothing stored → a first run; the app writes as normal.
+ *  - stored and read, `apply` succeeds → restored.
+ *  - stored, read, but `apply` throws (corrupt JSON, a blob the merge
+ *    refuses) → the raw text is copied byte-for-byte to
+ *    `<key>.corrupt-<ms>` in the SAME store and read back to prove it landed;
+ *    only then is `<key>` written again — at once, with the state this run
+ *    started from (`setAside`, which the caller acts on). Waiting for the
+ *    app's first change left the corrupt blob under `<key>`, so every launch
+ *    that ended before a change (killed, closed at once) set aside ANOTHER
+ *    full-size copy — until the store's quota was full and every save was
+ *    refused. If the copy cannot be proven, writes stay refused.
+ *  - stored and NOT readable (a read that threw, a native `has` with no
+ *    `get`) → no bytes to copy, so nothing may be written this run: the
+ *    original is left exactly as it is, and a restart reads it again (a
+ *    transient IO error or an OOM on a large state clears itself).
+ *
+ *  Both failures are `console.error`, the same in dev and prod, and each
+ *  line says where the original is and what to do. Returns the reason writes
+ *  are refused, or null. */
+function _restoreOrQuarantine(
+  store: _PersistStore,
+  key: string,
+  apply: (raw: string) => void,
+): { writesRefused: string | null; setAside?: true } {
+  const where = `${store.kind} store` +
+    (store.kind === "native" ? ` (${store.describe})` : "");
+  let r: { raw: string | null } | { unreadable: string };
+  try {
+    r = store.restore(key);
+  } catch (e) {
+    r = { unreadable: `reading "${key}" threw: ${e}` };
+  }
+  if ("unreadable" in r) {
+    const why = `the saved state "${key}" in the ${where} could not be ` +
+      `read at boot (${r.unreadable}). It has NOT been touched and nothing ` +
+      `this run changes will be saved over it — restart the app to read it ` +
+      `again; if this repeats, copy "${key}" out of the store before ` +
+      `anything else.`;
+    console.error(`[aio] \u2717 persistence: ${why}`);
+    return { writesRefused: why };
+  }
+  if (r.raw === null) return { writesRefused: null };
+  const raw = r.raw;
+  try {
+    apply(raw);
+    return { writesRefused: null };
+  } catch (e) {
+    const aside = `${key}.corrupt-${Date.now()}`;
+    try {
+      store.write(aside, raw);
+      if (store.read(aside) !== raw) {
+        throw new Error(`the copy read back different from what was written`);
+      }
+    } catch (e2) {
+      const why = `the saved state "${key}" in the ${where} could not be ` +
+        `restored (${e}), and setting it aside as "${aside}" failed (${e2}). ` +
+        `It has NOT been touched and nothing this run changes will be saved ` +
+        `over it — copy "${key}" out of the store, then restart.`;
+      console.error(`[aio] \u2717 persistence: ${why}`);
+      return { writesRefused: why };
+    }
+    console.error(
+      `[aio] \u2717 persistence: the saved state "${key}" in the ${where} ` +
+        `could not be restored (${e}). The app started from its INITIAL ` +
+        `state. The original is preserved byte-for-byte as "${aside}" in ` +
+        `the same store — repair it and put it back under "${key}" to ` +
+        `recover it; "${key}" now holds the state this run started from.`,
+    );
+    return { writesRefused: null, setAside: true };
+  }
+}
+
 /** Initializes standalone runtime — call before AIR mounts */
 export function initStandalone<S, A, E>(
   initialState: S,
@@ -858,22 +1160,34 @@ export function initStandalone<S, A, E>(
     // costs. Reaches Android logcat too (chromium relays page console lines).
     console.info(`[aio] persistence: ${store.describe}`);
   }
+  // The native bridge reaches every FRAME of the APK's WebView, not only the
+  // app's own page (see `_watchForeignIframes`). Said, never silent.
+  if (store.kind === "native") {
+    _stopIframeWatch?.();
+    _stopIframeWatch = _watchForeignIframes(
+      (globalThis as { document?: _IframeDoc }).document,
+      (msg) => console.error(msg),
+    );
+  }
 
   // Restore
   let state = initialState;
+  /** Why this run must NEVER write to `persistKey` — set when the restore
+   *  FAILED on a value that is there and could not be set aside first. */
+  let writesRefused: string | null = null;
+  /** The restore set a corrupt value aside: `persistKey` is written with the
+   *  starting state as soon as the writer exists (below). */
+  let setAside = false;
   if (shouldPersist) {
-    try {
-      const raw = store.read(persistKey);
-      if (raw) {
-        const persisted = restorableOnly(JSON.parse(raw), config.restorable);
-        state = deepMerge(
-          initialState as Record<string, unknown>,
-          persisted as Record<string, unknown>,
-        ) as S;
-      }
-    } catch (e) {
-      console.warn(`[aio] restore from ${store.kind} failed:`, e);
-    }
+    const r = _restoreOrQuarantine(store, persistKey, (raw) => {
+      const persisted = restorableOnly(JSON.parse(raw), config.restorable);
+      state = deepMerge(
+        initialState as Record<string, unknown>,
+        persisted as Record<string, unknown>,
+      ) as S;
+    });
+    writesRefused = r.writesRefused;
+    setAside = r.setAside === true;
   }
 
   const _reportOpts: ReportErrorOpts = {
@@ -900,6 +1214,7 @@ export function initStandalone<S, A, E>(
   let slowWriteWarned = false;
   /** Set once close() has written the final snapshot — see schedulePersist. */
   let finalWritten = false;
+  let refusalSaid = false;
 
   function writeNow(what: string): void {
     // The final snapshot is the LAST write — the server's order too. The
@@ -908,9 +1223,23 @@ export function initStandalone<S, A, E>(
     // background flush did the same later): every clean close replaced the
     // app's state with its teardown state. Pinned by tests/hosts.test.ts.
     if (finalWritten) return;
+    if (writesRefused !== null) {
+      // The restore could not read what is stored, and could not set it
+      // aside: writing now would replace it with this run's state. Refused
+      // for the whole run — said at boot, and again on the first refusal.
+      if (!refusalSaid) {
+        refusalSaid = true;
+        console.error(
+          `[aio] \u2717 ${what} to ${store.kind} REFUSED — ${writesRefused}`,
+        );
+      }
+      return;
+    }
+    let json: string | undefined;
     try {
       const t0 = Date.now();
-      store.write(persistKey, JSON.stringify(getDBState(state)));
+      json = JSON.stringify(getDBState(state));
+      store.write(persistKey, json);
       // An fsync per change is the price of "a kill cannot lose it". If it
       // ever costs more than two frames, say so ONCE rather than let the app
       // feel mysteriously heavy: that is a state big enough to want
@@ -919,11 +1248,10 @@ export function initStandalone<S, A, E>(
       if (store.durable && ms > 32 && !slowWriteWarned) {
         slowWriteWarned = true;
         console.warn(
-          `[aio] ⚠ a durable save took ${ms}ms — the whole state is written ` +
-            `and fsync'd on every change, so this cost is paid per ` +
-            `keystroke. Keep less of it: \`persist: "none"\` on a cell whose ` +
-            `state need not survive a restart, or ` +
-            `\`persist: { exclude: ["big"] }\` on the fields that need not.`,
+          `[aio] ⚠ a durable save took ${ms}ms for ${
+            _mb(json)
+          } — the whole state is written and fsync'd on every change, so ` +
+            `this cost is paid per keystroke. ${STANDALONE_STATE_FIX}`,
         );
       }
     } catch (e) {
@@ -934,9 +1262,17 @@ export function initStandalone<S, A, E>(
       // throws persists NOTHING, every change, for as long as the app runs.
       // The server answers that with a PERSIST_ERROR; this is the loudest
       // thing a page has, and it says what it costs.
+      // A full quota is the one cause with a known fix: the state outgrew
+      // the host's store (localStorage is ~5 MB in most browsers). Say so,
+      // with the size and the way out, instead of a bare DOMException.
+      const quota = _isQuotaError(e)
+        ? ` The state (${
+          json === undefined ? "?" : _mb(json)
+        }) is over this host's ${store.kind} quota. ${STANDALONE_STATE_FIX}`
+        : "";
       console.error(
         `[aio] ✗ ${what} to ${store.kind} FAILED — THIS CHANGE IS NOT SAVED ` +
-          `and no later change will be either until this stops:`,
+          `and no later change will be either until this stops.${quota}`,
         e,
       );
     }
@@ -972,6 +1308,9 @@ export function initStandalone<S, A, E>(
       persistTimer = null;
     }
   };
+  // The corrupt original is proven set aside: replace it NOW, so the next
+  // launch reads valid data instead of setting aside another copy of it.
+  if (setAside) writeNow("reset");
 
   // Belt and braces for the LAZY store only: the app going to the background
   // (Android pauses the WebView, a browser tab is hidden or closed) is the
@@ -993,31 +1332,51 @@ export function initStandalone<S, A, E>(
     error: (msg: string) => console.error(`[aio] \u2717 ${msg}`),
   };
 
+  // The fence: this app's dispatch is dead once a harness retires it.
+  const boot = ++_bootCount;
+  const bootSite = _bootSite();
+  const fence: BootFence = { dead: false, boot, site: bootSite };
   const dispatch = createDispatch<S, A, E>({
-    reduce,
+    reduce: (s, a) => {
+      if (fence.dead) {
+        _refuseDeadGeneration(
+          String((a as { type?: unknown }).type),
+          bootSite,
+          boot,
+        );
+      }
+      return _inBoot(fence, () => reduce(s, a));
+    },
     execute: (effect) =>
       // ONE exhaustive classifier for all three effect runtimes — a new
       // framework effect kind is a compile error here (see route-effect.ts).
-      routeEffect<E>(effect, {
-        // Schedule effects: hold on the virtual clock so tests can fire them
-        // deterministically with ui.advance(ms) / handle.advance(ms).
-        schedule: (e) => _scheduler().handle(e),
-        // No server between the method and the page: show it right here.
-        notify: (e) => showDesktopNotification(notifyPayload(e)),
-        // Really acquire and dispose. Ignoring `own` here made the in-process
-        // harnesses (testCell / testUI / bootCells) more permissive than
-        // production — a leaked or misfiring resource could not surface in the
-        // one place a test boots and disposes cells, converting a whole class
-        // of bug into a production-only bug. Tests are the strictest
-        // environment; a warning that says "ignored" is not strictness.
-        own: (e) => _ownManager().handle(e),
-        app: (e) => execute(app, e),
-      }),
+      _inBoot(fence, () =>
+        routeEffect<E>(effect, {
+          // Schedule effects: hold on the virtual clock so tests can fire them
+          // deterministically with ui.advance(ms) / handle.advance(ms).
+          schedule: (e) => _scheduler().handle(e),
+          // No server between the method and the page: show it right here.
+          notify: (e) => showDesktopNotification(notifyPayload(e)),
+          // Really acquire and dispose. Ignoring `own` here made the in-process
+          // harnesses (testCell / testUI / bootCells) more permissive than
+          // production — a leaked or misfiring resource could not surface in the
+          // one place a test boots and disposes cells, converting a whole class
+          // of bug into a production-only bug. Tests are the strictest
+          // environment; a warning that says "ignored" is not strictness.
+          own: (e) => _ownManager().handle(e),
+          app: (e) => execute(app, e),
+        })),
     getState: () => state,
     setState: (s) => {
       state = s;
     },
     onDone: () => {
+      // A retired boot publishes NOTHING. Its drain still ends here after the
+      // fence refused a late action, and the UI state, the per-cell signals
+      // (`onCommit` → `_applyFullState`) and the persist are module-wide: its
+      // stale state overwrote what the NEXT boot's reads returned — a live
+      // commit that the store held and `counter.count` no longer showed.
+      if (fence.dead) return;
       _state = getUIState(state);
       _notify();
       config.onCommit?.(state);
@@ -1101,6 +1460,7 @@ export function initStandalone<S, A, E>(
   };
 
   _app = app as AioApp;
+  _fences.set(app, fence);
   return app;
 }
 
@@ -1169,6 +1529,8 @@ export function _resetState(): void {
   // …and the background-flush hook, for the same reason: the process-wide
   // listeners stay, but they must not reach a torn-down app's writer.
   _flushPersist = null;
+  _stopIframeWatch?.();
+  _stopIframeWatch = null;
   _state = null;
   _app = null;
   _cellApp = null;
@@ -1192,6 +1554,7 @@ export function _resetState(): void {
 export function _reset(): void {
   _resetState();
   _resetCellRegistry();
+  _liveBoots.length = 0; // no cells left for any boot to take back
 }
 
 // ── Cell-based standalone runtime (AIO-404) ─────────────────────────
@@ -1394,8 +1757,13 @@ function bootStandalone(
       // bindCell: wrap methods to dispatch through the local loop
       bindCell(
         f,
-        (action) => Promise.resolve(app.dispatch(action)),
-        () => app.getState() as Record<string, unknown>,
+        (action) => {
+          // A call from code a RETIRED boot started (its async body, a timer
+          // it set) — this handle now points at a later boot. See BootScope.
+          _refuseCallFromDeadBoot(action.type);
+          return Promise.resolve(_liveFor(app).dispatch(action));
+        },
+        () => _liveFor(app).getState() as Record<string, unknown>,
       );
       // bindCellReactive (no sendFn): upgrade the state getters to read the
       // per-cell signal — keeps the bound methods from bindCell intact
@@ -1430,8 +1798,26 @@ function bootStandalone(
   };
   // wires setCbApp, runs each cell's onInit — marked as booting exactly as the
   // server marks it, so an early call is refused with the server's words.
-  _whileCellsBoot(cells, () => composed.initAll(lifecycleApp));
+  // Inside this boot's fence: what an onInit starts (a timer, a floating
+  // promise) is this boot's code, refused once it is retired.
+  const fence = _fences.get(app);
+  _whileCellsBoot(
+    cells,
+    () =>
+      fence
+        ? _inBoot(fence, () => composed.initAll(lifecycleApp))
+        : composed.initAll(lifecycleApp),
+  );
   bindAll();
+  _liveBoots.push({
+    app,
+    restore: () => {
+      _app = app as unknown as AioApp;
+      _cellApp = app;
+      _standaloneCells = new Set(composed.cellNames);
+      _applyFullState(app.getState() as Record<string, unknown>);
+    },
+  });
   let destroyed = false;
   _destroyCells = () => {
     if (destroyed) return; // close() then _resetState() must not destroy twice

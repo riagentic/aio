@@ -85,6 +85,7 @@ import {
 import { repoRoot } from "./am-cmd-create.ts";
 import {
   amLockKey,
+  appIsAmbiguous,
   declaredPort,
   holderSince,
   liveLock,
@@ -621,6 +622,105 @@ export function profileArg(appId: string, flags: GlobalFlags): string | null {
   return `--profile=${home}`;
 }
 
+/** What a project-wide `start`/`restart` got through, said when one
+ *  component's failure ends the command. `cmdStart` refuses by EXITING, so
+ *  the loop over the rest never ran and nothing said which components were
+ *  up, which failed and which were never tried — a project half up, reported
+ *  as one component's error. Said from `unload` (which `Deno.exit` fires);
+ *  `end()` disarms it once every component went through. */
+export function componentProgress(
+  verb: "start" | "restart",
+  labels: readonly string[],
+): { done(): void; end(): void } {
+  let i = 0;
+  const onUnload = () => {
+    const line = componentProgressLine(verb, labels, i);
+    if (line) sayErr(line);
+  };
+  globalThis.addEventListener("unload", onUnload);
+  return {
+    done: () => void i++,
+    end: () => globalThis.removeEventListener("unload", onUnload),
+  };
+}
+
+/** The line for a project-wide `verb` that ended at `labels[failed]`, or null
+ *  when there is nothing to add (a single component). Pure. */
+export function componentProgressLine(
+  verb: "start" | "restart",
+  labels: readonly string[],
+  failed: number,
+): string | null {
+  if (labels.length < 2 || failed >= labels.length) return null;
+  const ed = verb === "start" ? "started" : "restarted";
+  const up = labels.slice(0, failed);
+  const rest = labels.slice(failed + 1);
+  return `am: warning: the project is NOT fully up — ${verb} failed at ` +
+    `"${labels[failed]}"` +
+    (up.length ? `; ${ed}: ${up.join(", ")}` : "") +
+    (rest.length ? `; not attempted: ${rest.join(", ")}` : "") +
+    ` (am ${verb} <component> for one)`;
+}
+
+/** `am start`'s refusal for an entry that does not resolve, or null. THE
+ *  one wording — `am restart` asks it BEFORE it stops anything. */
+export function entryRefusal(flagEntry?: string): string | null {
+  if (resolveEntry(flagEntry)) return null;
+  return flagEntry
+    ? `entry not found: ${flagEntry}`
+    : 'no src/app.ts found — add "entry" to deno.json or use --entry=<path>';
+}
+
+/** The client a launch with these flags runs: `--client=` first, else the
+ *  app's declared one; undefined = the framework default (a browser). */
+async function effectiveClient(
+  flags: readonly string[],
+): Promise<string | undefined> {
+  const arg = flags.find((a) => a.startsWith("--client="))?.slice(9);
+  if (arg) return arg;
+  try {
+    const dj = ((await readDenoJson(projectRoot()))?.config ?? {}) as {
+      client?: string;
+    };
+    return dj.client;
+  } catch {
+    return undefined; // aio-ok: no deno.json client — the framework default
+  }
+}
+
+const isGuiClient = (c: string | undefined): boolean =>
+  c === "electron" || c === "client";
+
+/** A GUI client on a headless box hangs forever (electron never returns) —
+ *  the refusal with the fix, or null (a field report). */
+function headlessRefusal(effective: string | undefined): string | null {
+  const headless = Deno.build.os === "linux" &&
+    !Deno.env.get("DISPLAY") && !Deno.env.get("WAYLAND_DISPLAY");
+  return isGuiClient(effective) && headless
+    ? `client "${effective}" needs a display and this box has none ` +
+      `(no DISPLAY/WAYLAND_DISPLAY) — electron would hang forever. ` +
+      `Use: am start --client=browser (or --client=server-only)`
+    : null;
+}
+
+/** The entry `am restart` relaunches: an explicit `--entry` wins; else the
+ *  one `am start` RECORDED (resolved against the recorded cwd — `am start
+ *  --entry=app.ts` recorded it relative), when it is still there; else
+ *  undefined — the project's default, as `am start` resolves it. Replaying
+ *  only the flags dropped a `--entry`, and the restart (having already
+ *  stopped the app) failed "no src/app.ts found": the app left DOWN. */
+export function restartEntry(
+  explicit: string | undefined,
+  recorded: { entry?: string; cwd?: string } | null,
+  root: string,
+  exists: (p: string) => boolean,
+): { entry?: string; gone?: string } {
+  if (explicit !== undefined) return { entry: explicit };
+  if (!recorded?.entry) return {};
+  const abs = resolve(recorded.cwd ?? root, recorded.entry);
+  return exists(abs) ? { entry: abs } : { gone: abs };
+}
+
 export async function cmdStart(
   args: string[],
   flags: GlobalFlags,
@@ -657,7 +757,11 @@ export async function cmdStart(
   // `am start <label>` means one component of it. Ordinary repos never take
   // this branch (see `processPlan`), so nothing about them changes.
   {
-    const plan = processPlan(args, { app: flags.app, port: flags.port });
+    const plan = processPlan(args, {
+      app: flags.app,
+      port: flags.port,
+      entry: flags.entry,
+    });
     if (plan.kind === "error") {
       outError(plan.message, mode);
       Deno.exit(1);
@@ -670,6 +774,7 @@ export async function cmdStart(
     }
     if (plan.kind === "one" || plan.kind === "all") {
       const list = plan.kind === "one" ? [plan.component] : plan.components;
+      const progress = componentProgress("start", list.map((c) => c.label));
       for (const c of list) {
         const port = componentPort(c);
         await cmdStart(
@@ -681,7 +786,9 @@ export async function cmdStart(
             entry: c.entry,
           },
         );
+        progress.done();
       }
+      progress.end();
       return;
     }
   }
@@ -810,12 +917,7 @@ export async function cmdStart(
   // Resolve entry point — --entry flag > deno.json "entry" > src/app.ts
   const entry = resolveEntry(flags.entry);
   if (!entry) {
-    outError(
-      flags.entry
-        ? `entry not found: ${flags.entry}`
-        : 'no src/app.ts found — add "entry" to deno.json or use --entry=<path>',
-      mode,
-    );
+    outError(entryRefusal(flags.entry)!, mode);
     Deno.exit(1);
   }
 
@@ -835,27 +937,11 @@ export async function cmdStart(
    *  app's declared one. `undefined` = the framework default (a browser). */
   let effective: string | undefined;
   {
-    const clientArg = passthrough.find((a) => a.startsWith("--client="))
-      ?.slice(9);
-    effective = clientArg;
-    if (!effective) {
-      try {
-        const dj = ((await readDenoJson(projectRoot()))?.config ?? {}) as {
-          client?: string;
-        };
-        effective = dj.client;
-      } catch { /* no deno.json client — framework default applies */ }
-    }
-    gui = effective === "electron" || effective === "client";
-    const headless = Deno.build.os === "linux" &&
-      !Deno.env.get("DISPLAY") && !Deno.env.get("WAYLAND_DISPLAY");
-    if (gui && headless) {
-      outError(
-        `client "${effective}" needs a display and this box has none ` +
-          `(no DISPLAY/WAYLAND_DISPLAY) — electron would hang forever. ` +
-          `Use: am start --client=browser (or --client=server-only)`,
-        mode,
-      );
+    effective = await effectiveClient(passthrough);
+    gui = isGuiClient(effective);
+    const headless = headlessRefusal(effective);
+    if (headless) {
+      outError(headless, mode);
       Deno.exit(1);
     }
   }
@@ -1177,7 +1263,11 @@ async function awaitStarted(o: {
   let deadline = startedAt + timeout;
   let slowStart: string | null = null;
   // The port to probe is whatever the CHILD bound, which it records in its own
-  // lock — the only honest source when nothing was declared.
+  // lock — the only honest source when nothing was declared. Re-read on EVERY
+  // tick, never latched: a socket-only app takes its lock with the TCP port it
+  // might bind (`status: "starting"`) and rewrites it ~1 s later as
+  // `port: 0, socketPath` — a latched first read probed a port nothing ever
+  // listened on and reported a live app "not responding", exit 1 (cc §1).
   let livePort = declared;
   while (Date.now() < deadline) {
     await new Promise((r) => setTimeout(r, POLL_INTERVAL_MS));
@@ -1201,8 +1291,11 @@ async function awaitStarted(o: {
         );
       }
     }
-    if (livePort === undefined) {
-      const written = childLockOf(appId, pid); // our own child's lock
+    {
+      // Our own child's lock — and only if it IS our child's (same pid):
+      // `childLockOf` falls back to whatever sits under the key.
+      const found = childLockOf(appId, pid);
+      const written = found?.pid === pid ? found : null;
       // A SOCKET-ONLY app never binds a port, and `port: 0` is falsy — so
       // `livePort` never resolved, the loop always ran out, and `am start`
       // exited 1 with "not responding on port 0 after 10s" for a desktop app
@@ -1216,8 +1309,8 @@ async function awaitStarted(o: {
         }
         continue; // listening not yet — keep waiting
       }
-      if (written?.port) livePort = written.port;
-      else continue; // not far enough into boot to have chosen one
+      livePort = written?.port || declared;
+      if (livePort === undefined) continue; // no port chosen yet
     }
     try {
       const ctrlPort = resolveControlPort(livePort, appId);
@@ -1252,12 +1345,11 @@ async function awaitStarted(o: {
     // we probed. Reporting `port` here would print am's placeholder for an app
     // that chose its own.
     const realPort = updated?.port ?? livePort ?? port;
-    out(
-      mode === "pretty"
-        ? `started ${appId} (pid ${pid}, port ${realPort})`
-        : { appId, pid, port: realPort, status: "started" },
-      mode,
-    );
+    // A SOCKET-ONLY app (the desktop shape) bound no port: "port 0" named a
+    // door that does not exist. Its door is the socket — named as
+    // `am status` names it.
+    const done = startedReport(appId, pid, realPort, updated?.socketPath);
+    out(mode === "pretty" ? done.line : done.doc, mode);
   } else if (!isProcessAlive(pid)) {
     // Our own child's placeholder, under our own home — and ONLY it: by the
     // time the child died another start may have taken the name.
@@ -1307,6 +1399,31 @@ async function awaitStarted(o: {
     );
     Deno.exit(1);
   }
+}
+
+/** `am start`'s verdict for a child that is up — the pretty line and the
+ *  JSON document. A SOCKET-ONLY app (the desktop shape) bound no port, and
+ *  "port 0" named a door that does not exist: its door is the socket, named
+ *  as `am status` names it (`transport uds (<path>)`). Pure. */
+export function startedReport(
+  appId: string,
+  pid: number,
+  port: number,
+  socketPath?: string,
+): { line: string; doc: Record<string, unknown> } {
+  const door = socketPath && !port
+    ? `socket ${socketPath}`
+    : `port ${port}${socketPath ? `, transport uds (${socketPath})` : ""}`;
+  return {
+    line: `started ${appId} (pid ${pid}, ${door})`,
+    doc: {
+      appId,
+      pid,
+      port,
+      status: "started",
+      ...(socketPath ? { transport: "uds", socketPath } : {}),
+    },
+  };
 }
 
 /** The timeout message for a child that is alive but not listening yet.
@@ -1714,6 +1831,10 @@ export function instancesInNestedProjects(
 /** This project's own app id, or undefined when the cwd resolves to none
  *  (`resolveAmAppId` throws rather than guessing, and a listing must not). */
 export function thisProjectAppId(): string | undefined {
+  // A project that declares components has no ONE id, and `resolveAmAppId()`
+  // does not throw there — it prints its refusal and EXITS, which no `catch`
+  // sees. That killed the project-wide `am stop` the refusal recommends.
+  if (appIsAmbiguous()) return undefined;
   try {
     return resolveAmAppId();
   } catch {
@@ -1895,6 +2016,16 @@ export async function stopOne(
   // Graceful timeout expired — escalate to SIGKILL
   if (pf && isLockOwnerAlive(pf)) {
     await killProcess(pf.pid, 0, pf); // already waited gracefully
+    // Reported as it IS: "stopped" for a process still alive after SIGKILL
+    // is the lie a script then starts a second copy on.
+    if (isLockOwnerAlive(pf)) {
+      return {
+        ok: false,
+        appId,
+        error: `${appId} (pid ${pf.pid}) is still alive after SIGTERM and ` +
+          `SIGKILL — not stopped`,
+      };
+    }
   }
   removePid(appId, pf);
   return {
@@ -1911,6 +2042,14 @@ export async function cmdStop(
   flags: GlobalFlags,
 ): Promise<void> {
   const mode = detectMode(flags);
+  // `am stop` WAITS by default, as `am start` does: it returned the moment
+  // the shutdown was ASKED for, exit 0, while the process was still alive —
+  // a binary started right after hit "Already running". Waited up to the
+  // stop budget, then SIGKILL (the "SIGTERM → SIGKILL" help promises).
+  // `--no-wait` keeps the old return-at-once.
+  if (flags.wait === undefined && !flags.noWait) {
+    flags = { ...flags, wait: STOP_WAIT_DEFAULT_S };
+  }
   const waited = flags.wait !== undefined;
 
   // `am stop` in a multi-component project stops the PROJECT — which is what
@@ -1918,7 +2057,11 @@ export async function cmdStop(
   // `am stop <label>` stops one. A single-app repo is untouched.
   let stopAll = flags.all;
   {
-    const plan = processPlan(_args, { app: flags.app, port: flags.port });
+    const plan = processPlan(_args, {
+      app: flags.app,
+      port: flags.port,
+      entry: flags.entry,
+    });
     if (plan.kind === "error") {
       outError(plan.message, mode);
       Deno.exit(1);
@@ -2042,6 +2185,8 @@ export async function cmdStop(
       ? {
         appId: r.appId,
         status: "stopped",
+        pid: r.pid,
+        port: r.port,
         ...(r.unsaved ? { unsaved: r.unsaved } : {}),
       }
       : {
@@ -2090,7 +2235,11 @@ async function restartAll(
   // exactly what `--all` lacked: each component's entry and identity. That is
   // why the refusal in `restartApp` still stands for undeclared fleets and
   // does not stand here.
-  const plan = processPlan(args, { app: flags.app, port: flags.port });
+  const plan = processPlan(args, {
+    app: flags.app,
+    port: flags.port,
+    entry: flags.entry,
+  });
   if (plan.kind === "error") {
     outError(plan.message, mode);
     Deno.exit(1);
@@ -2105,6 +2254,7 @@ async function restartAll(
   if (plan.kind === "one" || plan.kind === "all") {
     const list = plan.kind === "one" ? [plan.component] : plan.components;
     const lost: string[] = [];
+    const progress = componentProgress("restart", list.map((c) => c.label));
     for (const c of list) {
       const port = componentPort(c);
       const r = await restartApp(
@@ -2117,7 +2267,9 @@ async function restartAll(
         },
       );
       if (r.unsaved) lost.push(r.appId);
+      progress.done();
     }
+    progress.end();
     return lost;
   }
   const r = await restartApp(args, flags);
@@ -2304,6 +2456,40 @@ async function restartApp(
     }
   }
 
+  // The START is decided — and checked — BEFORE anything is stopped. The
+  // entry `am start` recorded is replayed (see restartEntry), and a launch
+  // that cannot start is refused with the app still UP: stopping first and
+  // failing the start after left it down, with only a start error to show.
+  const re = restartEntry(flags.entry, recorded, projectRoot(), (p) => {
+    try {
+      return Deno.statSync(p).isFile;
+    } catch {
+      return false; // aio-ok: missing — reported below as `gone`
+    }
+  });
+  if (re.gone) {
+    restartNote(
+      mode,
+      `restart: the recorded entry ${re.gone} is gone — relaunching with ` +
+        `the project's default entry`,
+    );
+  }
+  if (re.entry !== undefined) flags = { ...flags, entry: re.entry };
+  {
+    const cannot = entryRefusal(flags.entry) ??
+      headlessRefusal(await effectiveClient(launchArgs));
+    if (cannot) {
+      outError(
+        running
+          ? `${appId} was NOT restarted (still running, untouched) — it ` +
+            `could not be started again: ${cannot}`
+          : cannot,
+        mode,
+      );
+      Deno.exit(1);
+    }
+  }
+
   let unsaved: string | undefined;
   // The port the app bound LAST time — reused when nothing declares one and
   // it is still free, so a restart keeps the address a human's tab (and an
@@ -2485,7 +2671,11 @@ export async function cmdStatus(
   // "Is the project up?" is the question a multi-component repo asks, and one
   // line about one of its three apps was not an answer to it.
   {
-    const plan = processPlan(_args, { app: flags.app, port: flags.port });
+    const plan = processPlan(_args, {
+      app: flags.app,
+      port: flags.port,
+      entry: flags.entry,
+    });
     if (plan.kind === "error") {
       outError(plan.message, mode);
       Deno.exit(1);

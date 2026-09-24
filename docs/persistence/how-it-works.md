@@ -169,6 +169,11 @@ The one way to know state is on disk is a flush that has completed: aio runs one
 on a clean shutdown (below), and `journal: true` closes the window from the
 other side by making the actions themselves recoverable.
 
+The standalone runtime (a page or an Android app with no server) has no ack at
+all: nothing reports a save back to the method or to `am`, and a save that fails
+is a `console.error` (`NOT SAVED`) on **every** failure, not once — a page has
+nothing louder.
+
 ### The shutdown flush, and who hears its verdict
 
 A clean shutdown (`am stop`, SIGTERM, `app.close()`) runs one last flush before

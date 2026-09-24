@@ -59,9 +59,11 @@ export function makeUnboundGuard(
           `cell IS in aio.run({ cells }), but methods are bound only after ` +
           `every cell's \`__init\` has run, and this call came from code ` +
           `running during it (a hook seeing a \`:__init\` action, or an ` +
-          `onInit). Defer the call: skip \`:__init\` actions in the hook and ` +
-          `make it on the first real action, or make it from onStart, which ` +
-          `runs after binding.`,
+          `onInit). From an onInit, dispatch it instead: ` +
+          `\`app.dispatch({ type: "${cellName}:${key}", payload: { args: [] } })\` ` +
+          `— in the log, cancellable. Or make the call from onStart, which ` +
+          `runs after binding; from a hook, skip \`:__init\` actions and make ` +
+          `it on the first real action.`,
       );
     }
     throw new Error(

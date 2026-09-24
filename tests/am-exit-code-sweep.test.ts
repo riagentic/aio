@@ -556,6 +556,15 @@ function verdict(s: Scenario, r: Run): string | null {
       r.stdout.slice(0, 200) || "(empty)"
     }`;
   }
+  // EXACTLY ONE document, and it is the error. A failure that prints its
+  // {error} and then a success-SHAPED document (`{"removed":3}` — no `ok`
+  // key, so the check above is blind to it) hands a `| jq .removed` script
+  // a number from a command that failed. Anything that is not the error is
+  // a second answer, and a failed command has only one.
+  if (docs.length !== 1) {
+    return `${docs.length} JSON documents on stdout (want exactly the one ` +
+      `{error}): ${r.stdout.slice(0, 240)}`;
+  }
   // Matched against the DECODED error text (JSON escapes a quote as \")
   // plus stderr, where pretty-mode prose and warnings go.
   const said = objs.map((d) => String(d.error ?? "")).join("\n") + "\n" +
@@ -664,8 +673,8 @@ Deno.test("am exit-code sweep: every registered verb has a failure scenario", as
 });
 
 Deno.test({
-  name: "am exit-code sweep: every verb fails with its exit code, no " +
-    "success doc, and names what failed",
+  name:
+    "am exit-code sweep: every verb fails with its exit code, no success doc, and names what failed",
   // POSIX fixtures: a `sleep` stands in for a live app, and the fake `deno`
   // that `uninstall` runs is a shell script.
   ignore: Deno.build.os === "windows",
@@ -706,6 +715,105 @@ Deno.test({
         [],
         "the sweep registered a git worktree in the real repo",
       );
+    } finally {
+      await dropTempDir(w.base);
+    }
+  },
+});
+
+/** One verb per section of SCENARIOS — the TEXT-mode half of the sweep. A
+ *  pipe is json mode (`detectMode`), so every row above only ever proves the
+ *  machine rendering; a person on a terminal reads the other one. Each pick is
+ *  the section's row with the most to say after it fails (a failed side
+ *  effect where the section has one). */
+const TEXT_CLASSES: Record<string, string> = {
+  process: "start",
+  state: "record",
+  data: "backup",
+  inspect: "sql",
+  auth: "auth",
+  scaffold: "create",
+  install: "remove",
+};
+
+/** `script` gives the child a pty, so `am` is in pretty mode. */
+const noPty = !["linux", "darwin"].includes(Deno.build.os) || !(() => {
+  try {
+    new Deno.Command("script", { args: ["-V"], stderr: "null" }).outputSync();
+    return true;
+  } catch {
+    return false;
+  }
+})();
+
+/** `am <argv>` on a pty: what the terminal showed (stdout + stderr, in the
+ *  order they arrived) and the child's exit code (`script -e` forwards it). */
+async function runAmPty(
+  w: World,
+  argv: string[],
+  prep: Prep = {},
+): Promise<{ code: number; text: string }> {
+  const cmd = [Deno.execPath(), "run", "-A", "--config", CONFIG, AM, ...argv];
+  const q = (s: string) => `'${s.replace(/'/g, `'\\''`)}'`;
+  const o = await new Deno.Command("script", {
+    args: Deno.build.os === "darwin"
+      ? ["-q", "/dev/null", ...cmd]
+      : ["-q", "-e", "-c", cmd.map(q).join(" "), "/dev/null"],
+    cwd: prep.cwd ?? w.empty,
+    clearEnv: true,
+    env: sandboxEnv(w, prep.env),
+    stdin: "null",
+    stdout: "piped",
+    stderr: "piped",
+  }).output();
+  return { code: o.code, text: new TextDecoder().decode(o.stdout) };
+}
+
+/** Why a TEXT-mode failure reads as anything but a failure, or null. Pure.
+ *
+ *  "Reads as success", precisely: am's pretty output leads every line that
+ *  reports an outcome with a tone glyph (`block`/`mark` in
+ *  src/diagnostics/fmt.ts) — `✗` for a failure, `✓` for a success — and a
+ *  refusal is `outError`'s `✗` block. So after the FIRST `✗` line, no line
+ *  may lead with `✓`, nor with a bare `done` / `ok` / `success` word (the
+ *  unglyphed spellings of the same claim). A `✓` BEFORE the error is allowed:
+ *  a multi-step verb may finish step 1 and fail at step 2, and saying so is
+ *  the honest transcript. */
+function textVerdict(want: number, r: { code: number; text: string }) {
+  if (r.code !== want) return `exit ${r.code} (want ${want})`;
+  const lines = r.text.replace(/\x1b\[[0-9;?]*[A-Za-z]/g, "").split(/\r?\n/)
+    .map((l) => l.trim());
+  const err = lines.findIndex((l) => l.startsWith("✗"));
+  if (err < 0) return `no ✗ error line on the terminal:\n${r.text}`;
+  const after = lines.slice(err + 1).find((l) =>
+    l.startsWith("✓") || /^(?:done|ok|success(?:ful(?:ly)?)?)\b/i.test(l)
+  );
+  return after === undefined
+    ? null
+    : `reads as success after the error: "${after}"\n${r.text}`;
+}
+
+Deno.test({
+  name:
+    "am exit-code sweep: on a terminal, nothing reads as success after the error (one verb per class)",
+  ignore: noPty,
+  fn: async () => {
+    const w = await makeWorld();
+    try {
+      const bad: string[] = [];
+      for (const [cls, verb] of Object.entries(TEXT_CLASSES)) {
+        const s = SCENARIOS[verb];
+        assert(s, `TEXT_CLASSES.${cls} names ${verb}, which has no row`);
+        const argv = s.argv(w);
+        const prep = (await s.prepare?.(w)) ?? {};
+        try {
+          const why = textVerdict(s.code ?? 1, await runAmPty(w, argv, prep));
+          if (why) bad.push(`[${cls}] am ${argv.join(" ")}\n      → ${why}`);
+        } finally {
+          await prep.cleanup?.();
+        }
+      }
+      assertEquals(bad, [], `${bad.length} class(es):\n  ${bad.join("\n  ")}`);
     } finally {
       await dropTempDir(w.base);
     }

@@ -1454,6 +1454,11 @@ export async function buildAll(): Promise<number> {
             ),
           });
         }
+        // …and its size is the size ON DISK, taken after every placement
+        // rewrite: `placeServiceUnit` edits the unit's install comment, so a
+        // byte count taken at staging recorded 1618 in manifest.json for a
+        // 1639-byte file — the manifest a release pipeline checks against.
+        for (const p of placed) p.bytes = await sizeOf(join(outDir, p.file));
         // The summary prints what is ON DISK. It used to print the staged name
         // (`✓ cli → notes`) while the file it had just written was `notes-cli`.
         r.artifacts = placed;

@@ -1,15 +1,15 @@
 /**
  * @module
  * `am create` — scaffold a new aio project (onboard kata). Non-interactive,
- * single command: `am create <name> [--template=counter|todo|cli] [--target=…]`.
+ * single command: `am create <name> [--template=counter|todo|cli] [--client=…]`.
  * Produces a minimal, immediately runnable app pinned to this am's aio
  * version (JSR), so `am@X create` and the app's `aio@X` stay in lockstep.
  *
  *   am create my-app                          # counter, browser target
  *   am create my-app --template=todo          # todo list
  *   am create my-tool --template=cli          # a scriptable CLI (server + commands)
- *   am create my-app --target=electron        # desktop app (electron auto-install)
- *   am create my-app --target=android         # android (needs SDK + Gradle)
+ *   am create my-app --client=electron        # desktop app (electron auto-install)
+ *   am create my-app --client=android         # android (needs SDK + Gradle)
  *   am create my-app --mirror                 # framework-dev: import aio from the repo
  */
 
@@ -29,9 +29,9 @@ import { PATH_PIN_PREFIX } from "../server/framework-pin.ts";
 import { LOCAL_PIN_FILE } from "../server/deno-json.ts";
 import { appHome, type AppMeta } from "../server/app-dirs.ts";
 import { resolveAppId } from "../server/single-instance-lock.ts";
-import { GIT_NO_PROMPT_ENV } from "../server/git-noninteractive.ts";
 import {
   ensureVersion,
+  gitEnvFor,
   latestTag,
   MAIN,
   syncFrameworkDeps,
@@ -125,7 +125,9 @@ export function parseCreateArgs(args: string[]): CreateOpts {
     target: DEFAULT_TARGET,
     force: false,
   };
-  let targetGiven = false;
+  // Which spelling set the target, so `--client=a --target=b` refuses by
+  // naming both rather than letting argument order pick one in silence.
+  let targetGiven: { flag: string; value: Target } | undefined;
   for (const a of args) {
     if (a === "--force") opts.force = true;
     else if (a === "--jsr") opts.jsr = true;
@@ -144,13 +146,18 @@ export function parseCreateArgs(args: string[]): CreateOpts {
         );
       }
       opts.css = v;
-    } else if (a.startsWith("--target=")) {
+    } else if (a.startsWith("--client=") || a.startsWith("--target=")) {
+      // `--client=` is the spelling: deno.json's key and `deno task dev
+      // --client=X` have said `client` since alpha70, and `am create --client=`
+      // was refused as an unknown flag (report a desktop agent app §4). `--target=` is
+      // the older spelling, kept as an alias.
+      const flag = a.slice(0, 8);
       let v = a.slice(9) as Target;
       // One vocabulary: the headless role is spelled `server` everywhere.
       // `service` is the deprecated alias — accepted, loudly renamed.
       if ((v as string) === "service") {
         sayErr(
-          "am create: warning: --target=service is now --target=server (one " +
+          `am create: warning: ${flag}=service is now ${flag}=server (one ` +
             "vocabulary — the headless role is `server`); scaffolding a " +
             "server app.",
         );
@@ -160,11 +167,20 @@ export function parseCreateArgs(args: string[]): CreateOpts {
       // wrong default and the user wouldn't know until `deno task dev`.
       if (!TARGETS.includes(v)) {
         throw new Error(
-          `am create: unknown --target=${v} (valid: ${TARGETS.join(", ")})`,
+          `am create: unknown ${flag}=${v} (valid: ${TARGETS.join(", ")})`,
+        );
+      }
+      if (
+        targetGiven && targetGiven.flag !== flag && targetGiven.value !== v
+      ) {
+        throw new Error(
+          `am create: ${targetGiven.flag}=${targetGiven.value} and ` +
+            `${flag}=${v} disagree — they are one setting (--target is the ` +
+            `old spelling of --client); pass one`,
         );
       }
       opts.target = v;
-      targetGiven = true;
+      targetGiven = { flag, value: v };
     } else if (a.startsWith("-")) {
       // AN UNKNOWN FLAG IS AN ERROR, not a no-op.
       //
@@ -195,7 +211,7 @@ export function parseCreateArgs(args: string[]): CreateOpts {
       );
     }
   }
-  // A CLI template is a CLI: with no `--target`, its default is `cli`, not
+  // A CLI template is a CLI: with no `--client`, its default is `cli`, not
   // the browser — a scaffold whose `deno task compile` built a browser shell
   // for a tool with no UI would be the wrong default, silently.
   if (opts.template === "cli" && !targetGiven) opts.target = "cli";
@@ -1207,7 +1223,9 @@ export async function cmdCreate(
 
   if (!opts.name) {
     fail(
-      "usage: am create <name> [--template=counter|todo|cli] [--target=browser|electron|android|cli|server]",
+      `usage: am create <name> [--template=counter|todo|cli] [--client=${
+        TARGETS.join("|")
+      }]`,
       mode,
     );
   }
@@ -1533,7 +1551,9 @@ async function tryGitInit(dir: string): Promise<GitInit> {
       stdout: "piped",
       stderr: "null",
       stdin: "null",
-      env: GIT_NO_PROMPT_ENV,
+      // Discovery open (the question IS "inside a repo?"), but never a repo
+      // an inherited GIT_DIR names (a hook) — see gitEnvFor.
+      ...gitEnvFor(null),
     }).output();
     if (inside.success) {
       const top = new TextDecoder().decode(inside.stdout).trim();
@@ -1546,7 +1566,7 @@ async function tryGitInit(dir: string): Promise<GitInit> {
         stdout: "null",
         stderr: "null",
         stdin: "null",
-        env: GIT_NO_PROMPT_ENV,
+        ...gitEnvFor(null),
       })
         .output();
     if (!(await run(["init"])).success) return "skipped: git init failed";

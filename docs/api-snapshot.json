@@ -2722,25 +2722,27 @@
         },
         "renderToStream": {
           "kind": "function",
-          "sig": "e75779b73fb37413",
+          "sig": "b31238fb581f7a5f",
           "members": {
             "param0": "req:db1f3454b1ecdf8d|336e2b46aff6c271~string+6aa3b7f779609e8d~VNode+b3d9da3d9fc5eb30~number+e47c90b8d1952424~null",
             "param1": "opt:b019059a2f930138|3ca36bd054eb18b8~object",
+            "param2": "opt:60c5b0fb9cbfb9e5|ceb706d8c42c3061~typeLiteral",
             "return": "req:2b09cfd8328d90bf"
           },
           "sigs": [
-            "b51c161fdcc0b632"
+            "266a7744b55f778d"
           ]
         },
         "renderToString": {
           "kind": "function",
-          "sig": "663fbfd6a8446bce",
+          "sig": "e4ef7fddf601c350",
           "members": {
             "param0": "req:629be5c887573fb8|336e2b46aff6c271~string+b3d9da3d9fc5eb30~number+dcc1cef5c3fde277~VNode+e47c90b8d1952424~null",
+            "param1": "opt:60c5b0fb9cbfb9e5|ceb706d8c42c3061~typeLiteral",
             "return": "req:2fb40568533c1a6d"
           },
           "sigs": [
-            "3ae59510a1c4ce46"
+            "5b76d2b27c8256f3"
           ]
         },
         "requestNotificationPermission": {
@@ -3690,13 +3692,14 @@
       "symbols": {
         "assetIncludes": {
           "kind": "function",
-          "sig": "b8e01ade1de480ee",
+          "sig": "3c0f234f5270d7e5",
           "members": {
             "param0": "req:f6c2bce213147f9c|336e2b46aff6c271~string",
+            "param1": "opt:f6c2bce213147f9c|336e2b46aff6c271~string",
             "return": "req:edc4951acc3aa2cc"
           },
           "sigs": [
-            "bf124004418f2e25"
+            "2c05b3e9cbe86907"
           ]
         },
         "build": {

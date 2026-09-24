@@ -1,7 +1,14 @@
 // watch() — observe signal changes with old/new values.
 // Thin wrapper over effect() + peek(). Returns a stop function.
 
-import { type Computed, effect, type Signal, untrack } from "./signal.ts";
+import {
+  _enterReadScope,
+  _readScopeNow,
+  type Computed,
+  effect,
+  type Signal,
+  untrack,
+} from "./signal.ts";
 
 /**
  * Explicit dependency declaration for effects. The returned function is passed
@@ -65,13 +72,21 @@ export function watch<T>(
   fn: (next: T, prev: T | undefined) => void,
   opts?: WatchOptions,
 ): () => void {
-  let prev: T | undefined = source.peek();
+  // A watch is never part of a render: created inside one given its own route
+  // (the signals' read scope, see signal.ts), its starting value and its
+  // `immediate` call are the GLOBAL ones, as are all its later runs (its
+  // effect runs on the global route by itself — and is named if it reads it).
+  const inRender = _readScopeNow() !== null;
+  const scope = inRender ? _enterReadScope(null) : null;
+  let prev: T | undefined;
+  try {
+    prev = source.peek();
+    if (opts?.immediate) fn(prev as T, undefined);
+  } finally {
+    if (inRender) _enterReadScope(scope);
+  }
   let first = true;
   const derived = isDerived(source);
-
-  if (opts?.immediate) {
-    fn(prev as T, undefined);
-  }
 
   const dispose = effect(() => {
     const next = source.value;

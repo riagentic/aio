@@ -14,6 +14,7 @@
 // this closes the one remaining open seam — the declared initial.
 
 import { log } from "../diagnostics/logger-api.ts";
+import { LARGE_STATE_DOC } from "./large-state-doc.ts";
 
 /** THE dev-freeze size ceiling — one decider for every freeze site (declared
  *  initial state here, cell signal slices in state-signals.ts). It used to be
@@ -341,8 +342,9 @@ export function noteFreezeSkipped(what: string): void {
   g.__aioFreezeSkipped = true;
   log.info(
     `dev freeze skipped: ${what} > ${FREEZE_SIZE_LIMIT}B — an illegal ` +
-      `in-place mutation of it will NOT throw at the site. Split the slice, ` +
-      `or keep large blobs out of cell state (logged once).`,
+      `in-place mutation of it will NOT throw at the site. Fix: split the ` +
+      `slice, or keep bulk rows in db: tables and page them into state — see ` +
+      `${LARGE_STATE_DOC} (logged once).`,
   );
 }
 

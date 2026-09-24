@@ -1,5 +1,5 @@
 // Runtime helpers extracted from _run() — config resolution, memoization, vitals, app object
-import { DENO_JSON_NAMES, parseDenoJson } from "./deno-json.ts";
+import { locateDenoJsonAbove } from "./deno-json.ts";
 import type { AioApp, AioConfig, AioUser } from "./aio-types.ts";
 import type { ReportErrorOpts } from "../diagnostics/error.ts";
 import {
@@ -13,6 +13,7 @@ import { createCoalescer } from "./broadcast-coalescer.ts";
 import { createDebtRetry } from "./debt-retry.ts";
 import { attributeRound } from "./server-broadcast.ts";
 import type { VitalsSystem } from "../vitals/mod.ts";
+import type { BudgetLedger } from "../state/budgets.ts";
 import type { ComposedCells } from "../state/cell.ts";
 import type { ServerHandle } from "./server-types.ts";
 import {
@@ -140,10 +141,18 @@ export function buildReportOpts<S>(opts: {
     // and error count. With no logger the report is not lost — reportError's
     // console box already went out through `log.error`'s console fallback —
     // so the file write is simply skipped.
+    // All three levels: `reportError` writes a WARN-class code (a blown
+    // budget) through `warn` when there is one, and with only `error` here
+    // every budget warning landed in error.log as an ERROR — one event, two
+    // levels, and a red line for a warning.
     logger: getLogger()
       ? {
         error: (msg: string, data?: Record<string, unknown>) =>
           getLogger()?.pub("error", "aio", msg, data),
+        warn: (msg: string, data?: Record<string, unknown>) =>
+          getLogger()?.pub("warn", "aio", msg, data),
+        info: (msg: string, data?: Record<string, unknown>) =>
+          getLogger()?.pub("info", "aio", msg, data),
       }
       : undefined,
     // The shim is ALWAYS installed and asks the getter each time. Deciding once,
@@ -662,7 +671,7 @@ export async function handleThinClient(
   setRunning: (v: boolean) => void,
 ): Promise<boolean> {
   if (serverUrl === undefined) return false;
-  if (serverUrl) log.info(`connecting to ${serverUrl}`);
+  if (serverUrl) log.info(`connecting to ${redactUrlToken(serverUrl)}`);
   else log.info("launching connect page");
   const proc = await launchElectronClient(log, serverUrl || undefined);
   if (proc) {
@@ -686,7 +695,7 @@ import {
   initDiagnostics,
   purgeDisabledArtifacts,
 } from "../diagnostics/mod.ts";
-import type { Redactor } from "../diagnostics/redact.ts";
+import { type Redactor, redactUrlToken } from "../diagnostics/redact.ts";
 import { getLogDir } from "../diagnostics/logger-api.ts";
 import {
   DEV_DEFAULTS,
@@ -701,9 +710,12 @@ import { createVitalsSystem } from "../vitals/mod.ts";
 export function initDiagAndVitals(
   diagConfig: DiagnosticsConfig | false | undefined,
   prod: boolean,
-  cellNames?: string[],
-  guardDispatches?: boolean,
-  redact?: Redactor,
+  cellNames: string[] | undefined,
+  guardDispatches: boolean | undefined,
+  redact: Redactor | undefined,
+  /** THIS app's ledger — its pressure monitor records into it (required: a
+   *  default would be "the latest boot's", i.e. possibly another app's). */
+  budgets: BudgetLedger,
 ): {
   diagHooks: ReturnType<typeof initDiagnostics> | null;
   vitalsSystem: VitalsSystem | undefined;
@@ -747,7 +759,7 @@ export function initDiagAndVitals(
     const vitalsConfig = typeof diagResolvedOpts.vitals === "object"
       ? diagResolvedOpts.vitals
       : {};
-    vitalsSystem = createVitalsSystem(vitalsConfig);
+    vitalsSystem = createVitalsSystem(vitalsConfig, budgets);
   }
 
   return { diagHooks, vitalsSystem, diagResolvedOpts };
@@ -796,41 +808,14 @@ export function appDenoJson(): Record<string, unknown> | undefined {
 export function appDenoJsonLocated():
   | { config: Record<string, unknown>; dir: URL }
   | undefined {
+  // The walk (and why a parse failure warns and continues rather than being
+  // swallowed as "no file") lives in deno-json.ts — ONE walk, shared with the
+  // dev server's prod-bundle check.
   try {
-    const main = new URL(Deno.mainModule);
-    for (const up of ["./", "../", "../../", "../../../", "../../../../"]) {
-      for (const name of DENO_JSON_NAMES) {
-        const url = new URL(`${up}${name}`, main);
-        let text: string;
-        try {
-          text = Deno.readTextFileSync(url);
-        } catch {
-          continue; // nothing at this level — keep walking up
-        }
-        // The file EXISTS. A parse failure here used to be swallowed by the
-        // same catch as "no file", so a `//` comment — legal in deno.json, and
-        // the natural place to explain an import alias — made the runtime walk
-        // silently PAST its own app's config and adopt a parent's, or none:
-        // wrong title, wrong version, and the pin-drift warning never firing.
-        // Comments now parse; anything still broken is said out loud and the
-        // walk continues, because an unrelated malformed file in some ancestor
-        // directory is not this app's problem to die on.
-        try {
-          return {
-            config: parseDenoJson(text, url.pathname),
-            dir: new URL(up, main),
-          };
-        } catch (e) {
-          log.warn(
-            `config: ignoring ${url.pathname} — ${
-              e instanceof Error ? e.message.split("\n")[0] : String(e)
-            }`,
-          );
-        }
-      }
-    }
-  } catch { /* no usable main module (REPL, eval) */ }
-  return undefined;
+    return locateDenoJsonAbove(new URL(Deno.mainModule));
+  } catch {
+    return undefined; // no usable main module (REPL, eval, a data: URL)
+  }
 }
 
 /** Resolve window title: CLI > config > the APP's deno.json "title" > fallback.

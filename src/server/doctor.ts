@@ -30,6 +30,8 @@ import {
 } from "../../aiol/checks.ts";
 import { manifestReport, scanCapabilities } from "../build/capabilities.ts";
 import { log } from "../diagnostics/logger-api.ts";
+import { count } from "../diagnostics/fmt.ts";
+import { checkLockCoverage } from "./lock-coverage.ts";
 
 /** One doctor check — a named config assertion with a one-line fix on failure. */
 interface Check {
@@ -305,6 +307,49 @@ export async function runDoctor(
   return { checks, ok: checks.every((c) => c.ok) };
 }
 
+/** The doctor line for {@linkcode checkLockCoverage}, or null when there is
+ *  no lock to judge (none on disk / `"lock": false`). A check that could not
+ *  run says so as a WARN — silence would read as "covered".
+ *  @internal test seam */
+export async function lockCoverageLine(
+  dir: string,
+): Promise<{ ok: boolean; line: string } | null> {
+  let cfg: Record<string, unknown> | undefined;
+  try {
+    cfg = (await readDenoJson(dir))?.config;
+  } catch {
+    return null; // unparsable deno.json: runDoctor already FAILed it
+  }
+  if (!cfg) return null;
+  const r = await checkLockCoverage(dir, cfg);
+  if (r.status === "complete") {
+    return {
+      ok: true,
+      line: `  PASS  ${r.lock} covers aio's tools (${
+        count(r.entries.length, "entry point")
+      })`,
+    };
+  }
+  if (r.status === "missing") {
+    const shown = r.missing.slice(0, 6).join(", ");
+    const more = r.missing.length > 6 ? ` (+${r.missing.length - 6} more)` : "";
+    return {
+      ok: false,
+      line:
+        `  WARN  ${r.lock} is missing ${
+          count(r.missing.length, "entry", "entries")
+        } for aio's tools — run \`am fix\`\n        ${shown}${more}\n        ` +
+        `without them a clone resolves aio's build/test tooling afresh; ` +
+        `commit the lock \`am fix\` writes`,
+    };
+  }
+  if (/^no |"lock": false/.test(r.reason)) return null;
+  return {
+    ok: false,
+    line: `  WARN  lock coverage not checked — ${r.reason}`,
+  };
+}
+
 if (import.meta.main) {
   const dir = Deno.args[0] ?? ".";
   const { checks, ok } = await runDoctor(dir);
@@ -317,7 +362,14 @@ if (import.meta.main) {
       log.info(`  FAIL  ${c.name}\n        fix: ${c.fix}`);
     }
   }
-  log.info(`\n${checks.length - failed} checks passed, ${failed} failed`);
+  // Lock coverage (report a desktop map app §5) — a WARN, never an exit: a lock
+  // missing aio's tool entries builds today; it drifts on the next clone.
+  const lock = await lockCoverageLine(dir);
+  if (lock) log.info(lock.line);
+  log.info(
+    `\n${checks.length - failed + (lock?.ok ? 1 : 0)} checks passed, ` +
+      `${failed} failed${lock && !lock.ok ? ", 1 warning" : ""}`,
+  );
   const manifest = await capabilityManifest(dir);
   if (manifest) log.info(`\n${manifest}`);
   if (!ok) Deno.exit(1);

@@ -22,6 +22,8 @@ import { cell } from "../mod.ts";
 import {
   _trackEnd,
   _trackStart,
+  computed,
+  effect,
   signal,
   trackedMemo,
 } from "../src/state/signal.ts";
@@ -299,3 +301,85 @@ Deno.test("dev: a component that reads nothing ANYWHERE stays silent", async () 
       "noise, and noise is how a real warning gets skimmed past",
   );
 });
+
+// ── a compute that THROWS keeps its caller subscribed ───────────────
+//
+// Until 1.0.11 a miss that threw dropped the reads it had made: the caller —
+// an effect, a component — was subscribed to nothing and never ran again,
+// even after the value it depended on recovered. A hit whose computed
+// dependency threw on the freshness check did the same. Both shapes: the
+// throw comes from a computed the memo reads, and from the memo itself.
+
+for (const shape of ["computed", "signal"] as const) {
+  Deno.test(`trackedMemo: an effect whose memo threw (${shape}) runs again when it recovers`, () => {
+    const src = signal(1);
+    const dbl = computed(() => {
+      if (src.value === 3) throw new Error("boom");
+      return src.value * 2;
+    });
+    const memo = trackedMemo((k: number) => {
+      if (shape === "computed") return dbl.value + k;
+      if (src.value === 3) throw new Error("boom");
+      return src.value * 2 + k;
+    });
+    const seen: string[] = [];
+    const stop = effect(() => {
+      try {
+        seen.push(String(memo(0)));
+      } catch {
+        seen.push("ERR");
+      }
+    });
+    try {
+      for (const v of [2, 3, 4, 3, 5]) src.set(v);
+      assertEquals(seen, ["2", "4", "ERR", "8", "ERR", "10"]);
+    } finally {
+      stop();
+    }
+  });
+}
+
+const flaky = cell("tm-flaky", {
+  state: { n: 1 },
+  methods: {
+    to(s: { n: number }, n: number) {
+      s.n = n;
+    },
+  },
+});
+const flakyDbl = computed(() => {
+  if (flaky.n === 3) throw new Error("three");
+  return flaky.n * 2;
+});
+const flakyMemo = trackedMemo((_k: string) => flakyDbl.value);
+function Flaky() {
+  let v: string;
+  try {
+    v = String(flakyMemo("k"));
+  } catch {
+    v = "ERR";
+  }
+  return (
+    <div>
+      <span t="val">{v}</span>
+      <button t="three" onClick={() => flaky.to(3)}>3</button>
+      <button t="four" onClick={() => flaky.to(4)}>4</button>
+    </div>
+  );
+}
+
+testUI(
+  Flaky,
+  "trackedMemo: a component whose memo threw re-renders when it recovers",
+  async (ui) => {
+    assertEquals(ui.val.text, "2");
+    await ui.three.click();
+    assertEquals(ui.val.text, "ERR");
+    await ui.four.click();
+    assertEquals(
+      ui.val.text,
+      "8",
+      "the component that saw the throw is still live",
+    );
+  },
+);

@@ -37,6 +37,7 @@ import {
   chargeSignup,
   recordAuthFail,
   refundAuthWork,
+  requestHost,
   SESSION_COOKIE,
   sessionCookieFrom,
   sessionTokenFromCookie,
@@ -131,7 +132,9 @@ const sameOrigin = (req: Request): boolean => {
   const origin = req.headers.get("origin");
   if (!origin) return true;
   try {
-    return new URL(origin).host === (req.headers.get("host") ?? "");
+    // `requestHost`, not the Host header: an HTTP/2 request has none (the name
+    // is in `:authority`), so every same-origin login POST over h2 was refused.
+    return new URL(origin).host === (requestHost(req) ?? "");
   } catch {
     return false;
   }

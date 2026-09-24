@@ -18,6 +18,7 @@ import { udsPreloadScript } from "../src/electron/electron-shared.ts";
 import { dropTempDir, tempDir } from "../src/testing/temp-dir.ts";
 import * as nodeFs from "node:fs";
 import * as nodePath from "node:path";
+import { permissiveUmask } from "./permissive-umask.ts";
 
 const udsMain = () =>
   electronMainScriptUDS("http://127.0.0.1:8000", "/tmp/x.sock", {
@@ -86,50 +87,51 @@ Deno.test("preload: neither shell writes a predictable path at the default umask
   }
 });
 
-Deno.test("preload: the emitted block RUNS and leaves 0600 in a 0700 dir", async () => {
-  const home = await tempDir("secB-preload");
-  try {
-    for (const [name, gen] of SHELLS) {
-      const block = preloadBlock(gen());
-      const run = new Function(
-        "fs",
-        "path",
-        "app",
-        "preloadCode",
-        `${block}\nreturn { preloadFile, preloadDir };`,
-      ) as (
-        fs: typeof nodeFs,
-        path: typeof nodePath,
-        app: { getPath: (k: string) => string },
-        preloadCode: string,
-      ) => { preloadFile: string; preloadDir: string };
-      const { preloadFile, preloadDir } = run(
-        nodeFs,
-        nodePath,
-        { getPath: () => home },
-        udsPreloadScript(),
-      );
-      const file = Deno.statSync(preloadFile);
-      const dir = Deno.statSync(preloadDir);
-      assertEquals(
-        (file.mode ?? 0) & 0o777,
-        0o600,
-        `${name}: the preload is readable by someone else`,
-      );
-      assertEquals(
-        (dir.mode ?? 0) & 0o777,
-        0o700,
-        `${name}: the preload's directory is readable by someone else`,
-      );
-      assert(
-        Deno.readTextFileSync(preloadFile).includes("__aio"),
-        `${name}: the preload written is not the preload generated`,
-      );
+Deno.test("preload: the emitted block RUNS and leaves 0600 in a 0700 dir", () =>
+  permissiveUmask(async () => {
+    const home = await tempDir("secB-preload");
+    try {
+      for (const [name, gen] of SHELLS) {
+        const block = preloadBlock(gen());
+        const run = new Function(
+          "fs",
+          "path",
+          "app",
+          "preloadCode",
+          `${block}\nreturn { preloadFile, preloadDir };`,
+        ) as (
+          fs: typeof nodeFs,
+          path: typeof nodePath,
+          app: { getPath: (k: string) => string },
+          preloadCode: string,
+        ) => { preloadFile: string; preloadDir: string };
+        const { preloadFile, preloadDir } = run(
+          nodeFs,
+          nodePath,
+          { getPath: () => home },
+          udsPreloadScript(),
+        );
+        const file = Deno.statSync(preloadFile);
+        const dir = Deno.statSync(preloadDir);
+        assertEquals(
+          (file.mode ?? 0) & 0o777,
+          0o600,
+          `${name}: the preload is readable by someone else`,
+        );
+        assertEquals(
+          (dir.mode ?? 0) & 0o777,
+          0o700,
+          `${name}: the preload's directory is readable by someone else`,
+        );
+        assert(
+          Deno.readTextFileSync(preloadFile).includes("__aio"),
+          `${name}: the preload written is not the preload generated`,
+        );
+      }
+    } finally {
+      await dropTempDir(home);
     }
-  } finally {
-    await dropTempDir(home);
-  }
-});
+  }));
 
 // ── …and it has to be gone the way the window actually ENDS ───────────────
 //

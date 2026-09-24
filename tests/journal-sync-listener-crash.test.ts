@@ -285,7 +285,8 @@ for (
 // It ignores the reaction lines (`__`-prefixed, no owner; `cells` left
 // empty), and folds every sync op through its listeners again. With nothing
 // saved before the kill (before-fold) that re-derives a store-persisted
-// listener exactly; a sync listener keeps only its own ops (the guide says
+// listener exactly; a sync listener keeps its last fold plus its own ops after
+// it — usually only its own ops (the guide says
 // so). It must never drop an acked op or apply one twice.
 async function exportTag(tag: string): Promise<string> {
   const dir = await tempDir("aio-old-tree-");
@@ -341,10 +342,21 @@ Deno.test("sync listener + journal: v1.0.9 itself replays this build's tail with
     assertEquals(out.tally, expected.tally, `tally re-derived, once\n${log}`);
     assertEquals(out.shaped, expected.shaped, "shaped re-derived, once");
     assertEquals(out.inbox, expected.inbox);
-    assertEquals(
-      out.mirror,
-      direct(expected.mirror),
-      "mirror: every acked direct op kept, no reaction applied twice",
+    // The mirror's own snapshot folds on its own clock (up to 500 ms, and
+    // no persist setting holds it back): on a loaded machine it lands
+    // mid-run. v1.0.9 then keeps the folded prefix whole and only the direct
+    // ops after it — any fold point k is correct; a lost or doubled op is not.
+    const folds = expected.mirror.map((_, k) => k).concat(
+      expected.mirror.length,
+    ).map((k) => [
+      ...expected.mirror.slice(0, k),
+      ...direct(expected.mirror.slice(k)),
+    ]);
+    assert(
+      folds.some((f) => JSON.stringify(f) === JSON.stringify(out.mirror)),
+      `mirror: every acked direct op kept, no reaction applied twice — got ${
+        JSON.stringify(out.mirror)
+      }, expected a fold prefix of ${JSON.stringify(expected.mirror)}`,
     );
     assertEquals(
       [...out.feed].sort(),

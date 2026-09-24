@@ -312,8 +312,13 @@ export function createCellWorkerPool(opts: {
       for (const [name, w] of byCell) w.reseed(getSlice(name));
     },
     close: async () => {
+      // NOT cleared: a closed worker answers every later call by name ("cell
+      // worker … is closed — not applied"). Clearing the map made `ownerOf`
+      // forget the cell, and `route` then handed its calls to the MAIN loop,
+      // whose composed reduce runs the cell's methods ON THE MAIN ISOLATE —
+      // away from the resources its worker owned, and admitted whenever
+      // dispatch was still open.
       await Promise.all([...byCell.values()].map((w) => w.close()));
-      byCell.clear();
     },
   };
 }

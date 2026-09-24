@@ -42,6 +42,7 @@ Deno.test({
       const flags = ["--env-file=.env.prod", "--port=8140"];
       assertEquals(writeLaunchInfo("lh", { flags, entry: "main.ts" }), null);
       assertEquals(readLaunchInfo("lh")?.flags, flags);
+      // aio-ok(umask): asserts bits PRESENT (0755, set by chmod above) — a restrictive umask cannot hide a narrowing chmod.
       assertEquals(Deno.statSync(home).mode! & 0o777, 0o755, "not chmodded");
     }),
 });

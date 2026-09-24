@@ -29,8 +29,9 @@
 // violation". The name constraints bite; they are not merely present.
 //
 // WHAT THOSE THREE COULD NOT SEE, found by feeding the encoder what a real
-// machine and a real thief would, and by asking verifiers that are neither
-// openssl nor rustls (Java's CertPathValidator, Python's `cryptography`):
+// machine and a real thief would, and by asking — by hand, no test runs them
+// — verifiers that are neither openssl nor rustls (Java's CertPathValidator,
+// Python's `cryptography`):
 //   • a SAN the root may not name — a Tailscale 100.64/10 address, say —
 //     invalidates the WHOLE certificate, localhost included. `tls.ts` now
 //     filters the SAN set against the root's own subtrees and says so.
@@ -38,8 +39,8 @@
 //     rfc822Name/otherName are not constrained at all: with the key, openssl
 //     accepted an S/MIME certificate for `ceo@bigbank.com` and a client
 //     certificate carrying a Windows UPN. The root carries an extendedKeyUsage
-//     AND rfc822Name/URI bases, because one of them is not enough: measured on
-//     macOS 14.8.9, Security.framework does not apply a trust anchor's EKU and
+//     AND rfc822Name/URI bases, because one of them is not enough: measured
+//     by hand on macOS 14.8.9, Security.framework does not apply a trust anchor's EKU and
 //     accepted the `ceo@bigbank.com` certificate with the EKU alone. openssl
 //     refuses it at depth 1 for the EKU, macOS at depth 0 for the base.
 //   • `"999.888.777.666"` minted as 231.120.9.154 and `"1.2.3"` as a
@@ -49,21 +50,24 @@
 //     re-encoded DN — only a rustls handshake against a PrintableString root
 //     can prove the verbatim issuer copy below is load-bearing. One now does.
 //
-// AND THE LIMIT THAT REMAINS, measured: RFC 5280 §6.1 begins path validation
-// AFTER the trust anchor, so a validator that follows it literally never reads
-// the constraints in a self-signed root at all. Java's CertPathValidator is
+// AND THE LIMIT THAT REMAINS, measured by hand (2026-09-21): RFC 5280 §6.1
+// begins path validation AFTER the trust anchor, so a validator that follows
+// it literally never reads the constraints in a self-signed root at all. Java's CertPathValidator is
 // one — it accepts `DNS:www.google.com` under this root, and rejects the same
 // leaf the moment the constraints sit on an intermediate. Closing that means
 // issuing leaves from a name-constrained intermediate.
 //
-// Every other verifier aio ships against DOES read the anchor, measured with
-// controls: openssl, rustls, NSS, Go, macOS Security.framework 14.8.9 and
-// Windows CryptoAPI (Win11 26200) all refuse a forged public name under this
-// root and all accept the legitimate `localhost` leaf. Java's CertPathValidator
-// and Android/Conscrypt 2.5.2 (TrustManagerImpl — what HttpsURLConnection
-// uses) are the outliers: both ignore anchor name constraints and anchor EKU,
-// both enforce the same constraints the moment they sit on an intermediate
-// (`tests/x509-conscrypt.test.ts`). Do NOT read the extendedKeyUsage as
+// Every other verifier aio ships against DOES read the anchor, measured by
+// hand with controls in the 1.0.8-beta round (2026-09-21): openssl, rustls,
+// NSS, Go, macOS Security.framework 14.8.9 and Windows CryptoAPI (Win11 26200)
+// all refuse a forged public name under this root and all accept the
+// legitimate `localhost` leaf. Of those, only openssl and rustls are re-probed
+// on every run (`tests/x509.test.ts`, `tests/tls-verifier-claims.test.ts`).
+// Java's CertPathValidator and Android/Conscrypt 2.5.2 (TrustManagerImpl —
+// what HttpsURLConnection uses) are the outliers: both ignore anchor name
+// constraints and anchor EKU, both enforce the same constraints the moment
+// they sit on an intermediate (Conscrypt, not stock Java, has a probe:
+// `tests/x509-conscrypt.test.ts`, skipped without a JDK and the jar). Do NOT read the extendedKeyUsage as
 // covering those two anyway: a forged SERVER certificate for a public name
 // needs exactly serverAuth, so on a verifier that skips the anchor the EKU is
 // no obstacle to the case that matters most.
@@ -440,10 +444,10 @@ const subjectAltName = (dns: string[], ips: string[]) => {
  *  The other name forms — rfc822Name, otherName, uniformResourceIdentifier,
  *  directoryName — stay unconstrained, and there is no portable way to write
  *  "exclude all of these": an empty excluded base means "everything" to Go and
- *  "nothing" to openssl (measured: an empty excluded rfc822Name printed as
- *  `email:` and stopped nothing), and a directoryName subtree in a CRITICAL
- *  extension is a name type Go refuses to process at all, which would make
- *  every chain unverifiable there. What bounds them instead is the
+ *  "nothing" to openssl (measured by hand: an empty excluded rfc822Name
+ *  printed as `email:` and stopped nothing), and a directoryName subtree in a
+ *  CRITICAL extension is a name type Go refuses to process at all, which would
+ *  make every chain unverifiable there. What bounds them instead is the
  *  extendedKeyUsage on the root: none of those forms is usable for serverAuth,
  *  so a certificate built around one is refused on purpose grounds. */
 function nameConstraints(
@@ -472,7 +476,7 @@ function nameConstraints(
     // that is the narrowest legal way to say "none".
     //
     // These are NOT redundant with the serverAuth extendedKeyUsage on the
-    // root, which is what it looked like until it was measured. macOS
+    // root, which is what it looked like until it was measured by hand. macOS
     // Security.framework does NOT enforce EKU nesting at a trust anchor: with
     // the EKU alone and no email base, `security verify-cert -p smime`
     // ACCEPTED a certificate for `ceo@bigbank.com` signed by this root
@@ -605,8 +609,9 @@ export async function generateRoot(opts: {
       // rustls handshake and `openssl verify` of a real leaf are unchanged.
       // This line alone is NOT enough. The earlier claim here that "Windows
       // CryptoAPI and macOS Security.framework enforce the same nesting" was
-      // written from documentation, and half of it is false. Measured, each
-      // against a control root carrying no EKU:
+      // written from documentation, and half of it is false. Measured by hand
+      // (2026-09-21; no test runs either OS), each against a control root
+      // carrying no EKU:
       //
       //   Windows CryptoAPI (Win11 26200): DOES apply it. The S/MIME leaf is
       //     NotValidForUsage; the control is accepted.

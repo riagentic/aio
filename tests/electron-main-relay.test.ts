@@ -214,7 +214,12 @@ function rawServer(path: string) {
     inbound,
     conns: () => connCount,
     async write(raw: string) {
-      await live!.write(encoder.encode(raw));
+      // `Conn.write` may take only PART of a buffer (a full socket buffer on
+      // a multi-MB frame): loop until every byte is on the wire.
+      const bytes = encoder.encode(raw);
+      for (let off = 0; off < bytes.length;) {
+        off += await live!.write(bytes.subarray(off));
+      }
     },
     async writeLine(line: string) {
       await this.write(line + "\n");
@@ -788,6 +793,38 @@ Deno.test("electron main: frames split across chunk boundaries reassemble", asyn
     await srv.write(line.slice(120_000) + "\n");
     await main.waitFor(() => main.msgs().length >= 1);
     assertEquals(main.msgs()[0], line);
+  });
+});
+
+Deno.test("electron main: a multi-MB frame in many chunks reassembles, with its neighbours intact", async () => {
+  // The generated main.cjs reads with the shared linear reader
+  // (protocol/line-reader.ts). Drive it the way a large state arrives: many
+  // chunks, a frame ending mid-chunk with the next one starting in the same
+  // chunk, and a frame boundary exactly on a chunk edge.
+  await withHarness(async (srv, main) => {
+    await main.rendererReady();
+    await main.finishLoad();
+    const big = JSON.stringify({
+      v: 2,
+      t: "state",
+      d: { rows: "r".repeat(3 * 1024 * 1024) },
+    });
+    const a = JSON.stringify({ v: 2, t: "patches", d: [{ n: 1 }] });
+    const b = JSON.stringify({ v: 2, t: "patches", d: [{ n: 2 }] });
+    const stream = a + "\n" + big + "\n" + b + "\n";
+    const cut = 64 * 1024;
+    for (let i = 0; i < stream.length; i += cut) {
+      await srv.write(stream.slice(i, i + cut));
+    }
+    await main.waitFor(() => main.msgs().length >= 3, 30_000);
+    const msgs = main.msgs();
+    assertEquals(msgs.length, 3);
+    assertEquals(msgs[0], a);
+    assert(
+      msgs[1] === big,
+      `the big frame came back ${msgs[1]?.length} chars, not ${big.length}`,
+    );
+    assertEquals(msgs[2], b);
   });
 });
 

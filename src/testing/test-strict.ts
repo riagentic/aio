@@ -227,8 +227,15 @@ export type WorkerBoundaryCall = (
   run: (args: unknown[]) => unknown,
 ) => unknown;
 
-/** One recorded failure and whether the caller ever looked at it. */
-type LedgerEntry = { err: unknown; method: string; seen: () => boolean };
+/** One recorded failure and whether the caller ever looked at it. `named`:
+ *  `err` is already the error to raise (an `onInit` throw), not a call's
+ *  rejection to wrap in the unobserved-call wording. */
+type LedgerEntry = {
+  err: unknown;
+  method: string;
+  seen: () => boolean;
+  named?: true;
+};
 
 /** One call whose promise has not settled yet. */
 type OpenCall = {
@@ -256,6 +263,9 @@ export type CallFailureLedger = {
   abandon(): string[];
   /** Put the cells' own bound method functions back. */
   restore(): void;
+  /** Add failures the boot recorded before the ledger existed (an `onInit`
+   *  that threw — see `_watchInitFailures`); the next `raise()` throws them. */
+  adopt(failures: readonly InitFailure[]): void;
 };
 
 /** Wrap every bound method on `cells` so a rejection nobody looked at is
@@ -330,7 +340,18 @@ export function _watchUnobservedCalls(
       const first = entries.find((e) => !e.seen());
       entries.length = 0;
       if (!first) return;
+      if (first.named) throw first.err;
       throw unobservedError(first.method, first.err);
+    },
+    adopt(failures) {
+      for (const f of failures) {
+        entries.push({
+          err: f.err,
+          method: f.cell,
+          seen: () => false,
+          named: true,
+        });
+      }
     },
     async drain(budgetMs: number) {
       const deadline = Date.now() + budgetMs;
@@ -374,6 +395,67 @@ export function _watchUnobservedCalls(
   };
 }
 
+/** One `onInit` that threw during a harness boot. */
+export type InitFailure = { cell: string; err: Error };
+
+/** Record every `onInit` that throws while `cells` boot.
+ *
+ *  The runtime reports an `onInit` throw as INIT_ERROR and keeps booting — the
+ *  right answer for a running app, whose other cells should still come up. A
+ *  test is not a running app: the throw was a log line printed next to a
+ *  PASSING test (testUI showed it only as post-test output), while the docs
+ *  said it "throws, as aio.run does". So the harness records it, and its
+ *  `settle()` / `dispose()` fail the test with it — the same way an
+ *  unobserved failing call does (`CallFailureLedger.adopt`). The runtime's own
+ *  behaviour is untouched: the throw still propagates to it and is still
+ *  logged. Wrap BEFORE the boot; `restore()` puts each `onInit` back.
+ *  @internal */
+export function _watchInitFailures(
+  cells: readonly CellDef[],
+): { take(): InitFailure[]; restore(): void } {
+  const failures: InitFailure[] = [];
+  const undo: (() => void)[] = [];
+  for (const def of cells) {
+    const meta = def.__aio as unknown as Record<string, unknown> | undefined;
+    const original = meta?.onInit;
+    if (!meta || typeof original !== "function") continue;
+    const cell = def.__aio.id;
+    const wrapped = function (this: unknown, ...args: unknown[]): unknown {
+      try {
+        return original.apply(this, args);
+      } catch (e) {
+        failures.push({ cell, err: initFailureError(cell, e) });
+        throw e;
+      }
+    };
+    meta.onInit = wrapped;
+    undo.push(() => {
+      if (meta.onInit === wrapped) meta.onInit = original;
+    });
+  }
+  return {
+    take: () => failures.splice(0),
+    restore() {
+      for (const fn of undo.splice(0)) fn();
+    },
+  };
+}
+
+function initFailureError(cell: string, err: unknown): Error {
+  const detail = err instanceof Error ? err.message : String(err);
+  const named = new Error(
+    `${cell} onInit threw — ${detail}\n` +
+      `  cause: aio.run reports it as INIT_ERROR and keeps booting the other ` +
+      `cells, so the app runs without whatever this onInit was to set up; ` +
+      `this harness fails the test rather than reporting success.\n` +
+      `  fix: an onInit that starts work dispatches it — ` +
+      `\`app.dispatch({ type: "${cell}:<method>", payload: { args: [] } })\`` +
+      ` — or leaves it to onStart (docs/state/lifecycle.md).`,
+  );
+  if (err instanceof Error) named.cause = err;
+  return named;
+}
+
 /** The error an unobserved failure surfaces as — one wording for every
  *  harness and every path (raise, late rejection). */
 function unobservedError(method: string, err: unknown): Error {
@@ -412,7 +494,12 @@ export function _abandonedCallsWarning(
 ): string {
   return `[aio:test] ${harness} teardown with ${methods.length} un-awaited ` +
     `call(s) still in flight: ${methods.join(", ")}. Teardown orphans them, ` +
-    `so if one fails afterwards this test cannot see it.\n` +
+    `so if one fails afterwards this test cannot see it${
+      harness === "bootCells"
+        ? " (and a write it makes after teardown is refused, loudly — it " +
+          "can never land in a later test's state)"
+        : ""
+    }.\n` +
     `  fix: await the call (or \`await ${spelling}.settle()\`) before ` +
     `teardown; if it is deliberately left running, attach a handler ` +
     `(\`.catch(…)\`) to say so.`;

@@ -17,6 +17,8 @@ import {
   _registerSsrCapture,
   _SSR_NO_CONTEXT,
   _ssrContextValue,
+  _ssrRouteNow,
+  _ssrRouteRead,
 } from "./vdom-ssr.ts";
 import {
   type ComponentFn,
@@ -82,8 +84,16 @@ _registerSsrCapture(
 
 /** The render's route snapshot on the server; null everywhere else. */
 function _ssrRoute(): _RouteNow | null {
+  // A render given its route (`renderToString(v, { route })`) routes by it
+  // alone: no global, nothing to check.
+  const explicit = _ssrRouteNow();
+  if (explicit !== null) return explicit;
   const ssr = _ssrContextValue(_SSR_ROUTE);
-  return ssr !== null && ssr !== _SSR_NO_CONTEXT ? ssr as _RouteNow : null;
+  if (ssr === null || ssr === _SSR_NO_CONTEXT) return null;
+  // A server render READ the route: said if it was set outside the render's
+  // synchronous step (air/ssr-render.ts, "Who set the route").
+  _ssrRouteRead();
+  return ssr as _RouteNow;
 }
 
 /** The current path — the auto-tracked signal on the client. */

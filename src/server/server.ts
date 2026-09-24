@@ -68,6 +68,7 @@ import {
   armLocalControl,
   authFailBudgetExceeded,
   bearerToken,
+  certHostNames,
   clearSessionCookie,
   crossOriginRefusal,
   hostRefusal,
@@ -364,6 +365,13 @@ export function createServer(config: ServerConfig): ServerHandle {
    *  goes through here, so a `port: 0` app never advertises port 0. */
   const livePort = (): number => boundPort ?? port;
   const keyCookieName = keyCookieNameFor(config.appId);
+  /** The DNS names in the certificate this listener SERVES, parsed once — the
+   *  Host gate admits them (an attacker's rebinding name cannot be in our
+   *  cert). Only when TLS is actually on: the same `cert && key` test as the
+   *  `Deno.serve` call below. */
+  const servedCertNames = config.cert && config.key
+    ? certHostNames(config.cert)
+    : [];
   /** This app's session cookie — per app for the same reason the key cookie
    *  is (see `sessionCookieNameFor`). */
   const sessionCookieName = sessionCookieNameFor(config.appId);
@@ -1032,6 +1040,7 @@ export function createServer(config: ServerConfig): ServerHandle {
     const hostDenied = hostRefusal(req, info?.remoteAddr, {
       bindHost: config.host ?? (config.expose ? "0.0.0.0" : "127.0.0.1"),
       allowedOrigins: config.allowedOrigins,
+      certNames: servedCertNames,
     });
     if (hostDenied) return hostDenied;
     // Only now is the URL parsed: `req.url` is built FROM the Host header, so

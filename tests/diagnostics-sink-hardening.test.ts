@@ -46,6 +46,7 @@ import {
 import { AioLogger } from "../src/diagnostics/logger-core.ts";
 import { resolveOptions } from "../src/diagnostics/types.ts";
 import { installCrashHandler } from "../src/diagnostics/crash-handler.ts";
+import { permissiveUmask } from "./permissive-umask.ts";
 
 const SRC = join(dirname(fromFileUrl(import.meta.url)), "..", "src");
 const settle = (ms = 120) => new Promise((r) => setTimeout(r, ms));
@@ -62,34 +63,36 @@ async function stopLogger(l: AioLogger | null): Promise<void> {
 
 // ── 1. the client log was world-readable ─────────────────────────────
 
-Deno.test("client log: the file is owner-only, like every other log sink", async () => {
-  if (Deno.build.os === "windows") return; // no POSIX mode
-  const dir = await Deno.makeTempDir({ prefix: "aio-clientlog-mode-" });
-  await Deno.chmod(dir, 0o755); // the realistic case: a loose parent
-  try {
-    initClientLog(dir);
-    writeClientLog(
-      0,
-      {
-        ts: Date.now(),
-        level: "info",
-        msg: "session token=SECRET from the renderer",
-      } as Parameters<typeof writeClientLog>[1],
-    );
-    await settle();
-    assertEquals(
-      await modeOf(join(dir, "client.log")),
-      0o600,
-      "client.log holds forwarded browser output and every diagnostic — " +
-        "any local account could read it",
-    );
-  } finally {
-    disposeClientLog();
-    await Deno.remove(dir, { recursive: true }).catch(() => {});
-  }
-});
+Deno.test("client log: the file is owner-only, like every other log sink", () =>
+  permissiveUmask(async () => {
+    if (Deno.build.os === "windows") return; // no POSIX mode
+    const dir = await Deno.makeTempDir({ prefix: "aio-clientlog-mode-" });
+    await Deno.chmod(dir, 0o755); // the realistic case: a loose parent
+    try {
+      initClientLog(dir);
+      writeClientLog(
+        0,
+        {
+          ts: Date.now(),
+          level: "info",
+          msg: "session token=SECRET from the renderer",
+        } as Parameters<typeof writeClientLog>[1],
+      );
+      await settle();
+      assertEquals(
+        await modeOf(join(dir, "client.log")),
+        0o600,
+        "client.log holds forwarded browser output and every diagnostic — " +
+          "any local account could read it",
+      );
+    } finally {
+      disposeClientLog();
+      await Deno.remove(dir, { recursive: true }).catch(() => {});
+    }
+  }));
 
 Deno.test("client log: a file left loose by an older build is tightened", async () => {
+  // aio-ok(umask): the file is chmod'ed 0644 first and must END 0600 — chmod ignores the umask, so none can fake the tightening.
   if (Deno.build.os === "windows") return;
   const dir = await Deno.makeTempDir({ prefix: "aio-clientlog-fix-" });
   try {
@@ -119,26 +122,27 @@ Deno.test("client log: a file left loose by an older build is tightened", async 
   }
 });
 
-Deno.test("logs: the log directory itself is owner-only", async () => {
-  if (Deno.build.os === "windows") return;
-  const base = await Deno.makeTempDir({ prefix: "aio-logdir-mode-" });
-  let logger: AioLogger | null = null;
-  try {
-    const dir = join(base, "log");
-    logger = new AioLogger({ dir, level: "info", console: false });
-    await logger.init();
-    assertEquals(
-      await modeOf(dir),
-      0o700,
-      "0600 files inside a 0755 directory still leak their names and sizes; " +
-        "the recovery path already used mode 0o700 — init did not",
-    );
-    await logger.flush();
-  } finally {
-    await stopLogger(logger);
-    await Deno.remove(base, { recursive: true }).catch(() => {});
-  }
-});
+Deno.test("logs: the log directory itself is owner-only", () =>
+  permissiveUmask(async () => {
+    if (Deno.build.os === "windows") return;
+    const base = await Deno.makeTempDir({ prefix: "aio-logdir-mode-" });
+    let logger: AioLogger | null = null;
+    try {
+      const dir = join(base, "log");
+      logger = new AioLogger({ dir, level: "info", console: false });
+      await logger.init();
+      assertEquals(
+        await modeOf(dir),
+        0o700,
+        "0600 files inside a 0755 directory still leak their names and sizes; " +
+          "the recovery path already used mode 0o700 — init did not",
+      );
+      await logger.flush();
+    } finally {
+      await stopLogger(logger);
+      await Deno.remove(base, { recursive: true }).catch(() => {});
+    }
+  }));
 
 // ── 2. one throwing subscriber broke the whole bus ───────────────────
 

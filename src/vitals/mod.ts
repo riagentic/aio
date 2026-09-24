@@ -21,7 +21,7 @@ import {
 import { evaluateHints } from "./hints.ts";
 import { generateCorrelationId } from "../diagnostics/error.ts";
 import { diagEmit } from "../diagnostics/diagnostic-bus.ts";
-import { budgetsFor } from "../state/budgets.ts";
+import { type BudgetLedger, budgetsFor } from "../state/budgets.ts";
 
 // ─── Types ──────────────────────────────────────────────────────────────────
 
@@ -80,8 +80,14 @@ export function resolveThresholds(
 
 // ─── Factory ────────────────────────────────────────────────────────────────
 
-/** Create the unified vitals system from config — wires probes, diagnostics, and pressure monitoring. */
-export function createVitalsSystem(config: VitalsConfig): VitalsSystem {
+/** Create the unified vitals system from config — wires probes, diagnostics, and pressure monitoring.
+ *  `budgets` — the OWNING app's ledger (aio.ts hands its own, as it does to
+ *  persistence and the server); absent ⇒ the latest boot's, for a caller with
+ *  no app of its own. */
+export function createVitalsSystem(
+  config: VitalsConfig,
+  budgets: BudgetLedger = budgetsFor(),
+): VitalsSystem {
   const thresholds = resolveThresholds(config.thresholds);
   const hintsEnabled = config.hints !== false;
   const onAlert = config.onVitalAlert;
@@ -149,10 +155,9 @@ export function createVitalsSystem(config: VitalsConfig): VitalsSystem {
   // them both correctly. An explicit `vitals.pressure` still WINS — it is the
   // more specific instruction, and silently overriding it would make the
   // narrower spelling the weaker one.
-  // Read synchronously inside the boot that just called `setBudgets`, so the
-  // latest ledger IS this app's — and the monitor keeps it, rather than
-  // recording into whichever app booted last.
-  const budgets = budgetsFor();
+  // The owning app's ledger, handed in (never "the latest boot's" read here:
+  // that was right only while no `await` sat between aio.ts's `setBudgets` and
+  // this call — one edit away from app B's limits judging app A's payloads).
   const declared = budgets.declared();
   const pressureMonitor = pressureCfg !== false
     ? createPressureMonitor({
@@ -222,8 +227,9 @@ export function createVitalsSystem(config: VitalsConfig): VitalsSystem {
       type: "vitals-alert",
       severity: status === "frozen" ? "error" : "warning",
       source: "vitals",
-      message:
-        `[${layer}] ${status} — measured: ${measured}, threshold: ${threshold}`,
+      message: `[${layer}] ${status} — measured: ${+measured.toFixed(
+        1,
+      )}, threshold: ${threshold}`,
       hint: hint?.suggestion,
     });
   }

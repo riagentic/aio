@@ -25,6 +25,7 @@ import {
 } from "../src/server/updates-check.ts";
 import { freePort } from "../src/testing/server-test.ts";
 import { tempDir } from "../src/testing/temp-dir.ts";
+import { permissiveUmask } from "./permissive-umask.ts";
 
 const KEY: JsonWebKey = { kty: "OKP", crv: "Ed25519", x: "abc" };
 
@@ -549,28 +550,33 @@ Deno.test("updates: an artifact on another host is refused before a byte is read
   assertEquals([...Deno.readDirSync(dir)].length, 0);
 });
 
-Deno.test("updates: keepStaged leaves the file in the 0700 staging dir", async () => {
-  const dir = await tmp("dl");
-  const h = artifactHost();
-  try {
-    const got = await downloadArtifact({
-      url: `${h.base}/app`,
-      dest: join(dir, "app.new"),
-      expectSha256: await sha256Hex(BODY),
-      expectSize: BODY.length,
-      keepStaged: true,
-    });
-    assert(got.ok, got.ok ? "" : got.error);
-    assert(got.path.includes(".aio-update-"), got.path);
-    assertEquals((await Deno.readFile(got.path)).length, BODY.length);
-    if (Deno.build.os !== "windows") {
-      const mode = (await Deno.stat(join(got.path, ".."))).mode ?? 0;
-      assertEquals(mode & 0o777, 0o700, "no other user may read a staged app");
+Deno.test("updates: keepStaged leaves the file in the 0700 staging dir", () =>
+  permissiveUmask(async () => {
+    const dir = await tmp("dl");
+    const h = artifactHost();
+    try {
+      const got = await downloadArtifact({
+        url: `${h.base}/app`,
+        dest: join(dir, "app.new"),
+        expectSha256: await sha256Hex(BODY),
+        expectSize: BODY.length,
+        keepStaged: true,
+      });
+      assert(got.ok, got.ok ? "" : got.error);
+      assert(got.path.includes(".aio-update-"), got.path);
+      assertEquals((await Deno.readFile(got.path)).length, BODY.length);
+      if (Deno.build.os !== "windows") {
+        const mode = (await Deno.stat(join(got.path, ".."))).mode ?? 0;
+        assertEquals(
+          mode & 0o777,
+          0o700,
+          "no other user may read a staged app",
+        );
+      }
+    } finally {
+      await h.stop();
     }
-  } finally {
-    await h.stop();
-  }
-});
+  }));
 
 Deno.test("updates: an unwritable install dir is named before anything downloads", async () => {
   const dir = await tmp("dl");

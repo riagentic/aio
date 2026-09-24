@@ -70,7 +70,7 @@ export const PASSTHROUGH: Readonly<Record<string, string>> = {
   // defect as a help omitting a real one. The full list lives in
   // am-help-text.ts (CREATE_FLAGS) and is printed by both the help and the
   // refusal.
-  create: "scaffold flags (--template --target --aio-version --mirror --jsr)",
+  create: "scaffold flags (--template --client --aio-version --mirror --jsr)",
   lab: "VM flags (--ram --cpus --disk --apk --tunnel …)",
   ui: "flags are forwarded to amui (`am ui --client=browser`)",
   upgrade: "hands off to the installer for am / an app / a checkout",

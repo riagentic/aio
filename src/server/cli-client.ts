@@ -25,6 +25,7 @@ import {
   wireError,
 } from "../protocol/envelope.ts";
 import { encodeAction } from "../state/action-encode.ts";
+import { LARGE_STATE_DOC } from "../state/budgets.ts";
 import { bindCell } from "../state/cell-catalog.ts";
 import { _releaseCellBindings } from "../state/cell-reactive.ts";
 import type { CellDef, Msg } from "../state/cell-types.ts";
@@ -61,7 +62,9 @@ import {
 } from "../protocol/protocol-version.ts";
 
 import { log } from "../diagnostics/logger-api.ts";
+import { redactUrlToken } from "../diagnostics/redact.ts";
 import { count } from "../diagnostics/fmt.ts";
+import { createLineReader } from "../protocol/line-reader.ts";
 
 /** How often a CLI client says "still here". Matches the browser's heartbeat
  *  interval; the server's `frozen` threshold is 2000 ms, so this has to be
@@ -308,6 +311,23 @@ type DenoWebSocket = new (
   url: string,
   opts: { headers: Record<string, string> },
 ) => WebSocket;
+
+/** What a terminal client says when the server's frame is over its runtime's
+ *  message ceiling — every reconnect, because the app is getting no state at
+ *  all. Pure, so the hint and the chapter link are pinned by
+ *  tests/large-state-hints.test.ts without a 64 MiB frame. @internal */
+export function frameTooLargeMessage(
+  closeReason: string,
+  retryMs: number,
+): string {
+  return `the server sent a frame this runtime refuses: ${
+    closeReason || "message too large"
+  }. Deno's WebSocket takes at most 64 MiB per message and cannot be ` +
+    `raised, so every reconnect ends the same way — the app's state is too ` +
+    `big to push to a terminal client. Fix (in the app): keep bulk rows in ` +
+    `db: tables and page them into state, or hide the big cell from this ` +
+    `client (visible) — see ${LARGE_STATE_DOC}. Retrying in ${retryMs}ms.`;
+}
 
 /** Connect a CLI process to a running aio app as a real client: live state,
  *  method calls, and reconnect with the offline queue — the terminal twin of a
@@ -628,9 +648,10 @@ export function connectCli<S>(
     if (now === undefined || now === peerAppId) return true;
     if (_wrongPeerNoted !== now) {
       _wrongPeerNoted = now;
+      const shown = redactUrlToken(url); // a share link carries its key
       log.error(
         "cli",
-        `${url} is now served by a DIFFERENT app ("${now}", was ` +
+        `${shown} is now served by a DIFFERENT app ("${now}", was ` +
           `"${peerAppId}") — the port was reused. NOT reconnecting: ` +
           `${queue.length} queued action(s) belong to "${peerAppId}" and ` +
           `would be written into "${now}". Still retrying in case the ` +
@@ -705,7 +726,7 @@ export function connectCli<S>(
     const wsUrl = `${proto}//${parsed.host}/ws${
       token && !inHeader ? `?token=${token}` : ""
     }`;
-    const shownUrl = wsUrl.replace(/([?&]token=)[^&]*/, "$1…");
+    const shownUrl = redactUrlToken(wsUrl);
 
     const socket = inHeader
       ? new (WebSocket as unknown as DenoWebSocket)(wsUrl, {
@@ -997,13 +1018,7 @@ export function connectCli<S>(
         retry = Math.max(retry, _tooLarge);
         log.error(
           "cli",
-          `the server sent a frame this runtime refuses: ${
-            closeReason || "message too large"
-          }. Deno's WebSocket takes at most 64 MiB per message and cannot be ` +
-            `raised, so every reconnect ends the same way — the app's state ` +
-            `is too big to push to a terminal client (bulk rows belong in ` +
-            `db: tables, binaries in files — docs/persistence/big-data.md). ` +
-            `Retrying in ${backoffDelay(retry)}ms.`,
+          frameTooLargeMessage(closeReason, backoffDelay(retry)),
         );
       }
       if (!wasConnected && retry === 2) {
@@ -1307,16 +1322,16 @@ export function connectCliUDS<S>(
         }
 
         // Read NDJSON
-        let buf = "";
+        const lineBuf = createLineReader(); // linear on a multi-MB frame
         const reader = c.readable.getReader();
         (async () => {
           try {
             while (true) {
               const { value, done } = await reader.read();
               if (done) break;
-              buf += decoder.decode(value, { stream: true });
-              const lines = buf.split("\n");
-              buf = lines.pop()!;
+              const lines = lineBuf.push(
+                decoder.decode(value, { stream: true }),
+              );
               for (const line of lines) {
                 if (!line) continue;
                 const frame = dec(line);

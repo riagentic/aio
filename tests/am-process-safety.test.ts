@@ -365,10 +365,18 @@ Deno.test({
     const p = new Deno.Command("sleep", { args: ["30"], stdout: "null" })
       .spawn();
     try {
-      const why = stalePidRefusal(
-        p.pid,
-        new Map<number, { appId: string; dir: string }>(),
-      );
+      // `spawn()` returns at fork, before exec: until then the child is still
+      // a copy of Deno (named `tokio-runtime-w`). Ask once it IS sleep.
+      const ask = () =>
+        stalePidRefusal(
+          p.pid,
+          new Map<number, { appId: string; dir: string }>(),
+        );
+      let why = ask();
+      for (let i = 0; i < 200 && !why?.includes("sleep"); i++) {
+        await new Promise((r) => setTimeout(r, 10));
+        why = ask();
+      }
       assert(why, `pid ${p.pid} runs "sleep 30" — am must not SIGTERM it`);
       assertStringIncludes(why, "not an aio process");
       assertStringIncludes(why, "sleep");

@@ -20,6 +20,7 @@ import {
   resolveAppKey,
 } from "../src/server/app-key.ts";
 import { _resetAppDirs } from "../src/server/app-dirs.ts";
+import { permissiveUmask } from "./permissive-umask.ts";
 
 const POSIX = Deno.build.os !== "windows";
 const dirOf = (p: string) => p.replace(/[/\\][^/\\]+$/, "");
@@ -29,13 +30,21 @@ const mode = (p: string) => (Deno.statSync(p).mode! & 0o777).toString(8);
 async function inFreshHome(fn: () => void | Promise<void>): Promise<void> {
   const home = await Deno.makeTempDir({ prefix: "aio-secret-perm-" });
   const prev = Deno.env.get("HOME");
+  const prevApps = Deno.env.get("AIO_APPS_DIR");
   Deno.env.set("HOME", home);
+  // AIO_APPS_DIR outranks HOME (the suite sets it): without this every key
+  // landed in a shared, reused tree whose dirs an earlier run already made
+  // 0700 — the "home is 0700" checks passed with the chmod deleted.
+  Deno.env.set("AIO_APPS_DIR", home);
   _resetAppDirs();
   try {
-    await fn();
+    // Under 022, where a secret written with no mode is world-readable.
+    await permissiveUmask(fn);
   } finally {
     if (prev === undefined) Deno.env.delete("HOME");
     else Deno.env.set("HOME", prev);
+    if (prevApps === undefined) Deno.env.delete("AIO_APPS_DIR");
+    else Deno.env.set("AIO_APPS_DIR", prevApps);
     _resetAppDirs();
     await Deno.remove(home, { recursive: true });
   }

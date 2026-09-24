@@ -64,6 +64,7 @@ Deno.test("zip: unpacks stored and deflated files, directories, exec bits and in
     );
     assert((await Deno.stat(join(dest, "empty"))).isDirectory);
     if (unix) {
+      // aio-ok(umask): asserts bits PRESENT (0755); a restrictive umask can only make this fail, never hide a missing mode.
       assertEquals((await Deno.stat(exe)).mode! & 0o777, 0o755);
       const link = join(dest, "App.app/Current");
       assert((await Deno.lstat(link)).isSymlink, "symlinks stay symlinks");

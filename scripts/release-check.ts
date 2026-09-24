@@ -29,7 +29,16 @@ import { machineFence } from "./test-shards.ts";
 const root = new URL("../", import.meta.url).pathname;
 const FAST_ONLY = Deno.args.includes("--fast");
 
-type Result = { name: string; ok: boolean; detail: string };
+/** One gate's answer. `skipped` marks a gate that did not RUN — it does not
+ *  fail the release (only the docker-less lab may skip, and
+ *  ci-mirrors-release-check.test.ts holds it to that), but it must never read
+ *  like one that passed. */
+export type Result = {
+  name: string;
+  ok: boolean;
+  detail: string;
+  skipped?: boolean;
+};
 
 /** No gate may run forever. `deno test` has no per-test timeout: one child that
  *  ignores SIGTERM turns the suite into a process that prints "has been running
@@ -46,8 +55,14 @@ const CEILING_MIN: Record<string, number> = {
   "test:build": 45,
   "test:electron": 45,
   "test:hosts": 20,
+  // 347 ledger rows × two `deno test` runs each, 4 workers: ~36 min measured
+  // (187 rows in 20 min on the release cores). Twice that is still a hang.
+  "check:mutations": 60,
   "lab (fresh ubuntu)": 45,
 };
+
+/** 12 ÷ the fence's usable cores (≥ 1), set once in `main()`. */
+let CEILING_SCALE = 1;
 
 /** The tail is all that is ever printed — keep that much, not 250 KB of green. */
 function keepTail(buf: string, add: string): string {
@@ -68,7 +83,7 @@ function gateLogPath(name: string): string {
 /** Every gate runs inside the same CPU fence as the test runner: off the
  *  first cores, niced — the heavy tier (builds, onboarding, mutations) used
  *  to take the whole machine too. See `machineFence` in test-shards.ts. */
-const FENCE = (await machineFence()).prefix;
+let FENCE: string[] = [];
 
 async function run(name: string, cmd: string[]): Promise<Result> {
   const t0 = Date.now();
@@ -128,7 +143,9 @@ async function run(name: string, cmd: string[]): Promise<Result> {
         failedTests.map((t) => `✗ ${t}`).join("\n      ")
       : "";
   const where = () => `\n      full log: ${logPath.slice(root.length)}`;
-  const ceilingMs = (CEILING_MIN[name] ?? DEFAULT_CEILING_MIN) * 60_000;
+  const ceilingMs = Math.round(
+    (CEILING_MIN[name] ?? DEFAULT_CEILING_MIN) * CEILING_SCALE * 60_000,
+  );
   let timer: ReturnType<typeof setTimeout> | undefined;
   const status = await Promise.race([
     child.status,
@@ -176,7 +193,7 @@ async function run(name: string, cmd: string[]): Promise<Result> {
       name,
       ok: false,
       detail: `${secs}s — HUNG: no result within ${
-        ceilingMs / 60_000
+        Math.round(ceilingMs / 60_000)
       }m, killed.\n      last output:\n      ${
         lastLines(3)
       }${failedList()}${where()}`,
@@ -336,9 +353,8 @@ const HEAVY: [string, string[]][] = [
   // is a release nobody checked it against. `.katana/beta.md` requires every
   // row to be proven or waiting on hardware/time; `--require` is beta's job.
   ["check:proof", ["deno", "task", "check:proof"]],
-  // ~30 s: breaks each load-bearing invariant on purpose and requires its
-  // named test to go red. Heavy because it runs `deno test` twice per entry,
-  // not because it is slow to fail.
+  // ~36 min at 347 rows: breaks each load-bearing invariant on purpose and
+  // requires its named test to go red — `deno test` twice per entry.
   ["check:mutations", ["deno", "task", "check:mutations"]],
   // ~20 s: N overlapping server renders on a seeded schedule (FUZZ_SEED
   // replays a failure), a third aborted mid-stream, plus the real Deno.serve
@@ -388,91 +404,124 @@ function labRuntime(): string | null {
   return null;
 }
 
-function report(results: Result[]): void {
-  for (const r of results) {
-    console.log(`  ${r.ok ? "✓" : "✗"} ${r.name.padEnd(38)} ${r.detail}`);
-  }
+/** The onboarding lab's gate name — the one gate allowed to skip. */
+const LAB = "lab (fresh ubuntu)";
+
+/** One report line. A SKIPPED gate is `⚠`, never `✓`: the lab skipped for
+ *  want of docker printed the same tick as a lab that passed, so a release
+ *  that never tested onboarding on a stranger's machine looked like one that
+ *  had. Pure. */
+export function resultLine(r: Result): string {
+  const mark = r.skipped ? "⚠" : r.ok ? "✓" : "✗";
+  return `  ${mark} ${r.name.padEnd(38)} ${r.detail}`;
 }
 
-console.log(`\nrelease check — v${VERSION}\n`);
-console.log("surfaces");
-// The physical matrix is PRINTED at every release, never enforced here: a cut
-// made on Linux cannot be blocked by a Mac this machine does not have. What it
-// must not do is stay invisible — the beta gate names five things only real
-// hardware can answer, and before this they were tracked by memory. Seeing
-// "0/6 proven" beside a green release is the point.
-await new Deno.Command(Deno.execPath(), {
-  args: ["run", "-A", `${root}scripts/proof.ts`],
-  stdout: "inherit",
-  stderr: "inherit",
-}).output();
+/** The last line of a passing run. What was SKIPPED is named in it — the one
+ *  line a person reads — so "releasable" never stands alone beside a gate that
+ *  did not run. Pure. */
+export function verdictLine(fastOnly: boolean, results: Result[]): string {
+  if (fastOnly) {
+    return "\n✓ fast gates + surfaces pass — run without --fast before pushing\n";
+  }
+  const lab = results.some((r) => r.skipped && r.name === LAB)
+    ? " (lab SKIPPED — no docker/podman)"
+    : "";
+  return "\n✓ releasable" + lab + " — every gate and surface in " +
+    ".katana/release.md passes; `deno task check:release-stamp` confirms " +
+    "the tree before you tag\n";
+}
 
-const surfaces = await surfaceChecks();
-report(surfaces);
+function report(results: Result[]): void {
+  for (const r of results) console.log(resultLine(r));
+}
 
-console.log("\ngates (fast)");
-const fast: Result[] = [];
-for (const [name, cmd] of FAST) fast.push(await run(name, cmd));
-report(fast);
+/** The run itself. Behind `import.meta.main` so the pure report helpers above
+ *  can be imported by a test without running every gate. */
+async function main(): Promise<void> {
+  const fence = await machineFence();
+  FENCE = fence.prefix;
+  // The ceilings are measured on the 12-core fence; a narrower one is slower
+  // in proportion, and a ceiling must never read a slow machine as a hang.
+  CEILING_SCALE = Math.max(1, 12 / fence.usable);
+  console.log(`\nrelease check — v${VERSION}\n`);
+  console.log("surfaces");
+  // The physical matrix is PRINTED at every release, never enforced here: a cut
+  // made on Linux cannot be blocked by a Mac this machine does not have. What it
+  // must not do is stay invisible — the beta gate names five things only real
+  // hardware can answer, and before this they were tracked by memory. Seeing
+  // "0/6 proven" beside a green release is the point.
+  await new Deno.Command(Deno.execPath(), {
+    args: ["run", "-A", `${root}scripts/proof.ts`],
+    stdout: "inherit",
+    stderr: "inherit",
+  }).output();
 
-const failedEarly = [...surfaces, ...fast].filter((r) => !r.ok);
-let heavy: Result[] = [];
-if (FAST_ONLY) {
-  console.log("\ngates (heavy)  — skipped (--fast)");
-} else if (failedEarly.length > 0) {
-  console.log(
-    `\ngates (heavy)  — skipped: fix the ${failedEarly.length} failure(s) ` +
-      `above first (they cost seconds, these cost ~12 minutes)`,
-  );
-} else {
-  console.log("\ngates (heavy)");
-  for (const [name, cmd] of HEAVY) heavy.push(await run(name, cmd));
-  // The lab last: it is the slowest, and everything above has to hold before
-  // "does a stranger's machine survive this?" is even a meaningful question.
-  const runtime = labRuntime();
-  if (runtime) {
-    heavy.push(
-      await run("lab (fresh ubuntu)", [
-        "deno",
-        "task",
-        "lab",
-        "--scenario=install,create-dev,run-sh",
-      ]),
+  const surfaces = await surfaceChecks();
+  report(surfaces);
+
+  console.log("\ngates (fast)");
+  const fast: Result[] = [];
+  for (const [name, cmd] of FAST) fast.push(await run(name, cmd));
+  report(fast);
+
+  const failedEarly = [...surfaces, ...fast].filter((r) => !r.ok);
+  let heavy: Result[] = [];
+  if (FAST_ONLY) {
+    console.log("\ngates (heavy)  — skipped (--fast)");
+  } else if (failedEarly.length > 0) {
+    console.log(
+      `\ngates (heavy)  — skipped: fix the ${failedEarly.length} failure(s) ` +
+        `above first (they cost seconds, these cost ~12 minutes)`,
     );
   } else {
-    heavy.push({
-      name: "lab (fresh ubuntu)",
-      ok: true,
-      detail: "SKIPPED — no docker/podman on this machine. The one gate that " +
-        "tests onboarding on a machine that is not this one did not run.",
-    });
+    console.log("\ngates (heavy)");
+    for (const [name, cmd] of HEAVY) heavy.push(await run(name, cmd));
+    // The lab last: it is the slowest, and everything above has to hold before
+    // "does a stranger's machine survive this?" is even a meaningful question.
+    const runtime = labRuntime();
+    if (runtime) {
+      heavy.push(
+        await run("lab (fresh ubuntu)", [
+          "deno",
+          "task",
+          "lab",
+          "--scenario=install,create-dev,run-sh",
+        ]),
+      );
+    } else {
+      heavy.push({
+        name: "lab (fresh ubuntu)",
+        ok: true,
+        detail:
+          "SKIPPED — no docker/podman on this machine. The one gate that " +
+          "tests onboarding on a machine that is not this one did not run.",
+        skipped: true,
+      });
+    }
+    report(heavy);
   }
-  report(heavy);
+
+  const failed = [...surfaces, ...fast, ...heavy].filter((r) => !r.ok);
+  if (failed.length > 0) {
+    console.log(
+      `\n✗ NOT releasable — ${failed.length} failing: ${
+        failed.map((f) => f.name).join(", ")
+      }\n`,
+    );
+    Deno.exit(1);
+  }
+  if (!FAST_ONLY) {
+    // The stamp: the one thing that turns "every gate passed" from a sentence
+    // in a release note into a fact about THIS tree. `deno task check:release-stamp`
+    // reads it back before a tag is cut; an edit after this line invalidates it.
+    const stamp = await writeStamp(VERSION, root);
+    console.log(
+      `  ✓ release stamp                          tree ${
+        stamp.tree.slice(0, 12)
+      } (${STAMP_PATH})`,
+    );
+  }
+  console.log(verdictLine(FAST_ONLY, [...surfaces, ...fast, ...heavy]));
 }
 
-const failed = [...surfaces, ...fast, ...heavy].filter((r) => !r.ok);
-if (failed.length > 0) {
-  console.log(
-    `\n✗ NOT releasable — ${failed.length} failing: ${
-      failed.map((f) => f.name).join(", ")
-    }\n`,
-  );
-  Deno.exit(1);
-}
-if (!FAST_ONLY) {
-  // The stamp: the one thing that turns "every gate passed" from a sentence
-  // in a release note into a fact about THIS tree. `deno task check:release-stamp`
-  // reads it back before a tag is cut; an edit after this line invalidates it.
-  const stamp = await writeStamp(VERSION, root);
-  console.log(
-    `  ✓ release stamp                          tree ${
-      stamp.tree.slice(0, 12)
-    } (${STAMP_PATH})`,
-  );
-}
-console.log(
-  FAST_ONLY
-    ? "\n✓ fast gates + surfaces pass — run without --fast before pushing\n"
-    : "\n✓ releasable — every gate and surface in .katana/release.md passes; " +
-      "`deno task check:release-stamp` confirms the tree before you tag\n",
-);
+if (import.meta.main) await main();

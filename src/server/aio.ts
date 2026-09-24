@@ -175,7 +175,11 @@ import {
   _onCallSettle,
   _setCallTimeouts,
 } from "../state/cell-impl.ts";
-import { _noteUnsaved } from "./action-ack.ts";
+import {
+  _durableFor as _durableForOwed,
+  _noteUnsaved,
+  _owedVerdict,
+} from "./action-ack.ts";
 import { PERSIST_REFUSED } from "./server-trojan.ts";
 import { _moveRejections } from "../state/rejection-tracker.ts";
 import {
@@ -1345,7 +1349,10 @@ async function _runAsApp(a?: any, b?: any): Promise<AioApp<any, any>> {
     // Logger — skipped in `--aio-data-contract` mode: installing it would
     // replace the stderr-only sink (putting boot lines back on the parsed
     // stdout) and rotate the app's log files for what is only a query.
-    logger = _contractMode ? null : await initLogger(fc);
+    logger = _contractMode ? null : await initLogger(fc, {
+      persisting: persistingCellIds,
+      cells: composed.cellNames,
+    });
     (globalThis as Record<string, unknown>).__aioCells = composed;
 
     // Bridge to legacy _run() config
@@ -1939,6 +1946,8 @@ async function _runPhases<S, A, E>(
     // WANT death-and-restart.
     config.guardDispatches ?? true,
     redact,
+    // THIS app's ledger, explicitly — as persistence and the server get it.
+    _budgetLedger,
   );
   bootUndo.push("vitals", () => vitalsSystem?.destroy());
   bootUndo.push("diagnostics", async () => {
@@ -2106,7 +2115,8 @@ async function _runPhases<S, A, E>(
   // not a second copy: a compiled binary's stylesheet lives in the embedded
   // dist/ while its app dir is the VFS entry dir with `<cwd>/src` behind it,
   // so asking only one of the three made this line confidently wrong there.
-  const themeNote = _themeBootNote(
+  // A headless run serves no page, so which look a page WOULD get is noise.
+  const themeNote = isHeadless ? null : _themeBootNote(
     ui.theme,
     [baseDir, ...baseDirFallbacks].some((d) => appHasStylesheet(d, distDir)),
     ui.layout,
@@ -2135,6 +2145,9 @@ async function _runPhases<S, A, E>(
 
   const boot = await bootStorage({
     appId,
+    // THIS app's ledger, explicitly — a `budgetsFor()` read inside the async
+    // boot can see a concurrently-booting app's (see BootConfig.budgets).
+    budgets: _budgetLedger,
     dbPath,
     dbPragmas: config.dbPragmas,
     checkIntegrityOnBoot: config.checkIntegrityOnBoot,
@@ -4208,28 +4221,19 @@ async function _runPhases<S, A, E>(
     }
     return p;
   }
-  const _verdict = (
-    owed: Set<Promise<string | undefined>>,
-  ): Promise<string | undefined> =>
-    Promise.all(owed).then((vs) => {
-      const failed = [...new Set(vs.filter((v) => v !== undefined))];
-      return failed.length === 0 ? undefined : failed.join("; ");
-    });
-  /** What must be durable before `action` may be acked, as its verdict;
-   *  undefined when nothing is owed. */
+  /** What must be durable before `action` may be acked — action-ack.ts
+   *  `_durableFor`, over this run's owed saves. */
   function _durableFor(
     action: object,
   ): Promise<string | undefined> | undefined {
-    const owed = _owedByAction.get(action);
-    _owedByAction.delete(action);
-    return owed === undefined ? undefined : _verdict(owed);
+    return _durableForOwed(_owedByAction, action);
   }
   /** The same for an async call's settlement — its write-sets' saves. */
   function _durableForCall(callId: string): Promise<unknown> | undefined {
     const owed = _owedByCall.get(callId);
     _owedByCall.delete(callId);
     if (owed === undefined) return undefined;
-    return _verdict(owed).then((why) => {
+    return _owedVerdict(owed).then((why) => {
       if (why !== undefined) _noteUnsaved(undefined, callId, why);
     });
   }
@@ -4821,6 +4825,9 @@ async function _runPhases<S, A, E>(
     getVitalsCheckTimer: () => _vitalsCheckTimer,
     getVitalsSystem: () => vitalsSystem,
     onStopping,
+    // In the orchestrator's own sequence (after onStopping, before dispatch
+    // closes) — so no shutdown path can skip it or run it out of order.
+    closeWorkers: () => workerPool.close(),
     onStop,
     appLock,
     releaseFileSizeGuard,
@@ -4847,7 +4854,8 @@ async function _runPhases<S, A, E>(
     log,
   });
 
-  /** Stop the worker threads BEFORE the rest of the runtime, and note that the
+  /** The worker threads stop INSIDE the orchestrator's sequence
+   *  (`closeWorkers`: after `onStopping`, before dispatch closes), and the
    *  order is load-bearing rather than incidental.
    *
    *  A worker's in-flight methods live in its own isolate, so Phase 1's
@@ -4855,9 +4863,12 @@ async function _runPhases<S, A, E>(
    *  abort + settle on the `close` message and streams the final writes home as
    *  patches, which the ack cannot overtake (FIFO). Those writes arrive as
    *  ordinary dispatches — so they must land while dispatch is still OPEN,
-   *  i.e. before `_shutdownRuntime()` closes it and takes the final snapshot.
+   *  i.e. before the orchestrator closes it and takes the final snapshot.
    *  Closing the pool after the runtime would silently drop exactly the writes
-   *  the worker just drained to produce.
+   *  the worker just drained to produce; closing it BEFORE `onStopping` (as
+   *  this did until 1.0.11) refused the worker-cell calls that hook exists to
+   *  make; and a path that skipped it (the update handover) let worker-cell
+   *  calls start new work for the whole drain.
    *
    *  `tests/shutdown-worker-cell-durability.test.ts` pins this end to end with
    *  a real worker (libraryMode runs worker cells in-isolate, so an in-process
@@ -4868,8 +4879,7 @@ async function _runPhases<S, A, E>(
     // FIRST, before anything awaits: boot steps still in flight (the Electron
     // launch) read this and refuse to start what the shutdown would miss.
     _stopCtl.abort();
-    await workerPool.close();
-    await _shutdownRuntime();
+    await _shutdownRuntime(); // closes the worker cells too (`closeWorkers`)
     _offCallSettle();
     // A closed app owns nothing: release THIS app's cells so they can bind
     // again. Without it a cell def stayed claimed for the life of the process,
@@ -5316,7 +5326,13 @@ async function _runPhases<S, A, E>(
       log,
       argv: Deno.args,
       snapshot: _snapshotDb,
-      shutdown: () => _shutdownRuntime().catch(() => {}),
+      // The app's ONE shutdown — not the orchestrator alone, which is what
+      // this was, and the worker pool was never closed on an update. NOT
+      // swallowed: a rejection reaches `deferHandOver`, which logs "update
+      // handover FAILED" and exits without relaunching onto a half-stopped
+      // app — the rule `aio.restart()` follows. A `.catch(() => {})` here made
+      // that line unreachable and the failed shutdown silent.
+      shutdown,
       prompt: ttyPrompt(),
       slot: _appSlots.get(config)?.updates,
     })

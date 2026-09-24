@@ -2,7 +2,7 @@
 
 import type { CellInfo, Checker } from "./types.ts";
 import { justifiedLoose } from "../src/diagnostics/ok-marker.ts";
-import { join, resolve } from "@std/path";
+import { dirname, join, resolve } from "@std/path";
 import * as fix from "./fixes.ts";
 import {
   declaredEntryPaths,
@@ -1388,7 +1388,7 @@ export const checkUI: Checker = (ctx) => {
             file: file.relative,
             line: lineIdx,
             fix:
-              "Move it behind a cell method (`await import(...)` runs on the server), put it in a *.server.ts module, or use `import type`",
+              'Move it into a *.server.ts module and reach it from a cell method with `await import("./x.server.ts")` (only a `*.server.ts` dynamic import stays out of the bundle — any other `import()` is followed), or use `import type`',
           },
         );
         continue;
@@ -1427,7 +1427,8 @@ export const checkUI: Checker = (ctx) => {
           `${file.relative}: side-effect import "${spec}" is server-only and this file is compiled into the browser bundle`,
           {
             file: file.relative,
-            fix: "Move it behind a cell method or into a *.server.ts module",
+            fix:
+              'Move it into a *.server.ts module and reach it from a cell method with `await import("./x.server.ts")`',
           },
         );
         continue;
@@ -1512,7 +1513,7 @@ export const checkUI: Checker = (ctx) => {
             file: file.relative,
             line: lineIdx,
             fix:
-              "Move to a server-only file and use dynamic import, or use import type",
+              'Move it into a *.server.ts module and use `await import("./x.server.ts")` inside a cell method (a dynamic import of any other file is bundled), or use import type',
           },
         );
         continue;
@@ -1658,33 +1659,61 @@ export const checkUI: Checker = (ctx) => {
     }
   }
 
-  // Check 4: Static dynamic import detection — only warn when target has server-only imports
-  const STATIC_DYN_RE = /\bimport\(\s*['"](\.[^'"]+)['"]\s*\)/g;
+  // Check 4: a literal `import("./y.ts")` whose target is server-only.
+  //
+  // Only a `*.server.ts` dynamic import is external to the browser bundle
+  // (docs/build/imports.md); any OTHER literal `import()` is followed by
+  // esbuild, so `y.ts` — and its `Deno.*` / `@std/*` — lands in the bundle
+  // the moment anything the browser loads names it. That is true one hop
+  // AWAY from a cell as much as in it: a cell importing `./lib.ts` whose
+  // `open()` does `await import("./y.ts")` (field report (a desktop agent app) §2) ships
+  // `y.ts` just the same. So the scan covers every module the browser graph
+  // reaches through STATIC local imports, not only the cell/component files.
+  //
+  // Scope (sound, narrow): the TARGET itself must be server-only on its face
+  // — a `Deno.` in code, or a static non-type import of a server-only
+  // specifier. A target that is server-only only through ITS imports, a
+  // non-literal `import(x)`, and an import-map alias are not followed here;
+  // the build's own graph check (graph-validator) still refuses those.
+  const SERVER_SPEC_RE =
+    /(?:import|export)\s+(?!type\s)[^'";]*?\s+from\s+['"]((?:jsr:)?(?:@std\/|node:|aio\/server)[^'"]*)['"]|(?:^|\n)\s*import\s+['"]((?:jsr:)?(?:@std\/|node:|aio\/server)[^'"]*)['"]/g;
+  const STATIC_LOCAL_RE =
+    /(?:import|export)\s+(?!type\s)(?:[^'";]*?\s+from\s+)?['"](\.{1,2}\/[^'"]+)['"]/g;
+  const STATIC_DYN_RE = /\bimport\(\s*['"](\.{1,2}\/[^'"]+)['"]\s*\)/g;
+  const resolveLocal = (from: { path: string }, spec: string) => {
+    const t = resolve(dirname(from.path), spec);
+    return ctx.sourceFiles.find((f) =>
+      f.path === t || f.path === t + ".ts" || f.path === t + ".tsx"
+    );
+  };
+  // The browser graph: the checked files, closed over static local imports.
+  // A `*.server.ts` hop is not followed — a static import of one is refused
+  // by its own rule, and a dynamic one is external.
+  const browserGraph = browserCheckedFiles.filter((f) =>
+    !isToolingPath(f.relative) && !isTestPath(f.relative)
+  );
+  for (let i = 0; i < browserGraph.length; i++) {
+    const from = browserGraph[i]!;
+    for (const m of codeMatches(from.content, STATIC_LOCAL_RE)) {
+      if (isServerOnlyFile(m[1]!)) continue;
+      const hop = resolveLocal(from, m[1]!);
+      if (hop && !browserGraph.includes(hop)) browserGraph.push(hop);
+    }
+  }
 
-  for (const file of browserCheckedFiles) {
+  for (const file of browserGraph) {
     for (const m of codeMatches(file.content, STATIC_DYN_RE)) {
       const target = m[1]!;
       // *.server.ts is the first-class convention (AIO-55): the build marks
       // these dynamic imports external, so they never enter the browser bundle.
       if (isServerOnlyFile(target)) continue;
-      // Resolve target file
-      const dir = file.relative.replace(/[^/]+$/, "");
-      const resolved = ctx.sourceFiles.find((f) => {
-        const t = dir + target.replace("./", "");
-        return f.relative === t || f.relative === t + ".ts" ||
-          f.relative === t + ".tsx";
-      });
+      const resolved = resolveLocal(file, target);
       if (!resolved) continue;
 
-      // Check if target has server-only imports
+      // Is the target server-only on its face?
       const serverImports: string[] = [];
-      for (
-        const sm of codeMatches(
-          resolved.content,
-          /(?:import|export)\s+(?!type\s).*?\s+from\s+['"]((?:@std\/|node:)[^'"]+)['"]/g,
-        )
-      ) {
-        serverImports.push(sm[1]!);
+      for (const sm of codeMatches(resolved.content, SERVER_SPEC_RE)) {
+        serverImports.push((sm[1] ?? sm[2])!);
       }
       if (/\bDeno\.\w+/.test(codeText(resolved.content))) {
         serverImports.push("Deno.*");
@@ -1693,6 +1722,10 @@ export const checkUI: Checker = (ctx) => {
       if (serverImports.length === 0) continue; // target is browser-safe, no warning
 
       const lineIdx = file.content.slice(0, m.index).split("\n").length;
+      const renamed = resolved.relative.replace(/.*\//, "").replace(
+        /\.(tsx?)$/,
+        ".server.$1",
+      );
       report(
         "warn",
         "ui",
@@ -1702,11 +1735,10 @@ export const checkUI: Checker = (ctx) => {
         {
           file: file.relative,
           line: lineIdx,
-          fix: `Rename the target to *.server.ts (the build excludes it from ` +
-            `the browser bundle — see docs/build/imports.md), or use a ` +
-            `string variable: const _p = '${
-              target.replace(/\.ts$/, "")
-            }'; import(\`\${_p}.ts\`)`,
+          fix: `Rename it to ${renamed} and import that — only a ` +
+            `\`*.server.ts\` dynamic import is external to the browser ` +
+            `bundle; any other \`import()\` is followed and bundled ` +
+            `(docs/build/imports.md).`,
         },
       );
     }

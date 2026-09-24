@@ -40,8 +40,6 @@ export interface SsrRender {
   /** The values of the `<select>` elements open around the cursor, innermost
    *  last, so an `<option>` knows which select it is being compared against. */
   readonly selects: unknown[];
-  /** Set when the render finishes (normally or by throwing). */
-  ended: boolean;
   /** Set once a component of this render asked for anything in `<head>`. A
    *  render that asked for none can neither leak a head nor miss one, which
    *  is what keeps the refusal below off pages that do not use `useHead`. */
@@ -59,6 +57,15 @@ export interface SsrRender {
   aborted: boolean;
   /** The render epoch right after its own set-up (see `_ssrRenderSetUp`). */
   epoch: number;
+  /** Set at a top-level call whose async context set the route and was NOT
+   *  the last to set it (see {@linkcode _ssrRouteForeignNow}): the call site,
+   *  said at the render's first route READ. Null otherwise. */
+  routeForeign: Error | null;
+  /** The route writer current in the call's async context (see
+   *  {@linkcode RouteWriter}) — what a same-turn re-read is checked against. */
+  routeCtx: RouteWriter | undefined;
+  /** {@linkcode _ssrRouteWrites} at the call. */
+  routeSince: number;
 }
 
 /** The key the render travels under inside an SSR context scope. Not a context
@@ -117,12 +124,14 @@ export function _ssrRenderNew(kind: SsrRender["kind"]): SsrRender {
     kind,
     ids: 0,
     selects: [],
-    ended: false,
     hasHead: false,
     collected: false,
     superseded: false,
     aborted: false,
     epoch: 0,
+    routeForeign: null,
+    routeCtx: undefined,
+    routeSince: 0,
   };
 }
 
@@ -157,7 +166,6 @@ export function _ssrRenderStart(r: SsrRender): void {
  *  a time. Nothing here now depends on a render ever ending, so a render that
  *  never does costs exactly one object. */
 export function _ssrRenderFinish(r: SsrRender, returned = false): void {
-  r.ended = true;
   r.aborted = returned;
   const prev = _lastEnded;
   // The one case end order cannot separate: an earlier STREAM finished, its
@@ -196,6 +204,25 @@ export function _ssrRenderEnter(r: SsrRender | null): SsrRender | null {
   return prev;
 }
 
+// ── An explicit route (`renderToString(v, { route })`) ─────────────────
+// A render given its route never reads `routePath` / `routeSearch`: the route
+// travels in its scope under this key (so nested renders and later stream
+// pulls inherit it), and is exposed here for the synchronous span of each
+// read the render makes — so the router and the route signals' own getters
+// answer with it, and any computed over them is recomputed for it.
+
+/** One render's explicit route. */
+export interface SsrRoute {
+  readonly path: string;
+  readonly search: URLSearchParams;
+}
+
+/** The key an explicit route travels under inside an SSR scope. */
+export const SSR_ROUTE_KEY: unique symbol = Symbol("aio.ssrRoute.explicit");
+
+// The route in effect is the signals' READ SCOPE (state/signal.ts), entered
+// by `_ssrIn` in air/vdom-ssr.ts around every read a render makes.
+
 /** Name a render with the caller's key. */
 export function _ssrRenderBindKey(key: object, r: SsrRender): void {
   _byKey.set(key, r);
@@ -206,14 +233,162 @@ export function _ssrRenderForKey(key: object): SsrRender | null {
   return _byKey.get(key) ?? null;
 }
 
-/** Call sites already told their route changed after `renderToStream()`. */
-const _lateRouteSites = new Set<string>();
+// ── Route warnings: said with a count, never silent for good ─────────
+// Every route warning is keyed by kind + call site. Said the 1st, 2nd, 4th,
+// 8th … time a site is hit, each repeat carrying how often it happened and
+// how many went unsaid since the last line. "Once per call site per process"
+// made the 2nd..Nth mis-render of a busy handler silent forever; this stays
+// quiet under load (log2 lines) and still says it is happening.
 
-/** True the FIRST time only for this call site. */
-export function _ssrLateRouteSiteOnce(site: string): boolean {
-  if (_lateRouteSites.has(site)) return false;
-  _lateRouteSites.add(site);
-  return true;
+/** Per key: times hit, and the count at which it was last said. */
+const _routeSites = new Map<string, { n: number; said: number }>();
+
+/** Count one hit at `key`. The suffix to append when it is said now ("" for
+ *  the first), or null when this hit is only counted. */
+export function _ssrRouteSaidAt(key: string): string | null {
+  const e = _routeSites.get(key) ?? { n: 0, said: 0 };
+  _routeSites.set(key, e);
+  e.n++;
+  if ((e.n & (e.n - 1)) !== 0) return null; // not a power of two: count only
+  const unsaid = e.n - e.said - 1;
+  e.said = e.n;
+  return e.n === 1 ? "" : ` [${e.n} times at this call site; ${unsaid} more ` +
+    `since the last warning]`;
+}
+
+// ── Who set the route ─────────────────────────────────────────────────
+// `routePath` / `routeSearch` are one pair of signals for the whole process.
+// Every write stamps the writer's ASYNC CONTEXT with a fresh token (and
+// remembers it as the last writer); a top-level server render compares, at
+// its call, the token of its own context with the last writer's. Different
+// means the route this render reads may have been set outside its
+// synchronous step — by another request, or by this one before an await — and
+// is said at the render's first route READ (a page that never reads the route
+// is never told). Observe-only; dev and prod alike.
+//
+// What a token can and cannot tell (measured on Deno 2.9):
+//  • A context that never wrote the route may still CARRY a token: a write in
+//    a `Deno.serve` handler's synchronous prefix lands on the accept loop, and
+//    every request accepted after it starts with that token. So "no write, no
+//    check" does not hold; the READ gate is what keeps a page that does not
+//    use the route quiet.
+//  • A write inside another library's `AsyncLocalStorage.run()` (a tracer's
+//    active span) is dropped from the context when that `run()` returns, so
+//    the render after it sees the token from BEFORE the write. Such a write
+//    is excused when it was made in this tick (no microtask since) FROM this
+//    context's token — the render's own synchronous step. The same rule
+//    excuses a write by a context that inherited this one's token through
+//    the accept-loop leak above; that is the one shape of "another request"
+//    this cannot see.
+//
+// Server-only by construction: `node:async_hooks` is asked for at runtime
+// (`process.getBuiltinModule`), never imported, so no browser bundle carries
+// it; with no `process` (a browser) every function here is a no-op.
+
+/** One route write, as seen from the async context that made it. Holds no
+ *  other token — only ids — so nothing a write leaves behind keeps earlier
+ *  writes alive (a static-site loop of 100k `set` + render retains one).
+ *  `base` is the id the writer's context held before this tick's first write
+ *  in it — shared by every write of one synchronous run of writes, however
+ *  long. */
+export interface RouteWriter {
+  readonly id: number;
+  readonly tick: number;
+  readonly base: number;
+}
+interface RouteStore {
+  getStore(): RouteWriter | undefined;
+  enterWith(t: RouteWriter): void;
+}
+let _store: RouteStore | null | undefined;
+function _routeStore(): RouteStore | null {
+  if (_store !== undefined) return _store;
+  _store = null;
+  try {
+    const p = (globalThis as {
+      process?: { getBuiltinModule?: (id: string) => unknown };
+    }).process;
+    const m = p?.getBuiltinModule?.("node:async_hooks") as
+      | { AsyncLocalStorage?: new () => RouteStore }
+      | undefined;
+    if (typeof m?.AsyncLocalStorage === "function") {
+      _store = new m.AsyncLocalStorage();
+    }
+  } catch {
+    // aio-ok: no async context API (a browser, a sandbox) — the check is off
+  }
+  return _store;
+}
+let _lastWriter: RouteWriter | undefined;
+let _writerIds = 0;
+/** Bumped by a microtask after any write: "no microtask since the write" is
+ *  `writer.tick === _tick`. */
+let _tick = 0;
+let _tickArmed = false;
+function _tickNow(): number {
+  if (!_tickArmed) {
+    _tickArmed = true;
+    queueMicrotask(() => {
+      _tick++;
+      _tickArmed = false;
+    });
+  }
+  return _tick;
+}
+
+/** A route signal was written: stamp the writer's async context. */
+export function _ssrRouteWritten(): void {
+  const s = _routeStore();
+  if (s === null) return;
+  const tick = _tickNow();
+  const prev = s.getStore();
+  const same = prev !== undefined && prev.tick === tick;
+  const t: RouteWriter = {
+    id: ++_writerIds,
+    tick,
+    base: same ? prev.base : prev?.id ?? 0,
+  };
+  s.enterWith(t);
+  _lastWriter = t;
+}
+
+/** The route writer current in this async context (undefined: none). */
+export function _ssrRouteContext(): RouteWriter | undefined {
+  return _routeStore()?.getStore();
+}
+
+/** Was `t` written from `ctx`'s token — the first write after it in its
+ *  context this tick, or a later one of the same run (same tick, same base:
+ *  `ctx` and `t` both belong to that run of writes, whatever its length)? */
+function _writtenFrom(t: RouteWriter, ctx: RouteWriter): boolean {
+  return t.base === ctx.id || (ctx.tick === t.tick && ctx.base === t.base);
+}
+
+/** Did the route this call reads come from outside the call's context? Not
+ *  when the last write was made in this very tick from the call's own token
+ *  (a write inside another library's `run()` — see above). */
+export function _ssrRouteForeign(ctx: RouteWriter | undefined): boolean {
+  const last = _lastWriter;
+  if (ctx === undefined || last === undefined || ctx === last) return false;
+  return !(last.tick === _tick && _writtenFrom(last, ctx));
+}
+
+/** How many route writes so far — a render's call records it, so a later
+ *  check can ask about writes made AFTER the call only. */
+export function _ssrRouteWrites(): number {
+  return _writerIds;
+}
+
+/** Was the LAST route write made after write number `since`, from `ctx`'s
+ *  token, within the tick — the 1.0.9 create-then-set step
+ *  (`renderToStream(…); routePath.set(p)`)? */
+export function _ssrRouteWrittenSince(
+  ctx: RouteWriter | undefined,
+  since: number,
+): boolean {
+  const last = _lastWriter;
+  return ctx !== undefined && last !== undefined && last.id > since &&
+    _writtenFrom(last, ctx);
 }
 
 /** @internal Test seam — forget every server render.
@@ -225,7 +400,8 @@ export function _ssrLateRouteSiteOnce(site: string): boolean {
  */
 // aio-ok: a test-only seam; a live render never forgets itself
 export function _resetSsrRenders(): void {
-  _lateRouteSites.clear();
+  _routeSites.clear();
+  _lastWriter = undefined;
   _last = null;
   _lastEnded = null;
   _current = null;

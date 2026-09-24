@@ -14,6 +14,7 @@ import {
   writeAppMeta,
 } from "../src/server/app-dirs.ts";
 import { homedir } from "../src/server/paths.ts";
+import { permissiveUmask } from "./permissive-umask.ts";
 
 function withEnv(vars: Record<string, string | null>, fn: () => void): void {
   const prev = new Map<string, string | undefined>();
@@ -76,25 +77,26 @@ Deno.test("appDirs: everything critical is inside data/, nothing else is", () =>
   }
 });
 
-Deno.test("ensureAppDirs: data/ is 0700 — it holds auth.db and a TLS key", async () => {
-  const base = await Deno.makeTempDir({ prefix: "aio-dirs-" });
-  try {
-    const d = appDirs("wallet", join(base, ".wallet"));
-    ensureAppDirs(d);
-    assertEquals((await Deno.stat(d.data)).isDirectory, true);
-    assertEquals((await Deno.stat(d.logs)).isDirectory, true);
-    if (Deno.build.os !== "windows") {
-      const mode = (await Deno.stat(d.data)).mode! & 0o777;
-      assertEquals(
-        mode,
-        0o700,
-        `data/ must be owner-only, got ${mode.toString(8)}`,
-      );
+Deno.test("ensureAppDirs: data/ is 0700 — it holds auth.db and a TLS key", () =>
+  permissiveUmask(async () => {
+    const base = await Deno.makeTempDir({ prefix: "aio-dirs-" });
+    try {
+      const d = appDirs("wallet", join(base, ".wallet"));
+      ensureAppDirs(d);
+      assertEquals((await Deno.stat(d.data)).isDirectory, true);
+      assertEquals((await Deno.stat(d.logs)).isDirectory, true);
+      if (Deno.build.os !== "windows") {
+        const mode = (await Deno.stat(d.data)).mode! & 0o777;
+        assertEquals(
+          mode,
+          0o700,
+          `data/ must be owner-only, got ${mode.toString(8)}`,
+        );
+      }
+    } finally {
+      await Deno.remove(base, { recursive: true });
     }
-  } finally {
-    await Deno.remove(base, { recursive: true });
-  }
-});
+  }));
 
 Deno.test("writeAppMeta: self-describing archive, and createdAt survives rewrites", async () => {
   const base = await Deno.makeTempDir({ prefix: "aio-dirs-" });
@@ -161,24 +163,25 @@ Deno.test("resolveAppDirs: libraryMode never resolves into the home", () => {
 // is where its launcher points TMPDIR. `/tmp` was the wrong answer on four
 // measured counts (see AppDirs.app) — these pin the properties that replaced it.
 
-Deno.test("app/: private to its owner — $HOME is 0755, so 0700 is the fix", async () => {
-  const base = await Deno.makeTempDir({ prefix: "aio-dirs-" });
-  try {
-    const d = appDirs("wallet", join(base, ".wallet"));
-    assertEquals(d.app, join(base, ".wallet", "app"));
-    assertEquals(ensureAppPayloadDir(d), d.app);
-    if (Deno.build.os !== "windows") {
-      const mode = (await Deno.stat(d.app)).mode! & 0o777;
-      assertEquals(
-        mode,
-        0o700,
-        `app/ must be owner-only, got ${mode.toString(8)}`,
-      );
+Deno.test("app/: private to its owner — $HOME is 0755, so 0700 is the fix", () =>
+  permissiveUmask(async () => {
+    const base = await Deno.makeTempDir({ prefix: "aio-dirs-" });
+    try {
+      const d = appDirs("wallet", join(base, ".wallet"));
+      assertEquals(d.app, join(base, ".wallet", "app"));
+      assertEquals(ensureAppPayloadDir(d), d.app);
+      if (Deno.build.os !== "windows") {
+        const mode = (await Deno.stat(d.app)).mode! & 0o777;
+        assertEquals(
+          mode,
+          0o700,
+          `app/ must be owner-only, got ${mode.toString(8)}`,
+        );
+      }
+    } finally {
+      await Deno.remove(base, { recursive: true });
     }
-  } finally {
-    await Deno.remove(base, { recursive: true });
-  }
-});
+  }));
 
 Deno.test("app/: is NOT in the backup unit, and is NOT cache/", () => {
   const d = appDirs("wallet", "/tmp/x-wallet");

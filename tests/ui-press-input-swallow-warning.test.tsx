@@ -11,6 +11,8 @@
 // So the trigger says it, at the press, with the address that works. The half
 // that keeps the warning honest is the SILENT cases below: a warning that
 // fires on correct code is the same defect as one that never fires.
+//
+// aio-ok: press swallowed on purpose — this file pins the swallow warning itself
 import { assert, assertEquals, assertStringIncludes } from "@std/assert";
 import { onGlobalKey } from "../src/air/renderer-lifecycle.ts";
 import { testUI } from "../src/testing/ui-test.ts";

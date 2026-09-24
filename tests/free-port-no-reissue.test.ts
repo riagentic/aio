@@ -23,6 +23,20 @@ import { _resetPortSlice, freePort } from "../src/testing/server-test.ts";
 
 const SLICE = "AIO_TEST_PORT_SLICE";
 
+// The ports these cases pin must be ports NO other process can hold. Under the
+// shard runner every port in 20000–32767 belongs to some shard's slice, so a
+// fixed number here is another shard's port, and it failed exactly that way
+// (AddrInUse on 29181, a neighbour shard's server). The top of THIS process's
+// own slice is ours alone: files in a shard run one after another, and the
+// resource sanitizer closes every listener between tests. With no slice (one
+// `deno test` run) nothing else is allocating, and a fixed base is fine.
+const OWN = (() => {
+  const m = /^(\d+)-(\d+)$/.exec(Deno.env.get(SLICE) ?? "");
+  return m ? Number(m[2]) - 15 : 29150;
+})();
+/** `n` consecutive ports starting `at` places into this file's own block. */
+const range = (at: number, n: number) => `${OWN + at}-${OWN + at + n - 1}`;
+
 /** Run `fn` with the slice env set, restoring whatever was there. The suite
  *  itself runs WITH a slice (the shard runner sets one), so this cannot just
  *  delete it afterwards. */
@@ -50,13 +64,13 @@ Deno.test("freePort: a port already issued is not handed out again", () => {
   // wraps. Now there is a free UNISSUED port and a free ISSUED one (the file
   // that holds it stopped its server between tests). The old allocator took
   // the issued one.
-  withSlice("29180-29183", () => {
-    const busy = Deno.listen({ port: 29181, hostname: "127.0.0.1" });
+  withSlice(range(0, 4), () => {
+    const busy = Deno.listen({ port: OWN + 1, hostname: "127.0.0.1" });
     let issued: number[];
     try {
       issued = [freePort(), freePort(), freePort()];
     } finally {
-      busy.close(); // 29181 is now free, and was never issued
+      busy.close(); // OWN + 1 is now free, and was never issued
     }
     // The SET, not the sequence. Where the cursor starts is deliberately
     // pid-dependent (see `sliceStart`), so pinning the order here would pin
@@ -64,7 +78,7 @@ Deno.test("freePort: a port already issued is not handed out again", () => {
     // next, for a reason nobody could act on.
     assertEquals(
       [...issued].sort((a, b) => a - b),
-      [29180, 29182, 29183],
+      [OWN, OWN + 2, OWN + 3],
       "the cursor must hand out every free port and skip the busy one",
     );
     assertEquals(
@@ -73,11 +87,11 @@ Deno.test("freePort: a port already issued is not handed out again", () => {
       "the same port was handed out twice in one process",
     );
     // The cursor has wrapped. Two ports are free: one whose caller is between
-    // servers (already issued) and 29181, which nobody was ever given. Only
+    // servers (already issued) and OWN + 1, which nobody was ever given. Only
     // the second one is a correct answer.
     assertEquals(
       freePort(),
-      29181,
+      OWN + 1,
       "freePort re-issued a port it had already handed out: the caller that " +
         "holds it will fail to listen, and the failure names the PRODUCT",
     );
@@ -85,11 +99,11 @@ Deno.test("freePort: a port already issued is not handed out again", () => {
 });
 
 Deno.test("freePort: a port held OPEN is skipped, not handed out", () => {
-  withSlice("29150-29152", () => {
-    const held = Deno.listen({ port: 29150, hostname: "127.0.0.1" });
+  withSlice(range(4, 3), () => {
+    const held = Deno.listen({ port: OWN + 4, hostname: "127.0.0.1" });
     try {
       const a = freePort(), b = freePort();
-      assert(a !== 29150 && b !== 29150, "a port in use was handed out");
+      assert(a !== OWN + 4 && b !== OWN + 4, "a port in use was handed out");
       assert(a !== b);
     } finally {
       held.close();
@@ -101,7 +115,7 @@ Deno.test("freePort: an exhausted slice DEGRADES, it does not throw", () => {
   // The deliberate limit of the rule. A reused port is a rare flake; a suite
   // that cannot start a server at all is not, so once every port has been
   // issued the allocator goes back to "free right now" rather than failing.
-  withSlice("29160-29161", () => {
+  withSlice(range(7, 2), () => {
     const first = new Set([freePort(), freePort()]);
     assertEquals(first.size, 2, "both distinct while unissued ones remain");
     const third = freePort();
@@ -134,44 +148,62 @@ Deno.test("freePort: with no slice it still answers a real free port", () => {
 // happens, it is the arrangement. It surfaced as recipe 14 dying on
 // `port 24256 already in use` while recipe 15 held it.
 //
-// Two processes cannot be run from a unit test cheaply, so what is pinned is
-// the property that makes them differ: the first port depends on the pid.
+// What is pinned is the property that makes them differ: the first port
+// depends on the pid. Asked of REAL processes (the pid is the whole mechanism,
+// and this process only has one), on ports only this file uses, and made
+// DETERMINISTIC: the old version asked "not every child started at `first`",
+// which a start pinned to `first` passed whenever `first` happened to be busy
+// (the walker then moved every child to `first + 1` alike).
+//
+// Each child chooses its slice size AFTER it knows its pid — the largest of
+// 7…2 that does NOT divide it — so the pid-spread start is provably not
+// `first`, and the port it prints must be exactly `first + pid % n`. A start
+// that ignores the pid prints `first` and goes red, every run.
 Deno.test("two processes do not start walking the slice at the same port", async () => {
-  const slice = "31000-31799";
-  const first = 31000;
-  // Ask two REAL processes, because the pid is the whole mechanism and this
-  // process only has one.
+  const first = OWN + 9; // OWN + 9 … OWN + 15: seven ports, this file's own
   const ask = async () => {
     const r = await new Deno.Command(Deno.execPath(), {
       args: [
         "eval",
         "--no-lock",
+        `const n = [7, 6, 5, 4, 3, 2].find((k) => Deno.pid % k !== 0) ?? 7;` +
+        `Deno.env.set(${
+          JSON.stringify(SLICE)
+        }, \`${first}-\${${first} + n - 1}\`);` +
         `const { freePort } = await import("${
           new URL("../src/testing/server-test.ts", import.meta.url).href
         }");` +
-        `console.log(freePort());`,
+        `console.log(JSON.stringify({ pid: Deno.pid, n, port: freePort() }));`,
       ],
-      env: { ...Deno.env.toObject(), [SLICE]: slice, NO_COLOR: "1" },
+      env: { ...Deno.env.toObject(), NO_COLOR: "1" },
       stdout: "piped",
       stderr: "piped",
     }).output();
     const out = new TextDecoder().decode(r.stdout).trim();
     assert(r.success, `child failed: ${new TextDecoder().decode(r.stderr)}`);
-    const n = Number(out.split("\n").at(-1));
-    assert(Number.isInteger(n), `child printed no port: ${out}`);
-    return n;
+    return JSON.parse(out.split("\n").at(-1)!) as {
+      pid: number;
+      n: number;
+      port: number;
+    };
   };
-  const ports = await Promise.all([ask(), ask(), ask(), ask()]);
-  for (const p of ports) {
-    assert(p >= first && p <= 31799, `${p} is outside the slice`);
+  // One after another: two children bind-checking the same port at the same
+  // instant would push one of them on, and the exact-start assertion with it.
+  const kids = [];
+  for (let i = 0; i < 4; i++) kids.push(await ask());
+  assertEquals(kids.length, 4);
+  for (const k of kids) {
+    assertEquals(
+      k.port,
+      first + (k.pid % k.n),
+      `pid ${k.pid} on ${first}-${first + k.n - 1} must start at ` +
+        `first + pid % n — a start that ignores the pid walks every sibling ` +
+        `in lockstep, the arrangement that failed recipe 14`,
+    );
   }
-  // Not "all different" — two pids CAN be congruent modulo the slice size, and
-  // a test that demands otherwise would flake for a reason nobody could act
-  // on. What must not happen is every process starting at `first`, which is
-  // what made the collision certain rather than unlikely.
+  // Only a pid divisible by 420 (every size 7…2) can start at `first`.
   assert(
-    new Set(ports).size > 1 || ports[0] !== first,
-    `every process started at ${first} — siblings are walking in lockstep, ` +
-      `which is exactly the arrangement that failed recipe 14: ${ports}`,
+    kids.some((k) => k.port !== first),
+    `every process started at ${first}: ${JSON.stringify(kids)}`,
   );
 });

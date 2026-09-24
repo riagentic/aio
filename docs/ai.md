@@ -120,6 +120,11 @@ free number (`:78`…) rather than put your window on their screen. To look in
 from a shell, name the cookie:
 `DISPLAY=:77 XAUTHORITY=$XDG_RUNTIME_DIR/aio/xephyr-77.auth xdpyinfo`.
 
+The nested display has no GPU, so Chromium blocklists WebGL there and a WebGL or
+three.js view draws black. Render it in software:
+`AIO_ELECTRON_ARGS="--use-angle=swiftshader --enable-unsafe-swiftshader"` (both
+are on the allow-list — see docs/clients/electron.md).
+
 `testDisplayEnv()` (`src/testing/test-display.ts`) is how the tests do the same.
 A capture of what a launch _generated_ — the main script Electron was handed —
 is cheaper than a window: `ELECTRON_PATH=<a script that copies $1>` replaces the

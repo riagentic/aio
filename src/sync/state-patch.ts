@@ -87,6 +87,9 @@ function walk(
       const bv = b[k];
       if (absent(bv)) continue;
       const av = Object.hasOwn(a, k) ? a[k] : undefined;
+      // Identity BEFORE the path: an unchanged key costs one `===`, not a
+      // path array (the walk would return at once anyway — same output).
+      if (av === bv) continue;
       if (absent(av)) out.push({ p: [...path, k], v: bv });
       else walk(av, bv, [...path, k], out);
     }
@@ -101,7 +104,17 @@ function walk(
   if (Array.isArray(a) && Array.isArray(b)) {
     if (a.length !== b.length) out.push({ p: path, n: b.length });
     const shared = Math.min(a.length, b.length);
-    for (let i = 0; i < shared; i++) walk(a[i], b[i], [...path, i], out);
+    // Identity BEFORE the path. This runs per commit when the journal is on
+    // (aio.ts reaction deltas) and per server push: `[...path, i]` for every
+    // index made a one-row edit in a 131k-row array allocate 131k paths to
+    // find the one row that moved. An identical element (or a hole on both
+    // sides) is exactly what `walk` returns on at once, so skipping it here
+    // changes nothing but the cost — pinned against the old walker by
+    // tests/state-patch-diff-oracle.test.ts.
+    for (let i = 0; i < shared; i++) {
+      const x = a[i], y = b[i];
+      if (x !== y) walk(x, y, [...path, i], out);
+    }
     for (let i = a.length; i < b.length; i++) {
       out.push({ p: [...path, i], v: inArray(b[i]) });
     }
