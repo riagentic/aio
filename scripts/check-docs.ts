@@ -3,7 +3,7 @@
 // Usage: deno run --allow-read scripts/check-docs.ts [expected-version]
 // Skips changelog.md (historical) and upgrade.md (migration references)
 
-import { walk } from "https://deno.land/std@0.208.0/fs/walk.ts";
+import { walk } from "@std/fs/walk";
 
 const DOCS_DIR = new URL("../docs/", import.meta.url).pathname;
 // The PRERELEASE SUFFIX is part of the version, and leaving it out meant this

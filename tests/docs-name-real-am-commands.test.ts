@@ -8,7 +8,7 @@
 // spelling, exit 1 — src/state/removals.ts); the documented surface is the
 // help text; docs must spell what it spells.
 import { assert, assertEquals } from "@std/assert";
-import { walk } from "https://deno.land/std@0.208.0/fs/walk.ts";
+import { walk } from "@std/fs/walk";
 import { HELP_TEXT } from "../src/am/am-cmd-meta.ts";
 import { commandIssues, loadTaskNames } from "../scripts/check-docs.ts";
 

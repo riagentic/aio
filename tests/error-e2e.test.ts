@@ -2,7 +2,7 @@ import {
   assertEquals,
   assertExists,
   assertRejects,
-} from "https://deno.land/std@0.224.0/assert/mod.ts";
+} from "@std/assert";
 import { createDispatch } from "../src/state/dispatch.ts";
 import { createTT, markError, record } from "../src/diagnostics/time-travel.ts";
 import {

@@ -2,7 +2,7 @@ import {
   assertEquals,
   assertExists,
   assertRejects,
-} from "https://deno.land/std@0.224.0/assert/mod.ts";
+} from "@std/assert";
 import { createDispatch } from "../src/state/dispatch.ts";
 import type { AioError } from "../src/diagnostics/error.ts";
 

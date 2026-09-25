@@ -65,6 +65,7 @@
     "jsxImportSource": "aio"
   },
   "imports": {
+    "@std/fs": "jsr:@std/fs@1.0.24",
     "@std/testing": "jsr:@std/testing@1.0.17",
     "aio": "./mod.ts",
     "aio/air": "./src/air.ts",

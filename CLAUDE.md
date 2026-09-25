@@ -11,7 +11,7 @@ state, persistence (worker-thread SQLite, one `state.db`), CRDT sync, and the UI
 (AIR — a signals+JSX renderer; a page downloads 82 KB gz, renderer plus client
 runtime). One codebase builds to browser, Electron, Android, CLI, and service
 targets. Elm-like core: `(state, action) → { state, effects[] }`.
-v1.0.0-alpha60, ~4300 test blocks in `tests/`.
+v1.0.12-beta, ~10600 test blocks in `tests/`.
 
 An app is TWO files' worth of decisions: `cell({ state, methods })` and a
 component. Everything a finished app also needs — a stylesheet, an icon, a
