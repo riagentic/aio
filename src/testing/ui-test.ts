@@ -28,6 +28,7 @@ import {
   _callAcrossWorkerBoundary,
   _isolateWorkerCellsInProcess,
   _refuseUnsafeCells,
+  _shedLeakedScopes,
   type HarnessBootOptions,
 } from "./boot-refusals.ts";
 import { formatCellState } from "./test-format.ts";
@@ -988,6 +989,26 @@ function _enforceCellAccess(
   };
 }
 
+/** The `{ persist: true }` store key: one per PROCESS, so a persistence-flow
+ *  test sees continuity between its own mounts while the host's localStorage
+ *  (Deno's is on disk and outlives the run) can never hand it a previous
+ *  run's state. The entry is removed when the process unloads. */
+let _runKey: string | null = null;
+function _persistRunKey(): string {
+  if (_runKey) return _runKey;
+  const key = `testui:run:${crypto.randomUUID()}`;
+  _runKey = key;
+  globalThis.addEventListener?.("unload", () => {
+    try {
+      (globalThis as { localStorage?: Storage }).localStorage?.removeItem(key);
+    } catch {
+      // aio-ok: a read-only host store — the key is unique to this run, so a
+      // leftover entry can never be restored by another one.
+    }
+  });
+  return key;
+}
+
 export function testUI(
   App: TestableComponent,
   name: string,
@@ -1338,6 +1359,11 @@ async function _mountTestUI(
   name?: string,
   testFile?: string | null,
 ): Promise<TestUI> {
+  // Synchronous, before the first await: the CALLER's context — the wrapper's
+  // Deno.test body, or the handle form's own test — starts outside every
+  // boot. A reducer's first import() pinned a dead boot's fence as Deno's
+  // ambient context, and the next test's first call was refused.
+  _shedLeakedScopes();
   // A throw anywhere in setup must leave the process exactly as it found it —
   // see PartialMount.
   const partial: PartialMount = { owned: [], restore: [], window: null };
@@ -1767,7 +1793,14 @@ async function _buildTestUI(
       // Hermetic by default: no cross-test state leaks through the (shared)
       // localStorage persist key. Opt in via { persist: true }.
       persist: opts.persist ?? false,
-      persistKey: `testui:${crypto.randomUUID().slice(0, 8)}`,
+      // `{ persist: true }` keeps ONE key per process — continuity across
+      // this run's mounts, never a previous run's entry in Deno's on-disk
+      // localStorage (see _persistRunKey).
+      // Under the harness-only symbol: the runtime ignores an app's
+      // `persistKey` (a server option) by design.
+      [standalone._HARNESS_PERSIST_KEY]: opts.persist
+        ? _persistRunKey()
+        : `testui:${crypto.randomUUID().slice(0, 8)}`,
       cellDefaults: opts.cellDefaults,
       localFirst: opts.localFirst,
       // The app's budgets — the effect budget AND the per-method call
@@ -1776,17 +1809,61 @@ async function _buildTestUI(
       // never to the runtime.)
       perfBudget: opts.perfBudget,
     }) as unknown as { getState: () => Record<string, unknown> };
+    // Undoable from HERE: everything after the boot can throw (a refused
+    // seed, the gates below), and a boot left live dispatched a later test's
+    // plain `cell.method()` into this dead mount's store. It used to be armed
+    // only at the end of this block, after the seed.
+    const bootedHere = standaloneApp;
+    partial.reset = () => {
+      standalone._resetState();
+      // Retired, as `dispose()` retires it: from here its dispatch refuses.
+      standalone._retire(bootedHere);
+      _resetAioRuntime();
+    };
     // Seed BEFORE the first render, so the component's very first pass already
     // sees the fixture (a seed applied after mount would test the re-render path
     // instead of the initial one, which is rarely what a test means).
-    if (opts.seed) standalone._seedState(opts.seed);
-    seedState = standalone._seedState;
+    // Every seeded KEY should be one the cell has — the rule `t.init(seed)`
+    // enforces. A typo (`gpuCount` for `gpus`) lands as a stray key the
+    // component never reads: a fixture that looks pinned and pins nothing.
+    // WARNED, not refused: 1.0.11 accepted any key (and silently dropped an
+    // undeclared one), and the surface is frozen — so the mount still runs,
+    // and the no-op is said out loud with the fix. Unknown CELL names
+    // are refused by `_seedState` itself (they were in 1.0.11 too).
+    const app = standaloneApp;
+    const checkedSeed = (p: Record<string, Record<string, unknown>>): void => {
+      const now = app.getState();
+      for (const [cellName, slice] of Object.entries(p)) {
+        const known = now[cellName];
+        if (!known || typeof known !== "object" || !slice) continue;
+        const bad = Object.keys(slice).filter((k) => !(k in known));
+        if (bad.length > 0) {
+          console.warn(
+            `[aio] seed: cell "${cellName}" has no ${
+              bad.map((k) => `"${k}"`).join(", ")
+            } — its state is { ${Object.keys(known).join(", ")} }. A seed ` +
+              `that lands nowhere looks like a fixture and pins nothing — ` +
+              `the component never sees it.\n` +
+              `  a typo: seed the declared key instead.\n` +
+              `  an OPTIONAL key (\`{} as { ${bad[0]}?: … }\`) counts only ` +
+              `once declared: declare \`${bad[0]}: undefined\` in \`state:\``,
+          );
+        }
+      }
+      standalone._seedState(p);
+    };
+    if (opts.seed) checkedSeed(opts.seed);
+    seedState = checkedSeed;
     // Dispose does a state-only reset (keeps the registry so re-mounts boot),
     // then retires this boot: the cells are module singletons, so a call an
     // `onInit` started and nobody awaited would otherwise commit into the NEXT
     // test's mount (feedback cc §2) — the same fence `bootCells` closes.
     const booted = standaloneApp;
     resetRuntime = () => {
+      // `_resetState()` CANCELS the debounced save (right for a hermetic
+      // mount); a persistence-flow test keeps its last change, so the next
+      // `{ persist: true }` mount restores what this one ended with.
+      if (opts.persist) standalone._flushPendingPersist();
       standalone._resetState();
       standalone._retire(booted);
     };
@@ -1818,7 +1895,7 @@ async function _buildTestUI(
     // push order), so each identity-checked undo finds its own wrapper.
     const unisolate = _isolateWorkerCellsInProcess(cells);
     ledger = _watchUnobservedCalls(cells, _callAcrossWorkerBoundary);
-    ledger.adopt(inits.take());
+    inits.pipe(ledger);
     partial.restore.push(() => ledger?.restore());
     partial.restore.push(unisolate);
     // The call ring a failure trace reads. Installed beside the ledger and
@@ -1847,12 +1924,6 @@ async function _buildTestUI(
         )
       ),
     });
-    // A throw AFTER the cells booted (the seed, the first render) must not
-    // leave them booted for the next test either.
-    partial.reset = () => {
-      standalone._resetState();
-      _resetAioRuntime();
-    };
   } else if (!opts.persist) {
     // A signals-only UI boots no cells, but the process-global runtime residue
     // is the SAME process — a `_pending` entry left by an earlier test makes
@@ -2269,13 +2340,30 @@ async function _buildTestUI(
       hover(mods?: KeyModifiers) {
         return act(
           null,
-          (e) => triggerAction(e, "hover", undefined, mods),
+          (e) => {
+            // A pointer cannot rest on what is not rendered: a browser fires
+            // no mouseenter on a `display:none` element, and the harness ran
+            // its onMouseEnter. Visibility only — a DISABLED control still
+            // takes hover in a browser (its tooltip is the point).
+            const invisible = _hiddenReason(e);
+            if (invisible) {
+              throw new Error(
+                `testUI: cannot hover "${resolveInfo().name}" — it is not ` +
+                  `visible: ${invisible}\n  a browser delivers no event to ` +
+                  `it; show it first, or assert on the state that hides it`,
+              );
+            }
+            triggerAction(e, "hover", undefined, mods);
+          },
           false,
           `${modsLabel(mods)}hover`,
         );
       },
       focus() {
-        return act(null, (e) => triggerAction(e, "focus"), false, "focus");
+        // Guarded like every gesture: a browser focuses neither a disabled
+        // control nor an invisible one, and the harness fired onFocus on a
+        // `display:none` element.
+        return act("focus", (e) => triggerAction(e, "focus"), false, "focus");
       },
       blur() {
         return act(null, (e) => triggerAction(e, "blur"), false, "blur");
@@ -2878,24 +2966,38 @@ async function _buildTestUI(
     );
   };
 
-  /** The state `expectCell`'s predicate just read — the booted slice from the
-   *  standalone store, falling back to the cell def's own view for a client
-   *  cell (whose state lives in the page runtime, not the server store). */
+  /** The state `expectCell`'s predicate just read — off the reactive def, the
+   *  same door the predicate reads through. NOT the standalone store's slice:
+   *  that is the SERVER's view, and under `{ user }` the def answers with the
+   *  client's `visible.forUser` view — so a failure printed rows the predicate
+   *  never saw (`items.length === 2` false, dump showing two items). A key
+   *  hidden from the client (its read throws) is left out, as the client
+   *  holds no such key. The store slice is only the fallback for a cell with
+   *  no declared keys. */
   const cellStateFor = (cell: AnyDoc): unknown => {
     const id = cell?.__aio?.id as string | undefined;
+    const keys = Object.keys((cell?.__aio?.state ?? {}) as object);
+    if (keys.length === 0) {
+      return id === undefined ? undefined : standaloneApp?.getState()?.[id];
+    }
+    const out: Record<string, unknown> = {};
+    for (const k of keys) {
+      try {
+        out[k] = (cell as Record<string, unknown>)[k];
+      } catch {
+        // aio-ok: a `visible:`-hidden key — the client holds no such field,
+        // so the dump of what the predicate saw has none either.
+      }
+    }
+    // A machine cell's status is not a declared key, and still what a status
+    // assertion is about.
     const slice = id === undefined
       ? undefined
       : standaloneApp?.getState()?.[id];
-    if (slice !== undefined) return slice;
-    try {
-      // A client cell: read its declared keys off the reactive def.
-      const keys = Object.keys((cell?.__aio?.state ?? {}) as object);
-      const out: Record<string, unknown> = {};
-      for (const k of keys) out[k] = (cell as Record<string, unknown>)[k];
-      return out;
-    } catch {
-      return undefined;
-    }
+    const status = (slice as { __aio_status?: unknown } | undefined)
+      ?.__aio_status;
+    if (status !== undefined) out.__aio_status = status;
+    return out;
   };
 
   // The mount's own window, with a NAME for the key that belongs to no

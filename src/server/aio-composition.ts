@@ -5,6 +5,7 @@ import {
   composeCells,
   type ComposedCells,
 } from "../state/cell.ts";
+import { filterValueProblem } from "../state/cell-helpers.ts";
 import { isRefusableCredential, looksSecret } from "../state/secret-names.ts";
 import {
   buildDBStateGetter,
@@ -135,6 +136,15 @@ function warnFieldFilters(composed: ComposedCells): void {
       ] as const
     ) {
       if (!filter || filter === "all" || filter === "none") continue;
+      // Not a filter at all (`persist: true` — the aio.run() option's
+      // spelling): `"include" in true` died here as a bare TypeError naming
+      // neither the cell nor the fix. cell() warned; the refusal stays.
+      const bad = filterValueProblem(
+        f.__aio.id,
+        kind === "ui" ? "visible" : kind,
+        filter,
+      );
+      if (bad?.refused) throw new Error(bad.msg);
       const isInclude = "include" in filter;
       const keys = isInclude
         ? filter.include

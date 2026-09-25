@@ -101,9 +101,11 @@ export function createTransportProbeClient(config: TransportProbeClientConfig) {
 
   function setStatus(next: VitalStatus) {
     if (next !== status) {
-      if (next !== "healthy" && firstDegradedAt === null) {
-        firstDegradedAt = Date.now();
-      }
+      // The start of the CURRENT degraded stretch, cleared when it ends — the
+      // loop probe's rule. Set-only, one slow round trip at boot stayed "when
+      // the transport first degraded" for the life of the page.
+      if (next === "healthy") firstDegradedAt = null;
+      else if (firstDegradedAt === null) firstDegradedAt = Date.now();
       status = next;
       onStatusChange?.(next);
     }

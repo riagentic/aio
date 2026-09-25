@@ -145,9 +145,18 @@ dist/
 - **`entry`** — the module this target compiles. Everything derived from the
   entry follows it, including the app dir (`dirname(entry)`) that the bundler
   reads `App.tsx`, `style.css` and `icon.png` from.
-- **`name`** — this target's binary/APK name, overriding `title`. Two different
-  apps must not share one name; without it they collide and the second is
-  suffixed as if it were another build of the first.
+- **`name`** — this target's binary/APK name (the file names, `notes-pro-…`, the
+  macOS bundle id `app.aio.<slug>`, the systemd `Description=`), overriding
+  `title`. Two different apps must not share one name; without it they collide
+  and the second is suffixed as if it were another build of the first.
+- **`title`** — this target's display name: what a person sees — the macOS
+  `.app` and DMG volume, the Linux `.desktop` `Name=`, the Windows README, the
+  generated icon monogram, the Android label — overriding deno.json `title`.
+  `name` does not change it, so a `"name": "Notes PRO"` edition still shows as
+  "Notes" and its `Notes.app` replaces the free edition in /Applications. Add
+  `"title": "Notes PRO"` and it installs beside it as `Notes PRO.app`. The build
+  warns when two desktop targets are different apps that show one name. The
+  running app's window title still comes from `aio.run({ ui: { title } })`.
 - **`platforms`** — an OS/arch list for this target alone, overriding
   `build.platforms`.
 - **`kind`** — what kind of target this is, when the key is a LABEL rather than
@@ -175,14 +184,19 @@ target freely and name its `kind`:
 }
 ```
 
-`name` renames the **binary**, not the app. A compiled binary takes its identity
-(its lock, its data directory) from the project's deno.json, which every target
+`name` renames the **artifact** (files, display name, macOS bundle id), not the
+running app. A compiled binary takes its RUNTIME identity (its lock, its data
+directory) and its window title from the project's deno.json, which every target
 embeds — so give each entry its own:
 
 ```ts
 // src/agent/app.ts
-await aio.run({ appId: "remote-agent" /* … */ });
+await aio.run({ appId: "remote-agent", ui: { title: "Remote Agent" } /* … */ });
 ```
+
+A declared `build.macos.bundleId` is one id for every target — leave it unset
+(or build the editions from separate deno.json files) when two desktop targets
+must install side by side on macOS.
 
 Without it all three run as the project's app: the second one started on a
 machine refuses with "Already running", and apps that never meet share one data
@@ -279,7 +293,9 @@ It never quietly means "some": a pair this host cannot produce is printed as
 The host's artifact keeps its plain name (`myapp`); every other platform is
 labelled (`myapp-windows.exe`, `myapp-macos-arm64`), so one `dist/` can hold
 them all. `manifest.json` records `builtOn`, the `platforms` list, and per
-artifact its `platform`, `triple`, and whether it is the `host` one.
+artifact its `platform`, `triple`, and whether it is the `host` one. A server
+target's systemd unit is written for Linux platforms only, named like its binary
+(`myapp.service`, `myapp-linux-arm64.service`).
 
 **What cross-compiles**
 
@@ -492,6 +508,7 @@ scaffolding (the AppImage `AppDir`, the generated Gradle project) lives in
 | `--force`                                 | Skip bundle cache — always rebuild `dist/app.js`                                                                                                     |
 | `--analyze`                               | Print where the bundle's bytes went (per dependency, per framework area) — same artifact, one extra report                                           |
 | `--release`                               | Android release build (default: debug) — emits `myapp-unsigned.apk`; sign it yourself                                                                |
+| `--display-name=X`                        | Display name for this build (a target's `"title"`; default: deno.json `"title"`)                                                                     |
 | `--entry=PATH`                            | Entry point for this build (default: `deno.json` `entry` › `src/app.ts`)                                                                             |
 | `--ui=PATH`                               | UI component this build bundles, overriding the `App.tsx` convention (recorded in the bundle; dev==prod checked)                                     |
 | `--platform=X`                            | Which OS/arch this binary is FOR (default: the host) — see `--platforms` below                                                                       |
@@ -528,12 +545,13 @@ scaffolding (the AppImage `AppDir`, the generated Gradle project) lives in
 Both exist, both matter, and `deno.json`'s does double duty — which is why it
 reads ambiguously:
 
-| Setting                      | Names                                                                              |
-| ---------------------------- | ---------------------------------------------------------------------------------- |
-| `deno.json` `"title"`        | the **binary/APK name** (slugified), and the window title if nothing else sets one |
-| `aio.run({ ui: { title } })` | the **window / browser tab title** only — never the binary                         |
-| `--name=X` (build)           | the binary name for this build, overriding `deno.json` `"title"`                   |
-| `--title=X` (runtime)        | the window title for this run, overriding `ui.title`                               |
+| Setting                      | Names                                                                                  |
+| ---------------------------- | -------------------------------------------------------------------------------------- |
+| `deno.json` `"title"`        | the **binary/APK name** (slugified), and the window title if nothing else sets one     |
+| `aio.run({ ui: { title } })` | the **window / browser tab title** only — never the binary                             |
+| `--name=X` (build)           | the binary/APK name for this build (a target's `name`), over `"title"`                 |
+| `--display-name=X` (build)   | the name people see (`.app`, DMG, `.desktop`, icon, Android label): a target's `title` |
+| `--title=X` (runtime)        | the window title for this run, overriding `ui.title`                                   |
 
 Window-title resolution is `--title` › `ui.title` › `deno.json "title"` ›
 `"AIO App"`. So setting only `deno.json "title"` gives you a matching binary
@@ -726,6 +744,36 @@ deno compile -A --node-modules-dir=none --exclude-unused-npm \
 `deno task build` already excludes the dev-only packages (electron, esbuild) for
 every target, which is why its binaries are small without either flag.
 
+### Hide the server source: `build.minify`
+
+`deno compile` puts every server module into the binary as readable source —
+comments and all. `strings myapp` prints your design notes back. The browser
+bundle is already minified; turn the server side on too:
+
+```jsonc
+// deno.json
+"build": { "minify": true }
+```
+
+Every compiled target (app, `server`, Electron, the Windows exe, `cli`) then
+ships each server module minified: no comments, short local names. The build
+says `build.minify: N server modules minified`. The Android APK has no server
+binary: it ships only the client bundle, which is always minified, and never its
+map.
+
+- **Type check first.** Your ORIGINAL code is type-checked, then the minified
+  copy is compiled with `--no-check`. A type error still fails the build.
+- **Per file, not one bundle.** Each module is minified in place, so workers
+  found by `new URL(…, import.meta.url)` (the SQLite worker) still load.
+- **Names of functions and classes are kept**, so code reading `fn.name` or
+  `constructor.name` works the same as unminified.
+- **The client source map is left out** (`dist/.app.js.map` — it holds every UI
+  name and path).
+- **Stack traces** from the server point into the minified code.
+- **Not a lock.** Minified JS is still readable by someone who tries hard. It
+  removes the free gift: the comments and names that explain the design.
+- `true` or `false` only — `"true"` (a string) fails the build.
+
 ## electron (desktop app)
 
 ```sh
@@ -749,6 +797,18 @@ On Linux and Windows the launcher sets `$ELECTRON_PATH` before starting the Deno
 binary; on macOS the `.app` bundles the runtime where the binary looks for it
 directly, so there is no launcher to run by hand. State is persisted to the OS
 user data directory.
+
+**Fuses.** The Electron inside every desktop package (and the one a
+self-contained Windows exe unpacks) has three of Electron's fuses turned off, so
+it cannot be started around your app:
+
+- as plain Node (`ELECTRON_RUN_AS_NODE`),
+- with code injected through `NODE_OPTIONS`,
+- with a debugger on the main process (`--inspect`).
+
+The build says `Electron fuses off: …`, and fails if the runtime has no fuse
+wire, so a package never ships without them. Dev (`node_modules/electron`) is
+not changed; aio already refuses those three when it starts Electron itself.
 
 **Cross-platform builds via CI:**
 

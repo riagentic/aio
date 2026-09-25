@@ -120,3 +120,105 @@ Deno.test({
     );
   },
 });
+
+// The server ENTRY (the file that calls `aio.run()`) holds the routes,
+// schedules and auth config and runs in THIS process — it cannot hot-reload
+// any more than a cell can. It declares no `cell(`, so the watcher used to
+// send a browser reload and print "reloaded src/app.ts" while the server kept
+// the old config: a route added in dev answered with the SPA shell.
+Deno.test({
+  name:
+    "an edited server entry restarts the app like a cell file, even mid-edit; a plain module does not",
+  sanitizeOps: false, // aio-ok: esbuild's service child — exit not awaitable
+  sanitizeResources: false, // aio-ok: same esbuild child
+  fn: async () => {
+    const tmp = await tempDir("aio-watch-entry-");
+    try {
+      const entry = join(tmp, "app.ts");
+      const helper = join(tmp, "helpers.ts");
+      // Mid-edit: the save that matters most does not even parse yet, so no
+      // import graph can be walked from it — the entry is known by NAME.
+      await Deno.writeTextFile(
+        entry,
+        'import { aio } from "aio";\nawait aio.run({ routes: { "/x": ( });\n',
+      );
+      await Deno.writeTextFile(helper, "export const x = 1;\n");
+      const restarted: string[] = [];
+      let watcher: ReturnType<typeof createFileWatcher> | undefined;
+      await captured(async () => {
+        watcher = createFileWatcher({
+          absBaseDir: tmp,
+          importMapObj: {},
+          debug: () => {},
+          broadcastWs: () => {},
+          graphTimeoutMs: 0,
+          serverEntry: entry,
+          onCellChange: (p: string) => restarted.push(p),
+          // deno-lint-ignore no-explicit-any
+        } as any);
+        watcher!.scheduleReload(helper);
+        watcher!.scheduleReload(entry);
+        await new Promise((r) => setTimeout(r, DEBOUNCE_MS + 300));
+      });
+      watcher?.shutdown();
+      assertEquals(restarted, [entry]);
+    } finally {
+      await dropTempDir(tmp);
+    }
+  },
+});
+
+// …and so is a plain module the SERVER imports. `cell.ts` importing a
+// `pricing.ts` helper that a method calls: editing the helper printed
+// "reloaded src/pricing.ts" while every server call kept the old function (a
+// live app charged the old fee after the save). A module only the UI reaches
+// still hot-reloads without a restart.
+Deno.test({
+  name:
+    "an edited module in the server entry's import graph restarts; a UI-only module does not",
+  sanitizeOps: false, // aio-ok: esbuild's service child — exit not awaitable
+  sanitizeResources: false, // aio-ok: same esbuild child
+  fn: async () => {
+    const tmp = await tempDir("aio-watch-graph-");
+    try {
+      const entry = join(tmp, "app.ts");
+      const cellFile = join(tmp, "cell.ts");
+      const pricing = join(tmp, "pricing.ts");
+      const widget = join(tmp, "widget.ts");
+      await Deno.writeTextFile(
+        entry,
+        'import "./cell.ts";\nimport { aio } from "aio";\nawait aio.run();\n',
+      );
+      await Deno.writeTextFile(
+        cellFile,
+        'import { fee } from "./pricing.ts";\nexport const f = fee;\n',
+      );
+      await Deno.writeTextFile(
+        pricing,
+        "export const fee = (n: number) => n + 1;\n",
+      );
+      await Deno.writeTextFile(widget, "export const w = 1;\n");
+      const restarted: string[] = [];
+      let watcher: ReturnType<typeof createFileWatcher> | undefined;
+      await captured(async () => {
+        watcher = createFileWatcher({
+          absBaseDir: tmp,
+          importMapObj: { aio: "/__aio/ui.js" },
+          debug: () => {},
+          broadcastWs: () => {},
+          graphTimeoutMs: 0,
+          serverEntry: entry,
+          onCellChange: (p: string) => restarted.push(p),
+          // deno-lint-ignore no-explicit-any
+        } as any);
+        watcher!.scheduleReload(widget);
+        watcher!.scheduleReload(pricing);
+        await new Promise((r) => setTimeout(r, DEBOUNCE_MS + 500));
+      });
+      watcher?.shutdown();
+      assertEquals(restarted.map((p) => p.split("/").pop()), ["pricing.ts"]);
+    } finally {
+      await dropTempDir(tmp);
+    }
+  },
+});

@@ -12,6 +12,7 @@ import {
   _classProp,
   _clearDomProp,
   _controlDrifted,
+  _defaultSelected,
   _RESERVED_PROPS,
   _selectValues,
   _writeProp,
@@ -64,8 +65,7 @@ export function applyChildDependentProps(
 ): void {
   if (el.tagName !== "SELECT") return;
   if (!("value" in next)) {
-    // deno-lint-ignore no-explicit-any
-    if ("value" in prev) (el as any).value = "";
+    if ("value" in prev) _resetSelect(el as HTMLSelectElement);
     return;
   }
   // A SIGNAL value is read here too, untracked. It used to return early
@@ -84,6 +84,28 @@ export function applyChildDependentProps(
   }
   // deno-lint-ignore no-explicit-any
   (el as any).value = rv ?? "";
+}
+
+/** A `<select>` whose `value` prop LEFT goes back to what a fresh mount of the
+ *  same props shows: its `selected` options (attribute or prop), else (single-select) the first
+ *  enabled one. It used to assign `value = ""`, which matches no option and
+ *  leaves a single-select BLANK — a state no fresh render of the new props
+ *  produces, so the incremental page and a reload disagreed about the choice. */
+function _resetSelect(el: HTMLSelectElement): void {
+  let any = false;
+  for (let i = 0; i < el.options.length; i++) {
+    const o = el.options[i]!;
+    const on = _defaultSelected(o);
+    o.selected = on;
+    any ||= on;
+  }
+  if (any || el.multiple) return;
+  for (let i = 0; i < el.options.length; i++) {
+    if (!el.options[i]!.disabled) {
+      el.options[i]!.selected = true;
+      return;
+    }
+  }
 }
 
 // `_isControlled`/`_controlDrifted` live in prop-write.ts — the leaf both prop
@@ -183,6 +205,16 @@ export function applyProps(
   // With `onChange` last it can see the slot `onInput` just took and not
   // delete it while moving itself out of the way.
   const entries = Object.entries(next);
+  // An <input>'s `value` goes after `min`/`max`/`step`, too: the browser
+  // SANITIZES a range input's value against the bounds it has at assignment
+  // and never re-reads what it clamped away. `<input type="range" value={150}
+  // max={200}>` mounted at 100 (measured in Chromium; `step={0.5}` turned 2.5
+  // into 3), while SSR — where the parser sees every attribute first — showed
+  // 150. JSX order is the author's, not a contract they should have to know.
+  if (el.tagName === "INPUT") {
+    const vi = entries.findIndex(([k]) => k === "value");
+    if (vi >= 0) entries.push(entries.splice(vi, 1)[0]!);
+  }
   const ci = entries.findIndex(([k]) => k === "onChange");
   if (ci >= 0 && ci < entries.length - 1) {
     entries.push(entries.splice(ci, 1)[0]!);
@@ -249,6 +281,23 @@ export function applyProps(
         _setWrapped(el, evt, wrapped);
       }
     } else if (!_isChildDependent(el, k)) {
+      // A SIGNAL-bound min/max/step was skipped above: its binding effect
+      // writes it after this pass, too late for the plain `value` written
+      // here, which the browser has already clamped (`max={sig} value={150}`
+      // mounted at 100). Its current value goes in first; the binding then
+      // rewrites the same value.
+      if (k === "value" && el.tagName === "INPUT") {
+        for (const b of _INPUT_BOUNDS) {
+          if (isSignal(next[b])) {
+            _writeProp(
+              el,
+              b,
+              resolveSignalProp(next[b]),
+              resolveSignalProp(prev[b]),
+            );
+          }
+        }
+      }
       // A style OBJECT may itself hold per-property signals; those are driven
       // by their own effects (bindSignalProps) and must not be written here.
       const value = (k === "style" && rv && typeof rv === "object")
@@ -268,6 +317,9 @@ export function applyProps(
   // the re-assert happens here — the decider is shared, not copied.
   reassertControlledSignalProps(el, next);
 }
+
+/** The props a range/number input sanitizes its `value` against. */
+const _INPUT_BOUNDS = ["min", "max", "step"] as const;
 
 /** Retire the listener registered under `evt` — delegated (map entry, plus
  *  the per-element fallback AIO-154 may have added) or per-element. */

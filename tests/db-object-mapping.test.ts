@@ -84,9 +84,10 @@ Deno.test("object mapping: a map binding diffs by pk and refuses a key that disa
     d.m["3"] = { id: 3, name: "c", qty: 0 };
   });
   const plan = planTablesIncremental(schema, next, base, index);
+  // UPDATEs before INSERTs (tests/db-unique-rename-reuse.test.ts).
   assertEquals(plan.stmts.map((s) => s.sql.split(" ")[0]), [
-    "INSERT",
     "UPDATE",
+    "INSERT",
   ]);
   plan.commit();
   const gone = produce(next, (d) => {

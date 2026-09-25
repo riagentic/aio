@@ -57,13 +57,18 @@ root with it.**
 // deno.json
 "entry": "src/app.ts"          // app root = src/     ← the scaffold's layout
 "entry": "app.ts"              // app root = the project root (flat app)
-"entry": "src/client/app.ts"   // app root = src/client/  ← ../core/* will 404
+"entry": "src/client/app.ts"   // app root = src/client/  (App.tsx, style.css, icon.png)
 ```
 
-Two independent field reports hit the third line: with the entry at
-`src/client/app.ts`, every `../core/…` import 404'd and the window came up
-blank, because those files sit outside the app root. Either keep the entry at
-the top of the tree it needs to serve, or move the shared code under it.
+A module the UI IMPORTS from outside the app root still loads, in dev as in the
+bundle: `src/client/App.tsx` importing `../core/format.ts` is rewritten by the
+dev server to `/__aio-src/src/core/format.ts` and served from the project root
+(the directory of your deno.json) — only the files your served modules import,
+with every guard the app root has (no dotfiles, no `*.server.*`, no symlink
+out), never in production (the bundle already followed the import). Each file
+has ONE url, so a module imported from both sides is one instance. An import
+that leaves the PROJECT is said out loud at the dev server — declare its
+directory in `share` (below).
 
 A build refuses loudly rather than shipping the wrong thing: a missing `App.tsx`
 next to the entry, or a stray `src/style.css` in an app whose root is elsewhere,

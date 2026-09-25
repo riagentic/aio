@@ -69,8 +69,23 @@ export function topLevelKeyOffsets(
     // A key is preceded (past whitespace) by the opening `{` or a comma —
     // never by anything else. Without that, `{ ms: cond ? timeout : 0 }` reads
     // its ternary's `:` as a key's colon.
+    //
+    // Comments between are skipped too: `{\n  // why\n  timeout: 5 }` is the
+    // same key, and walking back over whitespace alone stopped on the comment's
+    // last character — so a commented option was invisible to the rule (a
+    // REMOVED option that throws at runtime, reported clean) and to the fix.
+    // Comment bodies are mask 0; their `//` `/*` `*/` delimiters are code.
     let b = i - 1;
-    while (b > open && /\s/.test(src[b]!)) b--;
+    for (;;) {
+      while (b > open && (/\s/.test(src[b]!) || mask[b] !== 1)) b--;
+      if (b > open + 1 && src[b] === "/" && src[b - 1] === "/") {
+        b -= 2; // a line comment's opener
+      } else if (b > open + 1 && src[b] === "/" && src[b - 1] === "*") {
+        b -= 2; // a block comment's closer — walk to its opener
+        while (b > open + 1 && !(src[b] === "*" && src[b - 1] === "/")) b--;
+        b -= 2;
+      } else break;
+    }
     if (src[b] !== "{" && src[b] !== ",") continue;
     let a = i + key.length;
     while (a < src.length && /\s/.test(src[a]!)) a++;

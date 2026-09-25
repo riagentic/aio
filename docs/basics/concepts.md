@@ -228,9 +228,9 @@ Mandatory rules for correct AIO framework usage.
 no loose state, no ad-hoc logic outside cells.
 
 **AIO2** State MUST only be mutated inside methods (sync/async) — never directly
-from outside. In dev, cell signal values are deep-frozen so a stray `cell.x = …`
-from a component throws `TypeError: Cannot assign to read only property` and a
-dev hint explains the rule.
+from outside. Committed state is frozen in every mode, so a stray `cell.x = …`
+(or `cell.x.y = …`) from a component throws a `TypeError`, and in dev a one-time
+hint names the rule and the fix: call a cell method.
 
 **AIO3** Single entry point: `aio.run({ appId, cells: [...] })` -- no manual
 store creation, no manual server setup.
@@ -248,7 +248,8 @@ are fire-and-forget.
 
 **AIO7** Sync methods (reducers) MUST NOT contain side effects -- only state
 mutations and fire-and-forget dispatches. No fetch, file I/O, or timers in sync
-methods -- use async methods (or returned schedule/own effects) for those.
+methods -- use async methods (or schedule/own effects handed to `s.$do(…)`) for
+those.
 
 ## Writing state many times a second
 

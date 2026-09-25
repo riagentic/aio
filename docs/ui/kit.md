@@ -47,18 +47,19 @@ Reskin at whichever level you mean:
 }
 ```
 
-| kit token            | defaults to       | what it colours             |
-| -------------------- | ----------------- | --------------------------- |
-| `--aio-ui-accent`    | `--aio-accent`    | primary fill, focus ring    |
-| `--aio-ui-on-accent` | `--aio-on-accent` | the ink ON that fill        |
-| `--aio-ui-ink`       | `--aio-text`      | body text in components     |
-| `--aio-ui-ink-soft`  | `--aio-muted`     | secondary text              |
-| `--aio-ui-bg`        | `--aio-surface`   | input/field background      |
-| `--aio-ui-surface`   | `--aio-surface-2` | secondary button background |
-| `--aio-ui-line`      | `--aio-border`    | borders and hairlines       |
-| `--aio-ui-danger`    | `--aio-danger`    | destructive actions         |
-| `--aio-ui-radius`    | `--aio-r-2`       | corner radius               |
-| `--aio-ui-font`      | `--aio-font`      | component typeface          |
+| kit token            | defaults to       | what it colours                                                           |
+| -------------------- | ----------------- | ------------------------------------------------------------------------- |
+| `--aio-ui-accent`    | `--aio-accent`    | primary fill, focus ring                                                  |
+| `--aio-ui-on-accent` | `--aio-on-accent` | the ink ON that fill                                                      |
+| `--aio-ui-ink`       | `--aio-text`      | body text in components                                                   |
+| `--aio-ui-ink-soft`  | `--aio-muted`     | secondary text                                                            |
+| `--aio-ui-bg`        | `--aio-surface`   | input/field background                                                    |
+| `--aio-ui-surface`   | `--aio-surface-2` | secondary button background                                               |
+| `--aio-ui-line`      | `--aio-border`    | borders and hairlines                                                     |
+| `--aio-ui-danger`    | `--aio-danger`    | destructive actions                                                       |
+| `--aio-ui-on-danger` | `--aio-on-danger` | the ink ON the danger fill, solved from the fill unless the theme sets it |
+| `--aio-ui-radius`    | `--aio-r-2`       | corner radius                                                             |
+| `--aio-ui-font`      | `--aio-font`      | component typeface                                                        |
 
 > Before alpha64 the kit defined bare `--aio-*` names of its own, two of which
 > collided with the theme's under the same spelling — `--aio-accent-ink` meant
@@ -94,6 +95,10 @@ method:
 <Checkbox checked={settings.notify} label="Email me" onChange={settings.setNotify} />
 ```
 
+One exception: `Textarea` wraps only `onInput`. An `onChange` on it is passed to
+the DOM as-is and receives the **Event** (read `e.target.value`) — dev says so
+once.
+
 Binding a text field straight to a cell sends one call and gets one push per
 keystroke, and every component that reads that cell re-renders on each push. No
 keystroke is lost (a push carrying an older keystroke is not written into the
@@ -123,9 +128,10 @@ Wraps any control with a label, optional hint, and error message:
 A string `label` also becomes the **accessible name** of the control inside
 (unless it already has one, or a `t` handle) — so screen readers announce it and
 [`testUI`](../testing/ui-testing.md) addresses it by name: `ui.EmailInput`,
-never a positional `ui.find("Field", 1).Input`. The same holds for
-`<Checkbox label="…">`, whose wrapping `<label>` names its box
-(`ui.EmailMeCheckbox`).
+never a positional `ui.find("Field", 1).Input`. That covers `Switch` and
+`RadioGroup` too; a `Switch` with its own `label` keeps it. Alone,
+`<Checkbox label="…">` is named by its wrapping `<label>`
+(`ui.EmailMeCheckbox`); inside a `Field`, the field's label names it.
 
 ### Table
 

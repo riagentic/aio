@@ -105,6 +105,16 @@ export function h(
   }
 
   const vnode: VNode = { tag, props: p, children, key };
+  // Built around a vnode that is ALREADY MOUNTED (a component's own
+  // `children` on a self re-render, a memoized vnode)? Recorded here, where
+  // the children are in hand, so the reconciler can tell in O(1) whether an
+  // output re-places anything — see vdom-reuse.ts.
+  for (const c of children) {
+    if (typeof c === "object" && _holdsMounted(c)) {
+      (vnode as ReuseMark)[_REUSES] = true;
+      break;
+    }
+  }
 
   // Detect fully-static VNodes for diff short-circuit
   if (
@@ -119,6 +129,25 @@ export function h(
   }
 
   return vnode;
+}
+
+// ── Reused vnodes ─────────────────────────────────────────────────────
+
+/** Set on a vnode built (by `h()`) around a child that was mounted at the
+ *  time, or around one that itself carries the mark. A symbol, not a `VNode`
+ *  field: it is bookkeeping, not part of the shape. @internal */
+const _REUSES: unique symbol = Symbol("aio.reuses");
+type ReuseMark = VNode & { [_REUSES]?: true };
+
+/** Mounted right now (or torn down with its handles left behind). @internal */
+export function _isMountedVNode(v: VNode): boolean {
+  return v._dom !== undefined || v._instance !== undefined ||
+    v._anchor !== undefined;
+}
+
+/** `v` is mounted, or was built around something that was. @internal */
+export function _holdsMounted(v: VNode): boolean {
+  return _isMountedVNode(v) || (v as ReuseMark)[_REUSES] === true;
 }
 
 // ── Child flattening ──────────────────────────────────────────────────

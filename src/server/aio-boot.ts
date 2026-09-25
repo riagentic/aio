@@ -12,6 +12,7 @@ import {
   type JournalEntry,
   journalWatermarkKey,
   REACTIONS_FORMAT_ROW,
+  scrubUnstoredLines,
   SYNC_REACTION_TYPE,
   syncJournalWatermarkKey,
   type SyncReaction,
@@ -20,7 +21,7 @@ import type { SkvInstance } from "./skv.ts";
 import { migrateLegacyKv, SKV_SCHEMA, sqliteKv } from "./skv-sqlite.ts";
 import type { DB } from "../db/types.ts";
 import { createDB } from "../db/async-db.ts";
-import { initSchema, loadTables } from "../db/state-sync.ts";
+import { initSchema, loadTables, readSyncedTables } from "../db/state-sync.ts";
 // The db module owns the "is this a missing worker?" verdict — importing the
 // predicate keeps ONE decider for a failure that surfaces in two places.
 import { dbWorkerMissingHint } from "../db/async-db.ts";
@@ -32,11 +33,40 @@ import {
   pkColumn,
   type TableDef,
 } from "./sql.ts";
-import {
-  deepMerge,
-  MAX_DEPTH as DEEP_MERGE_MAX_DEPTH,
-} from "../state/deep-merge.ts";
+import { deepMerge } from "../state/deep-merge.ts";
 import { createDeclaredShapeGuard } from "./declared-shape-guard.ts";
+// The migration/restore pass is ONE implementation for every runtime (the
+// standalone/Android one runs it too) — re-exported so this module's importers
+// are unchanged.
+import {
+  applyCellMigrations,
+  type CellMigrationInfo,
+  type CellMigrationOutcome,
+  detectShapeDrift,
+  downgradeParkKey,
+  DRIFT_MAX_DEPTH,
+  kindOf,
+  MAX_DRIFT,
+  type MigrationReport,
+  reattachUndeclared,
+  refuseThenable,
+  runCellRestore,
+  type ShapeDriftEntry,
+  shapeDriftSummary,
+  shapeFingerprint,
+} from "../state/cell-migrate.ts";
+export {
+  applyCellMigrations,
+  type CellMigrationInfo,
+  type CellMigrationOutcome,
+  detectShapeDrift,
+  downgradeParkKey,
+  type MigrationReport,
+  reattachUndeclared,
+  runCellRestore,
+  type ShapeDriftEntry,
+  shapeDriftSummary,
+};
 import { isCompiled, resolveKvPath } from "./paths.ts";
 import { prodRequested } from "./aio-cli.ts";
 import { SYNC_VERSION_UNKNOWN } from "../sync/compact.ts";
@@ -56,6 +86,9 @@ import { migrateSchema, PERSIST_SCHEMA_VERSION } from "./persist-schema.ts";
 import type { Log } from "../diagnostics/logger-api.ts";
 import type { CheckpointData, DiagnosticsHooks } from "../diagnostics/mod.ts";
 import { staleCheckpointWarning } from "../diagnostics/mod.ts";
+import { applyCellFieldFilter } from "../state/state-filter.ts";
+import { unpersistedFromBase } from "../state/cell-persist-filter.ts";
+import type { CellFieldFilter } from "../state/cell-types.ts";
 import type { ServerSyncHandler } from "../sync/server-handler.ts";
 import { cloneState } from "../state/immutable.ts";
 import {
@@ -432,10 +465,24 @@ export async function replaySyncOps<S>(
     // A row written before the stamp existed: the build that last persisted
     // is the best evidence of the shape it was written under; with no stamp
     // at all, the current shape (today's behaviour, and what (c) warns about).
-    const resolveVersion = (v: number | undefined): number =>
-      v === undefined || v === SYNC_VERSION_UNKNOWN
+    // v0 means NEVER VERSIONED, not "an older shape" — the KV path's rule
+    // (`firstStamp` in the KV migration). A cell that first declares a
+    // `version` with no `onMigrate` is naming the shape it already has, which
+    // is exactly what the unversioned-log hint (c) below tells the author to
+    // do ("declare version: 1"). Following that advice used to REFUSE the boot
+    // in dev and quarantine the cell in prod: every v0 op was "older, no hook".
+    const adoptV0 = declared > 0 && !hook;
+    let adoptedV0 = false;
+    const resolveVersion = (v: number | undefined): number => {
+      const r = v === undefined || v === SYNC_VERSION_UNKNOWN
         ? (ctx.stampedVersions[cell] ?? declared)
         : v;
+      if (r === 0 && adoptV0) {
+        adoptedV0 = true;
+        return declared;
+      }
+      return r;
+    };
     // The slice the cell falls back to if its log cannot be folded: the
     // snapshot when there is one, else whatever restore produced (defaults).
     const before = (next as Record<string, unknown>)[cell];
@@ -632,6 +679,13 @@ export async function replaySyncOps<S>(
       current = declared;
     }
 
+    if (adoptedV0) {
+      log.info(
+        `sync: stamping cell "${cell}" at version ${declared} — first time ` +
+          `it declares one (no onMigrate), so its unversioned log/snapshot ` +
+          `is taken as that same shape`,
+      );
+    }
     const total = ops.length;
     const bad = failures.length > 0 || skipped.older > 0 || skipped.newer > 0;
     if (!bad) {
@@ -830,16 +884,6 @@ export async function stampReactions(db: DB, format: number): Promise<void> {
        ON CONFLICT(cell) DO UPDATE SET low_water = excluded.low_water`,
     [REACTIONS_FORMAT_ROW, String(format)],
   );
-}
-
-/** Per-cell migration metadata — version + optional onMigrate hook */
-export interface CellMigrationInfo {
-  version: number;
-  initialState: Record<string, unknown>;
-  onMigrate?: (
-    state: Record<string, unknown>,
-    fromVersion: number,
-  ) => Record<string, unknown>;
 }
 
 // ── `db:` table ↔ state bindings ──────────────────────────────────────
@@ -1053,24 +1097,30 @@ export function resolveDbBindings(
  *  unbound (SQL-only) table adds nothing — a table can never overwrite a
  *  cell's slice.
  *
- *  An EMPTY table never empties a non-empty array: that combination means the
- *  rows have not been written to SQLite yet — a binding that is new (the app
- *  just added `db:`, or upgraded to a version where the binding finally
- *  resolves), or a `state:` seed on first run. The array is adopted instead,
- *  and the first sync writes it into the table. Deleting rows on purpose still
- *  works: the bound array is excluded from the KV snapshot, so an emptied table
- *  restores as the declared default, not as stale data. */
+ *  An EMPTY table the sync has never written never empties a non-empty array:
+ *  that combination means the rows have not been written to SQLite yet — a
+ *  binding that is new (the app just added `db:`, or upgraded to a version
+ *  where the binding finally resolves), or a `state:` seed on first run. The
+ *  array is adopted instead, and the first sync writes it into the table. An
+ *  empty table the sync HAS written (`synced`) was emptied on purpose, and
+ *  restores empty — it used to restore the declared default, so a seeded
+ *  row the user deleted came back on every restart. */
 export function placeLoadedTables(
   state: Record<string, unknown>,
   bindings: readonly (Pick<DbBinding, "table" | "path"> & Partial<DbBinding>)[],
   loaded: Record<string, unknown[]>,
   log?: (msg: string) => void,
+  /** Tables the state sync has committed at least once (SYNCED_TABLES,
+   *  src/db/state-sync.ts). For THOSE an empty table is the truth — the app
+   *  emptied it — and the array restores empty; the seed/new-binding
+   *  adoption below is only for a table that was never written. */
+  synced?: ReadonlySet<string>,
 ): Record<string, unknown> {
   let next = state;
   for (const b of bindings) {
     if (b.path.length === 0 || !(b.table in loaded)) continue;
     const rows = loaded[b.table]!;
-    if (rows.length === 0) {
+    if (rows.length === 0 && !synced?.has(b.table)) {
       const current = readPath(next, b.path);
       const held = Array.isArray(current)
         ? current.length
@@ -1185,6 +1235,9 @@ export interface BootConfig<S> {
   /** Action types whose payload the journal must NOT record — forwarded from
    *  the app config (a passphrase argument must not land in a recovery file). */
   redactActions?: readonly string[];
+  /** Action types some cell `listensTo` — a copied journal keeps such a
+   *  `persist: "none"` call (see `scrubUnstoredLines`). */
+  listenedTypes?: readonly string[];
   initialState: S;
   shouldPersist: boolean;
   persistKey: string;
@@ -1348,6 +1401,13 @@ async function scrubStaleSlices(
  *  - `<data>/backups/**` — the pre-migration copy `updates` takes before it
  *    installs (updates-runtime.ts).
  *  - `<home>/backups/**` — `am backup`'s default destination.
+ *  - `<home>/<data>.replaced-*` — the data `am restore` moved aside, whole
+ *    (store, snapshot, update backups, journal).
+ *  - every JOURNAL among them, and a journal set aside beside the live one
+ *    (`<journal>.unreplayed-*`): a line written before `JournalEntry.unstored`
+ *    holds a `persist: "none"` call's arguments — for such a cell, its state.
+ *    Rewritten over the same bytes by `scrubUnstoredLines`; the live journal
+ *    is not a copy (boot replays it, and its next compaction drops the line).
  *
  *  Each is scrubbed IN PLACE rather than re-taken or deleted: a snapshot or a
  *  backup is a point in time (a rollback restores the store the old build ran
@@ -1382,6 +1442,8 @@ async function scrubStoreCopies(
     key: string;
     /** The declared `persist: "none"` cells — what "clean" was judged by. */
     none: readonly string[];
+    /** Action types some cell `listensTo` (`scrubUnstoredLines`). */
+    listened?: readonly string[];
     force: boolean;
   },
 ): Promise<void> {
@@ -1389,7 +1451,11 @@ async function scrubStoreCopies(
   const prior = verified.force
     ? null
     : await verified.kv.get<ScrubbedCopies>(verified.key);
-  const was = prior && JSON.stringify(prior.none) === JSON.stringify(none)
+  // What a journal copy keeps depends on the listened set too: a listener
+  // removed since means its kept calls can go now.
+  const listened = [...new Set(verified.listened ?? [])].sort();
+  const was = prior && JSON.stringify(prior.none) === JSON.stringify(none) &&
+      JSON.stringify(prior.listened ?? []) === JSON.stringify(listened)
     ? prior.files
     : {};
   const seen: Record<string, string> = {};
@@ -1425,6 +1491,7 @@ async function scrubStoreCopies(
   };
   const copies: string[] = lstat(snapshot)?.isFile ? [snapshot] : [];
   const quarantined: string[] = [];
+  const journals: string[] = [];
   for (const e of readDirOrEmpty(dbDir)) {
     if (!e.isFile) continue;
     if (e.name.startsWith(`${dbName}.snapshot.tmp-`)) {
@@ -1449,13 +1516,29 @@ async function scrubStoreCopies(
     } else if (
       e.name.startsWith(`${dbName}.corrupt-`) && !/-(wal|shm)$/.test(e.name)
     ) quarantined.push(join(dbDir, e.name));
+    else if (SET_ASIDE_JOURNAL.test(e.name)) journals.push(join(dbDir, e.name));
   }
-  for (const root of [join(dirs.data, "backups"), join(dirs.home, "backups")]) {
+  // `am restore` moves the data it replaces aside, whole, to
+  // `<data>.replaced-<stamp>[-n]` (am-cmd-data.ts) — the store, its snapshot
+  // and its update backups, a copy like any other. Not scanned, a secret an
+  // older build wrote stayed there for good, unsaid.
+  const replacedPrefix = `${basename(dirs.data)}.replaced-`;
+  const replaced = readDirOrEmpty(dirs.home)
+    .filter((e) => e.isDirectory && e.name.startsWith(replacedPrefix))
+    .map((e) => join(dirs.home, e.name));
+  for (
+    const root of [
+      join(dirs.data, "backups"),
+      join(dirs.home, "backups"),
+      ...replaced,
+    ]
+  ) {
     const walk = (d: string) => {
       for (const e of readDirOrEmpty(d)) {
         const p = join(d, e.name);
         if (e.isDirectory) walk(p);
         else if (!e.isFile || /-(wal|shm|journal)$/.test(e.name)) continue;
+        else if (JOURNAL_COPY.test(e.name)) journals.push(p);
         else if (e.name.includes(".corrupt-")) quarantined.push(p);
         else if (isSqliteFile(p)) copies.push(p);
       }
@@ -1483,6 +1566,49 @@ async function scrubStoreCopies(
       );
     }
   }
+  const noneSet = new Set(none);
+  const listenedSet = new Set(listened);
+  for (const p of journals) {
+    if (known(p)) continue; // this journal copy: verified before, unchanged
+    try {
+      const before = Deno.readFileSync(p);
+      const { text, cells, kept } = scrubUnstoredLines(
+        new TextDecoder().decode(before),
+        noneSet,
+        listenedSet,
+      );
+      if (cells.length > 0) overwriteInPlace(p, text, before.length);
+      record(p);
+      if (cells.length > 0) {
+        log.info(
+          `persist: removed the persist:"none" slice(s) ${cells.join(", ")} ` +
+            `from the copy ${p} too — overwritten, not just unlinked`,
+        );
+      }
+      const keptCalls = Object.values(kept).flat();
+      if (keptCalls.length > 0) {
+        log.warn(
+          `persist: ${p} still holds the arguments of ${
+            keptCalls.join(", ")
+          } ` +
+            `— calls on persist:"none" cell(s) ${
+              Object.keys(kept).join(", ")
+            } that an older build journalled as the ONLY record of the ` +
+            `listensTo reaction they caused on a persisted cell. Scrubbing ` +
+            `them would lose that acked write when this copy is restored, so ` +
+            `they are kept. Restore the copy and let one boot replay it (its ` +
+            `save compacts them away), or delete the copy once you no longer ` +
+            `need it.`,
+        );
+      }
+    } catch (err) {
+      log.error(
+        `persist: could not scrub the copy ${p} — it may still hold the ` +
+          `persist:"none" slice(s) an older build wrote. Delete it (or ` +
+          `take it again) if it is not needed: ${err}`,
+      );
+    }
+  }
   for (const p of quarantined) {
     if (known(p)) continue; // said once already, and unchanged since
     record(p);
@@ -1493,10 +1619,26 @@ async function scrubStoreCopies(
         `its -wal/-shm) once you no longer need it.`,
     );
   }
-  const next: ScrubbedCopies = { none, files: seen };
+  const next: ScrubbedCopies = {
+    none,
+    ...(listened.length > 0 ? { listened } : {}),
+    files: seen,
+  };
   if (JSON.stringify(next) !== JSON.stringify(prior)) {
     await verified.kv.set(verified.key, next);
   }
+}
+
+/** The declared cells outside the persist decider's answer — the
+ *  `persist: "none"` cells. Empty when every cell persists (no answer).
+ *  Pure. */
+function unstoredCells(
+  initialState: Record<string, unknown>,
+  persisting: readonly string[] | undefined,
+): Set<string> {
+  if (!persisting) return new Set();
+  const kept = new Set(persisting);
+  return new Set(Object.keys(initialState).filter((k) => !kept.has(k)));
 }
 
 /** The live-store row naming the copies verified free of `persist: "none"`
@@ -1505,7 +1647,43 @@ async function scrubStoreCopies(
  *  watermark ever reads it. */
 const scrubbedCopiesKey = (appId: string): string =>
   `${appId}:__scrubbed_copies`;
-type ScrubbedCopies = { none: string[]; files: Record<string, string> };
+type ScrubbedCopies = {
+  none: string[];
+  /** Absent when no cell listens to anything (the record's older shape). */
+  listened?: string[];
+  files: Record<string, string>;
+};
+
+/** A journal inside a copied data folder: `journal` (appDirs), `<db>.journal`
+ *  (an explicit db path), or one set aside (`…journal.unreplayed-<stamp>`).
+ *  Never its `.base`/`.wm` (watermarks only) or a tmp. */
+const JOURNAL_COPY = /(?:^|\.)journal(?:\.unreplayed-[^.]+)?$/;
+/** Beside the live store only the set-aside ones: the live journal is not a
+ *  copy. */
+const SET_ASIDE_JOURNAL = /(?:^|\.)journal\.unreplayed-[^.]+$/;
+
+/** Write `text` over the file's own bytes — never a new file renamed over
+ *  it, which leaves the old blocks (the secret) on the disk, unreferenced.
+ *  Shorter text is padded with a blank line (every journal reader skips one)
+ *  so no old byte is left past the new end. */
+function overwriteInPlace(p: string, text: string, oldLen: number): void {
+  let bytes = new TextEncoder().encode(text);
+  if (bytes.length < oldLen) {
+    const pad = oldLen - bytes.length;
+    const nl = text.endsWith("\n") ? "" : "\n";
+    bytes = new TextEncoder().encode(
+      text + nl + " ".repeat(Math.max(0, pad - nl.length - 1)) + "\n",
+    );
+  }
+  const f = Deno.openSync(p, { write: true });
+  try {
+    let at = 0;
+    while (at < bytes.length) at += f.writeSync(bytes.subarray(at));
+    f.syncSync();
+  } finally {
+    f.close();
+  }
+}
 
 /** A torn snapshot old enough that no live writer can still own it. */
 function tornLongAgo(p: string): boolean {
@@ -1593,6 +1771,54 @@ function restorableSlices(
   );
 }
 
+const isRecord = (v: unknown): v is Record<string, unknown> =>
+  v !== null && typeof v === "object" && !Array.isArray(v);
+
+/** A state document with each cell narrowed by its `persist` field filter —
+ *  `applyCellFieldFilter`, the call the store's getter makes, WITHOUT the
+ *  `onPersist` shape (see the checkpoint view in `bootStorage`). Cells with
+ *  no filter entry, or `"all"`, pass by identity. */
+function persistedFields(
+  state: Record<string, unknown>,
+  filters: Record<string, CellFieldFilter> | undefined,
+): Record<string, unknown> {
+  if (!filters) return state;
+  let out: Record<string, unknown> | null = null;
+  for (const [id, filter] of Object.entries(filters)) {
+    const slice = state[id];
+    if (filter === "all" || !isRecord(slice)) continue;
+    const kept = applyCellFieldFilter(filter, slice);
+    if (kept === slice) continue;
+    out ??= { ...state };
+    if (kept) out[id] = kept;
+    else delete out[id];
+  }
+  return out ?? state;
+}
+
+/** A checkpoint's state with every field `persist` keeps off disk taken from
+ *  `restart` (the store-restored boot state) — so restoring a checkpoint and
+ *  restarting agree on those fields (`unpersistedFromBase`, the rule journal
+ *  replay uses). */
+function fieldsAsRestart(
+  state: Record<string, unknown>,
+  filters: Record<string, CellFieldFilter> | undefined,
+  restart: Record<string, unknown>,
+): Record<string, unknown> {
+  if (!filters) return state;
+  let out: Record<string, unknown> | null = null;
+  for (const [id, filter] of Object.entries(filters)) {
+    const slice = state[id];
+    const base = restart[id];
+    if (filter === "all" || !isRecord(slice) || !isRecord(base)) continue;
+    const next = unpersistedFromBase(filter, base, slice);
+    if (next === slice) continue;
+    out ??= { ...state };
+    out[id] = next;
+  }
+  return out ?? state;
+}
+
 /** Runs the full storage boot sequence — SQLite, CRDT sync, KV restore,
  *  onRestore hook, checkpoint restore, SQLite table load, persistence manager. */
 export async function bootStorage<S>(
@@ -1620,15 +1846,25 @@ export async function bootStorage<S>(
     log,
   } = cfg;
 
-  // The dev checkpoint never holds a `persist: "none"` cell — from the first
-  // dispatch on (diagnostics/checkpoint.ts `CheckpointView`).
-  // Whole cells only, never the store's SHAPE: the checkpoint is handed to
-  // `onCheckpointRestore` and assigned into live state with no `onRestore`,
-  // so an `onPersist`-shaped or field-filtered slice would land there as-is.
+  // The dev checkpoint never holds what the store never holds — from the
+  // first dispatch on (diagnostics/checkpoint.ts `CheckpointView`): no
+  // `persist: "none"` cell, and no field a `persist: { exclude | include }`
+  // keeps off disk (top-level or dot path). Never the store's SHAPE: the
+  // checkpoint is handed to `onCheckpointRestore` and assigned into live
+  // state with no `onRestore`, so an `onPersist`-shaped slice would land
+  // there as-is. The fields it leaves out come back at restore exactly as a
+  // restart brings them back (step 6).
   const persisting = cfg.persistingCellIds;
   if (persisting) {
     diagHooks?.setCheckpointView?.((s) =>
-      restorableSlices(s, persisting, initialState as Record<string, unknown>)
+      persistedFields(
+        restorableSlices(
+          s,
+          persisting,
+          initialState as Record<string, unknown>,
+        ),
+        cfg.cellPersist,
+      )
     );
   }
 
@@ -1959,13 +2195,14 @@ export async function bootStorage<S>(
       const { cellAccessAllowed } = await import("./server-auth.ts");
       const cellAccess = cfg.cellAccess;
       const accessCheck = cellAccess && cellAccess.size > 0
-        ? (cell: string, user: unknown) => {
+        ? (cell: string, user: unknown, method: string, args: unknown[]) => {
           const rule = cellAccess.get(cell);
           return rule === undefined ||
             cellAccessAllowed(
               rule,
               user as import("./aio-types.ts").AioUser | undefined,
-              "sync",
+              method,
+              args,
             );
         }
         : undefined;
@@ -2047,6 +2284,10 @@ export async function bootStorage<S>(
   // The per-cell version stamp of the build that last persisted — also the
   // evidence the sync replay uses for rows that predate the op/snapshot stamp.
   let stampedVersions: Record<string, number> = {};
+  /** The shape the drift check read the store against — reused for the
+   *  persistence manager's per-cell shape stamp (one decider, one call of
+   *  `shapeSchema`, which may warn). */
+  let bootSchema: Record<string, unknown> | undefined;
   // Framework-parked slices (`__…` keys) this boot created — carried into
   // every persisted document alongside orphan cells, never into state.
   const parkedSlices: Record<string, unknown> = {};
@@ -2085,6 +2326,8 @@ export async function bootStorage<S>(
         log,
       );
       if (migrated) storedKeysOnDisk = Object.keys(migrated);
+      /** Slices of `persist: "none"` cells the live store still held. */
+      let stale: string[] = [];
       if (migrated && cfg.persistingCellIds) {
         // `persist: "none"` means never written AND never read back. The
         // write half always held; this read did not — a blob an older build
@@ -2097,7 +2340,7 @@ export async function bootStorage<S>(
           cfg.persistingCellIds,
           initialState as Record<string, unknown>,
         );
-        const stale = Object.keys(migrated).filter((k) => !(k in kept));
+        stale = Object.keys(migrated).filter((k) => !(k in kept));
         if (stale.length > 0) {
           await scrubStaleSlices(asyncDb, kvDb, persistKey, persistMode, stale)
             .then(() =>
@@ -2119,45 +2362,52 @@ export async function bootStorage<S>(
               )
             );
         }
-        // The live file is only one copy: a snapshot or a backup taken under
-        // an older build holds the same bytes. Checked on EVERY boot (each
-        // copy once, until it changes) — not only when the live file was
-        // stale, which a crash after the live scrub would never be again.
-        const persisting = new Set(cfg.persistingCellIds);
-        const none = Object.keys(initialState as Record<string, unknown>)
-          .filter((k) => !persisting.has(k));
-        if (
-          none.length > 0 && openedDbPath && openedDbPath !== ":memory:" &&
-          !openedDbPath.startsWith("file::memory:")
-        ) {
-          await scrubStoreCopies(
-            openedDbPath,
-            appDirs(appId, cfg.appDir),
-            persistKey,
-            (stored) => {
-              const keep = restorableSlices(
-                stored,
-                cfg.persistingCellIds!,
-                initialState as Record<string, unknown>,
-              );
-              return Object.keys(stored).filter((k) => !(k in keep));
-            },
-            log,
-            {
-              kv: kvDb,
-              key: scrubbedCopiesKey(appId),
-              none,
-              force: stale.length > 0,
-            },
-          ).catch((e) =>
-            log.error(
-              `persist: could not check the store's copies for the ` +
-                `persist:"none" slice(s) an older build may have left in ` +
-                `them — they may still hold those bytes: ${e}`,
-            )
-          );
-        }
         migrated = kept;
+      }
+      // The live file is only one copy: a snapshot or a backup taken under
+      // an older build holds the same bytes. Checked on EVERY boot (each
+      // copy once, until it changes) — not only when the live file was
+      // stale, which a crash after the live scrub would never be again —
+      // and not only when the store holds a snapshot: a crash before the
+      // first save leaves none, and a backup taken then holds the journal.
+      const none = [
+        ...unstoredCells(
+          initialState as Record<string, unknown>,
+          cfg.persistingCellIds,
+        ),
+      ];
+      if (
+        cfg.persistingCellIds && none.length > 0 && openedDbPath &&
+        openedDbPath !== ":memory:" &&
+        !openedDbPath.startsWith("file::memory:")
+      ) {
+        await scrubStoreCopies(
+          openedDbPath,
+          appDirs(appId, cfg.appDir),
+          persistKey,
+          (stored) => {
+            const keep = restorableSlices(
+              stored,
+              cfg.persistingCellIds!,
+              initialState as Record<string, unknown>,
+            );
+            return Object.keys(stored).filter((k) => !(k in keep));
+          },
+          log,
+          {
+            kv: kvDb,
+            key: scrubbedCopiesKey(appId),
+            none,
+            listened: cfg.listenedTypes,
+            force: stale.length > 0,
+          },
+        ).catch((e) =>
+          log.error(
+            `persist: could not check the store's copies for the ` +
+              `persist:"none" slice(s) an older build may have left in ` +
+              `them — they may still hold those bytes: ${e}`,
+          )
+        );
       }
       // This boot's own store writes (a layout adopted, a legacy store
       // moved in, a stale slice scrubbed) are done: recorded now, so a boot
@@ -2318,6 +2568,7 @@ export async function bootStorage<S>(
     const schema = shapedCells.size
       ? shapeSchema()
       : initialState as Record<string, unknown>;
+    bootSchema = schema;
     if (kvMigrations.size) {
       try {
         report = applyCellMigrations(
@@ -2394,9 +2645,26 @@ export async function bootStorage<S>(
       // — refusing to serve a working app over a stale key is the worse
       // outcome there. Seed erasure and undeclared cells keep their own
       // remedies (warn), so only STRUCTURAL drift of a declared cell refuses.
-      const structural = drift.filter((d) =>
+      const allStructural = drift.filter((d) =>
         d.issue === "unknown-field" || d.issue === "type-changed"
       );
+      // …but only drift a DECLARATION CHANGE left behind. A cell stamped with
+      // this build's shape fingerprint was written under this very `state:`,
+      // so its drift is what the app's own methods committed (`s.count +=
+      // "abc"` from `am dispatch counter:increment abc`). Refusing there
+      // bricked the app on state it accepted and persisted itself, and offered
+      // only a migration for a schema that never moved, or deleting the data.
+      // That drift degrades exactly like production — said by name below. An
+      // unstamped cell (a store from before the stamp) keeps the refusal.
+      const storedShapes = allStructural.length
+        ? await readStoredShapes(kvDb, appId, log)
+        : {};
+      const selfWritten = allStructural.filter((d) =>
+        d.cell in schema &&
+        storedShapes[d.cell] === shapeFingerprint(schema[d.cell])
+      );
+      const structural = allStructural.filter((d) => !selfWritten.includes(d));
+      if (selfWritten.length > 0) log.warn(selfWrittenDrift(selfWritten));
       if (isDevBoot() && structural.length > 0) {
         const dirs = appDirs(appId, cfg.appDir);
         const appsDir = appsDirEnv();
@@ -2413,8 +2681,12 @@ export async function bootStorage<S>(
     // …and the SAFE direction, said out loud. Adding a field needs no
     // migration, but silence about it is indistinguishable from silence about
     // a problem nobody looked for — the complaint that produced this line.
+    // A `db:`-bound path is omitted from the KV snapshot by design (SQLite
+    // owns those rows — `kvGetDBState` above), so its absence from the stored
+    // data is not news: without this, every restart of every app with a
+    // `db:` binding said the table "is new, or a method deleted it".
     const added = detectNewFields(
-      schema,
+      boundPaths.length ? omitPaths(schema, boundPaths) : schema,
       persistedSnapshot,
       { skip: new Set(report.map((r) => r.cell)) },
     );
@@ -2562,13 +2834,22 @@ export async function bootStorage<S>(
       // …and what comes BACK is the restore half of the same rule: a
       // checkpoint an older build wrote raw still holds `persist: "none"`
       // slices, and the app's hook would hand them straight back.
+      //
+      // Field filters too: a field `persist` keeps off disk comes back as a
+      // RESTART brings it back — the value the store restore (+ `onRestore`)
+      // just left in `state` — never the checkpoint's copy (an older build
+      // wrote it raw, secrets included).
       const recovered = cfg.persistingCellIds
         ? {
           ...raw,
-          state: restorableSlices(
-            raw.state,
-            cfg.persistingCellIds,
-            initialState as Record<string, unknown>,
+          state: fieldsAsRestart(
+            restorableSlices(
+              raw.state,
+              cfg.persistingCellIds,
+              initialState as Record<string, unknown>,
+            ),
+            cfg.cellPersist,
+            state as Record<string, unknown>,
           ),
         }
         : raw;
@@ -2601,6 +2882,7 @@ export async function bootStorage<S>(
       dbBindings,
       loaded,
       (m) => log.warn(m),
+      await readSyncedTables(asyncDb),
     ) as S;
   }
 
@@ -2666,6 +2948,12 @@ export async function bootStorage<S>(
         : appDirs(appId, cfg.appDir).journal,
       {
         redact: makeRedactor(cfg.redactActions),
+        // A `persist: "none"` cell's calls are written with their arguments
+        // withheld — for such a cell they ARE its state (JournalEntry.unstored).
+        unstored: unstoredCells(
+          initialState as Record<string, unknown>,
+          cfg.persistingCellIds,
+        ),
         ...(storedWatermark !== undefined ? { storedWatermark } : {}),
       },
     )
@@ -2755,6 +3043,17 @@ export async function bootStorage<S>(
     getReportOpts,
     syncCells: syncCellIds.length > 0 ? new Set(syncCellIds) : undefined,
     cellVersions,
+    // What this build's declaration looks like, per cell — stamped beside
+    // every written slice so the next boot can tell drift the app wrote from
+    // drift a declaration change left (see the drift check above).
+    cellShapes: Object.fromEntries(
+      Object.entries(
+        bootSchema ??
+          (shapedCells.size
+            ? shapeSchema()
+            : initialState as Record<string, unknown>),
+      ).map(([c, decl]) => [c, shapeFingerprint(decl)]),
+    ),
     appId,
     getJournalSeq: journal ? () => journal.capture() : undefined,
     onPersisted: journal ? (seq) => journal.setWatermark(seq) : undefined,
@@ -2943,174 +3242,6 @@ export async function loadAndMigrateSnapshot(
   return result.state;
 }
 
-/** Apply cell migrations — pure logic, extracted for testability.
- *  Mutates stateObj in place for cells that need migration. */
-/** One stored field whose shape no longer matches the declared `initialState`. */
-export type ShapeDriftEntry = {
-  cell: string;
-  /** Dotted path within the cell ("" = the cell itself). */
-  path: string;
-  issue: "unknown-field" | "type-changed" | "unknown-cell" | "seed-erased";
-  storedType: string;
-  /** Declared type — present for "type-changed". */
-  declaredType?: string;
-  /** How many declared entries the stored empty collection erases —
-   *  present for "seed-erased". */
-  declaredCount?: number;
-};
-
-const MAX_DRIFT = 100;
-// ONE cap with the restore: `deepMerge` prunes undeclared keys down to its
-// stack guard and keeps everything below it verbatim (and says so). A drift
-// walk that stopped earlier (it was 8) let the merge DROP a field 9+ levels
-// down with no drift line — dev booted, prod did not warn. The merge starts
-// at the whole state (depth 0 = the cells), this walk at one cell's slice, so
-// the same cut is one level less here.
-const DRIFT_MAX_DEPTH = DEEP_MERGE_MAX_DEPTH - 1;
-
-const kindOf = (v: unknown): string =>
-  v === null ? "null" : Array.isArray(v) ? "array" : typeof v;
-
-/** Diff persisted cell data against the declared shape (`initialState`) and
- *  report structural drift: a stored field the current shape no longer declares
- *  (a rename/removal that `deepMerge` would silently keep → stale-shape load),
- *  or a field whose type changed. This is "declared vs stored shape" using
- *  `initialState` as the schema — no separate schema declaration to drift from
- *  the code. Data-level differences (array lengths, values) are NOT drift; only
- *  structure is — and a declared EMPTY object is an open record (dynamic-key
- *  map), so its stored keys are data too, not drift. `skip` suppresses cells a
- *  migration already accounted for.
- *
- *  Pure + capped (MAX_DRIFT entries, DRIFT_MAX_DEPTH deep) so a large stored
- *  blob can't produce an unbounded or runaway report. */
-export function detectShapeDrift(
-  initial: Record<string, unknown>,
-  stored: Record<string, unknown>,
-  opts: { skip?: Set<string> } = {},
-): ShapeDriftEntry[] {
-  const out: ShapeDriftEntry[] = [];
-  const skip = opts.skip ?? new Set<string>();
-
-  const isPlainObj = (v: unknown): v is Record<string, unknown> =>
-    kindOf(v) === "object";
-
-  const walk = (
-    cell: string,
-    decl: unknown,
-    stor: unknown,
-    path: string,
-    depth: number,
-  ): void => {
-    if (out.length >= MAX_DRIFT) return;
-    const dk = kindOf(decl);
-    const sk = kindOf(stor);
-    // `null` on either side carries NO shape, so there is nothing to compare
-    // and nothing to migrate. `T | null` is how every app spells "not yet":
-    // `user: null`, `vault: null`, `me: null` in `initialState`, holding an
-    // object the moment someone signs in. Reading the declared `null` as a
-    // schema made that ordinary case look like a type change, and dev REFUSED
-    // TO BOOT for every app that had ever been used once — the drift this
-    // check exists for is a field renamed or removed (declared `undefined`),
-    // which is still caught below.
-    if (dk === "null" || sk === "null") return;
-    if (dk !== sk) {
-      out.push({
-        cell,
-        path,
-        issue: "type-changed",
-        storedType: sk,
-        declaredType: dk,
-      });
-      return;
-    }
-    // A declared collection with entries, stored empty: the restore wipes
-    // whatever `state:` seeded (a field report #2 — a curated token registry
-    // vanished, every holding rendered as a raw mint, nothing said). `state:`
-    // reads like a default and behaves like a first-run value; both are
-    // legitimate, so this is reported rather than overruled — unless the cell
-    // says which it meant with `persist: { seed: [...] }`.
-    // Arrays only: they are the one shape `deepMerge` replaces wholesale, so an
-    // empty stored array is the only value that can delete declared entries (an
-    // empty stored OBJECT merges key-by-key and erases nothing).
-    if (
-      Array.isArray(decl) && decl.length > 0 && Array.isArray(stor) &&
-      stor.length === 0
-    ) {
-      out.push({
-        cell,
-        path,
-        issue: "seed-erased",
-        storedType: sk,
-        declaredCount: decl.length,
-      });
-      return;
-    }
-    // Same kind. Recurse into plain objects only — arrays/primitives are data.
-    if (isPlainObj(decl) && isPlainObj(stor) && depth < DRIFT_MAX_DEPTH) {
-      // An EMPTY declared object is an open record (`{} as Record<K,V>` — a
-      // dynamic-key map whose keys are DATA, not schema, e.g. balances keyed by
-      // pubkey). Its stored keys are all legitimate, so don't flag them and
-      // don't recurse — exactly how an array's elements are treated as data
-      //.
-      if (Object.keys(decl).length === 0) return;
-      for (const key of Object.keys(stor)) {
-        if (out.length >= MAX_DRIFT) return;
-        const child = path ? `${path}.${key}` : key;
-        if (!(key in decl)) {
-          out.push({
-            cell,
-            path: child,
-            issue: "unknown-field",
-            storedType: kindOf(stor[key]),
-          });
-          continue;
-        }
-        walk(cell, decl[key], stor[key], child, depth + 1);
-      }
-    }
-  };
-
-  for (const cell of Object.keys(stored)) {
-    if (out.length >= MAX_DRIFT) break;
-    if (skip.has(cell)) continue;
-    // `__…` keys are framework-parked data, not app shape.
-    if (cell.startsWith("__")) continue;
-    if (!(cell in initial)) {
-      out.push({
-        cell,
-        path: "",
-        issue: "unknown-cell",
-        storedType: kindOf(stored[cell]),
-      });
-      continue;
-    }
-    walk(cell, initial[cell], stored[cell], "", 0);
-  }
-  return out;
-}
-
-/** Per-cell outcome of the boot migration pass — inspectable + testable. */
-export type CellMigrationOutcome =
-  | "migrated" // onMigrate ran, version advanced
-  | "stale" // version bumped but no onMigrate — kept as-is, may be stale
-  | "stamped" // first `version` this cell ever declared — nothing to convert
-  | "downgrade" // stored version NEWER than code — running old code on new data
-  | "sync-quarantined" // a sync cell's op-log could not be folded — held at its snapshot
-  | "sync-unversioned"; // a sync cell has a persisted log and no `version` (field report §3.1)
-// (There is no "reset": a throwing onMigrate used to reset the cell to its
-//  defaults, and the debounced persist then wrote that emptiness over the data
-//  the migration was supposed to transform. It now refuses to boot instead —
-//  nothing is written, so the stored bytes are still there for a fixed build.)
-
-/** Structured report of what the migration pass did — one entry per cell that
- *  was NOT a clean no-op. Returned for inspection (`am`/tests); also logged. */
-export type MigrationReport = {
-  cell: string;
-  from: number;
-  to: number;
-  outcome: CellMigrationOutcome;
-}[];
-
 /** The boot migration picture, surfaced live via the trojan `migrations` route
  *  and `am migrations`: declared vs stored per-cell versions, what the pass did,
  *  and any unaccounted shape drift. */
@@ -3248,8 +3379,9 @@ function withRestoreDropWatch(
  *
  *  A method that adds a key to a declared non-empty object (`opts: { a: 1 }`,
  *  then `s.opts.b = 3`) or changes a field's type persisted it faithfully, and
- *  nothing was said until the NEXT boot: dev refused to start over it, and
- *  production restored without it and wrote that back, so it was gone. The
+ *  nothing was said until the NEXT boot: dev refused to start over it (it no
+ *  longer does — the write stamps its declaration, see `selfWrittenDrift`),
+ *  and production restored without it and wrote that back, so it was gone. The
  *  same `detectShapeDrift` the boot check runs, pointed at the document being
  *  written instead of the one being read, says it while the code that wrote
  *  it is still on screen.
@@ -3333,8 +3465,8 @@ export function restoreDropWatcher(
         d.issue === "unknown-field"
           ? `persist (dev): ${where} (${d.storedType}) is being written but is ` +
             `not declared in the cell's \`state:\` — the next boot will NOT ` +
-            `restore it (dev refuses to boot over it; production boots without ` +
-            `it and its next write deletes it). Declare it with a default` +
+            `restore it (it boots without it, says so, and its next write ` +
+            `deletes it). Declare it with a default` +
             `${
               parent
                 ? `, or declare \`${parent}\` as \`{}\` if its keys are data`
@@ -3342,81 +3474,49 @@ export function restoreDropWatcher(
             }.`
           : `persist (dev): ${where} is being written as ${d.storedType} but ` +
             `is declared ${d.declaredType} in the cell's \`state:\` — the next ` +
-            `boot restores the declared default instead (dev refuses to boot ` +
-            `over it). Keep the declared type, or change the declaration.`,
+            `boot restores the declared default instead (and says so). Keep ` +
+            `the declared type, or change the declaration.`,
       );
     }
   };
 }
 
-/** One teachable line summarizing all shape drift found at boot.
- *  Seed erasure is reported separately — same detector, different remedy. */
-export function shapeDriftSummary(drift: ShapeDriftEntry[]): string {
-  const erased = drift.filter((d) => d.issue === "seed-erased");
-  const structural = drift.filter((d) => d.issue !== "seed-erased");
-  const lines: string[] = [];
-  if (erased.length > 0) {
-    const show = erased.slice(0, 5).map((d) =>
-      `${
-        d.path ? `${d.cell}.${d.path}` : d.cell
-      } (${d.declaredCount} declared ` +
-      `→ stored empty)`
+/** The stored per-cell shape stamps (`<appId>:__shapes`, written by the
+ *  persistence manager beside each slice). `{}` when absent or unreadable —
+ *  which only keeps the drift check as strict as it was before stamps. */
+async function readStoredShapes(
+  kvDb: { get: <T>(k: string) => Promise<T | null> },
+  appId: string,
+  log: Log,
+): Promise<Record<string, string>> {
+  try {
+    return await kvDb.get<Record<string, string>>(`${appId}:__shapes`) ?? {};
+  } catch (e) {
+    log.warn(
+      `persist: could not read the stored shape stamps (${appId}:__shapes) — ` +
+        `${e}. Every drift is treated as a declaration change.`,
     );
-    const more = erased.length > show.length
-      ? ` …and ${erased.length - show.length} more`
-      : "";
-    lines.push(
-      `restore erased seeded data: ${erased.length} declared list(s) were ` +
-        `replaced by an empty stored value — ${show.join(", ")}${more}. ` +
-        `A persisted array replaces the declared one wholesale, so whatever ` +
-        `\`state:\` seeded is gone. If the list is a fixed seed, keep it out ` +
-        `of persistence (\`persist: { exclude: [...] }\`); if it is a cache ` +
-        `that may legitimately empty, this is expected; if it must be merged, ` +
-        `bump the cell version and re-seed it in \`onMigrate\`.`,
-    );
+    return {};
   }
-  if (structural.length === 0) return lines.join("\n");
-  drift = structural;
-  const show = drift.slice(0, 5).map((d) => {
+}
+
+/** The sentence for drift THIS declaration's own methods wrote — restored as
+ *  the declared default, in dev and production alike. Pure. */
+function selfWrittenDrift(entries: ShapeDriftEntry[]): string {
+  const fields = entries.map((d) => {
     const where = d.path ? `${d.cell}.${d.path}` : d.cell;
-    if (d.issue === "unknown-cell") {
-      return `${where} (stored, no longer declared)`;
-    }
-    if (d.issue === "type-changed") {
-      return `${where} (${d.storedType}≠declared ${d.declaredType})`;
-    }
-    return `${where} (${d.storedType}, not in initialState)`;
+    return d.issue === "type-changed"
+      ? `${where} (${d.storedType} stored, ${d.declaredType} declared)`
+      : `${where} (${d.storedType} stored, not declared)`;
   });
-  const more = drift.length > show.length
-    ? ` …and ${drift.length - show.length} more`
-    : "";
-  lines.push(
-    `shape drift: ${drift.length} stored field(s) no longer match the ` +
-      `declared shape — ${show.join(", ")}${more}. ` +
-      // This used to say the stale value stays on disk ("persistence
-      // preserves it"). Measured: it does not. Restore drops an undeclared
-      // field from live state and puts the DECLARED default back over a
-      // changed type, and the first write after boot — which happens on boot,
-      // before any method runs — stores exactly that. A warning promising the
-      // data was safe is how the one copy of it was lost without anyone
-      // looking.
-      (drift.some((d) => d.issue !== "unknown-cell")
-        ? `Those stored fields are NOT restored — live state drops an ` +
-          `undeclared field and takes the declared default for a changed ` +
-          `type — and the next write replaces them on disk too, so they are ` +
-          `gone after this boot. If the app still writes the field, declare ` +
-          `it in \`state:\` (or declare the object as \`{}\`, an open ` +
-          `record). If it was renamed, bump the cell's version + add ` +
-          `onMigrate to carry it over, before this build writes.`
-        : "") +
-      (drift.some((d) => d.issue === "unknown-cell")
-        ? `${
-          drift.some((d) => d.issue !== "unknown-cell") ? " " : ""
-        }A stored cell no longer declared is kept on disk verbatim, but is ` +
-          `not in live state — declare the cell again, or clear its data.`
-        : ""),
-  );
-  return lines.join("\n");
+  return `persist: ${entries.length} stored field(s) do not match the ` +
+    `declared shape — ${fields.join(", ")} — and this app's own methods ` +
+    `wrote them under the current \`state:\` (it has not changed since), so ` +
+    `boot goes on: they are NOT restored (the declared default is used; an ` +
+    `undeclared key is dropped) and the next write replaces them on disk. ` +
+    `Fix the method that wrote them — a value of the wrong type (e.g. an ` +
+    `\`am dispatch\` argument that arrived as text) or a key \`state:\` does ` +
+    `not declare — or change the declaration to hold it.`;
 }
 
 /** The dev-mode refusal for unmigrated structural drift: per cell, the
@@ -3497,312 +3597,4 @@ function driftStoreLines(store: DriftStore): string {
       : `or run this build against a PRIVATE, empty data home and leave ` +
         `this one untouched: \`am start --instance=<name>\`\n`)
   );
-}
-
-/** Stored values the declared shape dropped, put back — deep, depth-capped.
- *  `deepMerge` uses `initialState` as the template and drops every stored key
- *  the running build does not declare. That is right for a rename; it is data
- *  loss for a DOWNGRADE, where the "unknown" fields are what a NEWER build
- *  wrote and a later roll-forward still needs. Declared keys are untouched —
- *  the running build's types win for anything it actually reads. */
-/** One cell's `onRestore`, run the way boot runs it — error-guarded: a throw
- *  is logged and the slice is kept as it was.
- *
- *  `shaped` is set for a cell whose `onPersist` SHAPES what it writes. The
- *  restore merge drops every stored key the cell does not declare, and a
- *  reshape stores exactly such keys: the documented pair —
- *  `onPersist: (s) => ({ key: s.thumbKey })`, `onRestore` reading `s.key` —
- *  had its `key` pruned before the hook ran, so the value was gone (and dev
- *  refused to boot over the "drift"). The hook is handed the declared shape
- *  PLUS what the store holds, the way `onMigrate` is, and what it returns is
- *  narrowed back to the declared shape with the restore's own merge.
- *
- *  `retyped`: a stored value whose TYPE differs from the declared one is
- *  handed over too. The merge keeps the declared value on a type mismatch
- *  (schema wins), and a shape that changes a type is the ordinary compact
- *  one — `onPersist: (s) => ({ items: Object.values(s.items) })` stores a
- *  list where a record is declared — so its partner was handed `items: {}`
- *  and the list was gone. Off for a cell the migration pass rewrote this
- *  boot: its slice is the migration's, not the store's. */
-/** Throw when a restore hook handed back a THENABLE instead of state.
- *
- *  Restore runs before the server starts and is awaited nowhere, so
- *  `onRestore: async (s) => …` returns a Promise. A Promise is an object, so
- *  every shape check passed it: the app-level hook made the whole app state a
- *  Promise (`Object.keys` of one is `[]`, so boot reported "state: 0 keys" and
- *  started), and a cell's made that cell's slice one — every read `undefined`,
- *  every method writing into a Promise, and the first persist storing `{}`
- *  over the real data. Both hooks are error-guarded, so this is reported and
- *  the restored state kept. */
-function refuseThenable(v: unknown): void {
-  if (
-    v !== null && typeof v === "object" &&
-    typeof (v as { then?: unknown }).then === "function"
-  ) {
-    throw new Error(
-      `returned a Promise — the restore hooks are SYNCHRONOUS (they run ` +
-        `before the server starts and nothing awaits them), so an \`async\` ` +
-        `hook hands back a Promise instead of state. Drop the \`async\` and ` +
-        `do the awaiting work in \`onStart\` instead.`,
-    );
-  }
-}
-
-export function runCellRestore(
-  id: string,
-  hook: (state: Record<string, unknown>) => Record<string, unknown> | void,
-  slice: Record<string, unknown>,
-  shaped:
-    | { stored: unknown; declared: unknown; retyped?: boolean }
-    | undefined,
-  log: Log,
-): Record<string, unknown> {
-  try {
-    const input = shaped && _isObj(shaped.stored)
-      ? reattachUndeclared(slice, shaped.stored, 0, shaped.retyped === true)
-      : slice;
-    const next = hook(input);
-    refuseThenable(next);
-    const out = next !== undefined ? next : input;
-    return shaped && _isObj(shaped.declared) && _isObj(out) && out !== slice
-      ? deepMerge(shaped.declared, out)
-      : out;
-  } catch (e) {
-    log.error(`hook onRestore(${id}): ${e}`);
-    return slice;
-  }
-}
-
-export function reattachUndeclared(
-  merged: Record<string, unknown>,
-  stored: Record<string, unknown>,
-  depth = 0,
-  /** Also hand back a stored value the merge refused for its TYPE (never a
-   *  stored `null`, which carries no type) — see `runCellRestore`. */
-  retyped = false,
-): Record<string, unknown> {
-  if (depth >= 32) return merged;
-  let out = merged;
-  for (const k of Object.keys(stored)) {
-    if (k === "__proto__" || k === "constructor" || k === "prototype") continue;
-    if (!(k in out)) {
-      out = { ...out, [k]: stored[k] };
-    } else if (_isObj(out[k]) && _isObj(stored[k])) {
-      const child = reattachUndeclared(
-        out[k] as Record<string, unknown>,
-        stored[k] as Record<string, unknown>,
-        depth + 1,
-        retyped,
-      );
-      if (child !== out[k]) out = { ...out, [k]: child };
-    } else if (
-      retyped && out[k] !== null && stored[k] !== null &&
-      kindOf(out[k]) !== kindOf(stored[k])
-    ) {
-      out = { ...out, [k]: stored[k] };
-    }
-  }
-  return out;
-}
-
-/** Key a downgrade boot parks the pre-downgrade slice under. Framework-owned
- *  (`__` prefix ⇒ never restored into state, always carried into every
- *  persisted document verbatim). */
-export const downgradeParkKey = (cell: string): string =>
-  `__downgraded:${cell}`;
-
-export function applyCellMigrations(
-  stateObj: Record<string, unknown>,
-  cellMigrations: Map<string, CellMigrationInfo>,
-  persistedVersions: Record<string, number>,
-  log: Log,
-  /** The RAW stored snapshot (pre-deepMerge) — lets a downgrade keep the
-   *  fields the merge narrowed away. Omitted ⇒ no re-attachment. */
-  storedSnapshot?: Record<string, unknown>,
-  /** The declared `initialState` — onMigrate's result is narrowed to it.
-   *  Omitted ⇒ the result is taken as-is (the pure unit tests). */
-  initialState?: Record<string, unknown>,
-  /** Cells whose `onPersist` SHAPES what they store → what that shape looks
-   *  like for the declared state (as stored). Their migration is handed the
-   *  stored value even where its TYPE differs from the declared one (a record
-   *  stored as a list), its output is read against the shape as well as the
-   *  declaration, and the raw output is left in `migratedRaw` so the cell's
-   *  `onRestore` receives it the way it receives a stored slice. */
-  shaped?: {
-    schema: Record<string, unknown>;
-    migratedRaw: Map<string, Record<string, unknown>>;
-  },
-): MigrationReport {
-  const report: MigrationReport = [];
-  for (const [cellId, info] of cellMigrations) {
-    if (info.version === 0) continue; // default — no migration needed
-    const persisted = persistedVersions[cellId] ?? 0;
-    const cellState = stateObj[cellId] as Record<string, unknown> | undefined;
-    if (persisted > info.version) {
-      // Downgrade: the DB was written by NEWER code than is now running. The
-      // stored shape is ahead of what this build understands, so proceeding
-      // silently risks reading fields that moved or vanished. Loud + explicit —
-      // mirrors the framework-schema downgrade guard, dev/prod alike.
-      //
-      // The old warning said "State kept as-is", which was a MISDIAGNOSIS: the
-      // restore had already narrowed the slice to this build's shape (deepMerge
-      // drops undeclared keys), and the next persist wrote that narrowed slice
-      // back — the newer build's fields deleted, silently. Put them back before
-      // anything can persist over them.
-      const stored = storedSnapshot?.[cellId];
-      let kept: string[] = [];
-      if (_isObj(cellState) && _isObj(stored)) {
-        const widened = reattachUndeclared(cellState, stored);
-        kept = Object.keys(stored).filter((k) => !(k in cellState));
-        stateObj[cellId] = widened;
-      }
-      log.warn(
-        `migrate: ${cellId} stored v${persisted} is NEWER than code v${info.version} — ` +
-          `running an older build against newer data. ${
-            kept.length
-              ? `Fields this build does not declare (${
-                kept.join(", ")
-              }) were kept — the restore had narrowed them away. `
-              : ""
-          }A verbatim copy of the stored slice is parked at ` +
-          `"${downgradeParkKey(cellId)}", and the stored version stamp stays ` +
-          `v${persisted} (it never regresses), so rolling forward will NOT ` +
-          `re-run onMigrate over already-migrated data. Re-deploy the build ` +
-          `that wrote it, or bump ${cellId}'s version and add an onMigrate ` +
-          `that down-converts. Fields this build DOES declare may be misread.`,
-      );
-      report.push({
-        cell: cellId,
-        from: persisted,
-        to: info.version,
-        outcome: "downgrade",
-      });
-      continue;
-    }
-    if (persisted < info.version) {
-      if (cellState && info.onMigrate) {
-        try {
-          // What the hook is HANDED matters: the restore ran `deepMerge`
-          // against the NEW `initialState`, which drops every stored key the
-          // new shape no longer declares — i.e. exactly the old fields a
-          // rename migration exists to read (`s.cents` was already gone by the
-          // time `onMigrate` looked for it, so the value it was meant to carry
-          // over was lost every time). The hook sees the declared shape PLUS
-          // whatever the store still holds; declared fields keep the merged
-          // (typed) value.
-          const stored = storedSnapshot?.[cellId];
-          // A shaped cell stores its SHAPE, whose field types may differ from
-          // the declaration (a record stored as a list): the merge kept the
-          // declared `{}` there, so hand the stored value back — the data the
-          // migration exists to carry over.
-          const shape = shaped && cellId in shaped.schema
-            ? shaped.schema[cellId]
-            : undefined;
-          const input = _isObj(stored)
-            ? reattachUndeclared(cellState, stored, 0, shape !== undefined)
-            : cellState;
-          const migrated = info.onMigrate(input, persisted);
-          // The hook was HANDED the undeclared stored keys (so a rename can
-          // read the old field) — whatever it leaves behind is not this
-          // build's shape. Kept, it rode into the next write and the FOLLOWING
-          // boot refused over "shape drift" the migration had just handled.
-          // Narrow with the SAME merge the restore runs, so this boot's state
-          // is exactly what the next boot will restore.
-          const declared = initialState?.[cellId];
-          if (_isObj(declared) && _isObj(migrated)) {
-            const off = (schema: unknown) =>
-              new Set(
-                detectShapeDrift(
-                  { [cellId]: schema },
-                  { [cellId]: migrated },
-                ).filter((d) =>
-                  d.issue === "unknown-field" || d.issue === "type-changed"
-                ).map((d) => d.path),
-              );
-            // A shaped cell's output may be in the STORED form (what it was
-            // handed): a field is dropped only when it fits neither the
-            // declaration nor the shape. What fits the shape is its
-            // `onRestore`'s to turn back, exactly as on every other boot.
-            const offShape = _isObj(shape) ? off(shape) : undefined;
-            const dropped = detectShapeDrift(
-              { [cellId]: declared },
-              { [cellId]: migrated },
-            ).filter((d) =>
-              (d.issue === "unknown-field" || d.issue === "type-changed") &&
-              (!offShape || offShape.has(d.path))
-            );
-            if (_isObj(shape)) shaped!.migratedRaw.set(cellId, migrated);
-            if (dropped.length) {
-              log.warn(
-                `migrate: ${cellId} onMigrate (v${persisted} → ` +
-                  `v${info.version}) left ${dropped.length} field(s) this ` +
-                  `build does not declare — ${
-                    dropped.map((d) => d.path).join(", ")
-                  } — dropped from state, and from disk at the first write. ` +
-                  `The migration owned this version, so that is taken as ` +
-                  `meant; declare a field in \`state:\` to keep it.`,
-              );
-            }
-            stateObj[cellId] = deepMerge(declared, migrated);
-          } else {
-            stateObj[cellId] = migrated;
-          }
-          log.info(`migrate: ${cellId} v${persisted} → v${info.version}`);
-          report.push({
-            cell: cellId,
-            from: persisted,
-            to: info.version,
-            outcome: "migrated",
-          });
-        } catch (e) {
-          // REFUSE TO BOOT. This used to reset the cell to `initialState` and
-          // carry on — and ~5ms later the debounced persist wrote that empty
-          // slice over the stored data and stamped the new version, so a FIXED
-          // build found nothing left to migrate. The data the hook failed on is
-          // still on disk right now; the only way to keep it that way is to
-          // write nothing at all.
-          throw createAioError(
-            "PERSIST_SCHEMA",
-            new Error(
-              `migrate: ${cellId} onMigrate (v${persisted} → v${info.version}) ` +
-                `threw — refusing to boot: ${e}\n` +
-                `NOTHING was written: the stored v${persisted} data is intact ` +
-                `on disk, and a build with a fixed onMigrate will migrate it. ` +
-                `(Booting on defaults would have persisted an empty ` +
-                `"${cellId}" over it within the debounce window.) Fix the ` +
-                `hook, or take a backup and clear the cell's stored slice to ` +
-                `start clean.`,
-            ),
-            { cellName: cellId },
-          );
-        }
-      } else if (cellState && !info.onMigrate) {
-        // `persisted === 0` means NEVER STAMPED, not "version zero". The shape
-        // on disk is the shape this build writes; nothing migrated, and there
-        // is nothing a hook could have done. Warning here fired once per cell
-        // on the first boot after an app adopts `version:` — twenty lines of
-        // "may be stale" about data that is not, which is how the real warning
-        // (a version GAP with no hook) gets skipped.
-        const firstStamp = persisted === 0;
-        if (firstStamp) {
-          log.info(
-            `migrate: stamping ${cellId} at version ${info.version} — first ` +
-              `time this cell declares one, so there is no older shape to ` +
-              `convert`,
-          );
-        } else {
-          log.warn(
-            `migrate: ${cellId} version ${persisted} → ${info.version} but no onMigrate hook — state may be stale`,
-          );
-        }
-        report.push({
-          cell: cellId,
-          from: persisted,
-          to: info.version,
-          outcome: firstStamp ? "stamped" : "stale",
-        });
-      }
-    }
-  }
-  return report;
 }

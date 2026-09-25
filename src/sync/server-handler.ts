@@ -96,8 +96,19 @@ export interface SyncHandlerDeps {
    *  Undefined = no access rules (open). The `action` dispatch path is gated in
    *  aio-server.ts; sync ops route through a different dispatch, so the SAME
    *  rule must be enforced here or an `access`-gated cell that is also
-   *  `sync: true` would be freely mutable by any connected client. */
-  accessCheck?: (cell: string, user: unknown) => boolean;
+   *  `sync: true` would be freely mutable by any connected client.
+   *
+   *  `method` and `args` are the op's OWN action and call args — the same two
+   *  facts the action path hands a predicate rule. It used to be asked about a
+   *  method called "sync" with no args, so a deny-list rule
+   *  (`m !== "wipe" || admin`) or a row-level one passed, and the op then ran
+   *  `wipe` for anyone. */
+  accessCheck?: (
+    cell: string,
+    user: unknown,
+    method: string,
+    args: unknown[],
+  ) => boolean;
   /** Send raw message to all connected clients except the given socket.
    *  Mutable ref: set after server creation to break circular dependency. */
   broadcastRaw: { fn: (msg: string, exclude?: WebSocket) => void };
@@ -200,6 +211,13 @@ function isValidCellCursor(
   const tsOk = c.lastServerTs === undefined ||
     (typeof c.lastServerTs === "number" && Number.isFinite(c.lastServerTs));
   return hlcOk && tsOk;
+}
+
+/** An op's positional call args (`payload.args`), as the action path reads
+ *  them for an access predicate — `[]` when the payload carries none. Pure. */
+function opArgs(payload: unknown): unknown[] {
+  const a = (payload as { args?: unknown } | null | undefined)?.args;
+  return Array.isArray(a) ? a : [];
 }
 
 /**
@@ -656,6 +674,76 @@ export function createServerSyncHandler(
     return true;
   }
 
+  // ── A session prefix belongs to the connection that announced it ──────
+  // An op id is `<clientId>-<session>-<counter>.<random>`, and the prefix is
+  // on every broadcast. Two filters read it as "this client's own op": the
+  // client drops a broadcast under its own prefix as its echo, and the
+  // catch-up leaves ops under the requester's prefix out. So a writer that
+  // submitted an op under ANOTHER client's prefix had it applied on the
+  // server and every other screen — and never on the victim's, silently,
+  // until a compaction snapshot covered it (r5 sync hunt; pinned by
+  // tests/sync/session-prefix-bound.test.ts).
+  //
+  // The prefix is public, so it cannot prove anything alone. Each engine
+  // announces its session in its `sync-req` WITH a per-session key it never
+  // sends anywhere else; the first announce binds the prefix to that key, and
+  // a later announce with the same key moves it to the new connection — a
+  // reconnect, even while the old socket still reads OPEN (half-open, until
+  // the heartbeat notices). A different key never takes it over.
+  //
+  // An op taken from any OTHER connection under a bound prefix is remembered
+  // as FOREIGN, and the owner's catch-up serves it instead of assuming it
+  // already has it; the engine, for its part, drops as an echo only an id it
+  // actually issued. Taken, not refused or held: the same shape is legitimate
+  // — a twin tab flushing the shared queue, or the owner's own op frame
+  // reaching its new connection ahead of the `sync-req` that moves the
+  // session — and the op of a writer posing as another session is then
+  // simply applied on every screen, the victim's included, which is exactly
+  // what that writer could do under its own session anyway. (The owner's own
+  // op served back to it is dropped by its id dedup, like any repeat.)
+  //
+  // In memory and bounded: a restart forgets every binding, and the engines
+  // re-announce on their reconnect. An engine that sends no key (built
+  // before it) binds nothing and is checked against nothing, as before.
+  const SESSIONS_CAP = 8192;
+  const _sessions = new Map<string, { key: string; socket: WebSocket }>();
+  const FOREIGN_CAP = 4096;
+  const _foreign = new Set<string>();
+  function sessionPrefix(opId: string): string | undefined {
+    return /^(.+-)[0-9a-z]+(?:\.[0-9a-z]+)?$/.exec(opId)?.[1];
+  }
+  function claimSession(prefix: string, key: string, socket: WebSocket): void {
+    const held = _sessions.get(prefix);
+    if (held === undefined || held.key === key) {
+      _sessions.delete(prefix); // re-inserted: the newest is evicted last
+      _sessions.set(prefix, { key, socket });
+      if (_sessions.size > SESSIONS_CAP) {
+        _sessions.delete(_sessions.keys().next().value!);
+      }
+      return;
+    }
+    if (held.socket === socket) return;
+    deps.log.warn(
+      `[sync:server] session "${prefix}" is announced by a second connection ` +
+        `with a different key — it stays with the first, and this ` +
+        `connection's ops under it are served to the first as a peer's. ` +
+        `Either a client is posing as another's session, or its real owner ` +
+        `lost the race after a restart (a reload gives it a new session).`,
+    );
+  }
+  /** Is this op's session prefix bound to ANOTHER connection? */
+  function sessionOwnedElsewhere(opId: string, socket: WebSocket): boolean {
+    const prefix = sessionPrefix(opId);
+    const held = prefix === undefined ? undefined : _sessions.get(prefix);
+    return held !== undefined && held.socket !== socket;
+  }
+  function noteForeign(opId: string): void {
+    _foreign.add(opId);
+    if (_foreign.size > FOREIGN_CAP) {
+      _foreign.delete(_foreign.values().next().value!);
+    }
+  }
+
   /** The op's cursor position for an ack. A fresh insert already knows it; a
    *  duplicate (resend after a lost ack) has to ask the store — the row, or
    *  the tombstone if compaction rolled the row over. `null` only when the
@@ -713,7 +801,7 @@ export function createServerSyncHandler(
         },
         serverHlc: clock.now(),
         cellVersion: deps.cellVersion?.(cell) ?? 0,
-        retentionMs: deps.opRetentionMs?.(cell),
+        retentionMs: sweepRetentionMs(),
         alsoWrite: fw === null ? undefined : () => {
           planned = true;
           return fw.plan(cell, at!);
@@ -731,6 +819,29 @@ export function createServerSyncHandler(
       }`;
     }
     return undefined;
+  }
+
+  /** The retention a compaction's tombstone SWEEP must honour: the longest
+   *  of ANY sync cell's, never the compacting cell's own.
+   *
+   *  `sync_compacted_ids` carries no cell, so the sweep in `compactSyncOps`
+   *  deletes every cell's tombstones older than the window it is given. Fed
+   *  the compacting cell's retention, a compaction of a default-retention
+   *  cell (24h) swept the tombstones a `retention: "7d"` cell still needed:
+   *  that cell's lost-ack resend two days later was younger than ITS window
+   *  (so not refused as stale), unknown to the store (tombstone gone) — and
+   *  applied a SECOND time, acked and broadcast. Keeping short-retention
+   *  tombstones longer costs rows; sweeping long-retention ones early costs
+   *  a double application. */
+  function sweepRetentionMs(): number | undefined {
+    let max: number | undefined;
+    for (const c of syncCells) {
+      const r = deps.opRetentionMs?.(c);
+      if (typeof r === "number" && Number.isFinite(r) && (max ?? 0) < r) {
+        max = r;
+      }
+    }
+    return max;
   }
 
   let _foldWatermark: SyncFoldWatermark | null = null;
@@ -1100,7 +1211,10 @@ export function createServerSyncHandler(
       // too. Without this, a client that passes /ws (any authed user in
       // per-user mode) could mutate an `access:"admin"` cell via an op frame,
       // bypassing the gate the `action` path enforces. Reject before persist.
-      if (deps.accessCheck && !deps.accessCheck(op.cell, meta.user)) {
+      if (
+        deps.accessCheck &&
+        !deps.accessCheck(op.cell, meta.user, op.action, opArgs(op.payload))
+      ) {
         deps.log.warn(
           `[sync:server] op for access-gated cell "${op.cell}" denied for ${
             (meta.user as { id?: string })?.id ?? "anonymous client"
@@ -1144,6 +1258,10 @@ export function createServerSyncHandler(
         } catch (e) {
           deps.log.error(`[sync:server] failed to persist op ${op.id}: ${e}`);
           return; // Don't ack — client will retry
+        }
+        // Under another connection's session — see `_foreign`.
+        if (serverTs !== null && sessionOwnedElsewhere(op.id, socket)) {
+          noteForeign(op.id);
         }
 
         // Apply to live server state BEFORE ack/compact — the op-log and
@@ -1395,6 +1513,8 @@ export function createServerSyncHandler(
         /** The requester's per-session nonce (see SyncRequest). Absent from a
          *  client built before it existed. */
         session?: string;
+        /** The session's private key (see SyncRequest.sessionKey). */
+        sessionKey?: unknown;
         cells: Record<string, { lastHlc: HLC | null; lastServerTs?: number }>;
         pendingOps: SyncOp[];
         /** Cells the client asks to be served as a SNAPSHOT whatever its
@@ -1404,6 +1524,18 @@ export function createServerSyncHandler(
         pushPatch?: unknown;
       };
       noteSyncSocket(socket, sync.pushPatch === true);
+      // Synchronously, before any op of this connection is looked at — see
+      // `claimSession`.
+      if (
+        typeof sync.session === "string" && sync.session !== "" &&
+        typeof sync.sessionKey === "string" && sync.sessionKey !== ""
+      ) {
+        claimSession(
+          `${sync.clientId}-${sync.session}-`,
+          sync.sessionKey,
+          socket,
+        );
+      }
       _heldSaid.delete(socket); // it asked again — see `_heldSaid`
       // Held ops come back in this request's `pendingOps` — held again, the
       // whole request with them (the client retries it as one).
@@ -1424,7 +1556,9 @@ export function createServerSyncHandler(
         : null;
       const isRequestersOwnOp = (o: SyncOp): boolean =>
         ownPrefix !== null
-          ? o.id.startsWith(ownPrefix)
+          // …except one another connection submitted under it while its
+          // owner was away (see `_foreign`): the owner never had it.
+          ? o.id.startsWith(ownPrefix) && !_foreign.has(o.id)
           : o.hlc[2] === sync.clientId;
 
       (async () => {
@@ -1478,7 +1612,15 @@ export function createServerSyncHandler(
             refuseIfDrifted(pending.id, pending.cell, pending.hlc, socket)
           ) continue;
           // Same access gate as handleOp — pending ops are client-submitted.
-          if (deps.accessCheck && !deps.accessCheck(pending.cell, meta.user)) {
+          if (
+            deps.accessCheck &&
+            !deps.accessCheck(
+              pending.cell,
+              meta.user,
+              pending.action,
+              opArgs(pending.payload),
+            )
+          ) {
             deps.log.warn(
               `[sync:server] pending op for access-gated cell "${pending.cell}" denied — dropping`,
             );
@@ -1512,6 +1654,10 @@ export function createServerSyncHandler(
               heldMid = true;
               return;
             }
+            // Another connection's session — see `_foreign`. Holding it
+            // instead stalled a twin tab's whole flush behind an owner that
+            // may never resend.
+            const foreign = sessionOwnedElsewhere(pending.id, socket);
             clock.receive(pending.hlc);
             const serverHlc = clock.tick();
             let serverTs: number | null = null;
@@ -1528,6 +1674,7 @@ export function createServerSyncHandler(
               );
               return; // Don't ack — client keeps it pending and retries
             }
+            if (foreign && serverTs !== null) noteForeign(pending.id);
             // Reconnect-queued ops must reach live state too (same contract
             // as handleOp) — but only ONCE. A pending op is re-sent on every
             // sync round until acked; dispatching a duplicate would re-apply
@@ -1609,6 +1756,11 @@ export function createServerSyncHandler(
                   }),
                   socket,
                 );
+                // Same fold as handleOp. This door never ran it, so a client
+                // that writes mostly offline — every op arriving here — grew
+                // its cell's op-log past `compactOps` for good
+                // (tests/sync/pending-ops-compact.test.ts).
+                await tryCompact(pending.cell);
               }
             }
             if (rejectedReason !== null) {

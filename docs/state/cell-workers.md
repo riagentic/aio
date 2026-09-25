@@ -111,7 +111,15 @@ around the call, and a component that re-renders because of the method's commit,
 are main-isolate code and read freely.
 
 `cell.$pending("method")` on the main isolate counts a worker cell's async call
-for as long as the worker runs it — the same number an in-isolate run reports.
+for as long as the worker runs it — the same number an in-isolate run reports. A
+call the worker answers from another call (a `concurrency: "first"` adopter, a
+`ttl` hit) is not counted, as in-isolate; the worker says so one thread hop
+after the call is posted, so only a read in the same synchronous turn still sees
+it.
+
+A worker cell's errors reach the app's `onError` like any other cell's —
+`INIT_ERROR` from its `onInit`, `EFFECT_ASYNC_ERROR` from a method — with the
+same code and message.
 
 ## What a worker cell cannot use
 
@@ -172,15 +180,32 @@ isolate keeps ticking while a worker cell burns its thread.
 3. The main isolate seeds the worker with the authoritative slice (after
    persistence and migrations), then routes that cell's actions to it — **never
    through the main dispatch queue**, which is what makes the isolation real.
+   The cell's `onInit` runs in the worker **once per boot**, alongside the main
+   cells' `onInit`s — not again when time travel or a snapshot load re-seeds it.
+   An `onInit` that throws or rejects is an `INIT_ERROR` (to `onError`, as on
+   the main isolate); the cell keeps serving calls. A worker that CRASHES is not
+   respawned: the cell answers every later call with the crash, by name, until
+   the app restarts, and `/__aio/health` reports it degraded
+   (`cell-worker:<name>`) — and a restart (including dev's automatic one when a
+   cell file changes) is a new boot, so `onInit` runs again, once. When the
+   entry is not a local module no worker can be spawned: the cell runs on the
+   main isolate with a warning, and its `onInit` runs there. `app.cells.disable`
+   (or a `circuitBreaker` trip) runs the cell's `onDestroy` and state reset in
+   its worker, and `app.cells.enable` its `onInit` — as for a main-isolate cell
+   ([lifecycle](lifecycle.md#runtime-control)).
 4. Each commit's patches stream home and are applied through the normal dispatch
    path, so everything downstream sees an ordinary state change. With
    `journal: true` each batch is journalled (and shown by `am timeline`) as
    `__aioWorkerPatch`, attributed to the cell as `<cell>:__worker` — the batch
    carries no method name, so a cell with any `redactActions` pattern has the
-   batch's values withheld.
+   batch's values withheld. The `dispatchStorm` guard counts the batches per
+   cell under the same name and never drops them — they are writes the worker
+   already made.
 5. Effects that belong to the runtime (schedules, cross-cell dispatches) are
    executed on the main isolate; the cell's own async-method machinery runs in
-   the worker.
+   the worker. A schedule's timer lives on the main isolate, but its tick is
+   routed like any other call: a tick naming a worker cell's method runs in that
+   cell's worker.
 
 See also: [performance](../debugging/performance.md),
 [methods](methods.md#async-methods).

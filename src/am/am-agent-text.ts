@@ -1378,7 +1378,7 @@ ${pre(renderRunKeys())}
 ### deno.json
 
 appId · title · version ("M.m") · client · entry (default src/app.ts) · assets · share
-(["../shared"] → /shared/…) · build { targets, platforms, out, server, css, v8Flags, channel } ·
+(["../shared"] → /shared/…) · build { targets, platforms, out, server, css, v8Flags, minify, channel } ·
 compile.include (extra data files)
 
 ### env

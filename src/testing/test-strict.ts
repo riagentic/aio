@@ -41,6 +41,98 @@ import { attachMeta } from "../state/cell-catalog.ts";
 export function _armTestStrict(): void {
   (globalThis as Record<string, unknown>).__aioDev = true;
   _sandboxAppDirs();
+  _sandboxHomeStores();
+}
+
+/** The per-user stores OUTSIDE the app homes that code a test drives can
+ *  write, each named by the variable that relocates it:
+ *
+ *  - `AIO_VERSIONS_DIR` — `~/.local/lib/aio-versions`, the provisioned
+ *    framework versions every pinned app on the machine runs. MEASURED
+ *    2026-09-24: a test wrote a mid-development snapshot there under the real
+ *    release name; two real apps ran it for hours and `am pin` would not
+ *    replace it (a provisioned version is immutable by design).
+ *  - `AIO_FEEDBACK_DIR` — `~/.local/share/aio/feedback`, `am feedback`'s notes.
+ *  - `AIO_INSTALL_ROOT` — `~/app`, where installed programs live.
+ *  - `AIO_HOME` — the canonical install `am update` fetches, checks out and
+ *    reinstalls `am` from. Pinned to an EMPTY directory: `am link` skips a
+ *    candidate with no `mod.ts` (so it still finds the checkout under test),
+ *    and `am update` refuses loud instead of mutating the real install.
+ *
+ *  Not here, deliberately: `XDG_CACHE_HOME` (`~/.cache/aio/tools`, `…/labs`)
+ *  is a download cache — content-keyed, read-mostly, 100 MB+ per Electron
+ *  runtime — and a private one per test process would re-download it every
+ *  run; `~/.local/share/applications` and `~/.local/bin` move only with
+ *  `HOME`, which the tests that install set themselves.
+ *  @internal */
+export const HOME_STORE_VARS = [
+  "AIO_VERSIONS_DIR",
+  "AIO_FEEDBACK_DIR",
+  "AIO_INSTALL_ROOT",
+  "AIO_HOME",
+] as const;
+
+/** Each {@link HOME_STORE_VARS} entry's sandbox subdirectory. */
+const STORE_SUBDIR: Record<(typeof HOME_STORE_VARS)[number], string> = {
+  AIO_VERSIONS_DIR: "versions",
+  AIO_FEEDBACK_DIR: "feedback",
+  AIO_INSTALL_ROOT: "install-root",
+  AIO_HOME: "aio-home",
+};
+
+/** `<base>/<subdir>` for every store variable — the ONE layout both the
+ *  in-process sandbox and the shard runner hand out. Pure. @internal */
+export function homeStoreEnv(base: string): Record<string, string> {
+  const b = base.replace(/[/\\]+$/, "");
+  return Object.fromEntries(
+    HOME_STORE_VARS.map((k) => [k, `${b}/${STORE_SUBDIR[k]}`]),
+  );
+}
+
+let _storeBase: string | undefined;
+
+/** Pin every {@link HOME_STORE_VARS} variable that is UNSET to a private dir
+ *  under the test root. A value already set — by the runner, or by a test for
+ *  its own fixture — wins; only "unset", which means "the real store", is
+ *  replaced.
+ *
+ *  NOT once-per-process, unlike `_sandboxAppDirs`: tests pin these per test
+ *  and hand them back, and a hand-back that DELETES the variable (the
+ *  `prev === undefined` branch, or a bare `Deno.env.delete`) re-exposes the
+ *  real store to everything after it. So every harness arm and every
+ *  `tempDir()` re-checks — four env reads when nothing is missing. It cannot
+ *  close the window between such a delete and the next arm; the shard runner
+ *  (which sets them for the whole process, so a restore lands on the runner's
+ *  value) and `check:home-clean`'s store diff are the nets for that.
+ *  @internal */
+export function _sandboxHomeStores(): void {
+  try {
+    const missing = HOME_STORE_VARS.filter((k) => !Deno.env.get(k));
+    if (missing.length === 0) return;
+    if (_storeBase === undefined) {
+      const base = aioTestDir("stores-");
+      _storeBase = base;
+      globalThis.addEventListener("unload", () => {
+        try {
+          Deno.removeSync(base, { recursive: true });
+        } catch {
+          // aio-ok: process-exit cleanup of a directory this function made;
+          // "already gone" and "the OS reaps it" are the only ways it fails.
+        }
+      });
+    }
+    const env = homeStoreEnv(_storeBase);
+    for (const k of missing) Deno.env.set(k, env[k]!);
+  } catch (e) {
+    // Loud, not thrown — the same trade `_sandboxAppDirs` makes, and why.
+    console.warn(
+      `[aio:testing] could not sandbox ${HOME_STORE_VARS.join("/")} (${
+        e instanceof Error ? e.message : e
+      }). A test that provisions a framework version, installs, or writes ` +
+        `feedback writes the REAL per-user store. Fix: run with ` +
+        `--allow-env --allow-write, or pin them to a temp dir yourself.`,
+    );
+  }
 }
 
 // A harness must not be able to write into the user's home — not by design, and
@@ -266,6 +358,10 @@ export type CallFailureLedger = {
   /** Add failures the boot recorded before the ledger existed (an `onInit`
    *  that threw — see `_watchInitFailures`); the next `raise()` throws them. */
   adopt(failures: readonly InitFailure[]): void;
+  /** Hold teardown for an async `onInit` still running (`method` names it):
+   *  `drain()` waits for it, `abandon()` names it. Its failure arrives through
+   *  `adopt`, so settling records nothing here. */
+  track(method: string, p: Promise<unknown>): void;
 };
 
 /** Wrap every bound method on `cells` so a rejection nobody looked at is
@@ -353,6 +449,12 @@ export function _watchUnobservedCalls(
         });
       }
     },
+    track(method, p) {
+      const entry: OpenCall = { method, async: true, p, seen: () => false };
+      open.add(entry);
+      const done = () => void open.delete(entry);
+      p.then(done, done);
+    },
     async drain(budgetMs: number) {
       const deadline = Date.now() + budgetMs;
       // Looped: a call that settles can start another (a follow-up dispatch),
@@ -412,21 +514,53 @@ export type InitFailure = { cell: string; err: Error };
  *  @internal */
 export function _watchInitFailures(
   cells: readonly CellDef[],
-): { take(): InitFailure[]; restore(): void } {
+): {
+  take(): InitFailure[];
+  pipe(ledger: Pick<CallFailureLedger, "adopt" | "track">): void;
+  restore(): void;
+} {
   const failures: InitFailure[] = [];
+  /** Async `onInit`s not settled yet — handed to the ledger (see `pipe`). */
+  const running = new Map<Promise<unknown>, string>();
   const undo: (() => void)[] = [];
+  /** Where a failure recorded AFTER the boot goes (see `pipe`). */
+  let sink: ((failures: InitFailure[]) => void) | undefined;
+  const record = (f: InitFailure) => {
+    if (sink) sink([f]);
+    else failures.push(f);
+  };
   for (const def of cells) {
     const meta = def.__aio as unknown as Record<string, unknown> | undefined;
     const original = meta?.onInit;
     if (!meta || typeof original !== "function") continue;
     const cell = def.__aio.id;
     const wrapped = function (this: unknown, ...args: unknown[]): unknown {
+      let r: unknown;
       try {
-        return original.apply(this, args);
+        r = original.apply(this, args);
       } catch (e) {
-        failures.push({ cell, err: initFailureError(cell, e) });
+        record({ cell, err: initFailureError(cell, e) });
         throw e;
       }
+      // An `async onInit` fails by REJECTING. The runtime now reports that as
+      // INIT_ERROR too (cell-compose-registry.ts) — which also means it is no
+      // longer an unhandled rejection that failed the test by itself, so the
+      // harness has to record it or the test would pass on a broken boot.
+      const then = (r as { then?: unknown } | null)?.then;
+      if (typeof then === "function") {
+        // It may reject long after the boot the harness reads failures at —
+        // an `onInit` that awaits real I/O — so it goes through `record`,
+        // which hands it to the ledger once one is piped (see `pipe`).
+        const p = Promise.resolve(
+          then.call(r, undefined, (e: unknown) => {
+            record({ cell, err: initFailureError(cell, e) });
+          }),
+        );
+        running.set(p, cell);
+        const done = () => void running.delete(p);
+        p.then(done, done);
+      }
+      return r;
     };
     meta.onInit = wrapped;
     undo.push(() => {
@@ -435,6 +569,19 @@ export function _watchInitFailures(
   }
   return {
     take: () => failures.splice(0),
+    // What the boot recorded, then every later failure as it lands. `take()`
+    // alone read the list ONCE, right after the boot, so an async `onInit`
+    // that rejected later was recorded where nothing looked again.
+    // …and every `onInit` still running is held open in it: a teardown that
+    // drains only CALLS reset the boot under a pending `onInit`, which then
+    // rejected into a ledger nothing read again — a green test on a broken
+    // boot.
+    pipe(ledger) {
+      sink = (f) => ledger.adopt(f);
+      const now = failures.splice(0);
+      if (now.length > 0) ledger.adopt(now);
+      for (const [p, cell] of running) ledger.track(`${cell}.onInit()`, p);
+    },
     restore() {
       for (const fn of undo.splice(0)) fn();
     },
@@ -488,6 +635,30 @@ export const _DISPOSE_DRAIN_MS = 250;
  *  these is invisible from here, and the test author has to know that.
  *  @internal */
 export function _abandonedCallsWarning(
+  harness: string,
+  methods: readonly string[],
+  spelling: string,
+): string {
+  // A pending `onInit` (held by `track`, named `<cell>.onInit()`) is no call:
+  // nobody can await it, and a long-lived one — a poll loop — is an ordinary
+  // cell. "Await the call" was advice with nothing to act on.
+  const inits = methods.filter((m) => m.endsWith(".onInit()"));
+  const calls = methods.filter((m) => !m.endsWith(".onInit()"));
+  const initLine = inits.length === 0 ? "" : `[aio:test] ${harness} ` +
+    `teardown with ${inits.join(", ")} still running — teardown orphans ` +
+    `it, so if it fails afterwards this test cannot see it.\n` +
+    `  fine if it is long-lived by design (a poll loop): end it from the ` +
+    `cell's onDestroy, which teardown runs. If it should have finished, make ` +
+    `the test wait for the state it sets up before teardown.`;
+  if (calls.length === 0) return initLine;
+  return (initLine ? initLine + "\n" : "") + _callsWarning(
+    harness,
+    calls,
+    spelling,
+  );
+}
+
+function _callsWarning(
   harness: string,
   methods: readonly string[],
   spelling: string,

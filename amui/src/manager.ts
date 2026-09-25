@@ -278,14 +278,17 @@ function normalizeVitals(v: RawVitals | null): AppVitals | null {
 async function fetchDiag(
   port: number,
   appId: string,
+  pid: number,
 ): Promise<Diag> {
   const { trojanGet, httpGet } = await import("./server/control.server.ts");
+  // `pid` on every call: two zero-port UDS instances of one app (a default
+  // and a profile) are told apart by nothing else.
   const [healthR, vitalsR, clientsR, historyR, promR] = await Promise.all([
-    httpGet(port, "/__aio/health", appId),
-    httpGet(port, "/__aio/vitals", appId),
-    trojanGet(port, "clients", appId),
-    trojanGet(port, "history", appId),
-    httpGet(port, "/__aio/metrics", appId),
+    httpGet(port, "/__aio/health", appId, undefined, pid),
+    httpGet(port, "/__aio/vitals", appId, undefined, pid),
+    trojanGet(port, "clients", appId, undefined, pid),
+    trojanGet(port, "history", appId, undefined, pid),
+    httpGet(port, "/__aio/metrics", appId, undefined, pid),
   ]);
   // Total reads — a foreign/older app may answer `history` with JSON `null` or
   // a non-object, and `clients` with a non-array; never deref blindly.
@@ -316,6 +319,8 @@ async function fetchDiag(
 }
 
 export interface ProjectDetail {
+  /** The list entry this detail shows — {@linkcode DiscoveredProject.id}. */
+  id: string;
   path: string;
   name: string;
   running: boolean;
@@ -352,6 +357,7 @@ export interface ProjectDetail {
 const plain = <T>(v: T): T => (v == null ? v : JSON.parse(JSON.stringify(v)));
 
 const detailOf = (p: DiscoveredProject): ProjectDetail => ({
+  id: p.id,
   path: p.path,
   name: p.name,
   running: !!p.running,
@@ -407,6 +413,7 @@ export function reconcileDetail(
   };
   return {
     ...detail,
+    id: fresh.id,
     running: up,
     appId,
     pid,
@@ -426,6 +433,7 @@ interface ScanTarget {
   projects: DiscoveredProject[];
   scanRoots: string[];
   lastScan: string | null;
+  selectedId: string | null;
   selectedPath: string | null;
   detail: ProjectDetail | null;
   cpuHistory: number[];
@@ -476,18 +484,18 @@ function applyScan(
   s.projects = found;
   s.scanRoots = roots;
   s.lastScan = new Date().toISOString();
-  const sel = s.selectedPath
-    ? found.find((p) => p.path === s.selectedPath)
-    : undefined;
-  if (s.selectedPath && !sel) {
+  const sel = s.selectedId ? followSelection(found, s.selectedId) : undefined;
+  if (s.selectedId && !sel) {
+    s.selectedId = null;
     s.selectedPath = null;
     s.detail = null;
   } else if (sel && s.detail) {
+    if (sel.id !== s.selectedId) s.selectedId = sel.id;
     // Decide from the PROXY (reads only) whether anything changed, so an
     // unchanged app doesn't reassign s.detail every 9s (needless re-render).
     const d = s.detail;
     const up = !!sel.running;
-    const changed = up !== d.running ||
+    const changed = sel.id !== d.id || up !== d.running ||
       (sel.running?.appId ?? null) !== d.appId ||
       (sel.running?.pid ?? null) !== d.pid ||
       (sel.running?.port ?? null) !== d.port ||
@@ -509,6 +517,54 @@ function applyScan(
   }
 }
 
+/** The entry `key` names: its exact {@linkcode DiscoveredProject.id}, else —
+ *  for callers that address a project by directory (`am dispatch`, older
+ *  clients) — the ONE entry at that path. A path two instances share names
+ *  neither: guessing would stop the wrong one. */
+export function findProject(
+  projects: readonly DiscoveredProject[],
+  key: string,
+): DiscoveredProject | undefined {
+  let atPath: DiscoveredProject | undefined;
+  let n = 0;
+  for (let i = 0; i < projects.length; i++) {
+    const p = projects[i]!;
+    if (p.id === key) return p;
+    if (p.path === key) {
+      atPath = p;
+      n++;
+    }
+  }
+  return n === 1 ? atPath : undefined;
+}
+
+/** How many entries run from `path` — for the "which one?" refusal. */
+const sharing = (projects: readonly DiscoveredProject[], path: string) => {
+  let n = 0;
+  for (let i = 0; i < projects.length; i++) {
+    if (projects[i]!.path === path) n++;
+  }
+  return n;
+};
+
+/** Where a selection goes after a rescan. The entry itself when it is still
+ *  listed; across a start/stop the id changes form (an idle project is its
+ *  path, a running instance `path#appId#home`), so an instance that stopped
+ *  follows to its idle entry, and an idle project that started follows to
+ *  its instance when exactly one runs there. Never to a SIBLING instance —
+ *  that would silently show (and let you stop) a different process. */
+function followSelection(
+  found: readonly DiscoveredProject[],
+  id: string,
+): DiscoveredProject | undefined {
+  const exact = found.find((p) => p.id === id);
+  if (exact) return exact;
+  const path = id.split("#")[0]!;
+  if (path !== id) return found.find((p) => p.id === path);
+  const at = found.filter((p) => p.path === id);
+  return at.length === 1 ? at[0] : undefined;
+}
+
 /** Scan the disk + registry and fold the result into state (shared by discover
  *  and the post-action refreshes). Throws only if the scan import fails. */
 async function rescanInto(s: ScanTarget): Promise<void> {
@@ -522,11 +578,34 @@ async function rescanInto(s: ScanTarget): Promise<void> {
  *  self entry; this is the enforcement (methods are also reachable by dispatch
  *  — `am` and the trojan route — so the UI alone is not a guard). Returns a
  *  refusal message, or null when the path is some other app. */
-async function refuseSelf(path: string): Promise<string | null> {
+const SELF_REFUSAL =
+  "that's amui itself — manage it from the shell that launched it";
+async function refuseSelf(
+  proj: DiscoveredProject | undefined,
+  path: string,
+): Promise<string | null> {
+  if (proj?.running?.pid === Deno.pid) return SELF_REFUSAL;
   const { selfPaths } = await import("./server/scan.server.ts");
-  return (await selfPaths()).has(path)
-    ? "that's amui itself — manage it from the shell that launched it"
-    : null;
+  return (await selfPaths()).has(proj?.path ?? path) ? SELF_REFUSAL : null;
+}
+
+const ambiguous = (path: string) =>
+  `several instances run from ${path} — pick one in the list`;
+
+/** A registry entry held by `am backup` / `am restore` is NOT an app: port 0,
+ *  nothing to shut down gracefully, and its pid is the maintenance op itself.
+ *  amui listed it as running and its Stop/Restart went straight to the SIGTERM
+ *  fallback — killing the user's backup or restore mid-copy (`am stop`
+ *  refuses exactly this). Returns `am`'s own refusal, or null for an app. */
+async function refuseHold(
+  running: DiscoveredProject["running"] | undefined,
+): Promise<string | null> {
+  if (!running?.maintenance) return null;
+  const { maintenanceMessage } = await import("./server/control.server.ts");
+  return maintenanceMessage(running.appId, {
+    pid: running.pid,
+    maintenance: plain(running.maintenance),
+  });
 }
 
 export const manager = cell("manager", {
@@ -543,6 +622,9 @@ export const manager = cell("manager", {
   cancelOn: { runTask: [{ type: "manager:cancelTask" }] },
   state: {
     projects: [] as DiscoveredProject[],
+    /** The selected entry's {@linkcode DiscoveredProject.id} — THE selection. */
+    selectedId: null as string | null,
+    /** The selected entry's directory (files/logs/tasks read it). */
     selectedPath: null as string | null,
     detail: null as ProjectDetail | null,
     detailLoading: false,
@@ -581,6 +663,7 @@ export const manager = cell("manager", {
     // pulled on select (a 350KB foreign state on every click floods sync/render)
     detailState: null as unknown,
     detailFields: null as CellFieldFlags | null,
+    /** The entry id (not a path) the loaded state belongs to. */
     detailStatePath: null as string | null,
     detailStateSize: 0,
     detailStateTruncated: false,
@@ -627,11 +710,16 @@ export const manager = cell("manager", {
      *  heavy live `state` is NOT fetched here — it loads lazily for the State
      *  tab (see loadState). Gives INSTANT feedback: the skeleton + spinner land
      *  synchronously, real data merges when the (timeout-bounded) fetches return. */
-    async select(s, path: string) {
-      const proj = s.projects.find((p) => p.path === path);
+    async select(s, key: string) {
+      const proj = findProject(s.projects, key);
       if (!proj) return;
+      const id = proj.id;
+      const path = proj.path;
 
       // ── instant feedback (committed before any await) ──
+      // EVERY per-app view field resets here — one left behind paints the
+      // previous app's banner/error/flag on this one until its data loads.
+      s.selectedId = id;
       s.selectedPath = path;
       s.detail = detailOf(proj);
       s.detailLoading = true;
@@ -651,6 +739,11 @@ export const manager = cell("manager", {
       s.detailFields = null;
       s.detailStatePath = null;
       s.detailStateError = null;
+      s.detailStateTruncated = false;
+      s.detailStateSize = 0;
+      s.detailStateLoading = false;
+      s.controlError = null;
+      s.logTruncated = false;
       s.cpuHistory = [];
       s.memHistory = [];
       s.heapHistory = [];
@@ -716,13 +809,16 @@ export const manager = cell("manager", {
         const { psStats } = await import("./server/proc.server.ts");
         const [config, metrics, cells, errors, schedules, ps, d] = await Promise
           .all([
-            trojanGet(port, "config", appId),
-            trojanGet(port, "metrics", appId),
-            trojanGet(port, "cells", appId),
-            trojanGet(port, "errors", appId),
-            trojanGet(port, "schedules", appId),
+            // The row's PID picks the instance: a profile instance on a
+            // zero-port socket is otherwise indistinguishable from the
+            // default one, and every call reached the default's socket.
+            trojanGet(port, "config", appId, undefined, pid),
+            trojanGet(port, "metrics", appId, undefined, pid),
+            trojanGet(port, "cells", appId, undefined, pid),
+            trojanGet(port, "errors", appId, undefined, pid),
+            trojanGet(port, "schedules", appId, undefined, pid),
             psStats(pid),
-            fetchDiag(port, appId),
+            fetchDiag(port, appId, pid),
           ]);
         diag = d;
         diag.controlError ??= controlErrorOf([config, metrics, cells, errors]);
@@ -751,7 +847,7 @@ export const manager = cell("manager", {
 
       // Supersede guard: if the user clicked another project mid-fetch, drop
       // this result rather than overwriting the newer selection.
-      if (s.selectedPath !== path) return;
+      if (s.selectedId !== id) return;
       s.detail = base;
       s.detailLoading = false;
       s.fileTree = files;
@@ -777,9 +873,10 @@ export const manager = cell("manager", {
 
     /** Load the enclosing repo's full file tree for the Codebase tab (lazy —
      *  the app dir's tree is already loaded by select). */
-    async loadCodebase(s, path: string) {
-      const proj = s.projects.find((p) => p.path === path);
+    async loadCodebase(s, key: string) {
+      const proj = findProject(s.projects, key);
       if (!proj || s.repoRoot === null) return;
+      const id = proj.id;
       const root = s.repoRoot;
       s.codebaseLoading = true;
       const { listFiles } = await import("./server/proc.server.ts");
@@ -792,7 +889,7 @@ export const manager = cell("manager", {
       } catch { /* unreadable */ }
       // Superseded by a newer selection → drop this result without touching the
       // spinner (a newer loadCodebase owns it now).
-      if (s.selectedPath !== path) return;
+      if (s.selectedId !== id) return;
       s.codebaseLoading = false;
       s.codebaseTree = nodes;
       s.codebaseTruncated = truncated;
@@ -801,31 +898,35 @@ export const manager = cell("manager", {
     /** Load the selected running app's live state for the State tab (lazy +
      *  size-capped). Never auto-polled: the monitored app's state may churn
      *  constantly, so amui pulls it on demand only. */
-    async loadState(s, path: string) {
-      const proj = s.projects.find((p) => p.path === path);
+    async loadState(s, key: string) {
+      const proj = findProject(s.projects, key);
+      const id = proj?.id ?? key;
       if (!proj?.running) {
         s.detailState = null;
         s.detailFields = null;
-        s.detailStatePath = path;
+        s.detailStatePath = id;
         s.detailStateError = "app not running";
+        s.detailStateTruncated = false;
+        s.detailStateSize = 0;
         return;
       }
       s.detailStateLoading = true;
       s.detailStateError = null;
-      const { appId, port } = proj.running;
+      const { appId, port, pid } = proj.running;
       const { trojanGet } = await import("./server/control.server.ts");
       // Full merged state (every cell) + per-field persist/ui flags in parallel.
+      // By pid — THIS instance's state, not a sibling profile's.
       const [r, f] = await Promise.all([
-        trojanGet(port, "state", appId),
-        trojanGet(port, "fields", appId),
+        trojanGet(port, "state", appId, undefined, pid),
+        trojanGet(port, "fields", appId, undefined, pid),
       ]);
       // Supersede guard.
-      if (s.selectedPath !== path) {
+      if (s.selectedId !== id) {
         s.detailStateLoading = false;
         return;
       }
       s.detailStateLoading = false;
-      s.detailStatePath = path;
+      s.detailStatePath = id;
       s.detailFields = f.ok ? (f.data as CellFieldFlags) : null;
       if (!r.ok) {
         s.detailState = null;
@@ -860,18 +961,27 @@ export const manager = cell("manager", {
     // makes optionality visible at runtime, which is exactly what that warning
     // asks for. The real default depends on state (`s.logSource`), so it stays
     // in the body.
-    async loadLogs(s, path: string, source: LogSource | undefined = undefined) {
-      const proj = s.projects.find((p) => p.path === path);
+    async loadLogs(s, key: string, source: LogSource | undefined = undefined) {
+      const proj = findProject(s.projects, key);
       if (!proj) return;
+      const id = proj.id;
+      const path = proj.path;
       const src = (source ?? s.logSource) as LogSource;
       s.logSource = src;
       s.logLoading = true;
       s.logError = null;
       try {
         const { readLogs } = await import("./server/proc.server.ts");
-        // appId unlocks the app's own `~/.<appId>/logs/` (alpha38 layout).
-        const r = await readLogs(path, src, 500, proj.running?.appId ?? null);
-        if (s.selectedPath !== path) return;
+        // appId unlocks the app's own `~/.<appId>/logs/` (alpha38 layout);
+        // the lock's home picks THIS instance's (a profile's is not ~/.<appId>).
+        const r = await readLogs(
+          path,
+          src,
+          500,
+          proj.running?.appId ?? null,
+          proj.running?.home ?? null,
+        );
+        if (s.selectedId !== id) return;
         s.logPath = r.path;
         s.logTruncated = r.truncated;
         s.logs = r.missing ? [] : r.lines.map(parseLogLine);
@@ -879,7 +989,7 @@ export const manager = cell("manager", {
           ? `no ${src} log found (app may not have written one yet)`
           : null;
       } catch (e) {
-        if (s.selectedPath === path) {
+        if (s.selectedId === id) {
           s.logError = `failed to read logs: ${
             e instanceof Error ? e.message : String(e)
           }`;
@@ -920,7 +1030,7 @@ export const manager = cell("manager", {
       }
 
       async function tickBody() {
-        const { pid, port, path } = before!;
+        const { pid, port, id } = before!;
         const appId = before!.appId!;
         // Snapshot the histories to PLAIN arrays. The async method's `s` exposes
         // array state as a proxy whose spread iterator throws ("not iterable")
@@ -935,15 +1045,15 @@ export const manager = cell("manager", {
         const { trojanGet } = await import("./server/control.server.ts");
         const { psStats } = await import("./server/proc.server.ts");
         const [metrics, ps, diag] = await Promise.all([
-          trojanGet(port!, "metrics", appId),
+          trojanGet(port!, "metrics", appId, undefined, pid!),
           psStats(pid!),
-          fetchDiag(port!, appId),
+          fetchDiag(port!, appId, pid!),
         ]);
         // Re-read AFTER the awaits — a stop()/select() may have superseded us
         // during the (up to a few second) trojan/ps round-trip. Drop this sample
         // rather than resurrecting the stale snapshot.
         const d = plain(s.detail);
-        if (!d || d.path !== path || !d.running) return;
+        if (!d || d.id !== id || !d.running) return;
         const cpu = ps?.cpuPct ?? d.cpuPct ?? 0;
         const mem = ps?.memMb ?? d.memMb ?? 0;
         const heapMb = diag.mem
@@ -995,9 +1105,14 @@ export const manager = cell("manager", {
     },
 
     /** Run a method on a running app (trojan dispatch — the "run method" button). */
-    async dispatch(s, path: string, type: string, payloadJson: string) {
-      const proj = s.projects.find((p) => p.path === path);
-      if (!proj?.running) return;
+    async dispatch(s, key: string, type: string, payloadJson: string) {
+      const proj = findProject(s.projects, key);
+      if (!proj?.running) {
+        if (!proj && sharing(s.projects, key) > 1) {
+          s.dispatchMsg = ambiguous(key);
+        }
+        return;
+      }
       let payload: unknown;
       const trimmed = (payloadJson ?? "").trim();
       if (trimmed) {
@@ -1031,28 +1146,37 @@ export const manager = cell("manager", {
           ? { type, payload: envelopeJsonPayload(type, payload) }
           : { type },
         proj.running.appId,
+        undefined,
+        // The pid, so a dispatch to a profile row lands in THAT instance's
+        // state — not the default instance's, on a zero-port socket.
+        proj.running.pid,
       );
       s.dispatchMsg = r.ok ? `dispatched ${type}` : `error: ${r.error}`;
     },
 
     /** Start a stopped project's app (browser shell, detached). Waits for the
      *  app to REGISTER as running before claiming it started — see awaitBoot. */
-    async start(s, path: string) {
-      const refusal = await refuseSelf(path);
+    async start(s, key: string) {
+      const proj = findProject(s.projects, key);
+      const path = proj?.path ?? key;
+      const refusal = await refuseSelf(proj, path);
       if (refusal) {
         s.actionMsg = refusal;
         return;
       }
       const name = path.split("/").pop();
       s.actionMsg = `starting ${name}…`;
-      const { startApp, awaitBoot } = await import("./server/proc.server.ts");
+      const { startApp, awaitBoot, pidsAt } = await import(
+        "./server/proc.server.ts"
+      );
+      const before = await pidsAt(path);
       const r = await startApp(path, "browser");
       if (!r.ok) {
         s.actionMsg = `start failed: ${r.error}`;
         return;
       }
       s.actionMsg = `started (pid ${r.pid ?? "?"}) — waiting for boot…`;
-      const boot = await awaitBoot(path, r.pid);
+      const boot = await awaitBoot(path, r.pid, undefined, before);
       await rescanInto(s).catch(() => {});
       s.actionMsg = boot.up
         ? `started ${name}`
@@ -1060,27 +1184,41 @@ export const manager = cell("manager", {
     },
 
     /** Stop a running app (graceful trojan shutdown, SIGTERM fallback). */
-    async stop(s, path: string) {
-      const refusal = await refuseSelf(path);
+    async stop(s, key: string) {
+      const proj = findProject(s.projects, key);
+      const refusal = await refuseSelf(proj, key);
       if (refusal) {
         s.actionMsg = refusal;
         return;
       }
-      const proj = s.projects.find((p) => p.path === path);
+      if (!proj && sharing(s.projects, key) > 1) {
+        s.actionMsg = ambiguous(key);
+        return;
+      }
       if (!proj?.running) return;
-      const { appId, port, pid } = proj.running;
+      const id = proj.id;
+      const path = proj.path;
+      // Snapshot before the await — `proj` is a live draft a concurrent
+      // discover() can revoke.
+      const running = plain(proj.running);
       const name = proj.name;
+      const held = await refuseHold(running);
+      if (held) {
+        s.actionMsg = held;
+        return;
+      }
+      const { appId, port, pid } = running;
       s.actionMsg = `stopping ${name}…`;
       const { stopApp, awaitDown } = await import("./server/proc.server.ts");
       const r = await stopApp(port, appId, pid);
-      if (s.detail && s.detail.path === path) {
+      if (s.detail && s.detail.id === id) {
         s.detail = { ...plain(s.detail), running: false, status: "stopping" };
         clearLiveDiagnostics(s);
       }
       // `stopApp` only reports that the request/signal was DELIVERED. Wait for
       // the app to actually deregister before saying it stopped — an app that
       // ignores SIGTERM would otherwise read as "stopped" while still serving.
-      const down = r.ok && await awaitDown(path);
+      const down = r.ok && await awaitDown(path, undefined, pid);
       // Refresh so the sidebar dot + detail agree with the verdict.
       await rescanInto(s).catch(() => {});
       s.actionMsg = !r.ok
@@ -1091,36 +1229,52 @@ export const manager = cell("manager", {
     },
 
     /** Restart: stop (if running) then start; rescan after. */
-    async restart(s, path: string) {
-      const refusal = await refuseSelf(path);
+    async restart(s, key: string) {
+      const proj = findProject(s.projects, key);
+      const refusal = await refuseSelf(proj, key);
       if (refusal) {
         s.actionMsg = refusal;
         return;
       }
-      const proj = s.projects.find((p) => p.path === path);
+      if (!proj && sharing(s.projects, key) > 1) {
+        s.actionMsg = ambiguous(key);
+        return;
+      }
+      const path = proj?.path ?? key;
       const name = path.split("/").pop();
+      const running = proj?.running ? plain(proj.running) : null;
+      const heldBy = await refuseHold(running);
+      if (heldBy) {
+        s.actionMsg = heldBy;
+        return;
+      }
       s.actionMsg = `restarting…`;
-      const { startApp, stopApp, awaitBoot, awaitDown } = await import(
+      const { startApp, stopApp, awaitBoot, awaitDown, pidsAt } = await import(
         "./server/proc.server.ts"
       );
-      if (proj?.running) {
-        const { appId, port, pid } = proj.running;
+      if (running) {
+        const { appId, port, pid } = running;
         await stopApp(port, appId, pid);
         // Wait for the port/singleton to be genuinely free — starting on top of
         // a still-live instance is how a restart "succeeds" into the OLD app.
-        if (!await awaitDown(path)) {
+        // THIS instance's pid: a sibling instance in the same directory stays
+        // up, and "anything registered here" never reads as down.
+        if (!await awaitDown(path, undefined, pid)) {
           s.actionMsg = `restart failed: ${name} did not stop (pid ${pid})`;
           await rescanInto(s).catch(() => {});
           return;
         }
       }
-      const r = await startApp(path, "browser");
+      // Boot the SAME instance again: a profile instance restarted without
+      // its profile comes back as the default one.
+      const before = await pidsAt(path);
+      const r = await startApp(path, "browser", running?.profile);
       if (!r.ok) {
         s.actionMsg = `restart failed: ${r.error}`;
         return;
       }
       s.actionMsg = `restarted (pid ${r.pid ?? "?"}) — waiting for boot…`;
-      const boot = await awaitBoot(path, r.pid);
+      const boot = await awaitBoot(path, r.pid, undefined, before);
       await rescanInto(s).catch(() => {});
       s.actionMsg = boot.up
         ? `restarted ${name}`
@@ -1174,7 +1328,9 @@ export const manager = cell("manager", {
     /** Open a cell's source in the viewer — locate `cell("<name>")` in the app's
      *  source tree (the repo if present, else the runtime/app dir) and load it.
      *  A compiled app with no source alongside it reports "not found". */
-    async openCellSource(s, path: string, cellName: string) {
+    async openCellSource(s, key: string, cellName: string) {
+      const id = findProject(s.projects, key)?.id ?? key;
+      const path = findProject(s.projects, key)?.path ?? key;
       const base = s.repoRoot ?? s.runtime?.root ?? path;
       // reset the viewer up front (committed before the await)
       s.openFilePath = null;
@@ -1187,7 +1343,7 @@ export const manager = cell("manager", {
         "./server/proc.server.ts"
       );
       const found = await findCellSource(base, cellName);
-      if (s.selectedPath !== path) return;
+      if (s.selectedId !== id) return;
       if (!found) {
         s.openFilePath = `cell "${cellName}"`;
         s.fileNotice =
@@ -1195,7 +1351,7 @@ export const manager = cell("manager", {
         return;
       }
       const r = await readFile(base, found.rel);
-      if (s.selectedPath !== path) return;
+      if (s.selectedId !== id) return;
       s.openFilePath = found.rel;
       s.openFileBase = base;
       s.fileContent = r.ok ? (r.content ?? "") : null;

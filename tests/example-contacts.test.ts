@@ -135,3 +135,26 @@ Deno.test("example contacts: the UI creates, edits and deletes", async () => {
   ui["delete-1"].click();
   await ui.expectCell(contacts, (c) => c.contacts.length === 0);
 });
+
+// `update`'s patch is typed `Partial<Omit<Contact, "id">>`, but a call that
+// is not TypeScript — `am dispatch`, a CLI, another client's JSON — carries
+// whatever keys it likes. `{ ...row, ...patch }` let `{ id: 2 }` rename a
+// contact onto another's primary key: the dispatch acked ok, and from then on
+// the `db:` table refused the duplicate and the WHOLE cell stopped reaching
+// disk — every later create/edit/delete lost on restart. Only the editable
+// fields are taken from a patch; the id stays the cell's.
+testCell(contacts, "an update cannot rewrite a contact's id", async (t) => {
+  t.init();
+  await t.send.create({ name: "Ada", email: "ada@example.com" });
+  await t.send.create({ name: "Bob", email: "bob@example.com" });
+  // deno-lint-ignore no-explicit-any -- an untyped caller, on purpose
+  await t.send.update(1, { id: 2, phone: "123", note: " hi " } as any);
+  const rows = t.getState().contacts;
+  assertEquals(rows.map((c) => c.id), [1, 2]);
+  assertEquals(rows[0], {
+    id: 1,
+    name: "Ada",
+    email: "ada@example.com",
+    note: "hi",
+  });
+});

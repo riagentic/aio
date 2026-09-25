@@ -272,10 +272,12 @@ let _warnedDenoJsonPort = false;
 function _warnDenoJsonPort(): void {
   if (_warnedDenoJsonPort) return;
   try {
-    const cfg = JSON.parse(
-      Deno.readTextFileSync(join(projectRoot(), "deno.json")),
-    ) as { port?: number };
-    if (typeof cfg.port !== "number") return;
+    // THE reader: JSONC, both filenames. `JSON.parse` of deno.json alone
+    // said nothing for a deno.jsonc, or for a deno.json with one comment.
+    const cfg = readDenoJsonSync(projectRoot())?.config as
+      | { port?: unknown }
+      | undefined;
+    if (typeof cfg?.port !== "number") return;
     _warnedDenoJsonPort = true;
     sayErr(
       `[am] note: deno.json has a top-level "port": ${cfg.port} — aio never ` +
@@ -912,6 +914,11 @@ const NEEDS_A_VALUE: Readonly<Record<string, string>> = {
   "--entry": "--entry needs a file: --entry=src/app.ts",
   "--profile":
     "--profile needs a name or a folder: --profile=dev, --profile=~/data/x",
+  // `--body=` is falsy, so `am dispatch t:add --body="$PAYLOAD"` with an
+  // unset variable fell through to the positional path and CALLED the method
+  // with no arguments, {"ok":true}. `--args=` has always refused.
+  "--body":
+    `--body needs JSON: --body='{"type":"T","payload":{…}}' (or --body=@file.json)`,
 };
 
 /** The client INDEX has four spellings; this is the long one.

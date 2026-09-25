@@ -51,6 +51,50 @@ export function filterStateBySubs(
   return filtered;
 }
 
+/** The subscription a read of a `scope: "client"` cell sends: it names no
+ *  cell (a cell id cannot start with `$`), so it narrows the connection to
+ *  nothing — a server of any version filters it out — and is not a typo'd id
+ *  to warn about. */
+export const CLIENT_ONLY_SUB = "$client";
+
+/** Unknown ids already warned about by `warnUnknownSubs` — once per id per
+ *  process, and at most `UNKNOWN_SUBS_SAID_CAP` of them: the ids come from
+ *  clients, so an unbounded set (or log) is a client-driven cost. */
+const _unknownSubsSaid = new Set<string>();
+const UNKNOWN_SUBS_SAID_CAP = 100;
+
+/**
+ * Warn — once per id, dev and prod — about a subscription whose cell id this
+ * server does not have. `filterStateBySubs` keeps only the cells that exist,
+ * so a typo'd id ("todo" for "todos") is an empty view for the life of the
+ * connection with nothing naming the cause. Accepted all the same (1.0.11
+ * accepted it; refusing would break a client that works today).
+ */
+export function warnUnknownSubs(
+  subs: Set<string> | null,
+  known: ReadonlySet<string>,
+  where: "ws" | "uds" = "ws",
+): void {
+  if (!subs) return;
+  for (const sub of subs) {
+    const id = sub.includes(".") ? sub.slice(0, sub.indexOf(".")) : sub;
+    if (id === CLIENT_ONLY_SUB) continue;
+    if (known.has(id) || _unknownSubsSaid.has(id)) continue;
+    if (_unknownSubsSaid.size >= UNKNOWN_SUBS_SAID_CAP) return;
+    _unknownSubsSaid.add(id);
+    log.warn(
+      where,
+      `a client subscribed to "${sub}", but this server has no cell "${id}" ` +
+        `— it will receive nothing for it. Known cells: ${
+          [...known].sort().join(", ") || "(none)"
+        }. A typo'd cell id?` +
+        (_unknownSubsSaid.size === UNKNOWN_SUBS_SAID_CAP
+          ? ` (${UNKNOWN_SUBS_SAID_CAP} unknown ids reported — no more will be.)`
+          : ""),
+    );
+  }
+}
+
 /** Filter patch entries — keep only those matching at least one subscription path */
 export function filterPatchesBySubs(
   patches: PatchEntry[],

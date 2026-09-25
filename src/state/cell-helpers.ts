@@ -48,6 +48,122 @@ export function normalizePersistFilter(
   return persist;
 }
 
+/** A `visible:` / `persist:` value that is not a filter AT ALL — not "all",
+ *  not "none", not an object (`true`, `false`, `1`, `"some"`, an array). The
+ *  message and whether it is REFUSED, or null for a value of the right kind
+ *  (its CONTENTS are `validateFieldFilters`' business).
+ *
+ *  Typed out of existence, so it arrives from JS, from config built at
+ *  runtime, or through a cast. Two outcomes, and both were silent about it:
+ *
+ *  · a TRUTHY non-filter: every reader asked `"include" in v` of a
+ *    primitive — a bare `TypeError: Cannot use 'in' operator to search for
+ *    'include' in true`, at cell() for `visible` and at BOOT for `persist`,
+ *    naming neither the cell nor the fix. Refused (it always was), named.
+ *    `persist: true` is the likely one: it is the APP option's spelling.
+ *  · a FALSY one (`false`, `null`, `0`, `""`): read as absent, i.e. the
+ *    default "all" — `visible: false` sends every field to every client,
+ *    `persist: false` writes every field to disk. That booted on 1.0.11, so
+ *    it is not refused; it is said. */
+export function filterValueProblem(
+  name: string,
+  kind: "visible" | "persist",
+  v: unknown,
+): { msg: string; refused: boolean } | null {
+  if (v === undefined || v === "all" || v === "none") return null;
+  if (v !== null && typeof v === "object" && !Array.isArray(v)) return null;
+  const forms = `${kind}: "all" (the default), "none", { include: [...] } ` +
+    `or { exclude: [...] }${kind === "visible" ? " (or { forUser })" : ""}`;
+  const shown = JSON.stringify(v) ?? String(v);
+  // An array or a function: `"include" in v` answers false instead of
+  // throwing, so it booted on 1.0.11 — as no filter anyone applies. Said, not
+  // refused; what each reader then makes of it is not promised here.
+  if (typeof v === "object" || typeof v === "function") {
+    if (v !== null) {
+      return {
+        refused: false,
+        msg: `[cell:${name}] ${kind} is ${shown} — not a filter, so none of ` +
+          `the field names in it is applied. FIX: ${forms}.`,
+      };
+    }
+  }
+  if (!v) {
+    return {
+      refused: false,
+      // Read as ABSENT — so `cellDefaults.<kind>` fills it when the app sets
+      // one (cell-defaults.ts fills a cell whose filter is unset), and only
+      // otherwise "all".
+      // cell() cannot see cellDefaults, so the message names both.
+      msg: `[cell:${name}] ${kind} is ${shown}, which is read as absent — ` +
+        `\`cellDefaults.${kind}\` if the app sets one, else the default ` +
+        `"all": every field is ${
+          kind === "visible"
+            ? "sent to every client"
+            : "written to the database"
+        }. FIX: ${kind}: "none" to ${
+          kind === "visible" ? "send nothing" : "store nothing"
+        }, or "all" to say it. The forms: ${forms}.`,
+    };
+  }
+  return {
+    refused: true,
+    msg: `[cell:${name}] ${kind} is ${shown} — not a filter. FIX: ${forms}${
+      kind === "persist" && v === true
+        ? ` — \`persist: true\` is the aio.run() option, not a cell's`
+        : ""
+    }.`,
+  };
+}
+
+/** The keys a `visible:` OBJECT is read for. Anything else is never read. */
+const VISIBLE_KEYS = ["include", "exclude", "forUser", "publicFields"];
+
+/** WARN (never throw — each of these booted on 1.0.11) about a filter shape
+ *  that silently does something other than what it says:
+ *
+ *  · a `visible:` object with a key nothing reads (`{ exlude: [...] }`). With
+ *    no include/exclude it resolves to `visible: "all"` — the field it meant
+ *    to hide goes to every client and the boot report says `visible=all`.
+ *    (`persist:` has its own refusal for that, `namesNoFilterMode`; `visible`
+ *    cannot share it, because `{ forUser }` alone is legal.)
+ *  · a `persist:` value that is not a filter at all — {@link
+ *    filterValueProblem}. `cell()` let it through and the boot died on it;
+ *    it is said HERE, where the cell is named, before the boot refuses it.
+ *
+ *  Pure apart from `warn`. */
+export function warnFilterShape(
+  name: string,
+  visible: unknown,
+  persist: unknown,
+  warn: (msg: string) => void,
+): void {
+  if (visible && typeof visible === "object" && !Array.isArray(visible)) {
+    for (const key of Object.keys(visible)) {
+      if (VISIBLE_KEYS.includes(key)) continue;
+      const near = nearestOf(key, VISIBLE_KEYS);
+      const filters = "include" in visible || "exclude" in visible;
+      warn(
+        `[cell:${name}] visible has \`${key}\`${
+          near ? ` — did you mean "${near}"?` : ""
+        } — nothing reads it${
+          filters
+            ? ""
+            : `, so this cell resolves to \`visible: "all"\` and every ` +
+              `field is sent to every client`
+        }. visible reads ${VISIBLE_KEYS.map((k) => `\`${k}\``).join(", ")}.`,
+      );
+    }
+  }
+  // `visible`'s truthy non-filters never get here — resolveVisibility refused
+  // them — so only its falsy ones ("read as all") are left to say.
+  for (
+    const [kind, v] of [["visible", visible], ["persist", persist]] as const
+  ) {
+    const p = filterValueProblem(name, kind, v);
+    if (p) warn(p.refused ? `${p.msg} The boot refuses it.` : p.msg);
+  }
+}
+
 /** Extract forUser from CellVisibility if present */
 export function extractForUser(
   // `any` S: forUser's param is contravariant, so a concrete-state
@@ -434,6 +550,107 @@ export function warnUnmatchedSyncFields(
   }
 }
 
+/** Could a dot-path exclude (`segs`, from depth `d`) remove anything under the
+ *  DECLARED value `v`? Walks by `deepExcludePaths`' own rule: a key equal to
+ *  the segment advances it, every other key is walked with it unchanged, and an
+ *  array is walked element-wise. Anything that can hold fields the declaration
+ *  does not show — `null`/`undefined`, an array, an EMPTY object (a record), a
+ *  non-plain object — answers "yes": only a fully closed shape is judged. */
+function excludePathCanMatch(v: unknown, segs: string[], d: number): boolean {
+  if (v === null || v === undefined || Array.isArray(v)) return true;
+  if (typeof v !== "object") return false; // a primitive has no fields
+  const proto = Object.getPrototypeOf(v);
+  if (proto !== Object.prototype && proto !== null) return true;
+  const keys = Object.keys(v);
+  if (keys.length === 0) return true;
+  const obj = v as Record<string, unknown>;
+  for (const k of keys) {
+    if (k === segs[d]) {
+      if (d === segs.length - 1) return true;
+      if (excludePathCanMatch(obj[k], segs, d + 1)) return true;
+    }
+    if (excludePathCanMatch(obj[k], segs, d)) return true;
+  }
+  return false;
+}
+
+/** Every key of every plain object reachable from the declared value `v`
+ *  (arrays walked element-wise) — the vocabulary a nested exclude segment is
+ *  checked against for a near-miss. */
+function declaredKeysUnder(v: unknown, out = new Set<string>()): Set<string> {
+  if (Array.isArray(v)) {
+    for (const e of v) declaredKeysUnder(e, out);
+  } else if (v !== null && typeof v === "object") {
+    const proto = Object.getPrototypeOf(v);
+    if (proto !== Object.prototype && proto !== null) return out;
+    for (const [k, e] of Object.entries(v)) {
+      out.add(k);
+      declaredKeysUnder(e, out);
+    }
+  }
+  return out;
+}
+
+/** Warn about a NESTED `exclude` path (`"accounts.encSecKey"`) whose inner
+ *  segments name nothing in the declared state — the dot-path half of
+ *  {@link validateFieldFilters}, which checks only the HEAD. A typo below the
+ *  head (`"accounts.encSeckey"`) excluded nothing: the secret was written to
+ *  the database (`persist`) or sent to every client (`visible`) without a word.
+ *
+ *  WARNED rather than thrown, for {@link warnUnmatchedSyncFields}' reason: a
+ *  method may write a field under an object the declaration shows closed, so a
+ *  refusal could be wrong about a cell that works. Only a fully closed declared
+ *  shape is judged (see `excludePathCanMatch`), and only a segment that is a
+ *  near-miss of a declared key warns — an optional field the declaration
+ *  omits (`apiKey?: string`) is excluded correctly once written, so it stays
+ *  silent. Same in dev and prod. */
+export function warnUnmatchedNestedExcludes(
+  name: string,
+  state: Record<string, unknown> | undefined,
+  // deno-lint-ignore no-explicit-any
+  ui: CellVisibility<string, any> | undefined,
+  persist: CellFieldFilter | undefined,
+  warn: (msg: string) => void,
+): void {
+  const decl = state ?? {};
+  for (
+    const [kind, filter] of [["visible", ui], ["persist", persist]] as const
+  ) {
+    if (!filter || typeof filter !== "object") continue;
+    const list = (filter as { exclude?: unknown }).exclude;
+    if (!Array.isArray(list)) continue;
+    for (const key of list) {
+      if (typeof key !== "string" || !key.includes(".")) continue;
+      // A top-level key literally CALLED "a.b" is the other reading of the
+      // same entry (`applyCellFieldFilter`), and it matches.
+      if (Object.hasOwn(decl, key)) continue;
+      const segs = key.split(".");
+      if (!Object.hasOwn(decl, segs[0]!)) continue; // the head check throws
+      if (excludePathCanMatch(decl[segs[0]!], segs, 1)) continue;
+      // An unmatched segment is judged only when it is a NEAR-MISS of a key
+      // the declared shape does hold (`encSeckey` vs `encSecKey`). A segment
+      // that resembles nothing is, far more often, an optional field the
+      // declaration leaves out (`apiKey?: string`, written later by a
+      // method) — and the runtime filter excludes it correctly once written.
+      const declared = declaredKeysUnder(decl[segs[0]!]);
+      const near = segs.slice(1).map((s) =>
+        declared.has(s) ? null : nearestOf(s, declared, s.length <= 4 ? 2 : 3)
+      ).find((n) => n !== null);
+      if (!near) continue;
+      const consequence = kind === "persist"
+        ? "so it excludes nothing — the field is written to the database"
+        : "so it filters nothing — the field is sent to every client";
+      warn(
+        `[cell:${name}] ${kind}.exclude names "${key}", but nothing under ` +
+          `"${segs[0]}" in the declared state matches "${
+            segs.slice(1).join(".")
+          }" — did you mean "${near}"? — ${consequence}. Check the ` +
+          `spelling (or declare the field in \`state:\`).`,
+      );
+    }
+  }
+}
+
 /** Extract `publicFields` from a ui config — the explicit "these look secret
  *  but are public" acknowledgement (silences the secret-exposure heuristic). */
 export function extractPublicFields(
@@ -500,7 +717,12 @@ export function resolveVisibility(
       name === "cellDefaults" ? "cellDefaults" : `cell:${name}`,
     );
   }
-  return config.visible ?? config.ui;
+  const v = config.visible ?? config.ui;
+  // Not a filter at all — it threw here already, as a bare `'in' operator`
+  // TypeError from `normalizeUiFilter`; the same refusal, naming the fix.
+  const bad = filterValueProblem(name, "visible", v);
+  if (bad?.refused) throw new Error(bad.msg);
+  return v;
 }
 
 // ── Selector helpers ──────────────────────────────────────────────────

@@ -559,8 +559,10 @@ test({
           join(ca, "aio-root-key.pem"),
           "-out",
           join(ca, "aio-root.pem"),
+          // A root near expiry is REPLACED (tls-root-expiry.test.ts), so the
+          // old-shaped root here must be long-lived to reach the warning.
           "-days",
-          "5",
+          "3650",
           "-config",
           cfg,
         ],

@@ -18,6 +18,7 @@ import {
   type Component,
   componentByLabel,
   componentConflict,
+  componentLaunchArgs,
   componentPort,
   entryDeclarations,
   processPlan,
@@ -110,6 +111,52 @@ Deno.test("components: distinct entries are the project's parts", async () => {
     assertEquals(cs[0]!.port, 9000, "a declared port is read from the entry");
     assertEquals(cs[1]!.port, undefined);
     assert(cs.every((c) => c.declaresAppId));
+  } finally {
+    await Deno.remove(dir, { recursive: true });
+  }
+});
+
+// The docs' own example: a `"kind": "server"` relay beside electron clients.
+// `am start` launched every component as the PROJECT's client, so the relay —
+// headless by definition — booted as a browser app and died on "App.tsx not
+// found". Each component now runs as its kind says, unless the caller chose.
+Deno.test("components: each one launches as the client its kind means", async () => {
+  const dir = await project({
+    client: "browser",
+    build: {
+      targets: {
+        relay: { kind: "server", entry: "src/relay/app.ts" },
+        agent: { kind: "electron", entry: "src/agent/app.ts" },
+        tool: { kind: "android", entry: "src/tool/app.ts" },
+        web: { kind: "server", entry: "src/web/app.ts" },
+        webdesk: { kind: "electron", entry: "src/web/app.ts" },
+      },
+    },
+  }, {
+    "src/relay/app.ts": entry("relay"),
+    "src/agent/app.ts": entry("agent"),
+    "src/tool/app.ts": entry("tool"),
+    "src/web/app.ts": entry("web"),
+  });
+  try {
+    const cs = projectComponents(dir);
+    assertEquals(cs.map((c) => c.label), ["relay", "agent", "tool", "web"]);
+    const args = cs.map((c) => componentLaunchArgs(c, ["--wait=5"]));
+    assertEquals(args, [
+      ["--wait=5", "--client=server-only"],
+      // A GUI kind is never forced: on a headless box `--client=electron`
+      // is refused with exit 1 — mid-loop, the rest of the project never
+      // started — where 1.0.11 ran it as the project's client.
+      ["--wait=5"],
+      // No dev client of its own, and two shells of one entry: the project's.
+      ["--wait=5"],
+      ["--wait=5"],
+    ]);
+    // The caller's own choice is never overridden.
+    assertEquals(
+      componentLaunchArgs(cs[0]!, ["--client=browser"]),
+      ["--client=browser"],
+    );
   } finally {
     await Deno.remove(dir, { recursive: true });
   }

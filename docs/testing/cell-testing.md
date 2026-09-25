@@ -18,7 +18,7 @@ import { counter } from "./cell/counter/index.ts";
 testCell(counter, "increment from idle", (t) => {
   t.send.increment(5);
   t.expect.state((s) => s.count === 5);
-  t.expect.effects(["counter:log"]);
+  t.expect.effects([]); // increment emits no s.$do(...) effect
 });
 
 testCell(counter, "guard line blocks increment while saving", (t) => {
@@ -269,12 +269,12 @@ It also keeps the app's clock and ceilings honest:
   its method, as on a real server; later timers still wait for `advance`.
 - **`perfBudget.methods[m].timeout` is the call ceiling here too**: pass the
   app's `perfBudget` and `await cell.method()` gives up when the app would.
-- **An `onInit` that throws fails the test** at the next `settle()` or
-  `dispose()` (in `bootCells` and `testUI` alike). `aio.run` reports it as
-  `INIT_ERROR` and boots the other cells without it; a test does not pass on
-  that. The commonest cause: a cell method called straight from `onInit` is
-  refused, as `aio.run` refuses it — methods are bound after every cell's
-  `__init`. Dispatch it there
+- **An `onInit` that throws (or, async, rejects) fails the test** at the next
+  `settle()` or `dispose()` (in `bootCells` and `testUI` alike). `aio.run`
+  reports it as `INIT_ERROR` and boots the other cells without it; a test does
+  not pass on that. The commonest cause: a cell method called straight from
+  `onInit` is refused, as `aio.run` refuses it — methods are bound after every
+  cell's `__init`. Dispatch it there
   (`app.dispatch({ type: "projects:scan", payload: { args: [] } })`), or call it
   from `onStart` (docs/state/lifecycle.md).
 
@@ -286,7 +286,7 @@ It also keeps the app's clock and ceilings honest:
 | `t.destroy()`                  | Reset + set status to 'uninitialized'                                                                                                                                                                                                                           |
 | `t.send.<action>(...args)`     | Dispatch an action — starts immediately, like production. Returns a promise; await it to wait for completion                                                                                                                                                    |
 | `t.expect.state(fn)`           | Assert on cell state slice (incl. your `status` field)                                                                                                                                                                                                          |
-| `t.expect.effects(['name'])`   | Assert effect types from last action — use full `'cellName:effectKey'` format, e.g. `'counter:persist'`                                                                                                                                                         |
+| `t.expect.effects(['name'])`   | Assert effect types from last action — a framework effect's type is `'__schedule'` / `'__own'` / `'__notify'`, not the method's `'cell:method'`                                                                                                                 |
 | `t.expect.effectCount(n)`      | Assert number of effects from last action                                                                                                                                                                                                                       |
 | `t.expect.invariant(fn)`       | Assert a predicate holds                                                                                                                                                                                                                                        |
 | `t.getState()`                 | Get cell state slice                                                                                                                                                                                                                                            |

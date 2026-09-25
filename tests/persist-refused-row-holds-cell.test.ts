@@ -133,6 +133,9 @@ function onDisk(dir: string): { counter: number; ids: number[] } {
     // Single mode: one document holding every cell. Multi: a row per cell.
     let counter: number | undefined;
     for (const r of rows) {
+      // Framework stamps (`<appId>:__schema`, `__versions`, `__shapes`) are
+      // keyed BY cell too — a stamp is not the cell's snapshot.
+      if (r.k.includes(":__")) continue;
       const v = JSON.parse(r.v) as Any;
       if (r.k.endsWith("\x1ftorn_c")) counter = v.counter;
       else if (v?.torn_c) counter = v.torn_c.counter;

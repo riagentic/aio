@@ -57,15 +57,37 @@ const _triggers = new Map<string, Set<Trigger>>();
 /** in-flight AbortControllers, one entry per (app, method) */
 const _inflight = new Set<Inflight>();
 /** Cells whose app is shutting down. `abortAllInflight` can only abort
- *  controllers that exist at sweep time — a `serialize: true` call queued
- *  behind the aborted one starts a moment LATER with a fresh controller and
- *  would stream unaware through the whole drain deadline, then lose its
+ *  controllers that exist at sweep time — a call tracked AFTER the sweep
+ *  would stream unaware through the whole drain deadline and then lose its
  *  writes at the sealed queue. Tracking the shutdown here lets `trackCall`
- *  hand such a late starter an already-aborted signal: in-flight calls finish
- *  writing, queued ones take their cancellation path on the first check.
+ *  hand such a late starter an already-aborted signal. (A call queued behind
+ *  a lock — `serialize: true`, `concurrency: "queue"` — has its controller
+ *  from dispatch, so the sweep itself reaches it: its body starts aborted.)
  *  `endShutdownAbort` clears it, so a later app booting the same cell names
  *  in this process (every sequential test does) starts clean. */
 const _shutdownCells: { app: AppScope; prefix: string }[] = [];
+
+/** Signals fired by SHUTDOWN, not by a cancelOn trigger.
+ *
+ *  A transaction whose signal fired discards its write-set — right for
+ *  cancelOn (the superseded run must not clobber the winner) and right for a
+ *  body that SAW the abort and stood down (half a transaction). But a body
+ *  that never read `s.$signal` cannot have stood down: it ran to completion,
+ *  and discarding it was a silent data loss — 20 serialized calls accepted
+ *  before `close()`, all resolved, 19 writes gone (each queued body started
+ *  with the shutdown's fired signal). The executor asks this, together with
+ *  `signalWasRead` (cell-impl.ts), before it discards. */
+const _shutdownAborted = new WeakSet<AbortSignal>();
+
+/** Did shutdown (not a cancel trigger) fire this signal? */
+export function abortedByShutdown(signal: AbortSignal): boolean {
+  return _shutdownAborted.has(signal);
+}
+
+function shutdownAbort(c: AbortController): void {
+  _shutdownAborted.add(c.signal);
+  c.abort();
+}
 
 /** `prefix === ""` is "every cell of that app" (the unscoped sweep). */
 function shuttingDown(prefix: string, app: AppScope): boolean {
@@ -179,7 +201,7 @@ export function trackCall(
   controller: AbortController,
   app: AppScope = "",
 ): () => void {
-  if (shuttingDown(cellPrefix, app)) controller.abort();
+  if (shuttingDown(cellPrefix, app)) shutdownAbort(controller);
   let entry = inflightEntry(cellPrefix, method, app);
   if (!entry) {
     entry = {
@@ -212,6 +234,27 @@ export function trackCall(
     // working).
     if (mine.set.size === 0 && _inflight.has(mine)) _inflight.delete(mine);
   };
+}
+
+/** Watchers of calls that did NOT run: a `concurrency: "first"` caller that
+ *  adopted the running call's outcome, or a `ttl` hit. `trackCall` never runs
+ *  for those, so this isolate's `$pending` never counted them — but a worker
+ *  cell's OWNER counts every call it posts across the thread
+ *  (cell-worker-pool.ts `counted`), and only the worker's executor knows which
+ *  calls it adopted. The worker host watches here and says so. */
+const _adoptWatchers = new Set<(callId: string) => void>();
+
+/** Framework-internal: watch for adopted calls (see `_adoptWatchers`). */
+export function _onCallAdopted(fn: (callId: string) => void): () => void {
+  _adoptWatchers.add(fn);
+  return () => void _adoptWatchers.delete(fn);
+}
+
+/** Framework-internal: the executor answered `callId` from another call
+ *  instead of running it. */
+export function _noteCallAdopted(callId: string | undefined): void {
+  if (callId === undefined) return;
+  for (const fn of _adoptWatchers) fn(callId);
 }
 
 /** Abort every in-flight call whose method lists this action as a trigger.
@@ -357,11 +400,12 @@ export async function settlePending(
  *
  *  "Commit what it has" is true for NON-TRANSACTIONAL cells only, and that
  *  distinction is the point rather than a caveat: a `transaction: true` method
- *  commits atomically at the end, so an interrupted one commits NOTHING —
- *  which is the correct outcome, because half a transaction on disk is the
- *  state the transaction exists to prevent. Aborting still matters there: it
- *  ends the wait instead of holding the drain open for a reply that is not
- *  coming.
+ *  commits atomically at the end, so one that READ `s.$signal` (and so may
+ *  have stood down) commits NOTHING — half a transaction on disk is the state
+ *  the transaction exists to prevent. One that never read it ran to
+ *  completion and commits whole (`_shutdownAborted`). Aborting still matters
+ *  there: it ends the wait instead of holding the drain open for a reply that
+ *  is not coming.
  *
  *  `cells` scopes it to one app's cells and `app` to one app's identity —
  *  omitting both aborts the whole process. Two apps can share a process (D2:
@@ -382,7 +426,7 @@ export function abortAllInflight(
     if (!sameApp(e.app, app)) continue;
     for (const c of e.set) {
       if (!c.signal.aborted) {
-        c.abort();
+        shutdownAbort(c);
         n++;
       }
     }

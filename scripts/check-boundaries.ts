@@ -58,7 +58,10 @@ const ALLOWED: Record<string, string[]> = {
     "sync", // client CRDT engine
     "adapters", // useLocal implementation
   ],
-  ui: ["air"], // component kit renders through air only
+  ui: [
+    "air", // component kit renders through air only
+    "protocol", // the <webview> host-key contract it shares with the Electron shell (host-keys.ts)
+  ],
   vitals: [
     "state", // signal/listener primitives
     "diagnostics", // bus + formatter

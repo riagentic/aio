@@ -175,19 +175,23 @@ export function createLoopProbe(thresholds: VitalThresholds): LoopProbeAPI {
     actionTimestamps.push(Date.now());
     pruneTimestamps(Date.now());
 
-    // Track first degraded
+    trackDegraded();
+  }
+
+  /** Stamp the START of the current degraded stretch — and clear it when the
+   *  loop is healthy again. It was only ever set: one blip made it the "first
+   *  degraded" moment for the life of the process, so hint rule 2 (did the
+   *  loop degrade BEFORE the transport did?) compared an hours-old timestamp
+   *  and blamed the queue for a freeze that started on the network. */
+  function trackDegraded(): void {
     const { status } = evaluateStatus();
-    if (status !== "healthy" && firstDegradedAt === null) {
-      firstDegradedAt = Date.now();
-    }
+    if (status === "healthy") firstDegradedAt = null;
+    else if (firstDegradedAt === null) firstDegradedAt = Date.now();
   }
 
   function updateQueueDepth(depth: number): void {
     queueDepth = depth;
-    const { status } = evaluateStatus();
-    if (status !== "healthy" && firstDegradedAt === null) {
-      firstDegradedAt = Date.now();
-    }
+    trackDegraded();
   }
 
   function updateEffectBacklog(count: number): void {
@@ -232,6 +236,9 @@ export function createLoopProbe(thresholds: VitalThresholds): LoopProbeAPI {
   }
 
   function getFirstDegradedAt(): number | null {
+    // A reading is a clock read: a reduce measurement ages out with no event
+    // at all, and the stretch it started has ended with it.
+    trackDegraded();
     return firstDegradedAt;
   }
 

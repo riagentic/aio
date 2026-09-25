@@ -30,7 +30,13 @@ import {
   statusList,
   tally,
 } from "./am-output.ts";
-import { instancesInProject, isUnder, projectRoot } from "./am-cmd-process.ts";
+import {
+  instancesInProject,
+  isUnder,
+  projectRoot,
+  stopCommandFor,
+} from "./am-cmd-process.ts";
+import { appHome, profileOfHome } from "../server/app-dirs.ts";
 import type { InstanceInfo } from "../server/single-instance-lock.ts";
 
 /** The newest file under a tree, by mtime. `null` for an empty/missing tree.
@@ -94,7 +100,26 @@ export type DoctorFinding = {
   /** The instance's settings that have more than one home, `name →
    *  "value (source)"` — read from its lock (written since 1.0.6). */
   settings?: Record<string, string>;
+  /** The instance's data home and profile, from its lock — what tells two
+   *  instances of one app id apart. */
+  home?: string;
+  profile?: string;
 };
+
+/** How a finding names its instance: `demo` for the default home,
+ *  `demo@dev` for a profile, `demo@<home>` for any other folder. Two
+ *  instances of one app printed as two identical `demo` rows (and two
+ *  identical settings blocks), with nothing to say which was which. Pure. */
+export function doctorLabel(
+  f: { appId: string; home?: string; profile?: string },
+): string {
+  if (f.profile) return `${f.appId}@${f.profile}`;
+  if (!f.home || resolve(f.home) === resolve(appHome(f.appId))) {
+    return f.appId;
+  }
+  const name = profileOfHome(f.appId, f.home);
+  return `${f.appId}@${name ?? f.home}`;
+}
 
 /** "Which of my flag, config and deno.json won?" — answered by the running
  *  instance itself (feedback/frustration.md F6), one aligned line per
@@ -117,7 +142,9 @@ export function settingsBlock(
  *  product caller. */
 export async function checkRunningAio(
   projectDir: string,
-  inst: Pick<InstanceInfo, "appId" | "pid" | "startedAt"> & { cwd?: string },
+  inst:
+    & Pick<InstanceInfo, "appId" | "pid" | "startedAt">
+    & { cwd?: string; home?: string; profile?: string },
 ): Promise<DoctorFinding> {
   // An instance of THIS app started from another checkout is still this app
   // (one app id, one lock), but the framework it runs is that checkout's —
@@ -172,7 +199,14 @@ export async function checkRunningAio(
       }, the process (pid ${inst.pid}) ` +
       `started at ${new Date(v.startedAt).toISOString()} — it is serving the ` +
       `OLD framework`,
-    fix: `am restart --app=${inst.appId}`,
+    // THIS instance's address — `--app` alone is the default home, so a
+    // stale PROFILE instance was told to restart its sibling and kept
+    // serving the old framework. `stopCommandFor` is the one spelling of an
+    // instance's address (`am instances` prints it as `stopWith`).
+    // No scope prefix: doctor runs in the shell whose AIO_APPS_DIR found the
+    // instance, so the fix runs there too.
+    fix: stopCommandFor(inst, { defaultHome: appHome(inst.appId) })
+      .replace("am stop ", "am restart "),
   };
 }
 
@@ -224,7 +258,7 @@ export async function cmdDoctor(
       statusList(
         findings.map((f) => ({
           tone: f.ok ? "ok" as const : "bad" as const,
-          name: f.appId,
+          name: doctorLabel(f),
           detail: `pid ${f.pid}  ${f.detail}`,
         })),
         { indent: "  " },
@@ -233,7 +267,7 @@ export async function cmdDoctor(
         [findings.length - bad.length, "ok", "ok"],
         [bad.length, "failed", "bad"],
       ])),
-      ...findings.map((f) => indent(settingsBlock(f.appId, f.settings))),
+      ...findings.map((f) => indent(settingsBlock(doctorLabel(f), f.settings))),
     );
   if (bad.length > 0) {
     // ONE act: findings + refusal. A preceding `out` then `outError` in

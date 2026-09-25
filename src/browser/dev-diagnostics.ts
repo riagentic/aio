@@ -30,7 +30,11 @@ import {
 } from "../air/ui-remote.ts";
 import { _registerDevHooks } from "../air/dev-hooks.ts";
 import { installDevOverlay } from "./dev-overlay.ts";
-import { _installReadOnlyHint } from "../air/dev-readonly-hint.ts";
+import {
+  _hintReadOnly,
+  _installReadOnlyHint,
+} from "../air/dev-readonly-hint.ts";
+import { _installDarkOsLightPageCheck } from "../air/dark-os-light-page.ts";
 
 // The two audits and the surface/trigger executor are CALLED from the render
 // path and the command router, so they go in as hooks.
@@ -38,10 +42,12 @@ _registerDevHooks({
   auditContrast,
   auditIdSelectors,
   uiRemote: { getSerializedSurfaces, getMeasuredSurfaces, runUITrigger },
+  readOnlyHint: _hintReadOnly,
 });
 
-// …and the two installers are side effects with nothing to call back into.
-// Both are idempotent and both re-check `isDevMode()` themselves, so loading
+// …and the three installers are side effects with nothing to call back into.
+// All are idempotent and all re-check `isDevMode()` themselves, so loading
 // this module twice, or loading it with dev mode off, is a no-op.
 installDevOverlay();
 _installReadOnlyHint();
+_installDarkOsLightPageCheck();

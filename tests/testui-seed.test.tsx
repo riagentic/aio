@@ -104,3 +104,25 @@ Deno.test("seed: an unknown cell name throws, listing what booted", async () => 
   assertStringIncludes(err.message, "hw-typo");
   assertStringIncludes(err.message, "hw-seed");
 });
+
+// A mount REFUSED at its seed had already booted the cells, and the undo for
+// that boot was armed only after the seed — so the refused mount's runtime
+// stayed live, and a later plain `hw.probe()` committed into its store
+// instead of being refused.
+Deno.test("seed: a mount refused at its seed leaves no live boot behind", async () => {
+  let refused = false;
+  try {
+    await testUI(App, { seed: { "hw-typo": { gpus: [] } } });
+  } catch {
+    refused = true;
+  }
+  assert(refused, "precondition: the seed was refused");
+  let err: Error | null = null;
+  try {
+    await (hw as unknown as { probe(): Promise<void> }).probe();
+  } catch (e) {
+    err = e as Error;
+  }
+  assert(err, "a call after the refused mount must not reach a live store");
+  assertStringIncludes(err.message, "torn-down runtime");
+});

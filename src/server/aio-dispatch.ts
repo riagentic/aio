@@ -492,6 +492,14 @@ export function setupDispatch<S, A, E, App = any>(
           cellFilterFields ?? new Map(),
         )
         : patches;
+      // …and NOTHING VISIBLE CHANGED → nothing to send either. `[]` (not
+      // `undefined`, which is the "full"-strategy fallback) means every op was
+      // on a `visible: "none"` cell or an excluded field. Broadcast, it became
+      // a FORCE round: every client got the whole visible state again (after
+      // any patch round the dedup memo is stale), and UDS clears its memo on
+      // force — so a hidden 1 s ticker cost every client a full state per
+      // tick. Pinned by tests/broadcast-hidden-change-sends-nothing.test.ts.
+      if (validPatches && validPatches.length === 0) return;
       getServer().broadcast(validPatches);
       if (onUdsBroadcast) onUdsBroadcast(validPatches);
     },

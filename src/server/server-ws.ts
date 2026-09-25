@@ -22,7 +22,12 @@ import {
   isIgnorableKind,
   type SfnPayload,
 } from "../protocol/envelope.ts";
-import { filterStateBySubs, parseSubs } from "../protocol/broadcast-utils.ts";
+import {
+  filterStateBySubs,
+  parseSubs,
+  warnUnknownSubs,
+} from "../protocol/broadcast-utils.ts";
+import { getRegisteredCells } from "../state/cell-reactive.ts";
 import { overUtf8, utf8Size } from "../protocol/utf8-size.ts";
 import { isFrameTooLarge } from "../protocol/transport-shared.ts";
 import { serializeReturn } from "../protocol/return-value.ts";
@@ -558,7 +563,10 @@ export function createWsManager(deps: WsDeps): WsManager {
    *  A scan, not a parse: this runs only on a path that is already dropping
    *  the frame, and must not turn an oversized frame into work. */
   const _CID_SCAN = 64 * 1024;
-  const _CID_RE = /"cid":"([A-Za-z0-9._:-]{1,64})"/;
+  // JSON, not one serializer's spelling of it: `json.dumps` (a Python peer)
+  // writes `"cid": "…"`, and a whitespace-exact pattern left that caller
+  // unsettled for the whole ack ceiling.
+  const _CID_RE = /"cid"\s*:\s*"([A-Za-z0-9._:-]{1,64})"/;
   /** …and a scan is the FALLBACK, not the answer. A regex finds the first
    *  `"cid"` anywhere in the frame — including one the app itself put in its
    *  own payload, which is where an outbox row's correlation id naturally
@@ -1314,8 +1322,9 @@ export function createWsManager(deps: WsDeps): WsManager {
           const size = utf8Size(data);
           const kind = /^\{"v":\d+,"t":"([^"]+)"/.exec(data)?.[1] ?? "frame";
           const msg = peerCeilingMessage(kind, size, peerCeiling, meta.index);
-          // Once per socket for the log — the round repeats every change —
+          // Once per EPISODE for the log — the round repeats every change —
           // and once for the peer, which only needs telling that it is stuck.
+          // A full state that goes through again ends the episode (below).
           if (refused++ === 0) {
             log.error("ws", msg);
             writeClientLog(meta.index, {
@@ -1338,6 +1347,14 @@ export function createWsManager(deps: WsDeps): WsManager {
           }
           return;
         }
+        // A FULL state went through: the episode is over, and the next
+        // refusal is a new one the peer must be told about. Once per socket
+        // told a client that recovered and went over again nothing — it
+        // patched its small copy against a 70 MB server, "connected".
+        if (
+          refused > 0 && typeof data === "string" &&
+          data.startsWith('"t":"state"', data.indexOf(",") + 1)
+        ) refused = 0;
         (rawSend as (d: unknown) => void)(data);
       };
     }
@@ -2366,8 +2383,18 @@ export function createWsManager(deps: WsDeps): WsManager {
     drainBeforeSnapshot();
     meta.subscriptions = subs;
     try {
+      const uiState = deps.getUIState(meta.user);
+      // Known = what this client can see plus every registered cell: a cell
+      // hidden from this user exists, and is not a typo.
+      warnUnknownSubs(
+        subs,
+        new Set([
+          ...Object.keys((uiState ?? {}) as object),
+          ...getRegisteredCells().keys(),
+        ]),
+      );
       const msg = JSON.stringify(
-        filterStateBySubs(deps.getUIState(meta.user), meta.subscriptions),
+        filterStateBySubs(uiState, meta.subscriptions),
       );
       // Not sent when the client already holds EXACTLY this text. The first
       // `subs` of every page arrives right after the connect-time state and,

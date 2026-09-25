@@ -25,7 +25,19 @@
  * each to the least-loaded shard (longest-processing-time first). A file with
  * no timing yet counts as one second.
  */
-import { join, relative } from "@std/path";
+import { dirname, join, relative } from "@std/path";
+import { homeStoreEnv } from "../src/testing/test-strict.ts";
+import { testDisplay } from "../src/testing/test-display.ts";
+import {
+  nestedDisplayAccepts,
+  nestedDisplayCookie,
+  pickNestedDisplay,
+} from "../src/server/nested-display.ts";
+import {
+  realStoreDirs,
+  snapshotStores,
+  storeChanges,
+} from "./check-home-clean.ts";
 import {
   pruneDeadLockDir,
   pruneDeadLockDirAt,
@@ -173,6 +185,13 @@ export function shardEnv(
   }
   return {
     AIO_APPS_DIR: opts.home,
+    // Every per-user store a test can write (the framework version store, the
+    // install root, feedback, the canonical install `am update` mutates),
+    // private to the shard and BESIDE its apps dir — never inside it, where
+    // `am ls` would read them as apps. Unconditional: the value the runner
+    // inherited IS the real store. A test that sets its own still wins, and
+    // its restore lands back here instead of on "unset" = the real one.
+    ...homeStoreEnv(join(dirname(opts.home), "stores")),
     AIO_TEST_PORT_SLICE: portSliceFor(i, n),
     ...(opts.realWindow ? {} : { XDG_RUNTIME_DIR: runtimeDir! }),
   };
@@ -467,8 +486,39 @@ if (import.meta.main) {
     if (REAL_WINDOW.test(src)) windowed.add(f);
   }));
   const shards = plan(files, n, timings, (f) => windowed.has(f));
+  // The nested test display is SHARED by every shard and every later run. A
+  // shard that started it kept its cookie in the shard's private
+  // XDG_RUNTIME_DIR — deleted when the shard ended — and every later GUI child
+  // was refused ("Invalid MIT-MAGIC-COOKIE-1 key": 5 Electron tests, a hosts
+  // row and 4 mutation rows red in one release check). So the runner starts it,
+  // under the real runtime dir, before any shard; and one it cannot
+  // authenticate to stops the run here, not an hour later.
+  if (
+    windowed.size > 0 && Deno.build.os === "linux" &&
+    Deno.env.get("DISPLAY") && !Deno.env.get("AIO_TEST_DISPLAY")
+  ) {
+    const pick = pickNestedDisplay();
+    const cookie = pick?.up ? nestedDisplayCookie(pick.display) : null;
+    if (
+      pick?.up &&
+      (cookie === null || !await nestedDisplayAccepts(pick.display, cookie))
+    ) {
+      console.error(
+        `test-shards: the test display ${pick.display} is up, but it refuses ` +
+          `this user's access cookie (${cookie ?? "none on file"}) — it was ` +
+          `started under another runtime dir — so every window test would be ` +
+          `refused. Close that Xephyr and run again.`,
+      );
+      Deno.exit(1);
+    }
+    testDisplay();
+  }
   await Deno.remove(OUT, { recursive: true }).catch(() => {});
   await Deno.mkdir(OUT, { recursive: true });
+  // The real stores, as they were before any shard ran — compared at the end,
+  // so a write that got past the sandbox fails the run, naming the entry.
+  const storeDirs = realStoreDirs(Deno.env.toObject());
+  const storesBefore = snapshotStores(storeDirs);
   const started = performance.now();
   console.log(
     `${files.length} test files → ${shards.length} parallel shards on ` +
@@ -483,6 +533,8 @@ if (import.meta.main) {
   const results = await Promise.all(shards.map(async (list, i) => {
     const home = join(ROOT, ".aio-test-shards", String(i), ".aio-test-home");
     await Deno.remove(home, { recursive: true }).catch(() => {});
+    await Deno.remove(join(dirname(home), "stores"), { recursive: true })
+      .catch(() => {});
     await Deno.mkdir(home, { recursive: true });
     const log = join(OUT, `${i}.log`);
     const junit = join(OUT, `${i}.xml`);
@@ -588,11 +640,23 @@ if (import.meta.main) {
 
   const bad = results.filter((r) => r.code !== 0 || r.left);
   const wall = Math.round((performance.now() - started) / 1000);
-  if (bad.length === 0) {
+  const storeWrites = storeChanges(storesBefore, snapshotStores(storeDirs));
+  if (storeWrites.length > 0) {
+    console.error(
+      `\n✗ the run wrote a REAL per-user store (a test escaped the ` +
+        `AIO_VERSIONS_DIR/AIO_HOME sandbox):\n  ${storeWrites.join("\n  ")}` +
+        `\n  Every pinned app on this machine runs what is in that store. ` +
+        `Inspect the entry, remove it by hand if a test made it, and find ` +
+        `the test that resolved the store without the sandbox.`,
+    );
+  }
+  if (bad.length === 0 && storeWrites.length === 0) {
     console.log(`\n✓ all ${shards.length} shards passed in ${wall}s`);
     Deno.exit(0);
   }
-  console.error(`\n✗ ${bad.length} shard(s) failed (${wall}s):`);
+  if (bad.length > 0) {
+    console.error(`\n✗ ${bad.length} shard(s) failed (${wall}s):`);
+  }
   for (const r of bad) {
     console.error(`  shard ${r.i} — ${relative(ROOT, r.log)}`);
     for (const f of r.failed) console.error(`    ${f.trim()}`);

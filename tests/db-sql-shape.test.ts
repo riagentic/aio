@@ -117,3 +117,9 @@ Deno.test("sql-shape: write tables — qualifiers, quoting, conflict clauses, CT
   // a keyword inside a comment names nothing
   assertEquals(writes("SELECT 1 /* DELETE FROM mail */"), []);
 });
+
+Deno.test("sql-shape: END — SQLite's spelling of COMMIT — is a write", () => {
+  assertEquals(looksLikeWrite("END"), true);
+  assertEquals(looksLikeWrite("END TRANSACTION"), true);
+  assertEquals(looksLikeWrite("SELECT CASE WHEN 1 THEN 2 END"), false);
+});

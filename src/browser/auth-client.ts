@@ -11,6 +11,26 @@
 
 import type { AioUser } from "../protocol/protocol-types.ts";
 
+/** Fired on `globalThis` when a sign-in lands a session: a browser tab that
+ *  stopped reconnecting because its old session died (browser-air-transport
+ *  `_signedOut`) resumes with the new one. */
+export const SIGNED_IN_EVENT = "aio:signed-in";
+
+/** Fired on `globalThis` when the transport gives up on a dead session
+ *  (`_signedOut`). The dev reload socket (server-html-scripts.ts
+ *  `devWsScript`, which spells both names literally — it is inline page
+ *  script) pauses on it until `SIGNED_IN_EVENT`: its every retry presented
+ *  the dead `?token=` and was charged to the failed-auth budget. */
+export const SIGNED_OUT_EVENT = "aio:signed-out";
+
+/** Announce a result that carries a session — see `SIGNED_IN_EVENT`. */
+function _announce<T>(r: T): T {
+  if (r && typeof r === "object" && "token" in r) {
+    globalThis.dispatchEvent?.(new Event(SIGNED_IN_EVENT));
+  }
+  return r;
+}
+
 export interface AuthClientResult {
   user: AioUser;
   /** Bearer token — same session the cookie carries; for non-cookie clients. */
@@ -68,6 +88,11 @@ const AUTH_ERROR_TEXT: Record<string, string> = {
   // Input the caller can fix
   password_too_short: "Password must be at least 8 characters.",
   invalid_id: "That username cannot be used — pick another.",
+  reserved_id:
+    "That username is reserved for accounts that sign in through an external provider — pick another.",
+  too_many_accounts:
+    "Too many accounts were created from this address. Try again later.",
+  body_too_large: "That request was too large.",
   user_exists: "That username is already taken.",
   invalid_email: "That email address is not valid.",
   email_required: "An email address is required.",
@@ -87,6 +112,8 @@ const AUTH_ERROR_TEXT: Record<string, string> = {
   pending_expired: "The sign-in took too long. Start again.",
   setup_first: "Set up two-factor authentication before confirming it.",
   totp_disabled: "Two-factor authentication is turned off for this app.",
+  totp_already_enabled:
+    "Two-factor authentication is already on. Turn it off first (that needs your password), then set it up again.",
   // Server-side configuration — not the user's fault, and saying so saves a
   // support round-trip
   mail_not_configured:
@@ -184,17 +211,23 @@ export function createAuthClient(base = ""): {
     /** Create an account (open signup). Logs straight in unless the app
      *  requires email verification first. */
     async signup(id, password, email) {
-      return await orThrow(await post(base, "signup", { id, password, email }));
+      return _announce(
+        await orThrow(await post(base, "signup", { id, password, email })),
+      );
     },
     /** Throws Error("invalid_credentials") on a wrong password; resolves with
      *  a TotpChallenge when a second factor is needed. */
     async login(id, password) {
-      return await orThrow(await post(base, "login", { id, password }));
+      return _announce(
+        await orThrow(await post(base, "login", { id, password })),
+      );
     },
     /** Complete a TOTP challenge from login. */
     async totp(pending, code) {
-      return await orThrow<AuthClientResult>(
-        await post(base, "totp", { pending, code }),
+      return _announce(
+        await orThrow<AuthClientResult>(
+          await post(base, "totp", { pending, code }),
+        ),
       );
     },
     /** Revoke the current session (cookie or explicit token). */

@@ -25,7 +25,7 @@ Add React to your project (only if you use it):
 
 ```tsx
 import { reactIsland } from "aio/air";
-import { market } from "./cells/market.ts";
+import { market } from "./cell/market.ts";
 
 // PriceChart.tsx is an ordinary React component using recharts, visx, etc.
 const PriceChart = reactIsland({

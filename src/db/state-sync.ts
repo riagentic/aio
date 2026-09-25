@@ -55,6 +55,17 @@ async function tableColumns(db: DB, name: string): Promise<ColumnInfo[]> {
 const _addableToNonEmpty = (def: ColumnDef): boolean =>
   def.nullable === true || def.default !== undefined;
 
+/** SQLite's column-affinity rules (datatype3 §3.1), so `INT` and `INTEGER`
+ *  compare equal and only a real type change is reported. */
+function _affinity(sqlType: string): string {
+  const t = sqlType.toUpperCase();
+  if (t.includes("INT")) return "INTEGER";
+  if (/CHAR|CLOB|TEXT/.test(t)) return "TEXT";
+  if (t === "" || t.includes("BLOB")) return "BLOB";
+  if (/REAL|FLOA|DOUB/.test(t)) return "REAL";
+  return "NUMERIC";
+}
+
 /** Reconcile one declared table with what SQLite actually has.
  *
  *  `CREATE TABLE IF NOT EXISTS` is a no-op against an existing table, so a
@@ -83,6 +94,59 @@ async function reconcileTable(
   if (actual.length === 0) return; // brand-new table — CREATE just made it
   const have = new Map(actual.map((c) => [c.name, c]));
   const declared = Object.keys(def.columns);
+  // SQLite column names are case-INSENSITIVE, but `SELECT *` hands rows back
+  // keyed by the STORED spelling. A column renamed only in case (`userid` →
+  // `userId`) was therefore read as "missing" (and refused the boot with "no
+  // value to put in them" for a column that holds every value), or — once
+  // made nullable as that message advised — added as a "duplicate", reported
+  // the old spelling as an undeclared column, and loaded every row keyed
+  // `userid`, so state's `userId` was undefined everywhere. The one lossless
+  // answer is SQLite's own: rename the stored column to the declared case.
+  for (const d of declared) {
+    if (have.has(d)) continue;
+    const stored = actual.find((c) =>
+      c.name.toLowerCase() === d.toLowerCase() && !declared.includes(c.name)
+    );
+    if (!stored) continue;
+    assertIdent(stored.name, "stored column name");
+    await applyDdl(
+      db,
+      `ALTER TABLE ${name} RENAME COLUMN ${stored.name} TO ${d}`,
+      {
+        ns: "db",
+        subject: `table "${name}"`,
+        source: "reconcileTable, src/db/state-sync.ts",
+      },
+    );
+    reportOnce(
+      `recase:${name}.${d}`,
+      `table "${name}" column "${stored.name}" renamed to "${d}" — the ` +
+        `declared spelling (SQLite names are case-insensitive; rows are read ` +
+        `back under the stored one).`,
+    );
+    have.delete(stored.name);
+    stored.name = d;
+    have.set(d, stored);
+  }
+  // A RETYPED column (`text()` → `integer()`) is the one drift CREATE and ADD
+  // cannot see: the stored column keeps its old affinity, the write-time
+  // check reads the DECLARED type, and so 42 was stored as "42.0" and
+  // restored into state as that string — in silence. Warn, not throw: the
+  // table still accepts every write, only the values coerce.
+  for (const d of declared) {
+    const stored = have.get(d);
+    if (!stored) continue;
+    const want = def.columns[d]!.sqlType;
+    if (_affinity(stored.type) === _affinity(want)) continue;
+    reportOnce(
+      `retyped:${name}.${d}`,
+      `table "${name}" column "${d}" is stored as ${
+        stored.type || "(untyped)"
+      } but declared ${want} — SQLite keeps the stored type, so values are ` +
+        `coerced to it and read back that way. Migrate the column with ` +
+        `app.db (add a new one, copy, drop the old), or declare it as stored.`,
+    );
+  }
   const missing = declared.filter((c) => !have.has(c));
   const extra = actual.filter((c) => !declared.includes(c.name));
 
@@ -270,6 +334,50 @@ export async function loadTables(
   return result;
 }
 
+/** aio's private record of the bound tables the state sync has COMMITTED at
+ *  least once — i.e. whose contents are the truth about their state array.
+ *
+ *  Boot cannot tell an empty table that was never written (a new binding, a
+ *  first run with a `state:` seed — adopt the array) from one the app EMPTIED
+ *  (every row deleted on purpose — restore it empty). It used to assume the
+ *  first, always: a todo list seeded with a welcome row, cleared by the user,
+ *  came back with the welcome row after every restart — a confirmed deletion
+ *  undone. This table is the one fact that separates the two, written in the
+ *  SAME transaction as the rows it vouches for. */
+export const SYNCED_TABLES = "aio_synced_tables";
+
+/** The statements that record `tables` as synced — ride in the window's
+ *  transaction, so the mark and the rows land together or not at all. */
+export function planSyncedMark(tables: readonly string[]): TablePlan {
+  if (tables.length === 0) return [];
+  return [
+    {
+      sql: `CREATE TABLE IF NOT EXISTS ${SYNCED_TABLES} ` +
+        `(name TEXT PRIMARY KEY NOT NULL)`,
+    },
+    ...tables.map((t) => ({
+      sql: `INSERT OR IGNORE INTO ${SYNCED_TABLES} (name) VALUES (?)`,
+      params: [t],
+    })),
+  ];
+}
+
+/** The bound tables the sync has committed at least once. A file with no
+ *  record yet (fresh, or written by an older aio) reads as none — the old
+ *  "adopt the array" answer, which is right for both. */
+export async function readSyncedTables(db: DB): Promise<Set<string>> {
+  try {
+    const { rows } = await db.query<{ name: string }>(
+      `SELECT name FROM ${SYNCED_TABLES}`,
+    );
+    return new Set(rows.map((r) => String(r.name)));
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e);
+    if (/no such table/i.test(msg)) return new Set();
+    throw e;
+  }
+}
+
 /** What `v` is, in words a developer can match to their own code. */
 /** The one thing a refused table write could NOT say about itself: the shape
  *  of the row it tried to send.
@@ -295,6 +403,8 @@ export function refusedWriteDetail(
   let shape = "";
   for (const st of stmts) {
     const t = /\b(?:INTO|UPDATE|FROM)\s+"?([A-Za-z_][\w]*)"?/i.exec(st.sql);
+    // aio's own bookkeeping row is never the app's refused write.
+    if (t?.[1] === SYNCED_TABLES) continue;
     if (t) tables.add(t[1]!);
     if (shape) continue;
     const cols = /\(([^)]+)\)\s*VALUES/i.exec(st.sql)?.[1];
@@ -927,13 +1037,14 @@ export function planTablesIncremental(
     const cols = Object.keys(def.columns);
     for (const col of cols) assertIdent(col, "column name");
     const pk = pkColumn(def);
+    const insertStmt = (row: Record<string, unknown>) => ({
+      sql: `INSERT INTO ${name} (${cols.join(", ")}) VALUES (${
+        cols.map(() => "?").join(", ")
+      })`,
+      params: cols.map((c) => row[c]),
+    });
     const insert = (row: Record<string, unknown>) =>
-      stmts.push({
-        sql: `INSERT INTO ${name} (${cols.join(", ")}) VALUES (${
-          cols.map(() => "?").join(", ")
-        })`,
-        params: cols.map((c) => row[c]),
-      });
+      stmts.push(insertStmt(row));
 
     if (pk) {
       const rows = rowsOf(name, state[name], pk, def.shape);
@@ -975,16 +1086,24 @@ export function planTablesIncremental(
             params: batch,
           });
         }
-        for (const row of d.toInsert) insert(row);
+        // UPDATEs BEFORE INSERTs. SQLite checks UNIQUE per statement, not at
+        // COMMIT, so the order is part of the answer: a window that renames
+        // row 1's `handle` "bob" → "robert" AND adds row 2 as "bob" — a state
+        // with no duplicate in it — was written INSERT-first, the INSERT met
+        // the not-yet-renamed "bob", and the batch was refused on EVERY window
+        // after (the cell held, both changes gone at the next boot). Updated
+        // first, a value can only collide with a row that is still there in
+        // the FINAL state too, i.e. with a real duplicate. (DELETEs stay
+        // first: they free values for both.)
         const setCols = cols.filter((c) => c !== pk);
-        for (const row of d.toUpdate) {
-          stmts.push({
-            sql: `UPDATE ${name} SET ${
-              setCols.map((c) => `${c} = ?`).join(", ")
-            } WHERE ${pk} = ?`,
-            params: [...setCols.map((c) => row[c]), row[pk]],
-          });
-        }
+        const updates: TablePlan = d.toUpdate.map((row) => ({
+          sql: `UPDATE ${name} SET ${
+            setCols.map((c) => `${c} = ?`).join(", ")
+          } WHERE ${pk} = ?`,
+          params: [...setCols.map((c) => row[c]), row[pk]],
+        }));
+        const inserts: TablePlan = d.toInsert.map(insertStmt);
+        stmts.push(...updates, ...inserts);
         advances.push(() => {
           index[name] = d.nextIndex();
         });

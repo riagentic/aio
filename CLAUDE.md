@@ -8,7 +8,7 @@ code in this repository.
 All-in-one full-stack TypeScript framework on Deno ≥2.9 (`MIN_DENO` in
 `src/server/deno-version.ts`). One `cell({ state, methods })` drives server
 state, persistence (worker-thread SQLite, one `state.db`), CRDT sync, and the UI
-(AIR — a signals+JSX renderer; a page downloads 79 KB gz, renderer plus client
+(AIR — a signals+JSX renderer; a page downloads 82 KB gz, renderer plus client
 runtime). One codebase builds to browser, Electron, Android, CLI, and service
 targets. Elm-like core: `(state, action) → { state, effects[] }`.
 v1.0.0-alpha60, ~4300 test blocks in `tests/`.
@@ -38,7 +38,7 @@ deno task lint              # deno lint src/
 deno task lint:aio          # aiol — the custom project linter
 deno task check:boundaries        # src/ folder dependency matrix gate
 deno task check:api         # public-surface snapshot gate (update:api regenerates)
-deno task check:docs        # doc accuracy gate (docs:index regenerates docs/content.md)
+deno task check:docs        # doc accuracy gate (update:docs regenerates docs/content.md)
 deno task check:coverage    # suite + src/ line-coverage floor
 deno task preflight         # publish/install/scaffold sanity, end to end
 deno task bench             # + bench:check against scripts/bench-baselines.json

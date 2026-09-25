@@ -89,6 +89,18 @@ async function run(cmd: string, args: string[], cwd: string): Promise<boolean> {
   return p.success;
 }
 
+/** publish's flags that carry a value (read only as `--k=v`). */
+const PUBLISH_VALUE_FLAGS: readonly string[] = [
+  "--channel",
+  "--dir",
+  "--targets",
+  "--target",
+  "--key",
+  "--notes",
+  "--version",
+  "--min-from",
+];
+
 export async function cmdPublish(
   args: string[],
   flags: GlobalFlags,
@@ -96,6 +108,23 @@ export async function cmdPublish(
   const mode = detectMode(flags);
   const flag = (k: string) =>
     args.find((a) => a.startsWith(`--${k}=`))?.slice(k.length + 3);
+  // Every value is read as `--k=v` only, so `--channel beta` (space) left
+  // `--channel` as a no-op and `beta` as a word nobody reads: the release
+  // went to the PROD channel under a success line. Refused before the build.
+  const bare = args.find((a) => PUBLISH_VALUE_FLAGS.includes(a));
+  if (bare) {
+    fail(`am publish: ${bare} takes its value with '=': ${bare}=<value>`, mode);
+  }
+  const stray = args.filter((a) => !a.startsWith("-"));
+  if (stray.length > 0) {
+    fail(
+      `am publish takes no arguments (got ${
+        stray.map((a) => JSON.stringify(a)).join(" ")
+      }) — every setting is a --flag=value: --channel= --dir= --targets= ` +
+        `--target= --key= --notes= --version= --min-from= --data=`,
+      mode,
+    );
+  }
   const root = Deno.cwd();
   const cfg = ((await readDenoJson(root))?.config ?? {}) as {
     build?: { out?: string; channel?: string };
@@ -284,7 +313,7 @@ export async function cmdPublish(
         // below rather than left to a message on the user's machine months later.
         // …and `--data=<contract.json>` is the hatch the warning below tells
         // people to use. It was named in that message and read by NOBODY:
-        // `flag("data")` appears nowhere in this file, and `publish` is in
+        // `flag("data")` appears nowhere in this file, and `publish` was in
         // PASSTHROUGH so an unknown flag is not refused either. A publisher
         // did exactly what the message said, saw no error, and every install
         // holding data refused the release forever — the precise failure this

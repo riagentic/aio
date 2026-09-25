@@ -26,6 +26,13 @@ import { serverRequest, serverUser } from "./auth-context.ts";
 import { recordRejection } from "../state/rejection-tracker.ts";
 import { resolveCall } from "../state/cell-impl.ts";
 import { log } from "../diagnostics/logger-api.ts";
+import { degraded } from "../diagnostics/degraded.ts";
+import {
+  type AioError,
+  type AioErrorCode,
+  type AioErrorContext,
+  createAioError,
+} from "../diagnostics/error.ts";
 
 /** How long to wait for a spawned host to report `ready` before failing boot. */
 const READY_TIMEOUT_MS = 30_000;
@@ -51,15 +58,36 @@ export type CellWorkerDeps = {
   refusalsReject: boolean;
   /** The owner's resolved appId, handed to the worker (see cellWorkerName). */
   appId?: string;
+  /** The owner's cell-error sink (`onError` + log) — a worker's composition
+   *  reports through it (FromWorker "cell-error"). */
+  reportError?: (err: AioError) => void;
+  /** One error of this cell, for the owner's circuit breaker — the failures
+   *  its composition would have counted had the method run there. */
+  countError?: () => void;
 };
+
+/** The `cell-error` codes the owner's composition counts toward the circuit
+ *  breaker when the same failure happens there (cell-compose-registry.ts,
+ *  cell-compose-execute.ts, the async `__error` path). */
+const COUNTED_CELL_ERRORS = new Set([
+  "INIT_ERROR",
+  "DESTROY_ERROR",
+  "EFFECT_ERROR",
+  "EFFECT_ASYNC_ERROR",
+]);
 
 export type CellWorker = {
   readonly cell: string;
   /** Route one action to the worker. Resolves with the method's return value,
    *  rejects with the method's error. */
-  call(action: Msg): Promise<unknown>;
+  /** `onAdopted` fires if the worker's executor answers the call from
+   *  another call instead of running it (FromWorker "adopted"). */
+  call(action: Msg, onAdopted?: () => void): Promise<unknown>;
   /** Wait until the host is bound and serving. */
   ready(): Promise<void>;
+  /** Run the cell's `onInit` in the worker — once, when the main isolate is
+   *  wired and initialising its own cells (see ToWorker["start"]). */
+  start(): void;
   /** Replace the worker's copy of the slice. Used when the main isolate swaps
    *  state wholesale (time travel, snapshot load) — otherwise the worker would
    *  keep mutating the state we just discarded. */
@@ -70,12 +98,66 @@ export type CellWorker = {
    *  calls says nothing about this thread's. Fire-and-forget: an abort has no
    *  reply, and a worker with nothing in flight simply finds no entry. */
   cancel(actionType: string): void;
+  /** Run the cell's disable in the worker (see ToWorker["disable"]); `done`
+   *  gets its outcome. A closed worker never answers: its cell stays as the
+   *  close left it. */
+  disable(done: (ok: boolean) => void): void;
+  /** Run the cell's enable (`__init` + `onInit`) in the worker. */
+  enable(): void;
   /** Graceful stop, then terminate. Safe to call twice. */
   close(): Promise<void>;
+  /** Closed: the crash that closed it (null: a plain close). Open: undefined.
+   *  Plain data, for `closedWorkerCall` once the handle is let go. */
+  closedBy(): string | null | undefined;
   /** Kill the thread NOW — the only way to stop a method that never returns.
    *  In-flight calls reject; the cell keeps the state main already has. */
   terminate(reason: string): void;
 };
+
+/** How a CLOSED worker cell answers a call — by name, never applied. Module
+ *  level and plain-data in: a closed app's cells keep answering this way after
+ *  the app is released (`_tombstoneCells`), holding nothing of the worker.
+ *  `crash` is the message of the crash that closed it, if one did. @internal */
+export function closedWorkerCall(
+  name: string,
+  crash: string | null,
+  action: Msg,
+): Promise<unknown> {
+  const callId = (action as { payload?: { _callId?: string } }).payload
+    ?._callId;
+  const err = new Error(
+    crash !== null
+      ? `${crash} — action "${action.type}" was not ` +
+        `applied, and this cell is unreachable for the life of the ` +
+        `process. Restart the app, or keep the work that can throw out ` +
+        `of the worker isolate.`
+      : `[aio] cell worker "${name}" is closed — action "${action.type}" was not applied`,
+  );
+  // A plain close IS the app closing (shutdown closes the pool first), and a
+  // caller that classifies by code must be able to tell — the scheduler does:
+  // DISPATCH_CLOSED stops a schedule quietly, anything else is an ERROR per
+  // tick. Once a worker cell's ticks reached its worker, every clean stop of
+  // an app polling one printed that error from inside its own shutdown. A
+  // crash keeps no code: it is not a shutdown.
+  if (crash === null) {
+    (err as Error & { code?: string }).code = "DISPATCH_CLOSED";
+  }
+  // An ASYNC method's caller awaits the REGISTRY promise (`_callId`), not
+  // this one — so rejecting only the transport left that caller hanging
+  // for the full 30 s call ceiling and then telling it the opposite of
+  // what happened ("the METHOD did not give up — it may still be
+  // running, and if it finishes its writes will still commit"). Nothing
+  // ran. Same shape the clone-failure branch in `call` was fixed
+  // for, and reachable BY DESIGN: shutdown closes the worker pool before
+  // it closes dispatch and the HTTP server, so there is a deliberate
+  // window in which the server still accepts calls and every worker cell
+  // is closed.
+  if (callId) {
+    resolveCall(callId, undefined, err);
+    return Promise.resolve(undefined);
+  }
+  return Promise.reject(err);
+}
 
 /** Snapshot the ambient caller context as plain data for the thread hop. */
 function ambient(): AmbientContext | undefined {
@@ -122,12 +204,16 @@ export function createCellWorker(
       resolve: (v: unknown) => void;
       reject: (e: Error) => void;
       callId?: string;
+      /** See `CellWorker.call`. */
+      onAdopted?: () => void;
       /** The caller's OWN action object — what `action-ack.ts` keys a refusal
        *  to. The worker refused a structured clone of it in another isolate,
        *  so the note comes home as data and is recorded against this one. */
       action: Msg;
     }
   >();
+  /** `disable` replies, in posting order (the worker answers FIFO). */
+  const disabling: ((ok: boolean) => void)[] = [];
   let closed = false;
   /** Why the worker is gone, when it went on its own.
    *
@@ -191,6 +277,10 @@ export function createCellWorker(
     switch (msg.t) {
       case "ready":
         clearTimeout(readyTimer);
+        // A fresh worker for this cell is up (a dev restart, the next boot in
+        // this process): the crash episode below is over. The tracker is
+        // process-wide, so without this it outlived the worker it described.
+        degraded(`cell-worker:${name}`, { after: 1 }).ok();
         readyResolve?.();
         return;
       case "patches":
@@ -204,6 +294,32 @@ export function createCellWorker(
           noteScheduleOwner(e, name);
           deps.runEffect(e);
         }
+        return;
+      case "cell-error": {
+        const cause = new Error(msg.message);
+        if (msg.stack) cause.stack = msg.stack;
+        if (msg.name) cause.name = msg.name;
+        const err = createAioError(
+          msg.code as AioErrorCode,
+          cause,
+          msg.context as AioErrorContext,
+          undefined,
+          msg.correlationId,
+        );
+        if (deps.reportError) deps.reportError(err);
+        else log.error("cell-worker", `${name}: [${msg.code}] ${msg.message}`);
+        // What the owner's composition counts for the same cell: an init,
+        // destroy, effect or async-method failure. A validation refusal also
+        // reports as REDUCE_ERROR and is not an error to count; a sync throw
+        // is counted from its `fail` below.
+        if (COUNTED_CELL_ERRORS.has(msg.code)) deps.countError?.();
+        return;
+      }
+      case "adopted":
+        inflight.get(msg.id)?.onAdopted?.();
+        return;
+      case "disabled":
+        disabling.shift()?.(msg.ok);
         return;
       case "done": {
         const entry = inflight.get(msg.id);
@@ -231,6 +347,9 @@ export function createCellWorker(
         if (msg.stack) err.stack = msg.stack;
         if (msg.name) err.name = msg.name;
         if (msg.code !== undefined) err.code = msg.code;
+        // A throw out of the worker's reduce — a sync method that threw. The
+        // owner's composed reduce counts the same throw for a local cell.
+        if (msg.code === "REDUCE_ERROR") deps.countError?.();
         if (entry?.callId) {
           // The awaiter sees the rejection via the registry; the transport
           // promise resolves so the fire-and-forget dispatch inside the bound
@@ -258,6 +377,13 @@ export function createCellWorker(
       `[aio] cell worker "${name}" crashed: ${ev.message ?? "unknown error"}`,
     );
     log.error("cell-worker", err.message);
+    // …and on the health surface. The crash rejected the calls in flight and
+    // every later one, but `/__aio/health` went on answering "healthy" with
+    // the cell `active`, `errors: 0` — for a cell that is unreachable until
+    // the app restarts. A degraded episode is what that endpoint (and `am`)
+    // reports as a dead subsystem; only a fresh worker for the cell (its
+    // `ready`, above) ends it.
+    degraded(`cell-worker:${name}`, { after: 1 }).fail(err);
     clearTimeout(readyTimer);
     readyReject?.(err);
     failAll(err);
@@ -303,41 +429,32 @@ export function createCellWorker(
         refusalsReject: deps.refusalsReject,
       });
     },
+    start(): void {
+      if (closed) return;
+      send({ t: "start" });
+    },
     cancel(actionType: string): void {
       if (closed) return;
       send({ t: "cancel", type: actionType });
     },
-    call(action: Msg): Promise<unknown> {
+    disable(done: (ok: boolean) => void): void {
+      if (closed) return;
+      disabling.push(done);
+      send({ t: "disable" });
+    },
+    enable(): void {
+      if (closed) return;
+      send({ t: "enable" });
+    },
+    call(action: Msg, onAdopted?: () => void): Promise<unknown> {
       const callId = (action as { payload?: { _callId?: string } }).payload
         ?._callId;
       if (closed) {
-        const err = new Error(
-          crashError
-            ? `${crashError.message} — action "${action.type}" was not ` +
-              `applied, and this cell is unreachable for the life of the ` +
-              `process. Restart the app, or keep the work that can throw out ` +
-              `of the worker isolate.`
-            : `[aio] cell worker "${name}" is closed — action "${action.type}" was not applied`,
-        );
-        // An ASYNC method's caller awaits the REGISTRY promise (`_callId`), not
-        // this one — so rejecting only the transport left that caller hanging
-        // for the full 30 s call ceiling and then telling it the opposite of
-        // what happened ("the METHOD did not give up — it may still be
-        // running, and if it finishes its writes will still commit"). Nothing
-        // ran. Same shape the clone-failure branch 30 lines below was fixed
-        // for, and reachable BY DESIGN: shutdown closes the worker pool before
-        // it closes dispatch and the HTTP server, so there is a deliberate
-        // window in which the server still accepts calls and every worker cell
-        // is closed.
-        if (callId) {
-          resolveCall(callId, undefined, err);
-          return Promise.resolve(undefined);
-        }
-        return Promise.reject(err);
+        return closedWorkerCall(name, crashError?.message ?? null, action);
       }
       const id = ++seq;
       const p = new Promise<unknown>((resolve, reject) => {
-        inflight.set(id, { resolve, reject, callId, action });
+        inflight.set(id, { resolve, reject, callId, action, onAdopted });
       });
       try {
         send({ t: "call", id, action, ctx: ambient() });
@@ -367,6 +484,7 @@ export function createCellWorker(
       }
       return p;
     },
+    closedBy: () => closed ? crashError?.message ?? null : undefined,
     async close(): Promise<void> {
       if (closed) return;
       closed = true;

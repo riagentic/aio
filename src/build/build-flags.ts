@@ -63,6 +63,11 @@ export const BUILD_VALUE_FLAGS = [
   // is the same app with two data directories).
   "--print-install-name",
   "--name",
+  // The name a person SEES (the macOS .app, DMG volume, .desktop Name=, icon
+  // monogram, Android label), overriding deno.json `title` for this build —
+  // how a per-target `title` reaches the builder. Not `--title=`: that is the
+  // RUNTIME's window-title flag, and this one never reaches the running app.
+  "--display-name",
   "--platform",
   "--android-dev-url",
   // The UI component this build bundles (relative to the app dir), overriding
@@ -94,6 +99,9 @@ export const FLEET_BOOL_FLAGS = [
   // Android refusal names `--allow-server-only` as its way out, and that way
   // out was reachable only by invoking the framework's build.ts by hand.
   "--allow-server-only",
+  // Forwarded verbatim, same reason: the documented spelling is
+  // `deno task build --analyze`, and the fleet refused it as unknown.
+  "--analyze",
 ] as const;
 
 /** Every `--flag=value` the fleet build understands. */
@@ -109,6 +117,7 @@ export const FLEET_VALUE_FLAGS = [
   // Now that every build goes through the fleet, refusing them would have
   // silently dropped a rename the caller asked for.
   "--name",
+  "--display-name",
   "--entry",
   "--ui",
   // Same reason, and it was missed: `dev:android` spawns the build with this,

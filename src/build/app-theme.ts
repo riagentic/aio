@@ -226,6 +226,7 @@ export function appThemeCss(name: string): string {
   --aio-muted:${n(42, 0.08)};
   --aio-border:${n(88, 0.12)};
   --aio-danger:hsl(2 72% 45%);
+  --aio-on-danger:#fff;
   --aio-ok:hsl(152 62% 32%);
   --aio-warn:hsl(38 82% 38%);
   --aio-r-1:6px; --aio-r-2:10px; --aio-r-3:14px; --aio-r-4:20px;
@@ -254,6 +255,15 @@ export function appThemeCss(name: string): string {
   --aio-warn:hsl(38 84% 62%);
   --aio-shadow-1:0 1px 2px #0006;
   --aio-shadow-2:0 8px 28px -10px #0009,0 1px 2px #0006;
+}}
+/* The ink ON a danger fill, solved from the fill itself: white where the
+   fill is darker than the WCAG white/black crossover (relative luminance
+   1791 in ten-thousandths), black where it is lighter — the better of the two, never under
+   4.58:1. A fixed dark ink for the lightened dark-mode fill broke every app
+   that sets its own --aio-danger (white on #d32f2f became 3.65:1); an engine
+   without relative colour keeps white, as before. */
+@supports (color: color(from red srgb-linear calc(r * 0.5) g b)){:root{
+  --aio-on-danger:color(from var(--aio-danger) srgb-linear calc(clamp(0, (1791 - (2126 * r + 7152 * g + 722 * b)) * 10, 1)) calc(clamp(0, (1791 - (2126 * r + 7152 * g + 722 * b)) * 10, 1)) calc(clamp(0, (1791 - (2126 * r + 7152 * g + 722 * b)) * 10, 1)));
 }}
 
 /* ── canvas ─────────────────────────────────────────────────────── */
@@ -378,7 +388,7 @@ body{
 :where(button.ghost){background:transparent; border-color:transparent; box-shadow:none}
 :where(button.ghost):hover:not(:disabled){background:var(--aio-surface-2)}
 :where(button.danger){
-  background:var(--aio-danger); color:#fff; border-color:transparent;
+  background:var(--aio-danger); color:var(--aio-on-danger); border-color:transparent;
 }
 :where(input,select,textarea):not([type=checkbox],[type=radio],[type=range],[type=file]){
   width:100%; padding:.5em .7em; background:var(--aio-surface);

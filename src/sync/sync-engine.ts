@@ -140,6 +140,10 @@ export function createSyncEngine(deps: SyncEngineDeps): SyncEngine {
   // counter passed the previous session's high mark. A per-engine nonce makes
   // the id self-contained: no part of it depends on what survived storage.
   const _session = randomUuid().slice(0, 8);
+  /** Proves `_session` is ours to the server — sent only in `sync-req`, so no
+   *  peer that read the nonce off a broadcast can claim it (see
+   *  SyncRequest.sessionKey). */
+  const _sessionKey = randomUuid();
   /** Every op id this engine issues, and nothing else. */
   const _ownPrefix = `${deps.clientId}-${_session}-`;
   /** An op THIS session issued — the only op that can be a live echo of our
@@ -152,6 +156,21 @@ export function createSyncEngine(deps: SyncEngineDeps): SyncEngine {
    *  invisible, forever, with nothing said. The session nonce already in every
    *  op id is the identity that is actually per client instance. */
   const isOwnSessionOp = (opId: string): boolean => opId.startsWith(_ownPrefix);
+  /** The ids this session actually ISSUED — what an echo can be. The prefix
+   *  alone is public (every broadcast carries it), so another writer could
+   *  submit an op under it, and dropping that as "our echo" kept it off this
+   *  screen alone while the server and every peer applied it
+   *  (tests/sync/session-prefix-bound.test.ts). Bounded FIFO: an echo comes
+   *  back within a reconnect's race, and one older than the cap falls to the
+   *  id dedup (`_appliedIds`, `_foldedAhead`) like any repeated op. */
+  const _issuedIds = new Set<string>();
+  const ISSUED_IDS_CAP = 4096;
+  function noteIssued(id: string): void {
+    _issuedIds.add(id);
+    if (_issuedIds.size > ISSUED_IDS_CAP) {
+      _issuedIds.delete(_issuedIds.values().next().value!);
+    }
+  }
   const clock: HLClock = createHLC(deps.clientId);
   let online = true;
 
@@ -1467,9 +1486,17 @@ export function createSyncEngine(deps: SyncEngineDeps): SyncEngine {
         // rejection — the channel this failure should have used all along.
         vetWirePayload(`${cell}:${action}`, payload);
         const hlc = clock.tick();
+        // …and a random tail, because the id is also the server's dedup key
+        // and every op is broadcast to every peer with its id. With a bare
+        // counter any other writer could read the prefix off one broadcast
+        // and submit ops under THIS client's next ids first; each later change
+        // of ours then met a "duplicate" — acked here, never applied there
+        // (tests/sync/op-id-unguessable.test.ts). The counter stays for
+        // reading a log in order; the tail makes the next id unguessable.
         const id = `${deps.clientId}-${_session}-${
           (++_opCounter).toString(36)
-        }`;
+        }.${randomUuid().replaceAll("-", "").slice(0, 12)}`;
+        noteIssued(id);
         const op: SyncOp = {
           id,
           cell,
@@ -1628,13 +1655,14 @@ export function createSyncEngine(deps: SyncEngineDeps): SyncEngine {
       // pending locally). Own ops only ever enter confirmed state through
       // handleAck.
       //
-      // Keyed on the op ID, not the HLC node: the node is the shared,
-      // persisted client id, and two clones of one profile carry the same one
-      // (see `isOwnSessionOp`). An op of the shared queue this session did
+      // Keyed on the exact op IDs this session issued (`_issuedIds`), not the
+      // HLC node — the node is the shared, persisted client id, and two clones
+      // of one profile carry the same one (see `isOwnSessionOp`) — and not the
+      // session prefix, which any writer can copy. An op of the shared queue this session did
       // NOT issue — an earlier page load's, or a twin tab's — is folded here
       // like any other and its ack, if one comes, only confirms it (see
       // `foldRemoteOp`).
-      if (isOwnSessionOp(op.id)) {
+      if (_issuedIds.has(op.id)) {
         logDuplicate(op.cell, op.id, "own-op echo");
         return Promise.resolve();
       }
@@ -2154,6 +2182,7 @@ export function createSyncEngine(deps: SyncEngineDeps): SyncEngine {
           // (see `isOwnSessionOp`). A server that predates the field falls
           // back to the client-id filter, exactly as before.
           session: _session,
+          sessionKey: _sessionKey,
           cells,
           pendingOps: slice,
           ...(resync.length > 0 ? { resync } : {}),

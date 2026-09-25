@@ -48,18 +48,23 @@ export function _redactCheckpointState(
   return touched ? out : state;
 }
 
-/** Which whole cells the checkpoint may hold — the app's restore rule
- *  (`persistingCellIds`): a `persist: "none"` cell is dropped, every other
- *  slice is kept exactly as it is in state.
+/** What the checkpoint may hold — the app's persist rule minus the store's
+ *  SHAPE: a `persist: "none"` cell is dropped (`persistingCellIds`), and so is
+ *  every field a `persist: { exclude | include }` keeps off disk, top-level
+ *  or dot path (`applyCellFieldFilter`, the call the store's getter makes).
  *
  *  It is read back: `onCheckpointRestore` hands it to the app, which returns
  *  the state to boot on. Written raw, it carried every `persist: "none"` slice
- *  (a session token, a passphrase) to disk in dev — the one thing that key
- *  promises never happens — and handed it back on the next boot, while prod
- *  (checkpoint off) came up without it. Deliberately NOT the store's full
- *  filter: the restored checkpoint is assigned into live state with no
- *  `onRestore`, so an `onPersist` shape or a field filter would land there
- *  as-is. A pure key filter, so it cannot throw. */
+ *  and every excluded field (a session token, an API key — the docs say "not
+ *  written to disk") to disk in dev, and handed them back on the next boot,
+ *  while prod (checkpoint off) came up without them. It used to keep excluded
+ *  fields ON PURPOSE so a restored checkpoint still had them — but a restart
+ *  brings them back as whatever the store restore leaves (the declared
+ *  default, or `onRestore`'s value), and the checkpoint restore now does
+ *  exactly that (aio-boot.ts step 6, `unpersistedFromBase`).
+ *  Deliberately NOT the `onPersist` transform: the restored checkpoint is
+ *  assigned into live state with no `onRestore`, so a shaped slice would land
+ *  there as-is. */
 export type CheckpointView = (
   state: Record<string, unknown>,
 ) => Record<string, unknown>;

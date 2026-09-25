@@ -131,7 +131,7 @@ export function misplacedDenoJsonKeys(
  *  Readers: `normalizeTargets` (targets/platforms) and `build-config.ts`
  *  (out/server/ui). A key added there belongs here. */
 export const VALID_BUILD_KEYS = new Set<string>([
-  "targets", // string[] | Record<label, { kind, entry, ui, name, platforms }>
+  "targets", // string[] | Record<label, { kind, entry, ui, name, title, platforms }>
   "platforms", // OS/arch list, e.g. ["linux-x64", "darwin-arm64"]
   "out", // output directory (default: dist/)
   "server", // LAN/remote address a shipped CLIENT defaults to
@@ -140,6 +140,8 @@ export const VALID_BUILD_KEYS = new Set<string>([
   // declare V8 flags, and for a COMPILED binary it is the only channel for a
   // heap ceiling — the flag cannot be raised at run time).
   "v8Flags",
+  // Minify the server modules a compiled binary embeds (build/minify-server.ts).
+  "minify",
   // The app's own CSS toolchain (Tailwind, PostCSS, Sass) — a command that
   // writes `style.css`, run before the stylesheet is read in a build and
   // before every dev reload. Read by `cssBuildStep` (build/build-css.ts).
@@ -151,6 +153,9 @@ export const VALID_BUILD_KEYS = new Set<string>([
   // stamped with. The stamp outranks the config literal at run time, which is
   // what stops a test build updating itself into the public release.
   "channel",
+  // `{ bundleId, host }` — read by build-config.ts (`resolveMacBundleId`,
+  // `resolveMacHost`) and documented in docs/build/targets.md.
+  "macos",
 ]);
 
 /** Keys a target override may carry in the object form of `build.targets`. */
@@ -159,6 +164,7 @@ export const VALID_BUILD_TARGET_KEYS = new Set<string>([
   "entry",
   "ui",
   "name",
+  "title",
   "platforms",
 ]);
 
@@ -280,7 +286,9 @@ export const VALID_AIO_CONFIG_KEYS = new Set<string>([
   "_refusalsReject",
   "_workerCells",
   "_workerEntry",
+  "_cellBreaker",
   "_healthGetter",
+  "_cellHealth",
   "_reduceBreakdown",
   "_onReportOptsReady",
   "_syncCellIds",
@@ -1842,21 +1850,9 @@ export function configConflicts(
       doc: "docs/auth/auth.md",
     });
   }
-  if (
-    sessions?.ttlMs !== undefined && auth?.ttlMs === undefined &&
-    cfg.auth !== undefined && cfg.auth !== false
-  ) {
-    out.push({
-      level: "warn",
-      keys: ["sessions.ttlMs", "auth.ttlMs"],
-      what:
-        `sessions.ttlMs is set and auth.ttlMs is not — issued tokens honour it, but the ` +
-        `login cookie's Max-Age falls back to the built-in 30 days, so the browser keeps a ` +
-        `cookie for a session the store has already expired`,
-      fix: `set auth: { ttlMs: ${sessions.ttlMs} } to the same value`,
-      doc: "docs/auth/auth.md",
-    });
-  }
+  // sessions.ttlMs ALONE under built-in auth is not a conflict: the login
+  // token takes the store default, and the cookie's Max-Age is read from that
+  // token's own expiry (auth-flows.ts), so the two cannot diverge.
 
   // ── 12. a git source ignores every manifest-trust option ─────────────
   if (updates && typeof updates.source === "string") {

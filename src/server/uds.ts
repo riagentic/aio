@@ -100,7 +100,9 @@ import {
   filterPatchesBySubs,
   filterStateBySubs,
   parseSubs,
+  warnUnknownSubs,
 } from "../protocol/broadcast-utils.ts";
+import { getRegisteredCells } from "../state/cell-reactive.ts";
 
 /** How long the server waits for a live client to answer a control request
  *  (`am surface N`, `am trigger N …`, `am client N`) — THE one decider for both
@@ -369,6 +371,13 @@ export function createUDSListener(
           tt,
           maxFrameBytes,
           control,
+          // Known = the state's cells plus every registered one (a cell
+          // hidden from the view exists, and is not a typo).
+          () =>
+            new Set([
+              ...Object.keys((getUIState() ?? {}) as object),
+              ...getRegisteredCells().keys(),
+            ]),
         );
       } catch (e) {
         log.error("uds", `client handshake failed — ${e}`);
@@ -675,6 +684,13 @@ export function createUDSListener(
               }
               continue;
             }
+            // Nothing in this round is in this client's view and it owes no
+            // debt: its view did not change. Falling through sent a FULL
+            // state whenever the memo was unknown — after every patch round —
+            // so a client subscribed to one cell paid its whole view each
+            // time an unrelated cell changed. The WS twin:
+            // tests/broadcast-unmatched-subs-sends-nothing.test.ts.
+            continue;
           }
 
           // Fallback: force-full, trailing flush, or no patches — send full state
@@ -857,6 +873,8 @@ function _handleUDSConn(
    *  itself, so a `ctl` frame meets the same routes and gates as a request
    *  over TCP. */
   control?: (req: Request) => Promise<Response>,
+  /** The cell ids a subscription may name — see `warnUnknownSubs`. */
+  knownSubIds?: () => ReadonlySet<string>,
 ): void {
   const decoder = new TextDecoder();
   const MAX_BUF = udsFrameCeiling(maxFrameBytes);
@@ -1152,6 +1170,14 @@ function _handleUDSConn(
                 // describe the base this peer holds (see the accept path).
                 flushAllUrgent();
                 client.subscriptions = parsed;
+                // Same warning as WS (see server-ws.ts `_handleSubs`).
+                if (knownSubIds) {
+                  try {
+                    warnUnknownSubs(parsed, knownSubIds(), "uds");
+                  } catch (e) {
+                    log.warn("uds", `could not check subscriptions: ${e}`);
+                  }
+                }
                 _sendFilteredState(conn, client, true);
               }
               continue;

@@ -4,6 +4,7 @@
 import type { Log } from "../diagnostics/logger-api.ts";
 import { flushClientLog } from "./client-log.ts";
 import { _liveSpawned, killAllSpawned } from "./spawn.ts";
+import { _diagScopeNow } from "../diagnostics/diagnostic-bus.ts";
 import { _blockingInFlight, blocking } from "../state/blocking.ts";
 import { _setUserStopHookActive } from "../state/dispatch.ts";
 import {
@@ -404,6 +405,10 @@ export function createShutdownOrchestrator(
   refs: ShutdownRefs,
 ): ShutdownOrchestrator {
   let shutdownPromise: Promise<void> | null = null;
+  // The app this orchestrator shuts down — its boot runs in that app's scope.
+  // Only ITS spawn() children are reaped: a sibling app in this process keeps
+  // its own running. Built outside any app ⇒ undefined ⇒ every child, as before.
+  const _ownApp = _diagScopeNow();
 
   async function _doShutdown(): Promise<void> {
     const { log } = refs;
@@ -559,8 +564,8 @@ export function createShutdownOrchestrator(
     // leaked process is invisible from inside the app and accumulates on a
     // machine until something runs out.
     await phase(log, "spawned children", tLeft, async () => {
-      const names = [..._liveSpawned().values()];
-      const killed = await killAllSpawned();
+      const names = [..._liveSpawned(_ownApp).values()];
+      const killed = await killAllSpawned(_ownApp);
       if (killed > 0) {
         log.warn(
           "spawn",

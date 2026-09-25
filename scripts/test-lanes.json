@@ -34,8 +34,10 @@
     "tests/am-fetch-error-refused-only.test.ts"
   ],
   "seam": [
+    "tests/worker-differential-fuzz.test.ts",
     "tests/ack-async-bare-frame.test.ts",
     "tests/action-ack-honesty.test.ts",
+    "tests/air-lifecycle-differential.test.ts",
     "tests/air-transport-send-throw-queue.test.ts",
     "tests/air-transport-stale-close.test.ts",
     "tests/air-transport-terminal-mismatch.test.ts",
@@ -66,6 +68,7 @@
     "tests/return-value-transport.test.ts",
     "tests/seam-method-differential.test.ts",
     "tests/seam-paths.test.ts",
+    "tests/signal-scope-differential.test.ts",
     "tests/state-transport-handler.test.ts",
     "tests/timeline-diff-differential.test.ts",
     "tests/transaction-differential.test.ts",
@@ -76,8 +79,7 @@
     "tests/wire-patch-differential.test.ts",
     "tests/ws-burst-no-lost-writes.test.ts",
     "tests/ws-dropped-frame-settles-call.test.ts",
-    "tests/ws-origin-one-decider.test.ts",
-    "tests/signal-scope-differential.test.ts"
+    "tests/ws-origin-one-decider.test.ts"
   ],
   "demoted": [
     {

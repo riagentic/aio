@@ -20,7 +20,6 @@ import type {
 } from "../state/state-filter.ts";
 import type { AioUser } from "./aio.ts";
 import type { ServerSyncHandler } from "../sync/server-handler.ts";
-import type { ComposedCells } from "../state/cell.ts";
 import type { VitalsSystem } from "../vitals/mod.ts";
 import type { AppLock } from "./single-instance-lock.ts";
 import { isPipePath, resolveSocketPath, resolveTransport } from "./paths.ts";
@@ -88,6 +87,10 @@ export interface TransportConfig {
   _cellPatchStrategies?: Map<string, CellPatchStrategy>;
   _cellFilterFields?: Map<string, PatchFilterFields>;
   _cellAccess?: Map<string, Access>;
+  /** THIS app's cell health rows — `/__aio/health`'s `cells`. */
+  _cellHealth?: (
+    state: Record<string, unknown>,
+  ) => import("../state/cell-compose-types.ts").CellStatus[];
   onConnect?: (user?: AioUser) => void;
   onDisconnect?: (user?: AioUser) => void;
   libraryMode?: boolean;
@@ -278,6 +281,7 @@ export interface ServerSetupResult {
 export function _noTlsWarning(
   expose: boolean,
   source: "flag" | "config",
+  bindHost = "0.0.0.0",
 ): string {
   const said = source === "flag" ? "--no-tls" : "`tls: false`";
   const undo = source === "flag" ? "Drop --no-tls" : 'Set `tls: "auto"`';
@@ -290,7 +294,9 @@ export function _noTlsWarning(
     return `tls: ${said} has no effect without --expose — a loopback server ` +
       `is plain HTTP already. It only matters when exposing to a network.`;
   }
-  return `tls: ${said} — serving on 0.0.0.0 over PLAIN HTTP/WS. State, auth ` +
+  // The address actually bound — `--host=` narrows it, and a warning naming
+  // 0.0.0.0 for a 127.0.0.1 bind contradicts the boot line printed beside it.
+  return `tls: ${said} — serving on ${bindHost} over PLAIN HTTP/WS. State, auth ` +
     `tokens and every action are readable and forgeable by anything on this ` +
     `network. Sound ONLY if the payload is already end-to-end encrypted or a ` +
     `TLS-terminating proxy fronts this port. ${undo} for HTTPS.`;
@@ -459,7 +465,7 @@ export async function setupTransport<S, A>(
   // flag, the discovery record's `tls:`) already reads `tlsCert` as nullable.
   let tlsCert: TlsCert | null = null;
   if (cliNoTls) {
-    log.warn(_noTlsWarning(expose, noTlsSource ?? "flag"));
+    log.warn(_noTlsWarning(expose, noTlsSource ?? "flag", bindHost));
   } else if (!expose && (cliCert || cliKey)) {
     log.warn(_unusedCertWarning(certSource ?? "flag"));
   } else if (expose) {
@@ -850,15 +856,14 @@ export async function setupTransport<S, A>(
       }),
       lastPersistError: deps.lastPersistError,
       getHealth: () => {
-        const composed = (globalThis as Record<string, unknown>)
-          .__aioCells as ComposedCells | undefined;
+        const cellHealth = config._cellHealth;
         const uptime = Math.round((Date.now() - _startedAt) / 1000);
         // ONE document, built once. This used to be two near-identical object
         // literals (with and without `cells`), which is how a signal added to
         // the health endpoint reaches one caller and not the other.
-        const cellsHealth: Record<string, unknown> | null = composed
+        const cellsHealth: Record<string, unknown> | null = cellHealth
           ? Object.fromEntries(
-            composed.registry.health(getState() as Record<string, unknown>)
+            cellHealth(getState() as Record<string, unknown>)
               .map((fs) => [fs.name, {
                 status: fs.status ?? "active",
                 enabled: fs.enabled,

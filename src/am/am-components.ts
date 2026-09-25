@@ -50,6 +50,40 @@ export interface Component {
   /** The port the entry declares, if any. Undefined means "am assigns one",
    *  because two components on the framework default would collide at bind. */
   port?: number;
+  /** The runtime `--client` its target `kind` means (see
+   *  {@linkcode componentLaunchArgs}); undefined when the kind names no dev
+   *  client, or when two shells of one entry disagree. */
+  client?: string;
+}
+
+/** The dev `--client` each target KIND runs as. `server` is headless by
+ *  definition; a kind not listed here (android, the `*-client` shells) has no
+ *  runtime client of its own and keeps the project's. `electron` is NOT
+ *  forced: on a headless box `am start` refuses a GUI client with exit 1 —
+ *  mid-loop, so the rest of the project never started — where 1.0.11 ran that
+ *  component as the project's client; and with a display it would open a
+ *  window 1.0.11 never did. */
+const KIND_CLIENT: Readonly<Record<string, string>> = {
+  server: "server-only",
+  "server-app": "browser",
+  browser: "browser",
+  cli: "cli",
+};
+
+/** The flags a component is launched with: the caller's, plus the `--client`
+ *  its declared `kind` means unless the caller chose one. Without it every
+ *  component ran as the PROJECT's client — the docs' `"kind": "server"` relay
+ *  booted as a browser app and died on "App.tsx not found". Pure. */
+export function componentLaunchArgs(
+  c: Component,
+  flags: readonly string[],
+): string[] {
+  const chosen = flags.some((f) =>
+    f.startsWith("--client=") || f === "--headless" || f === "--service"
+  );
+  return c.client === undefined || chosen
+    ? [...flags]
+    : [...flags, `--client=${c.client}`];
 }
 
 /** `aio.run({ appId, port })` as WRITTEN in an entry file.
@@ -135,8 +169,13 @@ export function projectComponents(root: string): Component[] {
   for (const t of targets) {
     const rel = t.entry ?? cfg?.entry ?? DEFAULT_ENTRY;
     const abs = resolve(join(root, rel));
+    const client = KIND_CLIENT[t.kind];
     const seen = byEntry.get(abs);
-    if (seen) continue; // first label wins — it is the one the user will type
+    if (seen) {
+      // Two shells of one app: no one kind decides its client.
+      if (seen.client !== client) delete seen.client;
+      continue; // first label wins — it is the one the user will type
+    }
     const declared = entryDeclarations(abs);
     byEntry.set(abs, {
       label: t.name,
@@ -144,6 +183,7 @@ export function projectComponents(root: string): Component[] {
       appId: componentAppId(root, abs, declared.appId),
       declaresAppId: declared.appId !== undefined,
       ...(declared.port !== undefined ? { port: declared.port } : {}),
+      ...(client !== undefined ? { client } : {}),
     });
   }
   const list = [...byEntry.values()];

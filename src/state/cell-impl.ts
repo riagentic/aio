@@ -14,7 +14,7 @@ import { removalMessage, removalOf } from "./removals-core.ts";
 import type { ScheduleEffect } from "./schedule.ts";
 import type { OwnEffect } from "./own.ts";
 import type { NotifyEffect } from "./notify.ts";
-import { diagEmit } from "../diagnostics/diagnostic-bus.ts";
+import { _diagScopeNow, diagEmit } from "../diagnostics/diagnostic-bus.ts";
 import { log } from "../diagnostics/logger-api.ts";
 import { markInflight } from "./dispatch.ts";
 
@@ -426,36 +426,87 @@ export function callWithOpts(
 // effect's and left this one at 30s, which is precisely the trap of a knob that
 // looks like it worked.
 const DEFAULT_CALL_TIMEOUT_MS = 30_000;
-let _callTimeoutMs = DEFAULT_CALL_TIMEOUT_MS;
-let _callTimeoutByMethod: Record<string, number> | undefined;
-/** `perfBudget.methods[key].timeout: "warn"` — the ceiling REPORTS instead of
- *  rejecting: one `log.warn` at N ms naming the method and the elapsed time,
- *  and the caller keeps awaiting. The default stays reject. */
-let _callWarnMethods = new Set<string>();
+type CallCeilings = {
+  defaultMs: number;
+  byMethod: Record<string, number> | undefined;
+  /** `perfBudget.methods[key].timeout: "warn"` — the ceiling REPORTS instead
+   *  of rejecting: one `log.warn` at N ms naming the method and the elapsed
+   *  time, and the caller keeps awaiting. The default stays reject. */
+  warn: Set<string>;
+};
+const _defaultCeilings = (): CallCeilings => ({
+  defaultMs: DEFAULT_CALL_TIMEOUT_MS,
+  byMethod: undefined,
+  warn: new Set(),
+});
+/** The ceilings for code running outside any app — and, as before, the last
+ *  app to boot's (a host calling an unbound cell has no app to ask). */
+let _ceilings: CallCeilings = _defaultCeilings();
+/** Each app's own ceilings, by its app scope (`_diagScopeNow()`). One process
+ *  can host several apps, and one slot let the LAST booted app's
+ *  `effectTimeoutMs` bound every app's `await cell.method()` — and keep
+ *  bounding them after that app closed. A WeakMap: a closed app's goes with
+ *  its scope. */
+const _ceilingsOf = new WeakMap<object, CallCeilings>();
+/** Bumped by `_resetCallTimeouts`: every app's entry set before it is stale. */
+let _ceilingsEpoch = 0;
+const _epochOf = new WeakMap<CallCeilings, number>();
+
+/** The app a bound dispatcher belongs to (`_bindCallScope`). A bound
+ *  method's call is REGISTERED in its caller's context — a test body, a host,
+ *  another app — before the dispatcher enters the cell's app, so the
+ *  ceiling is read from the dispatcher's app, not from wherever the caller
+ *  happens to be. */
+const _callScopeOf = new WeakMap<object, object>();
+/** The app whose ceilings the call being registered right now uses. */
+let _registeringFor: object | undefined;
+
+/** Tie a bound dispatcher to its app scope (the server bridge does, at bind
+ *  time). @internal */
+export function _bindCallScope(dispatch: object, scope: object): void {
+  _callScopeOf.set(dispatch, scope);
+}
+
+/** The ceilings for the code running now: its app's, else the process's. */
+function _ceilingsNow(): CallCeilings {
+  const scope = _registeringFor ?? _diagScopeNow();
+  const own = scope === undefined ? undefined : _ceilingsOf.get(scope);
+  return own !== undefined && _epochOf.get(own) === _ceilingsEpoch
+    ? own
+    : _ceilings;
+}
 
 /** Point the caller-side wait at the app's configured effect timeouts.
  *  `0` (or a negative) means wait indefinitely; `"warn"` means warn at the
- *  default ceiling and keep waiting. Called at boot. */
+ *  default ceiling and keep waiting. Called at boot — inside an app, for that
+ *  app (and for code outside any app, as before). */
 export function _setCallTimeouts(
   defaultMs?: number,
   perMethod?: Record<string, number | "warn">,
 ): void {
-  _callTimeoutMs = defaultMs ?? DEFAULT_CALL_TIMEOUT_MS;
   const numeric: Record<string, number> = {};
   const warn = new Set<string>();
   for (const [k, v] of Object.entries(perMethod ?? {})) {
     if (v === "warn") warn.add(k);
     else numeric[k] = v;
   }
-  _callTimeoutByMethod = perMethod ? numeric : undefined;
-  _callWarnMethods = warn;
+  const c: CallCeilings = {
+    defaultMs: defaultMs ?? DEFAULT_CALL_TIMEOUT_MS,
+    byMethod: perMethod ? numeric : undefined,
+    warn,
+  };
+  _ceilings = c;
+  const scope = _diagScopeNow();
+  if (scope !== undefined) {
+    _ceilingsOf.set(scope, c);
+    _epochOf.set(c, _ceilingsEpoch);
+  }
 }
 
 /** Restore the built-in default — test isolation. */
 export function _resetCallTimeouts(): void {
-  _callTimeoutMs = DEFAULT_CALL_TIMEOUT_MS;
-  _callTimeoutByMethod = undefined;
-  _callWarnMethods = new Set();
+  _ceilings = _defaultCeilings();
+  _ceilingsEpoch++;
   _longMethods.clear();
 }
 
@@ -514,10 +565,11 @@ export function _getCallTimeouts(): {
 } {
   // `"warn"` rides along: the browser must keep awaiting a warn-mode method
   // exactly as this process does, not reject it at the default ceiling.
+  const c = _ceilingsNow();
   const warn: Record<string, "warn"> = {};
-  for (const k of _callWarnMethods) warn[k] = "warn";
-  const explicit = _callTimeoutByMethod || _callWarnMethods.size
-    ? { ...(_callTimeoutByMethod ?? {}), ...warn }
+  for (const k of c.warn) warn[k] = "warn";
+  const explicit = c.byMethod || c.warn.size
+    ? { ...(c.byMethod ?? {}), ...warn }
     : undefined;
   // `long` folded in HERE, not only where the server assembles its config: the
   // browser must resolve the same ceiling this process enforces, and the
@@ -526,12 +578,12 @@ export function _getCallTimeouts(): {
   // in the one function that answers "what does the client wait?" is what keeps
   // them from drifting. An explicit per-method number still wins.
   if (_longMethods.size === 0) {
-    return { default: _callTimeoutMs, methods: explicit };
+    return { default: c.defaultMs, methods: explicit };
   }
   const methods: Record<string, number | "warn"> = {};
   for (const k of _longMethods) methods[k] = 0;
   return {
-    default: _callTimeoutMs,
+    default: c.defaultMs,
     methods: { ...methods, ...(explicit ?? {}) },
   };
 }
@@ -542,17 +594,18 @@ export function _getCallTimeouts(): {
  *  `long` (a number the app WROTE outranks a blanket "no ceiling"), which beats
  *  the global default. */
 export function callTimeoutFor(method?: string): number {
-  const perMethod = method ? _callTimeoutByMethod?.[method] : undefined;
+  const c = _ceilingsNow();
+  const perMethod = method ? c.byMethod?.[method] : undefined;
   if (perMethod !== undefined) return perMethod;
   if (method && _longMethods.has(method)) return 0;
-  return _callTimeoutMs;
+  return c.defaultMs;
 }
 
 /** What the ceiling DOES when it is reached: `"reject"` (default) or
  *  `"warn"` — `perfBudget.methods[key].timeout: "warn"` keeps the caller
  *  waiting and reports once. A `long` method has no ceiling to reach. */
 export function callTimeoutModeFor(method?: string): "reject" | "warn" {
-  return method && _callWarnMethods.has(method) ? "warn" : "reject";
+  return method && _ceilingsNow().warn.has(method) ? "warn" : "reject";
 }
 
 /** The one line that names the fix — shared by the reject and the warn text
@@ -855,7 +908,14 @@ export function dispatchTracked<A>(
   callId: string,
   method?: string,
 ): Promise<unknown> {
-  const done = registerCall(callId, method);
+  const prev = _registeringFor;
+  _registeringFor = _callScopeOf.get(dispatch) ?? prev;
+  let done: Promise<unknown>;
+  try {
+    done = registerCall(callId, method);
+  } finally {
+    _registeringFor = prev;
+  }
   done.catch(() => {});
   const refused = (e: unknown) =>
     resolveCall(
@@ -1758,6 +1818,9 @@ export function createBatcher(
   // broadcast, `ok: true`, not a line in any log. Immer revokes a sync
   // method's draft at the same moment; the async view refused nothing.
   let closed = false;
+  // Whether any write-set was dispatched — what a rejection report needs to
+  // say truthfully whether the method changed state before it threw.
+  let dispatched = false;
 
   function add(method: string, mutation: Mutation): void {
     if (closed) {
@@ -1793,6 +1856,10 @@ export function createBatcher(
     batch.mutations = [];
     batch.scheduled = false;
     batch.method = "";
+    dispatched = true;
+    // The live view must tell its OWN commit from a foreign one — see
+    // `StaleLedger.seen`. Before: absorb what others committed since.
+    api.flushHook?.(false);
     const r = dispatch(markInflight({
       // Sourced, because a write-set IS an effect result: it is the only way an
       // async method publishes anything. Flagged in-flight, because shutdown's
@@ -1803,6 +1870,8 @@ export function createBatcher(
       type: `${prefix}:${setKey(method)}`,
       payload: { mutations, _origin: method },
     }) as Msg);
+    // After: what the store holds now is this call's own write.
+    api.flushHook?.(true);
     if (r && typeof (r as Promise<unknown>).then === "function") {
       inflight.push(
         (r as Promise<unknown>).catch((e) => {
@@ -1819,14 +1888,21 @@ export function createBatcher(
     batch.method = "";
   }
 
-  return {
+  const api = {
     add,
+    /** Set by the call's live proxy: told just before (`false`) and just
+     *  after (`true`) each write-set is dispatched — see `StaleLedger.seen`. */
+    flushHook: undefined as ((after: boolean) => void) | undefined,
     /** The owning call has settled: every later write is refused by name. */
     close: () => {
       closed = true;
     },
     /** Whether `close()` has run — the owning call has settled. */
     closed: (): boolean => closed,
+    /** Whether this call's writes reach the store: a write-set already
+     *  dispatched, or one still buffered (a non-deferred batch flushes on its
+     *  microtask whatever the method did next). */
+    wrote: (): boolean => dispatched || batch.mutations.length > 0,
     /** Unflushed mutations of the current batch — the live proxy overlays
      *  these on reads (read-your-writes). */
     pending: () => batch.mutations,
@@ -1848,6 +1924,7 @@ export function createBatcher(
       }
     },
   };
+  return api;
 }
 
 // ── Live Proxy for async methods ───────────────────────────────────
@@ -1961,7 +2038,22 @@ type StaleLedger = {
     from?: number;
     /** …and last (inclusive); undefined = to the end. */
     to?: number;
+    /** Set when ANOTHER action (committed while this method awaited)
+     *  re-addressed a slot of this array path under `p` — see `movedUnder`.
+     *  `p` is then the held proxy's own path, not a container this method
+     *  wrote. */
+    moved?: string;
   }>;
+  /** The committed state this invocation last accounted for: its entry
+   *  state, then whatever its own write-set commit produced. A committed
+   *  state that differs from it at a read was produced by ANOTHER action —
+   *  the ledger's own entries only ever record THIS method's writes, so a
+   *  foreign `unshift`/`sort`/`filter` landing during an `await` used to
+   *  re-address a held row with nothing refusing it (`row.v = "saved"`
+   *  wrote into the row that slid into its slot). `NOT_SEEN` = unknown (an
+   *  own write-set that did not commit synchronously); the next read
+   *  re-baselines without judging. */
+  seen?: unknown;
   /** Per-invocation memo of built live-array views, keyed by path — see the
    *  array read-method interception. Lives here because the ledger is already
    *  the one object threaded through every proxy of one method call, and its
@@ -2020,7 +2112,7 @@ function staleHit(
   pathKey: string,
   birth: number,
   ledger: StaleLedger,
-): { p: string } | null {
+): { p: string; moved?: string } | null {
   const log = ledger.log;
   for (let i = birth; i < log.length; i++) {
     const e = log[i]!;
@@ -2041,6 +2133,68 @@ function staleHit(
   return null;
 }
 
+/** `StaleLedger.seen` when this invocation cannot say what it last saw. */
+const NOT_SEEN = Symbol("not-seen");
+
+const isObj = (v: unknown): v is object => v !== null && typeof v === "object";
+
+/** Per foreign commit: base array → current array → the lowest re-addressed
+ *  slot (see `lowestMoved`), computed once per pair. */
+type Slots = Map<unknown[], Map<unknown[], number>>;
+
+/** The lowest slot a commit from `was` to `now` re-addressed: over every row
+ *  present in both (same object — Immer's structural sharing keeps an
+ *  untouched row's identity) whose index changed, the smaller of its old and
+ *  new index. An insert or removal before slot i shifts a row across i; a
+ *  sort moves one to or from it; either way slot i no longer holds what it
+ *  held. Rows edited in place (new objects) prove nothing either way. */
+function lowestMoved(was: unknown[], now: unknown[], memo: Slots): number {
+  let byNow = memo.get(was);
+  if (byNow === undefined) memo.set(was, byNow = new Map());
+  let low = byNow.get(now);
+  if (low !== undefined) return low;
+  low = Infinity;
+  const at = new Map<object, number>();
+  for (let j = was.length - 1; j >= 0; j--) {
+    const v = was[j];
+    if (isObj(v)) at.set(v, j); // lowest slot of an aliased row
+  }
+  for (let j = 0; j < now.length && low > 0; j++) {
+    const v = now[j];
+    if (!isObj(v) || was[j] === v) continue;
+    const k = at.get(v);
+    if (k !== undefined) low = Math.min(low, j, k);
+  }
+  byNow.set(now, low);
+  return low;
+}
+
+/** The array path (joined) under `pathKey` whose slot a commit from `base` to
+ *  `cur` re-addressed — rows moved across it, or it is gone — or null. */
+function movedUnder(
+  pathKey: string,
+  base: unknown,
+  cur: unknown,
+  memo: Slots,
+): string | null {
+  const segs = pathKey.split(PATH_SEP);
+  let a = base, b = cur;
+  for (let k = 0; k < segs.length; k++) {
+    if (a === b || !isObj(a) || !isObj(b)) return null;
+    const key = segs[k]!;
+    const i = Number(key);
+    if (Array.isArray(a) && Array.isArray(b) && Number.isInteger(i)) {
+      if (
+        a[i] !== b[i] &&
+        ((isObj(a[i]) && i >= b.length) || i >= lowestMoved(a, b, memo))
+      ) return segs.slice(0, k).join(PATH_SEP);
+    }
+    a = (a as Record<string, unknown>)[key];
+    b = (b as Record<string, unknown>)[key];
+  }
+  return null;
+}
+
 /** Throw the named stale-capture error (get/set/has/keys on a reference that
  *  predates this method's overwrite of its container). */
 function throwStaleCapture(
@@ -2048,9 +2202,20 @@ function throwStaleCapture(
   methodName: string,
   pathKey: string,
   overwrittenKey: string,
+  moved?: string,
 ): never {
   const ref = "s." + pathKey.split(PATH_SEP).join(".");
   const ow = "s." + overwrittenKey.split(PATH_SEP).join(".");
+  if (moved !== undefined) {
+    throw new Error(
+      `[${cellName}:${methodName}] stale reference: this value was captured from ${ref} before another action ` +
+        `re-addressed the rows of ${
+          moved === "" ? "s" : "s." + moved.split(PATH_SEP).join(".")
+        } while this method awaited (it moved, removed or inserted rows). In an async method \`s\` is a live view, ` +
+        `so the old reference would silently address a DIFFERENT row now. Re-find the row after the await ` +
+        `(s.items.find((r) => r.id === id)) instead of holding it across one.`,
+    );
+  }
   throw new Error(
     `[${cellName}:${methodName}] stale reference: this value was captured from ${ref} before the method overwrote ${ow}. ` +
       `In an async method \`s\` is a live view — the old reference would silently resolve to the NEW value ` +
@@ -2197,6 +2362,17 @@ function _neverSignal(): AbortSignal {
   return _never;
 }
 
+/** Signals a method body has READ (`s.$signal`, through any proxy of the
+ *  call). A body that never read its signal cannot have stood down because
+ *  of it — the executor's shutdown-discard decision (cell-methods-internals,
+ *  method-cancel.ts `abortedByShutdown`) turns on exactly that. */
+const _signalsRead = new WeakSet<AbortSignal>();
+
+/** Did the method body read this call's `s.$signal`? */
+export function signalWasRead(signal: AbortSignal): boolean {
+  return _signalsRead.has(signal);
+}
+
 export function createLiveProxy<S extends Record<string, unknown>>(
   cellName: string,
   prefix: string,
@@ -2205,7 +2381,9 @@ export function createLiveProxy<S extends Record<string, unknown>>(
   // The proxy only reads pending writes + records new ones — flush/discard are
   // the executor's concern, so keep the param structural (test mocks + the
   // transactional path both satisfy it).
-  batcher: Pick<ReturnType<typeof createBatcher>, "add" | "pending">,
+  batcher:
+    & Pick<ReturnType<typeof createBatcher>, "add" | "pending">
+    & Partial<Pick<ReturnType<typeof createBatcher>, "flushHook">>,
   path: string[] = [],
   // Cache values carry the proxy AND its birth cursor so a re-fetch after an
   // overwrite can detect the entry is stale and rebuild (see StaleLedger).
@@ -2350,14 +2528,53 @@ export function createLiveProxy<S extends Record<string, unknown>>(
     }
   };
   const _liveArrays = (_stale.live ??= new Map());
+  /** Judge every FOREIGN commit since the last state this invocation
+   *  accounted for (see `StaleLedger.seen`): each proxy this call has built
+   *  whose path it re-addressed gets a `moved` ledger entry, so the proxy —
+   *  and only a HELD one, a fresh fetch is born after the entry — refuses by
+   *  name. Called before any freshness check and any proxy birth. Judged
+   *  here, eagerly, so the ledger never retains a state. */
+  const syncForeign = (): void => {
+    if (!("seen" in _stale)) return;
+    const now = getState();
+    const base = _stale.seen;
+    if (now === base) return;
+    _stale.seen = now;
+    if (base === NOT_SEEN) return;
+    const memo: Slots = new Map();
+    for (const key of _proxyCache.keys()) {
+      const moved = movedUnder(key, base, now, memo);
+      if (moved !== null) _stale.log.push({ p: key, moved });
+    }
+  };
+  // Only the ROOT of a live (non-pinned) view tracks, and only the first one
+  // on this batcher: the hook is what tells an own commit from a foreign one,
+  // and without it every own write-set would read as foreign. A pinned
+  // transactional view (`_live` set) sees no foreign commit at all.
+  if (
+    path.length === 0 && _live === undefined && "flushHook" in batcher &&
+    batcher.flushHook === undefined
+  ) {
+    _stale.seen = getState();
+    batcher.flushHook = (after) => {
+      if (!after) return syncForeign();
+      const now = getState();
+      // Unchanged = the write-set did not commit synchronously (queued behind
+      // a running drain) or was a no-op: unknown, so re-baseline, never judge.
+      _stale.seen = now === _stale.seen ? NOT_SEEN : now;
+    };
+  }
   const noteRead = _watch ? (k: string) => _watch.reads.add(k) : undefined;
   const noteWrite = _watch ? (k: string) => _watch.writes.add(k) : undefined;
   /** Throw if this proxy's container was overwritten after its creation. The
    *  root can never be stale, and the length check makes the common case free. */
   const assertFresh = (): void => {
+    syncForeign();
     if (path.length === 0 || _stale.log.length <= _birth) return;
     const hit = staleHit(pathKey, _birth, _stale);
-    if (hit) throwStaleCapture(cellName, methodName, pathKey, hit.p);
+    if (hit) {
+      throwStaleCapture(cellName, methodName, pathKey, hit.p, hit.moved);
+    }
   };
   /** Record a container overwrite — only when a proxy could already exist at
    *  or below the written path (every proxy's ancestors are cached by
@@ -2389,6 +2606,7 @@ export function createLiveProxy<S extends Record<string, unknown>>(
     // misses. Building it eagerly cost one 10k-element allocation storm per
     // array read method — `s.items.reduce(...)` allocated ten thousand arrays
     // to look ten thousand entries up in a Map, and then threw them away.
+    syncForeign();
     let cached = _proxyCache.get(cacheKey);
     if (
       cached && _stale.log.length > cached.birth &&
@@ -2641,6 +2859,7 @@ export function createLiveProxy<S extends Record<string, unknown>>(
       // fires). A never-aborting fallback keeps `s.$signal.aborted` safe in
       // sync methods / contexts without cancellation.
       if (key === "$signal") {
+        if (_signal) _signalsRead.add(_signal);
         return _signal ?? _neverSignal();
       }
       // Transactional mid-method publish (root-level; no-op off the flag).

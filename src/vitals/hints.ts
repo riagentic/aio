@@ -95,9 +95,13 @@ export function evaluateHints(
     (snap.transport.firstDegradedAt === null ||
       snap.loop.firstDegradedAt < snap.transport.firstDegradedAt)
   ) {
+    // One decimal: the rate is a count over a window, and printing
+    // `1.6666666666666667/s` into a log line reads as a precision it does
+    // not have.
+    const drain = Math.round(snap.loop.drainRate * 10) / 10;
     return {
       cause:
-        `Dispatch queue backed up to ${snap.loop.queueDepth} actions, drain rate: ${snap.loop.drainRate}/s`,
+        `Dispatch queue backed up to ${snap.loop.queueDepth} actions, drain rate: ${drain}/s`,
       evidence: [
         `queue depth: ${snap.loop.queueDepth} (threshold: ${thresholds.queue.frozen})`,
         `top contributor: ${snap.loop.lastReduceCell}/${snap.loop.lastReduceAction}`,

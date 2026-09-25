@@ -51,3 +51,37 @@ testCell(scan, "an unknown key throws and lists the real ones", (t) => {
   assert(msg.includes('"scannning"'), `names the bad key: ${msg}`);
   assert(msg.includes("scanning"), `lists the real keys: ${msg}`);
 });
+
+// Committed state is frozen in dev AND prod — including the declared initial
+// (deep-frozen at compose) and `testUI`'s `seed`. `t.init(seed)` built a fresh
+// UNFROZEN slice, so a selector sorting its state in place (`s.items.sort()`)
+// passed here and threw in the running app.
+const sortable = cell("seedFrozen", {
+  state: { items: [3, 1, 2] as number[], cfg: { a: 1 } },
+  methods: {
+    add(s, n: number) {
+      s.items.push(n);
+    },
+  },
+  selectors: { sorted: (s) => s.items.sort() },
+});
+
+testCell(
+  sortable,
+  "a seeded state is frozen like every committed state",
+  (t) => {
+    t.init({ items: [9, 8, 7] });
+    assert(Object.isFrozen(t.state), "the seeded slice is frozen");
+    assert(Object.isFrozen(t.state.items), "a seeded array is frozen");
+    let threw = false;
+    try {
+      (sortable as unknown as { sorted: () => number[] }).sorted();
+    } catch {
+      threw = true;
+    }
+    assert(threw, "an in-place sort of seeded state throws, as in prod");
+    assertEquals(t.state.items, [9, 8, 7], "the seed was not mutated");
+    t.destroy();
+    assert(Object.isFrozen(t.state), "destroy() leaves a frozen slice too");
+  },
+);

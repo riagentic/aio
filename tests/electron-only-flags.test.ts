@@ -88,8 +88,13 @@ Deno.test("electron-only: --cdp and --width/--height join the family", () => {
   assertStringIncludes(refusal(["--cdp=9333"], "server-only"), "--cdp");
   const w = refusal(["--width=100", "--height=100"], "browser");
   assertStringIncludes(w, "--width");
-  // A browser page's size has a real answer — the refusal says it.
+  // The refusal names the real knob — and does not claim it sizes a browser
+  // page. It used to say "A browser page takes its size from aio.run({ ui:
+  // { width, height } })", but no page can size the tab it runs in: ui.width
+  // sizes the Electron window only (docs/basics/quickstart.md, "Window size").
   assertStringIncludes(w, "ui: { width, height }");
+  assert(!w.includes("takes its size from"), w);
+  assertStringIncludes(w, "Electron window only");
   assertStringIncludes(refusal(["--height=100"], "browser"), "--height");
 });
 

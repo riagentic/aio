@@ -99,6 +99,13 @@ const EXTRA_ON_BROWSER: Record<string, string> = {
   serverImport:
     "the `aio` specifier maps here — stubbable *.server.ts import a cell " +
     "method makes (the cell module is in the client graph)",
+  table: "the `aio` specifier maps here — `db:` schema builder declared " +
+    "beside its cell (docs/persistence/sqlite.md)",
+  pk: "the `aio` specifier maps here — `db:` column builder",
+  integer: "the `aio` specifier maps here — `db:` column builder",
+  real: "the `aio` specifier maps here — `db:` column builder",
+  text: "the `aio` specifier maps here — `db:` column builder",
+  ref: "the `aio` specifier maps here — `db:` column builder",
   serverUser: "the `aio` specifier maps here — server-only; a facade that " +
     "throws when called (a cell module imports it; docs/auth/auth.md)",
   serverRequest: "the `aio` specifier maps here — server-only facade, " +

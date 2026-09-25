@@ -16,6 +16,7 @@
 // download, so its real build is a second opt-in (AIO_BUILD_ELECTRON=1);
 // without it the AppImage path is still asserted to be wired.
 
+import { fusesAreOff } from "../src/electron/electron-fuses.ts";
 import {
   assert,
   assertEquals,
@@ -820,6 +821,13 @@ Deno.test({
       assert(
         (await Deno.stat(join(squash, "electron", "electron"))).isFile,
         "Electron runtime missing from the AppImage",
+      );
+      // Fused: it cannot be started as plain Node, with NODE_OPTIONS code, or
+      // under a debugger (electron-fuses.ts; the real-binary proof is in
+      // electron-fuses.test.ts).
+      assert(
+        fusesAreOff(await Deno.readFile(join(squash, "electron", "electron"))),
+        "the AppImage ships Electron with its fuses on",
       );
       assert(
         (await Deno.stat(join(squash, "dist", "app.js"))).size > 0,

@@ -6,7 +6,7 @@ import { ensureLockDirOf, instances, slugify } from "./single-instance-lock.ts";
 import { isPipePath, listenLocal } from "./local-listen.ts";
 import { serveHttpOverLocal } from "./http-over-conn.ts";
 import { enc } from "../protocol/envelope.ts";
-import { dirname, join, resolve } from "@std/path";
+import { dirname, fromFileUrl, join, resolve } from "@std/path";
 import { AsyncLocalStorage } from "node:async_hooks";
 import { WS_BUFFER_HIGH_WATER } from "./write-backlog.ts";
 import { resolveShare } from "./app-dirs.ts";
@@ -37,7 +37,8 @@ export {
   TEXT_EXTENSIONS,
 } from "./server-html.ts";
 import { hasVendorImmer } from "./server-vendor.ts";
-import { appDenoJson } from "./aio-run-helpers.ts";
+import { appDenoJson, appDenoJsonLocated } from "./aio-run-helpers.ts";
+import { assetDirCandidates, isCompiled } from "./paths.ts";
 import { PIN_TTL_MS, verifyPin } from "./pairing.ts";
 export type { ServerConfig, ServerHandle } from "./server-types.ts";
 export { _timingSafeEqual } from "./server-auth.ts";
@@ -376,7 +377,13 @@ export function createServer(config: ServerConfig): ServerHandle {
    *  is (see `sessionCookieNameFor`). */
   const sessionCookieName = sessionCookieNameFor(config.appId);
   const authFlows = config.authFlows
-    ? { ...config.authFlows, cookieName: sessionCookieName }
+    ? {
+      ...config.authFlows,
+      cookieName: sessionCookieName,
+      // The POST flows' Origin check reads the same list the server-wide gate
+      // does — see `sameOrigin` in auth-flows.ts.
+      allowedOrigins: config.allowedOrigins,
+    }
     : undefined;
 
   // Diagnostic bus — dev-only event system for surfacing silent failures.
@@ -393,7 +400,9 @@ export function createServer(config: ServerConfig): ServerHandle {
   // went to a fourth place depending on where it was launched from. Setting a
   // path costs nothing; only the dev-only diagnostic BUS stays gated.
   initClientLog(getLogDir());
-  if (!prod) setDiagEmit(diagEmit);
+  // Wired in prod too: there `diagEmit` forwards only errors, and only to the
+  // listeners that asked (feedback auto-capture) — see `diagEmit`.
+  setDiagEmit(diagEmit);
 
   // Unified user resolver — one code path for both static map and dynamic hook (AIO-171)
   // AUTH-1: session tokens resolve FIRST (cheap indexed lookup, revocable),
@@ -540,6 +549,22 @@ export function createServer(config: ServerConfig): ServerHandle {
           `does not describe. Use "${
             key.split("/").slice(0, star + 1).join("/")
           }" and branch inside the handler.`,
+      );
+    }
+    // A `?` or `#` in a key can never match: the matcher compares
+    // `url.pathname`, which never carries the query or the fragment, so
+    // `"/api/x?y"` is declared, accepted, and every request for it falls
+    // through to the app shell — 200 text/html, read as success. Warn, not
+    // throw: 1.0.11 booted with such a key, and the surface is frozen.
+    if (key.includes("?") || key.includes("#")) {
+      log.warn(
+        "http",
+        `custom route "${key}" contains "?" or "#" and can never match — ` +
+          `routes match the request PATH only, so every request for it falls ` +
+          `through to the app shell (200 text/html). Declare "${
+            key.split(/[?#]/)[0]
+          }" and read the query in the handler: ` +
+          `new URL(req.url).searchParams.`,
       );
     }
     // A trailing wildcard/param pattern can't be refused (an SPA catch-all is
@@ -813,6 +838,9 @@ export function createServer(config: ServerConfig): ServerHandle {
     // `assets` is for DATA a running app serves — a model, a font, a sample
     // pack — which prod needs exactly as much as dev does.
     assets: config.assets,
+    // …and a compiled binary falls back, per file, to the copy it EMBEDDED —
+    // see assetDirCandidates.
+    assetFallbacks: _assetFallbacks(config.assets),
     // The shell's own CSP, when the app turned a nonce on. `securityHeaders`
     // computes the server-wide one from the same inputs; this is the same
     // function with a nonce threaded through, so the two cannot drift.
@@ -831,6 +859,15 @@ export function createServer(config: ServerConfig): ServerHandle {
       : {}),
     // A declared workspace share (deno.json "share"): dev only, like serveDirs.
     share: prod ? undefined : _shareRoots(absBaseDir),
+    // A module served from outside the app root (a relative import that left
+    // it) reloads the page on edit like any app-root file — the watcher is
+    // told each one as it enters the served graph. Dev only (no watcher in
+    // prod).
+    onSrcServed: (file) => watcher?.watchServed(file),
+    // …and every module the page actually loads, from any root: a served
+    // `.js`/`.mjs`/`.jsx` edit reloads, and a `serveDirs`/`share` module is
+    // watched where it lives. Build output the page never loads stays out.
+    onModuleServed: (file) => watcher?.watchServed(file),
     absDistDir,
     hasCSS,
     importMap: IMPORT_MAP,
@@ -858,6 +895,7 @@ export function createServer(config: ServerConfig): ServerHandle {
     getSnapshot: config.getSnapshot,
     loadSnapshot: config.loadSnapshot,
     blobs: config.blobs,
+    blobsPrivate: _perUserAuth || !!config.token,
     getHealth: config.getHealth,
     vitalsSystem: config.vitalsSystem,
     getVitalsExtra: () => {
@@ -1267,8 +1305,20 @@ export function createServer(config: ServerConfig): ServerHandle {
       // Resolution is not free (a `resolveUser` hook may hit a DB/JWKS) —
       // but it is exactly one credential check, the same one a legitimate
       // request performs, and refusing to make it was refusing service.
+      // A `?token=` that CANNOT authenticate this request is not a
+      // credential, and must not stand in front of one that can. A login
+      // session is refused from the URL on every path but `/ws` (see
+      // `_userResolver`), and with no `users:`/`resolveUser` there is nothing
+      // else for it to be — so it is an app's own query parameter (an invite,
+      // a confirmation link). Taken first, it masked the session cookie: a
+      // signed-in user was served as anonymous (an app route answered 401)
+      // and every such link was charged as a failed login, until 429.
+      const urlTokenInert = !_baseResolver && pathname !== "/ws" &&
+        url.searchParams.has("token");
+      const credUrl = urlTokenInert ? new URL(url) : url;
+      if (urlTokenInert) credUrl.searchParams.delete("token");
       const { token, fromUrl, source, legacyCookie } = _extractTokenWithSource(
-        url,
+        credUrl,
         req,
         sessionCookieName,
       );
@@ -1416,7 +1466,7 @@ export function createServer(config: ServerConfig): ServerHandle {
         if (extra) anonResp.headers.set("Set-Cookie", extra["Set-Cookie"]);
         return anonResp;
       }
-      if (url.searchParams.get("token")) _warnTokenInUrl();
+      if (credUrl.searchParams.get("token")) _warnTokenInUrl();
       if (pathname === "/ws") {
         // Sockets outlive the credential that opened them, so the socket keeps
         // the session token and re-validates it (see `revalidateSession`).
@@ -1879,6 +1929,16 @@ export function createServer(config: ServerConfig): ServerHandle {
       peerLocal: true,
     });
     if (originDenied) return harden(originDenied);
+    // The machine owner, exactly as on the main listener. Under TLS this is
+    // the port `am` talks to (`trojanPort`), and it never consulted the
+    // control credential — so every exposed per-user app answered `am`/amui
+    // with 401. Loopback-only by construction, and it opens the trojan prefix
+    // and nothing else.
+    if (
+      url.pathname.startsWith(TROJAN_PREFIX) && localControlAuthorized(req)
+    ) {
+      return harden(await staticHandler.serveStatic(url.pathname, req));
+    }
     // Authenticate trojan requests on localhost — same rules as main server
     if (config.token) {
       const qToken = url.searchParams.get("token");
@@ -2074,4 +2134,28 @@ function _shareRoots(absBaseDir: string) {
   const raw = (dj.config as { share?: unknown }).share;
   if (raw === undefined) return undefined;
   return resolveShare(dirname(dj.path), raw);
+}
+
+/** Per `assets` prefix, the directories a compiled binary falls back to when
+ *  the mount's own (CWD-relative) dir does not hold a file: the copy embedded
+ *  under its own project root, the directory of its embedded deno.json — see
+ *  {@link assetDirCandidates}. `undefined` when there is none (uncompiled, no
+ *  embedded root, only absolute mounts). */
+function _assetFallbacks(
+  assets: Record<string, string> | undefined,
+): Record<string, string[]> | undefined {
+  if (!assets || !isCompiled()) return undefined;
+  const located = appDenoJsonLocated();
+  const embeddedRoot = located?.dir.protocol === "file:"
+    ? fromFileUrl(located.dir)
+    : null;
+  const cwd = Deno.cwd();
+  const out: Record<string, string[]> = {};
+  for (const [prefix, dir] of Object.entries(assets)) {
+    if (typeof dir !== "string") continue;
+    const rest = assetDirCandidates(dir, { cwd, compiled: true, embeddedRoot })
+      .slice(1);
+    if (rest.length) out[prefix] = rest;
+  }
+  return Object.keys(out).length ? out : undefined;
 }

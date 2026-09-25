@@ -23,6 +23,21 @@ export function escapeHtml(s: string): string {
   return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
 }
 
+/** The elements whose FIRST newline the HTML parser drops: `<pre>\nabc</pre>`
+ *  parses to the text `abc`. The client builds the text node it was given, so
+ *  a `<pre>` (or a `<textarea>` value) that starts with a newline lost it in
+ *  server markup and got it back on hydration — the block jumped a line, and a
+ *  server-only page never showed it. The writers emit one extra newline there
+ *  for the parser to eat, as React does. */
+const LEADING_NEWLINE_ELEMENTS = new Set(["pre", "textarea", "listing"]);
+
+/** `content` as it must follow `<tag>` so the parser keeps its first newline. */
+export function keepLeadingNewline(tag: string, content: string): string {
+  return content.charCodeAt(0) === 10 && LEADING_NEWLINE_ELEMENTS.has(tag)
+    ? "\n" + content
+    : content;
+}
+
 /** The two elements whose text content is RAW: the parser reads to the
  *  closing tag and decodes no entities at all. */
 export const RAW_TEXT_ELEMENTS = new Set(["script", "style"]);

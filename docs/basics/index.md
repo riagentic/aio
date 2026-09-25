@@ -24,7 +24,8 @@
 ## State Management
 
 - [Cells](../state/cells.md) — cell() config and anatomy
-- [Cell Visibility](../state/cell-visibility.md) — per-cell ui/persist filters
+- [Cell Visibility](../state/cell-visibility.md) — per-cell visible/persist
+  filters
 - [Methods](../state/methods.md) — sync/async methods, workflows, cancellation,
   selectors
 - [Composition](../state/composition.md) — cross-cell communication

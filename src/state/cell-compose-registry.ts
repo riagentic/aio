@@ -2,7 +2,7 @@
 
 import { log } from "../diagnostics/logger-api.ts";
 import type { AioError } from "../diagnostics/error.ts";
-import { createAioError } from "../diagnostics/error.ts";
+import { CIRCUIT_BREAKER_TRIP, createAioError } from "../diagnostics/error.ts";
 import type { CellDef, Msg, ScopedApp } from "./cell-types.ts";
 import { tagSource } from "./cell-types.ts";
 import { inServerOrigin } from "./call-origin.ts";
@@ -33,6 +33,26 @@ export type RegistryBundle = {
   ) => void;
   /** Clear per-cell tracking on destroy (called by destroyAll/disable) */
   clearCell: (id: string) => void;
+  /** Hand the lifecycle of cells another isolate owns to that isolate — see
+   *  `RemoteLifecycle`. */
+  setRemote: (remote: RemoteLifecycle) => void;
+};
+
+/** The lifecycle of cells ANOTHER isolate runs (`worker: true`).
+ *
+ *  `disable`/`enable` ran the cell's `onDestroy`/`onInit` and its state reset
+ *  HERE, on the main isolate's copy — a thread that never opened the cell's
+ *  resources — while the worker's copy kept the old slice: the first call after
+ *  `enable` streamed home a write on top of it (n=3, reset to 0, one increment
+ *  read 4). The owning isolate runs the hooks and resets its own copy; this
+ *  side keeps the decision (disabled = refused at this door) and resets ITS
+ *  copy once the owner reports the destroy succeeded. */
+export type RemoteLifecycle = {
+  owns: (cell: string) => boolean;
+  /** Run the cell's disable in its isolate; `done(false)` = its `onDestroy`
+   *  threw and it rolled back (already reported and counted there). */
+  disable: (cell: string, done: (ok: boolean) => void) => void;
+  enable: (cell: string) => void;
 };
 
 function makeScopedApp(
@@ -64,6 +84,14 @@ export function buildRegistry(
     | { dispatch: (a: Msg) => void; getState: () => unknown }
     | undefined;
   let onCellDisable: ((prefix: string) => void) | undefined;
+  let remote: RemoteLifecycle | undefined;
+  /** Cells the breaker is disabling right now. A disable whose `onDestroy`
+   *  throws rolls back and COUNTS that throw — which, at or over `maxErrors`,
+   *  tripped the breaker again from inside its own trip: `onDestroy` ran
+   *  ~10 000 times until the stack overflowed, each run reported to `onError`,
+   *  and the method that tripped it failed with "Maximum call stack size
+   *  exceeded". One attempt per trip; the next error tries again. */
+  const tripping = new Set<string>();
 
   function countCellError(name: string): void {
     const now = Date.now();
@@ -77,21 +105,44 @@ export function buildRegistry(
     const count = timestamps.length;
     if (
       cbMaxErrors > 0 && count >= cbMaxErrors &&
-      !disabledCells.has(name) && cbApp
+      !disabledCells.has(name) && cbApp && !tripping.has(name)
     ) {
-      registry.disable(name, cbApp);
-      if (circuitBreaker?.onTrip) circuitBreaker.onTrip(name, count);
-      if (reportError) {
-        reportError(
-          createAioError(
-            "EFFECT_ERROR",
-            `circuit breaker tripped: cell "${name}" auto-disabled after ${count} errors${
-              cbWindow ? ` in ${cbWindow}ms` : ""
-            }`,
-            { cellName: name },
-          ),
-        );
+      tripping.add(name);
+      try {
+        // Reported once the disable SETTLED: a worker cell's answers by
+        // reply, and until then it looks disabled here even when its
+        // `onDestroy` threw and the worker rolled it back.
+        disableCell(name, cbApp, (ok) => {
+          // Rolled back (its `onDestroy` threw, reported as DESTROY_ERROR):
+          // the cell is still enabled, so the breaker did NOT trip — saying
+          // it did would be the lie.
+          if (ok) reportTrip(name, count);
+        });
+      } finally {
+        tripping.delete(name);
       }
+    }
+  }
+
+  function reportTrip(name: string, count: number): void {
+    if (circuitBreaker?.onTrip) circuitBreaker.onTrip(name, count);
+    if (reportError) {
+      reportError(
+        createAioError(
+          "EFFECT_ERROR",
+          // Named so the tip is the breaker's own, not the sync-effect one
+          // (see CIRCUIT_BREAKER_TRIP); the message and code are unchanged.
+          Object.assign(
+            new Error(
+              `circuit breaker tripped: cell "${name}" auto-disabled after ${count} errors${
+                cbWindow ? ` in ${cbWindow}ms` : ""
+              }`,
+            ),
+            { name: CIRCUIT_BREAKER_TRIP },
+          ),
+          { cellName: name },
+        ),
+      );
     }
   }
 
@@ -122,6 +173,74 @@ export function buildRegistry(
     return typeof own === "string" ? own : undefined;
   }
 
+  function disableCell(
+    name: string,
+    app: { dispatch: (a: Msg) => void; getState: () => unknown },
+    /** Called once the disable settled: `false` = rolled back. */
+    settled?: (ok: boolean) => void,
+  ): void {
+    const f = cells.find((f) => f.__aio.id === name);
+    disabledCells.add(name);
+    if (f && remote?.owns(name)) {
+      const destroyType = f.__aio.destroyType;
+      remote.disable(name, (ok) => {
+        if (!ok) {
+          // Rolled back over there — roll back here, as the local path does.
+          disabledCells.delete(name);
+          settled?.(false);
+          return;
+        }
+        // Unconditionally, even when an `enable` raced in behind the
+        // disable: the owner reset its copy and cancels nothing it re-arms
+        // until it re-inits, which it does AFTER this reply (FIFO) — so the
+        // reset and the cancel both belong before that.
+        app.dispatch(tagSource({ type: destroyType, payload: {} }, "System"));
+        cellLastAction.delete(name);
+        if (onCellDisable) onCellDisable(name);
+        settled?.(true);
+      });
+      return;
+    }
+    try {
+      if (f) {
+        if (f.__aio.onDestroy) {
+          const scopedApp = makeScopedApp(f, app, reportError);
+          f.__aio.onDestroy(scopedApp);
+        }
+        app.dispatch(
+          tagSource({ type: f.__aio.destroyType, payload: {} }, "System"),
+        );
+      }
+    } catch (e) {
+      disabledCells.delete(name);
+      countCellError(f?.__aio.id ?? name);
+      const msg = `disable("${name}") failed, rolled back: ${e}`;
+      if (reportError) {
+        reportError(
+          createAioError("DESTROY_ERROR", msg, {
+            cellName: f?.__aio.id ?? name,
+          }),
+        );
+      } else {
+        log.error("cell", msg);
+      }
+      settled?.(false);
+      return;
+    }
+    if (f) {
+      // The ERROR COUNT survives a disable. `clearCell` wipes it, and the
+      // breaker disables a cell BECAUSE of those errors — so the one moment
+      // an operator most needs the number was the moment it went to zero.
+      // Measured after a trip: `enabled: false` beside `errors: 0`, and
+      // `aio_cell_errors_total` — declared `# TYPE counter` — reset to 0,
+      // which is the counter-reset defect `server-metrics.ts` documents as
+      // fixed for the broadcast counters.
+      cellLastAction.delete(f.__aio.id);
+      if (onCellDisable) onCellDisable(f.__aio.id);
+    }
+    settled?.(true);
+  }
+
   const registry: Registry = {
     enable: (
       name: string,
@@ -134,6 +253,12 @@ export function buildRegistry(
         app.dispatch(
           tagSource({ type: f.__aio.initType, payload: {} }, "System"),
         );
+        // The owner runs `onInit` (and its own `__init`); its errors come home
+        // as cell errors and are counted there.
+        if (remote?.owns(name)) {
+          remote.enable(name);
+          return;
+        }
         if (f.__aio.onInit) {
           const scopedApp = makeScopedApp(f, app, reportError);
           try {
@@ -154,49 +279,7 @@ export function buildRegistry(
       }
     },
 
-    disable: (
-      name: string,
-      app: { dispatch: (a: Msg) => void; getState: () => unknown },
-    ) => {
-      const f = cells.find((f) => f.__aio.id === name);
-      disabledCells.add(name);
-      try {
-        if (f) {
-          if (f.__aio.onDestroy) {
-            const scopedApp = makeScopedApp(f, app, reportError);
-            f.__aio.onDestroy(scopedApp);
-          }
-          app.dispatch(
-            tagSource({ type: f.__aio.destroyType, payload: {} }, "System"),
-          );
-        }
-      } catch (e) {
-        disabledCells.delete(name);
-        countCellError(f?.__aio.id ?? name);
-        const msg = `disable("${name}") failed, rolled back: ${e}`;
-        if (reportError) {
-          reportError(
-            createAioError("DESTROY_ERROR", msg, {
-              cellName: f?.__aio.id ?? name,
-            }),
-          );
-        } else {
-          log.error("cell", msg);
-        }
-        return;
-      }
-      if (f) {
-        // The ERROR COUNT survives a disable. `clearCell` wipes it, and the
-        // breaker disables a cell BECAUSE of those errors — so the one moment
-        // an operator most needs the number was the moment it went to zero.
-        // Measured after a trip: `enabled: false` beside `errors: 0`, and
-        // `aio_cell_errors_total` — declared `# TYPE counter` — reset to 0,
-        // which is the counter-reset defect `server-metrics.ts` documents as
-        // fixed for the broadcast counters.
-        cellLastAction.delete(f.__aio.id);
-        if (onCellDisable) onCellDisable(f.__aio.id);
-      }
-    },
+    disable: (name, app) => disableCell(name, app),
 
     isEnabled: (name: string) => !disabledCells.has(name),
 
@@ -232,6 +315,9 @@ export function buildRegistry(
     setCbApp: (app) => {
       cbApp = app;
     },
+    setRemote: (r) => {
+      remote = r;
+    },
   };
 }
 
@@ -260,10 +346,7 @@ export function initAll(
           (app.getState() as Record<string, unknown>)[f.__aio.id] as unknown,
         getFullState: () => app.getState() as Record<string, unknown>,
       };
-      try {
-        // Server code, exactly as above — see call-origin.ts.
-        inServerOrigin(() => f.__aio.onInit!(scopedApp, f.__aio.state));
-      } catch (e) {
+      const failed = (e: unknown) => {
         if (reportError) {
           reportError(
             createAioError("INIT_ERROR", e, { cellName: f.__aio.id }),
@@ -272,6 +355,24 @@ export function initAll(
           log.error("cell", `${f.__aio.id} init: ${e}`);
         }
         countCellError(f.__aio.id);
+      };
+      try {
+        // Server code, exactly as above — see call-origin.ts.
+        const r: unknown = inServerOrigin(() =>
+          f.__aio.onInit!(scopedApp, f.__aio.state)
+        );
+        // An `async onInit` that rejects is the same failure as one that
+        // throws. Nothing observed the promise, so it was an UNHANDLED
+        // rejection: on the main isolate a crash-handler line with no
+        // INIT_ERROR, no `onError`, no fix — and inside a `worker: true`
+        // cell's worker it killed the thread, leaving the cell unreachable for
+        // the life of the process while every harness kept serving it.
+        const then = (r as { then?: unknown } | null)?.then;
+        if (typeof then === "function") {
+          then.call(r, undefined, failed);
+        }
+      } catch (e) {
+        failed(e);
       }
     }
   }

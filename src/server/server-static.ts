@@ -7,9 +7,19 @@ import {
   SNAPSHOT_MAX_BODY,
 } from "./read-body.ts";
 import { TROJAN_PREFIX } from "./server-auth.ts";
-import { SERVER_FILE_RE } from "../entries.ts";
+import { isServerOnlyMarker, SERVER_FILE_RE } from "../entries.ts";
 import type { CallTimeouts } from "../protocol/protocol-types.ts";
-import { extname, join, resolve, SEPARATOR } from "@std/path";
+import {
+  dirname,
+  extname,
+  fromFileUrl,
+  join,
+  relative,
+  resolve,
+  SEPARATOR,
+  toFileUrl,
+} from "@std/path";
+import { locateDenoJsonAbove } from "./deno-json.ts";
 import { formatPrometheus, healthCells } from "./server-metrics.ts";
 import { log } from "../diagnostics/logger-api.ts";
 import type { RenderBudget } from "../vitals/types.ts";
@@ -44,6 +54,153 @@ const AIR_TS_URL = new URL("../air.ts", import.meta.url);
 const LISTENERS_TS_URL = new URL("../state/listeners.ts", import.meta.url);
 // Base for resolving sub-module imports served under /__aio/ (src/ root).
 const AIO_SRC_BASE_URL = new URL("../", import.meta.url);
+
+/** DEV ONLY: where a module the app imports from OUTSIDE its app root is
+ *  served — `/__aio-src/<path relative to the project root>`.
+ *
+ *  The app root (`dirname(entry)`) is served at `/`, and a URL cannot climb
+ *  above `/`: with the entry at `src/pro/app.ts`, `App.tsx`'s
+ *  `import "../ui/Shell.tsx"` resolved in the browser to `/ui/Shell.tsx` =
+ *  `src/pro/ui/Shell.tsx` — a 404 and a blank page — while the production
+ *  bundle, which follows FILE paths, was fine. So the dev server rewrites such
+ *  an import to this prefix and serves exactly the files served modules import
+ *  (the bundler's graph, never the project directory). Inside `/__aio` so an
+ *  app's catch-all route cannot capture it (`isReservedRoutePath`). */
+export const SRC_TREE_PREFIX = "/__aio-src";
+
+/** DEV ONLY: what the dev server compiles on request — the extensions the
+ *  bundler compiles (`.jsx` is JSX to esbuild, exactly as in the bundle).
+ *  `.mts` is TypeScript the bundle compiles too; left out, dev served it raw
+ *  as `application/octet-stream`, which the browser refuses as a module. */
+const DEV_TRANSPILED: ReadonlySet<string> = new Set([
+  ".ts",
+  ".tsx",
+  ".jsx",
+  ".mts",
+]);
+
+/** DEV ONLY: every file the dev server serves as a JavaScript MODULE — the
+ *  compiled ones plus plain `.js`/`.mjs`. Each goes through
+ *  `_rewriteRelativeImports`: a module whose relative imports were left as
+ *  written resolves them against its own URL, which for a module outside the
+ *  app root names a file nothing made servable — a 404 the bundle never had. */
+const DEV_MODULE: ReadonlySet<string> = new Set([
+  ...DEV_TRANSPILED,
+  ".js",
+  ".mjs",
+]);
+
+/** A relative import specifier in esbuild's ESM output: `from "…"`
+ *  (import/export), `import("…")`, and a bare `import "…"`. The same
+ *  output-shape regexes `transpile()` already relies on. */
+const REL_IMPORT_RE =
+  /(\bfrom\s*|\bimport\s*\(\s*|\bimport\s*)(["'])(\.\.?\/[^"'\n]*)\2/g;
+
+/** An import statement's specifier, at the START of a line — so a comment
+ *  that merely mentions `import "aio/server-only"` does not match. */
+const LINE_IMPORT_RE =
+  /^\s*import\s*(?:[^"'\n;]*?\bfrom\s*)?(["'])([^"'\n]+)\1/gm;
+
+/** Does this module's source import the `aio/server-only` marker?
+ *
+ *  The marker is "the same statement" a `*.server.ts` name makes
+ *  (docs/build/imports.md), and `isProtectedPath` refuses that name over HTTP
+ *  in dev and prod alike. It could not refuse the marker — the rule is in the
+ *  FILE, not its name — so the dev server transpiled a marked module and
+ *  served it, connection strings and all, to `GET /db.ts`. Pure. */
+function _declaresServerOnly(source: string): boolean {
+  for (const m of source.matchAll(LINE_IMPORT_RE)) {
+    if (isServerOnlyMarker(m[2]!)) return true;
+  }
+  return false;
+}
+
+/** `a` is `dir` or inside it (absolute paths). Pure. */
+function _within(dir: string, a: string): boolean {
+  const pfx = dir.endsWith(SEPARATOR) ? dir : dir + SEPARATOR;
+  return a === dir || a.startsWith(pfx);
+}
+
+/** Is this (decoded) URL path under {@link SRC_TREE_PREFIX}? Pure. */
+function _isSrcTreeUrl(pathname: string): boolean {
+  return pathname.startsWith(SRC_TREE_PREFIX + "/");
+}
+
+/** A filesystem-relative path as URL path segments. Pure. */
+function _urlPath(rel: string): string {
+  return rel.split(/[\\/]/).map(encodeURIComponent).join("/");
+}
+
+/** THE project root a dev server serves {@link SRC_TREE_PREFIX} from: the
+ *  directory of this app's deno.json, found by THE app-config walk
+ *  (`locateDenoJsonAbove`, the one the runtime uses) — when it lies ABOVE the
+ *  app root; null when the app root is the project root (nothing to add) or
+ *  there is no config. @internal */
+export function devSrcRoot(absBaseDir: string): string | null {
+  const base = resolve(absBaseDir);
+  let dir: string | null = null;
+  try {
+    const found = locateDenoJsonAbove(toFileUrl(base + SEPARATOR));
+    if (found) dir = resolve(fromFileUrl(found.dir));
+  } catch { /* no usable config above — nothing to serve */ }
+  return dir !== null && dir !== base && _within(dir, base) ? dir : null;
+}
+
+/** THE dev URL of a module file — one url per file, so a file imported from
+ *  two places is one module instance: the app root at `/`, else the first
+ *  declared root (`assets`/`serveDirs`/`share`, by `withSlash` prefix) holding
+ *  it, else {@link SRC_TREE_PREFIX} under `srcRoot`. Null when no dev root
+ *  holds it. Pure. @internal */
+export function devModuleUrl(
+  file: string,
+  absBaseDir: string,
+  roots: readonly { withSlash: string; dir: string }[],
+  srcRoot: string | null,
+): string | null {
+  const base = resolve(absBaseDir);
+  if (_within(base, file)) return "/" + _urlPath(relative(base, file));
+  for (const r of roots) {
+    if (_within(r.dir, file)) {
+      return r.withSlash + _urlPath(relative(r.dir, file));
+    }
+  }
+  if (srcRoot && _within(srcRoot, file)) {
+    return `${SRC_TREE_PREFIX}/${_urlPath(relative(srcRoot, file))}`;
+  }
+  return null;
+}
+
+/** Rewrite each relative import in `code` (a module served at `importerUrl`
+ *  from `importerFile`) whose browser resolution is not the ONE url of the
+ *  file the bundler would load (`canonicalUrl(file)`) to that url — so the
+ *  import reaches the file, and a file imported from two places is one module
+ *  instance, never two. An import that already resolves there is left
+ *  byte-identical. Pure given its callback; exported for tests. @internal */
+export function _rewriteRelativeImports(
+  code: string,
+  importerFile: string,
+  importerUrl: string,
+  canonicalUrl: (file: string, spec: string) => string | null,
+): string {
+  return code.replace(
+    REL_IMPORT_RE,
+    (m, head: string, q: string, spec: string) => {
+      const cut = spec.search(/[?#]/);
+      const path = cut < 0 ? spec : spec.slice(0, cut);
+      const suffix = cut < 0 ? "" : spec.slice(cut);
+      const file = resolve(dirname(importerFile), path);
+      let natural: string | null = null;
+      try {
+        natural = _decodePathname(
+          new URL(path, `http://h${_urlPath(importerUrl)}`).pathname,
+        );
+      } catch { /* unparsable — treat as not reaching the file */ }
+      const url = canonicalUrl(file, spec);
+      if (url === null || _decodePathname(url) === natural) return m;
+      return `${head}${q}${url}${suffix}${q}`;
+    },
+  );
+}
 
 /** True when a baseDir-relative request path must never be served over HTTP.
  *
@@ -105,7 +262,8 @@ export function isProtectedPath(pathname: string, prod = false): boolean {
     decoded.split("/").filter((x) => x !== "").pop() ?? "",
   ].map((x) => x.toLowerCase());
   for (const last of lasts) {
-    if (prod && /\.tsx?$/.test(last)) return true;
+    // `.jsx` is source exactly like `.tsx` (the bundle compiled it).
+    if (prod && /\.(tsx?|jsx)$/.test(last)) return true;
     if (SERVER_FILE_RE.test(last)) return true;
   }
   return false;
@@ -236,7 +394,7 @@ export function fileExt(name: string): string {
 export function _isShellFile(name: string, dev: boolean): boolean {
   if (SHELL_FILES.has(name.toLowerCase())) return true;
   const ext = fileExt(name);
-  if (dev && (ext === ".ts" || ext === ".tsx")) return true;
+  if (dev && DEV_TRANSPILED.has(ext)) return true;
   return SHELL_EXT.has(ext);
 }
 
@@ -624,6 +782,11 @@ export interface StaticDeps {
    *  Same machinery and same guards as `serveDirs`; the difference is only
    *  that these survive a build — see `CellsConfig.assets`. */
   assets?: Record<string, string>;
+  /** Per `assets` prefix, directories tried PER FILE after the mount's own
+   *  dir misses — a compiled binary's embedded copy of a relative mount (see
+   *  `assetDirCandidates`). The mount's own dir always answers first, so a
+   *  file the running app wrote there is served as it always was. */
+  assetFallbacks?: Record<string, string[]>;
   /** Present only when `security.cspNonce` is on. `nonce()` mints one per
    *  response; `policy()` returns the SAME policy the server-wide headers
    *  would have sent, with that nonce in it. Handed in as a pair rather than
@@ -635,6 +798,17 @@ export interface StaticDeps {
    *  has. One fact for both worlds: the bundler resolves the same prefix. Dev
    *  only, like `serveDirs`: a prod server never reads outside its root. */
   share?: readonly ShareRoot[];
+  /** DEV ONLY: told each file that becomes servable under
+   *  {@link SRC_TREE_PREFIX} (once per file) — so live reload can watch
+   *  exactly the source-tree files the page loads, and nothing else. */
+  onSrcServed?: (file: string) => void;
+  /** DEV ONLY: told each file served as a JavaScript module (`DEV_MODULE`),
+   *  from ANY root — app root, `serveDirs`, `share`, `assets`, the source
+   *  tree — every time it is served, transpile error or not. Live reload
+   *  watches exactly these: a served `.js`/`.mjs`/`.jsx` edit reloads the
+   *  page, and a module served from a root outside the watched tree is
+   *  watched where it lives. Build output the page never loads stays out. */
+  onModuleServed?: (file: string) => void;
   absDistDir: string | null;
   hasCSS: boolean;
   importMap: string; // JSON stringified import map
@@ -675,6 +849,11 @@ export interface StaticDeps {
    *  exactly like every other app resource — see the per-user anonymous
    *  gate there. */
   blobs?: BlobStore;
+  /** The blob route answers only to a credential (a key, users, sessions or
+   *  login flows) — its responses are then `private`: `public` would license
+   *  a shared cache to store authenticated bytes and hand them to anyone who
+   *  asks for the URL (RFC 9111 §3.5), bypassing the gate. */
+  blobsPrivate?: boolean;
   // Health endpoint
   getHealth?: () => unknown;
   // Vitals
@@ -757,7 +936,13 @@ export function createStaticHandler(deps: StaticDeps): {
   // that read as "the guard refused you" instead of "your path was relative".
   // Absolute-vs-absolute keeps every guard exactly as strong.
   const _roots: Array<
-    { prefix: string; withSlash: string; dir: string; checked: boolean }
+    {
+      prefix: string;
+      withSlash: string;
+      dir: string;
+      checked: boolean;
+      fallback?: string[];
+    }
   > = [
     // `assets` FIRST. It is the only one of the three that survives a build,
     // so when a prefix is declared in both, the one that works in production
@@ -769,6 +954,7 @@ export function createStaticHandler(deps: StaticDeps): {
       withSlash: prefix.endsWith("/") ? prefix : prefix + "/",
       dir: resolve(dir),
       checked: false,
+      fallback: (deps.assetFallbacks?.[prefix] ?? []).map((d) => resolve(d)),
     })),
     ...Object.entries(deps.serveDirs ?? {}).map(([prefix, dir]) => ({
       prefix,
@@ -797,6 +983,50 @@ export function createStaticHandler(deps: StaticDeps): {
     ...(deps.absBaseDirs ?? []).map((d) => resolve(d)),
   ].filter((d, i, a) => a.indexOf(d) === i);
 
+  // ── DEV: imports that leave the app root (see SRC_TREE_PREFIX) ──
+  //
+  // The project root is THE app-config walk's answer (`locateDenoJsonAbove`,
+  // the same walk the runtime uses to find this app's deno.json) — resolved
+  // on first need, never in prod. `undefined` = not resolved yet, `null` =
+  // there is no project root above the app root to serve from.
+  let _srcRootMemo: string | null | undefined;
+  function _srcRoot(): string | null {
+    if (_srcRootMemo === undefined) _srcRootMemo = devSrcRoot(deps.absBaseDir);
+    return _srcRootMemo;
+  }
+  /** Files a served module imported from outside the app root — the ONLY
+   *  files `SRC_TREE_PREFIX` serves. The browser always fetches an importer
+   *  before what it imports, so the graph is known before it is requested. */
+  const _srcServable = new Set<string>();
+  /** Escaping imports already reported, so the warning fires once each. */
+  const _srcWarned = new Set<string>();
+
+  /** The ONE url a module file is served at — so a file imported from two
+   *  places is one module instance, not two. Null when no dev root holds it
+   *  (the import is then left as written, and said out loud). */
+  function _canonicalUrl(file: string, spec: string): string | null {
+    const sr = _srcRoot();
+    const url = devModuleUrl(file, deps.absBaseDir, _roots, sr);
+    if (url !== null) {
+      if (url.startsWith(SRC_TREE_PREFIX + "/") && !_srcServable.has(file)) {
+        _srcServable.add(file);
+        deps.onSrcServed?.(file);
+      }
+      return url;
+    }
+    if (!_srcWarned.has(file)) {
+      _srcWarned.add(file);
+      log.warn(
+        `import "${spec}" resolves to ${file}, outside this project` +
+          (sr ? ` (${sr})` : "") + ` — the dev server cannot serve it, ` +
+          `so the page will fail to load it. Declare its directory in ` +
+          `deno.json "share" (docs/basics/project-structure.md), which the ` +
+          `dev server and the bundler resolve the same way.`,
+      );
+    }
+    return null;
+  }
+
   /** Does a path resolve to something readable? The ladder's only question.
    *  `stat`, not `readFile`: the answer decides a ROOT, and the file is read
    *  (and every guard re-run) against that root afterwards. */
@@ -815,14 +1045,18 @@ export function createStaticHandler(deps: StaticDeps): {
    *  import, never at the config. Names the RESOLVED path, because a wrong
    *  relative root is the likely mistake. */
   async function _warnIfMissing(
-    r: { prefix: string; dir: string; checked: boolean },
+    r: { prefix: string; dir: string; checked: boolean; fallback?: string[] },
   ): Promise<void> {
     if (r.checked) return;
     r.checked = true;
     let ok = false;
-    try {
-      ok = (await Deno.stat(r.dir)).isDirectory;
-    } catch { /* missing — reported below */ }
+    // An embedded fallback that exists serves the mount: nothing to warn.
+    for (const d of [r.dir, ...(r.fallback ?? [])]) {
+      try {
+        ok = (await Deno.stat(d)).isDirectory;
+      } catch { /* missing — reported below */ }
+      if (ok) break;
+    }
     if (!ok) {
       log.warn(
         `serveDirs["${r.prefix}"] → ${r.dir} is not a directory — every ` +
@@ -943,7 +1177,7 @@ export function createStaticHandler(deps: StaticDeps): {
     const { prod, debug, absDistDir, noCache } = deps;
 
     // ── Root / SPA entry ──
-    if (pathname === "/") return await appShell();
+    if (pathname === "/") return _readOnly(req) ?? await appShell();
 
     // ── Framework endpoints: the method table, before any handler ──
     if (req) {
@@ -1198,7 +1432,62 @@ export function createStaticHandler(deps: StaticDeps): {
     }
 
     // ── Static file serving from baseDir ──
+    // The framework namespace keeps its own answers (a 404 for what is not
+    // mounted); files and the shell are read-only.
+    if (!pathname.startsWith("/__")) {
+      const denied = _readOnly(req);
+      if (denied) return denied;
+    }
     return await serveFile(pathname, req, opts);
+  }
+
+  /** Paths already warned about a write-method navigation (once each). */
+  const _warnedNavWrite = new Set<string>();
+
+  /** The 405 for a write method aimed at a file or the app shell, or null.
+   *
+   *  Both answered EVERY method: `POST /api/uplaod` (a typo'd route) got
+   *  `200 text/html`, the shell — `res.ok` was true and the app told its user
+   *  the upload worked; `DELETE /notes.txt` answered 200 with the file. A
+   *  request that reaches here matched no route, so the truthful answer is
+   *  the one `AIO_ROUTE_METHODS` gives the framework's own endpoints. */
+  function _readOnly(req: Request | undefined): Response | null {
+    const method = req?.method ?? "GET";
+    if (method === "GET" || method === "HEAD") return null;
+    // A browser NAVIGATION that POSTs lands a person on a page — a payment
+    // provider's return URL, a SAML/OIDC `form_post`, a form submitted before
+    // hydration. 1.0.11 served it, and a 405 text page strands that user, so
+    // it keeps the old answer and says so (frozen surface). Only a fetch —
+    // the typo'd-upload case, which reads `res.ok` — gets the 405.
+    // Fetch metadata is not on every navigation — Chromium sends it only to a
+    // potentially trustworthy origin (not a LAN address over plain http, the
+    // `--expose` / remote-APK case), Safari only since 16.4. With none, a
+    // navigation still says `Accept: text/html`; a fetch says `*/*`.
+    const mode = req!.headers.get("sec-fetch-mode");
+    const navigation = mode === null
+      ? (req!.headers.get("accept") ?? "").includes("text/html")
+      : mode === "navigate";
+    if (navigation) {
+      const path = new URL(req!.url).pathname;
+      // Bounded: the path is the caller's, and a warn-once set must not grow
+      // with every URL a client invents.
+      if (_warnedNavWrite.size < 64 && !_warnedNavWrite.has(path)) {
+        _warnedNavWrite.add(path);
+        log.warn(
+          "http",
+          `${method} navigation to ${path} matched no route — serving it as ` +
+            `GET (the request body is dropped). Declare the endpoint in ` +
+            `aio.run({ routes }) to read what was posted.`,
+        );
+      }
+      return null;
+    }
+    return new Response(
+      `Method Not Allowed — no route handles ${method} here; files and the ` +
+        `app shell serve GET, HEAD. Declare the endpoint in ` +
+        `aio.run({ routes }).`,
+      { status: 405, headers: { Allow: "GET, HEAD" } },
+    );
   }
 
   // ── Helpers ──
@@ -1292,7 +1581,9 @@ export function createStaticHandler(deps: StaticDeps): {
     const etag = `"${id}"`;
     const baseHeaders: Record<string, string> = {
       // Content-addressed: the bytes behind this URL can never change.
-      "Cache-Control": "public, max-age=31536000, immutable",
+      "Cache-Control": `${
+        deps.blobsPrivate ? "private" : "public"
+      }, max-age=31536000, immutable`,
       "ETag": etag,
       "Accept-Ranges": "bytes",
       // Derived from an INERT allowlist, never from the uploaded filename —
@@ -1573,16 +1864,19 @@ export function createStaticHandler(deps: StaticDeps): {
           : 0,
       });
       const loopVitals = vs.loopProbe.getVitals();
+      // Full scale = the configured FROZEN tier — the same thresholds the
+      // probes grade against. Fixed capacities (1000 actions, 100ms) drew a
+      // tuned app's frozen queue as a near-empty gauge.
       const serverGauges = {
         "server.queueDepth": _gaugeOf(
           "server.queueDepth",
           loopVitals.queueDepth,
-          1000,
+          vs.thresholds.queue.frozen,
         ),
         "server.reduceTime": _gaugeOf(
           "server.reduceTime",
           loopVitals.p95ReduceTime,
-          100,
+          vs.thresholds.loop.frozen,
         ),
       };
       const responseData = {
@@ -1725,12 +2019,33 @@ export function createStaticHandler(deps: StaticDeps): {
     let root = absBaseDir;
     let rel = filename;
     let matchedRoot = false;
-    for (const r of _roots) {
+    // DEV: a module imported from outside the app root (SRC_TREE_PREFIX).
+    // Prod never mounts it — the bundle already followed the import.
+    const srcTree = !prod && _isSrcTreeUrl(pathname);
+    if (srcTree) {
+      const sr = _srcRoot();
+      if (!sr) return new Response("Not Found", { status: 404 });
+      root = sr;
+      rel = pathname.slice(SRC_TREE_PREFIX.length + 1);
+      matchedRoot = true;
+    }
+    for (const r of matchedRoot ? [] : _roots) {
       if (pathname === r.prefix || pathname.startsWith(r.withSlash)) {
         await _warnIfMissing(r);
         root = r.dir; // absolute — see _roots
         rel = pathname.slice(r.withSlash.length).replace(/^\//, "");
         matchedRoot = true;
+        // Per FILE, like the app-dir ladder below: the mount's own dir first,
+        // an embedded copy only for what it does not hold (a miss 404s from
+        // the mount's own dir, as it always did).
+        if (r.fallback?.length && !(await _pathExists(resolve(root, rel)))) {
+          for (const d of r.fallback) {
+            if (await _pathExists(resolve(d, rel))) {
+              root = d;
+              break;
+            }
+          }
+        }
         break;
       }
     }
@@ -1753,6 +2068,10 @@ export function createStaticHandler(deps: StaticDeps): {
     const basePfx = root.endsWith(SEPARATOR) ? root : root + SEPARATOR;
     if (!filepath.startsWith(basePfx)) {
       return new Response("Forbidden", { status: 403 });
+    }
+    // The source tree is not an HTTP root: only what a served module imported.
+    if (srcTree && !_srcServable.has(filepath)) {
+      return new Response("Not Found", { status: 404 });
     }
     // Names no filesystem can hold are 404 before any syscall — see
     // `cannotExist` (ENAMETOOLONG used to be a 500 naming the absolute path).
@@ -1818,14 +2137,15 @@ export function createStaticHandler(deps: StaticDeps): {
       );
     }
 
-    const isText = TEXT_EXTENSIONS.has(ext);
+    // Dev modules (DEV_MODULE) are compiled and/or import-rewritten, never
+    // served verbatim — so they stay on the text path whatever their size.
+    const transpiled = !prod && DEV_TRANSPILED.has(ext);
+    const devModule = !prod && DEV_MODULE.has(ext);
+    const isText = TEXT_EXTENSIONS.has(ext) || devModule;
 
-    // Binary files — and text too large to hold (see `serveFromDisk`). Dev
-    // `.ts`/`.tsx` stay on the text path whatever their size: they are
-    // transpiled, not served.
-    const transpiled = !prod && (ext === ".ts" || ext === ".tsx");
+    // Binary files — and text too large to hold (see `serveFromDisk`).
     let st: Deno.FileInfo | null = null;
-    if (!isText || !transpiled) {
+    if (!isText || !devModule) {
       try {
         st = await Deno.stat(filepath);
       } catch {
@@ -1851,13 +2171,32 @@ export function createStaticHandler(deps: StaticDeps): {
       log.error("server", `static: cannot read ${filepath} — ${e}`);
       return new Response("Internal Server Error", { status: 500 });
     }
+    // A module that declares `import "aio/server-only"` is a `*.server.ts` by
+    // another spelling — the same 404 (see `_declaresServerOnly`).
+    if (DEV_MODULE.has(ext) && _declaresServerOnly(body)) {
+      return new Response("Not found", { status: 404 });
+    }
+    // Before the transpile: a module that fails to compile is still on the
+    // page, and the edit that fixes it must reload it.
+    if (devModule) deps.onModuleServed?.(filepath);
 
     let contentType = MIME[ext] ?? "text/plain";
 
-    // Dev only: live-transpile .ts/.tsx via esbuild
-    if (!prod && (ext === ".tsx" || ext === ".ts")) {
+    // Dev only: a plain-JS module is served as written, except for the
+    // relative imports whose browser resolution is not the file's one url.
+    if (devModule && !transpiled) {
+      body = _rewriteRelativeImports(body, filepath, pathname, _canonicalUrl);
+    }
+
+    // Dev only: live-transpile .ts/.tsx/.jsx via esbuild
+    if (transpiled) {
       try {
-        body = await transpile(body, filepath, debug);
+        body = _rewriteRelativeImports(
+          await transpile(body, filepath, debug),
+          filepath,
+          pathname,
+          _canonicalUrl,
+        );
         contentType = "application/javascript";
         lastError = "";
         errorMap.delete(filename);

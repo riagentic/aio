@@ -7,7 +7,7 @@
 import { log } from "../diagnostics/logger-api.ts";
 
 /** Open a file, folder or URL with the OS default handler (`open` /
- *  `start` / `xdg-open`) — the desktop app pattern "reveal in file manager" /
+ *  `Start-Process` / `xdg-open`) — the desktop app pattern "reveal in file manager" /
  *  "open in browser", from a cell method or serverFn. Server-only.
  *
  *  Resolves when the launcher hands off; rejects (never silently) when the
@@ -16,26 +16,49 @@ export async function openExternal(target: string): Promise<void> {
   if (typeof target !== "string" || target.length === 0) {
     throw new Error("openExternal: target must be a non-empty string");
   }
-  const os = Deno.build.os;
-  // Windows `start` is a cmd builtin, not an executable — it must go through
-  // `cmd /c`, with an empty title argument so a quoted path is not eaten as
-  // the window title.
-  const [cmd, args]: [string, string[]] = os === "darwin"
-    ? ["open", [target]]
-    : os === "windows"
-    ? ["cmd", ["/c", "start", "", target]]
-    : ["xdg-open", [target]];
-  const child = new Deno.Command(cmd, {
-    args,
+  const spec = _openSpec(Deno.build.os, target);
+  const child = new Deno.Command(spec.cmd, {
+    args: spec.args,
+    ...(spec.env ? { env: spec.env } : {}),
     stdout: "null",
     stderr: "null",
   }).spawn();
   const status = await child.status;
   if (!status.success) {
     throw new Error(
-      `openExternal: ${cmd} exited with code ${status.code} for "${target}"`,
+      `openExternal: ${spec.cmd} exited with code ${status.code} for "${target}"`,
     );
   }
+}
+
+/** The launcher for `target` on `os`, as a PURE spec (testable from any OS).
+ *
+ *  Windows: NOT `cmd /c start "" <target>`. cmd re-parses its command line,
+ *  so a target was code: `https://host/?a=1&b=2` opened `…?a=1` and RAN `b=2`
+ *  as a command, `%VAR%` expanded, `^` vanished (measured on Windows 11 with
+ *  Deno 2.9) — and a URL with a query string is the ordinary case, a file
+ *  named `x&calc.exe` the hostile one. PowerShell's `Start-Process` is the
+ *  same ShellExecute, and the target reaches it through an ENVIRONMENT
+ *  VARIABLE, which nothing parses. A missing target exits 1, so the
+ *  rejection below still fires. @internal */
+export function _openSpec(
+  os: typeof Deno.build.os,
+  target: string,
+): { cmd: string; args: string[]; env?: Record<string, string> } {
+  if (os === "darwin") return { cmd: "open", args: [target] };
+  if (os === "windows") {
+    return {
+      cmd: "powershell",
+      args: [
+        "-NoProfile",
+        "-NonInteractive",
+        "-Command",
+        "Start-Process -FilePath $env:AIO_OPEN_TARGET",
+      ],
+      env: { AIO_OPEN_TARGET: target },
+    };
+  }
+  return { cmd: "xdg-open", args: [target] };
 }
 
 /** Is there a desktop for a window to appear on?

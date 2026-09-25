@@ -4,7 +4,7 @@
  *  2000 itself — so raising one window silently left the other where it was. */
 export const DIAG_THROTTLE_MS = 2000;
 
-import type { DiagEvent } from "./types.ts";
+import { DEFAULT_THRESHOLDS, type DiagEvent } from "./types.ts";
 
 /** Count non-undefined values in detail (excluding hint) */
 function dataPointCount(detail: DiagEvent["detail"]): number {
@@ -50,10 +50,16 @@ export function formatDiagEvent(event: DiagEvent): string[] {
   }
 
   if (detail.rtt !== undefined) {
-    const status = detail.rtt > 500
-      ? "degraded"
-      : detail.rtt > 100
+    // The transport RTT tiers, in their order — degraded, then warning, then
+    // frozen. The labels were swapped (and the bounds exclusive), so a 300ms
+    // round trip printed "warning" and a 700ms one the milder "degraded".
+    const t = DEFAULT_THRESHOLDS.transport;
+    const status = detail.rtt >= t.frozen
+      ? "frozen"
+      : detail.rtt >= t.warning
       ? "warning"
+      : detail.rtt >= t.degraded
+      ? "degraded"
       : "healthy";
     lines.push(`  transport:  ${status} (RTT ${detail.rtt}ms)`);
   }

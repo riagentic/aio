@@ -15,6 +15,7 @@ import { assert, assertEquals } from "@std/assert";
 import { join } from "@std/path";
 import { GIT_REPO_ENV_VARS } from "../src/am/am-versions.ts";
 import { dropTempDir, tempDir } from "../src/testing/temp-dir.ts";
+import { DENO_DIR } from "./deno-dir-helper.ts";
 
 const VERSIONS = new URL("../src/am/am-versions.ts", import.meta.url).href;
 const CONFIG = new URL("../deno.json", import.meta.url).pathname;
@@ -49,8 +50,7 @@ Deno.test("am git: an inherited GIT_DIR / GIT_WORK_TREE / GIT_INDEX_FILE never r
       GIT_COMMITTER_NAME: "t",
       GIT_COMMITTER_EMAIL: "t@t",
     };
-    const denoDir = Deno.env.get("DENO_DIR");
-    if (denoDir) env.DENO_DIR = denoDir;
+    env.DENO_DIR = DENO_DIR;
     const repo = async (dir: string, tag: string) => {
       await Deno.mkdir(dir, { recursive: true });
       await git(dir, env, "init", "-q", "-b", "main");

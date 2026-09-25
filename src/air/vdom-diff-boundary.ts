@@ -123,7 +123,17 @@ function _removeRegion(
 ): void {
   let cursor: Node | null = first;
   for (const child of children) {
-    const at = getDom(child) ?? cursor;
+    const own = getDom(child);
+    // A child the failed attempt already took out of the document (a keyed
+    // row departing, a mismatched child removed before its replacement threw)
+    // occupies no node here any more: it is still unmounted, but stepping the
+    // cursor from its detached node ran the walk off the region, and every
+    // bare-text child after it stayed on the page beside the fallback.
+    if (own && !isChildOf(own, parent)) {
+      removeDom(parent, child, ctx);
+      continue;
+    }
+    const at = own ?? cursor;
     if (at && at === end) break; // the region ran out before the model did
     cursor = _advance(at, _domNodeCount(child));
     removeDom(parent, child, ctx, at);
@@ -150,14 +160,25 @@ function _retireRegion(
   first: Node | null,
   startAnchor: Node | null,
   end: Node | null,
+  known: boolean,
 ): void {
-  const d = getDom(ov);
-  const known = !!(d && isChildOf(d, parent));
-  _removeRegion(parent, ov.children, ctx, first, end);
+  // `known` is measured by the caller BEFORE the attempt: measured here it
+  // read the region's first node AFTER the failed child diff had already
+  // detached it (see `_removeRegion`), so the sweep was skipped exactly when
+  // there was debris to sweep.
+  const regionStart = (): Node | null =>
+    startAnchor && isChildOf(startAnchor, parent)
+      ? _nextLive(startAnchor)
+      : _firstLive(parent);
+  _removeRegion(
+    parent,
+    ov.children,
+    ctx,
+    first && !isChildOf(first, parent) && known ? regionStart() : first,
+    end,
+  );
   if (!known) return;
-  let n: Node | null = startAnchor && isChildOf(startAnchor, parent)
-    ? _nextLive(startAnchor)
-    : _firstLive(parent);
+  let n: Node | null = regionStart();
   while (n && n !== end) {
     // `_nextLive` and the skip: a node mid-exit is NOT leftover debris from a
     // failed diff — `removeDom` deliberately left it standing so its exit
@@ -281,6 +302,7 @@ export function _diffErrorBoundary(
   // where the boundary lives.
   const oldFirst = _regionStart(parent, ov, startAnchor);
   const at = _regionAnchor(parent, ov, oldFirst);
+  const known = isChildOf(getDom(ov), parent); // before, see _retireRegion
 
   // On the boundary stack for the CHILDREN only (popped before the fallback
   // work in either exit), exactly as the mount branch does: a component that
@@ -378,7 +400,7 @@ export function _diffErrorBoundary(
       ) ?? undefined;
       return;
     }
-    _retireRegion(parent, ov, ctx, oldFirst, startAnchor, at);
+    _retireRegion(parent, ov, ctx, oldFirst, startAnchor, at, known);
     const dom = createDom(fallbackVnode, ctx, isSvg, parent);
     // The node the fallback OCCUPIES, not the carrier `createDom` returned: a
     // bare-string fallback has no `_dom` to look up and a Fragment's carrier
@@ -410,6 +432,7 @@ export function _diffSuspense(
   // Measured before any removal — see the same comment in _diffErrorBoundary.
   const oldFirst = _regionStart(parent, ov, startAnchor);
   const at = _regionAnchor(parent, ov, oldFirst);
+  const known = isChildOf(getDom(ov), parent); // before, see _retireRegion
   // AIO-201: the children a retry finished building, retired if the failure
   // leaves this boundary (see the catch).
   const created: (VNode | string | number)[] = [];
@@ -509,7 +532,7 @@ export function _diffSuspense(
     }
     // Not pending before (a pending one was patched above): the children's
     // region gives way to the fallback.
-    _retireRegion(parent, ov, ctx, oldFirst, startAnchor, at);
+    _retireRegion(parent, ov, ctx, oldFirst, startAnchor, at, known);
     const dom = createDom(shown, ctx, isSvg, parent);
     const first = dom ? _occupied(shown, dom) : null;
     if (dom) _insertAt(parent, dom, at);

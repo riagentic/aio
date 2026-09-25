@@ -488,8 +488,12 @@ export const checkStructure: Checker = async (ctx) => {
       report(
         "hint",
         "structure",
-        `${cellFiles.length} cell files scattered — consider organizing in a src/cells/ (or src/cell/) directory`,
-        { fix: "See structure.md" },
+        // ONE spelling, the one docs/basics/project-structure.md teaches
+        // ("`cell/` (singular), never `cells/`") — a hint that offered both
+        // was a second source of the drift that page exists to end. An
+        // existing `cells/` still counts as organized above.
+        `${cellFiles.length} cell files scattered — consider one src/cell/ directory, one file per cell`,
+        { fix: "See docs/basics/project-structure.md" },
       );
     }
   }
@@ -893,9 +897,14 @@ export const checkPerformance: Checker = (ctx) => {
     // A cell defined in a benchmark is a fixture — nobody observes or cancels
     // its timers.
     if (isToolingPath(file.relative)) continue;
-    if (!file.content.includes("cell(")) continue;
-    for (let i = 0; i < file.lines.length; i++) {
-      const line = file.lines[i]!;
+    // CODE only, both questions. A helper that merely MENTIONS `cell("x", …)`
+    // in a doc comment is not cell code, and a `setTimeout(` in a comment is
+    // not a timer — each raw test made a finding on its own.
+    const code = codeText(file.content);
+    if (!code.includes("cell(")) continue;
+    const codeLines = code.split("\n");
+    for (let i = 0; i < codeLines.length; i++) {
+      const line = codeLines[i]!;
       if (!/set(Timeout|Interval)\(/.test(line)) continue;
       if (isSuppressed(file.lines, i)) continue;
       if (/setTimeout\([^,)]*,\s*0\s*\)/.test(line)) continue; // delay-0 yield
@@ -1768,8 +1777,16 @@ export const checkUI: Checker = (ctx) => {
 // 8. TESTING
 // ══════════════════════════════════════════════════════════════════════
 
+/** The test file the convention puts a cell's tests in: `tests/`, mirroring
+ *  the cell's path under `src/` (`src/cell/todo.ts` → `tests/cell/todo.test.ts`,
+ *  `src/cell.ts` → `tests/cell.test.ts`). Pure; `/`-separated on every OS. */
+function mirroredTestPath(cellFile: string): string {
+  const rel = cellFile.replaceAll("\\", "/").replace(/^src\//, "");
+  return `tests/${rel.replace(/\.[cm]?[jt]sx?$/, "")}.test.ts`;
+}
+
 export const checkTesting: Checker = (ctx) => {
-  const { cells, testFiles, report, pass, denoJson } = ctx;
+  const { cells, testFiles, report, pass } = ctx;
 
   if (cells.length === 0) return;
 
@@ -1819,7 +1836,13 @@ export const checkTesting: Checker = (ctx) => {
       report(
         "hint",
         "testing",
-        `cell "${f.name}" has no test file — create ${f.name}.test.ts`,
+        // The path, not just a name: `create todo.test.ts` read literally
+        // puts the file beside the cell in src/, the layout the docs retire.
+        // tests/ mirroring the cell's own file is the convention, and a file
+        // there imports the cell's module — which this check accepts.
+        `cell "${f.name}" has no test file — create ${
+          mirroredTestPath(f.file.relative)
+        }`,
         { file: f.file.relative },
       );
     }
@@ -1835,15 +1858,8 @@ export const checkTesting: Checker = (ctx) => {
     );
   }
 
-  // Test task
-  if (!denoJson?.tasks?.["test"]) {
-    report(
-      "hint",
-      "testing",
-      'no "test" task in deno.json — add "test": "deno test -A tests/"',
-      { safeFix: fix.fixAddTestTask },
-    );
-  }
+  // Test task: checkConfig owns it (it runs with or without cells). A second
+  // report here made one gap read as two [fixable] hints.
 
   if (testFiles.length > 0) pass(`${testFiles.length} test file(s)`);
 };
@@ -3017,38 +3033,70 @@ export const checkUpgrade: Checker = (ctx) => {
   // — is invisible to the static rule above and fails only at runtime, as
   // "createDB is not a function". Same symbols, same fix, dynamic spelling.
   const DYN =
-    /(?:\{([^}]*)\}\s*=\s*await\s+import\(\s*["']aio["']\s*\))|(?:\(\s*await\s+import\(\s*["']aio["']\s*\)\s*\)\s*\.\s*(\w+))/g;
+    /(?:\{([^{}]*)\}\s*=\s*await\s+import\(\s*["']aio["']\s*\))|(?:\(\s*await\s+import\(\s*["']aio["']\s*\)\s*\)\s*\.\s*(\w+))/g;
   for (const file of [...tsFiles, ...tsxFiles]) {
     // Masked the same way, and for the same reason: the raw scan reported
     // `await import("aio")` written inside a code-generator's template literal
     // and let --safe-fix edit it.
     const code = file.content;
+    let fixableReported = false;
     for (const dm of codeMatches(code, DYN)) {
       const names = dm[1] ?? dm[2] ?? "";
       if (!SERVER_ONLY.test(names)) continue;
+      // A destructure that ALSO takes browser-safe names cannot be repointed
+      // whole — `aio/server` does not export them. The fix declines it (see
+      // fix.dynamicDestructureNonServer); say so, per site, as [manual].
+      const keep = dm[1] !== undefined
+        ? fix.dynamicDestructureNonServer(dm[1])
+        : [];
+      if (keep.length === 0 && fixableReported) continue; // one fix covers all
       found++;
-      report(
-        "warn",
-        "upgrade",
+      const line = code.slice(0, dm.index).split("\n").length;
+      const message =
         `${file.relative}: dynamic \`import("aio")\` destructures a ` +
-          `server-only symbol — those moved to the \`aio/server\` entry ` +
-          `(alpha37), so this resolves to undefined at RUNTIME ` +
-          `("createDB is not a function")`,
-        {
+        `server-only symbol — those moved to the \`aio/server\` entry ` +
+        `(alpha37), so this resolves to undefined at RUNTIME ` +
+        `("createDB is not a function")`;
+      if (keep.length > 0) {
+        report("warn", "upgrade", message, {
           file: file.relative,
-          line: code.slice(0, dm.index).split("\n").length,
-          fix: 'const { createDB } = await import("aio/server")',
-          safeFix: fix.fixDynamicServerEntryImport(file.path),
-        },
-      );
-      break; // one report per file; the safe-fix rewrites every occurrence
+          line,
+          fix: 'split it: const { createDB } = await import("aio/server"), ' +
+            'and the rest from import("aio")',
+          manual: `the safe fix declines: this destructure also takes ` +
+            `${keep.join(", ")}, which \`aio/server\` does not export — ` +
+            `repointing the whole statement would make ${
+              keep.length > 1 ? "them" : "it"
+            } undefined`,
+        });
+        continue;
+      }
+      fixableReported = true;
+      report("warn", "upgrade", message, {
+        file: file.relative,
+        line,
+        fix: 'const { createDB } = await import("aio/server")',
+        safeFix: fix.fixDynamicServerEntryImport(file.path),
+      });
     }
   }
 
   // deno.json tasks: renamed TLS flags, and a build-only flag on a run task.
   const entry = appEntry?.relative ?? null;
   for (const [name, cmd] of Object.entries(denoJson?.tasks ?? {})) {
+    // Only a task that RUNS THE APP carries aio's flags — the same scope the
+    // rewrite uses (fix.taskRunsApp), so the report and the fix cannot drift.
+    // With NO detectable entry the renamed/removed flags are still reported on
+    // any `deno run <script>` task (silence would hide a boot failure), but as
+    // [manual]: the rewrite cannot tell the app from another program then.
     if (typeof cmd !== "string") continue;
+    const isApp = fix.taskRunsApp(cmd, entry);
+    if (!isApp && (entry !== null || !fix.taskRunsScript(cmd))) continue;
+    const flagFix = isApp ? { safeFix: fix.fixTaskFlags(entry) } : {
+      manual: `no app entry detected (declare \`entry\` in deno.json), so ` +
+        `--safe-fix cannot tell whether this task runs the app or another ` +
+        `program — edit it by hand if it runs the app`,
+    };
     if (/(?<![\w-])--(cert|key)=/.test(cmd)) {
       found++;
       report(
@@ -3059,7 +3107,7 @@ export const checkUpgrade: Checker = (ctx) => {
         {
           file: "deno.json",
           fix: "--tls-cert=/path/cert.pem --tls-key=/path/key.pem",
-          safeFix: fix.fixTaskFlags(entry),
+          ...flagFix,
         },
       );
     }
@@ -3077,13 +3125,12 @@ export const checkUpgrade: Checker = (ctx) => {
         {
           file: "deno.json",
           fix: r.now ?? `remove ${r.key} from the task`,
-          safeFix: fix.fixTaskFlags(entry),
+          ...flagFix,
         },
       );
     }
-    if (
-      entry && cmd.includes(entry) && /(?<![\w-])--headless(?![\w=-])/.test(cmd)
-    ) {
+    // `--headless` is only wrong on the APP (a build script may take it).
+    if (isApp && /(?<![\w-])--headless(?![\w=-])/.test(cmd)) {
       found++;
       report(
         "warn",

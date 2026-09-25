@@ -69,8 +69,12 @@ Deno.test("dev stamp: every public entry that exports `cell` reaches aio-boot.ts
   const dj = JSON.parse(await Deno.readTextFile(join(ROOT, "deno.json"))) as {
     exports: Record<string, string>;
   };
-  // `./amui` is an app (it boots when imported), not a library entry.
-  const entries = Object.entries(dj.exports).filter(([k]) => k !== "./amui")
+  // Not library entries — they RUN when imported: `./amui` boots an app, and
+  // `./electron-install` installs Electron into the cwd (it rewrote this
+  // repo's deno.json on a checkout without Electron).
+  const scripts = ["./amui", "./electron-install"];
+  const entries = Object.entries(dj.exports)
+    .filter(([k]) => !scripts.includes(k))
     .map(([k, v]) => [k, new URL(v, `file://${ROOT}`).href] as const);
   const probe = await tempDir("aio-devstamp-entries-");
   try {
@@ -95,7 +99,7 @@ Deno.exit(0);
         join(ROOT, "deno.json"),
         join(probe, "probe.ts"),
       ],
-      ROOT,
+      probe, // an entry that writes to its cwd writes here, not into the repo
     );
     const line = text.split("\n").find((l) => l.startsWith("CELL_ENTRIES="));
     assert(line, text);

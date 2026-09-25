@@ -3,10 +3,16 @@
 
 import { physicalMemoryBytes } from "./heap-policy.ts";
 import type { CellDef, ComposedCells } from "../state/cell.ts";
+import type { Msg } from "../state/cell-types.ts";
 import { _releaseCellBindings } from "../state/cell-reactive.ts";
-import { _whileCellsBoot } from "../state/cell-catalog.ts";
-import { mergeLongIntoPerfBudget } from "../state/cell-impl.ts";
+import { _boundDispatchOf, _whileCellsBoot } from "../state/cell-catalog.ts";
+import { _bindCallScope, mergeLongIntoPerfBudget } from "../state/cell-impl.ts";
 import { bindCell } from "../state/cell.ts";
+import {
+  _countCellError,
+  _noteCellAction,
+  _setRemoteLifecycle,
+} from "../state/cell-compose.ts";
 import { createMemoryMonitor } from "../diagnostics/memory-monitor.ts";
 import {
   createAioError,
@@ -27,7 +33,11 @@ import {
   releaseAppLogger,
   setLoggerScope,
 } from "../diagnostics/logger-api.ts";
-import { createStormDetector } from "../diagnostics/dispatch-storm.ts";
+import {
+  createStormDetector,
+  type StormInfo,
+} from "../diagnostics/dispatch-storm.ts";
+import { WORKER_PATCH_ACTION } from "../state/cell-compose-reduce.ts";
 import { _setDiagScope, diagEmit } from "../diagnostics/diagnostic-bus.ts";
 import { makeRedactor } from "../diagnostics/redact.ts";
 import { parseCli } from "./aio-cli.ts";
@@ -41,6 +51,9 @@ import {
   persistingCellIds,
 } from "../state/cell-persist-filter.ts";
 import { setDiagnosticsOptOut } from "../diagnostics/diagnostics-optout.ts";
+import { _serverFnsAppLive } from "./server-fns.ts";
+import { closedWorkerCall } from "./cell-worker.ts";
+import { _hostsWorkerThreads } from "./cell-worker-pool.ts";
 
 /** Whose app is running this code — for the logger, the diagnostic bus and
  *  the `degraded()` registries.
@@ -57,10 +70,21 @@ import { setDiagnosticsOptOut } from "../diagnostics/diagnostics-optout.ts";
  *
  *  The wrappers below still enter the scope explicitly: a cell method called
  *  from outside any app (a test, a host) has to run as the app it is bound to. */
-type AppScope = { logger: AioLogger | null };
+type AppScope = { logger: AioLogger | null; closed?: boolean };
 const _appScope = new AsyncLocalStorage<AppScope>();
-setLoggerScope(() => _appScope.getStore()?.logger);
-_setDiagScope(() => _appScope.getStore());
+/** The running app's scope — never a CLOSED app's. Deno pins the process's
+ *  ambient async context to wherever an npm module is first evaluated
+ *  (`outside-app.ts`), and an app's method can `await import("npm:…")`, which
+ *  nothing here can intercept: that app's scope then surrounds every later
+ *  unwrapped callback in the process — the next `Deno.test`, another host's
+ *  handler — long after `close()`. Once closed, a scope is no app's: the code
+ *  it surrounds is "outside any app", which is what it is. */
+function liveScope(): AppScope | undefined {
+  const s = _appScope.getStore();
+  return s && !s.closed ? s : undefined;
+}
+setLoggerScope(() => liveScope()?.logger);
+_setDiagScope(liveScope);
 
 /** Run `fn` — a whole `aio.run()` — as a new app. @internal */
 export function runAsApp<T>(fn: () => T): T {
@@ -237,38 +261,51 @@ export function buildLegacyConfig(
   // Dispatch-storm guard (watcher-loop field report #2) — every server dispatch
   // flows through beforeReduce, so frequency is measured (and optionally
   // circuit-broken) before reducers/effects/logging amplify the loop.
-  const storm = fc.dispatchStorm === false ? null : createStormDetector({
-    // `true`/omitted → defaults; object → tuned; false → disabled (above).
-    ...(typeof fc.dispatchStorm === "object" ? fc.dispatchStorm : {}),
-    onStorm: (info) => {
-      // `ended`, not a guess from the rate. A storm that stops by dropping
-      // back UNDER the threshold ends at a non-zero rate, so this branch never
-      // fired for it and the recovery was reported as a fresh storm — with a
-      // rate below the threshold that triggers one.
-      if (info.ended) {
-        log.info(
-          "storm",
-          `${info.type} storm ended after ${info.seconds}s above threshold`,
-        );
-        return;
-      }
-      log.warn(
+  const onStorm = (info: StormInfo): void => {
+    // `ended`, not a guess from the rate. A storm that stops by dropping
+    // back UNDER the threshold ends at a non-zero rate, so this branch never
+    // fired for it and the recovery was reported as a fresh storm — with a
+    // rate below the threshold that triggers one.
+    if (info.ended) {
+      log.info(
         "storm",
-        `DISPATCH_STORM: ${info.type} fired ${info.rate}×/s for ${info.seconds}s${
-          info.breaking ? " — circuit-breaking (dropping) it" : ""
-        } — look for a feedback loop (e.g. an fs watcher observing your own writes)`,
+        `${info.type} storm ended after ${info.seconds}s above threshold`,
       );
-      diagEmit({
-        type: "dispatch:storm",
-        severity: "warning",
-        source: "dispatch",
-        message: `${info.type} fired ${info.rate}×/s for ${info.seconds}s`,
-        detail: info,
-        hint:
-          "find the feedback loop; set dispatchStorm.breaker to drop it automatically",
-      });
-    },
-  });
+      return;
+    }
+    log.warn(
+      "storm",
+      `DISPATCH_STORM: ${info.type} fired ${info.rate}×/s for ${info.seconds}s${
+        info.breaking ? " — circuit-breaking (dropping) it" : ""
+      } — look for a feedback loop (e.g. an fs watcher observing your own writes)`,
+    );
+    diagEmit({
+      type: "dispatch:storm",
+      severity: "warning",
+      source: "dispatch",
+      message: `${info.type} fired ${info.rate}×/s for ${info.seconds}s`,
+      detail: info,
+      hint:
+        "find the feedback loop; set dispatchStorm.breaker to drop it automatically",
+    });
+  };
+  const stormCfg = typeof fc.dispatchStorm === "object" ? fc.dispatchStorm : {};
+  // `true`/omitted → defaults; object → tuned; false → disabled.
+  const storm = fc.dispatchStorm === false
+    ? null
+    : createStormDetector({ ...stormCfg, onStorm });
+  // A `worker: true` cell's commits arrive as patch batches, all of ONE type
+  // (`__aioWorkerPatch`) whichever cell sent them. Tracked under that type,
+  // a worker cell streaming progress was reported as a storm of an action
+  // nobody wrote, every worker cell's rate was summed into one, and the
+  // breaker DROPPED batches the worker had already committed — its copy and
+  // this one then disagreed for good (measured: the method returned 603 rows
+  // while state held 472, and every later op landed on the wrong copy). Tracked per
+  // cell, under the name the journal gives the batch, and never dropped: a
+  // batch is a record of writes made, not new input.
+  const workerStorm = fc.dispatchStorm === false
+    ? null
+    : createStormDetector({ ...stormCfg, breaker: false, onStorm });
   const userBeforeReduce = beforeReduce as
     | ((a: unknown, s: unknown, u?: unknown) => unknown)
     | undefined;
@@ -312,12 +349,14 @@ export function buildLegacyConfig(
    *  This is the aio.run path, where the pool exists; the harness composes on
    *  the standalone runtime and keeps running them on its one thread. */
   const workerCells = composed.cells.filter((f) => f.__aio.worker === true);
-  // …only when this boot ACTUALLY hosts workers. `_hostWorkers` in aio.ts is
-  // `!libraryMode || _workerEntry !== undefined`, so a `worker: true` cell in
-  // libraryMode with no worker entry runs in THIS isolate and must init here.
+  // …only when this boot ACTUALLY hosts workers — the pool's own decider. A
+  // `worker: true` cell in libraryMode with no worker entry, or under an entry
+  // no worker can be spawned from, runs in THIS isolate and must init here.
   // Skipping it unconditionally would trade a double init for none at all.
-  const hostsWorkers = !(fc as { libraryMode?: boolean }).libraryMode ||
-    (fc as { _workerEntry?: unknown })._workerEntry !== undefined;
+  const hostsWorkers = _hostsWorkerThreads(
+    (fc as { libraryMode?: boolean }).libraryMode,
+    (fc as { _workerEntry?: string })._workerEntry,
+  );
   const workerIds = new Set(
     hostsWorkers ? workerCells.map((f) => f.__aio.id) : [],
   );
@@ -370,10 +409,12 @@ export function buildLegacyConfig(
       // app's own server.
       if (scope) _appScope.enterWith(scope);
       return inAppScope(scope, () => {
-        if (
-          storm &&
-          !storm.track((action as { type: string }).type ?? "unknown")
-        ) {
+        const type = (action as { type: string }).type ?? "unknown";
+        if (type === WORKER_PATCH_ACTION) {
+          const cell = (action as { payload?: { cell?: unknown } }).payload
+            ?.cell;
+          workerStorm?.track(`${String(cell)}:__worker`);
+        } else if (storm && !storm.track(type)) {
           return null; // breaker active — drop mid-storm dispatches
         }
         return userBeforeReduce
@@ -604,7 +645,25 @@ export function buildLegacyConfig(
     // …and the flag those workers need to answer a refusal the way the main
     // isolate does. Same value the composed reduce was given.
     _refusalsReject: fc.refusalsReject === true,
+    // …and the circuit breaker, which lives HERE: a worker cell's method never
+    // runs in this composition, so its failures are counted by the pool, and a
+    // cell the breaker disabled is not routed to its worker at all.
+    _cellBreaker: {
+      count: (cell: string) => _countCellError(composed, cell),
+      // …and a routed call is the cell's last action, as the reduce records
+      // it for a local one (`health()[i].lastAction`).
+      note: (cell: string, type: string) =>
+        _noteCellAction(composed, cell, type),
+      isEnabled: (cell: string) => composed.registry.isEnabled(cell),
+      // …and `disable`/`enable` of a worker cell run its lifecycle there.
+      bindWorkers: (remote) => _setRemoteLifecycle(composed, remote),
+    },
     _reduceBreakdown: composed.lastBreakdown,
+    // The full rows, per app. `/__aio/health` and the vitals probe used to read
+    // them off `globalThis.__aioCells` — the LAST app booted in the process —
+    // so with two apps in one process (an embedding host, two `testServer`s)
+    // the first app's health endpoint listed the second app's cells.
+    _cellHealth: (state) => composed.registry.health(state),
     _healthGetter: (state: unknown) => {
       const health = composed.registry.health(
         state as Record<string, unknown>,
@@ -855,10 +914,22 @@ export async function wrapAppWithCells(
   });
 
   // Wrap close to also stop memory monitor
+  // …and to end the app's scope once it is fully down (see `liveScope`).
+  // Serving from here: a namespace every app serves is named once two are up.
+  const leaveServerFns = _serverFnsAppLive(resolveAppId(fc.appId));
+  // THIS app's scope, taken now: `fc` is the caller's object, and a later
+  // `aio.run(fc)` with the same one re-keys `_scopeOf` to ITS scope — a second
+  // (idempotent) close of this app then ended the NEXT app's scope.
+  const ownScope = _scopeOf.get(fc);
   const origClose = app.close;
   (app as Record<string, unknown>).close = async () => {
     memoryMonitor.stop();
-    await origClose();
+    try {
+      await origClose();
+    } finally {
+      leaveServerFns();
+      if (ownScope) ownScope.closed = true;
+    }
   };
 
   // Attach cells API to app
@@ -891,20 +962,103 @@ export async function wrapAppWithCells(
   // of app B still logs as A afterwards.
   const logger = _loggerOf.get(fc) ?? null;
   const scope = scopeOf(fc, logger);
+  /** The dispatch each of OUR cells is bound to — "is it still ours?" at
+   *  release (see `_boundDispatchOf`). */
+  const ours = new Map<CellDef, unknown>();
   for (const f of composed.cells) {
+    const dispatch = (a: Parameters<typeof app.dispatch>[0]) =>
+      inAppScope(scope, () => app.dispatch(a));
+    // …and a call's ceiling is this app's, whoever calls (see `_bindCallScope`).
+    if (scope) _bindCallScope(dispatch, scope);
     bindCell(
       f,
-      (a) => inAppScope(scope, () => app.dispatch(a)),
+      dispatch,
       () => app.getState() as Record<string, unknown>,
     );
+    ours.set(f, _boundDispatchOf(f));
   }
   // …and record how to give them back. A cell def binds to exactly one app, and
   // that claim used to outlive the app: a second `testServer()` in the same file
   // failed with "already bound" even after `await using` closed the first
-  //. Shutdown calls this; scoped to OUR cells, so a second app in
-  // the same process keeps its own bindings.
-  (app as Record<string, unknown>)._releaseCells = () =>
-    _releaseCellBindings(composed.cells, composed.appId);
+  //. Shutdown calls this — after the final persist and the worker pool's
+  // close — with each closed worker cell's reason; scoped to OUR cells, so a
+  // second app in the same process keeps its own bindings.
+  (app as Record<string, unknown>)._releaseCells = (
+    closedWorkers: Record<string, string | null> = {},
+  ) => {
+    // Only cells STILL bound to this app: a harness reset (`_resetCellBindings`)
+    // lets another app re-bind one while this app lives, and releasing it
+    // here broke THAT app's live cell (DISPATCH_CLOSED for good).
+    const mine = composed.cells.filter((f) =>
+      _boundDispatchOf(f) === ours.get(f)
+    );
+    _releaseCellBindings(mine, composed.appId);
+    // …and let go of the APP. A cell def is a module object that outlives
+    // every app it serves (and `cell()` registers it process-wide), so the
+    // dispatch/getState closures bound above kept the closed app — its state,
+    // its config, its scope and logger — reachable for the life of the
+    // process: 0 of N closed apps were ever collected. The def is re-bound to
+    // a tombstone that answers every call shape exactly as the closed app did
+    // — its FINAL state (frozen plain data, read now: dispatch is sealed), the
+    // main loop's DISPATCH_CLOSED, a closed worker's refusal by name — and
+    // holds nothing else of it. `bound` stays false: the next app binds as
+    // before. Built at MODULE level on purpose: a closure made in here would
+    // carry this function's context chain, i.e. the app's config, right back.
+    const finalState = app.getState() as Record<string, unknown>;
+    _tombstoneCells(mine, finalState, closedWorkers);
+  };
+}
+
+/** Re-bind closed cells to a tombstone that holds nothing of their app — see
+ *  `_releaseCells`. Module level so no closure here can reach an app's scope
+ *  through its context chain; everything it keeps is plain data. Each shape
+ *  answers as the closed app's own door did: a worker cell as its closed
+ *  worker (`closedWorkerCall`), any other as the sealed main loop
+ *  (dispatch.ts — the same warning, once per type, and DISPATCH_CLOSED). */
+function _tombstoneCells(
+  cells: readonly CellDef[],
+  finalState: Record<string, unknown>,
+  closedWorkers: Readonly<Record<string, string | null>>,
+): void {
+  if (cells.length === 0) return;
+  const warned = new Set<string>();
+  let dropped = 0;
+  const sealed = (a: Msg): Promise<unknown> => {
+    const t = String(a?.type ?? "(unknown)");
+    dropped++;
+    if (!warned.has(t)) {
+      warned.add(t);
+      log.warn(
+        `dispatch after close() — '${t}' ignored (further drops of this ` +
+          `type suppressed; ${dropped} dropped so far)`,
+      );
+    }
+    const p = Promise.reject(createAioError(
+      "DISPATCH_CLOSED",
+      "dispatch after close() — action dropped, not applied",
+      { actionType: a?.type as string },
+    ));
+    p.catch(() => {
+      // aio-ok: marks it handled only — the caller still receives the
+      // rejection, and the drop was warned above; a fire-and-forget call must
+      // not crash the process with an unhandled rejection.
+    });
+    return p;
+  };
+  const getState = () => finalState;
+  for (const f of cells) {
+    const id = f.__aio.id;
+    // Own keys only: a cell named `constructor` is not a worker.
+    const crash = Object.hasOwn(closedWorkers, id)
+      ? closedWorkers[id]
+      : undefined;
+    bindCell(
+      f,
+      crash === undefined ? sealed : (a) => closedWorkerCall(id, crash, a),
+      getState,
+    );
+    (f.__aio as Record<string, unknown>).bound = false;
+  }
 }
 
 /** Filter cell entries by --isolate flag */

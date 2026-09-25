@@ -858,6 +858,19 @@ export async function cmdTop(
     return r.ok ? (r.data as TopMetrics) : null;
   };
 
+  // A mistyped interval used to fall back to 1s via `|| 1` — the poll then
+  // looked fine while ignoring what was asked for. Checked BEFORE the mode
+  // split: piped/--json, `am top 2s` was never read at all and answered
+  // exit 0, so the same typo passed in a script and failed at a terminal.
+  const secArg = args.find((a) => !a.startsWith("--"));
+  const secs = secArg === undefined
+    ? { ok: true as const, value: 1 }
+    : parseNumArg(secArg, "poll interval (seconds)", { min: 0.25 });
+  if (!secs.ok) {
+    outError(secs.error, mode);
+    Deno.exit(1);
+  }
+
   if (mode !== "pretty") {
     const m = await fetchOnce();
     if (!m) {
@@ -868,16 +881,6 @@ export async function cmdTop(
     return;
   }
 
-  // A mistyped interval used to fall back to 1s via `|| 1` — the poll then
-  // looked fine while ignoring what was asked for.
-  const secArg = args.find((a) => !a.startsWith("--"));
-  const secs = secArg === undefined
-    ? { ok: true as const, value: 1 }
-    : parseNumArg(secArg, "poll interval (seconds)", { min: 0.25 });
-  if (!secs.ok) {
-    outError(secs.error, mode);
-    Deno.exit(1);
-  }
   const intervalMs = Math.max(250, secs.value * 1000);
   let running = true;
   const stop = () => (running = false);
@@ -1495,7 +1498,7 @@ export async function cmdSurface(
     headlessRender
       ? `this is a server-side render — am trigger drives a CONNECTED ` +
         `client: open the app (or start it with --client=browser), then ` +
-        `am surface 0`
+        `am surface (it reads the newest client)`
       // No index in the hint: `am trigger` drives the newest UI client, and a
       // number copied from here is stale the moment the page reloads.
       : `trigger with: am trigger "<Component…:Element>" <action> [text]`,

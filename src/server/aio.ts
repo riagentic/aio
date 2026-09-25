@@ -69,7 +69,7 @@ import { inFlightVerdict, opKey, placeOps } from "./op-placement.ts";
 import { takeRejectionFor } from "../state/rejection-tracker.ts";
 import { diffState } from "../sync/state-patch.ts";
 import { deepMerge } from "../state/deep-merge.ts";
-import { restoreExcluded } from "../state/state-filter.ts";
+import { unpersistedFromBase } from "../state/cell-persist-filter.ts";
 import {
   type ActionCause,
   isLegacyTail,
@@ -90,6 +90,7 @@ import {
   type SyncReaction,
   type TimeTravelRestore,
   TT_RESTORE_TYPE,
+  unstoredCellOf,
   workerPatchCell,
 } from "./journal.ts";
 import { AsyncLocalStorage } from "node:async_hooks";
@@ -126,8 +127,11 @@ import {
 import {
   appDirs,
   checkUnpackLocation,
+  dbPathOutsideHomeError,
   ensureAppDirs,
   homeRequested,
+  planAppDirs,
+  recordAppDirs,
   registerAppDirs,
   registeredProfile,
   resolveAppDirs,
@@ -525,6 +529,24 @@ export function _tlsOf(
  *  Once per process, like every other boot hint here: `parseCli`-adjacent code
  *  runs several times in one boot and a repeated diagnostic reads as a loop. */
 let _hintedMisplacedDenoJson = false;
+/** How a config refusal ends the boot. `libraryMode` promises "no
+ *  `Deno.exit`" — a test runner or an embedding host must survive its own
+ *  typo — so there the refusal (already logged, with the valid keys) THROWS
+ *  out of `aio.run()` instead of exiting the process. Otherwise `undefined`:
+ *  `validateConfig`'s own default, `Deno.exit`. */
+export function _configExit(
+  libraryMode: boolean | undefined,
+): ((code: number) => never) | undefined {
+  if (!libraryMode) return undefined;
+  return (code: number): never => {
+    throw new Error(
+      `[aio] invalid aio.run() configuration — refused (see the error ` +
+        `logged above for the key and the valid ones). libraryMode throws ` +
+        `here instead of Deno.exit(${code}).`,
+    );
+  };
+}
+
 function _warnMisplacedDenoJson(): void {
   if (_hintedMisplacedDenoJson) return;
   const stray = misplacedDenoJsonKeys(appDenoJson());
@@ -951,6 +973,7 @@ async function _runAsApp(a?: any, b?: any): Promise<AioApp<any, any>> {
     fc as unknown as Record<string, unknown>,
     VALID_FEATURES_CONFIG_KEYS,
     "CellsConfig",
+    _configExit(fc.libraryMode),
   );
   // Statically knowable, so it is refused while it is still config — not out
   // of scheduleManager.start() once persistence is open and the port is bound.
@@ -963,7 +986,12 @@ async function _runAsApp(a?: any, b?: any): Promise<AioApp<any, any>> {
   // typo in one gets the same did-you-mean as a typo in aio's own.
   declareAppFlags(fc.appFlags);
   if (fc.ui) {
-    validateConfig(fc.ui as Record<string, unknown>, VALID_UI_KEYS, "ui");
+    validateConfig(
+      fc.ui as Record<string, unknown>,
+      VALID_UI_KEYS,
+      "ui",
+      _configExit(fc.libraryMode),
+    );
   }
   // An app with `memory` and no `ui` had its memory keys accepted unchecked,
   // typos and all — the check lived inside the `ui` one. It still boots (the
@@ -1324,15 +1352,28 @@ async function _runAsApp(a?: any, b?: any): Promise<AioApp<any, any>> {
     const _earlyAppId = resolveAppId(fc.appId);
     let _earlyDirs: ReturnType<typeof resolveAppDirs>;
     try {
-      _earlyDirs = resolveAppDirs({
+      // `--profile` / `--home` (+ AIO_PROFILE): the RUNNER's say.
+      const request = fc.libraryMode ? undefined : homeRequest();
+      const plan = planAppDirs({
         appId: _earlyAppId,
         appDir: fc.appDir,
         libraryMode: fc.libraryMode,
         baseDir: fc.baseDir,
-        // `--profile` / `--home` (+ AIO_PROFILE): the RUNNER's say.
-        request: fc.libraryMode ? undefined : homeRequest(),
+        request,
         profiles: fc.profiles,
       });
+      // An explicit dbPath outside the requested home opens the DEFAULT
+      // home's database under a profile's lock and logs — refused BEFORE the
+      // plan is recorded, so a caught refusal leaves no profile behind.
+      const split = plan.requested
+        ? dbPathOutsideHomeError(
+          dbPathOf(parseCli(), fc)?.value,
+          plan.dirs.home,
+          request?.source,
+        )
+        : null;
+      if (split) throw new Error(split);
+      _earlyDirs = recordAppDirs(_earlyAppId, plan);
     } catch (e) {
       // A refused data folder (profiles: false, another app's, a foreign
       // one) is an operator's answer, not a crash: one line, exit 1.
@@ -1353,7 +1394,6 @@ async function _runAsApp(a?: any, b?: any): Promise<AioApp<any, any>> {
       persisting: persistingCellIds,
       cells: composed.cellNames,
     });
-    (globalThis as Record<string, unknown>).__aioCells = composed;
 
     // Bridge to legacy _run() config
     const config = buildLegacyConfig({
@@ -2076,9 +2116,15 @@ async function _runPhases<S, A, E>(
     config as unknown as Record<string, unknown>,
     VALID_AIO_CONFIG_KEYS,
     "AioConfig",
+    _configExit(config.libraryMode),
   );
   if (config.ui) {
-    validateConfig(config.ui as Record<string, unknown>, VALID_UI_KEYS, "ui");
+    validateConfig(
+      config.ui as Record<string, unknown>,
+      VALID_UI_KEYS,
+      "ui",
+      _configExit(config.libraryMode),
+    );
     if (config.memory) {
       validateMemoryConfig(config.memory as Record<string, unknown>);
     }
@@ -2181,6 +2227,7 @@ async function _runPhases<S, A, E>(
     cellPersist: config._cellPersist,
     cellPersistShaped: config._cellPersistShaped,
     persistingCellIds: config._persistingCellIds,
+    listenedTypes: Object.values(config._cellForeignActions ?? {}).flat(),
     log,
   });
   state = boot.state as S;
@@ -2709,53 +2756,15 @@ async function _runPhases<S, A, E>(
   }
 
   /** One cell's replayed slice with what `filter` keeps out of the store put
-   *  back to its boot value (or removed, where boot had none). Identity is
-   *  kept when nothing differs. */
+   *  back to its boot value (or removed, where boot had none) — the shared
+   *  rule in `state/cell-persist-filter.ts`, which the dev checkpoint restore
+   *  reads too. */
   function _unpersistedFromBoot(
     filter: import("../state/cell-types.ts").CellFieldFilter,
     was: Record<string, unknown>,
     now: Record<string, unknown>,
   ): Record<string, unknown> {
-    if (filter === "all") return now;
-    if (filter === "none") return was;
-    let slice = now;
-    const revert = (key: string) => {
-      if (slice[key] === was[key] && (key in slice) === (key in was)) return;
-      if (slice === now) slice = { ...now };
-      if (key in was) slice[key] = was[key];
-      else delete slice[key];
-    };
-    if ("include" in filter) {
-      // Top level only — `persist.include` refuses dot paths at definition.
-      const kept = new Set(filter.include);
-      for (const key of new Set([...Object.keys(now), ...Object.keys(was)])) {
-        if (!kept.has(key)) revert(key);
-      }
-      return slice;
-    }
-    // A filter object that names NEITHER key keeps everything — the answer
-    // `fieldIncluded`, the store's own projection and the startup report all
-    // give it (it is a type error, so it arrives from JS, from a runtime-built
-    // `cellDefaults`, or from `onPersist` written inside `persist:`; boot says
-    // so out loud). This was the one decider that instead read `undefined` as
-    // iterable: the first boot after a CRASH threw before the server started,
-    // and so did every boot after it.
-    if (!("exclude" in filter)) return now;
-    for (const path of filter.exclude) {
-      // BOTH READINGS, as the store's own projection takes them: the key
-      // literally named `path` (a no-op when the cell has none), and the
-      // dotted path under its head. A replay that put back a literal `"a.b"`
-      // the store never wrote is the same divergence this function exists to
-      // close, one spelling over.
-      revert(path);
-      if (path.includes(".")) {
-        slice = restoreExcluded(slice, was, path.split(".")) as Record<
-          string,
-          unknown
-        >;
-      }
-    }
-    return slice;
+    return unpersistedFromBase(filter, was, now);
   }
 
   /** The tail minus the lines that write only a quarantined sync cell: its
@@ -3302,7 +3311,13 @@ async function _runPhases<S, A, E>(
   let _vitalsCheckTimer: ReturnType<typeof setInterval> | undefined;
 
   const scheduleManager = createScheduleManager(
-    (action) => dispatch(action as A),
+    // The APP's door (`appDispatch`, below), not the raw loop: a tick that
+    // names a `worker: true` cell's method has to reach that cell's worker.
+    // Through the raw loop the MAIN isolate's composed reduce ran the method
+    // body — off its thread, away from its module singletons, and onto a
+    // slice the worker never saw, so the worker's next commit overwrote the
+    // tick's write. For every other cell the two doors are the same call.
+    (action) => appDispatch(action as A),
     log,
   );
   bootUndo.push("schedules", () => scheduleManager.cancelAll());
@@ -3810,7 +3825,20 @@ async function _runPhases<S, A, E>(
         ts,
       )
       : timeline.lastSeq() + 1;
-    if (journal && multiClock) _journalReaction(next, reacted, false);
+    // A `persist: "none"` cell's call went in with its arguments withheld
+    // and is not replayed (`JournalEntry.unstored`) — so what it wrote to
+    // PERSISTED cells (a `listensTo` reaction, an `s.$call`) rides no call
+    // line: it is journalled as data, the way a reaction to a sync op is.
+    const owner = unstoredCellOf(t, payload, origin);
+    const asData = journal?.unstored?.(owner)
+      ? _reactedKeys(prev, next, owner).filter((k) =>
+        !reacted.includes(k) && !_syncCellSet.has(k) &&
+        !journal.unstored?.(k)
+      )
+      : [];
+    if (journal && (multiClock || asData.length > 0)) {
+      _journalReaction(next, [...reacted, ...asData], false);
+    }
     // `cell({ diagnostics: false })` covers `am timeline` too. A key by that
     // name that still listed the cell in the diagnostic surface people
     // actually read would be dishonest.
@@ -4498,6 +4526,7 @@ async function _runPhases<S, A, E>(
       heartbeatInterval: interval,
       dispatch,
       getState: () => state,
+      ...(config._cellHealth ? { cellHealth: config._cellHealth } : {}),
     });
   }
   bootUndo.push("vitals check", () => {
@@ -4610,6 +4639,13 @@ async function _runPhases<S, A, E>(
     // The SAME identity `composeCells` was given (aio-composition.ts), so the
     // pool scopes the cancel registry exactly as the composed reduce does.
     appId,
+    // The main door's paused-time-travel refusal, for calls routed around it.
+    isPaused: () => tt?.paused === true,
+    // A worker cell's INIT_ERROR / EFFECT_ASYNC_ERROR reaches the app's
+    // `onError` exactly as the same cell's does on this isolate.
+    reportError: (err) => reportAioError(err, _reportOpts),
+    // …and counts toward the app's `circuitBreaker`, as it does there.
+    ...(config._cellBreaker ? { breaker: config._cellBreaker } : {}),
     // An effect handed back by a worker executes HERE, where the runtime lives.
     // A schedule effect is NOT an action — dispatching it would do nothing at
     // all, and the schedule would silently never fire.
@@ -4887,10 +4923,12 @@ async function _runPhases<S, A, E>(
     // with `await using` — the second test had to move to its own file for no
     // visible reason. Scoped to our own cells, so a second app in
     // the same process is untouched.
+    // The closed worker cells' reasons ride along as plain data: released,
+    // they keep answering by name, as the closed pool does.
     const release = (app as Record<string, unknown>)._releaseCells as
-      | (() => void)
+      | ((closedWorkers: Record<string, string | null>) => void)
       | undefined;
-    release?.();
+    release?.(workerPool.closedBy());
     _unregisterAuthStore?.();
     _unregisterRuntime();
   };
@@ -4913,10 +4951,18 @@ async function _runPhases<S, A, E>(
     // loaded state and a crash inside the debounce replayed that action onto
     // the PRE-load database (5, load 1000, deposit(1), SIGKILL → 6).
     // tests/journal-snapshot-load-crash.test.ts.
+    // …and its SYNC cells as a server write, as a jump's are: a sync cell is
+    // durable only in its op-log and fold snapshot, which the scheduled KV
+    // persist never writes — so `am snapshot load` answered "loaded" and a
+    // restart brought back the writes it undid.
+    // tests/snapshot-load-sync-cell-durable.test.ts.
     setState: (s) => {
       const before = state;
       state = s;
-      if (s !== before) _recordTimeTravel("snapshot", undefined, before, s);
+      if (s !== before) {
+        _recordTimeTravel("snapshot", undefined, before, s);
+        _jumpSyncCells(before, s);
+      }
     },
     port,
     asyncDb,
@@ -4953,10 +4999,16 @@ async function _runPhases<S, A, E>(
   const sessionResolver = sessionStore
     ? (tok: string) => sessionStore.get(tok)
     : undefined;
-  // Per-user credentials (users / resolveUser / auth:true) and the shared app
-  // key are mutually exclusive — an app in per-user mode never authenticates
-  // anyone with `app.key`.
-  const _perUserAuth = !!users || !!_resolveUser || authEnabled;
+  // Per-user credentials (users / resolveUser / sessions / auth:true) and the
+  // shared app key are mutually exclusive — an app in per-user mode never
+  // authenticates anyone with `app.key`.
+  //
+  // `sessions: true` ALONE counts: server.ts resolves every request through
+  // the session store and that path always returns, so a key there can only
+  // 401. Left out, an exposed sessions-only app was defaulted to `key: true`
+  // and printed a share link and a pair code that let nobody in.
+  const _sessionsOnly = !!sessionStore && !authEnabled;
+  const _perUserAuth = !!users || !!_resolveUser || !!sessionStore;
   // NOTE the condition here is deliberately NOT `_perUserAuth`. `token` means
   // two things downstream — "the credential to enforce" and "the author asked
   // for a shared key" — and server.ts's `key:`+`auth:` boot refusal reads the
@@ -4974,9 +5026,23 @@ async function _runPhases<S, A, E>(
     perUserAuth: _perUserAuth,
     key: _cfgKey,
   });
-  const _keyRes = (expose && !users && !_resolveUser)
+  const _keyRes = (expose && !users && !_resolveUser && !_sessionsOnly)
     ? resolveAppKey(appId, _effKey)
     : { key: undefined, persisted: false, explicit: false };
+  // An explicit key the per-user gate can never consult. It used to be
+  // resolved and ADVERTISED (share link, pair code) for a sessions-only app,
+  // and ignored without a word next to `users`/`resolveUser` — say so instead.
+  if (
+    expose && _cfgKey !== undefined && _cfgKey !== false &&
+    (users || _resolveUser || _sessionsOnly)
+  ) {
+    log.warn(
+      `\`key\` is ignored: this app authenticates per user (${
+        users ? "users" : _resolveUser ? "resolveUser" : "sessions"
+      }), and that gate never consults a shared app key. Drop \`key\`, or ` +
+        `drop per-user auth and share the key.`,
+    );
+  }
   // Named once, in the author's own spelling — see `exposeReason`.
   const _why = exposeReason(
     parseCli(),
@@ -5365,6 +5431,10 @@ async function _runPhases<S, A, E>(
         // and it is the wire's.
         visibleFilters: config._cellVisible,
         visible: config._cellFields,
+        // …and the disk gate: a report is written to disk, so what a cell
+        // keeps off disk (`persist: "none"`, `persist: { exclude }`) stays
+        // out of it — the rule the dev checkpoint already reads.
+        _persistFilters: config._cellPersist,
         getTimeline: () => timeline.entries(),
       },
     })
@@ -5483,9 +5553,18 @@ async function _runPhases<S, A, E>(
     // what `onInit` dispatches — every harness runs it too — so it is caused,
     // like a timer a method arms. Recorded as an input, `am record` emitted
     // the call AND `bootCells` ran `onInit`: applied twice.
-    onStart: onStart &&
-      ((a: Parameters<typeof onStart>[0]) =>
-        _effectScope.run(true, () => onStart(a))),
+    //
+    // Worker cells' `onInit` runs in THEIR isolate, started here — beside the
+    // main cells' and no earlier: a patch it dispatches is applied through
+    // this isolate's dispatch, whose broadcast is wired only now. Posted
+    // BEFORE the main `onInit`s, so a main cell calling a worker cell from its
+    // own `onInit` reaches one that has already initialised (per-worker FIFO).
+    onStart: onStart || workerPool.size > 0
+      ? ((a: Parameters<NonNullable<typeof onStart>>[0]) => {
+        workerPool.start();
+        if (onStart) return _effectScope.run(true, () => onStart(a));
+      })
+      : undefined,
     fatalOnStart: config.fatalOnStart,
     scheduleManager,
     schedules: config.schedules,

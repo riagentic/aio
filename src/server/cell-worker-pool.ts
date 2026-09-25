@@ -20,6 +20,8 @@ import {
 import { type CellWorker, createCellWorker } from "./cell-worker.ts";
 import { log } from "../diagnostics/logger-api.ts";
 import { bumpPending } from "../protocol/pending-calls.ts";
+import type { AioError } from "../diagnostics/error.ts";
+import type { RemoteLifecycle } from "../state/cell-compose-registry.ts";
 
 /** Refuse at boot what the thread boundary can't honour. Every one of these is
  *  a silent-wrong-behavior trap if allowed through, so they fail loudly with the
@@ -76,11 +78,18 @@ export type CellWorkerPool = {
   route(dispatch: (a: Msg) => Promise<unknown>): (a: Msg) => Promise<unknown>;
   /** Wait until every host is bound (or fail boot with its error). */
   ready(): Promise<void>;
+  /** Run every worker cell's `onInit` — call when the main isolate runs its
+   *  own cells' (the bridge's `onStart`), never earlier: before it, a patch
+   *  an `onInit` dispatches cannot be applied here. Once per boot. */
+  start(): void;
   /** Re-seed every worker from the current authoritative state — call after a
    *  wholesale replacement (time travel, snapshot load). */
   reseed(): void;
   /** Stop every worker. Safe to call twice. */
   close(): Promise<void>;
+  /** Each CLOSED worker cell's reason — `closedBy()` by cell name, as plain
+   *  data, so a released app's cells answer as the closed pool did. */
+  closedBy(): Record<string, string | null>;
 };
 
 const EMPTY_POOL: CellWorkerPool = {
@@ -88,9 +97,31 @@ const EMPTY_POOL: CellWorkerPool = {
   owns: () => false,
   route: (d) => d,
   ready: () => Promise.resolve(),
+  start: () => {},
   reseed: () => {},
   close: () => Promise.resolve(),
+  closedBy: () => ({}),
 };
+
+/** Can a worker be spawned from this entry? Only a local module can be
+ *  re-imported as one (a compiled binary's embedded entry reports `file:`). */
+function hostableEntry(entry: string | undefined): boolean {
+  return !!entry && entry.startsWith("file:");
+}
+
+/** Will this boot run its `worker: true` cells on real threads? ONE decider,
+ *  asked by the pool (below) and by the cells bridge, which skips those cells'
+ *  `onInit`/`onDestroy` on the main isolate exactly when their worker runs
+ *  them. The bridge used to decide from `libraryMode`/`_workerEntry` alone, so
+ *  an entry the pool cannot host (not a local module) ran the cells on the
+ *  main isolate — and ran their `onInit` NOWHERE. */
+export function _hostsWorkerThreads(
+  libraryMode: boolean | undefined,
+  workerEntry: string | undefined,
+): boolean {
+  if (libraryMode && workerEntry === undefined) return false;
+  return hostableEntry(workerEntry ?? Deno.mainModule);
+}
 
 export function createCellWorkerPool(opts: {
   cells: CellDef[];
@@ -113,6 +144,21 @@ export function createCellWorkerPool(opts: {
    *  cancel registry the same way the composed reduce does — `""` is the
    *  wildcard the registry already treats as "app unknown". */
   appId?: string;
+  /** Is the main dispatch door refusing everything right now (time travel
+   *  paused)? A worker call is routed AROUND that door, so the pool asks. */
+  isPaused?: () => boolean;
+  /** The app's cell-error sink — what a worker's composition reports through
+   *  (see FromWorker "cell-error"). */
+  reportError?: (err: AioError) => void;
+  /** The owner's circuit breaker (`AioConfig._cellBreaker`): a worker cell's
+   *  failures are counted there, and a cell it disabled is not routed. */
+  breaker?: {
+    count: (cell: string) => void;
+    /** Record a routed method call as the cell's `health()` lastAction. */
+    note?: (cell: string, type: string) => void;
+    isEnabled: (cell: string) => boolean;
+    bindWorkers?: (remote: RemoteLifecycle) => void;
+  };
   /** Whether this boot hosts workers at all (default true). `false` under
    *  libraryMode without a worker entry: the cells run in-isolate, and are
    *  still VALIDATED here — a harness must refuse what the app refuses. */
@@ -132,7 +178,7 @@ export function createCellWorkerPool(opts: {
   validateWorkerCells(cells);
   if (cells.length === 0 || opts.host === false) return EMPTY_POOL;
 
-  if (!entry || !entry.startsWith("file:")) {
+  if (!hostableEntry(entry)) {
     // An entry that is not a local module can't be re-imported as a worker.
     // Degrade LOUDLY to in-isolate execution rather than failing the app: the
     // cell still works, it just isn't isolated.
@@ -171,6 +217,8 @@ export function createCellWorkerPool(opts: {
         // `""` (app unknown) is no identity to hand over — the worker then
         // resolves as it always did.
         ...(appId ? { appId } : {}),
+        ...(opts.reportError ? { reportError: opts.reportError } : {}),
+        countError: () => opts.breaker?.count(name),
         initialState: () => getSlice(name),
         applyPatches: (cell: string, ops: Patch[]) => {
           // In-flight (dispatch.ts INFLIGHT): these ARE a method's writes
@@ -201,6 +249,21 @@ export function createCellWorkerPool(opts: {
     );
   }
 
+  // `app.cells.disable`/`enable` (and the breaker's trip) of a hosted cell run
+  // its `onDestroy`/`onInit` and state reset in ITS worker, where every other
+  // hook of it runs — never on this isolate's copy alone.
+  opts.breaker?.bindWorkers?.({
+    owns: (cell) => byCell.has(cell),
+    disable: (cell, done) => byCell.get(cell)!.disable(done),
+    enable: (cell) => byCell.get(cell)!.enable(),
+  });
+
+  const methodTypes = new Set(
+    cells.flatMap((f) => [...f.__aio.actionTypeToKey.keys()]),
+  );
+  const lifecycleTypes = new Set(
+    cells.flatMap((f) => [f.__aio.initType, f.__aio.destroyType]),
+  );
   const ownerOf = (action: Msg): CellWorker | undefined => {
     const type = action?.type;
     if (typeof type !== "string") return undefined;
@@ -259,15 +322,32 @@ export function createCellWorkerPool(opts: {
   // the hop, for exactly the methods the executor would count: async ones.
   // The transport settles when the worker reports the method DONE, so the
   // count spans the method, not the postMessage.
+  //
+  // …for a call that RUNS. A `concurrency: "first"` adopter or a `ttl` hit is
+  // never counted by the executor (`trackCall` runs only for a call that
+  // runs), and only the worker's executor knows which calls those are: it
+  // reports each one (`onAdopted`), and the count is released then — once.
+  // Counting it until its adopted outcome landed made two overlapping
+  // `scan("a")` read 2 here and 1 on the main isolate. What is left is one
+  // thread hop of over-count before the report arrives.
   const asyncTypes = new Set(
     cells.flatMap((f) =>
       [...(f.__aio.asyncMethods ?? [])].map((m) => `${f.__aio.id}:${m}`)
     ),
   );
-  const counted = (type: string, p: Promise<unknown>): Promise<unknown> => {
-    if (!asyncTypes.has(type)) return p;
+  const counted = (
+    type: string,
+    run: (onAdopted: () => void) => Promise<unknown>,
+  ): Promise<unknown> => {
+    if (!asyncTypes.has(type)) return run(() => {});
     bumpPending(type, 1);
-    const release = () => void bumpPending(type, -1);
+    let released = false;
+    const release = () => {
+      if (released) return; // adopted AND settled — decrement once
+      released = true;
+      bumpPending(type, -1);
+    };
+    const p = run(release);
     p.then(release, release);
     return p;
   };
@@ -276,10 +356,36 @@ export function createCellWorkerPool(opts: {
     size: byCell.size,
     owns: (action) => ownerOf(action) !== undefined,
     route: (dispatchFn) => (action: Msg) => {
+      // Paused time travel refuses every action at the main door — and a
+      // worker call never reaches that door. So the method RAN in its worker
+      // and answered its caller, while the patches it streamed home were
+      // refused by the paused door: a write the caller was told succeeded,
+      // kept only in the worker's copy until the next re-seed dropped it.
+      // Hand it to the door instead; it refuses with its own words (and
+      // settles an async caller's registration), exactly as for any cell.
+      if (opts.isPaused?.()) return dispatchFn(action);
       const owner = ownerOf(action);
       forwardCancel(action, owner);
-      if (!owner) return dispatchFn(action);
+      // A worker cell's `__init`/`__destroy` maintain THIS isolate's copy
+      // (the registry's enable/disable); the worker runs its own through its
+      // registry (`disable`/`enable` above). Posted as a call, a re-enable's
+      // late reset landed in the worker AFTER its `onInit` and wiped it.
+      if (!owner || lifecycleTypes.has(action.type)) return dispatchFn(action);
       const cell = action.type.slice(0, action.type.indexOf(":"));
+      // Disabled (the circuit breaker, `app.cells.disable`) is decided HERE,
+      // in the composition that owns it. The worker hears of it only after a
+      // round trip, so the door refuses a disabled cell's action at once,
+      // exactly as it does a local one's, instead of letting it run there.
+      if (opts.breaker?.isEnabled(cell) === false) return dispatchFn(action);
+      // The reduce that runs it is the worker's, so the owner's health row
+      // (`lastAction`) learns of it here, once the worker answered — for a
+      // method the cell has, and not for a sync throw (REDUCE_ERROR), exactly
+      // what the local reduce records.
+      const note = () => {
+        if (methodTypes.has(action.type)) {
+          opts.breaker?.note?.(cell, action.type);
+        }
+      };
       const settle = async (): Promise<void> => {
         const why = (await Promise.all([...(patching.get(cell) ?? [])]))
           .filter((v) => v !== undefined);
@@ -293,20 +399,26 @@ export function createCellWorkerPool(opts: {
       };
       return counted(
         action.type,
-        owner.call(action).then(
-          async (v) => {
-            await settle();
-            return v;
-          },
-          async (e) => {
-            await settle();
-            throw e;
-          },
-        ),
+        (onAdopted) =>
+          owner.call(action, onAdopted).then(
+            async (v) => {
+              note();
+              await settle();
+              return v;
+            },
+            async (e) => {
+              if ((e as { code?: unknown })?.code !== "REDUCE_ERROR") note();
+              await settle();
+              throw e;
+            },
+          ),
       );
     },
     ready: async () => {
       await Promise.all([...byCell.values()].map((w) => w.ready()));
+    },
+    start: () => {
+      for (const w of byCell.values()) w.start();
     },
     reseed: () => {
       for (const [name, w] of byCell) w.reseed(getSlice(name));
@@ -319,6 +431,14 @@ export function createCellWorkerPool(opts: {
       // away from the resources its worker owned, and admitted whenever
       // dispatch was still open.
       await Promise.all([...byCell.values()].map((w) => w.close()));
+    },
+    closedBy: () => {
+      const out: Record<string, string | null> = {};
+      for (const [name, w] of byCell) {
+        const why = w.closedBy();
+        if (why !== undefined) out[name] = why;
+      }
+      return out;
     },
   };
 }

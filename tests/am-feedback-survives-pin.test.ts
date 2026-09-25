@@ -44,8 +44,13 @@ Deno.test("am feedback: the findings location is NOT inside the version store", 
   // THE assertion. A path under the version store is deleted by an upgrade,
   // which is the whole defect. Checked against the real default, so setting
   // the override cannot make this pass vacuously.
+  // Both paths are only COMPUTED here (no file is touched), so reading the
+  // real defaults is safe — and the harness's store sandbox pins both vars,
+  // which would otherwise compare two sandbox paths.
   const original = Deno.env.get("AIO_FEEDBACK_DIR");
+  const originalStore = Deno.env.get("AIO_VERSIONS_DIR");
   Deno.env.delete("AIO_FEEDBACK_DIR");
+  Deno.env.delete("AIO_VERSIONS_DIR");
   try {
     const dir = feedbackDir();
     const store = versionsDir();
@@ -57,6 +62,9 @@ Deno.test("am feedback: the findings location is NOT inside the version store", 
     assert(dir.length > 0 && dir !== "/", `implausible feedback dir: ${dir}`);
   } finally {
     if (original !== undefined) Deno.env.set("AIO_FEEDBACK_DIR", original);
+    if (originalStore !== undefined) {
+      Deno.env.set("AIO_VERSIONS_DIR", originalStore);
+    }
   }
 });
 

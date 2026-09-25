@@ -120,6 +120,9 @@ function applyServerFrame<S>(
   return frame.d as S;
 }
 
+/** Minimum gap between `resync` asks of a client that is out of sync. */
+const RESYNC_MIN_MS = 2_000;
+
 /** Reactive WS client handle — subscribe to state, send actions, close when done */
 export type CliApp<S> = {
   /** Current state (null until first message from server) */
@@ -135,7 +138,10 @@ export type CliApp<S> = {
   subscribe(fn: (state: S) => void): () => void;
   /** Close the connection (no reconnect) */
   close(): void;
-  /** Whether WS is currently open */
+  /** Whether WS is currently open AND carries the app's state — false while
+   *  a full state the server could not send this client (over the WebSocket
+   *  message ceiling, `ws-frame-ceiling`) is outstanding; `state` then reads
+   *  null. */
   readonly connected: boolean;
   /** Resolves when first state is received */
   readonly ready: Promise<S>;
@@ -372,6 +378,13 @@ export function connectCli<S>(
   /** Consecutive connections killed by an oversized frame — the reconnect
    *  backoff grows with it instead of restarting at 1 s on every open. */
   let _tooLarge = 0;
+  /** The server REFUSED a full state for this client (`ws-frame-ceiling`):
+   *  the copy it held is gone and no patch applies until a full state lands.
+   *  See the `diag` case. */
+  let _outOfSync = false;
+  /** Last `resync` asked while out of sync, and the one queued behind it. */
+  let _resyncAt = 0;
+  let _resyncTimer: ReturnType<typeof setTimeout> | undefined;
   const queue: Array<{ type: string; payload?: unknown }> = [];
   const listeners = new Set<(state: S) => void>();
   /** Which app answered on this URL, learned on the first connect.
@@ -855,12 +868,36 @@ export function connectCli<S>(
         // Errors only: informational diagnostics are the panel's business.
         case "diag": {
           const d = frame.d as
-            | { severity?: string; message?: string; hint?: string }
+            | {
+              type?: string;
+              severity?: string;
+              message?: string;
+              hint?: string;
+            }
             | null;
           if (d && d.severity === "error" && typeof d.message === "string") {
             log.error(
               "cli",
               `server diagnostic: ${d.message}${d.hint ? ` (${d.hint})` : ""}`,
+            );
+          }
+          // The server refused a FULL STATE for this client and kept the
+          // socket open. The copy held here is now a state the server no
+          // longer has, and every later patch is a delta against the one it
+          // refused: applying them showed `blob.len=0 n=2` against a server
+          // at 70 MB n=2 — a state that never existed, reported `connected`.
+          // Drop it: `state` reads null and `connected` false until a full
+          // state fits; patches are not applied meanwhile, each asks for one.
+          if (d?.type === "ws-frame-ceiling") {
+            _outOfSync = true;
+            state = null;
+            log.error(
+              "cli",
+              `out of sync: the server could not send this client its state ` +
+                `(over the WebSocket message ceiling) — the copy held here ` +
+                `was dropped (state reads null, connected false) rather than ` +
+                `patched on a base the server no longer has. It is asked ` +
+                `for again on every change and taken once it fits.`,
             );
           }
           return;
@@ -936,6 +973,16 @@ export function connectCli<S>(
           // hello before the state that kills the socket, and resetting on that
           // put the retry clock back to 1 s on every attempt.
           _tooLarge = 0;
+          if (_outOfSync) {
+            // No base to apply a patch to — only a full state ends it.
+            if (frame.t === "patches") {
+              requestResync();
+              return;
+            }
+            _outOfSync = false;
+            clearTimeout(_resyncTimer);
+            _resyncTimer = undefined;
+          }
           state = applyServerFrame(state, frame, () => {
             // desync — request full state from server
             if (socket.readyState === WebSocket.OPEN && pacer) {
@@ -1049,6 +1096,27 @@ export function connectCli<S>(
     ws = socket;
   }
 
+  /** Ask for a full state while out of sync — at once, then at most once per
+   *  {@linkcode RESYNC_MIN_MS} (every answer that still does not fit costs
+   *  the server a full serialization), with a trailing ask so the LAST change
+   *  in a burst — the one that may make it fit — is never the one skipped. */
+  function requestResync(): void {
+    if (_resyncTimer !== undefined || closed) return;
+    const wait = _resyncAt + RESYNC_MIN_MS - Date.now();
+    const ask = () => {
+      _resyncTimer = undefined;
+      if (closed || !_outOfSync) return;
+      _resyncAt = Date.now();
+      if (ws?.readyState === WebSocket.OPEN && pacer) {
+        try {
+          pacer.push({ frame: enc("resync"), seq: _seq++ });
+        } catch { /* aio-ok: closing — the reconnect sends full state */ }
+      }
+    };
+    if (wait <= 0) ask();
+    else _resyncTimer = setTimeout(ask, wait);
+  }
+
   connect();
 
   return {
@@ -1056,7 +1124,7 @@ export function connectCli<S>(
       return state;
     },
     get connected() {
-      return ws?.readyState === WebSocket.OPEN;
+      return ws?.readyState === WebSocket.OPEN && !_outOfSync;
     },
     ready,
 
@@ -1139,6 +1207,8 @@ export function connectCli<S>(
         clearTimeout(reconnectTimer);
         reconnectTimer = undefined;
       }
+      clearTimeout(_resyncTimer);
+      _resyncTimer = undefined;
       // Disarms the readyTimeoutMs deadline; a no-op once ready resolved.
       _readyAbandon?.();
       _readyResolve = _readyAbandon = null;
@@ -1211,7 +1281,6 @@ export function connectCliUDS<S>(
   const queue: Array<{ type: string; payload?: unknown }> = [];
   const listeners = new Set<(state: S) => void>();
   const encoder = new TextEncoder();
-  const decoder = new TextDecoder();
 
   let _readyResolve: ((s: S) => void) | null = null;
   let _readyAbandon: (() => void) | null = null;
@@ -1323,6 +1392,11 @@ export function connectCliUDS<S>(
 
         // Read NDJSON
         const lineBuf = createLineReader(); // linear on a multi-MB frame
+        // Per connection, like the line reader: a streaming decoder shared
+        // across reconnects carried a character cut off by a dead connection
+        // into the next one's first frame, which then failed to parse and
+        // was dropped without a word.
+        const decoder = new TextDecoder();
         const reader = c.readable.getReader();
         (async () => {
           try {

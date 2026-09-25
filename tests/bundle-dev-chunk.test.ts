@@ -41,9 +41,10 @@ const DEV_ONLY = [
   // observe-only audits, called inside `if (isDevMode())` in renderer-flush
   "src/air/contrast-audit.ts",
   "src/air/selector-audit.ts",
-  // observe-only installers: both `return` on `!isDevMode()`, first line
+  // observe-only installers: each `return`s on `!isDevMode()`, first line
   "src/browser/dev-overlay.ts",
   "src/air/dev-readonly-hint.ts",
+  "src/air/dark-os-light-page.ts",
   // the `am surface` / `am trigger` executor: driven only by the two trojan
   // frames, and the trojan is never mounted in prod (server-static.ts)
   "src/air/ui-remote.ts",

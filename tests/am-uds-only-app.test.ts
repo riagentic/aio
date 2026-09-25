@@ -116,7 +116,14 @@ await new Promise(() => {});
         "--client=electron",
       ],
       cwd: dir,
-      env,
+      // The app launches "Electron" only where it sees a desktop session
+      // (`hasDesktopSession`: an X or Wayland display name in the env). The
+      // stand-in needs no display at all, so a run with the display vars
+      // stripped (an agent's or a CI box's) never launched it and the roster
+      // stayed empty for 90 s. A NAME is enough — nothing connects to it.
+      env: Deno.env.get("WAYLAND_DISPLAY")
+        ? env
+        : { ...env, WAYLAND_DISPLAY: "aio-uds-standin" },
       stdout: "piped",
       stderr: "piped",
     }).spawn();

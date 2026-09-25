@@ -18,7 +18,12 @@
 import { join } from "@std/path";
 import { _redactCheckpointState } from "../diagnostics/checkpoint.ts";
 import { diagRecent } from "../diagnostics/diagnostic-bus.ts";
-import { noRedaction, REDACTED, type Redactor } from "../diagnostics/redact.ts";
+import {
+  noRedaction,
+  REDACTED,
+  redactLogCredentials,
+  type Redactor,
+} from "../diagnostics/redact.ts";
 import type { CellFieldFlags } from "./aio-types.ts";
 import type { CellFieldFilter } from "../state/cell-types.ts";
 import { applyCellFieldFilter, visibleValueAt } from "../state/state-filter.ts";
@@ -158,6 +163,26 @@ export type ReportSources = {
   visibleFilters?: Record<string, CellFieldFilter>;
 };
 
+/** @internal What aio's own boot hands {@linkcode buildReport}: the public
+ *  {@linkcode ReportSources} plus each cell's `persist` filter, resolved as
+ *  the store resolves it (`_cellPersist`).
+ *
+ *  A report is WRITTEN TO DISK — automatically, on a crash — and POSTed. The
+ *  `visible` screen answers "may this leave the server", not "may this be
+ *  written to disk": a field the app shows its own client but declared
+ *  `persist: { exclude }` ("not written to disk" — a session token), or a
+ *  whole `persist: "none"` cell (a draft), went into `data/reports/*.json`
+ *  in full, while the dev checkpoint beside it already honoured the same
+ *  declaration (`CheckpointView`). Internal, not a `ReportSources` member:
+ *  that type is public and frozen. */
+export type _ReportSourcesInternal = ReportSources & {
+  _persistFilters?: Record<string, CellFieldFilter>;
+};
+
+/** Which declaration a screen reads — only the wording of its notes differs;
+ *  the walker is the same. */
+type _Gate = "visible" | "persist";
+
 /** The head of a dot path — the top-level state key it starts at. */
 const key0 = (path: string): string => path.split(".")[0]!;
 
@@ -201,8 +226,12 @@ function _applyDeclaredVisibility(
   raw: Record<string, unknown>,
   filters: Record<string, CellFieldFilter> | undefined,
   truncated: string[],
+  gate: _Gate = "visible",
 ): Record<string, unknown> {
   if (!filters || Object.keys(filters).length === 0) {
+    // No persist map ⇒ a caller outside aio's boot; the visible note already
+    // speaks for an unscreened report.
+    if (gate === "persist") return raw;
     truncated.push(
       "state was NOT screened by cell `visible` declarations — this report " +
         "carries every field, including any the app hides from clients",
@@ -234,8 +263,8 @@ function _applyDeclaredVisibility(
       // from clients" would be a wrong answer for one: those fields DO reach
       // clients, a different set each. (An app that writes `include: []`
       // itself lands here too, and the note is true of it as well.)
-      (typeof filter === "object" && "include" in filter &&
-          filter.include.length === 0
+      (gate === "visible" && typeof filter === "object" &&
+          "include" in filter && filter.include.length === 0
         ? noClient
         : withheld).push(cell);
       continue;
@@ -255,9 +284,14 @@ function _applyDeclaredVisibility(
   }
   if (withheld.length) {
     truncated.push(
-      `cells withheld whole — every field is hidden from clients: ${
-        withheld.join(", ")
-      }`,
+      gate === "persist"
+        ? `cells withheld whole — the app keeps every field off disk ` +
+          `(\`persist\`), and a report is written to disk: ${
+            withheld.join(", ")
+          }`
+        : `cells withheld whole — every field is hidden from clients: ${
+          withheld.join(", ")
+        }`,
     );
   }
   if (noClient.length) {
@@ -271,7 +305,11 @@ function _applyDeclaredVisibility(
   }
   if (dropped.length) {
     truncated.push(
-      `fields hidden from clients were omitted: ${dropped.join(", ")}`,
+      gate === "persist"
+        ? `fields the app keeps off disk (\`persist\`) were omitted: ${
+          dropped.join(", ")
+        }`
+        : `fields hidden from clients were omitted: ${dropped.join(", ")}`,
     );
   }
   return out;
@@ -295,7 +333,7 @@ function _applyDeclaredVisibility(
  *  {@link _withholdAsyncCallPayloads}. */
 function _screenTimelineEntry(
   e: TimelineEntry,
-  filters: Record<string, CellFieldFilter>,
+  screens: readonly Record<string, CellFieldFilter>[],
   anyHidden: boolean,
 ): {
   entry: TimelineEntry;
@@ -312,8 +350,15 @@ function _screenTimelineEntry(
     segs: readonly string[],
     v: unknown,
   ): unknown => {
-    const seen = visibleValueAt(filters[cell], segs, v);
-    return seen.hidden ? REDACTED : seen.value;
+    // Every declaration in turn (`visible`, then `persist`): a value either
+    // one keeps back is kept back.
+    let cur = v;
+    for (const filters of screens) {
+      const seen = visibleValueAt(filters[cell], segs, cur);
+      if (seen.hidden) return REDACTED;
+      cur = seen.value;
+    }
+    return cur;
   };
   let leaves = 0;
   let touched = false;
@@ -386,11 +431,12 @@ function _callIdOf(e: TimelineEntry): string | undefined {
 function _withholdAsyncCallPayloads(
   entries: TimelineEntry[],
   touchedCalls: ReadonlySet<string>,
-  filters: Record<string, CellFieldFilter>,
+  screens: readonly Record<string, CellFieldFilter>[],
 ): { entries: TimelineEntry[]; payloads: number } {
   const hiddenCell = (type: string): boolean => {
     const at = type.indexOf(":");
-    return at > 0 && _hidesAnything(filters[type.slice(0, at)]);
+    return at > 0 &&
+      screens.some((f) => _hidesAnything(f[type.slice(0, at)]));
   };
   let payloads = 0;
   const out = entries.map((e) => {
@@ -429,12 +475,16 @@ function safeSize(v: unknown): number {
   }
 }
 
-/** Read the last N lines of the app log, if there is one. */
+/** Read the last N lines of the app log, if there is one — with the
+ *  credentials aio prints there on purpose masked. The `--expose` boot banner
+ *  writes the share link (`?token=<the app key>`) and the pair code into
+ *  app.log for the operator; on a quiet app they are inside the tail, and a
+ *  report is POSTed off the machine. */
 async function tailLog(logsDir: string, lines: number): Promise<string[]> {
   try {
     const text = await Deno.readTextFile(join(logsDir, "app.log"));
     const all = text.split("\n").filter(Boolean);
-    return all.slice(-lines);
+    return all.slice(-lines).map(redactLogCredentials);
   } catch {
     return [];
   }
@@ -453,7 +503,7 @@ export async function buildReport(
     id?: string;
     now?: Date;
   },
-  src: ReportSources,
+  src: _ReportSourcesInternal,
 ): Promise<Report> {
   const now = input.now ?? new Date();
   const id = input.id ??
@@ -465,13 +515,21 @@ export async function buildReport(
   // ONE screen for the state and the timeline — whichever form the caller
   // declared it in. See `_filtersOf`.
   const filters = _filtersOf(src);
+  // The disk gate beside it — see `_ReportSourcesInternal`.
+  const persistFilters = src._persistFilters;
+  const screens = [filters, persistFilters].filter(
+    (f): f is Record<string, CellFieldFilter> =>
+      f !== undefined && Object.keys(f).length > 0,
+  );
   const truncated: string[] = [];
 
   const report: Report = {
     id,
     createdAt: now.toISOString(),
     kind: input.kind,
-    title: input.title.slice(0, 300),
+    // An automatic report's title IS a diagnostic message (feedback-boot.ts)
+    // — masked as the `diagnostics` section masks the same line below.
+    title: redactLogCredentials(input.title.slice(0, 300)),
     app: {
       id: src.appId,
       version: src.appVersion,
@@ -511,8 +569,14 @@ export async function buildReport(
       // statement anyone made about this data, and `redactActions` (built for
       // action payloads) knows nothing about it. A cell with `visible: "none"`
       // contributes nothing; `include`/`exclude` are applied field by field,
-      // exactly as they are for a browser.
-      const screened = _applyDeclaredVisibility(raw, filters, truncated);
+      // exactly as they are for a browser. Then `persist`: a report is
+      // written to disk, and what the app keeps off disk stays off it.
+      const screened = _applyDeclaredVisibility(
+        _applyDeclaredVisibility(raw, filters, truncated),
+        persistFilters,
+        truncated,
+        "persist",
+      );
       const safe = _redactCheckpointState(screened, redact);
       if (redact.redactsAnyCell()) {
         const withheld = src.cells.filter((c) => redact.redactsCell(c));
@@ -544,12 +608,14 @@ export async function buildReport(
     // The same `visible` declaration the state went through — see
     // `_screenTimelineEntry`. Absent ⇒ the state note above already says
     // nothing was screened.
-    if (filters && kept.length) {
-      const anyHidden = Object.values(filters).some(_hidesAnything);
+    if (screens.length && kept.length) {
+      const anyHidden = screens.some((f) =>
+        Object.values(f).some(_hidesAnything)
+      );
       let leaves = 0, payloads = 0;
       const touchedCalls = new Set<string>();
       kept = kept.map((e) => {
-        const r = _screenTimelineEntry(e, filters, anyHidden);
+        const r = _screenTimelineEntry(e, screens, anyHidden);
         leaves += r.leaves;
         if (r.payload) payloads++;
         if (r.touched) {
@@ -560,13 +626,14 @@ export async function buildReport(
         return r.entry;
       });
       if (anyHidden) {
-        const r = _withholdAsyncCallPayloads(kept, touchedCalls, filters);
+        const r = _withholdAsyncCallPayloads(kept, touchedCalls, screens);
         kept = r.entries;
         payloads += r.payloads;
       }
       if (leaves || payloads) {
         truncated.push(
-          `timeline: values of fields hidden from clients were withheld ` +
+          `timeline: values of fields hidden from clients or kept off ` +
+            `disk were withheld ` +
             `(${leaves} diff value${leaves === 1 ? "" : "s"}, ${payloads} ` +
             `action payload${
               payloads === 1 ? "" : "s"
@@ -618,7 +685,7 @@ export async function buildReport(
         ts: d.ts,
         type: d.type,
         severity: String(d.severity ?? "info"),
-        message: String(d.message ?? ""),
+        message: redactLogCredentials(String(d.message ?? "")),
       }));
     }
   } catch { /* the bus is optional */ }

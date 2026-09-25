@@ -100,9 +100,15 @@ export function createSelector<S, Result>(
       }
     }
 
+    // Compute FIRST, then remember. Remembering the inputs before the
+    // combiner ran meant a combiner that threw left them cached beside the
+    // PREVIOUS result: the next call with the same inputs returned the answer
+    // for different inputs (or `undefined` after a first-call throw) instead
+    // of throwing again.
+    const result = (combiner as (...args: unknown[]) => Result)(...inputs);
     lastInputs = inputs;
-    lastResult = (combiner as (...args: unknown[]) => Result)(...inputs);
-    return lastResult;
+    lastResult = result;
+    return result;
   };
 }
 

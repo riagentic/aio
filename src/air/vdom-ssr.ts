@@ -7,6 +7,7 @@ import {
   camelToKebab as _camelToKebab,
   escapeAttr as _escapeAttr,
   escapeHtml as _escapeHtml,
+  keepLeadingNewline,
   RAW_TEXT_ELEMENTS,
   rawTextContent,
   resolveClassName as _resolveClassName,
@@ -909,6 +910,7 @@ function _rts(
   // Raw html owns the content (see _hasRawHtml); the children are not emitted.
   const areaText = _ssrTextareaText(vnode);
   const inSelect = ssrOpenSelect(render, tag, ownValue);
+  const start = html.length;
   try {
     if (_hasRawHtml(vnode.props)) {
       html += (vnode.props.dangerouslySetInnerHTML as { __html: string })
@@ -939,6 +941,7 @@ function _rts(
     ssrCloseSelect(render, inSelect);
   }
 
+  html = html.slice(0, start) + keepLeadingNewline(tag, html.slice(start));
   html += `</${tag}>`;
   return html;
 }

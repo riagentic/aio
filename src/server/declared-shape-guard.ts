@@ -2,8 +2,8 @@
 //
 // `state:` is the restore template. Restore fills every declared key back in
 // (so `delete s.key` of a declared key never survives a restart), and a key it
-// does not declare under a closed object is drift (dev refuses to boot, prod
-// warns and drops it). Both writes were accepted silently at every door and
+// does not declare under a closed object is drift (the next boot warns and
+// drops it; dev refuses only when the declaration changed since the write). Both writes were accepted silently at every door and
 // failed one restart later. Restore semantics stay exactly as documented; the
 // write is made LOUD instead.
 //
@@ -175,8 +175,8 @@ export function createDeclaredShapeGuard(
 function addMessage(method: string, where: string, key: string): string {
   return `state write: ${method} added "${where}" — the cell's \`state:\` ` +
     `does not declare "${key}" under that (closed) object. It is kept now ` +
-    `and fails one restart later: dev refuses to boot on the shape drift, ` +
-    `production drops the value. Either declare it in \`state:\` (bump the ` +
+    `and fails one restart later: the next boot drops the value (and says ` +
+    `so). Either declare it in \`state:\` (bump the ` +
     `cell's \`version\` with an \`onMigrate\` if stored data must be ` +
     `reshaped), or keep it out of state (\`persist: { exclude: [...] }\`, or ` +
     `declare the parent as \`{}\` if its keys are data).`;

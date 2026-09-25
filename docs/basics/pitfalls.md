@@ -70,8 +70,8 @@ oracle. Hiding state is `visible`; gating calls is `access` (`false` =
 server-side only). Boot warns when a cell hides secret-shaped state and declares
 no `access`. See [cell visibility](../state/cell-visibility.md).
 
-**`include` is top-level only.** `include: ["a.b"]` warns and matches nothing.
-Deep paths are for `exclude`.
+**`include` is top-level only.** `include: ["a.b"]` throws at `cell()`. Deep
+paths are for `exclude`.
 
 **Schema changes need a version bump.** Changed the state shape? Persisted state
 deep-merges with defaults, which covers additions — but renames and type changes
@@ -91,6 +91,12 @@ remove that directory) when the stored data is simply stale. Restore does NOT
 keep that value: the field is dropped from memory and the first write after boot
 removes it from disk, so rename with `version` + `onMigrate` before you ship.
 `initialState` is the declared shape; the drift check diffs storage against it.
+Drift your app's OWN methods wrote under the current declaration (a string put
+into a number field by `am dispatch counter:increment abc`) is not a declaration
+change: every write stamps the declaration that wrote it, so that dev boot warns
+by name, as prod does, and restores the declared default. A slice loaded with
+`am snapshot load` that drifts from the declaration carries no such stamp and is
+judged as stale data.
 
 ## Scheduling & effects
 

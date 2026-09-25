@@ -44,7 +44,7 @@ flowchart LR
     D --> M[beforeReduce]
     M --> R["method mutates draft<br/>(Immer)"]
     R --> S[new state]
-    R --> FX["returned effects<br/>(schedule / own)"]
+    R --> FX["s.$do(effect)<br/>(schedule / own)"]
     FX -- "batched writes<br/>(read-your-writes)" --> D
     S --> P[persist]
     S --> BC[broadcast patches<br/>to every client]

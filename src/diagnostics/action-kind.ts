@@ -24,6 +24,10 @@
  * written down four times drifts; this is where it is written down once.
  */
 
+/** The internal action a `worker: true` cell's commits arrive as on the main
+ *  isolate. Its type names no cell — the cell is in its payload. */
+export const WORKER_PATCH_ACTION = "__aioWorkerPatch";
+
 /** `cell:__setMethod` — the atomic write-set an async/transactional method
  *  commits. NEVER noise: no other action carries what the method wrote. */
 export function isWriteSetAction(type: string): boolean {

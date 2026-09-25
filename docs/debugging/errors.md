@@ -70,7 +70,7 @@ In prod mode, errors are compact one-liners:
 | `EFFECT_TIMEOUT`     | Effect      | Async effect exceeded timeout (default 30s)                                                                       |
 | `EFFECT_ASYNC_ERROR` | Effect      | Async effect promise rejected                                                                                     |
 | `HOOK_ERROR`         | Hook        | `beforeReduce`, `onAction`, or `onEffect` hook threw                                                              |
-| `INIT_ERROR`         | Lifecycle   | Cell `onInit` callback threw                                                                                      |
+| `INIT_ERROR`         | Lifecycle   | Cell `onInit` callback threw (or, async, rejected)                                                                |
 | `DESTROY_ERROR`      | Lifecycle   | Cell `onDestroy` callback threw                                                                                   |
 | `ACCESS_DENIED`      | Access      | The cell's `access:` rule (or a serverFn's `{ access }`) refused this caller                                      |
 | `ACTION_REFUSED`     | Dispatch    | The action reached the server and applied nothing (unknown method, unbooted or disabled cell, `validate` refusal) |

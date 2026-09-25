@@ -259,6 +259,17 @@ export function Tabs(props: TabsProps): VNode {
   const active = props.value ??
     (tabs.some((t) => t.id === inner.value) ? inner.value : firstEnabled);
   const baseId = nextId("tabs");
+  // A tab id is app data, and a DOM id may not hold whitespace: "General
+  // settings" made `aria-labelledby` an IDREF LIST of two ids that do not
+  // exist, so the panel lost its name. Whitespace is percent-escaped — and
+  // `%` too, so two different tab ids can never land on one DOM id.
+  const tabDomId = (id: string): string =>
+    `${baseId}-tab-${
+      id.replace(
+        /[%\s]/g,
+        (c) => `%${c.charCodeAt(0).toString(16).padStart(2, "0")}`,
+      )
+    }`;
 
   const select = (id: string): void => {
     if (props.value === undefined) inner.set(id);
@@ -282,7 +293,7 @@ export function Tabs(props: TabsProps): VNode {
       // browser, so under `testUI` the whole handler threw `CSS is not
       // defined` and the arrow keys silently did nothing. A comparison needs
       // no escaping and cannot be defeated by an exotic id.
-      const wanted = `${baseId}-tab-${t.id}`;
+      const wanted = tabDomId(t.id);
       const siblings = (e.currentTarget as HTMLElement | null)?.parentElement
         ?.children;
       if (siblings) {
@@ -341,7 +352,7 @@ export function Tabs(props: TabsProps): VNode {
         h("button", {
           key: t.id,
           type: "button",
-          id: `${baseId}-tab-${t.id}`,
+          id: tabDomId(t.id),
           class: `aio-tab${t.id === active ? " aio-tab--active" : ""}`,
           role: "tab",
           "aria-selected": t.id === active ? "true" : "false",
@@ -367,9 +378,7 @@ export function Tabs(props: TabsProps): VNode {
         class: "aio-tabpanel",
         role: "tabpanel",
         id: `${baseId}-panel`,
-        "aria-labelledby": activeTab
-          ? `${baseId}-tab-${activeTab.id}`
-          : undefined,
+        "aria-labelledby": activeTab ? tabDomId(activeTab.id) : undefined,
         // A panel with focusable content does not need this; one with only
         // text does, or a keyboard user can never read it.
         tabIndex: 0,
@@ -839,8 +848,9 @@ export function Skeleton(props: SkeletonProps): VNode {
   const { width, height, circle, lines = 1, class: cls } = props;
   const px = (v: string | number | undefined) =>
     v === undefined ? undefined : typeof v === "number" ? `${v}px` : v;
-  const one = (key?: number) =>
+  const one = (key?: number, attrs?: Common) =>
     h("span", {
+      ...attrs,
       key,
       class: cx(`aio-skel${circle ? " aio-skel--circle" : ""}`, cls),
       "aria-hidden": "true",
@@ -850,7 +860,15 @@ export function Skeleton(props: SkeletonProps): VNode {
         ...(props.style ?? {}),
       },
     });
-  if (lines <= 1) return one();
+  // One line IS the component, so the escape-hatch attributes (id, data-*,
+  // aria-*, title…) belong on it — they were dropped, while the stacked form
+  // below kept them.
+  if (lines <= 1) {
+    return one(
+      undefined,
+      rest(props, ["width", "height", "circle", "lines", "class", "style"]),
+    );
+  }
   return h(
     "span",
     {

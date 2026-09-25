@@ -295,3 +295,26 @@ Deno.test("check:docs is green on the real docs tree", async () => {
   assertStringIncludes(out, "Symbols in docs: all resolve");
   assertStringIncludes(out, "Page links ([text](page.md)): all land");
 });
+
+// examples/README.md is where a newcomer goes to pick an example, and it links
+// into docs/ by heading — but the link gates walked docs/, README.md and
+// CLAUDE.md only, so its `imports.md#2-server-only-code-…` link (the rule
+// `disk/` exists to teach) pointed at a heading that never existed. The page
+// is a teaching surface; it is walked like one.
+Deno.test("the examples README is walked, and every link in it lands", async () => {
+  const { readAllDocs } = await import("../scripts/check-docs.ts");
+  const all = await readAllDocs();
+  const ex = all.filter((d) => d.rel === "examples/README.md");
+  assertEquals(ex.length, 1, "examples/README.md is part of the doc set");
+  const onDisk = (rel: string) => {
+    try {
+      return Deno.statSync(new URL(`../${rel}`, import.meta.url)).isFile;
+    } catch {
+      return false; // aio-ok: absence IS the answer
+    }
+  };
+  const mine = (issues: string[]) =>
+    issues.filter((l) => l.trim().startsWith("examples/README.md:"));
+  assertEquals(mine(anchorIssues(all, onDisk)), []);
+  assertEquals(mine(pageLinkIssues(all, onDisk)), []);
+});

@@ -6,6 +6,7 @@ import { isActionNoise } from "./action-kind.ts";
 import { actionOrigin } from "./action-kind.ts";
 import { isRedactedAction, noRedaction, REDACTED } from "./redact.ts";
 import type { Redactor } from "./redact.ts";
+import { WORKER_PATCH_ACTION } from "./action-kind.ts";
 
 /** Minimal interface for the parts of AioLogger that observe() needs */
 export type ObserveCtx = {
@@ -48,7 +49,12 @@ export function observeAction(
   // A write-set commit and an error frame travel under their OWN type, so the
   // originating `cell:method` decides too — an exact pattern would otherwise
   // plug the call and leak the same values under a different name.
-  const hidden = isRedactedAction(redact, type, actionOrigin(type, payload));
+  const hidden = isRedactedAction(redact, type, actionOrigin(type, payload)) ||
+    // A `worker: true` cell's patch batch names no cell in its type, and its
+    // ops ARE the values the method stored — judged by the payload's cell, as
+    // the journal and the timeline judge it.
+    (type === WORKER_PATCH_ACTION && typeof payload.cell === "string" &&
+      redact.redactsCell(payload.cell));
 
   // ── Cell lifecycle ─────────────────────────────────────────
   if (type.endsWith(":__init")) {

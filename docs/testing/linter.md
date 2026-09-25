@@ -278,7 +278,7 @@ aiol v1.0.0-beta — scanning project
   ⚠ WARN   [security] src/config.ts:12 — possible hardcoded token
 
   · HINT   [perf] src/components/Dashboard.tsx: uses useAio() — prefer direct cell access
-  · HINT   [testing] no "test" task in deno.json [fixable]
+  · HINT   [config] no "test" task — add "test": "deno test -A tests/" [fixable]
 
 ────────────────────────────────────────────────────────────
   Files: 12  Cells: 3  Tests: 3

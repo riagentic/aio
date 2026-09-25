@@ -18,6 +18,11 @@
  */
 import { readDenoJson } from "./server/deno-json.ts";
 import {
+  unknownBuildKeys,
+  VALID_BUILD_KEYS,
+  VALID_BUILD_TARGET_KEYS,
+} from "./server/config.ts";
+import {
   basename,
   extname,
   fromFileUrl,
@@ -34,7 +39,11 @@ import {
   lastFlag,
   unknownFleetFlags,
 } from "./build/build-flags.ts";
-import { resolveAppDir, resolveEntry } from "./build/build-config.ts";
+import {
+  displayNameClashes,
+  resolveAppDir,
+  resolveEntry,
+} from "./build/build-config.ts";
 import { DIST_DIR } from "./server/app-files.ts";
 import { bakedServerUrl } from "./server/paths.ts";
 import { ansi } from "./diagnostics/color.ts";
@@ -186,6 +195,13 @@ export interface TargetOverride {
    *  different apps must not both be called `myapp` and be papered over by the
    *  collision suffix — they are not two builds of one app. */
   name?: string;
+  /** The name a person SEES for this target's artifact — the macOS `.app`
+   *  and DMG volume, the Linux `.desktop` `Name=`, the icon monogram, the
+   *  Android label — overriding deno.json `title`. `name` names the FILES
+   *  only. Two desktop targets that show one title install over each other
+   *  in /Applications; the build warns and names this key. The running app's
+   *  window title still comes from `aio.run({ ui: { title } })`. */
+  title?: string;
   /** OS/arch list for this target only, overriding `build.platforms`. */
   platforms?: string[];
 }
@@ -226,6 +242,8 @@ export interface ResolvedTarget {
   ui?: string;
   /** Per-target app name (pre-slugify), or undefined to use deno.json `title`. */
   appName?: string;
+  /** Per-target display name, or undefined to use deno.json `title`. */
+  title?: string;
   /** Per-target platform list, or undefined to use `build.platforms`. */
   platforms?: string[];
 }
@@ -263,11 +281,19 @@ export function normalizeTargets(
       ...(o?.entry ? { entry: o.entry.trim() } : {}),
       ...(o?.ui ? { ui: o.ui.trim() } : {}),
       ...(o?.name ? { appName: o.name.trim() } : {}),
+      // Whitespace-only is unset: the clash check and the build must see the
+      // same title, and a blank one names nothing.
+      ...(o?.title?.trim() ? { title: o.title.trim() } : {}),
       ...(Array.isArray(o?.platforms) ? { platforms: o.platforms } : {}),
     };
   });
 }
 
+import {
+  buildBlockShapeProblems,
+  buildBlockShapeWarnings,
+  foreignOutEntries,
+} from "./build/build-shape.ts";
 import { iosArtifactName } from "./build/build-ios.ts";
 import {
   artifactVersion,
@@ -674,6 +700,7 @@ function within(a: string, b: string): boolean {
 export const FLEET_FLAG_FOR: Readonly<Record<string, string>> = {
   "--entry": "--entry",
   "--name": "--name",
+  "--display-name": "--display-name",
   "--ui": "--ui",
   "--out": "--out",
   // The fleet's axis is a LIST (it fans one build over many platforms); the
@@ -689,6 +716,7 @@ export const FLEET_BOOLEANS: readonly string[] = [
   "--release",
   "--force",
   "--allow-server-only",
+  "--analyze",
 ];
 
 /** The fleet's own argv for a delegated single-target build.
@@ -867,6 +895,40 @@ export async function buildAll(): Promise<number> {
     );
     return 1;
   }
+  const targetsOverridden = flag("targets") !== undefined;
+  const shapeProblems = buildBlockShapeProblems(denoJson.build, {
+    targetsOverridden,
+  });
+  if (shapeProblems.length > 0) {
+    console.error(
+      `${C.red}✗ deno.json build block:${C.r}\n${
+        shapeProblems.map((p) => `  ${p}`).join("\n")
+      }\n`,
+    );
+    printTargets();
+    return 1;
+  }
+  for (
+    const w of buildBlockShapeWarnings(denoJson.build, { targetsOverridden })
+  ) {
+    console.warn(`${C.yellow}⚠ deno.json ${w}${C.r}`);
+  }
+  // A misspelled key builds the DEFAULT of what it meant (`targtes` → the
+  // declared-or-empty target list, `platform` → host only) and said nothing;
+  // the linter knew, the build did not. Warned, not refused: a stray key
+  // built before and must keep building.
+  const strayKeys = unknownBuildKeys(denoJson.build);
+  if (strayKeys.length > 0) {
+    console.warn(
+      `${C.yellow}⚠ deno.json build block: aio never reads ${
+        strayKeys.join(", ")
+      } — ${
+        strayKeys.length === 1 ? "it does" : "they do"
+      } nothing in this build.${C.r}\n  ${C.dim}known: ${
+        [...VALID_BUILD_KEYS].join(", ")
+      }; per target: ${[...VALID_BUILD_TARGET_KEYS].join(", ")}${C.r}`,
+    );
+  }
   const block: BuildBlock = denoJson.build ?? {};
   const title = denoJson.title ?? basename(root);
   const binaryName = slugify(title);
@@ -939,6 +1001,33 @@ export async function buildAll(): Promise<number> {
         `  Clients dial a server; this fleet records none. Add the ${C.blue}server${C.r} target ` +
         `(builds the exposed --remote binary), or set ${C.blue}"build": { "server": "192.168.1.50:8000" }${C.r} ` +
         `if it is built/hosted elsewhere.\n  ${C.dim}(browser/electron/android without -client are LOCAL app binaries, not servers)${C.r}`,
+    );
+  }
+
+  // Two desktop editions that SHOW one name install over each other: the
+  // macOS `.app` in /Applications is named by the display name, not the file
+  // name. A per-target `name` renames the files only (changing that would
+  // rename shipped apps), so say it here, naming the key that fixes it.
+  const projectTitle = typeof denoJson.title === "string" && denoJson.title
+    ? denoJson.title
+    : undefined;
+  for (
+    const [a, b, shown] of displayNameClashes(targetList.map((t) => {
+      const bin = slugify(t.appName ?? flag("name") ?? title);
+      return {
+        label: t.name,
+        kind: t.kind,
+        display: t.title ?? flag("display-name") ?? projectTitle ?? bin,
+        binary: bin,
+      };
+    }))
+  ) {
+    console.warn(
+      `${C.yellow}⚠ targets "${a}" and "${b}" are two apps that both show as ` +
+        `"${shown}"${C.r} — installed on macOS, the second ${shown}.app ` +
+        `replaces the first in /Applications.\n  fix: give one its own ` +
+        `display name: ${C.blue}"build": { "targets": { "${b}": { "title": ` +
+        `"${shown} …" } } }${C.r}`,
     );
   }
 
@@ -1038,7 +1127,7 @@ export async function buildAll(): Promise<number> {
         `${C.red}✗ refusing to build into ${outDir}${C.r} — it points inside ` +
           `dist/, which is the bundle staging dir: it is embedded into the ` +
           `binary wholesale and wiped by every target this run builds.\n  ` +
-          `${C.dim}fix: pick a directory of its own (--out=release, ` +
+          `${C.dim}fix: pick a directory of its own (--out=out, ` +
           `--out=out/agent).${C.r}`,
       );
       return 1;
@@ -1053,6 +1142,51 @@ export async function buildAll(): Promise<number> {
         `deno.json (or --out=dist), then delete the "out" that pointed here.${C.r}`,
     );
     return 1;
+  }
+  // …and it must hold nothing but a previous release. dist/ is exempt: it is
+  // aio's own staging dir, which every per-target build wipes anyway.
+  if (outDir !== resolve(join(root, DIST_DIR))) {
+    const entries: string[] = [];
+    // A directory's own entries — a publish channel dir (see
+    // foreignOutEntries) is aio's only when everything in it is.
+    const dirs: Record<string, string[]> = {};
+    try {
+      for await (const e of Deno.readDir(outDir)) {
+        entries.push(e.name);
+        if (!e.isDirectory) continue;
+        const inside: string[] = [];
+        for await (const f of Deno.readDir(join(outDir, e.name))) {
+          // A nested directory is never publish output: listed as itself, it
+          // matches no rule and keeps the directory foreign.
+          inside.push(f.isDirectory ? `${f.name}/` : f.name);
+        }
+        dirs[e.name] = inside;
+      }
+    } catch (e) {
+      if (!(e instanceof Deno.errors.NotFound)) throw e;
+    }
+    let previous: unknown = null;
+    try {
+      previous = JSON.parse(
+        await Deno.readTextFile(join(outDir, "manifest.json")),
+      );
+    } catch {
+      // aio-ok: no previous release here — every entry is foreign, which is
+      // the refusing answer, so nothing is swallowed
+    }
+    const foreign = foreignOutEntries(entries, previous, dirs);
+    if (foreign.length > 0) {
+      const shown = foreign.slice(0, 5).join(", ") +
+        (foreign.length > 5 ? `, … (${foreign.length} in all)` : "");
+      console.error(
+        `${C.red}✗ refusing to build into ${outDir}${C.r} — it holds files ` +
+          `no aio build put there (${shown}), and "out" is emptied and ` +
+          `refilled on every build: they would be DELETED.\n  ${C.dim}fix: ` +
+          `point "out" at a directory of its own, or move those files out ` +
+          `first.${C.r}`,
+      );
+      return 1;
+    }
   }
   const release = Deno.args.includes("--release");
   const force = Deno.args.includes("--force");
@@ -1088,6 +1222,9 @@ export async function buildAll(): Promise<number> {
   // compile` are both this module, so a flag it does not forward is a flag no
   // scaffolded app can reach.
   const allowServerOnly = Deno.args.includes("--allow-server-only");
+  // The bundle-size report is printed by the child that bundles, so the flag
+  // has to reach it — accepted and dropped, it was a flag that did nothing.
+  const analyze = Deno.args.includes("--analyze");
 
   // Resolve the single-target build entry. Prefer the caller-supplied
   // `--build-spec` (the generated task passes the framework's own build path /
@@ -1226,6 +1363,9 @@ export async function buildAll(): Promise<number> {
           buildScript,
           ...spec.flags,
           `--name=${targetTitle}`,
+          ...((t.title ?? flag("display-name"))
+            ? [`--display-name=${t.title ?? flag("display-name")}`]
+            : []),
           `--platform=${platform}`,
           // Per-target entry: the single-target build resolves configEntry —
           // and therefore appDir and every app asset — from this.
@@ -1244,6 +1384,7 @@ export async function buildAll(): Promise<number> {
         if (release) args.push("--release");
         if (force) args.push("--force");
         if (allowServerOnly) args.push("--allow-server-only");
+        if (analyze) args.push("--analyze");
         const { code } = await new Deno.Command("deno", {
           args,
           cwd: root,
@@ -1441,7 +1582,11 @@ export async function buildAll(): Promise<number> {
             path: join(outDir, bin),
           });
         }
-        const unit = renamed.get(`${r.binary}.service`);
+        // The unit is named like its binary (a cross build carries the
+        // platform), so it is looked up the same way.
+        const unit = renamed.get(
+          `${artifactName(r.binary, r.platform)}.service`,
+        );
         if (unit) {
           serviceInstalls.push({
             target: r.target,
@@ -1507,7 +1652,10 @@ export async function buildAll(): Promise<number> {
     // so building one target replaces a directory that held others — correct,
     // and silent until now: the artifacts were simply gone, with a green
     // summary above them.
-    const dropped = previousTargets.filter((t) =>
+    // Deduped: the manifest has one entry per target PER PLATFORM, so a
+    // three-platform `server` read "no longer holds server, server, server"
+    // and suggested `--targets=server,server,server,…`.
+    const dropped = [...new Set(previousTargets)].filter((t) =>
       !results.some((r) => r.ok && r.target === t)
     );
     if (dropped.length > 0) {
@@ -1518,8 +1666,12 @@ export async function buildAll(): Promise<number> {
           dropped.join(", ")
         }${C.r} ${C.dim}(built into it earlier).${C.r}\n  ${C.dim}Build them ` +
           `together to keep both: ${C.r}${C.blue}--targets=${
-            [...dropped, ...results.filter((r) => r.ok).map((r) => r.target)]
-              .join(",")
+            [
+              ...new Set([
+                ...dropped,
+                ...results.filter((r) => r.ok).map((r) => r.target),
+              ]),
+            ].join(",")
           }${C.r}`,
       );
     }

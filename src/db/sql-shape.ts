@@ -13,7 +13,7 @@
  *  identifiers) blanked out to spaces — same length, so offsets still line
  *  up. Blanking rather than deleting keeps the words on either side apart:
  *  `DELETE/**\/FROM` must not become `DELETEFROM`. */
-function mask(sql: string, literals: boolean): string {
+export function mask(sql: string, literals: boolean): string {
   let out = "";
   for (let i = 0; i < sql.length; i++) {
     const c = sql[i]!;
@@ -82,7 +82,7 @@ export function looksLikeWrite(sql: string): boolean {
   if (writesRows(sql)) return true;
   const m = mask(sql, true);
   if (/^\s*PRAGMA\b/i.test(m)) return !pragmaReads(m);
-  return /^\s*(?:CREATE|DROP|ALTER|TRUNCATE|VACUUM|BEGIN|COMMIT|ROLLBACK|SAVEPOINT|RELEASE|REINDEX|ANALYZE|ATTACH|DETACH)\b/i
+  return /^\s*(?:CREATE|DROP|ALTER|TRUNCATE|VACUUM|BEGIN|COMMIT|END|ROLLBACK|SAVEPOINT|RELEASE|REINDEX|ANALYZE|ATTACH|DETACH)\b/i
     .test(m) ||
     // RETURNING only exists on a DML statement, whatever precedes it.
     /\bRETURNING\b/i.test(m);

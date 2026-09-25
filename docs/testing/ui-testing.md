@@ -364,8 +364,12 @@ re-renders on Back exactly as it does in a browser. The same objects are on the
 handle: `ui.window` and `ui.document`. Use them for what the component's own
 code would reach — `ui.window.dispatchEvent(new ui.window.Event("resize"))`,
 `ui.document.activeElement`, a listener registered where the component's one
-lives. `localStorage` is a fresh in-memory store per mount (`{ persist: true }`
-keeps it). Nothing is installed twice: a `document` you pass in is used as-is.
+lives. `localStorage` is a fresh in-memory store per mount — or, where the host
+already has one (Deno's is on disk), cleared per mount. `{ persist: true }`
+keeps it: its mounts share one key for the whole run (never a previous run's
+entry), and dispose flushes the pending save, so the next `{ persist: true }`
+mount restores what the last one ended with (a hermetic mount in between clears
+it). Nothing is installed twice: a `document` you pass in is used as-is.
 
 There is no HTTP server under `testUI`, so a component's relative
 `fetch("/media/x.txt")` fails — with an error that says so and points to

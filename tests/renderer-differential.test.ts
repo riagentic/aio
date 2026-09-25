@@ -2275,7 +2275,18 @@ async function runExtended(mode: "diff" | "hydrate"): Promise<XRun> {
           _removeDomCleanup(prev, { doc });
           host.innerHTML = "";
           _render(host, prev, null, { doc });
-        } else hydrated++;
+        } else {
+          hydrated++;
+          // What `hydrate()` does next (`_dropSplitTail` at the root): a
+          // server text remainder no child claimed is removed — here the
+          // signal a component wrote DURING the client render (`XReent`) left
+          // the root's last text shorter than the server's. Exactly one
+          // trailing TEXT node, so anything else left over still fails.
+          const tail = host.childNodes[consumed];
+          if (tail?.nodeType === 3 && host.childNodes.length === consumed + 1) {
+            host.removeChild(tail);
+          }
+        }
       } else {
         _render(host, prev, null, { doc });
       }

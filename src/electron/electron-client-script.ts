@@ -1,6 +1,11 @@
 // Electron main.cjs generator — self-contained client with connect page
 
-import { CONNECT_HTML, tmplBounds, tmplCrashGuard } from "./electron-shared.ts";
+import {
+  CONNECT_HTML,
+  tmplBounds,
+  tmplCrashGuard,
+  tmplPermissionGuard,
+} from "./electron-shared.ts";
 
 /** Generates a self-contained Electron main.cjs with a connect page for aio-client */
 export function electronClientScript(bakedUrl?: string | null): string {
@@ -21,6 +26,7 @@ const fs = require('fs');
 Menu.setApplicationMenu(null);
 app.name = 'aio-client';
 ${tmplCrashGuard()}
+${tmplPermissionGuard()}
 
 // ── Window state persistence ──
 ${tmplBounds()}

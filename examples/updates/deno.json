@@ -20,6 +20,7 @@
     "aio/server": "../../src/server-entry.ts",
     "aio/extras": "../../src/extras/mod.ts",
     "aio/updates": "../../src/updates.ts",
+    "aio/feedback": "../../src/feedback.ts",
     "aio/testing": "../../src/cell-test.ts",
     "esbuild": "npm:esbuild@0.24.2",
     "immer": "npm:immer@10.2.0",

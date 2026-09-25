@@ -117,7 +117,7 @@ Fires `action` every `ms` milliseconds until cancelled.
 
 Every tick re-sends the **same** action, payload included, exactly as it was
 when the schedule was made:
-`schedule.every("tick", 1000, self.tick.action(Date.now()))` sends the first
+`schedule.every("tick", 1000, self("tick", Date.now()))` sends the first
 timestamp forever. Read anything that changes (the time, live state) inside the
 method, not from its arguments.
 
@@ -196,8 +196,13 @@ nothing to overlap.
 
 ### `schedule.at(id, isoTime, action)` — one-shot at absolute time
 
-Fires once at a specific UTC datetime. `isoTime` is any string parseable by
-`new Date()`.
+Fires once at a specific datetime. `isoTime` is any string parseable by
+`new Date()`, read the way `new Date()` reads it: a `Z` or an offset
+(`"+09:00"`) is explicit, but a date-time with **no** offset
+(`"2026-01-01T09:00:00"`, what `<input type="datetime-local">` yields) is read
+in the **machine's** zone — so hosts in different zones fire it at different
+instants. The scheduler warns once per id when it sees one; append `Z` (or an
+offset) to pin the instant.
 
 ```ts
 s.$do(schedule.at("promo-end", "2025-12-31T23:59:00Z", promo.expire.action()));
@@ -249,7 +254,12 @@ where it is written, not quietly disappear at the first fire attempt.
 
 A failing cron tick is logged and the schedule keeps its cadence (one bad tick
 does not switch a nightly job off). If the dispatch loop is closing — the app is
-shutting down — the schedule stops instead of re-arming into the drain.
+shutting down — the schedule stops instead of re-arming into the drain. Paused
+time travel (the debug panel's pause, or undo) is not a shutdown: ticks that
+fall inside the pause are dropped, and every schedule keeps its cadence. A
+one-shot (`after`/`at`) whose tick the dispatch door refuses is tried again up
+to 3 times, 5 s apart (a pause waits for its end); one whose method throws is
+not — it ran, and it runs once, sync or async.
 
 **When the wall clock steps back** (an NTP correction, a VM resumed from a
 snapshot), cron warns once per step. A **minute-starred** pattern (`* * * * *`,

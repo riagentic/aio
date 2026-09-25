@@ -181,3 +181,31 @@ Deno.test("build flags: a flag the fleet reads is a flag the fleet ACCEPTS", () 
     `build-all reads, but its vocabulary refuses: ${missing}`,
   );
 });
+
+Deno.test("build flags: every builder boolean that is not a target reaches the child build", async () => {
+  // `--analyze` was in the builder's vocabulary and in the docs
+  // (`deno task build --analyze`), but not the fleet's: the documented command
+  // was refused as an unknown flag, and `build.ts --compile --analyze` dropped
+  // it on the hop to the fleet — no report, exit 0. Every builder boolean that
+  // does not NAME a target (those become --targets=) and is not a `--print-*`
+  // question (answered before delegation) has to survive all three hops.
+  const { BUILD_BOOL_FLAGS, PRINT_FLAGS, unknownFleetFlags } = await import(
+    "../src/build/build-flags.ts"
+  );
+  const { TARGETS } = await import("../src/build-all.ts");
+  const targetFlags = new Set(Object.values(TARGETS).flatMap((t) => t.flags));
+  const inputs = BUILD_BOOL_FLAGS.filter((f) =>
+    !targetFlags.has(f) && !PRINT_FLAGS.includes(f)
+  );
+  assert(inputs.includes("--analyze"), "the vocabulary lost --analyze");
+  assert(inputs.length > 0);
+  const src = Deno.readTextFileSync(ROOT + "src/build-all.ts");
+  for (const f of inputs) {
+    assertEquals(unknownFleetFlags([f]), [], `the fleet refuses ${f}`);
+    assertEquals(forwardedToFleet([f]), [f], `build.ts drops ${f}`);
+    assert(
+      src.includes(`args.push("${f}")`),
+      `the fleet never hands its children ${f}`,
+    );
+  }
+});

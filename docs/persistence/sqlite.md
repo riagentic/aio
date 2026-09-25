@@ -210,6 +210,9 @@ drift is reconciled at boot instead:
   throws only when it is `NOT NULL` without a default (every `INSERT` would fail
   on it). Dropping it, and its data, stays your call:
   `ALTER TABLE t DROP COLUMN c`
+- a column you **retyped** (`text()` → `integer()`) is reported: SQLite keeps
+  the stored type, so values coerce to it (`42` is stored and restored as
+  `"42.0"`) until you migrate the column yourself
 
 > **A table's rows can never overwrite a cell's slice.** Rows are only ever
 > written to the array field a table is BOUND to. A table named after a cell

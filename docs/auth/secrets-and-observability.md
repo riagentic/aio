@@ -23,10 +23,13 @@ cell("settings", {
 });
 ```
 
-> The `ui`/`persist` filters are validated at cell creation — a key that matches
-> no state field (a typo, or a nested path in `include`) **throws**, because a
-> filter that silently matches nothing is a silent leak. Nested `exclude`
-> (dot-paths like `"accounts.encSecKey"`) is supported.
+> The `visible`/`persist` filters are validated at cell creation — a key that
+> matches no state field (a typo, or a nested path in `include`) **throws**,
+> because a filter that silently matches nothing is a silent leak. Nested
+> `exclude` (dot-paths like `"accounts.encSecKey"`) is supported; its head is
+> checked like any key (throws), and a segment below it that matches nothing in
+> a closed declared shape (`"accounts.encSeckey"`) warns at `cell()` — warned,
+> not thrown, because a method may write a field the declaration does not show.
 
 ## The rule for plaintext secrets
 

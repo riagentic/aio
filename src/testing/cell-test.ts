@@ -21,7 +21,11 @@ import { _resetHead } from "../air/head.ts";
 import { routeEffect } from "../state/route-effect.ts";
 import { selfCallSurvivedLine } from "../state/dispatch.ts";
 import { assertionFailure, formatCellState } from "./test-format.ts";
-import { frozenWriteMessage, isFrozenWriteError } from "../state/immutable.ts";
+import {
+  deepFreeze,
+  frozenWriteMessage,
+  isFrozenWriteError,
+} from "../state/immutable.ts";
 import {
   _abandonedCallsWarning,
   _armTestStrict,
@@ -36,6 +40,7 @@ import {
   _callAcrossWorkerBoundary,
   _isolateWorkerCellsInProcess,
   _refuseUnsafeCells,
+  _shedLeakedScopes,
   type HarnessBootOptions,
 } from "./boot-refusals.ts";
 import { attachMeta } from "../state/cell-catalog.ts";
@@ -430,6 +435,9 @@ export function testCell(
 ): void {
   _armTestStrict();
   Deno.test(`[${f.__aio.id}] ${testName}`, async () => {
+    // The body starts outside every boot, whatever context Deno's ambient
+    // pinned (a reducer's first import() — see `_shedLeakedScopes`).
+    _shedLeakedScopes();
     // Reset shared runtime state for test isolation — prevents bleed from prior runs
     _resetAioRuntime();
     _resetHead();
@@ -590,9 +598,23 @@ export function testCell(
     if (selectors) {
       for (const [key, fn] of Object.entries(selectors)) {
         const had = Object.getOwnPropertyDescriptor(f, key);
+        // The server bind's rule (cell-catalog.ts): a deps-form selector ALWAYS
+        // takes the full state second, accessor args behind it. Without this a
+        // parameterized deps selector got its first arg as the "full state"
+        // here and answered garbage where every other harness answered right.
+        const isDeps = key in
+          ((f.__aio as { selectorDeps?: Record<string, unknown> })
+            .selectorDeps ?? {});
         Object.defineProperty(f, key, {
           value: (...args: unknown[]) => {
             const own = (state as Record<string, unknown>)[prefix];
+            if (isDeps) {
+              return (fn as (
+                s: unknown,
+                full: unknown,
+                ...a: unknown[]
+              ) => unknown)(own, state, ...args);
+            }
             return args.length > 0
               ? (fn as (s: unknown, ...a: unknown[]) => unknown)(own, ...args)
               : fn(own, state as unknown);
@@ -606,6 +628,26 @@ export function testCell(
           else delete (f as Record<string, unknown>)[key];
         });
       }
+    }
+    // …and the STATE getters, for the same reason. Unbound, `cell.n` is the
+    // creation-time getter over the DECLARED initial, so a method reading its
+    // own cell through the def (`if (counter.count > 5)` in an async body, a
+    // timer's callback) saw 0 here while every booted runtime saw the live
+    // value. Bound like the server binds them (cell-catalog.ts): a live read of
+    // this harness's slice. Restored with the selectors.
+    for (const key of Object.keys(f.__aio.state ?? {})) {
+      const had = Object.getOwnPropertyDescriptor(f, key);
+      if (!had?.get || !had.configurable) continue; // a callable owns the name
+      Object.defineProperty(f, key, {
+        ...had,
+        get: () => {
+          const own = (state as Record<string, unknown>)[prefix] as
+            | Record<string, unknown>
+            | undefined;
+          return own ? own[key] : had.get!.call(f);
+        },
+      });
+      restoreSelectors.push(() => Object.defineProperty(f, key, had));
     }
 
     // A call to this cell's own method made WHILE a reducer runs
@@ -843,12 +885,16 @@ export function testCell(
                 unknown.map((k) => `"${k}"`).join(", ")
               } — this cell's state is { ${Object.keys(known).join(", ")} }. ` +
                 `A seed that lands nowhere looks like a fixture and pins ` +
-                `nothing.`,
+                `nothing.\n  an OPTIONAL key counts only once declared: ` +
+                `declare \`${unknown[0]}: undefined\` in \`state:\``,
             );
           }
-          (state as Record<string, unknown>)[prefix] = _deepMergeSeed(
-            known,
-            seed,
+          // FROZEN, like every committed state (declared initials are
+          // deep-frozen at compose; `testUI`'s seed is frozen by its apply).
+          // An unfrozen fixture let a selector's in-place `s.items.sort()`
+          // pass here and throw in dev AND prod.
+          (state as Record<string, unknown>)[prefix] = deepFreeze(
+            _deepMergeSeed(known, seed),
           );
         }
         lastEffects = [];
@@ -858,7 +904,7 @@ export function testCell(
         const base = machine === false
           ? { ...f.__aio.state }
           : { ...f.__aio.state, __aio_status: machine.initial };
-        state = { [f.__aio.id]: base };
+        state = { [f.__aio.id]: deepFreeze(base) };
         lastEffects = [];
         emittedFramework.length = 0;
       },
@@ -1167,6 +1213,10 @@ export async function bootCells(
   opts: HarnessBootOptions = {},
 ): Promise<BootHandle> {
   _armTestStrict();
+  // Synchronous, before the first await, so it holds for the CALLER's test
+  // body: a reducer's first import() pins its boot's fence as Deno's ambient
+  // context, and the next test's first call met the dead-boot refusal.
+  _shedLeakedScopes();
   // Every boot refusal a real `aio.run()` performs, BEFORE anything boots —
   // bootCells composes on the standalone runtime, which is not the server's
   // boot path, so a cell exposing a credential to the UI used to boot green
@@ -1224,7 +1274,7 @@ export async function bootCells(
   // (identity-checked) runs first at teardown.
   const unisolate = _isolateWorkerCellsInProcess(cells);
   const ledger = _watchUnobservedCalls(cells, _callAcrossWorkerBoundary);
-  ledger.adopt(inits.take());
+  inits.pipe(ledger);
   /** Drain until nothing is in flight.
    *
    *  Microtask ticks alone were not enough, and `advance()` is where that

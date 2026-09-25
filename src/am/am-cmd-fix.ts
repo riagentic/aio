@@ -16,7 +16,7 @@ import { parse as parseJsonc } from "@std/jsonc";
 import { refOfLink } from "../server/framework-pin.ts";
 import { resolveEntryPath } from "../server/paths.ts";
 import { aioToolEntries } from "../server/lock-coverage.ts";
-import { readDenoJson } from "../server/deno-json.ts";
+import { parseDenoJson, readDenoJson } from "../server/deno-json.ts";
 import type { GlobalFlags } from "./am-types.ts";
 import { detectMode, out, outError, say } from "./am-output.ts";
 import {
@@ -43,6 +43,10 @@ import { meetsMinDeno, MIN_DENO } from "../server/deno-version.ts";
 import { parseDeclaredVersion } from "../server/app-version.ts";
 import { removalMessage, removalsInSource } from "../state/removals.ts";
 import { count } from "../diagnostics/fmt.ts";
+import {
+  machineBoundImports,
+  machineBoundWarning,
+} from "../build/machine-bound-imports.ts";
 import {
   electronSpec,
   installedElectronIn,
@@ -463,6 +467,22 @@ export function isOwnDepAio(dir: string, provider: string): boolean {
   return real(dirname(dirname(provider))) === real(dir);
 }
 
+/** Does JSON(C) `text` contain a `//` or `/* … *\/` comment outside a string?
+ *  Pure. */
+function hasJsonComments(text: string): boolean {
+  for (let i = 0; i < text.length; i++) {
+    const c = text[i];
+    if (c === '"') {
+      for (i++; i < text.length && text[i] !== '"'; i++) {
+        if (text[i] === "\\") i++;
+      }
+    } else if (c === "/" && (text[i + 1] === "/" || text[i + 1] === "*")) {
+      return true;
+    }
+  }
+  return false;
+}
+
 export async function cmdFix(
   args: string[],
   flags: GlobalFlags,
@@ -521,6 +541,17 @@ export async function cmdFix(
     outError("deno.json is not valid JSON/JSONC — fix it by hand first.", mode);
     Deno.exit(1);
   }
+  // A config whose comments a JSON rewrite would destroy: `deno.jsonc`, or a
+  // `deno.json` that uses the comments Deno allows in it. Its structural
+  // repairs are ADVISED, never rewritten — and never attempted with
+  // JSON.parse, which threw on the first comment and reported a raw
+  // "Expected property name … at position 4" as a manual blocker. The value
+  // names the file for the advice; "" means a plain-JSON file, safe to write.
+  const keepComments = jsonPath.endsWith(".jsonc")
+    ? "deno.jsonc"
+    : hasJsonComments(raw)
+    ? "deno.json has comments"
+    : "";
   const imports: Record<string, string> = cfg.imports ?? {};
   const tasks: Record<string, string> = cfg.tasks ?? {};
 
@@ -530,11 +561,11 @@ export async function cmdFix(
   // exist. Since alpha70 the runtime REFUSES `target` in dev and logs it in
   // prod (src/state/removals.ts) — this is the fix it names.
   if (typeof cfg.target === "string") {
-    if (jsonPath.endsWith(".jsonc")) {
+    if (keepComments) {
       add(
         'deno.json "target" → "client"',
         "advise",
-        'deno.jsonc — rename the "target" key to "client" by hand ' +
+        `${keepComments} — rename the "target" key to "client" by hand ` +
           "(comments would be lost in a rewrite)",
       );
     } else {
@@ -542,10 +573,10 @@ export async function cmdFix(
         'deno.json "target" → "client"',
         true,
         async () => {
-          const raw = JSON.parse(await Deno.readTextFile(jsonPath)) as Record<
-            string,
-            unknown
-          >;
+          const raw = parseDenoJson(
+            await Deno.readTextFile(jsonPath),
+            jsonPath,
+          );
           const out: Record<string, unknown> = {};
           for (const [k, v] of Object.entries(raw)) {
             if (k === "target") {
@@ -1005,6 +1036,19 @@ export async function cmdFix(
       'set compilerOptions.jsxImportSource to "aio"',
     );
   }
+  // An absolute / file: import-map value compiles into a binary that loads it
+  // from that disk path at run time — it runs only on this machine. The same
+  // words the build warns with; advised, never rewritten (the path is a
+  // deliberate choice the author may have reasons for).
+  const bound = machineBoundWarning(
+    machineBoundImports(cfg, dirname(jsonPath)),
+    jsonPath.endsWith(".jsonc") ? "deno.jsonc" : "deno.json",
+  );
+  cfgAdvise(
+    bound !== null,
+    "portable import map",
+    bound ? `${bound[0]}: ${bound[1].split("\n")[0]}… — ${bound[2]}` : "",
+  );
   if (usesElectron) {
     cfgAdvise(
       cfg.nodeModulesDir !== "auto" && cfg.nodeModulesDir !== true,
@@ -1020,11 +1064,11 @@ export async function cmdFix(
   // an existing task is NEVER overwritten — user customization wins. Skipped
   // for custom framework vendoring (unknowable paths) and for deno.jsonc
   // (a rewrite would destroy comments).
-  if (jsonPath.endsWith(".jsonc")) {
+  if (keepComments) {
     add(
       "standard deno tasks",
       "advise",
-      "deno.jsonc — not auto-edited (comments would be lost); compare with `am create` output",
+      `${keepComments} — not auto-edited (comments would be lost); compare with \`am create\` output`,
     );
   } else if (aioMode === "dep" || aioMode === "registry") {
     // Targets the app's LEGACY task names encode — the same decider the
@@ -1155,10 +1199,10 @@ export async function cmdFix(
         "task vocabulary migration",
         changed > 0,
         async () => {
-          const raw = JSON.parse(await Deno.readTextFile(jsonPath)) as Record<
-            string,
-            unknown
-          >;
+          const raw = parseDenoJson(
+            await Deno.readTextFile(jsonPath),
+            jsonPath,
+          );
           if (deriveFleet) {
             const build = (raw.build ?? {}) as Record<string, unknown>;
             build.targets = derivedTargets;
@@ -1215,10 +1259,10 @@ export async function cmdFix(
         "standard deno tasks",
         missingTasks.length > 0,
         async () => {
-          const raw = JSON.parse(await Deno.readTextFile(jsonPath)) as Record<
-            string,
-            unknown
-          >;
+          const raw = parseDenoJson(
+            await Deno.readTextFile(jsonPath),
+            jsonPath,
+          );
           const cur = (raw.tasks ?? {}) as Record<string, string>;
           for (const k of missingTasks) cur[k] = expected[k]!;
           raw.tasks = cur;
@@ -1340,10 +1384,11 @@ export async function cmdFix(
   // that lets aio number builds from commits (docs/build/versioning.md).
   {
     let declared: unknown;
-    let raw = "";
     try {
-      raw = await Deno.readTextFile(join(dir, "deno.json"));
-      declared = (parseJsonc(raw) as { version?: unknown } | null)?.version;
+      // THE reader: both names Deno accepts. Reading only `deno.json` gave a
+      // `deno.jsonc` app no version at all, so a refused or pinned version
+      // there was reported "ok" — the advice skipped exactly that app.
+      declared = (await readDenoJson(dir))?.config.version;
     } catch {
       /* aio-ok: no deno.json — the checks above already reported it */
     }

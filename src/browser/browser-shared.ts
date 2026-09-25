@@ -71,10 +71,24 @@ export const NO_TRANSPORT_MSG =
   "page has no HTTP origin and no IPC bridge \u2014 the aio:// page must be " +
   "loaded by the aio Electron shell";
 
+/** The page URL's `?token=` the server refused (see `refuseUrlToken`). */
+let _refusedUrlToken: string | null = null;
+
+/** The server refused this page's credential: never present its URL
+ *  `?token=` again. The server reads a URL token BEFORE the cookie, so after
+ *  a sign-in (whose session rides the cookie) the dead token still in the
+ *  page URL was presented on every reconnect — refused, charged to the
+ *  failed-auth budget, and the signed-in tab stayed signed out. The dev
+ *  reload socket (`devWsScript`) keeps the same rule. */
+export function refuseUrlToken(): void {
+  _refusedUrlToken = new URLSearchParams(location.search).get("token");
+}
+
 /** Build WebSocket URL from current page location */
 export function buildWsUrl(): string {
   const proto = location.protocol === "https:" ? "wss:" : "ws:";
-  const tokenParam = new URLSearchParams(location.search).get("token");
+  let tokenParam = new URLSearchParams(location.search).get("token");
+  if (tokenParam === _refusedUrlToken) tokenParam = null;
   return proto + "//" + location.host + "/ws" +
     (tokenParam ? "?token=" + encodeURIComponent(tokenParam) : "");
 }
@@ -152,10 +166,15 @@ export function handleControlFrame(
    *  envelope contract that says a mismatch "closes the socket with code 4505
    *  — loudly, never silently". */
   onFatal?: (reason: string) => void,
+  /** How this page reloads. The transport passes one that first lets the
+   *  calls it still owes the server land (see `_reloadWhenDrained`) — a bare
+   *  `location.reload()` on the `boot` frame of a restarted server killed the
+   *  offline queue that very connection was replaying. */
+  reload: () => void = () => location.reload(),
 ): boolean {
   switch (f.t) {
     case "reload":
-      location.reload();
+      reload();
       return true;
     case "patch": {
       // A `.tsx` edit used to reload the whole document. aio starts from a
@@ -177,7 +196,7 @@ export function handleControlFrame(
       const d = f.d as { path?: string; v?: number } | undefined;
       const path = typeof d?.path === "string" ? d.path : "";
       if (!path) {
-        location.reload();
+        reload();
         return true;
       }
       void (async () => {
@@ -191,13 +210,13 @@ export function handleControlFrame(
             typeof next !== "function" ||
             swapRootComponent(next as never) === 0
           ) {
-            location.reload();
+            reload();
           }
         } catch {
           // aio-ok: anything at all — a syntax error in the new module, a
           // renderer that threw mid-swap, a page with no mounted root — is
           // answered by the reload this replaced.
-          location.reload();
+          reload();
         }
       })();
       return true;
@@ -217,7 +236,7 @@ export function handleControlFrame(
     case "boot": {
       const id = (f.d as { id?: string } | undefined)?.id ?? "";
       if (bootId.current && bootId.current !== id) {
-        location.reload();
+        reload();
         return true;
       }
       bootId.current = id;
@@ -234,7 +253,7 @@ export function handleControlFrame(
       return true;
     case "graph-clear":
       // Red → green: the corrected build is worth fetching.
-      location.reload();
+      reload();
       return true;
     // A3: version hellos on transports without their own handler (IPC —
     // client and server ship in one bundle, a real mismatch is a packaging

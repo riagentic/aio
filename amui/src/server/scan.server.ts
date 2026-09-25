@@ -24,7 +24,14 @@ export interface ProjectMeta {
 }
 
 export interface DiscoveredProject {
-  /** Absolute project directory — the stable identity. */
+  /** THE list identity — what select/stop/restart address. The directory
+   *  alone is not one: two instances can run from one directory (profiles,
+   *  two components, two binaries in one `dist/`), and keying by path folded
+   *  them into one entry, so one vanished and Stop could hit the other. A
+   *  running instance is `path#appId#home` (unique: the lock allows one live
+   *  holder per appId+home); a project that is not running is its `path`. */
+  id: string;
+  /** Absolute project directory — what the files/logs/tasks views read. */
   path: string;
   /** Display name (deno.json title/name, else folder name). */
   name: string;
@@ -39,6 +46,10 @@ export interface DiscoveredProject {
     /** Set when the holder is `am backup`/`am restore`, not the app — read
      *  it BEFORE `status` (which then says "starting" for older readers). */
     maintenance?: LockData["maintenance"];
+    /** The instance's data home and profile — what tells two instances of
+     *  one appId apart, and what a restart must boot again. */
+    home?: string;
+    profile?: string;
   } | null;
   /** true when a `.git` dir is present. */
   git: boolean;
@@ -98,19 +109,23 @@ export async function readProjectMeta(dir: string): Promise<ProjectMeta> {
         title?: string;
         name?: string;
         version?: string;
+        client?: string;
         target?: string;
         entry?: string;
         tasks?: Record<string, string>;
         imports?: Record<string, string>;
       };
       const imports = j.imports ?? {};
+      // `client` is the key since alpha52 (what `am create` writes and the
+      // runtime reads); `target` is its old spelling, still read.
+      const shell = j.client ?? j.target ?? null;
       const isAio = "aio" in imports ||
         Object.values(imports).some((v) => /\baio\b/.test(v)) ||
-        !!j.target;
+        !!shell;
       return {
         name: j.title ?? j.name ?? "",
         version: j.version ?? null,
-        target: j.target ?? null,
+        target: shell,
         tasks: j.tasks ?? {},
         isAio,
         entry: typeof j.entry === "string" && j.entry ? j.entry : null,
@@ -142,6 +157,7 @@ async function scanDisk(
     const meta = await readProjectMeta(dir);
     if (meta.isAio) {
       out.set(dir, {
+        id: dir,
         path: dir,
         name: meta.name || dir.split("/").filter(Boolean).pop() || dir,
         meta,
@@ -271,6 +287,7 @@ export async function discoverProjects(): Promise<
     const meta = await readProjectMeta(p);
     if (!meta.isAio) continue;
     byPath.set(p, {
+      id: p,
       path: p,
       name: meta.name || p.split("/").filter(Boolean).pop() || p,
       meta,
@@ -279,11 +296,18 @@ export async function discoverProjects(): Promise<
     });
   }
 
-  // Overlay running instances (authoritative for their path).
+  // Overlay running instances (authoritative for their path). EVERY instance
+  // is its own entry: a directory with two live instances lists two, and the
+  // idle on-disk entry for that directory gives way to them.
+  const byId = new Map<string, DiscoveredProject>();
+  const ran = new Set<string>();
   for (const i of running) {
     const existing = byPath.get(i.cwd);
     const meta = existing?.meta ?? await readProjectMeta(i.cwd);
-    byPath.set(i.cwd, {
+    const git = existing?.git ?? await isDir(join(i.cwd, ".git"));
+    ran.add(i.cwd);
+    const entry: DiscoveredProject = {
+      id: instanceId(i.cwd, i.appId, i.home),
       path: i.cwd,
       name: existing?.name || meta.name || i.appId,
       meta,
@@ -293,23 +317,42 @@ export async function discoverProjects(): Promise<
         port: i.port,
         status: i.status,
         ...(i.maintenance ? { maintenance: i.maintenance } : {}),
+        ...(i.home ? { home: i.home } : {}),
+        ...(i.profile ? { profile: i.profile } : {}),
       },
-      git: existing?.git ?? await isDir(join(i.cwd, ".git")),
-    });
+      git,
+    };
+    if (i.pid === Deno.pid || self.has(i.cwd)) entry.self = true;
+    byId.set(entry.id, entry);
+  }
+  for (const p of ran) byPath.delete(p);
+  for (const [p, entry] of byPath) {
+    if (self.has(p)) entry.self = true;
+    byId.set(entry.id, entry);
+  }
+  // Two instances sharing a directory (and so a name) read apart by what
+  // differs: the profile, else the appId.
+  const names = new Map<string, number>();
+  for (const e of byId.values()) {
+    names.set(e.name, (names.get(e.name) ?? 0) + 1);
+  }
+  for (const e of byId.values()) {
+    if ((names.get(e.name) ?? 0) > 1 && e.running) {
+      e.name = `${e.name} (${e.running.profile ?? e.running.appId})`;
+    }
   }
 
-  for (const p of self) {
-    const entry = byPath.get(p);
-    if (entry) entry.self = true;
-  }
-
-  const projects = [...byPath.values()].sort((a, b) => {
+  const projects = [...byId.values()].sort((a, b) => {
     // running first, then by name
     if (!!a.running !== !!b.running) return a.running ? -1 : 1;
     return a.name.localeCompare(b.name);
   });
   return { projects, roots };
 }
+
+/** A running instance's list identity — see {@linkcode DiscoveredProject.id}. */
+export const instanceId = (cwd: string, appId: string, home?: string): string =>
+  `${cwd}#${appId}#${home ?? ""}`;
 
 /** Exported for tests — the root set and the traversal denylist are the two
  *  things that decide whether discovery is both complete and cheap. */

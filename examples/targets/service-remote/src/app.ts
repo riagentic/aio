@@ -1,4 +1,4 @@
-// ex-service-remote — `compile:service:remote` target example — zero-config
+// ex-service-remote — `--targets=server` example — zero-config
 // except the two behavioral choices below.
 // Dev: deno task dev   Build: deno task compile
 import "./cell/counter.ts";

@@ -430,6 +430,7 @@ Deno.test("am fix relinks dep/aio when the pin and the link disagree", async () 
     assertStringIncludes(link, join(s.versions, want));
     // The decider reads the versions dir from the env — this process must see
     // the sandbox's, exactly as the child `am fix` did.
+    const prevVersions = Deno.env.get("AIO_VERSIONS_DIR");
     Deno.env.set("AIO_VERSIONS_DIR", s.versions);
     try {
       assert(
@@ -437,7 +438,10 @@ Deno.test("am fix relinks dep/aio when the pin and the link disagree", async () 
         "the pin decider agrees with the link am fix wrote",
       );
     } finally {
-      Deno.env.delete("AIO_VERSIONS_DIR");
+      // Restore, never delete: an unset var makes the REAL store the answer
+      // for the rest of the process.
+      if (prevVersions === undefined) Deno.env.delete("AIO_VERSIONS_DIR");
+      else Deno.env.set("AIO_VERSIONS_DIR", prevVersions);
     }
 
     // Idempotent: the second run has nothing to say.

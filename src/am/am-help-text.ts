@@ -371,10 +371,10 @@ Inspect:
   tables                  The same list under its own name (= sql --tables)
   schedules               Active scheduled effects
   logs [filter]           Tail app log; a filter is a substring, e.g. "am logs error"
+                          keeps error events
                           (--client --filter --lines --follow --level --tag --since)
                           --lines=N counts EVENTS; --json .matched is the
                           health-check count (.total keeps unreadable lines)
-                          keeps error events
   errors                  What went wrong: the build error (if any) first,
                           then the tail of error.log (--lines=N)
   metrics                 Uptime, connections, schedules

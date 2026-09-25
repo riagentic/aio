@@ -181,3 +181,48 @@ Deno.test("vitals: the console is opt-in, and never at the cost of the files", (
     console.error = real.error;
   }
 });
+
+Deno.test("vitals: a queue-depth loop alert is written to perf.log in actions, not ms", async () => {
+  // The queue driver measures an ACTION COUNT against queue thresholds; the
+  // loop driver measures ms. perf.log printed both as "ms", so a queue flood
+  // of 60 pending actions read "60ms (threshold: 50ms)" — a fast loop.
+  const { AioLogger } = await import("../src/diagnostics/logger-core.ts");
+  const { getLogger, setLogger } = await import(
+    "../src/diagnostics/logger-api.ts"
+  );
+  const { createVitalsSystem } = await import("../src/vitals/mod.ts");
+  const { tempDir, dropTempDir } = await import("../src/testing/temp-dir.ts");
+  const dir = await tempDir("aio-vitals-unit-");
+  const logger = new AioLogger({ dir, level: "info", console: false });
+  await logger.init();
+  const prev = getLogger();
+  setLogger(logger);
+  const v = createVitalsSystem({ pressure: false });
+  try {
+    v.loopProbe.updateQueueDepth(60);
+    v.checkAndAlert();
+    await logger.flush();
+    const lines = (await Deno.readTextFile(logger.path("perf")))
+      .split("\n").filter((l) => l.includes("vitals:loop"));
+    assertEquals(lines.length >= 1, true, "no loop alert reached perf.log");
+    const q = lines[0]!;
+    assertStringIncludes(q, "degraded 60 actions (threshold: 50 actions)");
+    assert(!/\d+ms\b/.test(q), `a queue count was printed as ms: ${q}`);
+    assertStringIncludes(q, "unit=actions");
+  } finally {
+    v.destroy();
+    setLogger(prev);
+    logger.onStop();
+    await logger.flush();
+    await dropTempDir(dir);
+  }
+});
+
+Deno.test("vitals: a loop alert with no unit context still reads ms", () => {
+  const s = sink();
+  logVitals("loop", "slow", 150, 100, undefined, s.write, s.pathFn, false);
+  assertEquals(
+    (s.to("perf")[0]!.entry.data as Record<string, unknown>).unit,
+    "ms",
+  );
+});

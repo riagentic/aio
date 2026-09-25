@@ -50,7 +50,7 @@ import { justified as okMarker } from "../src/diagnostics/ok-marker.ts";
 // private-mode storage adopt (browser-storage) — absence is the wanted outcome.
 // 315 → 313 in 1.0.11: two fewer unjustified swallows after this release's
 // fixes (ratcheted to the measured count).
-const CEILING = 313;
+const CEILING = 308;
 
 /** The budget for the PROMISE spelling, counted separately.
  *

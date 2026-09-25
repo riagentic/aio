@@ -12,8 +12,12 @@
  */
 
 import type { Result } from "./am-types.ts";
-import { _discoveredAppTarget, liveLock } from "./am-utils.ts";
-import { isLockOwnerAlive } from "../server/single-instance-lock.ts";
+import { _discoveredAppTarget, liveLock, resolveAmAppId } from "./am-utils.ts";
+import {
+  instances,
+  isLockOwnerAlive,
+  type LockData,
+} from "../server/single-instance-lock.ts";
 import { CLIENT_REPLY_TIMEOUT_MS } from "../server/uds.ts";
 import {
   appKeyPath,
@@ -73,20 +77,80 @@ export type ControlEndpoint =
   | { kind: "tcp"; port: number }
   | { kind: "uds"; socketPath: string; pid: number; port: number };
 
+/** The lock of the instance `port` addresses. `liveLock(appId)` is "the"
+ *  instance — the default home, or the `--home`/`--profile` one — and a port
+ *  that belongs to a DIFFERENT live instance of the same app (a profile's,
+ *  typed as `--port`, or passed by amui for the row it lists) was ignored:
+ *  the default lock's socket won, and `am dispatch --port=<dev's port>`
+ *  wrote into the default instance's state. A port is an instance's identity
+ *  exactly when one live lock of this app holds it; otherwise the rule is
+ *  unchanged. */
+function lockForPort(
+  appId: string | undefined,
+  port: number,
+  pid?: number,
+): LockData | null {
+  // A PID names the instance outright, and it is the only thing that does
+  // for two zero-port UDS instances of one app (a default and a profile):
+  // amui knows the pid of every row it lists, and without it every call for
+  // the profile row — its State tab, a dispatch, a Stop — reached the
+  // DEFAULT instance's socket.
+  if (pid !== undefined) {
+    const id = appId ?? resolveAmAppId();
+    const hit = instances(id).find((i) => i.alive && i.pid === pid);
+    if (hit) return hit;
+  }
+  if (port > 0) {
+    const id = appId ?? resolveAmAppId();
+    const own = instances(id).filter((i) =>
+      i.alive && (i.port === port || i.trojanPort === port)
+    );
+    if (own.length === 1) return own[0]!;
+  }
+  // A pid that names no live instance names one that is GONE (it crashed or
+  // stopped after amui listed it) — never "the" instance instead: on zero-port
+  // sockets that is the DEFAULT one, and a Stop on the dead row shut its live
+  // sibling down, reporting success. No lock → the plain port path, which
+  // says the app is not running.
+  if (pid !== undefined) return null;
+  return liveLock(appId);
+}
+
+// aio-ok: the endpoint half of `controlTarget`, kept as the seam the endpoint tests pin (am-uds-only-app, am-port-picks-instance) — every product caller goes through `controlTarget` so its credentials follow the same lock
 export function controlEndpoint(
   appId: string | undefined,
   port: number,
+  pid?: number,
 ): ControlEndpoint {
-  const pf = liveLock(appId);
+  return controlTarget(appId, port, pid).ep;
+}
+
+/** The endpoint AND the addressed instance's data home — one lock read, so
+ *  the wire and the credentials can never name two different instances.
+ *  `home` is where that instance minted `control.key` and keeps `app.key`:
+ *  reading them from `appDirs(appId)` (the default home) presented a
+ *  `--profile` instance its sibling's credentials, i.e. a 401 on every call
+ *  through `--port` or amui. `undefined` (no lock, or one older than
+ *  `LockData.home`) keeps the default home. */
+function controlTarget(
+  appId: string | undefined,
+  port: number,
+  pid?: number,
+): { ep: ControlEndpoint; home: string | undefined } {
+  const pf = lockForPort(appId, port, pid);
+  const home = pf?.home;
   if (pf?.socketPath && isLockOwnerAlive(pf)) {
     return {
-      kind: "uds",
-      socketPath: pf.socketPath,
-      pid: pf.pid,
-      port: pf.port,
+      ep: {
+        kind: "uds",
+        socketPath: pf.socketPath,
+        pid: pf.pid,
+        port: pf.port,
+      },
+      home,
     };
   }
-  return { kind: "tcp", port: resolveControlPort(port, appId) };
+  return { ep: { kind: "tcp", port: resolveControlPort(port, appId) }, home };
 }
 
 /** The message for a socket that did not answer on an app that has NO other
@@ -129,6 +193,7 @@ async function trojanOverUds(
   },
   timeout: number,
   appId?: string,
+  home?: string,
 ): Promise<Result | { transportError: string }> {
   const path = `/__aio/trojan/${route}`;
   const send = (c: LocalCreds) =>
@@ -139,10 +204,10 @@ async function trojanOverUds(
       timeout,
     );
 
-  let creds = localCreds(appId, { control: true, gated: false });
+  let creds = localCreds(appId, { control: true, gated: false }, home);
   let r = await send(creds);
   if (!("error" in r) && (r.status === 401 || r.status === 403)) {
-    const keyed = localCreds(appId, { control: true, gated: true });
+    const keyed = localCreds(appId, { control: true, gated: true }, home);
     // Only worth a second trip if it actually adds a credential.
     if (keyed.headers["Authorization"] !== creds.headers["Authorization"]) {
       creds = keyed;
@@ -326,7 +391,7 @@ export async function verifyInstance(
 async function controlPreflight(
   ctrl: number,
   appId: string | undefined,
-  opts: { control: boolean; timeout: number },
+  opts: { control: boolean; timeout: number; home?: string },
 ): Promise<
   { mismatch: { ok: false; error: string } } | {
     mismatch: null;
@@ -346,7 +411,11 @@ async function controlPreflight(
   }
   return {
     mismatch: null,
-    creds: localCreds(appId, { control: opts.control, gated: probe.gated }),
+    creds: localCreds(
+      appId,
+      { control: opts.control, gated: probe.gated },
+      opts.home,
+    ),
   };
 }
 
@@ -383,6 +452,8 @@ type LocalCreds = {
 function localCreds(
   appId: string | undefined,
   opts: { control: boolean; gated: boolean },
+  /** The addressed instance's data home (`controlTarget`). */
+  home?: string,
 ): LocalCreds {
   const headers: Record<string, string> = {};
   if (!appId) {
@@ -395,14 +466,14 @@ function localCreds(
   }
   let controlError: string | undefined;
   if (opts.control) {
-    const r = readControlKey(appId);
+    const r = readControlKey(appId, home);
     if (r.error !== undefined) controlError = r.error;
     else headers["X-Aio-Control"] = r.key;
   }
   let keyPath: string | undefined;
   if (opts.gated) {
     try {
-      const p = appKeyPath(appId);
+      const p = appKeyPath(appId, home);
       const key = Deno.readTextFileSync(p).trim();
       if (key) {
         headers["Authorization"] = `Bearer ${key}`;
@@ -759,7 +830,7 @@ export function resolveControlPort(
   mainPort: number,
   appId?: string,
 ): number {
-  const pf = liveLock(appId);
+  const pf = lockForPort(appId, mainPort);
   return (pf?.port === mainPort && pf.trojanPort) ? pf.trojanPort : mainPort;
 }
 
@@ -769,11 +840,12 @@ export async function trojanGet(
   route: string,
   appId?: string,
   timeout = FETCH_TIMEOUT,
+  pid?: number,
 ): Promise<Result> {
   // The app's own wire first. An app on UDS may bind no TCP port at all, and
   // the identity gate below is a PORT concern — a socket is named by the app's
   // own lock, so there is no "who answers on this number" question to ask.
-  const ep = controlEndpoint(appId, port);
+  const { ep, home } = controlTarget(appId, port, pid);
   if (ep.kind === "uds") {
     const r = await trojanOverUds(
       ep.socketPath,
@@ -781,6 +853,7 @@ export async function trojanGet(
       { method: "GET" },
       timeout,
       appId,
+      home,
     );
     if (!("transportError" in r)) return r;
     if (ep.port <= 0) return udsUnreachable(ep, appId, r.transportError);
@@ -789,6 +862,7 @@ export async function trojanGet(
   const pre = await controlPreflight(ctrl, appId, {
     control: true,
     timeout,
+    home,
   });
   if (pre.mismatch) return pre.mismatch;
   const creds = pre.creds;
@@ -820,6 +894,7 @@ export async function trojanPost(
   body?: unknown,
   appId?: string,
   timeout = FETCH_TIMEOUT,
+  pid?: number,
 ): Promise<Result> {
   // A GUESS may be read from; it may never be written to. `resolvePort` has a
   // last rung that answers with "the one instance that is running" when the id
@@ -839,7 +914,7 @@ export async function trojanPost(
         `like that; a write may not. Name it: --app=${guessed}`,
     };
   }
-  const ep = controlEndpoint(appId, port);
+  const { ep, home } = controlTarget(appId, port, pid);
   if (ep.kind === "uds") {
     const r = await trojanOverUds(
       ep.socketPath,
@@ -856,6 +931,7 @@ export async function trojanPost(
       },
       timeout,
       appId,
+      home,
     );
     if (!("transportError" in r)) return r;
     if (ep.port <= 0) return udsUnreachable(ep, appId, r.transportError);
@@ -865,6 +941,7 @@ export async function trojanPost(
   const pre = await controlPreflight(ctrl, appId, {
     control: true,
     timeout,
+    home,
   });
   if (pre.mismatch) return pre.mismatch;
   const creds = pre.creds;
@@ -901,22 +978,23 @@ export async function httpGet(
   path: string,
   appId?: string,
   timeout = FETCH_TIMEOUT,
+  pid?: number,
 ): Promise<Result<string>> {
   // The app's own routes answer on the socket too — same handler. Without this
   // `am state` would work on a socket-only app while `am health` reported it
   // unreachable: one app, two verdicts, which is worse than either.
-  const ep = controlEndpoint(appId, port);
+  const { ep, home } = controlTarget(appId, port, pid);
   if (ep.kind === "uds") {
     const sock = ep.socketPath;
     // NO control credential, exactly as below: it authorizes the control
     // plane, not the app's front door.
-    const creds = localCreds(appId, { control: false, gated: false });
+    const creds = localCreds(appId, { control: false, gated: false }, home);
     let r = await udsRequest(sock, path, {
       method: "GET",
       headers: creds.headers,
     }, timeout);
     if (!("error" in r) && (r.status === 401 || r.status === 403)) {
-      const keyed = localCreds(appId, { control: false, gated: true });
+      const keyed = localCreds(appId, { control: false, gated: true }, home);
       if (keyed.headers["Authorization"]) {
         r = await udsRequest(sock, path, {
           method: "GET",
@@ -941,6 +1019,7 @@ export async function httpGet(
   const pre = await controlPreflight(ctrl, appId, {
     control: false,
     timeout,
+    home,
   });
   // `/__aio/snapshot` dumps a whole app's data
   if (pre.mismatch) return pre.mismatch;

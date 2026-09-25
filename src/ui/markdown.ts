@@ -14,6 +14,7 @@
 
 import { Fragment, h } from "../air/vdom.ts";
 import type { VChild, VNode } from "../air/vdom.ts";
+import { el, pushAll } from "./h-spread.ts";
 
 /** Props for {@link Markdown}. */
 export interface MarkdownProps {
@@ -225,17 +226,17 @@ function parseInline(text: string): VChild[] {
         const href = normalizeHref(raw);
         if (href) {
           out.push(
-            h("a", {
+            el("a", {
               href,
               class: "aio-md__a",
               ...(/^https?:/i.test(href)
                 ? { target: "_blank", rel: "noopener noreferrer" }
                 : {}),
-            }, ...parseInline(label)),
+            }, parseInline(label)),
           );
         } else {
           warnDroppedHref(raw);
-          out.push(...parseInline(label)); // drop the href, keep the text
+          pushAll(out, parseInline(label)); // drop the href, keep the text
         }
         i = end + 1;
         continue;
@@ -246,7 +247,7 @@ function parseInline(text: string): VChild[] {
       const close = nextBold[c === "*" ? "**" : "__"](i + 3);
       if (close !== -1 && dotRun(i + 2, close)) {
         flush();
-        out.push(h("strong", null, ...parseInline(text.slice(i + 2, close))));
+        out.push(el("strong", null, parseInline(text.slice(i + 2, close))));
         i = close + 2;
         continue;
       }
@@ -256,7 +257,7 @@ function parseInline(text: string): VChild[] {
       const close = nextItalic[c](i + 2);
       if (close !== -1 && dotRun(i + 1, close)) {
         flush();
-        out.push(h("em", null, ...parseInline(text.slice(i + 1, close))));
+        out.push(el("em", null, parseInline(text.slice(i + 1, close))));
         i = close + 1;
         continue;
       }
@@ -314,15 +315,15 @@ function parseBlocks(src: string, depth = 0): VChild[] {
   let i = 0;
 
   const listItems = (ordered: boolean): VNode => {
-    const items: VNode[] = [];
+    const items: VChild[] = [];
     const re = ordered ? OL : UL;
     while (i < lines.length) {
       const m = re.exec(lines[i]!);
       if (!m) break;
-      items.push(h("li", null, ...parseInline(m[2]!)));
+      items.push(el("li", null, parseInline(m[2]!)));
       i++;
     }
-    return h(ordered ? "ol" : "ul", { class: "aio-md__list" }, ...items);
+    return el(ordered ? "ol" : "ul", { class: "aio-md__list" }, items);
   };
 
   while (i < lines.length) {
@@ -364,7 +365,7 @@ function parseBlocks(src: string, depth = 0): VChild[] {
     const head = HEADING.exec(line);
     if (head) {
       blocks.push(
-        h(`h${head[1]!.length}`, null, ...parseInline(head[2]!.trim())),
+        el(`h${head[1]!.length}`, null, parseInline(head[2]!.trim())),
       );
       i++;
       continue;
@@ -383,10 +384,10 @@ function parseBlocks(src: string, depth = 0): VChild[] {
         i++;
       }
       blocks.push(
-        h(
+        el(
           "blockquote",
           { class: "aio-md__quote" },
-          ...parseBlocks(quote.join("\n"), depth + 1),
+          parseBlocks(quote.join("\n"), depth + 1),
         ),
       );
       continue;
@@ -415,9 +416,9 @@ function parseBlocks(src: string, depth = 0): VChild[] {
     const inline: VChild[] = [];
     para.forEach((l, idx) => {
       if (idx > 0) inline.push(h("br", null));
-      inline.push(...parseInline(l));
+      pushAll(inline, parseInline(l));
     });
-    blocks.push(h("p", { class: "aio-md__p" }, ...inline));
+    blocks.push(el("p", { class: "aio-md__p" }, inline));
   }
   return blocks;
 }
@@ -429,6 +430,6 @@ export function Markdown(props: MarkdownProps): VNode {
   return h(
     "div",
     { class: props.class ? `aio-md ${props.class}` : "aio-md" },
-    h(Fragment, null, ...parseBlocks(props.source ?? "")),
+    el(Fragment, null, parseBlocks(props.source ?? "")),
   );
 }

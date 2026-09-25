@@ -197,9 +197,12 @@ the watcher's reload budget is unaffected. `--verbose` prints the numbers:
 
 ## Live reload
 
-AIO watches `baseDir` (default: `src/`) for file changes. When any `.ts`,
-`.tsx`, `.css`, or other file is modified or created, all connected browsers
-automatically reload.
+AIO watches `baseDir` (default: `src/`) for file changes. When a `.ts`, `.tsx`,
+`.css`, `.html` or `.svg` file — or any module the page has loaded (`.js`,
+`.mjs`, `.jsx` included) — is modified or created, all connected browsers
+automatically reload. A module served from a `serveDirs` or `share` root outside
+`baseDir` is watched too (that file only, not its folder); build output the page
+never loads (`dist/`, `node_modules`) reloads nothing.
 
 **How it works:**
 
@@ -232,13 +235,15 @@ your client graph imports the UI entry, so re-importing it cannot leave anything
 stale — and that is not true of any other file. A hot reload that silently fails
 to apply an edit to a child module is worse than a reload that always works, so:
 
-| You changed                    | What happens                                               |
-| ------------------------------ | ---------------------------------------------------------- |
-| `src/App.tsx` alone            | patch, no reload                                           |
-| `App.tsx` **and** another file | full reload                                                |
-| any other `.ts` / `.tsx`       | full reload                                                |
-| a file that defines a cell     | server restart                                             |
-| `*.server.ts`                  | full reload + a note that this process kept the old module |
+| You changed                       | What happens                                               |
+| --------------------------------- | ---------------------------------------------------------- |
+| `src/App.tsx` alone               | patch, no reload                                           |
+| `App.tsx` **and** another file    | full reload                                                |
+| a file that defines a cell        | server restart                                             |
+| the server entry (`aio.run()`)    | server restart                                             |
+| a module the server entry imports | server restart                                             |
+| `*.server.ts`                     | full reload + a note that this process kept the old module |
+| any other `.ts` / `.tsx`          | full reload                                                |
 
 Every failure falls back to a reload — a syntax error in the new module, a
 render that throws, a page with no mounted root. The worst case is exactly the
@@ -253,6 +258,14 @@ file declares a `cell(...)`, dev restarts the app for you:
 ```
 INFO  watch  cell file changed (cart.ts) — restarting the app
 ```
+
+The same holds for the **server entry** — the file that calls `aio.run()`, which
+holds the routes, schedules, auth and every other boot option — and for any of
+the app's own modules it imports (statically or dynamically), such as a helper a
+cell method or a route calls. Both run in the server process, so an edit to one
+restarts the app too (`server entry changed (app.ts)` /
+`server module changed (pricing.ts)`); a browser reload alone would keep serving
+the old route or the old helper.
 
 The app tears down first (port released, persistence flushed), then comes back
 on the same port; open tabs notice the new boot ID and reload themselves. The
@@ -279,8 +292,10 @@ can't relaunch faithfully:
 
 When the server restarts (crash, manual restart, `am restart`), existing browser
 tabs auto-reconnect via WebSocket. The server sends a boot ID on each WS connect
-— if the browser detects a different boot ID on reconnect, it triggers
-`location.reload()` to pick up fresh JS. No stale code in memory after restarts.
+— if the browser detects a different boot ID on reconnect, it reloads the page
+to pick up fresh JS. No stale code in memory after restarts. The reload first
+waits (up to 10s) for the calls queued while the server was down to leave the
+socket, so a restart does not discard them — in dev exactly as in prod.
 
 Additionally, when `--open` is passed the browser open is delayed 1.5s on
 startup. Without `--open` aio opens nothing at all. If an existing tab

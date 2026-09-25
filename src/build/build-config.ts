@@ -101,6 +101,51 @@ export function resolveMacBundleId(
   return declared;
 }
 
+/** THE display-name decider for a build: this build's `--display-name=` (a
+ *  per-target `title`, handed down by the fleet), else deno.json `title`, else
+ *  undefined (callers then fall back to `binaryName`). `--name=` is NOT a
+ *  display name: it names the FILES only, as it always has — making it the
+ *  display name would rename every shipped app that has a per-target `name`.
+ *  Pure. @internal */
+export function resolveAppTitle(
+  mainConfig: Record<string, unknown>,
+  displayName: string | undefined,
+): string | undefined {
+  if (displayName) return displayName;
+  const t = mainConfig.title;
+  return typeof t === "string" && t ? t : undefined;
+}
+
+/** Target kinds whose artifact installs under its DISPLAY name — the macOS
+ *  `.app` in /Applications is named by it, so two such artifacts with one
+ *  display name replace each other there. */
+const INSTALLS_BY_DISPLAY_NAME = new Set(["electron", "electron-client"]);
+
+/** Pairs of fleet targets that would install over each other: both install
+ *  by display name, they are DIFFERENT apps (their binary names differ), and
+ *  their display names are equal. `display`/`binary` are each target's
+ *  resolved names. Pure. @internal */
+export function displayNameClashes(
+  targets: readonly {
+    label: string;
+    kind: string;
+    display: string;
+    binary: string;
+  }[],
+): [string, string, string][] {
+  const out: [string, string, string][] = [];
+  const shown = targets.filter((t) => INSTALLS_BY_DISPLAY_NAME.has(t.kind));
+  for (let i = 0; i < shown.length; i++) {
+    for (let j = i + 1; j < shown.length; j++) {
+      const a = shown[i]!, b = shown[j]!;
+      if (a.display === b.display && a.binary !== b.binary) {
+        out.push([a.label, b.label, a.display]);
+      }
+    }
+  }
+  return out;
+}
+
 export interface BuildConfig {
   // Paths
   root: string;
@@ -314,7 +359,6 @@ export async function loadBuildConfig(): Promise<BuildConfig> {
 
   const mainConfig = (await readDenoJson(root))?.config ?? {};
   const rendererMode = "aio" as const;
-  const appTitle = mainConfig.title as string | undefined;
   // --entry=<module> overrides deno.json's `entry` for THIS build only (a
   // per-target entry from build-all). appDir, and with it every app-asset path,
   // derives from it through the existing rule — no second app-dir rule.
@@ -331,6 +375,13 @@ export async function loadBuildConfig(): Promise<BuildConfig> {
   const defaultName = appIdFromConfig(mainConfig) ?? slugify(basename(root));
   const rawName = Deno.args.find((a) => a.startsWith("--name="))?.slice(7);
   const binaryName = rawName ? slugify(rawName) : defaultName;
+  // THE display-name decider: `--display-name=` is how a per-target `title`
+  // reaches this build; it names what a person SEES (the .app, the DMG volume,
+  // the .desktop Name=, the Windows README, the icon monogram, the Android
+  // label). Without it, deno.json `title` — unchanged for every shipped app.
+  const displayArg = Deno.args.find((a) => a.startsWith("--display-name="))
+    ?.slice("--display-name=".length);
+  const appTitle = resolveAppTitle(mainConfig, displayArg);
   // A Mac that can run `hdiutil`, so a non-macOS host can still produce a
   // .dmg. deno.json `build.macos.host` outranks $AIO_MACOS_SSH.
   const macosHost = resolveMacHost(

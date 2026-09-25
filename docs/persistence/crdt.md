@@ -478,9 +478,12 @@ deleting the ops.
 
 Two warnings you will see before anything goes wrong:
 
-- `sync: cell "x" has a persisted op-log and no \`version\``— declare`version:
-  1` now, so the next shape change has a boundary to migrate across. Dev and
-  prod both warn (a refusal would break every existing sync app).
+- `` sync: cell "x" has a persisted op-log and no `version` `` — declare
+  `version: 1` now, so the next shape change has a boundary to migrate across.
+  Dev and prod both warn (a refusal would break every existing sync app).
+  Declaring it with no `onMigrate` is silent: an unversioned (v0) log and
+  snapshot are taken as the declared shape — v0 means "never versioned", not
+  "older" (the KV path's first-stamp rule).
 - `migrate: sync cell "x" snapshot v1 → v2 but no onMigrate hook` — the same
   `stale` outcome the KV path reports.
 

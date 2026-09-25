@@ -3,14 +3,35 @@
 The same cell code runs in three places. Most behaviour is identical — these are
 the differences that have bitten real apps.
 
-| Concern            | Server (Deno, `aio.run`)                                               | Browser client                                | Standalone (testUI / electron / android)      |
-| ------------------ | ---------------------------------------------------------------------- | --------------------------------------------- | --------------------------------------------- |
-| Read cell state    | the bound cell object reads LIVE state (`app.getState()` equivalent)   | the cell object is reactive (`counter.count`) | the cell object is reactive                   |
-| `ui.exclude`       | server code sees everything (routes, effects)                          | hidden — never broadcast                      | hidden — reads `undefined` + one-time warning |
-| Persistence        | SQLite (aio_kv snapshot + tables + sync op-log)                        | server-driven (patches)                       | `localStorage` (`persist`)                    |
-| Sync cells restore | op-log replayed at boot (headless)                                     | on (re)connect                                | via bundled server                            |
-| `onRestore`        | runs after snapshot restore                                            | n/a                                           | n/a (use `onStart` seeding)                   |
-| `onStart`          | runs **after** cell methods are bound — safe to seed via a cell method | n/a                                           | runs after bind                               |
+| Concern                        | Server (Deno, `aio.run`)                                                         | Browser client                                | Standalone (testUI / electron / android)      |
+| ------------------------------ | -------------------------------------------------------------------------------- | --------------------------------------------- | --------------------------------------------- |
+| Read cell state                | the bound cell object reads LIVE state (`app.getState()` equivalent)             | the cell object is reactive (`counter.count`) | the cell object is reactive                   |
+| `ui.exclude`                   | server code sees everything (routes, effects)                                    | hidden — never broadcast                      | hidden — reads `undefined` + one-time warning |
+| Persistence                    | SQLite (aio_kv snapshot + tables + sync op-log)                                  | server-driven (patches)                       | `localStorage` (`persist`)                    |
+| Sync cells restore             | op-log replayed at boot (headless)                                               | on (re)connect                                | via bundled server                            |
+| cell `onMigrate` / `onRestore` | run after the snapshot restore                                                   | n/a                                           | the same — same code, same `version` stamp    |
+| app `onRestore` / `onStart`    | `onStart` runs **after** cell methods are bound — safe to seed via a cell method | n/a                                           | NOT run in a packaged APK (see below)         |
+| `aio.run({...})` options       | all applied                                                                      | served by the server that ran them            | NOT applied in a packaged APK (see below)     |
+
+## A packaged APK never runs `app.ts`
+
+A local APK (`--android`, no `--remote`) bundles `App.tsx` and what it imports —
+its bundle entry never imports the app's entry module, so **nothing passed to
+`aio.run({...})` reaches the phone**: not `ui.theme` / `ui.layout` / `ui.lang` /
+`ui.dir` (the APK renders the tokens-only look, LTR, no `lang`), not the hooks
+(`onStart`, `onStop`, `onError`, `onAction`, app-level `onRestore`), not
+`persist: false`, `cellDefaults`, `localFirst`, `circuitBreaker`, `perfBudget`
+or `appId`. The android build prints a warning naming each option your entry
+sets (read from its source) and what to do instead:
+
+- look → ship `src/style.css` (the build packages it);
+- `lang` / `dir` → set `document.documentElement.lang` / `.dir` from `App`;
+- persistence / visibility → set them per cell (`cell({ persist })`);
+- seeding / repair → the cell's own `onInit` / `onRestore`.
+
+Or build `--android --remote`: that APK is a client of the server that runs
+`app.ts`, so every option applies. Baking the serializable config into the APK
+is tracked in `todo.md`.
 
 ## Reading state in a server route
 
@@ -35,7 +56,11 @@ everything. Keep true secrets out of cell state entirely when possible;
 - **Server:** seed in `onStart` (fires after the cell method surface is bound,
   so `members.seed()` works) or in `onRestore` (mutate the restored state
   directly).
-- **Standalone:** `onRestore` does not run; seed in `onStart`.
+- **Standalone:** a packaged APK runs `App.tsx` and the cells it imports — never
+  `app.ts` — so nothing passed to `aio.run({...})` reaches it (`onStart`, the
+  app-level `onRestore`, `cellDefaults`). Seed in a cell's `onInit`, and repair
+  restored state in the cell's own `onRestore`: both run on every runtime, after
+  the store restore and any `onMigrate`.
 - Idempotent seeding (check-then-write) is safest — `onStart` runs every boot.
 - **Import the cell _inside_ `onStart`** when the entry file itself calls a
   method:

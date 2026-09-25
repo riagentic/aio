@@ -390,6 +390,39 @@ Deno.test("am auth users: empty and populated, in both renderings", async () => 
   });
 });
 
+// The rescue path starts by FINDING who is locked out — the documented columns
+// are "role, email, 2FA, locked". `locked` is ADDED; the existing JSON fields
+// keep their 1.0.11 values (no email is "—") — the surface is frozen, and a
+// script comparing `.email == "—"` must keep working.
+Deno.test('am auth users: shows who is locked out, and no email stays "—" in JSON', async () => {
+  await withApp(async (appId) => {
+    const s = openUserStore(appDirs(appId).authDb);
+    try {
+      await s.create("alice", "correct-horse-9");
+      await s.create("bob", "correct-horse-9", { email: "b@example.com" });
+      for (let i = 0; i < 5; i++) await s.verify("alice", "wrong-password");
+      assertEquals(await s.verify("alice", "correct-horse-9"), "locked");
+    } finally {
+      s.close();
+    }
+
+    const rows = json<{ id: string; email: unknown; locked: unknown }[]>(
+      await run(["users"], { app: appId }),
+    );
+    assertEquals(rows.length, 2);
+    const byId = Object.fromEntries(rows.map((r) => [r.id, r]));
+    assertEquals(byId.alice!.email, "—");
+    assertEquals(byId.alice!.locked, true);
+    assertEquals(byId.bob!.email, "b@example.com");
+    assertEquals(byId.bob!.locked, false);
+
+    const human = (await run(["users"], { app: appId, tty: true })).logs;
+    assertEquals(human.length, 2);
+    assertStringIncludes(human.find((l) => l.startsWith("alice"))!, "locked");
+    assert(!human.find((l) => l.startsWith("bob"))!.includes("locked"));
+  });
+});
+
 Deno.test("am auth: every subcommand refuses a user that is not there", async () => {
   await withApp(async (appId) => {
     for (

@@ -112,9 +112,27 @@ export function _selectJwk<T>(
   return keys.length === 1 ? keys[0] : undefined;
 }
 
-async function jwksKeys(jwksUri: string): Promise<JsonWebKey[]> {
+/** Least time between two cache-bypassing JWKS re-reads (unknown `kid`). */
+const JWKS_REREAD_MIN_MS = 30_000;
+/** When each JWKS was last re-read because a token named a kid it lacked. */
+const _jwksReread = new Map<string, number>();
+
+async function jwksKeys(
+  jwksUri: string,
+  reread = false,
+): Promise<JsonWebKey[]> {
   const hit = _jwks.get(jwksUri);
-  if (hit && Date.now() - hit.at < CACHE_MS) return hit.keys;
+  if (hit && Date.now() - hit.at < CACHE_MS) {
+    // A KEY ROTATION IS NOT A CACHE HIT. A token naming a kid the cached set
+    // lacks is the first sign the provider published a new key — refusing it
+    // until the hour runs out failed every SSO login after a rotation.
+    // Throttled per JWKS: a stream of foreign kids must not turn the callback
+    // into a fetch pump against the provider.
+    if (!reread) return hit.keys;
+    const last = _jwksReread.get(jwksUri) ?? 0;
+    if (Date.now() - last < JWKS_REREAD_MIN_MS) return hit.keys;
+    _jwksReread.set(jwksUri, Date.now());
+  }
   const resp = await fetch(jwksUri);
   if (!resp.ok) throw new Error(`jwks fetch failed: ${resp.status}`);
   const { keys } = await resp.json() as { keys: JsonWebKey[] };
@@ -126,6 +144,7 @@ async function jwksKeys(jwksUri: string): Promise<JsonWebKey[]> {
 export function _resetOidcCaches(): void {
   _discovery.clear();
   _jwks.clear();
+  _jwksReread.clear();
   _issuerMissingWarned.clear();
   _unverifiedEmailWarned.clear();
 }
@@ -152,7 +171,9 @@ export async function verifyIdToken(
   // "correct until the issuer adds a second key" is not a property worth
   // having. A key set with no kid at all is still matched by position, because
   // some issuers publish none and refusing them would break a working setup.
-  const jwk = _selectJwk(keys, header.kid);
+  const jwk = _selectJwk(keys, header.kid) ??
+    // Unknown kid → the provider may have rotated: re-read once (throttled).
+    _selectJwk(await jwksKeys(jwksUri, true), header.kid);
   if (!jwk) throw new Error("oidc_unknown_kid");
   const key = await crypto.subtle.importKey(
     "jwk",

@@ -95,7 +95,9 @@ export type CellCost = {
 export type CostReport = {
   /** Window actually covered, in seconds (never longer than the ring holds). */
   windowSec: number;
-  /** True when the ring wrapped — the window is a floor, not the whole story. */
+  /** True when a ring dropped samples from INSIDE the window — the window is
+   *  then a floor, not the whole story. A ring that wrapped long before the
+   *  window began has lost nothing from it. */
   truncated: boolean;
   cells: CellCost[];
   /** EXACT wire totals — the bytes that crossed sockets in the window. */
@@ -409,7 +411,14 @@ export function createCostMeter(opts: {
 
       return {
         windowSec: Math.round(effectiveSec * 100) / 100,
-        truncated: sends.wrapped || attribs.wrapped || reduces.wrapped,
+        // A ring that wrapped only lost samples INSIDE this window when what
+        // it still holds starts at or after the window's start. "Has ever
+        // wrapped" is the normal state of any long-running app, so that alone
+        // told every `am cost --window=10s` on a busy server that "older
+        // samples dropped" out of a window its rings covered many times over.
+        truncated: [sends, attribs, reduces].some((ring) =>
+          ring.wrapped && (ring.oldest()?.at ?? Infinity) >= from
+        ),
         cells,
         wire: {
           bytesPerSec: totalBytes / sendSec,

@@ -14,7 +14,7 @@ import { createDebtRetry } from "./debt-retry.ts";
 import { attributeRound } from "./server-broadcast.ts";
 import type { VitalsSystem } from "../vitals/mod.ts";
 import type { BudgetLedger } from "../state/budgets.ts";
-import type { ComposedCells } from "../state/cell.ts";
+import type { CellStatus } from "../state/cell-compose-types.ts";
 import type { ServerHandle } from "./server-types.ts";
 import {
   AppLock,
@@ -34,6 +34,7 @@ import { getLogger, log } from "../diagnostics/logger-api.ts";
 import { snapshotCellsError, snapshotShapeError } from "./server-static.ts";
 import { findUnserializable, PersistSerializeError } from "./persist-guard.ts";
 import { deepFreeze } from "../state/immutable.ts";
+import { detectShapeDrift } from "../state/cell-migrate.ts";
 
 /** Cache key for a user — a STABLE serialization of everything `ui.forUser`
  *  can observe, not just the id.
@@ -184,6 +185,8 @@ export function startVitalsCheck(opts: {
   heartbeatInterval: number;
   dispatch: { getQueueDepth: () => number; getEffectBacklog: () => number };
   getState: () => unknown;
+  /** THIS app's cell health rows (`AioConfig._cellHealth`). */
+  cellHealth?: (state: Record<string, unknown>) => CellStatus[];
 }): ReturnType<typeof setInterval> {
   return setInterval(() => {
     opts.vitalsSystem.loopProbe.updateQueueDepth(
@@ -192,11 +195,8 @@ export function startVitalsCheck(opts: {
     opts.vitalsSystem.loopProbe.updateEffectBacklog(
       opts.dispatch.getEffectBacklog(),
     );
-    const composed = (globalThis as Record<string, unknown>).__aioCells as
-      | ComposedCells
-      | undefined;
-    if (composed) {
-      const health = composed.registry.health(
+    if (opts.cellHealth) {
+      const health = opts.cellHealth(
         opts.getState() as Record<string, unknown>,
       );
       const tripped = health.filter((f: { enabled: boolean }) => !f.enabled)
@@ -229,7 +229,10 @@ export function buildAppObject<S, A>(refs: {
   port: number;
   asyncDb: unknown;
   initialState: S;
-  persistence: { resetPrevState: () => void };
+  persistence: {
+    resetPrevState: () => void;
+    unstampShapes?: (cells: readonly string[]) => void;
+  };
   schedulePersist: () => void;
   getTT: () => TTState<S, { type: string }> | null;
   setTT: (tt: TTState<S, { type: string }>) => void;
@@ -285,6 +288,31 @@ export function buildAppObject<S, A>(refs: {
           Object.keys(refs.initialState as Record<string, unknown>),
         );
         if (mismatch) throw new Error(mismatch);
+      } else {
+        // `force` DESTROYS a declared cell the snapshot lacks — to its
+        // declared state, which is what every restart gives it. Left absent,
+        // the live state held no slice: every method of the cell threw
+        // REDUCE_ERROR until a restart, and a sync cell's fold pushed
+        // "nothing" to its clients (reported as a ui-hidden cell).
+        const init = refs.initialState as Record<string, unknown>;
+        for (const k of Object.keys(init)) {
+          if (!(k in (parsed as Record<string, unknown>))) {
+            (parsed as Record<string, unknown>)[k] = init[k];
+          }
+        }
+        // …and DROPS a cell this app does not declare, which is also what a
+        // restart does. Kept, it lived in memory only: `snapshot()` exported
+        // it and the next boot discarded it without a word.
+        const dropped = Object.keys(parsed as Record<string, unknown>)
+          .filter((k) => !Object.hasOwn(init, k));
+        for (const k of dropped) delete (parsed as Record<string, unknown>)[k];
+        if (dropped.length) {
+          log.warn(
+            `snapshot: --force dropped ${dropped.length} undeclared cell(s): ` +
+              `${dropped.join(", ")} — this app does not declare them, so ` +
+              `there is nothing to load them into`,
+          );
+        }
       }
       // FROZEN, like every other state the app holds. It went in as the raw
       // parse: a write outside a method (`getState().cell.x.y = 1`) then
@@ -299,6 +327,20 @@ export function buildAppObject<S, A>(refs: {
       // to reach them, or they'd keep mutating the state we just replaced.
       refs.onStateReplaced?.();
       refs.persistence.resetPrevState();
+      // A loaded slice was not written by this declaration's methods, so its
+      // next write must not carry this build's shape stamp: a backup taken
+      // before a rename would otherwise read, at the next dev boot, as drift
+      // the app wrote itself — booted and dropped instead of refused. Only a
+      // slice that actually drifts loses the stamp; a clean one is as good as
+      // one this build wrote.
+      const declared = refs.initialState as Record<string, unknown>;
+      const loaded = refs.getState() as Record<string, unknown>;
+      const foreign = Object.keys(declared).filter((c) =>
+        detectShapeDrift({ [c]: declared[c] }, { [c]: loaded[c] }).some((d) =>
+          d.issue === "unknown-field" || d.issue === "type-changed"
+        )
+      );
+      if (foreign.length) refs.persistence.unstampShapes?.(foreign);
       const tt = refs.getTT();
       if (tt) {
         refs.setTT(record(tt, { type: "__snapshot" }, refs.getState()));

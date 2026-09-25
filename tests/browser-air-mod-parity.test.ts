@@ -49,12 +49,6 @@ const ABSENT_ON_BROWSER: Record<string, string> = {
     "browser cell is a protocol stub with no app to bind",
   composeCells: "server: composes cells into the server's reduce/execute " +
     "pipeline; the browser dispatches to that pipeline over the wire",
-  table: "server: SQLite schema for aio.run({ db })",
-  pk: "server: SQLite column builder for aio.run({ db })",
-  integer: "server: SQLite column builder for aio.run({ db })",
-  real: "server: SQLite column builder for aio.run({ db })",
-  text: "server: SQLite column builder for aio.run({ db })",
-  ref: "server: SQLite column builder for aio.run({ db })",
 };
 
 /** The names that ship on the browser entry BECAUSE a cell module or a
@@ -74,6 +68,13 @@ const SHIPPED_FOR_CELL_MODULES = [
   "degraded",
   "degradedReport",
   "serverImport",
+  // `db:` schema builders: a table is declared beside its cell.
+  "table",
+  "pk",
+  "integer",
+  "real",
+  "text",
+  "ref",
 ] as const;
 
 /** Server-only names the browser entry carries as FACADES that throw (or

@@ -132,6 +132,12 @@ Deno.addSignalListener("SIGINT", () => {
 });
 ```
 
+A `connectCli` client never shows a state the server does not have. When the
+server cannot send it a full state (over a Deno peer's 64 MiB message ceiling,
+`ws-frame-ceiling`), the client says `out of sync`, drops its copy — `state`
+reads `null`, `connected` reads `false` — applies no patch meanwhile, asks for
+the state again on each change, and takes it once it fits.
+
 `source` is anything with `subscribe(fn) → unsubscribe`: the handle
 `connectCli()` returns, a signal, `getCellSignal(name)` from `aio/state-core`.
 On a terminal each frame is a clean full redraw (screen cleared, cursor hidden,

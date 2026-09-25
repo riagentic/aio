@@ -513,6 +513,14 @@ directory, so dev and a packaged app agree. Every refusal is logged with its
 reason (`[aio:electron] openWindow refused — …`). See [webview](webview.md) for
 the inline alternative.
 
+A child window has **no channel back to the app**. Its preload can inject into
+the page, but `ipcRenderer.sendToHost` goes nowhere (that is a `<webview>`
+feature), and the main process is aio's, so the app cannot add an `ipcMain`
+handler. A preload that must deliver something to the app (a wallet provider's
+signing request, say) needs the page inline: a `<webview>` guest's preload
+reaches its host with `ipcRenderer.sendToHost`, heard as `ipc-message` on the
+element.
+
 The child window is **sandboxed**. `openWindow(url, { sandbox: false })` — the
 page-world injection escape hatch — is refused unless the app itself asked for
 it:

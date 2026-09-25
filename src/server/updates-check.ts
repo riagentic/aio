@@ -43,6 +43,15 @@ export type TrustStore = {
    *  poisoned by exactly that bug: it is ignored, so the next check refetches
    *  in full.) */
   etagCurrent?: string;
+  /** WHAT `etagCurrent` was a verdict about: the running version and the
+   *  manifest URL it was judged against. "You are current" is a fact about
+   *  THIS install and THIS channel, not about the manifest alone — an older
+   *  binary started on the same data dir (a downgrade, a second copy, a
+   *  reinstall) sent the newer install's validator, got a 304, and was told
+   *  it was the latest while a newer release sat in the manifest. A cached
+   *  tag is sent only when both still match; one without this (written
+   *  before it existed) is not sent at all, so the next check refetches. */
+  etagCurrentFor?: { version: string; url: string };
   /** The commit this build was made from — a git source's "current version". */
   commit?: string;
   /** The SHA-256 of the artifact this install is RUNNING, as verified at the
@@ -110,13 +119,36 @@ export function readTrust(dataDir: string): TrustStore {
   return parsed as TrustStore;
 }
 
+/** Replace the trust file ATOMICALLY: temp file, fsync, rename — the shape
+ *  `writePending` uses. It is rewritten on every routine "you are current"
+ *  check, and `readTrust` refuses a file it cannot parse (boot reads it), so a
+ *  crash inside an in-place write stopped the app from starting over a cache
+ *  field. Interrupted, this leaves the previous file whole. */
+function writeTrustFile(path: string, next: TrustStore): void {
+  const tmp = `${path}.tmp-${Deno.pid}`;
+  try {
+    Deno.writeTextFileSync(tmp, JSON.stringify(next, null, 2));
+    const f = Deno.openSync(tmp, { write: true });
+    try {
+      f.syncSync();
+    } finally {
+      f.close();
+    }
+    Deno.renameSync(tmp, path);
+  } catch (e) {
+    try {
+      Deno.removeSync(tmp);
+    } catch { /* aio-ok: never written, or already renamed */ }
+    throw e;
+  }
+}
+
 /** Merge and persist. Best-effort by design: a read-only home must not stop an
  *  app from running, and the only thing lost is the memory of an ETag. The one
  *  exception is the KEY — see pinKey. */
 export function writeTrust(dataDir: string, patch: Partial<TrustStore>): void {
   try {
-    const next = { ...readTrust(dataDir), ...patch };
-    Deno.writeTextFileSync(trustPath(dataDir), JSON.stringify(next, null, 2));
+    writeTrustFile(trustPath(dataDir), { ...readTrust(dataDir), ...patch });
   } catch { /* best-effort */ }
 }
 
@@ -181,7 +213,7 @@ export function pinKey(
   }
   const next = { ...readTrust(dataDir), key };
   try {
-    Deno.writeTextFileSync(trustPath(dataDir), JSON.stringify(next, null, 2));
+    writeTrustFile(trustPath(dataDir), next);
   } catch (e) {
     throw new Error(
       `[updates] cannot pin the release signing key at ${
@@ -221,6 +253,10 @@ export type ManifestFetch =
      *  `transportAuthenticatesHost`. The artifact may still be fetched over
      *  plain http once a key is pinned: the signed digest carries integrity. */
     pinnable: boolean;
+    /** The URL `pinnable` was judged by — the first redirect hop whose
+     *  transport does not authenticate its host, else the last one. What
+     *  `pinKey` is handed as `from`. */
+    pinFrom: string;
   }
   | { kind: "error"; error: string };
 
@@ -228,6 +264,9 @@ export type ManifestFetch =
  *  login page, an error document, or a host that decided to hand back a DVD —
  *  and `res.text()` would buffer all of it before anyone could object. */
 const MANIFEST_MAX_BYTES = 1_000_000;
+
+/** Redirect hops a manifest fetch follows — fetch's own `follow` limit. */
+const MAX_REDIRECTS = 20;
 
 /** Is this actually a ship manifest, or just an object that reached us?
  *
@@ -438,10 +477,32 @@ export async function fetchManifest(
 ): Promise<ManifestFetch> {
   const isFile = url.startsWith("file:");
   try {
-    const res = await fetch(url, {
-      headers: !isFile && etag ? { "if-none-match": etag } : undefined,
-      redirect: "follow",
-    });
+    // Redirects are followed BY HAND, so every hop's transport is seen: a key
+    // may be pinned only if EACH leg authenticated its host. Judging the
+    // configured URL alone pinned whatever a downgrading mirror's plain-http
+    // leg carried — the URL judged was not the one that served the body.
+    let at = url;
+    let pinFrom = url;
+    let res: Response;
+    for (let hop = 0;; hop++) {
+      res = await fetch(at, {
+        headers: !isFile && etag ? { "if-none-match": etag } : undefined,
+        redirect: "manual",
+      });
+      const next = res.headers.get("location");
+      if (res.status < 300 || res.status > 399 || res.status === 304 || !next) {
+        break;
+      }
+      await res.body?.cancel();
+      if (hop >= MAX_REDIRECTS) {
+        return {
+          kind: "error",
+          error: `${url} redirected more than ${MAX_REDIRECTS} times`,
+        };
+      }
+      at = new URL(next, at).href;
+      if (transportAuthenticatesHost(pinFrom)) pinFrom = at;
+    }
     if (res.status === 304) {
       await res.body?.cancel();
       return { kind: "not-modified" };
@@ -489,7 +550,8 @@ export async function fetchManifest(
       kind: "ok",
       manifest: parsed.manifest,
       etag: res.headers.get("etag") ?? undefined,
-      pinnable: transportAuthenticatesHost(url),
+      pinnable: transportAuthenticatesHost(pinFrom),
+      pinFrom,
     };
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e);
@@ -703,7 +765,11 @@ export async function downloadArtifact(opts: {
       };
     }
     const sha = hash.digest("hex");
-    if (sha !== opts.expectSha256) {
+    // Case-blind: the manifest validator accepts either case (a digest from
+    // PowerShell's `Get-FileHash` is UPPERCASE), and the digest computed here
+    // is lowercase — so an exact compare refused every such release with
+    // "does not match", naming two identical digests.
+    if (sha !== opts.expectSha256.toLowerCase()) {
       return {
         ok: false,
         error: `downloaded artifact does not match the manifest (sha256 ${
@@ -742,7 +808,8 @@ export async function verifyDownload(
   const claims = await verifyManifestClaims(manifest, expect);
   if (!claims.ok) return claims;
   const sha256 = await fileSha256(path);
-  if (sha256 !== manifest.sha256) {
+  // Case-blind for the same reason as `downloadArtifact`.
+  if (sha256 !== manifest.sha256.toLowerCase()) {
     return {
       ok: false,
       reason: "sha256 mismatch — binary does not match manifest",
@@ -804,9 +871,31 @@ export async function gitLsRemote(
         const [sha = "", name = ""] = l.split(/\s+/);
         return { sha, name };
       });
-    // The dereferenced entry wins when it is there; it is the commit.
-    const picked = lines.find((l) => l.name.endsWith("^{}")) ?? lines[0];
-    const sha = picked?.sha ?? "";
+    // `ls-remote <pattern>` matches the TAIL of a ref name, so `main` also
+    // lists `refs/heads/feature/main` — which sorts FIRST. Taking the first
+    // line followed that branch instead, while the rebuild clones `--branch
+    // main`: the recorded commit never equalled the "head", and every check
+    // offered the same update again (with `auto`, an endless rebuild loop).
+    // So the ref is resolved EXACTLY, in the order `git clone --branch` uses
+    // (a branch, then a tag), or taken verbatim for a full name such as
+    // `HEAD`. The dereferenced entry of the chosen name wins when it is
+    // there: for an annotated tag it is the commit.
+    let picked: { sha: string; name: string } | undefined;
+    for (const name of [`refs/heads/${ref}`, `refs/tags/${ref}`, ref]) {
+      picked = lines.find((l) => l.name === `${name}^{}`) ??
+        lines.find((l) => l.name === name);
+      if (picked) break;
+    }
+    if (!picked) {
+      return {
+        ok: false,
+        error: `git ls-remote found no branch or tag named exactly "${ref}" ` +
+          `in ${source} (it matched only ${
+            lines.map((l) => l.name).join(", ")
+          }) — check the branch or tag name`,
+      };
+    }
+    const sha = picked.sha;
     if (!/^[0-9a-f]{40}$/.test(sha)) {
       return {
         ok: false,

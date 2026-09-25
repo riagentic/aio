@@ -114,3 +114,45 @@ Deno.test("console intercept: the forwarded entry carries the CALLER's location"
     );
   }
 });
+
+Deno.test("_serialize: NaN, undefined, functions and symbols say what the console says", () => {
+  // JSON.stringify turns NaN into "null" and undefined/functions/symbols into
+  // `undefined`, which `join` prints as "" — the forwarded line in `am logs`
+  // then said something the page's own console never did.
+  assertEquals(_serialize(["total:", NaN]), "total: NaN");
+  assertEquals(_serialize(["got", undefined]), "got undefined");
+  assertEquals(_serialize([Infinity, -Infinity]), "Infinity -Infinity");
+  assertEquals(_serialize([function onTick() {}]), "[Function onTick]");
+  assertEquals(_serialize([Symbol("k")]), "Symbol(k)");
+  assertEquals(_serialize([10n, true, null]), "10 true null");
+});
+
+Deno.test("_serialize: nested NaN, undefined, functions, symbols and cycles keep their console words", () => {
+  // JSON.stringify printed `{ total: NaN, cb: undefined }` as `{"total":null}`
+  // — the NaN became null and the key vanished.
+  assertEquals(
+    _serialize([{ total: NaN, cb: undefined }]),
+    '{"total":NaN,"cb":undefined}',
+  );
+  assertEquals(_serialize([[undefined, Infinity]]), "[undefined,Infinity]");
+  assertEquals(
+    _serialize([{ f: function onTick() {}, s: Symbol("k"), n: 10n }]),
+    '{"f":[Function onTick],"s":Symbol(k),"n":10n}',
+  );
+  // Plain data prints exactly as JSON did (toJSON included).
+  const plain = { a: 1, b: ["x", true, null], d: new Date(0), o: { c: -2 } };
+  assertEquals(_serialize([plain]), JSON.stringify(plain));
+  // A cycle is named in place, the rest of the value survives.
+  const cyc: Record<string, unknown> = { id: 7 };
+  cyc.self = cyc;
+  assertEquals(_serialize([cyc]), '{"id":7,"self":[Circular]}');
+  // A shared (non-cyclic) reference is not a cycle.
+  const shared = { v: 1 };
+  assertEquals(_serialize([[shared, shared]]), '[{"v":1},{"v":1}]');
+  // Depth and size are bounded.
+  let deep: unknown = NaN;
+  for (let i = 0; i < 50; i++) deep = [deep];
+  assert(_serialize([deep]).includes("[Array]"));
+  const huge = Array.from({ length: 100_000 }, (_, i) => ({ i }));
+  assert(_serialize([huge]).length <= 4096);
+});

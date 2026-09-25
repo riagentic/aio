@@ -19,9 +19,11 @@ single `state.db`. On restart, persisted state is **deep-merged** with
   primitive keeps its stored `null`). If `null` is a value the field holds,
   declare it `null as T | null`. Dev also warns at the write that stores one.
 - A key a method adds to a declared non-empty object (`opts: { a: 1 }`, then
-  `s.opts.b = 3`) is **not** restored: dev warns at the write and refuses to
-  boot on it, production boots without it and the next write removes it from
-  disk. Declare it, or declare the object as `{}` (an open record).
+  `s.opts.b = 3`) is **not** restored: dev warns at the write; the next boot
+  (dev and production alike) goes on without it, says so by name, and the next
+  write removes it from disk. The same goes for a value a method writes with the
+  wrong type (`s.count += "abc"` over a declared number): the declared default
+  comes back. Declare it, or declare the object as `{}` (an open record).
 
 Writes are **debounced** (`persistDebounceMs`, default 100 ms), so a method that
 has returned is committed in memory and broadcast, but not yet on disk. What
@@ -63,7 +65,7 @@ To opt every cell out by default (e.g. for privacy-sensitive apps), use
 ```ts
 await aio.run({
   cells: [counter, auth],
-  cellDefaults: { persist: "all" },
+  cellDefaults: { persist: "none" }, // a cell that sets `persist` still wins
 });
 ```
 
@@ -162,13 +164,26 @@ the hook returns.
 
 `persist: "none"` keeps a cell's **state** out of the state store — and out of
 the dev checkpoint (`logs/checkpoint.json`), which can be read back by
-`onCheckpointRestore` and so leaves every `persist: "none"` cell out. Since
-1.0.11 it also keeps the cell's **payloads** out of `logs/actions.jsonl` and the
+`onCheckpointRestore` and so leaves every `persist: "none"` cell out — and every
+field a `persist: { exclude }` (or `include`) keeps off disk; a restored
+checkpoint brings those fields back exactly as a restart does. Since 1.0.11 it
+also keeps the cell's **payloads** out of `logs/actions.jsonl` and the
 state-diff debug log: a `setToken(t)` call's argument IS the state the cell must
 never keep, so the line records that the action ran, with its payload redacted.
-Lines an older build wrote are rewritten once, in place. To keep the cell's
-actions out entirely — the line, not just its payload — use `diagnostics: false`
-(the whole cell) or `redactActions` (named actions), below.
+Lines an older build wrote are rewritten once, in place. Under `journal: true`
+the durability journal withholds the same payloads: such a cell's calls are
+journalled without their arguments and are not replayed after a crash (its state
+is never restored, so a crash brings it back empty, as a clean restart does),
+while what a call wrote to **persisted** cells — a `listensTo` reaction — is
+journalled as data and survives. The copies an older build left are scrubbed
+once at boot, in place: the rolling `.snapshot`, the pre-update `backups/`,
+`am backup` copies, the `data.replaced-*` folder `am restore` sets aside, and
+every journal among them — except, in an older build's journal, a call some cell
+`listensTo`: that line is the only record of the reaction it caused, so it is
+kept and the copy is named in a warning (restore it and let one boot replay it,
+or delete the copy). To keep the cell's actions out entirely — the line, not
+just its payload — use `diagnostics: false` (the whole cell) or `redactActions`
+(named actions), below.
 
 They are different things and they now have different words:
 
@@ -293,11 +308,15 @@ collection (walk down, then across).
 `am migrations` shows a running app's declared vs stored version per cell, what
 the last boot's migration pass did, and any **shape drift** — a field still in
 storage that the current `state` no longer declares. It needs a running app: a
-dev boot REFUSES over unmigrated drift, and that refusal prints the same picture
-— the drifted fields per cell, where the data is, and the ways out (including
-`am start --instance=<name>`, which runs the new build against a private, empty
-data home and leaves the refused data untouched). Production boots and warns
-instead, so a rename you forgot to migrate is visible before a user reports it.
+dev boot REFUSES over unmigrated drift left by a changed declaration (every
+write stamps its cell's declared shape, so drift the app's OWN methods wrote
+under an unchanged `state:` is told apart: that boot goes on, restores the
+declared defaults and names each field), and that refusal prints the same
+picture — the drifted fields per cell, where the data is, and the ways out
+(including `am start --instance=<name>`, which runs the new build against a
+private, empty data home and leaves the refused data untouched). Production
+boots and warns instead, so a rename you forgot to migrate is visible before a
+user reports it.
 
 Boot also says the **safe** case out loud:
 
@@ -375,7 +394,10 @@ app.loadSnapshot!(otherAppsFile, { force: true }); // a file whose cell set does
 A snapshot has the shape `snapshot()` returns: an object keyed by cell name,
 each value that cell's **whole state object**. It must name every declared cell
 and no other — a missing cell would be wiped, so a mismatch throws
-(`snapshot refused — it has nothing for cell "counter"…`) unless `force: true`.
+(`snapshot refused — it has nothing for cell "counter"…`) unless `force: true`,
+which wipes each missing cell to its declared state and drops each cell the app
+does not declare, with a warning (what a restart gives it). A load is as durable
+as a write, `sync: true` cells included, and their clients get the loaded state.
 Pass the exact string `snapshot()` gave you.
 
 ### HTTP endpoints

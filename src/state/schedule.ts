@@ -455,6 +455,44 @@ function _checkEveryMs(id: string, ms: unknown): void {
   }
 }
 
+/** An ISO-like date-time with NO offset (`2026-01-01T09:00`, seconds and
+ *  fraction optional; a space for the `T` too) — exactly what
+ *  `<input type="datetime-local">` yields. `new Date()` reads that shape in
+ *  the MACHINE's zone (a bare date is UTC, a `Z`/`±hh:mm` one is explicit),
+ *  and `at` keeps that reading: v1.0.11 armed it so, and existing apps rely
+ *  on it. Reading it as UTC is a breaking fix, parked in `future/v2.md`. */
+const ISO_NO_OFFSET = /^\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?$/;
+
+/** Is `time` an offset-less date-time — read in this machine's zone? */
+function _isZoneLocal(time: unknown): boolean {
+  return typeof time === "string" && ISO_NO_OFFSET.test(time.trim());
+}
+
+/** The action a schedule will dispatch. `aio.run({ schedules })` refused a
+ *  non-action by name; the `schedule.*` builders did not, so
+ *  `schedule.after("t", 5000, "timer:tick")` — a bare string, the natural
+ *  slip — or an action missing its `type` returned `ok` from the method and
+ *  detonated at FIRE time as `REDUCE_ERROR Cannot read properties of
+ *  undefined (reading 'endsWith')` for reducer "?", naming neither the
+ *  schedule nor the mistake (and an `after` retried it three times). Same
+ *  predicate and words as the config check, at the call that wrote it. */
+function _checkAction(api: string, id: string, action: unknown): void {
+  const t = (action as { type?: unknown } | null | undefined)?.type;
+  if (
+    typeof action === "object" && action !== null && typeof t === "string" &&
+    t !== ""
+  ) return;
+  throw teachableError(
+    `schedule.${api} '${id}': action is ${
+      describeValue(action)
+    }, not an action object`,
+    'use cell.method.action() (or { type: "cell:method", payload }) — a ' +
+      "bare string or a type-less object has nothing to dispatch and fails " +
+      "on the first tick, not here",
+    SCHEDULE_DOC,
+  );
+}
+
 /** The target time in ms, or a throw naming the accepted form. */
 function _checkAt(time: unknown): number {
   const target = new Date(time as string).getTime();
@@ -578,6 +616,31 @@ function _requireDuration(
   return v;
 }
 
+/** The retry counter `backoff`/`poll` scale by. It was never checked, so an
+ *  unset one (`s.attempts` never initialised → `undefined`) made the delay
+ *  `NaN`: the method returned `ok`, and the retry it asked for was refused
+ *  LATER by the scheduler as `schedule.after '<id>': ms must be finite` — an
+ *  EFFECT_ERROR naming an API the app never called, with the retry silently
+ *  gone. Refused here instead, exactly when the arithmetic below would yield
+ *  NaN (it coerces like `Math.max` does, so every input that works keeps
+ *  working). */
+function _requireAttempt(
+  fn: "backoff" | "poll",
+  id: string,
+  attempt: unknown,
+): void {
+  // A bigint/symbol already throws a TypeError out of the arithmetic.
+  if (typeof attempt === "bigint" || typeof attempt === "symbol") return;
+  if (!Number.isNaN(Number(attempt))) return;
+  throw teachableError(
+    `schedule.${fn} '${id}': attempt is ${describeValue(attempt)}, not a ` +
+      `number`,
+    "attempt counts the tries so far — 0 for the first; an unset counter " +
+      "reads undefined, so write `s.attempts ?? 0`",
+    SCHEDULE_DOC,
+  );
+}
+
 /** `(fn, id, key)` triples already warned about in production. */
 const _negativeWarned = new Set<string>();
 
@@ -630,6 +693,7 @@ function _backoffEffect(
   opts: BackoffOpts,
   action: ScheduleAction,
 ): ScheduleEffect {
+  _requireAttempt("backoff", id, attempt);
   const base = _requireDuration("backoff", id, "base", opts.base);
   const factor = opts.factor === undefined
     ? 2
@@ -664,6 +728,7 @@ function _pollEffect(
       ),
     );
   }
+  _requireAttempt("poll", id, attempt);
   const every = _requireDuration("poll", id, "every", opts.every);
   const factor = opts.factor === undefined
     ? 1
@@ -741,6 +806,7 @@ export const schedule = {
   ): ScheduleEffect => {
     _checkId(id);
     _checkAfterMs(id, ms);
+    _checkAction("after", id, action);
     return {
       type: "__schedule",
       kind: "after",
@@ -776,6 +842,7 @@ export const schedule = {
   ): ScheduleEffect => {
     _checkId(id);
     _checkEveryMs(id, ms);
+    _checkAction("every", id, action);
     return {
       type: "__schedule",
       kind: "every",
@@ -792,6 +859,7 @@ export const schedule = {
   ): ScheduleEffect => {
     _checkId(id);
     _checkAt(time);
+    _checkAction("at", id, action);
     return {
       type: "__schedule",
       kind: "at",
@@ -807,6 +875,7 @@ export const schedule = {
   ): ScheduleEffect => {
     _checkId(id);
     _checkCron(id, pattern);
+    _checkAction("cron", id, action);
     return {
       type: "__schedule",
       kind: "cron",
@@ -861,6 +930,7 @@ export const schedule = {
     action: { type: string; payload?: unknown },
   ): ScheduleEffect => {
     _checkId(id);
+    _checkAction("next", id, action);
     return { type: "__schedule", kind: "after", id, ms: 0, action };
   },
   cancel: (id: string): ScheduleEffect => {
@@ -1130,6 +1200,7 @@ export function createScheduleManager(
   /** id → the cell that issued it (noteScheduleOwner), for cancel-on-disable. */
   const owners = new Map<string, string>();
   const warnedCollisions = new Set<string>();
+  const warnedZoneLocal = new Set<string>(); // `at` ids warned offset-less
   // Schedules whose latest tick has not settled — see `skipIfRunning`.
   const inFlight = new Set<string>();
   // Consecutive skipped ticks per id — a wedged poller has to be audible.
@@ -1354,15 +1425,25 @@ export function createScheduleManager(
       // `stopped … errors=0` summary, for a condition the next three lines
       // exist to handle.
       const code = (e as { code?: string })?.code;
-      const closed = code === "DISPATCH_CLOSED" || code === "DISPATCH_DRAINING";
-      if (closed) {
+      // Paused time travel refuses at the same door with the same code, but it
+      // is a developer's click in the debug panel, not a shutdown: the app
+      // resumes. Reading it as "closed" cancelled every schedule whose tick
+      // fell inside a pause, so after resume the app never polled again. The
+      // tag is `TT_PAUSED` (dispatch.ts — not imported: dispatch imports this
+      // module). The tick is dropped like any refused one; the schedule lives.
+      const paused = (e as { reason?: unknown })?.reason === "tt-paused";
+      if (paused) {
+        log.debug(`schedule: '${id}' tick dropped — time travel is paused`);
+        if (kind === "every" || kind === "cron") return;
+        // A one-shot has no next tick: it takes the ordinary retry below.
+      } else if (code === "DISPATCH_CLOSED" || code === "DISPATCH_DRAINING") {
         // There is nothing to retry into, and re-arming a timer here would
         // resurrect one `cancelAll()` just cleared.
         log.debug(`schedule: '${id}' dropped — the dispatch loop is closed`);
         cancelTimer(id);
         return;
       }
-      log.error(`schedule: dispatch '${id}' failed: ${e}`);
+      if (!paused) log.error(`schedule: dispatch '${id}' failed: ${e}`);
       if (kind === "every" || kind === "cron") {
         // A REPEATING schedule survives a failed tick. One transient failure —
         // a network blip inside a poll, a momentary queue overflow — must not
@@ -1384,11 +1465,29 @@ export function createScheduleManager(
         );
         return;
       }
+      // The METHOD threw (a sync body — an async one throws after its dispatch
+      // has settled, so it never lands here). That is the job's answer, not a
+      // refused tick: it ran. Re-running it three more times turned one fault
+      // into four, and a deliberate refusal into a possible late success —
+      // while the same method written `async` ran once. The retry is for a
+      // tick the door refused, where nothing ran.
+      if (code === "REDUCE_ERROR") {
+        cancelTimer(id);
+        return;
+      }
       if (retryCount < 3) {
         const timerId = clock.setTimeout(
           () => {
             timers.delete(id); // fired: the entry is spent, the epoch is not
-            safeDispatch(id, action, kind, retryCount + 1);
+            // A paused retry is not a failed one: a pause may outlast
+            // three 5s retries, and giving up then would drop the job with
+            // an ERROR for a click in the debug panel.
+            safeDispatch(
+              id,
+              action,
+              kind,
+              paused ? retryCount : retryCount + 1,
+            );
           },
           5000,
         );
@@ -1587,6 +1686,23 @@ export function createScheduleManager(
     action: { type: string; payload?: unknown },
   ): void {
     const target = _checkAt(time);
+    const zoneLocal = _isZoneLocal(time);
+    // An offset-less time is read in THIS machine's zone (as `new Date()`
+    // does, and as v1.0.11 did) — the same app on a laptop in Tokyo and on a
+    // UTC server fires nine hours apart. Kept for compat, said out loud once
+    // per id, identically in dev and prod (observe-only). Bounded like the
+    // other warn-once sets: past the cap it still warns, just unremembered.
+    if (zoneLocal && !warnedZoneLocal.has(id)) {
+      if (warnedZoneLocal.size < 256) warnedZoneLocal.add(id);
+      log.warn(
+        `schedule: at '${id}' time ${
+          JSON.stringify(time)
+        } has no offset, so it is read in this machine's zone (${
+          new Date(target).toISOString()
+        }) — hosts in different zones fire it at different instants. ` +
+          `Fix: append "Z" for UTC or an offset like "+09:00".`,
+      );
+    }
     // AIO-236: a target in the past never fires. Said out loud, not at debug:
     // the id also never shows up in `active()`, so "my 09:00 job did nothing"
     // had no observable trace anywhere — and the usual cause is a UTC/local
@@ -1607,7 +1723,11 @@ export function createScheduleManager(
           replaced
             ? `; the previous '${id}' schedule it replaces was CANCELLED`
             : ""
-        }. Times are UTC.`,
+        }. ${
+          zoneLocal
+            ? "An offset-less time is read in this machine's zone."
+            : "Times are UTC."
+        }`,
       );
       return;
     }
@@ -1728,6 +1848,7 @@ export function createScheduleManager(
   function handle(effect: ScheduleEffect): void {
     validateId(effect.id);
     if (effect.kind !== "cancel") {
+      _checkAction(effect.kind, effect.id, effect.action);
       rejectUnresolvedSelf(effect.id, effect.action);
     }
     // a dynamic schedule reusing a static id silently replaces it

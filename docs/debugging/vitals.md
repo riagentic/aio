@@ -1,25 +1,27 @@
 # Vitals
 
 Client diagnostic system for detecting and diagnosing UI freezes. Three probes
-measure different layers; a hint engine correlates signals into root-cause
-diagnosis.
+measure different layers; on the server, a hint engine correlates the loop and
+transport signals into a root-cause diagnosis. The browser runs no hint engine:
+it measures, reports its own render status with a one-line render hint, and
+sends its staleness to the server.
 
 ## Architecture
 
 ```
 Client (Browser/Electron)              Server
 +----------------------------+    +----------------------------+
-| RenderProbe                |    | LoopProbe                  |
-|  setTimeout drift + rAF    |    |  hooks into dispatch()     |
-|                            |    |  queue depth, drain rate   |
-| TransportProbe (client)    |    |  reduce timing, p95        |
-|  sends ping, measures RTT  |    |                            |
-|                            |    | TransportProbe (server)    |
-|                            |    |  tracks client pongs       |
+| RenderMeter                |    | LoopProbe                  |
+|  rAF staleness             |    |  hooks into dispatch()     |
+|  renderHint() one-liner    |    |  queue depth, drain rate   |
+|                            |    |  reduce timing, p95        |
+| TransportProbe (client)    |    |                            |
+|  sends ping, measures RTT  |    | TransportProbe (server)    |
+|                            |    |  tracks client pings       |
 |                            |    |  detects frozen clients    |
 |                            |    |                            |
-|                            |    | HintEngine                 |
-|                            |    |  correlates all layers     |
+|                            |    | HintEngine (server only)   |
+|                            |    |  correlates loop+transport |
 |                            |    |  produces root-cause hint  |
 +----------------------------+    +----------------------------+
            vitals-ping/pong frames
@@ -61,11 +63,10 @@ aio.run({
         heartbeatInterval: 1000,  // ms between checks (default: 1000)
         hints: true,              // enable hint engine (default: true in dev)
         backpressure: true,       // per-client send throttling (default: true)
-        thresholds: {             // override per-layer thresholds (ms)
-          render:    { degraded: 50,  warning: 200, frozen: 2000 },
-          transport: { degraded: 100, warning: 500, frozen: 2000 },
-          loop:      { degraded: 100, warning: 500, frozen: 2000 },
-          queue:     { degraded: 50,  warning: 200, frozen: 1000 },
+        thresholds: {             // override per-layer thresholds
+          transport: { degraded: 100, warning: 500, frozen: 2000 }, // only frozen is read
+          loop:      { degraded: 100, warning: 500, frozen: 2000 }, // ms
+          queue:     { degraded: 50,  warning: 200, frozen: 1000 }, // actions
         },
         onVitalAlert: (alert) => {
           console.log(alert.layer, alert.status, alert.hint?.cause);
@@ -79,11 +80,17 @@ aio.run({
 
 Kill switch: `vitals: false`.
 
+Two threshold keys are accepted but read by nothing, and the server warns once
+at boot when they are set: `thresholds.render` (the browser grades render
+staleness against `renderBudget` — see RenderMeter below) and a custom
+`transport.degraded` / `transport.warning` (the browser's RTT probe grades on
+the built-in tiers; the server reads `transport.frozen` alone).
+
 `backpressure: false` turns off the per-client send throttle: a client that
-reports itself behind (staleness above the transport threshold) is no longer
-sent state at a reduced rate. Leave it on unless you have measured that the
-throttle is what is holding a client back — the hint engine says so by name when
-it is.
+reports itself behind is no longer sent state at a reduced rate (2x above 100ms
+of reported render staleness, 4x above 300ms — fixed, not the transport tiers).
+Leave it on unless you have measured that the throttle is what is holding a
+client back — the hint engine says so by name when it is.
 
 ---
 
@@ -105,20 +112,13 @@ circuit breaker state.
 | `effectBacklog`    | Pending effects awaiting execution       |
 | `circuitBreakers`  | Names of tripped circuit breakers        |
 
-Queue thresholds are checked first (higher priority than reduce-time).
-
-### RenderProbe (client)
-
-Detects main-thread freezes using `setTimeout` drift. Measures how late the
-callback arrives -- drift beyond threshold means the main thread was blocked.
-
-Tracks: drift time, last AIO action before freeze, unprocessed deltas during
-freeze, freeze count in last 30s (death spiral detection).
+Queue depth and reduce time are both graded and the worse status wins; on a tie
+the queue drives the alert (its number is an action count, the loop's is ms).
 
 ### RenderMeter (client)
 
-Frame-level measurement using `requestAnimationFrame`. Provides continuous
-render health while RenderProbe detects freezes.
+Frame-level measurement using `requestAnimationFrame` (it replaced the older
+`setTimeout`-drift RenderProbe, which no longer exists).
 
 | Metric           | Description                                |
 | ---------------- | ------------------------------------------ |
@@ -143,7 +143,9 @@ opens:
 - a `requestAnimationFrame` loop measures how long the newest one stays
   unpainted (staleness), the frame gap, the pending count and the paint rate;
 - a threshold crossing is reported once per status change — a `console.warn`
-  with the hint engine's line (prod and dev), and a `vitals:render-stale` /
+  with the render meter's one-line hint (`renderHint()`: expensive components
+  vs. patch rate vs. a blocked main thread — not the hint engine, which runs
+  only on the server) (prod and dev), and a `vitals:render-stale` /
   `vitals:render-frozen` / `vitals:render-recovered` event on the diagnostic bus
   (dev overlay, `am errors`, client-log);
 - the heartbeat carries the staleness to the server (`vitals-ping {t1, ms}`,
@@ -167,9 +169,11 @@ Two different measurements, on purpose:
 - **server** — liveness only. It stamps `lastPing` with its OWN clock (a
   cross-clock subtraction is a latency plus a constant offset, not an elapsed
   time) and asks one question: has this client been silent for longer than
-  `transport.frozen`? Answer: `healthy` / `frozen` / `recovered`. The clock
-  starts at the WS upgrade, so a peer that connects and never says anything
-  freezes on its own. Frozen clients are skipped by the broadcaster
+  `transport.frozen`? Answer: `healthy` / `frozen` / `recovered`. Only a client
+  that has sent at least one `vitals-ping` is graded: a peer that never speaks
+  the heartbeat protocol (a CLI client, the dev reload socket) is registered but
+  never frozen — a silent socket is caught by the broadcaster's `bufferedAmount`
+  check instead. Frozen clients are skipped by the broadcaster
   (`server-broadcast.ts`) and are what raises the `transport` alert.
 
 The vitals protocol runs over WebSocket only. There is no IPC keepalive: the
@@ -183,32 +187,44 @@ never pings (`src/browser/browser-vitals.ts`).
 ```
 Server                              Client
 +---------------------+    +--------------------------+
-| dispatch() called   |    | RenderProbe              |
-|   performance.now() |    |   setTimeout drift       |
-|   LoopProbe collects|    | RenderMeter              |
-|     reduceTime      |    |   rAF gap -> staleness   |
-|     queueDepth      |    | TransportProbe (client)  |
-|     drainRate       |    |   ping -> measure RTT    |
-|          |          |    |         |                |
-| vitals-pong --------+--->| VitalsSnapshot assembled |
-|                     |    |         |                |
-| DiagReporter        |    | HintEngine               |
-|  (server console)   |    |   correlate all probes   |
-|                     |    |   -> root-cause hint     |
-| onDiagnostic hook <-+----| DiagReporter (client)    |
-| GET /__aio/vitals   |    | onVitalAlert callback    |
-+---------------------+    +--------------------------+
+| dispatch() called   |    | RenderMeter              |
+|   performance.now() |    |   rAF gap -> staleness   |
+|   LoopProbe collects|    |   status change ->       |
+|     reduceTime      |    |     console.warn +       |
+|     queueDepth      |    |     renderHint() line +  |
+|     drainRate       |    |     diag bus (dev)       |
+|          |          |    |                          |
+| TransportProbe  <---+----| vitals-ping {t1, ms}     |
+|  (liveness, ms)     |    |                          |
+| vitals-pong --------+--->| TransportProbe (client)  |
+|          |          |    |   pong -> RTT            |
+| VitalsSnapshot      |    +--------------------------+
+| HintEngine          |
+|  -> root-cause hint |
+| perf.log line       |
+| onVitalAlert hook   |
+| DiagReporter        |
+|  (server console,   |
+|   onDiagnostic hook)|
+| GET /__aio/vitals   |
++---------------------+
 ```
 
-Pipeline runs on each heartbeat interval (default: 1000ms).
+The server pipeline runs on each heartbeat interval (default: 1000ms). The
+snapshot, the hint engine, `onVitalAlert` and `onDiagnostic` are all
+server-side; the client has none of them.
 
 ---
 
 ## Hint engine
 
 Pure function: takes `VitalsSnapshot`, produces a `VitalHint` with cause,
-evidence, and suggestion. Six rules evaluated in priority order -- first match
-wins:
+evidence, and suggestion. It runs on the SERVER only (`src/vitals/mod.ts`, for
+each alert and the timeline summary) — the browser never calls it. The server
+has no render probe, so its snapshot always reads render `healthy`: of the six
+rules below, only **2** (queue saturation) and **3** (transport stall) can fire
+today. Rules 1, 4, 5 and 6 read the render layer and are kept for a snapshot
+that carries one. Six rules evaluated in priority order -- first match wins:
 
 | # | Rule                  | Trigger                                                | Severity   |
 | - | --------------------- | ------------------------------------------------------ | ---------- |
@@ -239,8 +255,10 @@ Turns probe signals into actionable console output. Split by side:
 
 - **Server reporter** -- loop + transport probes: slow, stale, disconnect
   events. Fires `onDiagnostic` hook.
-- **Client reporter** -- render probe + pong loop data: freeze, recovered
-  events.
+- **Client** -- no reporter object and no `DiagEvent`: the browser's render
+  meter reports its own status changes as a `console.warn` line and a
+  `vitals:render-*` event on the dev diagnostic bus (see RenderMeter above).
+  `onDiagnostic` never fires for a client-side render freeze.
 
 ### DiagEvent
 
@@ -270,12 +288,15 @@ type DiagEvent = {
 Structured block when severity is `likely`/`possible`:
 
 ```
-[aio:vitals] RENDER FROZEN -- no update for 3.2s
+[aio:vitals] SLOW DISPATCH -- portfolio.refresh took 1847ms (budget: 500ms)
   trigger:    portfolio.refresh reduce took 1847ms (p95: 45ms)
   queue:      12 actions pending, drain rate 2.1/s
-  transport:  healthy (RTT 23ms)
-  hint:       slow reducer blocking main thread
 ```
+
+This is the server reporter. A render freeze is a browser-side measurement and
+prints the client's own one-liner instead
+(`[aio:vitals] render FROZEN — …ms
+behind (renderBudget.staleness …ms) — <render hint>`).
 
 ### Connection teardown diagnostics
 
@@ -304,14 +325,14 @@ kind+trigger suppressed for 2s).
 
 ### Resource pressure warnings
 
-| Source             | Where  | Default             | Warns about             |
-| ------------------ | ------ | ------------------- | ----------------------- |
-| Payload size       | Server | 500KB per broadcast | Large state deltas      |
-| Broadcast rate     | Server | 30/sec              | High dispatch frequency |
-| Render degradation | Client | 50ms drift          | Main thread under load  |
+| Source           | Where  | Default              | Warns about             |
+| ---------------- | ------ | -------------------- | ----------------------- |
+| Payload size     | Server | 500KB per broadcast  | Large state deltas      |
+| Broadcast rate   | Server | 30/sec               | High dispatch frequency |
+| Render staleness | Client | 300ms (renderBudget) | Main thread under load  |
 
 Configure: `vitals.pressure: { payloadThreshold, rateThreshold }`.
-`pressure: false` disables. Default: on in dev, off in prod.
+`pressure: false` disables. Default: on in dev and prod (it is observe-only).
 
 ---
 

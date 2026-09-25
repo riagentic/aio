@@ -43,6 +43,11 @@ import {
   DIST_DIR,
 } from "../server/app-files.ts";
 import { HEY, NO, OK } from "../diagnostics/fmt.ts";
+import {
+  electronFuseBinary,
+  fuseElectronFile,
+  FUSES_OFF,
+} from "../electron/electron-fuses.ts";
 
 /** Zip a directory's CONTENTS, portably.
  *
@@ -234,6 +239,21 @@ export async function buildElectron(cfg: BuildConfig): Promise<void> {
   await copyDir(electronSrc, electronDst);
   console.log(`${OK} electron/ copied`);
 
+  // Fuses: the shipped runtime cannot be started around aio as plain Node,
+  // with NODE_OPTIONS code, or under a debugger (see electron-fuses.ts).
+  // A runtime without the wire fails the build — never ships unfused.
+  try {
+    await fuseElectronFile(electronFuseBinary(electronDst, os));
+  } catch (e) {
+    console.error(
+      `${NO} Electron fuses: ${e instanceof Error ? e.message : e}`,
+    );
+    Deno.exit(1);
+  }
+  console.log(
+    `${OK} Electron fuses off: ${Object.values(FUSES_OFF).join(", ")}`,
+  );
+
   // Trim Chromium's translations — ~46 MB on Linux/Windows, ~66 MB on macOS,
   // and the largest safe saving in every desktop package. The app's own text is
   // in the Deno bundle; a missing locale falls back to English, so the worst
@@ -271,7 +291,11 @@ export async function buildElectron(cfg: BuildConfig): Promise<void> {
     // square every icon-less app used to get. Three running aio apps must be
     // three distinguishable entries in a taskbar, which is the whole job an
     // icon does before someone draws a real one.
-    await writeDefaultIcon(join(appDir, binaryName), appTitle ?? binaryName);
+    await writeDefaultIcon(
+      join(appDir, binaryName),
+      appTitle ?? binaryName,
+      binaryName,
+    );
     console.log(
       `${OK} default icon for "${appTitle ?? binaryName}"`,
     );
@@ -384,6 +408,23 @@ Categories=Utility;
   );
 }
 
+/** The `run.bat` an Electron zip ships. `start ""` returns at once, so the
+ *  launcher's own console closes instead of sitting behind the window (the
+ *  exe itself is a GUI program).
+ *
+ *  Every `SET` is the QUOTED form: `SET HERE=%~dp0` is parsed after `%~dp0`
+ *  expands, so an install path holding `&` ended the SET there and RAN the
+ *  rest as a command, and the exe never started (measured on Windows 11 with
+ *  a directory named `A&md,pwned`). Inside quotes the value is inert.
+ *  @internal */
+export function _winLauncherBat(binaryName: string): string {
+  return `@echo off
+SET "HERE=%~dp0"
+SET "ELECTRON_PATH=%HERE%electron\\electron.exe"
+start "" "%HERE%${binaryName}.exe" %*
+`;
+}
+
 async function _packageWindows(
   cfg: BuildConfig,
   appDir: string,
@@ -393,13 +434,7 @@ async function _packageWindows(
   binaryName: string,
 ): Promise<void> {
   void cfg;
-  // `start ""` returns at once, so the launcher's own console closes instead
-  // of sitting behind the window (the exe itself is a GUI program).
-  const launcher = `@echo off
-SET HERE=%~dp0
-SET ELECTRON_PATH=%HERE%electron\\electron.exe
-start "" "%HERE%${binaryName}.exe" %*
-`;
+  const launcher = _winLauncherBat(binaryName);
   await Promise.all([
     Deno.writeTextFile(join(appDir, "run.bat"), launcher),
     Deno.writeTextFile(
@@ -484,7 +519,7 @@ async function _packageMacos(
       );
     }
   }
-  if (icns === null) icns = await icnsFromName(displayName);
+  if (icns === null) icns = await icnsFromName(displayName, binaryName);
 
   // Assembled into the build SCRATCH, never the output dir: a `.app` is a
   // 300 MB directory, and the artifact this target ships is the ONE file that

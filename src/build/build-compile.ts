@@ -10,7 +10,14 @@ import {
 } from "../server/deno-json.ts";
 import { isProcessAlive } from "../server/single-instance-lock.ts";
 import { resolveEntryPath } from "../server/paths.ts";
-import { dirname, fromFileUrl, isAbsolute, join, relative } from "@std/path";
+import {
+  dirname,
+  fromFileUrl,
+  isAbsolute,
+  join,
+  relative,
+  resolve,
+} from "@std/path";
 import { artifactName } from "./platforms.ts";
 import { BUILD_STAMP_FILE } from "./build-version.ts";
 import { BUILD_VERSION_ENV } from "../server/app-version.ts";
@@ -25,6 +32,8 @@ import { HEY, NO } from "../diagnostics/fmt.ts";
 import { compiled } from "./build-say.ts";
 import { electronStagingDir, freshElectronStaging } from "./build-electron.ts";
 import { writeWindowsIcon } from "./build-helpers.ts";
+import { warnMachineBoundImports } from "./machine-bound-imports.ts";
+import { minifyDeclared, runCompile } from "./minify-server.ts";
 
 /** npm packages the FRAMEWORK only ever needs at BUILD / DEV / TEST time.
  *  None of them is reachable from a compiled binary:
@@ -1141,6 +1150,12 @@ export function _compileArgv(opts: {
  *     (not `aio.run()`), so nothing is baked into it
  *   - any other compile → the browser app
  *
+ *  A `cli` binary whose embedded deno.json ALREADY declares `"client": "cli"`
+ *  (what `am create --template=cli` writes) gets nothing baked: the flag would
+ *  change no decision, and `deno compile` puts baked args IN FRONT of the
+ *  user's, so the app's own program saw `Deno.args[0] === "--client=cli"` —
+ *  the scaffolded `todo serve` fell through to "no todo server running".
+ *
  *  Pure. */
 export function bakedClientArgs(
   opts: {
@@ -1148,9 +1163,16 @@ export function bakedClientArgs(
     doHeadless: boolean;
     doCli: boolean;
     doRemote: boolean;
+    /** The app's deno.json `client` (or the retired `target`) — the rung the
+     *  binary falls back to when nothing is baked. */
+    declaredClient?: unknown;
   },
 ): string[] {
-  if (opts.doCli) return opts.doRemote ? [] : ["--client=cli"];
+  if (opts.doCli) {
+    return opts.doRemote || opts.declaredClient === "cli"
+      ? []
+      : ["--client=cli"];
+  }
   const client = opts.doElectron
     ? "electron"
     : opts.doHeadless || opts.doRemote
@@ -1223,6 +1245,9 @@ export async function runDenoCompile(
   const assets = await assetIncludes(root, configEntry);
   const v8Flags = await v8FlagsArg(root);
   if (v8Flags.length) console.log(`${v8Flags[0]}`);
+  // An absolute / file: import-map value builds a binary that only runs HERE
+  // (Deno 2.9 loads it from that disk path at run time). Warn, not refuse.
+  await warnMachineBoundImports(root);
   if (assets.length) {
     console.log(
       `embedding ${assets.length / 2} data asset(s): ${
@@ -1243,9 +1268,11 @@ export async function runDenoCompile(
     cwd: root,
     roots: compileModuleRoots(configEntry, [...workerInclude, ...assets]),
   };
+  const minify = await minifyDeclared(root);
   const ok = await withDevExcluded(nmDir, async (excludes) => {
-    const result = await new Deno.Command("deno", {
-      args: _compileArgv({
+    const result = await runCompile(
+      root,
+      _compileArgv({
         hasDist,
         workerInclude,
         assets,
@@ -1258,10 +1285,9 @@ export async function runDenoCompile(
         runtimeArgs: bakedClientArgs(cfg),
         windowsGui,
       }),
-      stdout: "inherit",
-      stderr: "inherit",
-    }).output();
-    if (result.code !== 0) return false;
+      minify,
+    );
+    if (!result.success) return false;
     // …and then RUN IT. `deno compile` exiting 0 is not the same claim as "the
     // artifact boots", and the gap is reachable: a project path containing a
     // SPACE (or any non-ASCII) makes the embedded npm module paths
@@ -1318,12 +1344,18 @@ export async function smokeRunArtifact(
     if (out.success) return null;
     const tail = new TextDecoder().decode(out.stderr).trim().split("\n")
       .slice(-4).join("\n       ");
+    // The path diagnosis only where it can be the cause: said of a plain
+    // path, it sent people moving a project whose real error (a missing
+    // import-map entry, a throwing top level) sat right above it.
     return `✗ ${bin} compiled, but does not run: \`${shown}\` exited ` +
       `${out.code}.\n       ${tail}\n` +
-      `       This is a BROKEN BUILD. A path containing a space or a ` +
-      `non-ASCII character is the known cause (the embedded npm paths are ` +
-      `percent-encoded twice and resolve to nothing) — move the project to a ` +
-      `plain-ASCII path with no spaces and rebuild.`;
+      `       This is a BROKEN BUILD. ` +
+      (/[^\x21-\x7e]/.test(resolve(bin))
+        ? `A path containing a space or a non-ASCII character is the known ` +
+          `cause (the embedded npm paths are percent-encoded twice and ` +
+          `resolve to nothing) — move the project to a plain-ASCII path with ` +
+          `no spaces and rebuild.`
+        : `The artifact's own error is above this line.`);
   } catch (e) {
     return `✗ ${bin} compiled, but could not be executed at all (${
       e instanceof Error ? e.message : e
@@ -1461,6 +1493,17 @@ export async function writeServiceFile(cfg: BuildConfig): Promise<void> {
   // operator is not watching. The unit is installed under the plain name,
   // so ExecStart keeps it; only the copy's SOURCE is the artifact.
   const artifact = artifactName(binaryName, cfg.platform);
+  // systemd is Linux-only: a unit for a Windows .exe or a Mach-O binary names
+  // an install path that host does not have. Written anyway, every platform's
+  // unit was `<name>.service`, so `--platforms=host,windows` on a server
+  // target collided in the fleet's dist/ and the whole build died after
+  // compiling everything.
+  if (cfg.os === "windows" || cfg.os === "darwin") {
+    console.log(
+      `· no systemd unit for the ${cfg.platform} binary — systemd is Linux-only`,
+    );
+    return;
+  }
   // BUILD-MACHINE IDENTITY, and the unit is copied verbatim to a server.
   //
   // `User=` and `HOME=` were taken from the build environment and written as
@@ -1489,9 +1532,11 @@ export async function writeServiceFile(cfg: BuildConfig): Promise<void> {
   }
   // `?? "."` keeps a hand-built config (a test, a custom script) writing into
   // the cwd exactly as it did before --out= existed.
+  // Named like the binary it runs: a cross-built `linux-arm64` unit beside
+  // the host's is `<name>-linux-arm64.service`, not a second `<name>.service`.
   const serviceFile = join(
     cfg.outDir ?? cfg.root ?? ".",
-    `${binaryName}.service`,
+    `${artifact}.service`,
   );
   const port = servicePort(cfg.bakedServer);
   const execFlags = serviceExecFlags({ doRemote, doHeadless, port });
@@ -1510,7 +1555,7 @@ ${systemdEnvAssignment(DEFAULT_PORT_ENV, String(SERVICE_DEFAULT_PORT))}
     : "";
   if (port === undefined) {
     console.warn(
-      `${HEY} ${binaryName}.service names no --port: the service binds the ` +
+      `${HEY} ${artifact}.service names no --port: the service binds the ` +
         `port the app declares (aio.run({ port }) or $AIO_PORT), and ` +
         `${SERVICE_DEFAULT_PORT} when it declares none ` +
         `(${DEFAULT_PORT_ENV}=${SERVICE_DEFAULT_PORT} in the unit). To pin ` +
@@ -1527,13 +1572,16 @@ ${systemdEnvAssignment(DEFAULT_PORT_ENV, String(SERVICE_DEFAULT_PORT))}
   //
   // `--name=` first: it is how a per-target `name` reaches this build, and a
   // `relay` target's unit read `Description=spapp (aio)` — the PROJECT's
-  // title, on the unit of a different app.
+  // title, on the unit of a different app. A per-target `title`
+  // (`--display-name=`) is already `appTitle` and wins over both.
   const named = Deno.args.find((a) => a.startsWith("--name="))?.slice(7);
-  const safeTitle = (named || appTitle || binaryName).replace(
-    // deno-lint-ignore no-control-regex
-    /[\u0000-\u001f\u007f]/g,
-    " ",
-  ).trim();
+  const hasDisplay = Deno.args.some((a) => a.startsWith("--display-name="));
+  const safeTitle = ((hasDisplay && appTitle) || named || appTitle ||
+    binaryName).replace(
+      // deno-lint-ignore no-control-regex
+      /[\u0000-\u001f\u007f]/g,
+      " ",
+    ).trim();
   // COMMENTS ON THEIR OWN LINES, never after a directive. systemd has no
   // trailing-comment syntax: a `#` after `ExecStart=` is part of the command
   // line, so `# adjust path after install` shipped as FIVE extra argv words
@@ -1589,7 +1637,7 @@ WantedBy=multi-user.target
   console.log(`
   Install:
     sudo cp ${artifact} /usr/local/bin/${binaryName}
-    sudo cp ${serviceFile} /etc/systemd/system/
+    sudo cp ${serviceFile} /etc/systemd/system/${binaryName}.service
     sudo systemctl enable --now ${binaryName}
 
   Manage:

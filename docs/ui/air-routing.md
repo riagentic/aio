@@ -14,7 +14,15 @@ project folder (`/docs`, `/settings/` — aio serves no directory listings or
 index files, so a directory answers with the shell) and a dotted last segment
 that is not a file type (`/u/john.doe`, `/blog/v1.2`). An existing file always
 wins over the route reading of its name, and a missing file with a file
-extension (`/lib/util.js`, `/export.csv`) is a `404`, never an HTML page.
+extension (`/lib/util.js`, `/export.csv`) is a `404`, never an HTML page. Files
+and the shell answer `GET`/`HEAD` only: a `POST`/`PUT`/`DELETE` that no server
+`routes:` entry claims is a `405`, never the shell with a `200` (a typo'd API
+path fails, rather than reading as a success). A browser _navigation_ that posts
+(a payment provider's return URL, an OIDC `form_post`) —
+`Sec-Fetch-Mode:
+navigate`, or `Accept: text/html` from a browser that sends no
+fetch metadata — still gets the shell, with a warning — declare a route to read
+what it posted.
 
 Server `routes:` and `<Route>` agree on the shape of a path: a trailing slash is
 the same path (`/api/get/` reaches the `/api/get` route), and `/x/*` matches
@@ -237,7 +245,9 @@ export const nav = (
 | `activeStyle` | `object`  | --       | Inline styles merged when active          |
 | `children`    | `VNode`   | --       | Link content                              |
 
-All other props (`className`, `style`, `aria-*`) pass through to `<a>`.
+All other props (`class`/`className`, `style`, `aria-*`) pass through to `<a>`;
+the active class is added beside your own. Your `onClick` runs before the
+router's, and calling `e.preventDefault()` in it keeps the link from navigating.
 
 ---
 

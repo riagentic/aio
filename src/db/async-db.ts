@@ -146,9 +146,13 @@ function _afterTriggerBody(sql: string): number {
       i++;
       continue;
     }
-    if (!/[A-Za-z]/.test(c)) continue;
+    // A WHOLE identifier, underscores and digits included: reading letters
+    // only split `end_at` into the keyword END (and `case_no` into CASE), so
+    // a valid trigger touching such a column closed early or never, and was
+    // refused as several statements.
+    if (!/[A-Za-z_]/.test(c)) continue;
     let j = i;
-    while (j < sql.length && /[A-Za-z]/.test(sql[j]!)) j++;
+    while (j < sql.length && /[\w$]/.test(sql[j]!)) j++;
     const word = sql.slice(i, j).toUpperCase();
     i = j - 1;
     if (word === "BEGIN" || word === "CASE") {
@@ -232,6 +236,10 @@ export function multiStatementRejection(
     `what keeps the \`am sql\` route from being a multi-statement injection ` +
     `surface, so it is enforced, not relaxed.)`;
 }
+
+/** Multi-statement `db.transaction()` entries already warned about — once per
+ *  text, and at most 100 (a hot path must not grow it or the log). */
+const _multiEntrySaid = new Set<string>();
 
 /** Default SQLite PRAGMA statements for WAL mode, cache, and foreign keys */
 export const DEFAULT_PRAGMAS = [
@@ -331,6 +339,10 @@ type Pending = { resolve: (v: unknown) => void; reject: (e: Error) => void };
  *  police slow queries. */
 export const DB_REQUEST_TIMEOUT_MS = 120_000;
 
+/** Dev-only: how long an in-memory read may wait for an open callback
+ *  transaction before dev says it may be a deadlock (observe-only). */
+const MEMORY_READ_WAIT_WARN_MS = 2_000;
+
 /** Await `work`, but give up after `ms` — and CLEAR THE TIMER either way.
  *
  *  `Promise.race([work, new Promise(r => setTimeout(r, 5000))])` reads as "wait
@@ -372,6 +384,11 @@ export function createDB(path: string, opts: DBOpts = {}): DB {
   let writerWorker: Worker | null = null;
   let readerWorkers: Worker[] = [];
   let readerIndex = 0;
+  /** A read-only connection spawned on first need for reads issued OUTSIDE an
+   *  open callback transaction when there is no reader pool (see `query()`).
+   *  Its `ready` is separate: the pool is usable without it. */
+  let sideReader: Worker | null = null;
+  let sideReady: Promise<Worker> | null = null;
   let ready: Promise<void> | null = null;
   /** Has `close()` finished? A closed handle must REFUSE, not re-open.
    *
@@ -430,6 +447,7 @@ export function createDB(path: string, opts: DBOpts = {}): DB {
       ready = null;
       if (writerWorker === w) writerWorker = null;
       readerWorkers = readerWorkers.filter((rw) => rw !== w);
+      if (sideReader === w) sideReader = null;
       _teardownPool();
     };
   }
@@ -469,10 +487,17 @@ export function createDB(path: string, opts: DBOpts = {}): DB {
             : msg.type === "transaction"
             ? ` — a ${msg.stmts.length}-statement transaction`
             : "";
+          // The worker is not interrupted: a slow write runs on and COMMITS
+          // after this rejection — an app that retries on it writes twice.
+          const mayCommit = msg.type === "open"
+            ? ""
+            : ` The worker does not cancel it: if it writes, it may still ` +
+              `commit after this error — check before retrying, or a retry ` +
+              `writes twice.`;
           reject(
             new Error(
               `db: the SQLite worker did not answer a "${msg.type}" within ` +
-                `${ceiling}ms${sql}. Either the statement is genuinely ` +
+                `${ceiling}ms${sql}.${mayCommit} Either the statement is genuinely ` +
                 `slower than that, or the worker died without reporting it ` +
                 `(an OOM-killed isolate fires no error event) — in which ` +
                 `case this request would otherwise never settle, and a ` +
@@ -513,7 +538,7 @@ export function createDB(path: string, opts: DBOpts = {}): DB {
    *  rebuilds the pool from nothing. Called when any worker dies (they share
    *  one file and one open/ready gate) and before every respawn. */
   function _teardownPool(): void {
-    for (const w of [writerWorker, ...readerWorkers]) {
+    for (const w of [writerWorker, ...readerWorkers, sideReader]) {
       if (!w) continue;
       try {
         w.terminate();
@@ -525,6 +550,8 @@ export function createDB(path: string, opts: DBOpts = {}): DB {
     writerWorker = null;
     readerWorkers = [];
     readerIndex = 0;
+    sideReader = null;
+    sideReady = null;
     ready = null;
   }
 
@@ -598,6 +625,35 @@ export function createDB(path: string, opts: DBOpts = {}): DB {
     return sendTo<T>(w, msg);
   }
 
+  /** A read that must not see an open callback transaction's uncommitted
+   *  rows and must not wait for it either: it runs on a read-only connection
+   *  of its own, which (WAL) sees committed data only. Opened after the pool
+   *  (the writer created the file and switched it to WAL) and kept until the
+   *  pool goes — a pool teardown drops it with everything else. */
+  async function sideRead<T>(msg: WorkerMsg): Promise<T> {
+    if (closed) return gate<T>(msg, false); // gate says CLOSED, loudly
+    await ensureWorkers();
+    if (!sideReady) {
+      const { worker, opening } = spawnAndOpen(true);
+      sideReader = worker;
+      const p: Promise<Worker> = opening.then(() => worker);
+      sideReady = p;
+      // A failed open must not poison every later read: forget it, so the
+      // next read tries again (this one still rejects with the real cause).
+      p.catch(() => {
+        if (sideReady !== p) return;
+        try {
+          worker.terminate();
+        } catch { /* already gone */ }
+        if (sideReader === worker) sideReader = null;
+        sideReady = null;
+      });
+    }
+    const w = await sideReady;
+    if (closed) return gate<T>(msg, false);
+    return sendTo<T>(w, msg);
+  }
+
   // Once per statement KIND (its first keyword), not once per handle. One
   // latch for the whole handle meant whichever write reached `query()` first
   // spoke for all of them: the framework's own `PRAGMA table_info` (counted as
@@ -627,6 +683,21 @@ export function createDB(path: string, opts: DBOpts = {}): DB {
   // nested.
   const _txScope = new AsyncLocalStorage<{ open: boolean }>();
   const _inOpenCallback = (): boolean => _txScope.getStore()?.open === true;
+  /** A callback transaction holds the writer connection between its BEGIN
+   *  and its COMMIT/ROLLBACK (at most one — it holds the writer lock). */
+  let _callbackOpen = false;
+  /** When the open callback transaction last made PROGRESS (a tx.* request
+   *  sent or settled, BEGIN, COMMIT) — the in-memory outside read's ceiling
+   *  counts from here, so a long but progressing transaction never fails it. */
+  let _txProgressAt = 0;
+  const _txProgress = <T>(p: Promise<T>): Promise<T> => {
+    _txProgressAt = performance.now();
+    const bump = () => {
+      _txProgressAt = performance.now();
+    };
+    p.then(bump, bump);
+    return p;
+  };
   let _warnedLockInScope = false;
   /** Said once per handle: a write that queues on the writer lock from INSIDE
    *  a callback cannot run until that callback finishes — awaited, it never
@@ -642,6 +713,72 @@ export function createDB(path: string, opts: DBOpts = {}): DB {
         `callback's \`tx\` handle (tx.execute / tx.query) for work that ` +
         `belongs to the transaction. Said once.`,
     );
+  }
+  /** An in-memory read from OUTSIDE an open callback transaction: it waits
+   *  for that transaction (see `query()`), bounded.
+   *
+   *  Unbounded, a callback that awaits such a read (a memoized loader first
+   *  started outside it, a loopback request whose handler queries) deadlocked
+   *  with no error, forever: the read was queued behind the callback, never
+   *  posted to the worker, so not even the request ceiling applied. Dev says
+   *  what is happening after a short wait (observe-only); once the
+   *  transaction has made NO progress for the request ceiling, the read fails
+   *  by name — the same ceiling that turns every other hung db request into
+   *  an error. Measured from the last progress, not from the call: a long
+   *  transaction that keeps issuing tx.* requests is working, not stuck. */
+  function _awaitCallbackThenRead<T>(msg: WorkerMsg, sql: string): Promise<T> {
+    return new Promise<T>((resolve, reject) => {
+      let gaveUp = false;
+      const dev = (globalThis as Record<string, unknown>).__aioDev === true;
+      const what = `db.query(${JSON.stringify(sql.trim().slice(0, 60))})`;
+      const warnTimer = dev
+        ? setTimeout(() => {
+          log.warn(
+            "db",
+            `${what} on an in-memory database has waited ` +
+              `${MEMORY_READ_WAIT_WARN_MS}ms for an open db.transaction() ` +
+              `callback. An in-memory database has no second connection, so ` +
+              `a read from outside the callback waits for it — if the ` +
+              `callback awaits this read, that is a deadlock. Pass the ` +
+              `callback's \`tx\` down (tx.query), or use a file database.`,
+          );
+        }, MEMORY_READ_WAIT_WARN_MS)
+        : undefined;
+      const startedAt = performance.now();
+      let ceilingTimer: ReturnType<typeof setTimeout> | undefined;
+      const armCeiling = (ms: number) => {
+        ceilingTimer = setTimeout(onCeiling, ms);
+        Deno.unrefTimer?.(ceilingTimer as unknown as number);
+      };
+      const onCeiling = () => {
+        const idle = performance.now() - Math.max(startedAt, _txProgressAt);
+        if (idle < timeoutMs) return armCeiling(timeoutMs - idle);
+        gaveUp = true;
+        if (warnTimer !== undefined) clearTimeout(warnTimer);
+        reject(
+          new Error(
+            `db: ${what} waited for an open db.transaction() callback that ` +
+              `made no progress for ${timeoutMs}ms, and was not run. On an ` +
+              `in-memory database a read from outside the callback must wait ` +
+              `for it (no second connection sees committed data), so a ` +
+              `callback that awaits such a read is a DEADLOCK. fix: pass the ` +
+              `callback's \`tx\` handle down (tx.query), start the read ` +
+              `after the transaction, or use a file database (its outside ` +
+              `reads never wait).`,
+          ),
+        );
+      };
+      if (timeoutMs > 0) armCeiling(timeoutMs);
+      if (warnTimer !== undefined) {
+        Deno.unrefTimer?.(warnTimer as unknown as number);
+      }
+      _writerLock.then(() => {
+        if (warnTimer !== undefined) clearTimeout(warnTimer);
+        if (ceilingTimer !== undefined) clearTimeout(ceilingTimer);
+        if (gaveUp) return;
+        gate<T>(msg, false).then(resolve, reject);
+      });
+    });
   }
   function withWriterLock<T>(fn: () => Promise<T>): Promise<T> {
     const result: Promise<T> = _writerLock.then(fn);
@@ -701,6 +838,34 @@ export function createDB(path: string, opts: DBOpts = {}): DB {
           gate<QueryResult<T>>({ type: "query", sql, params }, true)
         );
       }
+      // A READ from outside an open callback transaction must not see that
+      // transaction's uncommitted rows. With no reader pool it runs on the
+      // WRITER connection — the very connection the callback's BEGIN is open
+      // on — so it read them, and a ROLLBACK a moment later made them rows
+      // that never existed (measured: `query("SELECT …")` answered the
+      // callback's INSERT, then the callback threw and the table was empty).
+      //
+      // It must not WAIT for the transaction either: a callback that awaits
+      // this very read (a memoized loader first started outside it, a
+      // loopback request whose handler queries) would deadlock forever, and
+      // every unrelated read would stall for as long as the callback awaits
+      // anything slow. So it runs on a read-only connection of its own —
+      // exactly what a reader worker already is (WAL: committed data only).
+      // The callback's own reads (through any number of awaits) stay on the
+      // writer and see its writes.
+      //
+      // `:memory:` has no second connection to the same data (another one
+      // opens a different, empty database — AIO-421; a shared-cache or memdb
+      // in-memory database refuses the reader while the writer holds its
+      // lock, or dirty-reads with read_uncommitted), so there the read still
+      // waits for the transaction: a stale-free answer or none, never rows
+      // from nowhere — and never forever (see `_awaitCallbackThenRead`).
+      if (_callbackOpen && !_inOpenCallback() && readerWorkers.length === 0) {
+        const msg: WorkerMsg = { type: "query", sql, params };
+        return path === ":memory:" || path === ""
+          ? _awaitCallbackThenRead<QueryResult<T>>(msg, sql)
+          : sideRead<QueryResult<T>>(msg);
+      }
       return gate<QueryResult<T>>({ type: "query", sql, params }, false);
     },
     // Writes serialize through the lock so they can't sneak into an open transaction
@@ -735,6 +900,29 @@ export function createDB(path: string, opts: DBOpts = {}): DB {
 
       // Batch form: goes through write lock for consistency (no execute() can interleave)
       if (Array.isArray(stmts_or_fn)) {
+        // The same one-statement rule as execute(): the worker `prepare()`s
+        // each entry, which compiles the FIRST statement and drops the rest —
+        // `[{ sql: "A; B" }]` committed A, reported success, and B never ran.
+        // WARNED, not refused: 1.0.11 resolved this batch, and the surface is
+        // frozen — so it still runs as it did, and the drop is said, once
+        // per entry text, naming what did not run.
+        for (const s of stmts_or_fn) {
+          const n = countSqlStatements(s.sql);
+          // Past the cap, silent: an entry not remembered would warn on
+          // every call — the flood the cap is for.
+          if (
+            n > 1 && _multiEntrySaid.size < 100 && !_multiEntrySaid.has(s.sql)
+          ) {
+            _multiEntrySaid.add(s.sql);
+            log.warn(
+              "db",
+              `a db.transaction() entry runs exactly ONE statement — this ` +
+                `one has ${n}, and only its FIRST ran: SQLite prepares the ` +
+                `first and drops the rest, with no error. Fix: one statement ` +
+                `per entry. The entry: ${s.sql.slice(0, 300)}`,
+            );
+          }
+        }
         return withWriterLock(() =>
           gate<QueryResult[]>({ type: "transaction", stmts: stmts_or_fn })
         );
@@ -743,19 +931,31 @@ export function createDB(path: string, opts: DBOpts = {}): DB {
       // Callback form: acquire write lock, BEGIN/COMMIT wrapping the async callback
       return withWriterLock(async () => {
         const scope = { open: true };
+        _callbackOpen = true;
+        // A refused BEGIN means a transaction is ALREADY open on the writer
+        // (an app's own `execute("BEGIN")`) — rolling back then undid THAT
+        // one, and its later statements landed alone in autocommit.
+        let begun = false;
         try {
-          await gate<QueryResult>({ type: "execute", sql: "BEGIN" });
+          await _txProgress(
+            gate<QueryResult>({ type: "execute", sql: "BEGIN" }),
+          );
+          begun = true;
           const tx: Tx = {
             // tx.query goes to writer — must see current transaction's own writes
             query: <T>(sql: string, params?: unknown[]) => {
               const bad = multiStatementRejection(sql, "tx.query()");
               if (bad) return Promise.reject(new Error(bad));
-              return gate<QueryResult<T>>({ type: "query", sql, params }, true);
+              return _txProgress(
+                gate<QueryResult<T>>({ type: "query", sql, params }, true),
+              );
             },
             execute: (sql: string, params?: unknown[]) => {
               const bad = multiStatementRejection(sql, "tx.execute()");
               if (bad) return Promise.reject(new Error(bad));
-              return gate<QueryResult>({ type: "execute", sql, params });
+              return _txProgress(
+                gate<QueryResult>({ type: "execute", sql, params }),
+              );
             },
           };
           // The callback — and everything it awaits — runs inside the scope,
@@ -768,18 +968,24 @@ export function createDB(path: string, opts: DBOpts = {}): DB {
             // Whatever the callback left running is no longer inside it.
             scope.open = false;
           }
-          await gate<QueryResult>({ type: "execute", sql: "COMMIT" });
+          await _txProgress(
+            gate<QueryResult>({ type: "execute", sql: "COMMIT" }),
+          );
           return result;
         } catch (e) {
           // Only ROLLBACK if BEGIN succeeded (we're actually in a transaction)
-          try {
-            await gate<QueryResult>({ type: "execute", sql: "ROLLBACK" });
-          } catch {
-            /* ROLLBACK may fail if BEGIN never succeeded — safe to ignore */
+          if (begun) {
+            try {
+              await gate<QueryResult>({ type: "execute", sql: "ROLLBACK" });
+            } catch {
+              // aio-ok: SQLite already rolled back (e.g. SQLITE_FULL) — no
+              // transaction is left open, and `e` is the error that matters.
+            }
           }
           throw e;
         } finally {
           scope.open = false;
+          _callbackOpen = false;
         }
       });
     },
@@ -869,7 +1075,13 @@ export function createDB(path: string, opts: DBOpts = {}): DB {
       return { ok: problems.length === 0, problems };
     },
     async close(): Promise<void> {
-      if (!ready) return;
+      if (!ready) {
+        // Nothing is running (never used, or the pool already died) — but the
+        // handle is still CLOSED. Returning without saying so let the next
+        // late `db.query()` spawn a fresh pool nothing would ever close.
+        closed = true; // never-opened handle
+        return;
+      }
       // A FAILED OPEN MUST STILL CLOSE.
       //
       // `ensureWorkers()` spawns the worker and THEN awaits its open
@@ -925,7 +1137,7 @@ export function createDB(path: string, opts: DBOpts = {}): DB {
       // because a failed open can leave the writer unassigned while readers
       // exist (or the reverse), and `[null, …]` would throw here instead of
       // terminating the ones that ARE there.
-      const spawned = [writerWorker, ...readerWorkers].filter((
+      const spawned = [writerWorker, ...readerWorkers, sideReader].filter((
         w,
       ): w is Worker => !!w);
       await Promise.all(spawned.map(async (w) => {
@@ -953,6 +1165,8 @@ export function createDB(path: string, opts: DBOpts = {}): DB {
       }));
       writerWorker = null;
       readerWorkers = [];
+      sideReader = null;
+      sideReady = null;
       ready = null;
       closed = true;
       // Anything STILL pending here waited out the 5s drain and then had its

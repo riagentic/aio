@@ -71,23 +71,43 @@ export async function resolveEntry(
 export const startLogPath = (dir: string): string =>
   join(dir, ".aio-amui-start.log");
 
+/** The environment a process amui launches for a project runs with: amui's
+ *  own, minus what describes AMUI's process. After a dev restart amui is a
+ *  supervised child whose env carries its port (`AIO_PORT`), its supervisor's
+ *  pid and the supervised flag — inherited, the app bound amui's port (and
+ *  was refused) and would die with amui's supervisor. */
+function projectEnv(): Record<string, string> {
+  const env = Deno.env.toObject();
+  delete env.AIO_PORT;
+  delete env.AIO_PARENT_PID;
+  delete env.AIO_DEV_SUPERVISED;
+  return env;
+}
+
 /** Start a project's app (detached — survives amui). Returns { ok, pid?, error? }.
  *  `client` picks the shell (browser is safe/instant; others as-is). */
 export async function startApp(
   dir: string,
   client: "browser" | "electron" | "server-only" = "browser",
+  /** The profile to boot under (`--profile=<name>`) — a restart of a
+   *  profile instance must come back as that instance. */
+  profile?: string,
 ): Promise<{ ok: boolean; pid?: number; error?: string }> {
   const resolved = await resolveEntry(dir);
   if (!resolved.ok) return { ok: false, error: resolved.error };
   const entry = resolved.entry;
   const logFile = startLogPath(dir);
   const esc = (s: string) => "'" + s.replace(/'/g, "'\\''") + "'";
-  const inner = `deno run -A --unstable-kv ${esc(entry)} --client=${client}`;
+  const inner = `deno run -A --unstable-kv ${esc(entry)} --client=${client}${
+    profile ? ` ${esc(`--profile=${profile}`)}` : ""
+  }`;
   const cmd = `nohup ${inner} >${esc(logFile)} 2>&1 & echo $!`;
   try {
     const out = await new Deno.Command("sh", {
       args: ["-c", cmd],
       cwd: dir,
+      env: projectEnv(),
+      clearEnv: true,
       stdin: "null",
       stdout: "piped",
       stderr: "null",
@@ -107,9 +127,30 @@ export async function stopApp(
 ): Promise<{ ok: boolean; error?: string }> {
   try {
     const { trojanPost } = await import("./control.server.ts");
-    const r = await trojanPost(port, "shutdown", undefined, appId);
+    // By pid: a zero-port profile instance's Stop otherwise reached the
+    // DEFAULT instance's socket and shut the sibling down, reporting success.
+    const r = await trojanPost(
+      port,
+      "shutdown",
+      undefined,
+      appId,
+      undefined,
+      pid,
+    );
     if (r.ok) return { ok: true };
   } catch { /* fall through to signal */ }
+  // Only a pid a live lock of THIS app still names: `instances()` judges the
+  // owner by its recorded start identity, so a row whose instance died after
+  // it was listed — its pid since reused by an unrelated process — is not
+  // signalled. SIGTERM on the bare pid killed that stranger.
+  const { instances } = await import("./control.server.ts");
+  if (!instances(appId).some((i) => i.alive && i.pid === pid)) {
+    return {
+      ok: false,
+      error: `pid ${pid} is no longer a running ${appId} instance — ` +
+        `nothing was signalled`,
+    };
+  }
   try {
     Deno.kill(pid, "SIGTERM");
     return { ok: true };
@@ -135,12 +176,25 @@ const REGISTRY_POLL_MS = 150;
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
-/** Is an app registered as running from `dir`? */
-async function registeredAt(dir: string): Promise<boolean> {
+/** The pids registered as running from `dir`. */
+export async function pidsAt(dir: string): Promise<number[]> {
   const { instances } = await import(
     "./control.server.ts"
   );
-  return instances().some((i) => i.alive && i.cwd === dir);
+  return instances().filter((i) => i.alive && i.cwd === dir).map((i) => i.pid);
+}
+
+/** Is an app registered as running from `dir` — `pid` when given (one
+ *  instance of several in a directory), else any, and never one of
+ *  `except` (the instances that were already there before a start). */
+async function registeredAt(
+  dir: string,
+  pid?: number,
+  except?: readonly number[],
+): Promise<boolean> {
+  return (await pidsAt(dir)).some((p) =>
+    (pid === undefined || p === pid) && !except?.includes(p)
+  );
 }
 
 /** The reason a boot failed, out of the launcher's captured output — pure.
@@ -182,6 +236,9 @@ export async function awaitBoot(
   dir: string,
   pid?: number,
   timeoutMs = BOOT_TIMEOUT_MS,
+  /** Pids already registered from `dir` before the spawn — a sibling that
+   *  was up all along is not this boot succeeding. */
+  before?: readonly number[],
 ): Promise<{ up: true } | { up: false; reason: string }> {
   const { isProcessAlive } = await import(
     "./control.server.ts"
@@ -190,7 +247,7 @@ export async function awaitBoot(
   let died = false;
   while (Date.now() < deadline) {
     await sleep(REGISTRY_POLL_MS);
-    if (await registeredAt(dir)) return { up: true };
+    if (await registeredAt(dir, undefined, before)) return { up: true };
     if (pid !== undefined && !isProcessAlive(pid)) {
       died = true;
       break;
@@ -212,13 +269,16 @@ export async function awaitBoot(
 export async function awaitDown(
   dir: string,
   timeoutMs = DOWN_TIMEOUT_MS,
+  /** The ONE instance being stopped. Without it, any instance from `dir`
+   *  counts — and a sibling that stays up reads as a stop that failed. */
+  pid?: number,
 ): Promise<boolean> {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
-    if (!(await registeredAt(dir))) return true;
+    if (!(await registeredAt(dir, pid))) return true;
     await sleep(REGISTRY_POLL_MS);
   }
-  return !(await registeredAt(dir));
+  return !(await registeredAt(dir, pid));
 }
 
 const TASK_TIMEOUT = 300_000; // 5 min hard cap — no task hangs amui forever
@@ -245,6 +305,8 @@ export async function runTask(
     child = new Deno.Command("deno", {
       args: ["task", task],
       cwd: dir,
+      env: projectEnv(),
+      clearEnv: true,
       stdout: "piped",
       stderr: "piped",
       stdin: "null",
@@ -685,9 +747,18 @@ export function logLinesOf(text: string): string[] {
 
 /** Absolute candidates first (the app's own `~/.<appId>/logs/`), then the
  *  cwd-relative ones (the stdout capture, and the pre-alpha38 layout). */
-function logCandidates(source: LogSource, appId: string | null): string[] {
+function logCandidates(
+  source: LogSource,
+  appId: string | null,
+  home: string | null,
+): string[] {
   const file = source === "combined" ? "app.log" : `${source}.log`;
-  const own = appId ? [join(appDirs(appId).logs, file)] : [];
+  // The INSTANCE's home, not the appId's default one: a profile instance
+  // (`--profile=dev` → `~/.<appId>-dev`) logs under its own home, and
+  // `appDirs(appId)` alone named the default instance's — the Logs tab of
+  // the dev instance showed its sibling's log, under the dev instance's name.
+  const logs = appId ? appDirs(appId, home ?? undefined).logs : null;
+  const own = logs ? [join(logs, file)] : [];
   switch (source) {
     case "app":
     case "error":
@@ -699,7 +770,7 @@ function logCandidates(source: LogSource, appId: string | null): string[] {
       // the pre-alpha38 locations, kept so an app still running from before the
       // move is readable.
       return [
-        ...(appId ? [join(appDirs(appId).logs, "stdout.log")] : []),
+        ...(logs ? [join(logs, "stdout.log")] : []),
         ...own,
         ".aio.log",
         ".aio-amui-start.log",
@@ -710,15 +781,17 @@ function logCandidates(source: LogSource, appId: string | null): string[] {
 
 /** Tail an app's logs. `cwd` is the app's working dir (== project path for a
  *  dev app; the lock cwd for a running instance); `appId` (when known) unlocks
- *  the app's own log directory. Reads the last LOG_TAIL_MAX
+ *  the app's own log directory, under `home` (the running instance's data
+ *  home, from its lock) when given. Reads the last LOG_TAIL_MAX
  *  bytes, strips ANSI, and returns the final `tailLines` non-empty lines. */
 export async function readLogs(
   cwd: string,
   source: LogSource = "combined",
   tailLines = 500,
   appId: string | null = null,
+  home: string | null = null,
 ): Promise<RawLog> {
-  for (const rel of logCandidates(source, appId)) {
+  for (const rel of logCandidates(source, appId, home)) {
     // `own` candidates are already absolute; join() leaves those untouched.
     const p = isAbsolute(rel) ? rel : join(cwd, rel);
     let stat: Deno.FileInfo;
@@ -733,15 +806,26 @@ export async function readLogs(
     try {
       if (stat.size > LOG_TAIL_MAX) {
         using f = await Deno.open(p, { read: true });
-        await f.seek(stat.size - LOG_TAIL_MAX, Deno.SeekMode.Start);
-        const buf = new Uint8Array(LOG_TAIL_MAX);
+        // One byte EARLIER than the window: if it is a newline, the window
+        // starts on a whole line and that line is kept (see below).
+        await f.seek(stat.size - LOG_TAIL_MAX - 1, Deno.SeekMode.Start);
+        const buf = new Uint8Array(LOG_TAIL_MAX + 1);
         let off = 0;
         while (off < buf.length) {
           const n = await f.read(buf.subarray(off));
           if (n === null) break;
           off += n;
         }
-        text = new TextDecoder().decode(buf.subarray(0, off));
+        // The seek lands mid-line (and possibly mid-UTF-8-sequence): the
+        // first line of the window is a FRAGMENT. It used to be shown as a
+        // raw, unparseable line at the top of the tail — a half timestamp or
+        // a word cut in two, with replacement characters. Start at the first
+        // whole line. (No newline in the whole window = one giant line: show
+        // what there is rather than nothing.)
+        const firstNl = buf.subarray(0, off).indexOf(0x0a);
+        text = new TextDecoder().decode(
+          buf.subarray(firstNl === -1 ? 0 : firstNl + 1, off),
+        );
         bytesDropped = true;
       } else {
         text = await Deno.readTextFile(p);

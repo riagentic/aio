@@ -650,10 +650,27 @@ export type AioConfig<S, A, E> = {
    *  because under `libraryMode` the main module is the TEST file and spawning
    *  a worker on it would re-run the test in another thread. */
   _workerEntry?: string;
+  /** Internal: the composition's circuit breaker, for `worker: true` cells —
+   *  their failures happen in another isolate (see cell-worker-pool.ts). */
+  _cellBreaker?: {
+    count: (cell: string) => void;
+    /** Record a routed call as the cell's `health()` lastAction. */
+    note?: (cell: string, type: string) => void;
+    isEnabled: (cell: string) => boolean;
+    /** Hand the hosted worker cells' disable/enable to their workers. */
+    bindWorkers?: (
+      remote: import("../state/cell-compose-registry.ts").RemoteLifecycle,
+    ) => void;
+  };
   /** Internal: health getter factory — passed from CellsConfig for diagnostics */
   _healthGetter?: (
     state: unknown,
   ) => Record<string, { errors: number; enabled: boolean }>;
+  /** Internal: THIS app's `health()` rows, for `/__aio/health` and the vitals
+   *  loop probe — per app, never a process global (see aio-cells-bridge.ts). */
+  _cellHealth?: (
+    state: Record<string, unknown>,
+  ) => import("../state/cell-compose-types.ts").CellStatus[];
   /** Internal: reduce breakdown getter — passed from CellsConfig via composeCells */
   _reduceBreakdown?: () => ReduceBreakdown | undefined;
   /** Internal: cell IDs that sync — `sync:` on the cell, or adopted by

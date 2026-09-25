@@ -444,6 +444,17 @@ The same applies to a captured array **element** after an index-moving mutator
 address a different element. (`push` never moves existing elements, so captured
 elements stay valid.)
 
+The same goes for **another action** that lands while this method `await`s: a
+row held across the `await` is refused
+(`… before another action re-addressed
+the rows of s.items …`) when that action
+moved rows across its slot (`unshift`, `sort`, a `filter` removing an earlier
+row) or removed it. A row that was only edited — by you or by the other action —
+stays valid. Re-find the row after the `await`
+(`s.items.find((r) => r.id === id)`) instead of holding it across one: the one
+case the check cannot see is a slot whose row was replaced by a brand-new object
+with no other row shifting.
+
 A **loop** over an array the method replaces mid-loop is not a stale capture:
 `for (const x of s.items.values()) s.items = s.items.filter(…)` finishes over
 the array it started on, exactly as in a sync method. Rows it hands out after
@@ -1077,8 +1088,10 @@ APIs, use `"queue"` (or `"first"`) and re-check freshness at the start of the
 method.
 
 `"first"` resolves the second caller with the **running call's result**, not
-`undefined`. Resolving it with nothing is the bug that report shipped, and the
-difference between a policy and a silent drop.
+`undefined`. It dedups by the **arguments**, as `ttl` does: `scan("/a")` adopts
+a running `scan("/a")`, while `scan("/b")` runs alongside it. Resolving it with
+nothing is the bug that report shipped, and the difference between a policy and
+a silent drop.
 
 `"queue"` runs every call, one at a time, in order. It is not "drop".
 

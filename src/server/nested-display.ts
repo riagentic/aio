@@ -200,6 +200,70 @@ export function xauthorityEntry(
   return out;
 }
 
+/** Does the X server on `display` ACCEPT the cookie in `file`? A cookie file
+ *  can outlive the server it was written for — a later Xephyr started under
+ *  another runtime dir (a test shard's) writes its own there — and then every
+ *  GUI child dies with "Invalid MIT-MAGIC-COOKIE-1 key". Only the server can
+ *  tell: this sends the X11 connection setup (little-endian, protocol 11.0,
+ *  the record's auth name + data) and reads the first reply byte, which is 1
+ *  on success. False on a refusal, no answer within `ms`, or no server. */
+// aio-ok: called by scripts/test-shards.ts, before any shard can start the display
+export async function nestedDisplayAccepts(
+  display: string,
+  file: string,
+  ms = 3000,
+): Promise<boolean> {
+  const rec = await Deno.readFile(file);
+  let at = 2; // family
+  const field = () => {
+    const n = ((rec[at] ?? 0) << 8) | (rec[at + 1] ?? 0);
+    const f = rec.subarray(at + 2, at + 2 + n);
+    at += 2 + n;
+    return f;
+  };
+  field(); // address
+  field(); // display number
+  const name = field();
+  const data = field();
+  const pad = (n: number) => (4 - (n % 4)) % 4;
+  const msg = new Uint8Array(
+    12 + name.length + pad(name.length) + data.length + pad(data.length),
+  );
+  const v = new DataView(msg.buffer);
+  msg[0] = 0x6c; // "l": little-endian
+  v.setUint16(2, 11, true);
+  v.setUint16(6, name.length, true);
+  v.setUint16(8, data.length, true);
+  msg.set(name, 12);
+  msg.set(data, 12 + name.length + pad(name.length));
+  let conn: Deno.UnixConn;
+  try {
+    conn = await Deno.connect({
+      transport: "unix",
+      path: displaySocket(display),
+    });
+  } catch {
+    return false;
+  }
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    const ask = (async () => {
+      for (let o = 0; o < msg.length;) o += await conn.write(msg.subarray(o));
+      const b = new Uint8Array(1);
+      return (await conn.read(b)) === 1 && b[0] === 1;
+    })();
+    const late = new Promise<boolean>((r) => {
+      timer = setTimeout(() => r(false), ms);
+    });
+    return await Promise.race([ask, late]);
+  } catch {
+    return false; // aio-ok: a reset connection IS a refusal
+  } finally {
+    clearTimeout(timer);
+    conn.close();
+  }
+}
+
 /** Write a fresh cookie for `display` and return the file, or null (with the
  *  reason in `problem`) when no private place exists to keep it. A new cookie
  *  on every start: the file describes the server that is about to run, never

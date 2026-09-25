@@ -29,23 +29,93 @@ let _hasChannel: () => boolean = () => true;
 let _installed = false;
 let _forwarding = false;
 
+/** How deep {@linkcode _render} descends before printing `[Object]`/`[Array]`
+ *  — the same shape Node's `console.log` uses for a deep value. */
+const MAX_DEPTH = 6;
+
+/** A NESTED value as JSON would print it, except where JSON prints a
+ *  different word or nothing: `{ total: NaN, cb: undefined }` became
+ *  `{"total":null}` — the NaN read as null and the key vanished — so the line
+ *  in `am logs` said something the page's own console never did. Here NaN,
+ *  ±Infinity, `undefined`, functions, symbols and bigints keep their console
+ *  words, a cycle is `[Circular]` (JSON threw and the WHOLE argument became
+ *  "[Object (circular)]"), depth is bounded, and output stops once `budget`
+ *  characters are spent, so a huge object costs no more than the line it fits
+ *  in. Plain data (strings, finite numbers, arrays, objects, `toJSON`) prints
+ *  byte-for-byte as JSON did. */
+function _render(
+  v: unknown,
+  depth: number,
+  ancestors: readonly object[],
+  budget: { left: number },
+): string {
+  if (budget.left <= 0) return "…";
+  const out = (s: string) => {
+    budget.left -= s.length;
+    return s;
+  };
+  if (typeof v === "string") return out(JSON.stringify(v));
+  if (typeof v === "bigint") return out(`${v}n`);
+  if (typeof v === "function") {
+    return out(`[Function ${v.name || "anonymous"}]`);
+  }
+  if (v === null || typeof v !== "object") return out(String(v));
+  if (v instanceof Error) return out(JSON.stringify(`${v.name}: ${v.message}`));
+  if (ancestors.includes(v)) return out("[Circular]");
+  const toJSON = (v as { toJSON?: unknown }).toJSON;
+  if (typeof toJSON === "function") {
+    return _render(toJSON.call(v), depth, [...ancestors, v], budget);
+  }
+  const isArr = Array.isArray(v);
+  if (depth >= MAX_DEPTH) return out(isArr ? "[Array]" : "[Object]");
+  const inner = [...ancestors, v];
+  const items: string[] = [];
+  budget.left -= 2;
+  // Arrays by index, never a keys array: a million-element array stops at
+  // the budget without first allocating a million keys.
+  const keys = isArr ? null : Object.keys(v);
+  const n = keys ? keys.length : (v as unknown[]).length;
+  for (let i = 0; i < n; i++) {
+    if (budget.left <= 0) {
+      items.push("…");
+      break;
+    }
+    const k = keys ? keys[i]! : i;
+    const val = _render(
+      (v as Record<string | number, unknown>)[k],
+      depth + 1,
+      inner,
+      budget,
+    );
+    items.push(keys ? `${out(JSON.stringify(k))}:${val}` : val);
+  }
+  return isArr ? `[${items.join(",")}]` : `{${items.join(",")}}`;
+}
+
 /** Stringify console args, joined with space, truncated to MAX_MSG_LEN. */
 export function _serialize(args: unknown[]): string {
+  const budget = { left: MAX_MSG_LEN };
   const parts = args.map((a) => {
     if (typeof a === "string") return a;
     // Errors JSON-stringify to "{}" (no enumerable props) WITHOUT throwing, so
-    // the catch below never ran — a forwarded `console.error(err)` showed "{}".
-    // Render them readably up front.
+    // a forwarded `console.error(err)` showed "{}". Render them readably.
     if (a instanceof Error) return `${a.name}: ${a.message}`;
+    // What JSON turns into a DIFFERENT word, or into nothing at all: `NaN` /
+    // `Infinity` read as "null", and `undefined` / a function / a symbol
+    // stringify to `undefined`, which `join` prints as "" — so
+    // `console.log("total:", NaN)` arrived in `am logs` as "total: null" and
+    // `console.log("got", undefined)` as "got ". Say what the console says —
+    // at the top level and nested (see `_render`).
+    if (typeof a === "function") return `[Function ${a.name || "anonymous"}]`;
+    if (a === null || typeof a !== "object") return String(a);
     try {
-      return JSON.stringify(a);
+      return _render(a, 0, [], budget);
     } catch {
-      // Circular refs, BigInt, etc — extract useful info
-      if (a instanceof Error) return `${a.name}: ${a.message}`;
-      if (a && typeof a === "object" && "constructor" in a) {
-        return `[${a.constructor?.name ?? "Object"} (circular)]`;
-      }
-      return String(a);
+      // A throwing getter / toJSON / Proxy trap — say what it was.
+      return `[${
+        (a as { constructor?: { name?: string } }).constructor?.name ??
+          "Object"
+      }]`;
     }
   });
   const full = parts.join(" ");

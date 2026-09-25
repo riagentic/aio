@@ -138,9 +138,37 @@ export function findLossy(
       out.push({ path, from: "Array", to: typeName(round) });
       return;
     }
+    // An Array SUBCLASS arrives as a plain array — its prototype, methods and
+    // fields are gone, exactly like any other class instance.
+    if (Object.getPrototypeOf(orig) !== Array.prototype) {
+      out.push({ path, from: typeName(orig), to: "Array" });
+      return;
+    }
     for (let i = 0; i < orig.length; i++) {
       findLossy(orig[i], (round as unknown[])[i], `${path}[${i}]`, out, budget);
       if (out.length >= MAX_REPORTED) return;
+    }
+    // Named properties on an array (`index`/`input`/`groups` on a RegExp
+    // match, a tag an app hung on a list) are erased by JSON, which writes
+    // indices only. Own keys list indices first, so any named ones are the
+    // tail. Skipped past the walk's budget, which then reports `truncated`.
+    if (orig.length <= MAX_NODES) {
+      const keys = Object.keys(orig);
+      let from = keys.length;
+      while (from > 0) {
+        const k = keys[from - 1]!;
+        if (String(Number(k) >>> 0) === k && Number(k) < orig.length) break;
+        from--;
+      }
+      for (let j = from; j < keys.length; j++) {
+        const k = keys[j]!;
+        out.push({
+          path: `${path}.${k}`,
+          from: typeName((orig as unknown as Record<string, unknown>)[k]),
+          to: "absent",
+        });
+        if (out.length >= MAX_REPORTED) return;
+      }
     }
     return;
   }

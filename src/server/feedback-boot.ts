@@ -26,12 +26,12 @@ import {
   installFeedbackRuntime,
 } from "../state/feedback-cell.ts";
 import {
+  type _ReportSourcesInternal,
   buildReport,
   listReports,
   type Report,
   type ReportKind,
   reportsDir,
-  type ReportSources,
   writeReport,
 } from "./report.ts";
 import { join } from "@std/path";
@@ -96,9 +96,13 @@ async function prune(dataDir: string, keep: number): Promise<void> {
   } catch { /* nothing to prune */ }
 }
 
+/** How long delivery to `feedback.url` may take before it counts as failed.
+ *  A mutable object so a test can shorten it. @internal */
+export const _feedbackDelivery = { timeoutMs: 15_000 };
+
 export type StartFeedbackDeps = {
   feedback: FeedbackInput;
-  sources: ReportSources;
+  sources: _ReportSourcesInternal;
   log: Log;
   redact?: Redactor;
   /** Which app's `feedback` cell and runtime this is (`_feedbackForApp`).
@@ -178,7 +182,10 @@ export function startFeedback(deps: StartFeedbackDeps): StartedFeedback {
     : deps.feedback === false
     ? {}
     : deps.feedback;
-  const sources: ReportSources = { ...deps.sources, redact: deps.redact };
+  const sources: _ReportSourcesInternal = {
+    ...deps.sources,
+    redact: deps.redact,
+  };
   const { log } = deps;
 
   const capture = async (input: {
@@ -202,6 +209,9 @@ export function startFeedback(deps: StartFeedbackDeps): StartedFeedback {
           method: "POST",
           headers: { "content-type": "application/json" },
           body: JSON.stringify(report),
+          // A deadline: a collector that accepts and never answers held
+          // `capture()` — and the user's "capturing" — pending forever.
+          signal: AbortSignal.timeout(_feedbackDelivery.timeoutMs),
         });
         delivered = res.ok;
         await res.body?.cancel();
@@ -282,7 +292,9 @@ export function startFeedback(deps: StartFeedbackDeps): StartedFeedback {
         kind: "error",
         title: `${event.type}: ${String(event.message).slice(0, 200)}`,
       }).catch((e) => log.warn("feedback", `automatic capture failed: ${e}`));
-    });
+      // In prod too — the bus is otherwise off there, and a shipped app is
+      // exactly the one nobody is watching.
+    }, { prodErrors: true });
   }
 
   return {

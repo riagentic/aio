@@ -101,7 +101,11 @@ import {
   resolveAmAppId,
   resolveEntry,
 } from "./am-utils.ts";
-import { componentPort, processPlan } from "./am-components.ts";
+import {
+  componentLaunchArgs,
+  componentPort,
+  processPlan,
+} from "./am-components.ts";
 import {
   probePort,
   resolveControlPort,
@@ -367,15 +371,7 @@ export async function ensureSingleton(
       : false;
     if (listening && pastGrace) {
       let responds = !(probePort > 0); // a live socket IS the answer
-      if (probePort > 0) {
-        try {
-          const r = await fetch(`http://127.0.0.1:${probePort}/`, {
-            signal: AbortSignal.timeout(HEALTH_TIMEOUT_MS),
-          });
-          await r.body?.cancel();
-          responds = r.ok;
-        } catch { /* listening, not answering */ }
-      }
+      if (probePort > 0) responds = await doorAnswers(probePort);
       if (responds) {
         // It's actually started — refuse
         outError(alreadyRunningLine(pf), mode);
@@ -435,14 +431,7 @@ export async function ensureSingleton(
   }
 
   // status='started' — verify it's actually responding
-  let responds = false;
-  try {
-    const r = await fetch(`http://127.0.0.1:${pf.trojanPort ?? pf.port}/`, {
-      signal: AbortSignal.timeout(HEALTH_TIMEOUT_MS),
-    });
-    await r.body?.cancel();
-    responds = r.ok;
-  } catch { /* not responding */ }
+  let responds = await doorAnswers(pf.trojanPort ?? pf.port);
   // The same fallback `am status` carries (see its comment): a prod+UDS app
   // listens on its Unix socket and NOWHERE else, so the TCP probe above can
   // never succeed for it. Without this, single-instance protection was
@@ -727,8 +716,12 @@ export async function cmdStart(
   /** `reusePort`: the port this app bound LAST time (a restart) — used when
    *  nothing declares one and it is still free, so a restart does not move
    *  the app and kill every open tab. Never recorded: a later restart asks
-   *  the same question again, and a taken port falls back to a free one. */
-  opts?: { reusePort?: number },
+   *  the same question again, and a taken port falls back to a free one.
+   *  `peerOf`: a RESTART's start — the pid it stopped (none when nothing was
+   *  running). A child refused because another launch of this same identity
+   *  took the lock first is then judged by that instance (see
+   *  {@linkcode racingPeer}), not reported as a start that failed. */
+  opts?: { reusePort?: number; peerOf?: { stopped?: number } },
 ): Promise<void> {
   const mode = detectMode(flags);
 
@@ -778,7 +771,7 @@ export async function cmdStart(
       for (const c of list) {
         const port = componentPort(c);
         await cmdStart(
-          args.filter((a) => a.startsWith("-")),
+          componentLaunchArgs(c, args.filter((a) => a.startsWith("-"))),
           {
             ...flags,
             app: c.appId,
@@ -1153,6 +1146,7 @@ export async function cmdStart(
     flags,
     mode,
     logFile,
+    peerOf: opts?.peerOf,
     onStarted: requested
       ? async (real) => {
         // The home the CHILD resolved — for an `appDir` app, `<appDir>-dev`,
@@ -1223,6 +1217,8 @@ async function awaitStarted(o: {
   logFile?: string;
   /** Run once the child is up, with its real lock. */
   onStarted?: (real: LockData | null) => Promise<void>;
+  /** A restart's start — see `cmdStart`'s `peerOf`. */
+  peerOf?: { stopped?: number };
 }): Promise<void> {
   const { appId, pid, declared, port, flags, mode } = o;
   const logPath = () => o.logFile ?? stdoutLogPath(appId);
@@ -1312,17 +1308,10 @@ async function awaitStarted(o: {
       livePort = written?.port || declared;
       if (livePort === undefined) continue; // no port chosen yet
     }
-    try {
-      const ctrlPort = resolveControlPort(livePort, appId);
-      const resp = await fetch(`http://127.0.0.1:${ctrlPort}/`, {
-        signal: AbortSignal.timeout(HEALTH_TIMEOUT_MS),
-      });
-      await resp.body?.cancel();
-      if (resp.ok) {
-        healthy = true;
-        break;
-      }
-    } catch { /* not ready yet */ }
+    if (await doorAnswers(resolveControlPort(livePort, appId))) {
+      healthy = true;
+      break;
+    }
   }
 
   if (healthy) {
@@ -1354,6 +1343,27 @@ async function awaitStarted(o: {
     // Our own child's placeholder, under our own home — and ONLY it: by the
     // time the child died another start may have taken the name.
     removeLockIfOwner(amLockKey(appId), { pid });
+    // A RESTART whose child lost the lock to another launch of the SAME app:
+    // save a cell file and `am restart` at once, and the app's dev watcher
+    // relaunches it in-process while am launches its own child — one wins.
+    // When the watcher's did, this said "did not start", exit 1, while
+    // `am status` showed the app up under a new pid. The app IS up, under the
+    // identity the restart asked for: that is the verdict, said with the pid
+    // actually serving, and a note for the child that stood down.
+    const peer = o.peerOf
+      ? await racingPeer(appId, pid, o.peerOf.stopped, deadline)
+      : null;
+    if (peer) {
+      sayErr(
+        `am: note: another launch of ${appId} (pid ${peer.pid} — e.g. its ` +
+          `dev watcher reloading a saved file) took the lock first; this ` +
+          `restart's child (pid ${pid}) stood down, and that instance is the ` +
+          `app now`,
+      );
+      const done = startedReport(appId, peer.pid, peer.port, peer.socketPath);
+      out(mode === "pretty" ? done.line : done.doc, mode);
+      return;
+    }
     // What it said — the `error:` line and the `→ fix:` lines under it, not
     // the last lines of the log (the stack frames, so the one line that says
     // what to do was the first to be cut).
@@ -1400,6 +1410,73 @@ async function awaitStarted(o: {
     Deno.exit(1);
   }
 }
+
+/** The instance that won the lock from a restart's child (`child`), when it
+ *  is the app the restart asked for — and SERVING — by `deadline`: under the
+ *  same lock key (appId + home + profile), alive, not the pid the restart
+ *  stopped (`stopped`: that one surviving is a failed stop, never a start),
+ *  not a maintenance hold, launched from THIS checkout, `started`, and its
+ *  door answering. Anything else is null — a start that really failed. */
+async function racingPeer(
+  appId: string,
+  child: number,
+  stopped: number | undefined,
+  deadline: number,
+): Promise<LockData | null> {
+  // At least a short grace: the child exits the moment it is refused, which
+  // can be before the winner has finished its own boot.
+  const until = Math.max(deadline, Date.now() + PEER_GRACE_MS);
+  do {
+    const l = readPid(appId);
+    if (
+      !l || l.pid === child || l.pid === stopped || maintenanceOp(l) ||
+      foreignCheckout(l) !== null || !isLockOwnerAlive(l)
+    ) return null;
+    if (l.status === "started") {
+      if (await answers(l, appId)) return l;
+    }
+    await new Promise((r) => setTimeout(r, POLL_INTERVAL_MS));
+  } while (Date.now() < until);
+  return null;
+}
+
+/** Does `l`'s door answer — its socket (the socket-only desktop shape), else
+ *  an HTTP 2xx on its control port, the test `awaitStarted` uses. */
+async function answers(l: LockData, appId: string): Promise<boolean> {
+  if (l.socketPath && !l.port) return await isSocketAlive(l.socketPath);
+  if (!(l.port > 0)) return false;
+  return await doorAnswers(resolveControlPort(l.port, appId));
+}
+
+/** Does the aio server on `port` ANSWER? Its page (`/`) with a 2xx — or,
+ *  when the page is refused, its health route: a prod server with no
+ *  browser bundle (every `client: "server-only"` app) answers `/` with an
+ *  honest 503, and reading that as "not answering" made `am start --prod`
+ *  exit 1 ("did not answer") for an app that was serving, and made the
+ *  single-instance check kill it as a zombie. `/__aio/health` is served in
+ *  every mode; a 401/403 there is a keyed app answering. THE liveness
+ *  question for `start`, the singleton check and a restart's peer. */
+async function doorAnswers(port: number): Promise<boolean> {
+  const get = async (path: string): Promise<number> => {
+    try {
+      const r = await fetch(`http://127.0.0.1:${port}${path}`, {
+        signal: AbortSignal.timeout(HEALTH_TIMEOUT_MS),
+      });
+      await r.body?.cancel();
+      return r.status;
+    } catch {
+      return 0; // aio-ok: nothing answered — the verdict below says so
+    }
+  };
+  const page = await get("/");
+  if (page >= 200 && page < 300) return true;
+  if (page === 0) return false;
+  const health = await get("/__aio/health");
+  return (health >= 200 && health < 300) || health === 401 || health === 403;
+}
+
+/** How long {@linkcode racingPeer} waits at least for the winner to serve. */
+const PEER_GRACE_MS = 5_000;
 
 /** `am start`'s verdict for a child that is up — the pretty line and the
  *  JSON document. A SOCKET-ONLY app (the desktop shape) bound no port, and
@@ -1574,7 +1651,24 @@ export function noLockMessage(appId: string): string {
   let live = "";
   try {
     const running = instances().filter((i) => i.alive);
-    if (running.length === 1 && running[0]!.appId !== appId) {
+    // THIS id, running from a home the target did not name (a profile, an
+    // isolated boot). Listing it as "running right now: x, x — target one
+    // with --app=<id>" repeated the id that had already resolved and left out
+    // the only thing that tells the instances apart.
+    const same = running.filter((i) => i.appId === appId);
+    if (same.length > 0) {
+      const how = (i: (typeof same)[number]): string => {
+        const home = i.home ?? appHome(appId);
+        const profile = i.profile ?? profileOfHome(appId, home);
+        if (profile) return `--profile=${profile}`;
+        return resolve(home) === resolve(appHome(appId))
+          ? "the default home (no --profile)"
+          : `--home=${home}`;
+      };
+      live = `\n  "${appId}" IS running — from another data home; name it: ${
+        same.map((i) => `${how(i)} (pid ${i.pid})`).join(" · ")
+      }`;
+    } else if (running.length === 1 && running[0]!.appId !== appId) {
       live = `\n  RUNNING RIGHT NOW: "${running[0]!.appId}" (pid ${
         running[0]!.pid
       }) — did you mean \`--app=${running[0]!.appId}\`?`;
@@ -2258,7 +2352,7 @@ async function restartAll(
     for (const c of list) {
       const port = componentPort(c);
       const r = await restartApp(
-        args.filter((a) => a.startsWith("-")),
+        componentLaunchArgs(c, args.filter((a) => a.startsWith("-"))),
         {
           ...flags,
           app: c.appId,
@@ -2539,11 +2633,10 @@ async function restartApp(
       } // connection refused = port free
     }
   }
-  await cmdStart(
-    launchArgs,
-    flags,
-    lastPort !== undefined ? { reusePort: lastPort } : undefined,
-  );
+  await cmdStart(launchArgs, flags, {
+    ...(lastPort !== undefined ? { reusePort: lastPort } : {}),
+    peerOf: { stopped: pf && running ? pf.pid : undefined },
+  });
   return unsaved === undefined ? { appId } : { appId, unsaved };
 }
 
@@ -2841,14 +2934,8 @@ export async function cmdStatus(
   // Process alive — probe control port to distinguish starting vs started
   const port = pf.port;
   const ctrlPort = pf.trojanPort ?? pf.port;
-  let portResponds = false;
-  try {
-    const resp = await fetch(`http://127.0.0.1:${ctrlPort}/`, {
-      signal: AbortSignal.timeout(HEALTH_TIMEOUT_MS),
-    });
-    await resp.body?.cancel();
-    portResponds = resp.ok;
-  } catch { /* not responding */ }
+  // `doorAnswers`: a server-only prod app answers `/` with a 503 by design.
+  let portResponds = await doorAnswers(ctrlPort);
 
   // A compiled (prod, zero-TCP) app listens on its Unix socket and NOWHERE
   // else, so the TCP probe above can never succeed — `status` sat on
@@ -3024,10 +3111,13 @@ export function cmdInstances(_args: string[], flags: GlobalFlags): void {
       APP: inst.profile ? `${inst.appId}@${inst.profile}` : inst.appId,
       PID: String(inst.pid),
       // A maintenance hold listens on nothing: name the op instead of `:0`.
+      // An app with BOTH wires (a socket, and a TCP port for a browser or
+      // `am --port`) shows both — "uds" alone hid the port a reader scans
+      // this column for.
       LISTENING: maintenanceOp(inst)
         ? `(${maintenanceOp(inst)})`
         : inst.socketPath
-        ? "uds"
+        ? (inst.port > 0 ? `:${inst.port} + uds` : "uds")
         : `:${inst.port}`,
       UP: formatUptime(Math.round((Date.now() - holderSince(inst)) / 1000)),
       AIO: instanceAioMismatch(inst.aioVersion)

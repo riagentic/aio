@@ -13,6 +13,13 @@ import {
   RENDERER_TAG,
 } from "./electron-renderer-log.ts";
 import { upstreamNoiseMatcherSource } from "../diagnostics/upstream-noise.ts";
+import {
+  HOST_KEY_EVENT,
+  HOST_KEY_MAX_LEN,
+  HOST_KEYS_ATTR,
+  HOST_KEYS_MAX,
+} from "../protocol/host-keys.ts";
+export { HOST_KEY_EVENT, HOST_KEYS_ATTR, HOST_KEYS_MAX };
 
 export type Log = { info: (msg: string) => void; error: (msg: string) => void };
 
@@ -176,6 +183,69 @@ process.on('uncaughtException', (err) => {
 process.on('unhandledRejection', (reason) => {
   console.error('[aio:electron] unhandled promise rejection in main process: ' + ((reason && reason.stack) || String(reason)));
 });`;
+}
+
+/** 🔒 Permissions: an embedded page gets none.
+ *
+ *  Electron's default permission handler GRANTS EVERY REQUEST, and aio never
+ *  installed one. A page inside a \`<webview>\` (or a foreign-origin iframe)
+ *  therefore held clipboard-read, camera, microphone, geolocation and
+ *  notifications with no prompt. Proven from the field on a crypto wallet built
+ *  on aio: a page in its in-app browser read, with \`navigator.clipboard
+ *  .readText()\`, text the wallet window had just copied — a seed phrase or a
+ *  private key is exactly what such an app copies.
+ *
+ *  The rule, on every session (the default one and every \`<webview>\`
+ *  partition, via \`session-created\`):
+ *   • the app's OWN page (a window, requesting from the origin it shows) keeps
+ *     what 1.0.11 gave it — it runs the app's own code;
+ *   • anything else — a guest, a foreign-origin frame — is denied, except
+ *     \`fullscreen\` (a video player's button). Each denial is said once per
+ *     origin and permission: a refusal nobody can see is the bug class this
+ *     file keeps closing. A guest that needs more should be a window, where the
+ *     request is explicit (the same line the \`<webview>\` preload rule draws).
+ *  Expects \`app\` in scope. */
+export function tmplPermissionGuard(): string {
+  return `
+const __aioPermSeen = new WeakSet();
+const __aioPermSaid = new Set();
+// A custom scheme (aio://app) and data: both have origin "null" — compare
+// scheme + host there, so a data: frame is not the app's own page.
+function __aioOrigin(u) {
+  try {
+    const x = new URL(u);
+    return x.origin !== 'null' ? x.origin : x.protocol + '//' + x.host;
+  } catch { return ''; }
+}
+function __aioPermOk(wc, permission, requesting) {
+  if (permission === 'fullscreen') return true;
+  if (!wc || typeof wc.getType !== 'function' || wc.getType() !== 'window') return false;
+  const own = __aioOrigin(wc.getURL());
+  return !requesting || __aioOrigin(requesting) === own;
+}
+function __aioPermDenied(permission, requesting) {
+  const key = permission + ' ' + requesting;
+  if (__aioPermSaid.has(key)) return;
+  __aioPermSaid.add(key);
+  console.warn('[aio:electron] permission "' + permission + '" DENIED to embedded page ' +
+    (requesting || '(unknown origin)') + ' — a <webview> guest or foreign-origin frame gets no ' +
+    'permissions (clipboard, camera, microphone, geolocation, notifications…). Only the app\\'s ' +
+    'own page keeps them.');
+}
+function __aioGuardSession(ses) {
+  if (!ses || __aioPermSeen.has(ses)) return;
+  __aioPermSeen.add(ses);
+  ses.setPermissionRequestHandler((wc, permission, cb, details) => {
+    const requesting = (details && details.requestingUrl) || (wc && wc.getURL()) || '';
+    const ok = __aioPermOk(wc, permission, requesting);
+    if (!ok) __aioPermDenied(permission, requesting);
+    cb(ok);
+  });
+  ses.setPermissionCheckHandler((wc, permission, requestingOrigin) =>
+    __aioPermOk(wc, permission, requestingOrigin));
+}
+app.on('session-created', __aioGuardSession);
+app.on('ready', () => __aioGuardSession(require('electron').session.defaultSession));`;
 }
 
 /** Die with the aio server that launched this window.
@@ -521,7 +591,13 @@ ${
         // LINE COMMENT that swallows the closing paren — a syntax error in a
         // file no type-checker reads, i.e. a window that never opens. Caught
         // by the parse test; kept as prose so it is not reintroduced.
-        const wantPath = want.startsWith('file://') ? want.slice(7) : want;
+        // fileURLToPath, not slice(7): a URL is percent-encoded (the space in
+        // "/Applications/My App.app" is %20) and on Windows it is
+        // file:///C:/…, so the sliced "path" never existed and EVERY such
+        // preload was refused as ENOENT.
+        const wantPath = want.startsWith('file://')
+          ? require('url').fileURLToPath(want)
+          : want;
         const real = fs.realpathSync(wantPath);
         ok = real === root || real.startsWith(root + path.sep);
         if (ok) webPreferences.preload = real;
@@ -573,7 +649,77 @@ ${
       } catch {}
       return { action: 'deny' };
     });
+${tmplHostKeyRelay()}
   });`;
+}
+
+/** Host-key relay — the body of `did-attach-webview` (expects `win` and
+ *  `guest` in scope).
+ *
+ *  A key pressed while focus is inside an IFRAME within a guest never reaches
+ *  the host: the guest's preload runs in its top frame only
+ *  (`nodeintegrationinsubframes` is forced off, and turning it on would put a
+ *  preload into every third-party frame). So "Escape always gives the
+ *  keyboard back" failed exactly when the user had clicked into a video embed
+ *  or a captcha. The guest's `before-input-event` sees EVERY frame, and only
+ *  real input (a page cannot synthesize it), so the relay lives in main:
+ *
+ *   - the keys are the ones the EMBEDDING element declares
+ *     ({@link HOST_KEYS_ATTR}), read once when the guest attaches — the guest
+ *     cannot declare, widen or observe anything;
+ *   - filtered HERE, so an undeclared key never leaves the main process;
+ *   - keyDown only; the guest still receives the key (relay, not steal);
+ *   - delivered as a bubbling {@link HOST_KEY_EVENT} CustomEvent on the
+ *     `<webview>` element, with the modifiers. `executeJavaScript` rather than
+ *     IPC: the WebSocket shell has no preload, and this must work in both. */
+function tmplHostKeyRelay(): string {
+  // Finds the element hosting THIS guest; `getWebContentsId()` is already
+  // answered at did-attach-webview (measured, Electron 44).
+  const find = (gid: string, body: string) =>
+    `'(() => { for (const w of document.querySelectorAll("webview")) { ' +
+        'let id; try { id = w.getWebContentsId(); } catch { continue; } ' +
+        'if (id === ' + ${gid} + ') { ${body} } } return null; })()'`;
+  return `    // Host-key relay (see tmplHostKeyRelay in electron-shared.ts).
+    const _hkHost = win.webContents;
+    const _hkGid = guest.id;
+    _hkHost.executeJavaScript(${
+    find("_hkGid", `return w.getAttribute(${JSON.stringify(HOST_KEYS_ATTR)});`)
+  }).then((raw) => {
+      if (raw === null || raw === undefined) return; // nothing declared
+      let keys = null;
+      try { keys = JSON.parse(raw); } catch {}
+      const ok = Array.isArray(keys) && keys.length > 0 &&
+        keys.length <= ${HOST_KEYS_MAX} &&
+        keys.every((k) => typeof k === 'string' && k.length > 0 && k.length <= ${HOST_KEY_MAX_LEN});
+      if (!ok) {
+        console.warn('[aio:electron] <webview> ${HOST_KEYS_ATTR} IGNORED: ' +
+          String(raw).slice(0, 200) + ' — expected a JSON array of 1..${HOST_KEYS_MAX} ' +
+          'KeyboardEvent.key names (e.g. ["Escape"]). No key will be relayed from this guest.');
+        return;
+      }
+      const set = new Set(keys);
+      guest.on('before-input-event', (_e, input) => {
+        if (input.type !== 'keyDown' || !set.has(input.key)) return;
+        if (guest.isDestroyed() || _hkHost.isDestroyed()) return;
+        const detail = JSON.stringify({
+          key: input.key, code: input.code,
+          ctrlKey: !!input.control, shiftKey: !!input.shift,
+          altKey: !!input.alt, metaKey: !!input.meta, repeat: !!input.isAutoRepeat,
+        });
+        _hkHost.executeJavaScript(${
+    find(
+      "_hkGid",
+      `w.dispatchEvent(new CustomEvent(${
+        JSON.stringify(HOST_KEY_EVENT)
+      }, { bubbles: true, detail: ' + detail + ' })); return true;`,
+    )
+  }).catch((e) => {
+          console.warn('[aio:electron] host key ' + input.key + ' not delivered: ' + String((e && e.message) || e));
+        });
+      });
+    }, (e) => {
+      console.warn('[aio:electron] could not read the <webview> host keys: ' + String((e && e.message) || e));
+    });`;
 }
 
 // ── Client connect page HTML (used by electronClientScript) ──

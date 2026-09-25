@@ -908,8 +908,15 @@ Deno.test("electron main: relay fuzz — nothing lost, reordered or corrupted", 
 
     const KINDS = ["state", "patches", "cfg", "proto", "ack", "tt-state"];
 
+    // "Connected" means BOTH ends: main's `type` hello has arrived. Accepted
+    // alone is not enough — a drop before main's 'connect' handler ran makes
+    // its hello write fail with EPIPE, and Node discards the unread frames
+    // with the socket (measured). That connection never handed anything over,
+    // so I3 would charge main for frames it could not have read.
+    const connected = () =>
+      srv.inbound.some((l) => l.startsWith('{"v":2,"t":"type"'));
     try {
-      await main.waitFor(() => srv.conns() > 0);
+      await main.waitFor(connected);
 
       for (let i = 0; i < steps; i++) {
         const r = rnd();
@@ -963,7 +970,7 @@ Deno.test("electron main: relay fuzz — nothing lost, reordered or corrupted", 
           await Deno.remove(sockPath).catch(() => {});
           await new Promise((r2) => setTimeout(r2, 30));
           srv = rawServer(sockPath);
-          await main.waitFor(() => srv.conns() > 0, 20000);
+          await main.waitFor(connected, 20000);
         } else if (r < 0.90) {
           const line = JSON.stringify({
             v: 2,

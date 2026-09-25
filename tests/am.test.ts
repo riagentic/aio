@@ -458,7 +458,9 @@ Deno.test("am: PidFile with trojanPort round-trip", () => {
 
 Deno.test("am: resolveControlPort returns trojanPort when TLS active", () => {
   try {
-    writePid(makePf({ pid: 1234, port: 8000, trojanPort: 9001 }));
+    // A LIVE pid: reading instances sweeps the lock of a dead one, and a dead
+    // app has no control port to resolve.
+    writePid(makePf({ pid: Deno.pid, port: 8000, trojanPort: 9001 }));
     assertEquals(resolveControlPort(8000, TEST_APP), 9001);
     assertEquals(resolveControlPort(9999, TEST_APP), 9999); // different main port — no match
   } finally {

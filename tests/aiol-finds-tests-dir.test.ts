@@ -169,3 +169,32 @@ Deno.test("aiol: a cell named as a whole word IS counted as tested", async () =>
     await Deno.remove(dir, { recursive: true });
   }
 });
+
+// The hint said `create todo.test.ts` — no directory. Followed literally, that
+// file lands beside the cell in src/, the exact layout the docs retire ("tests
+// live in tests/ at the project root … mirroring src/"), and aiol then still
+// counted it only because it scans src/ too. The hint names the file the
+// convention means: tests/ mirroring the cell's own path, which is also a file
+// the check itself accepts (it imports the cell's module).
+Deno.test("aiol: the untested-cell hint names the tests/ file that mirrors the cell", async () => {
+  const dir = await project({
+    "deno.json": JSON.stringify({ imports: { aio: "jsr:@riagentic/aio@1" } }),
+    "src/cell/todo.ts": CELL.replace('"hw"', '"todo"'),
+    "src/cell.ts": CELL.replace('"hw"', '"view"'),
+  });
+  try {
+    const { ctx, report } = await buildContext(dir);
+    const { checkTesting } = await import("../aiol/checks.ts");
+    await checkTesting(ctx);
+    const msgs = report.issues
+      .filter((i) => i.message.includes("has no test file"))
+      .map((i) => i.message)
+      .sort();
+    assertEquals(msgs, [
+      'cell "todo" has no test file — create tests/cell/todo.test.ts',
+      'cell "view" has no test file — create tests/cell.test.ts',
+    ]);
+  } finally {
+    await Deno.remove(dir, { recursive: true });
+  }
+});

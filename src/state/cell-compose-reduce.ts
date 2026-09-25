@@ -147,7 +147,10 @@ function _frozenMutationHint(e: unknown): string {
     : "";
 }
 
-export const WORKER_PATCH_ACTION = "__aioWorkerPatch";
+// Defined in the diagnostics leaf so the logger can name it without loading
+// the state engine (aio/log stays a leaf).
+export { WORKER_PATCH_ACTION } from "../diagnostics/action-kind.ts";
+import { WORKER_PATCH_ACTION } from "../diagnostics/action-kind.ts";
 
 export type ReduceResult = {
   state: Record<string, unknown>;

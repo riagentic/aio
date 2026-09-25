@@ -1,6 +1,7 @@
 // The update UI is yours — aio ships no component. `updates` is a cell, so
 // this is an ordinary reactive read; copy this file and restyle it.
 import { updates } from "aio/updates";
+import { feedback } from "aio/feedback";
 import { notes } from "./cell.ts";
 
 const bar: Record<string, string> = {
@@ -143,6 +144,29 @@ export default function App() {
       <button type="button" onClick={() => notes.add(`note ${Date.now()}`)}>
         Add a note
       </button>
+
+      {
+        /* The other half of reaching users: `feedback: true` in app.ts, and a
+          button. The report — build, state (redacted), recent actions, logs —
+          is captured server-side; the cell says where it went, or why not. */
+      }
+      <p>
+        <button
+          type="button"
+          onClick={() => feedback.report("Problem reported from the app")}
+        >
+          Report a problem
+        </button>
+        {
+          /* `report()` never throws: a refusal (not configured, rate-capped,
+            a failed write) lands in `error`, so it is read, not caught. */
+        }
+        {feedback.status === "error"
+          ? ` Not saved: ${feedback.error}`
+          : feedback.last
+          ? ` Thanks — saved to ${feedback.last.path}.`
+          : ""}
+      </p>
 
       <p style={{ color: "#6b7280", fontSize: "0.9rem", marginTop: "2rem" }}>
         {

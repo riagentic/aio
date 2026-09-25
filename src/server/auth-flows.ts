@@ -35,6 +35,7 @@ import {
   bearerToken,
   chargeAuthWork,
   chargeSignup,
+  originVerdict,
   recordAuthFail,
   refundAuthWork,
   requestHost,
@@ -87,6 +88,9 @@ export interface AuthFlows {
   /** The session cookie's name — `sessionCookieNameFor(appId)`, filled in by
    *  the server. Absent → the legacy shared `aio_session`. */
   cookieName?: string;
+  /** The app's `allowedOrigins` — admitted by the POST flows' Origin check
+   *  exactly as by the server-wide one (filled in by the server). */
+  allowedOrigins?: readonly string[];
 }
 
 /** Every auth response is identity-bearing (a user, a session token, a
@@ -123,21 +127,28 @@ const cookieHeader = (
   `${name}=${token}; Path=/; HttpOnly; SameSite=Strict` +
   `; Max-Age=${maxAgeS}${secure ? "; Secure" : ""}`;
 
-/** CSRF floor for the POST flows: when a browser sends an Origin, its host
- *  must match the request host (SameSite=Strict already blocks cross-site
- *  cookie sends; this also stops cross-origin token-less POSTs). Requests
- *  without Origin (curl, native clients) pass — they carry no ambient cookie
- *  authority to ride. */
-const sameOrigin = (req: Request): boolean => {
+/** CSRF floor for the POST flows: when a browser sends an Origin, it must be
+ *  one this server admits (SameSite=Strict already blocks cross-site cookie
+ *  sends; this also stops cross-origin token-less POSTs). Requests without
+ *  Origin (curl, native clients) pass — they carry no ambient cookie authority
+ *  to ride.
+ *
+ *  THE Origin decider (`originVerdict`), not a second spelling of it. This
+ *  used to compare the Origin's host with the Host header and nothing else,
+ *  so the two gates a login POST passes disagreed: an origin named in
+ *  `allowedOrigins` — which "may connect, POST AND embed" — and aio's own
+ *  Electron shell (`aio://app`) passed the server-wide gate and were then
+ *  refused `cross_origin` here, so neither could sign in at all. */
+const sameOrigin = (req: Request, cfg: AuthFlows): boolean => {
   const origin = req.headers.get("origin");
   if (!origin) return true;
-  try {
-    // `requestHost`, not the Host header: an HTTP/2 request has none (the name
-    // is in `:authority`), so every same-origin login POST over h2 was refused.
-    return new URL(origin).host === (requestHost(req) ?? "");
-  } catch {
-    return false;
-  }
+  // `requestHost`, not the Host header: an HTTP/2 request has none (the name
+  // is in `:authority`), so every same-origin login POST over h2 was refused.
+  return originVerdict(origin, {
+    hostHeader: requestHost(req),
+    secure: cfg.secure,
+    allowedOrigins: cfg.allowedOrigins,
+  }) === null;
 };
 
 /** The raw value under the legacy shared cookie name, if any. */
@@ -212,10 +223,23 @@ export async function handleAuthFlow(
 ): Promise<Response | null> {
   if (!url.pathname.startsWith("/__aio/auth/")) return null;
   const route = `${req.method} ${url.pathname.slice("/__aio/auth/".length)}`;
-  const maxAgeS = Math.floor((cfg.ttlMs ?? 30 * 24 * 3_600_000) / 1000);
   const cookieName = cfg.cookieName ?? SESSION_COOKIE;
-  const sessionCookie = (token: string): string =>
-    cookieHeader(token, maxAgeS, cfg.secure, cookieName);
+  /** The cookie lives exactly as long as the session it carries — read from
+   *  the store's own expiry, not re-derived from `cfg.ttlMs`. With `auth.ttlMs`
+   *  unset the token takes the STORE default (`sessions.ttlMs`), and a cookie
+   *  hard-coded to 30 days logged a 90-day session out on day 30. */
+  const sessionCookie = (token: string): string => {
+    const exp = cfg.sessions.get(token)?.expiresAt;
+    const ms = exp !== undefined
+      ? exp - Date.now()
+      : (cfg.ttlMs ?? 30 * 24 * 3_600_000);
+    return cookieHeader(
+      token,
+      Math.max(0, Math.floor(ms / 1000)),
+      cfg.secure,
+      cookieName,
+    );
+  };
   /** The legacy shared-name cookie, when it holds a session THIS app issued.
    *
    *  Only then may this app clear it. Any other value under `aio_session` may
@@ -313,7 +337,7 @@ export async function handleAuthFlow(
   }
 
   if (req.method !== "POST") return json(404, { error: "unknown_auth_route" });
-  if (!sameOrigin(req)) return json(403, { error: "cross_origin" });
+  if (!sameOrigin(req, cfg)) return json(403, { error: "cross_origin" });
   // Body cap, once, for every POST route — a route added later inherits it,
   // and a route that forgets to read the body cannot leave one unbounded.
   // The declared length is refused before a byte is read; a body that lies
@@ -555,6 +579,11 @@ export async function handleAuthFlow(
         const rec = cfg.users.get(stored.subject);
         if (!rec) return json(401, { error: "invalid_code" });
         lockout?.clear(rec.id);
+        // A correct code gives its work unit back, exactly as a correct
+        // password does in `login` — otherwise every completed 2FA sign-in
+        // spent the budget a correct login shares, and thirty in a minute
+        // behind the documented proxy 429'd the next valid credential.
+        refundAuthWork(clientKey);
         return issueSession({ id: rec.id, role: rec.role });
       });
     }
@@ -599,6 +628,8 @@ export async function handleAuthFlow(
         }
         return json(401, { error: "invalid_credentials" });
       }
+      // The old password was RIGHT — its work unit goes back (see `login`).
+      refundAuthWork(clientKey);
       try {
         await cfg.users.setPassword(user.id, newPw);
       } catch (e) {
@@ -780,6 +811,8 @@ export async function handleAuthFlow(
         return json(401, { error: "invalid_code" });
       }
       cfg.users.enableTotp(user.id);
+      // Password AND code were right — the unit goes back (see `login`).
+      refundAuthWork(clientKey);
       log.warn(`[aio] auth: TOTP enabled for id=${user.id}`);
       return json(200, { ok: true });
     }
@@ -809,6 +842,7 @@ export async function handleAuthFlow(
         // never had one, in the middle of a lost-device recovery". The store
         // learned that; this route threw the answer away and always said ok.
         const cleared = cfg.users.disableTotp(user.id);
+        refundAuthWork(clientKey); // a correct password (see `login`)
         return json(200, { ok: true, cleared });
       }
       recordAuthFail(clientKey, `totp disable failed for id=${user.id}`);

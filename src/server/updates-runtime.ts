@@ -216,7 +216,13 @@ export function createUpdatesRuntime(deps: UpdatesRuntimeDeps): UpdatesRuntime {
   async function checkManifest(opts: CheckOptions): Promise<CheckResult> {
     const trust = readTrust(deps.dataDir);
     const url = manifestUrl(config.source, channel, platform);
-    const got = await fetchManifest(url, trust.etagCurrent);
+    // Sent only for the verdict it was cached under — see `etagCurrentFor`.
+    const cachedFor = trust.etagCurrentFor;
+    const validator = cachedFor?.version === deps.appVersion &&
+        cachedFor.url === url
+      ? trust.etagCurrent
+      : undefined;
+    const got = await fetchManifest(url, validator);
     if (got.kind === "error") return { kind: "error", error: got.error };
     if (got.kind === "not-modified") {
       return { kind: "current", reason: `${deps.appVersion} is the latest` };
@@ -246,7 +252,9 @@ export function createUpdatesRuntime(deps: UpdatesRuntimeDeps): UpdatesRuntime {
     // could not see the one caller that actually uses it.
     if (!expect.key && m.publicKey && m.signature) {
       try {
-        pinKey(deps.dataDir, m.publicKey, url);
+        // `pinFrom`, not `url`: the manifest may have come over a redirect,
+        // and the leg that served it is the one that must authenticate.
+        pinKey(deps.dataDir, m.publicKey, got.pinFrom);
       } catch (e) {
         // A refusal to pin is a refusal to CHECK — never "no update
         // available". Same rule as a failed claim above.
@@ -320,7 +328,10 @@ export function createUpdatesRuntime(deps: UpdatesRuntimeDeps): UpdatesRuntime {
     if (
       got.etag && d.kind === "current" && !d.reason.includes("was dismissed")
     ) {
-      writeTrust(deps.dataDir, { etagCurrent: got.etag });
+      writeTrust(deps.dataDir, {
+        etagCurrent: got.etag,
+        etagCurrentFor: { version: deps.appVersion, url },
+      });
     }
     if (d.kind === "incompatible") {
       // Kept so `apply({ acceptDataLoss: true })` has something to install:
@@ -716,7 +727,9 @@ export function createUpdatesRuntime(deps: UpdatesRuntimeDeps): UpdatesRuntime {
     try {
       void Promise.resolve((deps.cell ?? createUpdatesCell()).setPhase(next))
         .catch(() => {});
-    } catch { /* not bound — the install continues either way */ }
+    } catch {
+      // aio-ok: not bound — the install continues either way
+    }
   }
 
   /** Report the pre-migration backup into the cell, the same way `phase` does.

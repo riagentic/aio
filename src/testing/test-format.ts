@@ -17,13 +17,20 @@ export function formatCellState(state: unknown, maxLen = 2000): string {
   if (state === undefined) return "(unavailable)";
   let text: string;
   try {
-    const seen = new WeakSet<object>();
-    text = JSON.stringify(state, (_k, v) => {
+    // ANCESTORS, not "seen anywhere": a value reached twice through structural
+    // sharing (`s.selected = s.items[0]`) is not a cycle, and printing it as
+    // "[Circular]" hid the very field a failing assertion was about. The
+    // replacer's `this` is the holder, so the chain is unwound to it first.
+    const chain: unknown[] = [];
+    text = JSON.stringify(state, function (this: unknown, _k, v) {
       if (typeof v === "bigint") return `${v}n`;
       if (typeof v === "function") return "[Function]";
       if (v && typeof v === "object") {
-        if (seen.has(v as object)) return "[Circular]";
-        seen.add(v as object);
+        while (chain.length > 0 && chain[chain.length - 1] !== this) {
+          chain.pop();
+        }
+        if (chain.includes(v)) return "[Circular]";
+        chain.push(v);
       }
       return v;
     }) ?? String(state);

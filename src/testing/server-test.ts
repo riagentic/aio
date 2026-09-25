@@ -9,6 +9,7 @@ import { _armTestStrict } from "./test-strict.ts";
 import {
   _isolateWorkerCellsInProcess,
   _refuseWorkerCells,
+  _shedLeakedScopes,
 } from "./boot-refusals.ts";
 import { dropTempDir, tempDir } from "./temp-dir.ts";
 import { chromiumBin, findChromium, launchChromium } from "./chromium.ts";
@@ -315,6 +316,7 @@ export async function testServer<S = unknown>(
   config: TestServerConfig,
 ): Promise<TestServer<S>> {
   _armTestStrict(); // tests are the strictest environment, never the most permissive
+  _shedLeakedScopes(); // the caller's body is no worker's code (see there)
   // Before anything is allocated — a misconfigured harness must not leave a
   // temp directory behind on its way to throwing.
   const workerEntryUrl = resolveWorkerMode(config);

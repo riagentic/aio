@@ -36,6 +36,7 @@ export const UI_CSS: string = `
   --aio-ui-ink-soft: var(--aio-ink-soft, var(--aio-muted, #55606f));
   --aio-ui-line: var(--aio-line, var(--aio-border, #e2e6ec));
   --aio-ui-danger: var(--aio-danger, #d3364a);
+  --aio-ui-on-danger: var(--aio-on-danger, #ffffff);
   --aio-ui-radius: var(--aio-radius, var(--aio-r-2, 8px));
   --aio-ui-font: var(--aio-font, ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif);
 }
@@ -49,6 +50,15 @@ export const UI_CSS: string = `
     --aio-ui-ink-soft: var(--aio-ink-soft, var(--aio-muted, #97a1b5));
     --aio-ui-line: var(--aio-line, var(--aio-border, #2a3040));
     --aio-ui-danger: var(--aio-danger, #ff6b78);
+  }
+}
+/* The ink ON the danger fill, solved from the fill (see app-theme.ts): dark
+   mode LIGHTENS the fill — white on #ff6b78 is 2.8:1 — and an app may set any
+   --aio-danger, so no fixed ink fits. An engine without relative colour keeps
+   white, as before. */
+@supports (color: color(from red srgb-linear calc(r * 0.5) g b)) {
+  :root {
+    --aio-ui-on-danger: var(--aio-on-danger, color(from var(--aio-ui-danger) srgb-linear calc(clamp(0, (1791 - (2126 * r + 7152 * g + 722 * b)) * 10, 1)) calc(clamp(0, (1791 - (2126 * r + 7152 * g + 722 * b)) * 10, 1)) calc(clamp(0, (1791 - (2126 * r + 7152 * g + 722 * b)) * 10, 1))));
   }
 }
 
@@ -69,7 +79,7 @@ export const UI_CSS: string = `
 .aio-btn--secondary:hover:not(:disabled) { border-color: var(--aio-ui-accent); }
 .aio-btn--ghost { background: transparent; color: var(--aio-ui-ink); }
 .aio-btn--ghost:hover:not(:disabled) { background: var(--aio-ui-surface); }
-.aio-btn--danger { background: var(--aio-ui-danger); color: #fff; }
+.aio-btn--danger { background: var(--aio-ui-danger); color: var(--aio-ui-on-danger); }
 .aio-btn--danger:hover:not(:disabled) { filter: brightness(1.07); }
 
 .aio-input {
@@ -201,7 +211,8 @@ export const UI_CSS: string = `
 
 /* Tooltip — hover AND focus, both in CSS */
 .aio-tip { position: relative; display: inline-flex; }
-.aio-tip__bubble { position: absolute; z-index: 1200; inset-inline-start: 50%; transform: translateX(-50%); background: var(--aio-ui-ink); color: var(--aio-ui-bg); font-family: var(--aio-ui-font); font-size: .82em; padding: .35em .6em; border-radius: 4px; white-space: nowrap; opacity: 0; visibility: hidden; transition: opacity .12s ease; pointer-events: none; }
+.aio-tip__bubble { position: absolute; z-index: 1200; transform: translateX(-50%); background: var(--aio-ui-ink); color: var(--aio-ui-bg); font-family: var(--aio-ui-font); font-size: .82em; padding: .35em .6em; border-radius: 4px; white-space: nowrap; opacity: 0; visibility: hidden; transition: opacity .12s ease; pointer-events: none; }
+.aio-tip__bubble { left: 50%; } /* aio-ok: centring, not reading order — the translate above is physical, so its offset must be too (a logical inset flips in RTL and put the bubble a full width off its trigger) */
 .aio-tip--top .aio-tip__bubble { inset-block-end: calc(100% + .35em); }
 .aio-tip--bottom .aio-tip__bubble { inset-block-start: calc(100% + .35em); }
 .aio-tip:hover .aio-tip__bubble, .aio-tip:focus-within .aio-tip__bubble { opacity: 1; visibility: visible; }

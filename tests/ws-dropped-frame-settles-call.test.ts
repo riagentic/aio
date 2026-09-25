@@ -191,6 +191,79 @@ Deno.test("ws: an OVERSIZED frame settles its caller too — the cap is on the s
   }
 });
 
+// …and a frame over the parse budget is SCANNED for its cid — so the scan must
+// read JSON, not one serializer's spelling of it. The pattern demanded
+// `"cid":"…"` with no whitespace, which is `JSON.stringify`'s output and
+// nobody else's: a peer written in Python (`json.dumps` puts a space after
+// every colon) had its oversized call dropped with no ack, and its caller
+// waited out the full ceiling.
+Deno.test("ws: an oversized frame from a peer that spaces its JSON still settles its caller", async () => {
+  const c = cell("wsbigsp", {
+    state: { n: 0 },
+    methods: {
+      add(s: { n: number }, _v: string) {
+        s.n++;
+      },
+    },
+  });
+  const port = freePort();
+  const dir = await tempDir("aio-wsbigsp-");
+  const app = await aio.run({
+    cells: [c],
+    appId: `wsbigsp-${Deno.pid}`,
+    client: "server-only",
+    persist: false,
+    libraryMode: true,
+    singleton: false,
+    port,
+    baseDir: dir,
+    dbPath: ":memory:",
+    // deno-lint-ignore no-explicit-any
+  } as any);
+
+  const ws = new WebSocket(`ws://127.0.0.1:${port}/ws`);
+  const acks: { cid: string; ok: boolean; error?: string }[] = [];
+  const opened = new Promise<void>((res, rej) => {
+    ws.onopen = () => res();
+    ws.onerror = () => rej(new Error("socket failed to open"));
+  });
+  ws.onmessage = (e) => {
+    try {
+      const f = dec(String(e.data)) as { t?: string; d?: unknown } | null;
+      if (f?.t !== "ack") return;
+      const d = f.d as { cid?: string; ok?: boolean; error?: string };
+      if (typeof d?.cid === "string") {
+        acks.push({ cid: d.cid, ok: d.ok === true, error: d.error });
+      }
+    } catch { /* not our frame */ }
+  };
+
+  try {
+    await opened;
+    ws.send(enc("proto", protoHello()));
+    // What `json.dumps` sends: `": "` and `", "` between every member.
+    const frame = enc("action", {
+      type: "wsbigsp:add",
+      payload: { args: ["x".repeat(1_100_000)] },
+      cid: "big-sp",
+    }).replaceAll('":', '": ').replaceAll('","', '", "');
+    assert(frame.includes('"cid": "big-sp"'), "the frame must be spaced");
+    ws.send(frame);
+    const t0 = Date.now();
+    while (acks.length < 1 && Date.now() - t0 < 4000) {
+      await new Promise((r) => setTimeout(r, 20));
+    }
+    assertEquals(acks.length, 1, "the spaced oversized frame settled nothing");
+    assertEquals(acks[0]?.cid, "big-sp");
+    assertEquals(acks[0]?.ok, false);
+  } finally {
+    try {
+      ws.close();
+    } catch { /* already closed */ }
+    await app.close();
+  }
+});
+
 // ── the cid must be the ENVELOPE's, not one the app happened to write ────────
 //
 // The cid was recovered by scanning the raw frame text for the first

@@ -35,25 +35,34 @@ export function _installReadOnlyHint(): void {
   const listener = (ev: {
     message?: string;
     error?: Error;
-  }) => {
-    if ((globalThis as Record<string, unknown>).__aioDev !== true) return;
-    const msg = ev?.error?.message ?? ev?.message ?? "";
-    if (
-      !/read.only|read.only property|read.only object|Cannot assign to read only/i
-        .test(msg)
-    ) {
-      return;
-    }
-    if (_hinted.has("readonly")) return;
-    _hinted.add("readonly");
-    // eslint-disable-next-line no-console
-    console.info(
-      "[aio] state is read-only — call a cell method to change it (rule AIO2). " +
-        "Mutations from components bypass the framework and silently desync.",
-    );
-  };
+  }) => _hintReadOnly(ev?.error ?? ev?.message);
   _installedListener = listener;
   target.addEventListener("error", listener);
+}
+
+/** Print the AIO2 hint (once, dev only) when `err` is a write to read-only
+ *  state. Called by the global `error` listener above AND by AIR's event
+ *  handler wrapper (via `devHooks.readOnlyHint`): a component writes state
+ *  from a handler, and the wrapper CATCHES that throw so one bad handler
+ *  cannot take the page — the global event never fires for it, so the
+ *  listener alone never hinted the write the rule is about.
+ *
+ *  "only a getter" is the TOP-level write (`counter.count = 5` — a cell's
+ *  state key is a getter-only property); "read only" is a nested one
+ *  (`counter.box.n = 5` — committed state is frozen). */
+export function _hintReadOnly(err: unknown): void {
+  if ((globalThis as Record<string, unknown>).__aioDev !== true) return;
+  const msg = err instanceof Error ? err.message : String(err ?? "");
+  // Every engine's wording: V8 "read only" / "which has only a getter",
+  // SpiderMonkey "read-only" / "getter-only", JavaScriptCore "readonly".
+  if (!/read.?only|only a getter|getter-only/i.test(msg)) return;
+  if (_hinted.has("readonly")) return;
+  _hinted.add("readonly");
+  // eslint-disable-next-line no-console
+  console.info(
+    "[aio] state is read-only — call a cell method to change it (rule AIO2). " +
+      "Mutations from components bypass the framework and silently desync.",
+  );
 }
 
 /** Uninstall the global error listener — for teardown / hot-reload so the

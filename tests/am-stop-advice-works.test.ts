@@ -51,7 +51,11 @@ Deno.test("no source advises `am stop <appId>` with an app id", async () => {
       text.split("\n").forEach((l, i) => {
         // `am stop ${…}` — an interpolated value in the component slot is an
         // app id every time; a literal label (am stop web) is fine.
-        if (/am stop \$\{/.test(l) && !/--app=/.test(l)) {
+        // `targetArgs(…)` (src/am/am-cmd-data.ts) always starts with `--app=`.
+        if (
+          /am stop \$\{/.test(l) && !/--app=/.test(l) &&
+          !/am stop \$\{targetArgs\(/.test(l)
+        ) {
           offenders.push(`${p}:${i + 1}  ${l.trim().slice(0, 100)}`);
         }
       });

@@ -119,6 +119,15 @@ export type CreateOpts = {
 
 /** Parse positional name + create-scoped flags out of the raw args. Unknown
  *  `--flags` are ignored (am's global parser already handled the shared ones). */
+/** create's flags that need an `=value` — named when given bare. */
+const CREATE_VALUE_FLAGS: readonly string[] = [
+  "--template",
+  "--client",
+  "--target",
+  "--css",
+  "--aio-version",
+];
+
 export function parseCreateArgs(args: string[]): CreateOpts {
   const opts: CreateOpts = {
     template: "counter",
@@ -181,6 +190,15 @@ export function parseCreateArgs(args: string[]): CreateOpts {
       }
       opts.target = v;
       targetGiven = { flag, value: v };
+    } else if (CREATE_VALUE_FLAGS.includes(a)) {
+      // A KNOWN flag, spelled with a space: `--template counter`. It used to
+      // land in the unknown-flag branch below and be refused as "unknown flag
+      // --template" — while the very next line listed --template as accepted.
+      throw new Error(
+        `am create: ${a} takes its value with '=': ${
+          CREATE_FLAGS.find((f) => f.startsWith(`${a}=`)) ?? `${a}=<value>`
+        }`,
+      );
     } else if (a.startsWith("-")) {
       // AN UNKNOWN FLAG IS AN ERROR, not a no-op.
       //
@@ -1304,7 +1322,9 @@ export async function cmdCreate(
     // newest release (never the branch tip, which is WIP by definition).
     // `--aio-version=main` opts into the moving target; `--mirror=<path>` still
     // wins for framework development, where the whole point is the live tree.
-    if (!opts.mirror) {
+    // `!== undefined`, not truthiness: a bare `--mirror` parses to "" (the
+    // checkout am runs from), and "" read as "no mirror" pinned a release.
+    if (opts.mirror === undefined) {
       const want = opts.aioVersion ?? await latestTag(root) ?? MAIN;
       const res = await ensureVersion(root, want);
       if (!res.ok) fail(res.error, mode);
@@ -1418,7 +1438,13 @@ export async function cmdCreate(
       }`,
       `    ${dim(dir)}`,
       `    ${dim(gitSentence(git))}`,
-      `    ${dim(frameworkSentence(pinnedVersion, aioPath, !!opts.mirror))}`,
+      `    ${
+        dim(frameworkSentence(
+          pinnedVersion,
+          aioPath,
+          opts.mirror !== undefined,
+        ))
+      }`,
       ...(existingData
         ? [`  ${st.yellow("⚠")} ${priorAppDataLine(appId, existingData)}`]
         : []),
@@ -2026,6 +2052,18 @@ if (Deno.args[0] === "serve") {
     },
   });
 
+  // Usage first: a malformed command is refused on its args alone — naming
+  // the right spelling, with or without a server — and as \`{"error"}\` under
+  // \`--json\` like every other refusal (\`args()\` does the same for typos).
+  const usage = (msg: string) => fail(msg, { code: EXIT.usage, json: a.json });
+  if (a.command === "add" && !a.rest.join(" ").trim()) {
+    usage("todo add <text...>");
+  }
+  const doneId = Number(a.rest[0]);
+  if (a.command === "done" && !Number.isInteger(doneId)) {
+    usage("todo done <id>");
+  }
+
   // WHERE the server is. \`serve\` binds a FREE port unless one is named, so a
   // hard-coded ws://localhost:8000 was wrong on nearly every run: \`todo list\`
   // said "no server" against a server that was running. The lock the app
@@ -2062,15 +2100,11 @@ if (Deno.args[0] === "serve") {
   try {
     switch (a.command) {
       case "add":
-        if (!a.rest.length) fail("todo add <text...>", { code: EXIT.usage });
         await todos.add(a.rest.join(" "));
         break;
-      case "done": {
-        const id = Number(a.rest[0]);
-        if (!Number.isInteger(id)) fail("todo done <id>", { code: EXIT.usage });
-        await todos.done(id);
+      case "done":
+        await todos.done(doneId);
         break;
-      }
       case "clear":
         await todos.clear();
         break;

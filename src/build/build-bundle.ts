@@ -24,6 +24,7 @@ import { misplacedIconHint, resolveAppIcon } from "./build-helpers.ts";
 import { explainServerOnlyImport } from "../server/server-only-specs.ts";
 import { bytes } from "../diagnostics/fmt.ts";
 import { bad, ok, staged, step, warn } from "./build-say.ts";
+import { minifyDeclared } from "./minify-server.ts";
 import { HEY, NO } from "../diagnostics/fmt.ts";
 
 /** Where the bundle's REAL input list is recorded — esbuild's own metafile,
@@ -564,7 +565,15 @@ export async function runBundle(
       // surfaces have to agree for it to work (write · staging allowlist ·
       // server read) and the first version silently failed at the second, so
       // the build reports the artifact like every other thing it stages.
-      if (wrote) {
+      if (wrote && await minifyDeclared(root)) {
+        // The compile leaves it out (minify-server.ts): say so, not "goes
+        // into the binary".
+        step(
+          `built dist/${BUNDLE_MAP}`,
+          `${bytes(bundle.map.length)} — build.minify leaves it out of the ` +
+            `binary, so forwarded client errors name app.js:1:…`,
+        );
+      } else if (wrote) {
         staged(
           `dist/${BUNDLE_MAP}`,
           `${bytes(bundle.map.length)} — forwarded client errors name your ` +
@@ -768,8 +777,17 @@ export async function runBundle(
     // set by loadBuildConfig, but the bundle step is also driven by harnesses
     // with a hand-built config — the icon label must resolve to SOMETHING.
     const label = appTitle ?? binaryName ?? basename(appDir);
-    await Deno.writeFile(join(dist, APP_ICON), await appIconPng(label, 512));
-    await Deno.writeTextFile(join(dist, "icon.svg"), appIconSvg(label));
+    // The HUE keys on the appId (binaryName), as the theme does — a title
+    // that is not the appId's spelling must not paint another colour.
+    const id = binaryName ?? label;
+    await Deno.writeFile(
+      join(dist, APP_ICON),
+      await appIconPng(label, 512, id),
+    );
+    await Deno.writeTextFile(
+      join(dist, "icon.svg"),
+      appIconSvg(label, 512, id),
+    );
     staged("dist/icon.png", `generated monogram "${label}"`);
   }
 }

@@ -1,5 +1,662 @@
 # Changelog
 
+## v1.0.12-beta — six bug-hunt rounds after 1.0.11, each fix proven by a test that fails without it (2026-09-25)
+
+> **Additive only — nothing is removed and nothing changes shape.** About 350
+> real bugs fixed, each with a failing-first test and a mutation-ledger row.
+> What an app may notice (see
+> [the upgrade guide](docs/upgrade/from-1.0.11-beta-to-1.0.12-beta.md)): a write
+> request to a path with no route gets `405`; an async method holding a row
+> across an `await` that another action moved is refused; a signed-out tab says
+> "Signed out" instead of reconnecting forever; the default icon's colour
+> follows the appId; dev warns once about a dark OS on an unpainted page.
+
+Bug-hunt round 1 after 1.0.11: three hunters (an app author, two apps in one
+process + memory pressure, a real 1.0.10 → 1.0.11 upgrade with crashes), then an
+adversarial review of every fix. Each fix has a test that fails without it and a
+mutation-ledger row.
+
+### Data
+
+- **`transaction: { serialize: true }` calls queued at `close()` lost their
+  writes** and resolved `undefined` (19 of 20). A shutdown abort now discards a
+  transaction only if its body read `s.$signal` (and says so as a warning); a
+  body that never looked runs whole. Queued stand-down loops still end at the
+  drain, never after `close()`. `concurrency: "queue"` had the same hole.
+- **`am snapshot load` did not stick for `sync: true` cells**: a restart brought
+  back the writes the load undid. The load now moves sync cells the way time
+  travel does. A `--force` load that leaves a declared cell out gives it its
+  initial state, as a restart would, instead of a cell whose every method
+  throws.
+- **`persist: "none"` method arguments no longer reach the journal.** Their
+  lines are written redacted and marked unstored; a reaction on a persisted cell
+  is journalled as data, so a SIGKILL still keeps it. The copy scrub now also
+  covers `data.replaced-*` (what `am restore` sets aside), copied journals, and
+  boots whose store has no snapshot yet. In a journal copy written by 1.0.11, a
+  call some cell `listensTo` is the only record of that reaction: it is kept,
+  and the copy is named in a warning.
+- **`--profile` no longer splits an app's data between two homes.** An app that
+  opened its own files before `aio.run()` and passed `dbPath` computed from the
+  default home kept opening the everyday database under `--profile=tasks`, while
+  aio moved its lock, logs and `meta.json` to `~/.<appId>-tasks`. Boot now
+  refuses a `dbPath` (config or `--db-path`) outside the requested home, naming
+  both paths. New in `aio/server`: `resolveHome({ appId, appDir, profiles })`
+  answers the home `aio.run()` will use, profile applied, before boot and in a
+  worker cell.
+
+### Two apps in one process (`docs/testing/multi-app.md`)
+
+- Closing one app no longer kills another app's `spawn()` children.
+- A `serverFns` namespace registered inside an app is served by that app only.
+  When that app closes, the next app to boot takes it over (a restart's shape),
+  never one already running beside it, and a takeover by a different app is
+  warned. One registered at module top level is served by every app — now said
+  once, with the fix, as soon as a second app runs.
+- Call ceilings (`effectTimeoutMs`), browser `client.log` lines and the signup /
+  login budgets are per app.
+- A closed app's scope no longer outlives it. Deno pins its ambient async
+  context to the first importer of an npm module: aio's boot loaded esbuild
+  inside the app, so every later test and unwrapped handler ran as that app.
+- **A closed app is now freed from memory.** Its cells (defined once per
+  process) and its diagnostics subscription kept every closed app alive: about
+  110 KB per app, and each diagnostic event logged once per closed app. A cell
+  used after its app closed still answers as before (`DISPATCH_CLOSED`), and
+  binds to the next app.
+
+### `am` and clients
+
+- `am restore` refuses another profile's archive (it used to exit 0 and leave a
+  home that refuses to boot).
+- `am restart` racing the dev watcher's relaunch: one process, on the same port,
+  visible to `am instances` — no invisible supervisor left behind, and no false
+  "did not start".
+- `am start --prod` of a server-only app (its `/` answers 503 on purpose) said
+  "not responding", stayed at `starting`, and the next `am start` killed it as a
+  zombie. `am` now asks `/__aio/health`, like the dev path.
+- A `connectCli` client now reads `connected: false` and `state: null` when the
+  server could not send it a full state (over the 64 MiB message ceiling,
+  `ws-frame-ceiling`), instead of patching a stale copy. It asks for the state
+  again on each change and is back in sync once the state fits.
+
+### Build and dev
+
+- **`<Browser hostKeys={["Escape"]} onHostKey={…}>`** (new, optional): a key
+  pressed inside a `<webview>` guest, even inside its iframes, now reaches the
+  host app. Only the declared keys, only on key-down; the guest still gets the
+  key and cannot see or change the list. Escape could not close an embedded site
+  before. `docs/clients/webview.md`.
+- **A build target can have its own display name**: a new, optional
+  `build.targets.<t>.title` names the macOS `.app` and DMG volume, the
+  `.desktop` `Name=`, the icon monogram and the Android label. A paid edition
+  named `"Notes PRO"` still showed as "Notes" and its `Notes.app` replaced the
+  free edition in `/Applications`; the build now warns when two desktop targets
+  are different apps that show one name, and names the key. Without `title`,
+  nothing changes: `name` still names only the files.
+- **Dev now loads a relative import that leaves the app root**
+  (`src/pro/App.tsx` → `../ui/Shell.tsx`), as the bundle always did. The dev
+  server serves only the files the app's modules import, with the app root's
+  guards, and never in prod — from `.ts`/`.tsx` and plain `.js`/`.mjs` modules
+  alike — and an edit to such a file live-reloads the page like an app-root
+  edit. `smoke()` uses the same rule. Dev also compiles `.jsx` now (it was
+  served as a download the browser refused), and a production server refuses
+  `.jsx` source like `.ts`/`.tsx`.
+- **Live reload follows the modules the page loads**: an edit to a served
+  `.js`/`.mjs`/`.jsx` module now reloads the page (only `.ts`/`.tsx`/`.css`/
+  `.html`/`.svg` did), and so does an edit to a module served from a `serveDirs`
+  or `share` root outside the app — that file is watched, nothing else in its
+  folder, and `watch: false` / `watch: [...]` are respected. Build output the
+  page never loads (`dist/`, `node_modules`) still reloads nothing. `smoke()`
+  now also fails a module that answers 200 with a non-JavaScript `Content-Type`
+  (the browser refuses it), naming the file, the type and the import chain.
+
+### Testing
+
+- **A proof row is no longer written from uncommitted code.** A gated test (the
+  real-browser web proof) recorded HEAD's commit while the working tree held
+  other changes, so the row claimed code that never ran. It now records nothing
+  and says why.
+- **Tests can no longer write the real version store.** `versionsDir()` fell
+  back to `~/.local/lib/aio-versions` whenever `AIO_VERSIONS_DIR` was unset, and
+  a test that restored the variable by deleting it made the real store the
+  answer for the rest of the run: a sandbox checkout was planted there as a
+  release. The harness, `tempDir()` and the shard runner now pin every per-user
+  store (versions, feedback, install root, `AIO_HOME`), and `check:home-clean`
+  fails a run that adds, changes or removes a real store entry.
+- **A method's first `import()` no longer breaks the next test.** Deno keeps the
+  async context a module is first loaded in for the rest of the process. So when
+  a method ran `import("./m.ts")` for a module not yet loaded, the next
+  `testUI`/`bootCells` test ran inside the previous test's disposed boot, and
+  its first cell call was refused as "dispatched into a torn-down runtime". In a
+  desktop wallet app, 19 of 105 tests failed this way. Every harness entry
+  (`testUI`, `testCell`, `bootCells`, `testServer`) now starts its body outside
+  every boot and worker scope. A disposed boot's own late call is still refused.
+
+### Round 2 — ten areas, one hunter each
+
+Hunters with fuzzers and real servers in: sync, auth, the renderer, the client
+runtime, the database, the server core, state, `am`, build, and updates/media.
+Each fix has a test that fails without it and a mutation-ledger row.
+
+**Data and state**
+
+- **An app with a `shape: "map"` table binding could not boot** once its table
+  had rows: the restored rows reached the shape check as an array.
+- Rows deleted from a table whose `state:` default had rows came back on the
+  next boot. A table the app has written is now restored as written, even when
+  empty.
+- Renaming a UNIQUE value and giving it to a new row in the same write window
+  was refused on every window (the cell was held). Writes now go DELETE, UPDATE,
+  INSERT.
+- A column renamed only in letter case (`userid` → `userId`) refused the boot;
+  it is now renamed in place, values kept.
+- A `db.query()` outside an open `db.transaction(async …)` could read that
+  transaction's uncommitted rows. It now reads committed data from a separate
+  read-only connection, without waiting for the transaction. `END` counts as a
+  write.
+- A `db` handle closed before its first statement now refuses later calls.
+- `schedule.at("2026-01-01T09:00:00")` — no offset — is still read in the
+  machine's zone (as `new Date()` does), but now warns once per id that hosts in
+  different zones fire it at different instants, naming the fix (`Z` or an
+  offset). The docs, which called every `at` time UTC, say so.
+- `schedule.*` builders refuse a non-action and `backoff`/`poll` refuse a
+  non-numeric `attempt` at the call, by name, instead of failing when the timer
+  fires.
+- `own.set` releases resources that only have `Symbol.dispose` /
+  `Symbol.asyncDispose` (a `Deno.serve()` server, a child process) and async
+  factories; a value it cannot release is logged.
+- `cell()` refuses a malformed `transaction` setting (it was read as off; a
+  misspelled `conflict` committed anyway), a `scope`/`worker`/`diagnostics`
+  value it would not read, and a bare `ttl`/`listensTo` value.
+- Sync: a default-retention cell's compaction swept a longer-retention cell's
+  tombstones, so that cell's late resend was applied twice. `lww-per-key` no
+  longer merges a key named like an `Object.prototype` member (`constructor`).
+
+**Server, auth and clients**
+
+- A client subscribed to some cells (WS and the desktop socket) was resent its
+  whole view whenever an unrelated cell changed; a change to a `visible: "none"`
+  cell resent every client its full state. Both now send nothing.
+- Login/signup/logout honour `allowedOrigins` and the Electron shell's origin,
+  like every other POST.
+- A `?token=` link parameter no longer hides a valid session cookie on an
+  `auth: true` app without `users:`.
+- OIDC: a login signed with a freshly rotated provider key works at once (the
+  key set is re-fetched, at most every 30 s per provider).
+- The session cookie lives as long as its session (`sessions.ttlMs` was ignored:
+  a 90-day session logged out on day 30).
+- Re-enrolling a NEW 2FA secret within 30 s of the last 2FA login is no longer
+  refused as a replay.
+- The sign-in form shows its own error text, and every error code the server
+  sends has a sentence.
+- Electron: calls made before the bridge opens queue behind older offline calls
+  (they jumped the queue, and could fail AND run); a torn-down client no longer
+  comes back to life or reads as connected.
+- Return values and arguments that JSON changes (a RegExp match's named
+  properties, an Array subclass) are reported as lossy.
+- Forwarded console lines keep `NaN`, `undefined`, functions and symbols.
+- A terminal client's socket decodes each connection on its own: a character cut
+  by a dead connection no longer drops the next connection's first frame.
+- Tray/notification links to the current page replace its history entry.
+
+**Renderer**
+
+- **A component that re-renders on its own signal and places the same `children`
+  somewhere else** unmounted the children still on screen (frozen signal text,
+  `onUnmount` run, leaked portal content). They stay mounted now.
+- Four placement bugs in keyed/unkeyed diffs with fragments and portals, and
+  bare text left behind when a region whose inner component swapped its root was
+  removed.
+- Hydration removes server text left over when a signal became a shorter prefix
+  of it.
+
+**Build**
+
+- **A build whose `out` was a folder of the user's files (`--out=tests`) deleted
+  them** under a green summary. The build now refuses an `out` folder holding
+  anything its previous release manifest does not list.
+- The compiled `--template=cli` app could never serve: the build put
+  `--client=cli` in front of the app's own arguments.
+- A misspelled `build` key is now warned about by the build, not only the
+  linter. A `build` block of the wrong shape is named: a shape that crashed or
+  built nothing (`"platforms": "linux"` split per character, `"out": 5`) is
+  refused naming the key; one that built on 1.0.11 is warned about and still
+  builds. `build.macos` is a known key.
+- **A compiled app whose config is `deno.jsonc` (or a `deno.json` with a
+  comment) took its app id from the binary's file name** — every versioned
+  install started from empty state. It reads the embedded config as JSONC now; a
+  git update of such an app finds its compile task, and `am fix` reads its
+  pinned version.
+- `aio.run({ assets })` folders answered 404 in a compiled binary started from
+  another directory. The folder next to where the app runs still wins, file by
+  file; the copy embedded at build time answers what it does not have.
+- "Compiled, but does not run" blames spaces or non-ASCII in the path only when
+  the path has them; `ship` accepts an uppercase sha256.
+
+**Dev, `am` and updates**
+
+- Dev loads `import data from "./x.json" with { type: "json" }` (the page was
+  the diagnostic page) and serves `.mts` compiled, as JavaScript.
+- `am fix --dry` ran the real repair, and `am publish --chanel=beta` (or
+  `--channel beta`) published to prod: both now refuse flags they do not read.
+  `am auth` refuses fields it would drop; an unknown one-dash flag is refused;
+  an empty `--body=` is refused; stray words to a verb that reads none are
+  warned about; `am top` checks its interval in `--json` mode.
+- A git update source followed a branch whose name only ENDS with the named one
+  (`feature/main` for `main`) and offered the update forever.
+- The "you are current" ETag is tied to the install it was judged for; an
+  uppercase manifest `sha256` is accepted everywhere the validator accepts it.
+- `am shot`/`am eval` exit after a CDP connect timeout.
+- `blobs.put` keeps the FIRST name under concurrent puts of the same bytes.
+- `createSelector` does not cache a throwing combiner's inputs.
+- Vitals forget an old "first degraded" time once the loop recovers.
+
+### Round 3 — test harness, docs vs. behaviour, one real app, security, tools
+
+Hunters for the test harness, every doc claim (run, not read), one app built end
+to end from the docs, a security sweep, server odds and ends, amui and aiol,
+then fixers for everything they left.
+
+**Security**
+
+- **A sync `op` frame ran a method the cell's `access` rule denies** — the
+  predicate was asked about a method named `"sync"`. It now sees the op's real
+  method and arguments, live and on the reconnect flush.
+- On Windows, opening a link or a file (`openExternal`) went through
+  `cmd /c start`, which re-parsed it: `?a=1&b=2` ran `b=2`. Targets are passed
+  so nothing parses them.
+- The Windows update swap ran `cmd.exe /c <bat> …`, re-parsing its paths (an
+  install folder with `&` ran a command), started its helper inside the folder
+  it moves (Windows refuses that), and `run.bat` did not start from a path with
+  `&`. Values now reach PowerShell through the environment only; checked on
+  Windows 11. `spawn()` on Windows acts on an already-aborted signal; the
+  machine root certificate is replaced before it expires.
+- Blobs on an app with auth are `Cache-Control: private`.
+- The dev checkpoint no longer stores `persist`-excluded fields; one an older
+  build wrote is rewritten at boot, and a restore gives restart values.
+- A typo below the first segment of a nested `exclude` path excluded nothing,
+  silently; it is warned about at `cell()`.
+- TLS: a cached certificate is re-issued after the machine root changes or when
+  it is about to expire; half a cert/key pair is refused.
+
+**Apps and dev**
+
+- **A `db:` table declared in a module the UI imports broke the browser (and
+  Android) bundle.** The schema builders are isomorphic now (same import paths,
+  same objects).
+- Editing the server entry, or a module it imports, restarts the dev server — it
+  logged "reloaded" and kept the old routes and methods.
+- A `db:`-bound field is no longer reported as "new" on every restart.
+- Following the boot hint `version: 1` on a sync cell no longer refuses the boot
+  (dev) or quarantines the cell (prod).
+- An async method that throws after writing says its writes stayed.
+- `libraryMode` config errors throw instead of `Deno.exit(1)`.
+- A forced snapshot load drops undeclared cells, as a restart does.
+- A `:memory:` db read that a callback transaction waits on fails by name
+  instead of hanging.
+- `spawn()`: a grandchild keeps its group tracked, and `kill()` still escalates
+  after the direct child exits.
+- `<webview preload>` accepts encoded and Windows `file:` URLs.
+- `memory.maxHeap: "0GB"` is refused like `0`; an async `args` predicate is
+  refused by name; the plain-HTTP warning names the bound host.
+- A build whose import map uses absolute or `file:` paths warns: the binary runs
+  only on the machine that built it. `am fix` says the same.
+- `isCompiled()` holds for a framework imported by absolute path.
+
+**Test harness**
+
+- A seeded `t.init()` state is frozen like every committed state; deps selectors
+  get their arguments in the right slot; `cell.x` reads live state in
+  `testCell`.
+- `hover()`/`focus()` refuse hidden (and focus, disabled) elements, in `testUI`
+  and `am trigger`. "Hidden" follows the browser: a `visibility: visible` child
+  of a hidden parent, and a `[hidden]` element the app styles with a `display`,
+  are operable (click included).
+- A `testUI` seed of an undeclared key warns loudly (it mounts, as on 1.0.11)
+  and names the fix: declare `key: undefined` in `state:`; `t.init` of one is
+  refused and names the same fix.
+- A mount refused at its seed leaves no live boot; `expectCell` failures print
+  the view the predicate read; a shared reference prints as its value, not
+  `[Circular]`.
+- `testUI({ persist: true })` never restores a previous run and keeps its last
+  write.
+- `am surface` on an auth app with no client renders the same every time.
+
+**Tools**
+
+- `am fix` handles a commented `deno.json` (advises instead of failing) and
+  notes an ignored `"port"` in `deno.jsonc`.
+- `aiol --safe-fix` no longer rewrites other programs' tasks, a mixed
+  `await import("aio")`, a `return` inside a callback, or
+  `fn.call({ timeout })`; five rules lost false positives or negatives.
+- amui: two instances from one directory are two entries, and Stop/Restart act
+  on the selected one; Stop/Restart refuse an `am backup`/`restore` hold; the
+  log tail starts at a whole line; a previous app's banner clears on select.
+
+**Docs** — eight claims corrected after running them (`cellDefaults` opt-out,
+`--expose` default, lockout codes, dotted `include`, scheduling and testing
+examples, `concurrency: "first"`, the API reference), plus the auth route rule,
+the dev reload table and the upload example.
+
+### Round 4 — privacy, UI kit, vitals, standalone, workers, am/amui, examples
+
+Seven area hunters, then fixers for what they left.
+
+**Privacy**
+
+- **Problem reports ignored `persist`**: `persist: "none"` cells and
+  `persist`-excluded fields reached `data/reports/*.json` and the feedback URL,
+  crash reports included. Reports now screen state, timeline values and write
+  arguments by the store's own persist filters as well as `visible`.
+- **Problem reports carried the app key**: the log tail held the `--expose`
+  share link (`?token=`) and the pair code. Both are masked, in the log tail,
+  the diagnostics and the title.
+- The `stateDiffs` debug log no longer prints `persist`-excluded values.
+- `setTotpSecret`'s invalid-secret error no longer quotes the secret — only its
+  length and the position of the first bad character.
+
+**Standalone / Android** — one shared restore path with the server
+(`src/state/cell-migrate.ts`):
+
+- A cell's `version`/`onMigrate` and `onRestore` now run on standalone; an APK
+  update that renamed a field lost its value.
+- A stored cell the build no longer declares is kept, as on the server — it was
+  deleted by the first write.
+- An app `onRestore` that changes the state and returns nothing (the documented
+  form) no longer crashes the boot.
+- Versions are stamped in the same write as the state; a downgrade keeps the
+  newer build's fields; a renamed field with no version bump warns. A store from
+  before version stamps keeps its data: a cell whose stored slice already fits
+  its declared shape is stamped at its current version without running
+  `onMigrate`; one that does not fit migrates from 0.
+- **A local APK never runs `app.ts`**, so nothing passed to `aio.run({...})`
+  reaches it (`ui.*`, the app hooks, `cellDefaults`, `localFirst`, …). The
+  build's note claimed `ui.*` was applied at boot; it now warns instead, naming
+  each option the entry sets and what to do (ship `src/style.css`, or build
+  `--android --remote`). Baking the config in is on `todo.md`.
+
+**Worker cells and scheduling**
+
+- A `worker: true` cell's `onInit` runs once, alongside the main cells'; its
+  writes reach the main isolate, and a snapshot load or time travel no longer
+  re-runs it.
+- Scheduled ticks that call a worker cell's method run in that cell's worker.
+- Paused time travel refuses worker-cell calls like any other, and a schedule
+  whose tick fell in a pause keeps running after resume (it was cancelled for
+  good); one-shots no longer give up during a long pause. A clean stop no longer
+  prints `ERROR schedule: dispatch … failed` — a closed worker cell's refusal
+  now carries `DISPATCH_CLOSED`, as a main cell's does (same message).
+- A worker cell's `$pending` no longer counts `concurrency: "first"` callers
+  that share a running call, or `ttl` cache hits — it reads what the same cell
+  reads on the main thread.
+- An `async onInit` that rejects is reported as `INIT_ERROR` (it was an
+  unhandled rejection, and in a worker it killed the thread); the harnesses fail
+  the test for it, as for a throw — during the boot or after it. A worker cell's
+  `INIT_ERROR` and `EFFECT_ASYNC_ERROR` reach the app's `onError`; worker cells
+  that fall back to the main thread still run `onInit`.
+
+**UI kit and renderer**
+
+- `<Markdown>`, `<Table>` and `<Select>` render 100k+ children instead of
+  throwing `RangeError`.
+- `<Browser keepAlive>` no longer hides its page on the first re-render,
+  restores the parked guest on remount, and the restored guest follows later
+  `class`/`style` changes, and moves with its row when a keyed list is
+  reordered.
+- The renderer no longer throws or skips teardown when an action's cleanup has
+  already moved its element.
+- Danger buttons meet WCAG AA in dark mode: the label colour (`--aio-on-danger`,
+  `--aio-ui-on-danger`) is solved from the fill, so an app's own `--aio-danger`
+  gets a readable label too (an engine without relative colour keeps white, as
+  before); a one-line `<Skeleton>` keeps pass-through attributes; `<Tabs>` ids
+  with spaces stay valid ARIA references; the tooltip is centred in RTL.
+
+**Vitals**
+
+- A client-freeze alert carries the "network stalled" hint even with a CLI or
+  reload socket connected; a recovery is reported as a recovery (a second
+  client's too), and a disconnect shows that client's own duration.
+- Queue-driven loop alerts are printed in actions, not ms — in `perf.log` and in
+  the SLOW DISPATCH line.
+- RTT labels follow the transport tiers (they were swapped); a one-off slow RTT
+  at boot no longer sticks; `/__aio/vitals` gauges use the configured
+  thresholds; `am cost` says "ring wrapped" only when the window lost samples;
+  `thresholds.render` and custom `transport` tiers warn that nothing reads them.
+
+**`am` and amui**
+
+- **amui acted on the wrong instance**: with a default and a profile instance of
+  one app on sockets, State, Dispatch and Stop reached the default one (Stop
+  reported success). Every amui call now targets the instance's pid — a pid
+  whose instance has exited reaches nothing, and Stop never signals a pid no
+  live instance holds; the Logs tab reads that instance's own log dir.
+- `am` and amui present a profile or `--home` instance's own `control.key` and
+  `app.key` (they used the default home's and got 401); `am instances` shows
+  `:PORT + uds` for an app on both.
+- `am --port=N` targets the instance holding that port; `am doctor` names the
+  stale instance's own restart command and labels rows `app@profile`.
+- Multi-line `am` errors keep their line breaks; `am state` names the keys where
+  a path stopped; the no-lock message names running instances' profiles;
+  `am dispatch` to a client-scoped cell says so instead of "not booted".
+
+**Data**
+
+- **One bad dispatch bricked the next dev boot**: a method writing the wrong
+  type (`am dispatch counter:increment abc`) was accepted and saved, and the
+  next dev boot refused over the app's own data. Every write now stores a
+  fingerprint of the cell's declared shape (`<appId>:__shapes`); data written
+  under the current declaration boots with a warning naming each field and the
+  fix, and the default restored, as prod already did. A changed declaration with
+  no migration still refuses in dev. A snapshot load of data that drifts from
+  the declaration is not stamped as the app's own write, so the next dev boot
+  still refuses it.
+
+**Examples and docs**
+
+- contacts: `update` can no longer rewrite an id (two rows on one key stopped
+  the cell being saved); cli-tool usage errors honour `--json`; the updates
+  example gains "Report a problem"; disk's ↑ Up works on Windows paths.
+- `cell()`: a typo'd `visible` key (`exlude`) leaked the field to every client —
+  it now warns with "did you mean"; `persist: true` and falsy/array filters
+  warn; a non-filter `visible` is refused with a message naming the fix.
+- Dev: a state write from an event handler prints the AIO2 read-only hint (in
+  every engine's wording).
+- An `--expose` boot no longer warns that its own `?token=` share link is
+  insecure (the warning when a URL token is actually used stays); the `--width`
+  refusal no longer claims `ui.width` sizes a browser page.
+- Docs stop teaching the retired `ui:` filter, returned effects and
+  `src/cells/`; the vitals doc describes the hint engine that runs (server
+  only); the docs link gate covers `examples/README.md`.
+
+### Round 5 — re-hunt of the round-2 areas, round-4 leftovers
+
+Fresh hunters on sync, auth, database, renderer, client runtime, server core and
+state, then fixers, two reviews of the fixes, and a re-check of the reviews' own
+fixes.
+
+**Security and data**
+
+- Sync op ids carry a random suffix: a peer could predict a client's next id,
+  submit under it first, and the server's dedup dropped the victim's acked
+  write. An op under another client's session prefix now reaches that client's
+  screen and catch-up instead of being dropped as its own echo.
+- A module that imports `aio/server-only` is a 404 over HTTP, like `*.server.ts`
+  — the dev server served its source.
+- An async method's row held across an `await` is refused, naming the other
+  action, when that action moved or removed rows under it — the write used to
+  land silently on whichever row took its slot.
+- `am sql`'s read-only guard reads the query with the SQL lexer: a `--` or `/*`
+  inside a string literal could hide a `DELETE`.
+- `db.transaction(fn)`: a refused `BEGIN` no longer rolls back the transaction
+  the app already had open. A batch entry holding several statements runs its
+  first (as 1.0.11 did) and now warns about the dropped rest. A write rejected
+  by `requestTimeoutMs` says it may still commit. A `db:` column retyped between
+  runs is reported at boot.
+- A server restart (dev and prod) no longer reloads open pages over the calls
+  queued offline; the reload waits up to 10 s for them.
+
+**Auth**
+
+- A sessions-only app under `--expose` no longer advertises a shared key, share
+  link or pair code that could only 401; an explicit `key` there warns.
+- The TLS control listener accepts the local control credential, so `am` and
+  amui work on exposed per-user apps.
+- Successful 2FA, password-change and TOTP enable/disable refund their
+  work-meter unit, as documented.
+- A tab whose session was revoked or expired stops reconnecting, shows "Signed
+  out" and renders `<SignIn/>`; a sign-in (in this tab or another, on focus)
+  resumes it, and a refused `?token=` is never presented again. The dev reload
+  socket follows it instead of charging failed logins. A client torn down while
+  signed out stays down until the next subscribe.
+- `am auth revoke` revokes by the stored id (a padded id revoked nothing).
+
+**Renderer**
+
+- A stateful component inside a Portal keeps its click handlers after
+  re-rendering; nested portals into the same target no longer interleave.
+- Range `value` is no longer clamped by prop order or by signal-bound
+  `min`/`max`/`step`; `!important` in style objects and signals is kept;
+  removing a select's `value` falls back to its default option; SSR keeps the
+  leading newline of `<pre>`/`<textarea>`; `virtualList` with `overscan: 0`
+  renders the partly visible bottom row.
+- `<Browser keepAlive>` no longer shows a blank box after a remount (Electron
+  destroys a moved guest); it reopens the page the guest was on.
+
+**Server, client, workers, tools**
+
+- A `fetch` write (POST/PUT/DELETE/PATCH) that matches no route gets 405 instead
+  of `200` with the shell; a browser form navigation keeps the shell, with a
+  warning. A `routes` key with `?`/`#` warns at boot.
+- An oversized WS frame with spaced JSON settles its caller at once.
+- A `subs` entry naming an unknown cell warns once; a page reading only
+  client-scope cells subscribes to no server cell.
+- Electron: the IPC watchdog also retries an unanswered reconnect; a 1008 close
+  for a revoked session is reported as such.
+- Worker cells: errors count toward `circuitBreaker`; disable/enable run
+  `onDestroy`/`onInit` and the reset in the worker; a trip prints its own tip.
+- A one-shot schedule whose method throws runs once, sync or async.
+- `testUI`: a seed of an undeclared key warns (it mounts, as on 1.0.11); an
+  async `onInit` still pending or rejecting at teardown fails the test and is
+  named as the cell's `onInit`.
+- Android build: the `aio.run()` options warning reads `import { aio as app }`.
+- Ops flushed from a reconnect's offline queue trigger op-log compaction.
+
+### Round 6 — am/amui, build, updates/media/privacy, UI kit, workers/vitals, renderer
+
+Fresh hunters on the areas not re-checked since round 4, then two reviews of the
+fixes.
+
+**Security**
+
+- 🔒 Electron: a `<webview>` guest, or a frame from another origin inside the
+  app window, was granted every permission it asked for — a crypto wallet built
+  on aio found its embedded page could read the clipboard. Guests and foreign
+  frames are now denied everything but fullscreen, said once per permission and
+  origin; the app's own page keeps what it had. A real-Electron test shows the
+  guest granted without the guard and denied with it.
+- 🔒 New, opt-in: `"build": { "minify": true }`. `deno compile` shipped every
+  server module as readable source, comments included. Now each module is
+  minified before compile (no comments, short local names, function names kept),
+  the original is still type-checked, workers still load, and the client source
+  map is left out. `true`/`false` only. A real build shows the marker comment
+  and local name gone, and the binary still boots, runs a method and keeps its
+  state.
+- 🔒 Electron fuses: the Electron in every desktop package (AppImage, Windows
+  zip, macOS `.app`, and the runtime a self-contained Windows exe unpacks) can
+  no longer be started as plain Node, with `NODE_OPTIONS` code, or with
+  `--inspect`. aio already refused these when it launched Electron; the fuses
+  close them when someone starts the runtime directly. A real-Electron test
+  shows the stock binary running as Node and loading injected code, and the
+  fused one doing neither. The self-contained exe unpacks into a separate
+  `…-fused` cache folder, so an unfused runtime already cached is never reused.
+- 🪟 A compiled app on real Windows is known as compiled again. Windows 11 keeps
+  `.exe` in the folder name the binary unpacks to; aio looked for the name
+  without it, so the Windows exe and zip ran the dev-time checks and stopped
+  with "App.tsx not found". Found by running the built artifacts on a real
+  Windows 11 machine.
+
+**Privacy and updates**
+
+- `redactActions` also covers `worker: true` cells in `logs/actions.jsonl` and
+  `debug.log` (a worker cell's writes arrive as one internal patch action that
+  named no cell).
+- An update check pins a signing key on first use only when every redirect leg
+  authenticates its host.
+- The update trust file is written atomically: a crash during a routine check
+  can no longer leave a file that stops the app from booting.
+- `feedback` auto-capture works in prod, exactly as in dev.
+- Delivery to `feedback.url` gives up after 15 s instead of hanging `report()`.
+
+**Workers and health**
+
+- A circuit-breaker trip whose `onDestroy` throws rolls back once instead of
+  recursing to a stack overflow, and a rolled-back trip no longer calls
+  `onTrip`.
+- `dispatchStorm` counts `worker: true` cells' patch batches per cell
+  (`<cell>:__worker`) and never drops them — dropping committed batches split
+  the worker's state from the main copy.
+- `/__aio/health` and the vitals circuit-breaker list report each app's own
+  cells when several apps share a process.
+- A crashed worker cell makes `/__aio/health` report `degraded`
+  (`cell-worker:<name>`), and a worker cell's health row names its last call.
+- A worker cell's trip is reported only after it is really disabled, so `onTrip`
+  and health never report a cell that is still taking calls.
+
+**UI kit and router**
+
+- `<Field label>` names a `Switch` or `RadioGroup` inside it, and keeps their
+  own `label` when it is a `Switch`.
+- A caller's `aria-label`/`title` wins over the default on `Spinner`, `Avatar`
+  and `Pagination`.
+- `<Link onClick>` runs first, and `preventDefault()` in it stops the
+  navigation; `NavLink`/`Link` keep the author's `class`/`className` and add the
+  active class beside it.
+- `<Textarea onChange>` receives the Event (unchanged); dev warns once and
+  `kit.md` says so.
+- The default icon's hue comes from the appId slug, so taskbar icon, title bar
+  and buttons are one colour, as `theme.md` promises.
+- Dev warns once when a dark OS meets a page nothing paints
+  (`ui.theme:
+  "tokens"` and no `color-scheme`): the kit's dark-mode text
+  landed on white. `theme.md` gives the one-line fixes.
+
+**Build and Android**
+
+- `deno task build --analyze` works: the fleet forwards it to the build that
+  bundles.
+- A `server` target built for several platforms no longer crashes: systemd units
+  are written for Linux only and named like their binary.
+- `dev:android` and `install:android` launch the package the APK was built as,
+  including an explicit `android.applicationId`; `dev:android` reports a failed
+  launch instead of printing ✓.
+- The fleet's "no longer holds" note names each dropped target once.
+
+**`am` and amui**
+
+- Each project component runs as the client its `kind` says (`"server"` →
+  `--client=server-only`, browser/server-app → browser, cli → cli); electron
+  components keep the project's client, and an explicit
+  `--client`/`--headless`/`--service` still wins.
+- amui's Start and Run task no longer pass amui's own `AIO_PORT`,
+  `AIO_PARENT_PID` and `AIO_DEV_SUPERVISED` to the app.
+- `am backup`/`am restore --profile=…`: the "stop it first" hint names the
+  profile.
+- `am create --mirror` / `--dev` with no value path-pins the checkout `am` runs
+  from.
+- `am auth users` shows a `locked` column (and field in `--json`).
+- amui reads the app's shell from deno.json `client`, falling back to `target`.
+
+**Renderer**
+
+- A hydration mismatch no longer deletes the portal target's own content: a
+  `<Portal target={document.body}>` the hydrate never reached used to remove the
+  page's first body node.
+- A keyed row turning from a `<Portal>` into an element keeps its place in the
+  list.
+- An `<ErrorBoundary>`/`<Suspense>` falling back from keyed content leaves none
+  of its old text beside the fallback, and no false "aio bug" dev warning.
+- Hydrating a shorter client text before an empty region no longer duplicates
+  the text after it.
+
 ## v1.0.11-beta — what 1.0.10 claimed, each claim broken on purpose and caught (2026-09-24)
 
 > **Additive only — nothing is removed and nothing changes shape.** Three

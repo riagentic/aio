@@ -29,6 +29,7 @@ import * as air from "../src/air.ts";
 import * as android from "../src/standalone-air.ts";
 import { _applyShellUi } from "../src/standalone-air.ts";
 import * as aio from "../mod.ts";
+import { stopEsbuildService } from "../src/build/esbuild-shared.ts";
 
 // ── 1. the contract of a shared name is identical on both entries ────────
 
@@ -171,12 +172,8 @@ const SERVER_ONLY: Record<string, string> = {
   generateTotpSecret: "server-side TOTP enrolment",
   totpUri: "server-side TOTP enrolment",
   verifyTotp: "server-side TOTP verification",
-  table: "SQLite schema builder",
-  pk: "SQLite schema builder",
-  ref: "SQLite schema builder",
-  text: "SQLite schema builder",
-  integer: "SQLite schema builder",
-  real: "SQLite schema builder",
+  // (`table`/`pk`/`text`/`integer`/`real`/`ref` ship since round 3 — a cell
+  // module declares its `db:` table beside the cell; pinned below.)
   isCellWorker: "Deno worker-thread cells",
   definePlugin:
     "plugins are resolved by aio.run() at boot — a WebView bundle has no " +
@@ -226,6 +223,42 @@ Deno.test("android `aio`: the ledgers have no dead entries", () => {
       "that does not shrink when the gap does is a lie:\n  " +
       stale.join("\n  "),
   );
+});
+
+Deno.test("android `aio`: the db schema builders are present, and are THE same objects", async () => {
+  for (const n of ["table", "pk", "text", "integer", "real", "ref"] as const) {
+    assertEquals(android[n], aio[n], `standalone must re-export aio's ${n}`);
+  }
+  // …and a cell module declaring a table BUNDLES against the android entry
+  // (esbuild refused it: "No matching export … for import \"table\"").
+  const esbuild = await import("esbuild");
+  const entry = new URL("../src/standalone-air.ts", import.meta.url).pathname;
+  try {
+    const out = await esbuild.build({
+      stdin: {
+        contents:
+          `import { table, pk, text } from "aio"; console.log(table({ id: pk(), t: text() }));`,
+        resolveDir: new URL("../src/", import.meta.url).pathname,
+        loader: "ts",
+      },
+      bundle: true,
+      write: false,
+      format: "esm",
+      logLevel: "silent",
+      packages: "external",
+      plugins: [{
+        name: "aio-android",
+        setup(b) {
+          b.onResolve({ filter: /^aio$/ }, () => ({ path: entry }));
+        },
+      }],
+    });
+    assertEquals(out.errors, []);
+  } finally {
+    // Waits for the service child to EXIT, not just be told to — under load a
+    // bare `stop()` left it closing during the next test (leak sanitizer).
+    await stopEsbuildService(() => esbuild.stop());
+  }
 });
 
 Deno.test("android `aio`: log is present, and is THE logger", () => {

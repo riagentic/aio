@@ -164,6 +164,18 @@ export function flattenOnto(
   }
 }
 
+/** The dispatch each def is bound to NOW — whose binding it is. A def is
+ *  re-bound by every app that uses it (after a release or a harness reset),
+ *  so "is this still mine?" is answered here, not by `bound`. */
+const _boundTo = new WeakMap<CellDef, (action: Msg) => Promise<unknown>>();
+
+/** The dispatch `f` is currently bound to (undefined: never bound). @internal */
+export function _boundDispatchOf(
+  f: CellDef,
+): ((action: Msg) => Promise<unknown>) | undefined {
+  return _boundTo.get(f);
+}
+
 /** Bind a cell to a live app — replaces action creators with dispatch wrappers,
  *  selectors with bound state readers. Called by aio.run() after compose.
  *  All bound methods return a Promise — sync methods resolve with their
@@ -291,6 +303,7 @@ export function bindCell(
     });
   }
 
+  _boundTo.set(f, dispatch);
   (f.__aio as Record<string, unknown>).bound = true;
 }
 

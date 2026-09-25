@@ -18,6 +18,7 @@ import {
   tmplCrashGuard,
   tmplKeyboardShortcuts,
   tmplParentWatch,
+  tmplPermissionGuard,
   tmplPreloadCleanup,
   tmplPreloadWrite,
   tmplRendererDiagnostics,
@@ -95,6 +96,7 @@ app.commandLine.appendSwitch('disable-features', 'CloudPrintEnable');
 Menu.setApplicationMenu(null);
 app.name = ${JSON.stringify(slug)};
 ${tmplCrashGuard()}
+${tmplPermissionGuard()}
 ${tmplParentWatch()}
 
 // ── Where the page comes from: disk (prod), the app's socket (dev, zero
