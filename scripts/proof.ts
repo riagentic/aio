@@ -150,13 +150,51 @@ async function shortCommit(): Promise<string> {
   }
 }
 
+/** The `git status --porcelain` lines that make a proof row a lie: any change
+ *  to the code that ran, tracked or new — except this file itself (a second
+ *  gated test in the same run records into it). Pure. */
+export function uncommittedChanges(porcelain: string): string[] {
+  return porcelain.split("\n").filter((l) =>
+    l.trim() !== "" && !l.slice(3).trim().endsWith("proof-matrix.json")
+  );
+}
+
+async function porcelain(): Promise<string | null> {
+  try {
+    const r = await new Deno.Command("git", {
+      args: ["status", "--porcelain", "--untracked-files=normal"],
+      cwd: dirname(FILE),
+      stdout: "piped",
+      stderr: "null",
+    }).output();
+    return r.success ? new TextDecoder().decode(r.stdout) : null;
+  } catch {
+    return null; // aio-ok: no git (a tarball) — commit is "unknown" anyway
+  }
+}
+
 /** Record that `target` was proven in `env`. Called BY the gated test, on
- *  success — so the ledger cannot claim a run that did not happen. */
+ *  success — so the ledger cannot claim a run that did not happen.
+ *
+ *  Not from a tree with uncommitted changes: the row names HEAD, and HEAD is
+ *  not the code that ran — a row that says "proven at <commit>" about other
+ *  code is the claim-without-evidence this file exists to end. Said, not
+ *  silent. */
 export async function recordProof(
   target: string,
   env: string,
   detail?: string,
 ): Promise<void> {
+  const dirty = uncommittedChanges((await porcelain()) ?? "");
+  if (dirty.length > 0) {
+    console.warn(
+      `[aio] proof: ${target}/${env} passed but is NOT recorded — the working ` +
+        `tree has ${dirty.length} uncommitted change(s) (e.g. ${
+          dirty[0]!.slice(3).trim()
+        }), so HEAD is not the code that ran. Commit, then run the gate again.`,
+    );
+    return;
+  }
   const entries = (await load()).filter((e) =>
     !(e.target === target && e.env === env)
   );

@@ -22,6 +22,7 @@ import { join } from "@std/path";
 import { APP_NAME_RE, appNameError } from "../src/am/am-utils.ts";
 import { dataRemovalGate } from "../src/am/am-cmd-remove.ts";
 import { appHome, installedAppPaths } from "../src/server/app-dirs.ts";
+import { DENO_DIR } from "./deno-dir-helper.ts";
 
 const AM = new URL("../src/am.ts", import.meta.url).pathname;
 
@@ -32,7 +33,7 @@ async function am(
 ): Promise<{ code: number; out: string }> {
   const o = await new Deno.Command(Deno.execPath(), {
     args: ["run", "-A", AM, ...args],
-    env: { HOME: home, AIO_INSTALL_ROOT: join(home, "app") },
+    env: { HOME: home, AIO_INSTALL_ROOT: join(home, "app"), DENO_DIR },
     clearEnv: true,
     stdout: "piped",
     stderr: "piped",

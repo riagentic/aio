@@ -693,6 +693,31 @@ export function certSubjectDer(certPem: string): Bytes {
   return der.slice(subject.h, subject.e) as Bytes;
 }
 
+/** The `notAfter` instant of the FIRST certificate in `certPem` (UTCTime or
+ *  GeneralizedTime, RFC 5280 §4.1.2.5 — the pair `Time()` writes). */
+export function certNotAfter(certPem: string): Date {
+  const der = fromPem(certPem);
+  const cert = children(der, 0, der.length)[0];
+  if (!cert) throw new Error("malformed certificate");
+  const tbs = children(der, cert.s, cert.e)[0];
+  if (!tbs) throw new Error("malformed certificate: no tbsCertificate");
+  const f = children(der, tbs.s, tbs.e);
+  // [0] version (optional), serial, sigAlg, issuer, validity, …
+  const validity = f[f[0]?.tag === 0xa0 ? 4 : 3];
+  const na = validity && children(der, validity.s, validity.e)[1];
+  if (!na || (na.tag !== 0x17 && na.tag !== 0x18)) {
+    throw new Error("malformed certificate: no notAfter time");
+  }
+  const t = new TextDecoder().decode(der.subarray(na.s, na.e));
+  const m = (na.tag === 0x17 ? /^(\d{2})/ : /^(\d{4})/).exec(t);
+  const rest = /(\d{2})(\d{2})(\d{2})(\d{2})(\d{2})Z$/.exec(t);
+  if (!m || !rest) throw new Error(`malformed certificate time "${t}"`);
+  let y = Number(m[1]);
+  if (na.tag === 0x17) y += y >= 50 ? 1900 : 2000;
+  const [, mo, d, h, mi, se] = rest.map(Number);
+  return new Date(Date.UTC(y, mo! - 1, d!, h!, mi!, se!));
+}
+
 const SAN_OID = [0x55, 0x1d, 0x11]; // 2.5.29.17
 const NC_OID = [0x55, 0x1d, 0x1e]; // 2.5.29.30
 const SKI_OID = [0x55, 0x1d, 0x0e]; // 2.5.29.14

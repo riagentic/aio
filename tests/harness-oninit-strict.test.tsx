@@ -151,3 +151,102 @@ Deno.test("INIT_ERROR tip names app.dispatch and onStart, not a generic guess", 
   assert(tip.includes("onStart"), tip);
   assert(!tip.includes("missing dependencies"), tip);
 });
+
+// An `async onInit` fails by REJECTING. The runtime used to leave that
+// promise unobserved — an unhandled rejection, which failed a test by itself.
+// Now the runtime reports it as INIT_ERROR (so it no longer escapes), and the
+// harness must record it like a throw, or a broken boot would pass green.
+Deno.test("bootCells: an async onInit that rejects fails the test at settle()", async () => {
+  const c: Any = cell("init_boot_reject", {
+    state: { n: 0 },
+    methods: {
+      warm(s: S) {
+        s.n += 1;
+      },
+    },
+    async onInit() {
+      await Promise.resolve();
+      throw new Error("async setup failed");
+    },
+  });
+  const h = await quiet(() => bootCells([c]));
+  try {
+    const e = await assertRejects(() => quiet(() => h.settle()), Error);
+    assert(e.message.includes("init_boot_reject onInit threw"), e.message);
+    assert(e.message.includes("async setup failed"), e.message);
+  } finally {
+    h.dispose(); // settle() already took the failure
+  }
+});
+
+// …and one that rejects LATER than the boot. The harness took the boot's
+// failures once, right after `aio.run` resolved, so an `onInit` that awaited
+// real I/O (a timer here) and then failed landed in a list nobody read again:
+// the INIT_ERROR log line beside a passing test. Before the runtime observed
+// the promise, that same rejection was unhandled and failed the test by itself.
+Deno.test("bootCells: an async onInit that rejects after the boot still fails the test", async () => {
+  const c: Any = cell("init_boot_late_reject", {
+    state: { n: 0 },
+    methods: {
+      warm(s: S) {
+        s.n += 1;
+      },
+    },
+    async onInit() {
+      await new Promise((r) => setTimeout(r, 20));
+      throw new Error("late setup failed");
+    },
+  });
+  const h = await quiet(() => bootCells([c]));
+  try {
+    await quiet(() => new Promise((r) => setTimeout(r, 60)));
+    const e = await assertRejects(() => quiet(() => h.settle()), Error);
+    assert(e.message.includes("init_boot_late_reject onInit threw"), e.message);
+    assert(e.message.includes("late setup failed"), e.message);
+  } finally {
+    h.dispose(); // settle() already took the failure
+  }
+});
+
+// …and one still pending when the test ENDS. The ledger's teardown drain waits
+// for un-awaited CALLS, and an `onInit` is not a call: `await using h` tore the
+// boot down while it was still awaiting, it rejected into a ledger nobody read
+// again, and the test passed beside the INIT_ERROR line.
+const lateInit = (id: string): Any =>
+  cell(id, {
+    state: { n: 0 },
+    methods: {
+      warm(s: S) {
+        s.n += 1;
+      },
+    },
+    async onInit() {
+      await new Promise((r) => setTimeout(r, 40));
+      throw new Error("setup failed after the test body");
+    },
+  });
+
+Deno.test("bootCells: an async onInit still pending at `await using` teardown fails the test", async () => {
+  const c = lateInit("init_boot_teardown_reject");
+  const e = await assertRejects(
+    () =>
+      quiet(async () => {
+        await using h = await bootCells([c]);
+        await c.warm();
+        void h;
+      }),
+    Error,
+  );
+  assert(
+    e.message.includes("init_boot_teardown_reject onInit threw"),
+    e.message,
+  );
+});
+
+Deno.test("testUI: an async onInit still pending at dispose() fails the test", async () => {
+  const c = lateInit("init_ui_teardown_reject");
+  const App = () => <div>{String(c.n)}</div>;
+  const ui = await quiet(() => testUI(App as never, { cells: [c] }));
+  const e = await assertRejects(() => quiet(() => ui.dispose()), Error);
+  assert(e.message.includes("init_ui_teardown_reject onInit threw"), e.message);
+});

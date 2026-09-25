@@ -8,6 +8,7 @@ import {
   tmplCrashGuard,
   tmplKeyboardShortcuts,
   tmplParentWatch,
+  tmplPermissionGuard,
   tmplPreloadCleanup,
   tmplPreloadWrite,
   tmplRendererDiagnostics,
@@ -42,6 +43,7 @@ Menu.setApplicationMenu(null);
 ${tmplPreloadWrite(JSON.stringify(shellBridgePreload({ standalone: true })))}
 app.name = ${JSON.stringify(slug)};
 ${tmplCrashGuard()}
+${tmplPermissionGuard()}
 ${tmplParentWatch()}
 
 // ── Window state persistence ──

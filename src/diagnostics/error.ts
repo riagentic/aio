@@ -473,6 +473,12 @@ function workerHint(err: AioError): string {
  *  tip must say so. Set by the persistence manager, read by `generateTip`. */
 export const PERSIST_WRITTEN_ANYWAY = "PersistWrittenAnyway";
 
+/** `Error.name` of the `original` behind the EFFECT_ERROR a `circuitBreaker`
+ *  trip reports: no effect threw — the framework disabled the cell — so the
+ *  sync-effect tip (`Sync effect "?" threw…`) is wrong for it. Set by the
+ *  registry (state/cell-compose-registry.ts), read by `generateTip`. */
+export const CIRCUIT_BREAKER_TRIP = "CircuitBreakerTrip";
+
 export function generateTip(err: AioError): string | undefined {
   // FIRST, before the per-code tips: a frozen-state write is recognisable by
   // its message whatever code it arrives under, and it is the single most
@@ -513,6 +519,15 @@ export function generateTip(err: AioError): string | undefined {
         `state they ran on. See docs/debugging/errors.md.`;
     }
     case "EFFECT_ERROR": {
+      if (err.original?.name === CIRCUIT_BREAKER_TRIP) {
+        const cell = err.context.cellName ?? "?";
+        return `Tip: the circuit breaker disabled cell "${cell}" — the errors ` +
+          `it counted were reported above; this is not a new one. Until it is ` +
+          `re-enabled its methods are refused and its schedules stopped. Fix ` +
+          `the cause, then \`app.cells.enable("${cell}")\` (or restart); ` +
+          `\`/__aio/health\` shows it as \`enabled: false\`. Tune ` +
+          `\`circuitBreaker: { maxErrors, window }\` in \`aio.run\`.`;
+      }
       const et = String(err.context.effectType ?? "?");
       // `cell:__exec` / `__effects` / `__set` are the FRAMEWORK's own runners
       // (an async method, the `s.$do` bridge, an async write-set), not an app

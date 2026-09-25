@@ -5,6 +5,7 @@
 import type { ClientLogEntry } from "../air/dom-inspector-types.ts";
 import { getLogDir, log } from "../diagnostics/logger-api.ts";
 import { remapClientText } from "../diagnostics/stack-remap.ts";
+import { _diagScopeNow } from "../diagnostics/diagnostic-bus.ts";
 
 const MAX_RATE = 100; // messages per second per client
 const MAX_CLIENT_MSG = 8192; // max msg length from client
@@ -16,27 +17,41 @@ const LEVEL_PAD: Record<ClientLogEntry["level"], string> = {
   error: "ERROR",
 };
 
-// Rate tracking: clientIndex → { count within current second, warned flag }
-const _rate = new Map<number, { count: number; warned: boolean }>();
+// Rate tracking, per app: app scope → clientIndex → { count within the
+// current second, warned flag }. Client indices are per server, so two apps in
+// one process both have a client 1 — one flat map made them share a budget.
+// `undefined` is code outside any app. Cleared every second, so it cannot grow.
+const _rate = new Map<
+  object | undefined,
+  Map<number, { count: number; warned: boolean }>
+>();
 
 // Set by `initClientLog` when the HTTP server boots; otherwise THE logger's
 // directory, asked at write time. It used to default to the cwd-relative
 // `.aio/log`, and a prod Electron app on a named pipe never boots the HTTP
 // server — so every renderer line of an installed Windows app failed with
 // "write failed for .aio/log/client.log" (real Windows 11, 2026-09-17).
+//
+// …and set PER APP: `initClientLog` runs inside the booting app's scope
+// (`_diagScopeNow()`), and one process can host several apps. A single slot
+// sent app A's browser console lines into the LAST booted app's `logs/`. The
+// slot below stays for code outside any app, which goes where it went before.
 let _logDir: string | null = null;
+let _logDirOf = new WeakMap<object, string>();
 let _resetTimer: ReturnType<typeof setTimeout> | null = null;
 let _writeErrors = 0;
-/** Whether this process has already tightened the current `client.log`. One
- *  chmod per file per boot, not one per append. */
-let _modeFixed = false;
+/** The `client.log` files this process has already tightened. One chmod per
+ *  file per boot, not one per append. */
+const _modeFixed = new Set<string>();
 
 // ── Public API ────────────────────────────────────────────────────────
 
 /** Set the directory where client.log will be written. */
 export function initClientLog(logDir: string): void {
   _logDir = logDir;
-  _modeFixed = false; // a different file — tighten that one too
+  const scope = _diagScopeNow();
+  if (scope !== undefined) _logDirOf.set(scope, logDir);
+  _modeFixed.delete(`${logDir}/client.log`); // a new boot — tighten it again
 }
 
 /** Append a client log entry. Fire-and-forget; safe to call from WS handler. */
@@ -46,11 +61,14 @@ export function writeClientLog(
 ): void {
   _ensureResetTimer();
 
-  // Rate limiting per client
-  let slot = _rate.get(clientIndex);
+  // Rate limiting per client of THIS app
+  const app = _diagScopeNow();
+  let slots = _rate.get(app);
+  if (!slots) _rate.set(app, slots = new Map());
+  let slot = slots.get(clientIndex);
   if (!slot) {
     slot = { count: 0, warned: false };
-    _rate.set(clientIndex, slot);
+    slots.set(clientIndex, slot);
   }
 
   slot.count++;
@@ -121,7 +139,9 @@ export function _pendingWrites(): number {
 }
 
 export function _rateSlotCount(): number {
-  return _rate.size;
+  let n = 0;
+  for (const slots of _rate.values()) n += slots.size;
+  return n;
 }
 
 /** Wait for every in-flight client-log write (and the mode fix that rides
@@ -138,8 +158,9 @@ export function disposeClientLog(): void {
     _resetTimer = null;
   }
   _rate.clear();
-  _modeFixed = false;
+  _modeFixed.clear();
   _logDir = null; // back to the logger's directory
+  _logDirOf = new WeakMap();
 }
 
 // ── Internals ─────────────────────────────────────────────────────────
@@ -150,7 +171,10 @@ export function disposeClientLog(): void {
 const _pending = new Set<Promise<unknown>>();
 
 function _append(line: string): void {
-  const path = `${_logDir ?? getLogDir()}/client.log`;
+  const scope = _diagScopeNow();
+  const dir = (scope === undefined ? undefined : _logDirOf.get(scope)) ??
+    _logDir ?? getLogDir();
+  const path = `${dir}/client.log`;
   // 0600 + the chmod half, exactly as `logger-core.ts` documents it and
   // `action-log.ts` obeys it. This was the one log writer in the repo that
   // did neither, and it is the worst file to miss: `client.log` holds every
@@ -174,8 +198,8 @@ function _append(line: string): void {
   const done = Deno.writeTextFile(path, line, { append: true, mode: 0o600 })
     .then(() => {
       _writeErrors = 0; // reset on success
-      if (!_modeFixed) {
-        _modeFixed = true;
+      if (!_modeFixed.has(path)) {
+        _modeFixed.add(path);
         if (Deno.build.os !== "windows") {
           return Deno.chmod(path, 0o600).catch(() => {});
         }

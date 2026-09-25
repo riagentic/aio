@@ -4,11 +4,14 @@
 // The decider is two timestamps, and the finding must name the fix.
 import { assert, assertEquals, assertStringIncludes } from "@std/assert";
 import { join } from "@std/path";
+import { dropTempDir, tempDir } from "../src/testing/temp-dir.ts";
 import {
   checkRunningAio,
+  doctorLabel,
   driftVerdict,
   newestMtimeUnder,
 } from "../src/am/am-cmd-doctor.ts";
+import { profileHome } from "../src/server/app-dirs.ts";
 
 Deno.test("doctor: driftVerdict — newer on disk than the process is stale, else not", () => {
   const f = { path: "x/src/a.ts", mtime: 2000 };
@@ -75,5 +78,41 @@ Deno.test("doctor: a process older than dep/aio/src is a finding that names `am 
     assertStringIncludes(none.detail, "no dep/aio");
   } finally {
     await Deno.remove(dir, { recursive: true });
+  }
+});
+
+// A stale PROFILE instance was told to `am restart --app=demo` — which
+// restarts the DEFAULT instance and leaves the stale one serving. The fix
+// names the instance the finding is about (the same address `am instances`
+// prints in `stopWith`), and the pretty list labels it apart from its sibling.
+Deno.test("doctor: a stale profile instance's fix restarts THAT instance", async () => {
+  const dir = await tempDir("aio-doctor-");
+  try {
+    const fw = join(dir, "checkout");
+    await Deno.mkdir(join(fw, "src"), { recursive: true });
+    await Deno.writeTextFile(join(fw, "mod.ts"), "");
+    await Deno.writeTextFile(join(fw, "src", "x.ts"), "");
+    await Deno.mkdir(join(dir, "app", "dep"), { recursive: true });
+    await Deno.symlink(fw, join(dir, "app", "dep", "aio"));
+    const now = Date.now();
+    const fresh = new Date(now + 60_000);
+    await Deno.utime(join(fw, "src", "x.ts"), fresh, fresh);
+    const inst = {
+      appId: "demo",
+      pid: 4242,
+      startedAt: now,
+      home: profileHome("demo", "dev"),
+      profile: "dev",
+    };
+    const stale = await checkRunningAio(join(dir, "app"), inst);
+    assertEquals(stale.ok, false);
+    assert(
+      stale.fix?.endsWith("am restart --app=demo --profile=dev"),
+      stale.fix,
+    );
+    assertEquals(doctorLabel(stale), "demo@dev");
+    assertEquals(doctorLabel({ appId: "demo" }), "demo");
+  } finally {
+    await dropTempDir(dir);
   }
 });

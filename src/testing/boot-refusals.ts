@@ -143,7 +143,7 @@ export function _callAcrossWorkerBoundary(
 // code on the main isolate, never the method body, even though the render was
 // queued from inside the method's scope.
 
-const _workerScope = new AsyncLocalStorage<string>();
+const _workerScope = new AsyncLocalStorage<string | undefined>();
 
 /** The standalone runtime's "whose boot is this code running for" scope
  *  (`BootScope` in standalone-air.ts), backed by `AsyncLocalStorage` so it
@@ -157,11 +157,37 @@ export function _armBootScope(
 ): void {
   install(_bootScope);
 }
-const _bootAls = new AsyncLocalStorage<Parameters<BootScope["run"]>[0]>();
+const _bootAls = new AsyncLocalStorage<
+  Parameters<BootScope["run"]>[0] | undefined
+>();
 const _bootScope: BootScope = {
   run: (fence, fn) => _bootAls.run(fence, fn),
   get: () => _bootAls.getStore(),
 };
+
+/** Start a harness body OUTSIDE every in-process scope — the boot fence and
+ *  the worker scope — whatever context the runner handed it. Called first,
+ *  synchronously, by every harness entry (testUI both forms, testCell,
+ *  bootCells): `enterWith` then holds for the rest of the caller's run,
+ *  across its `await`s.
+ *
+ *  Why a harness body can arrive INSIDE one: Deno pins the process's ambient
+ *  async context — what a callback Rust starts runs in, the next `Deno.test`
+ *  body included — to the context a module is FIRST evaluated in, and never
+ *  puts it back (measured, Deno 2.9.7; the npm half of it is
+ *  `importOutsideApp`, outside-app.ts). A reducer runs inside its boot's
+ *  fence, so a fresh `import()` there made that fence every later test's
+ *  context: once its test disposed, the next body's first cell call was
+ *  refused as "dispatched into a torn-down runtime" (a desktop wallet app: 19
+ *  of 105 tests). A worker cell's reducer pins the worker scope the same way.
+ *  A harness body is never a boot's code nor a worker's, so shedding both is
+ *  exact — and the real refusal stands: a retired boot's own late call runs
+ *  in ITS continuation, which this never touches.
+ *  @internal */
+export function _shedLeakedScopes(): void {
+  _bootAls.enterWith(undefined);
+  _workerScope.enterWith(undefined);
+}
 
 /** Refuse, while a `worker: true` cell's method runs in process, what a real
  *  worker refuses: reading another cell's state, and calling any cell's

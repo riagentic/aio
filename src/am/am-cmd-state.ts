@@ -314,6 +314,42 @@ export function _braceHint(paths: readonly string[]): string | null {
   return `${prefix}{${tails.join(",")}}`;
 }
 
+/** The hint for a path that did not resolve: the keys at the DEEPEST point
+ *  the path did reach. It listed the ROOT keys for every miss, so a typo one
+ *  level down (`counter.cnt`) answered "available: counter" — naming the key
+ *  the caller had just typed correctly, and nothing that would fix the path.
+ *  Stops at a wildcard or a brace pick (their own misses are about the
+ *  elements, not one key). Pure. @internal */
+export function _missHint(data: unknown, path: string): string {
+  const segs = path.replace(/\[(\d+|\*)\]/g, ".$1").split(".");
+  let node = data;
+  const walked: string[] = [];
+  for (const seg of segs) {
+    if (seg.includes("*") || seg.includes("{")) break;
+    if (node === null || typeof node !== "object") break;
+    const rec = node as Record<string, unknown>;
+    if (!Object.hasOwn(rec, seg)) break;
+    node = rec[seg];
+    walked.push(seg);
+  }
+  const at = walked.join(".");
+  if (Array.isArray(node)) {
+    const n = node.length;
+    return n === 0
+      ? ` ("${at}" is an empty array)`
+      : ` ("${at}" has ${n} item${n === 1 ? "" : "s"}: 0..${n - 1})`;
+  }
+  if (node === null || typeof node !== "object") {
+    const kind = node === null ? "null" : typeof node;
+    return walked.length ? ` ("${at}" is a ${kind}, not an object)` : "";
+  }
+  const keys = Object.keys(node as Record<string, unknown>);
+  if (!keys.length) return walked.length ? ` ("${at}" is empty)` : "";
+  return walked.length
+    ? ` (available under "${at}": ${keys.join(", ")})`
+    : ` (available: ${keys.join(", ")})`;
+}
+
 export async function cmdState(
   args: string[],
   flags: GlobalFlags,
@@ -345,10 +381,7 @@ export async function cmdState(
     const r = resolvePath(result.data, path);
     if (!r.found) {
       if (!silent) {
-        const keys = result.data && typeof result.data === "object"
-          ? Object.keys(result.data as Record<string, unknown>)
-          : [];
-        const hint = keys.length ? ` (available: ${keys.join(", ")})` : "";
+        const hint = _missHint(result.data, path);
         outError(`path "${path}" not found in state${hint}`, mode);
       }
       return { ok: false };

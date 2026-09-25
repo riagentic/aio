@@ -149,20 +149,33 @@ Type imports are erased at compile time — they cross both worlds freely.
 import type { AppState } from "./helpers.ts";
 ```
 
-## Browser-reachable imports may not leave `baseDir`
+## Browser-reachable imports that leave `baseDir`
 
 In **dev**, the browser fetches modules over HTTP, and `baseDir` (your entry's
-directory) is the HTTP root. A relative import that climbs out of it —
-`../../core/lib/sse.ts` — type-checks and runs fine on the server, then 404s in
-the browser and blanks the page:
+directory) is served at `/`. A relative import that climbs out of it —
+`../ui/Shell.tsx` from `src/pro/App.tsx` — cannot be resolved by the browser (a
+URL cannot go above `/`), so the dev server REWRITES it to the file's own url,
+`/__aio-src/src/ui/Shell.tsx`, and serves it from the project root (the
+directory of your deno.json). Dev loads exactly what the bundle does:
+
+- Only files a served module imports are served there — the project directory is
+  not an HTTP root.
+- Every guard of the app root applies: no dotfiles, no `*.server.*`, no
+  traversal, no symlink out of the project.
+- One url per file, so a module reached from both sides of the boundary is one
+  module instance.
+- Dev only. Prod is unaffected — the bundler follows relative imports at build
+  time.
+
+An import that leaves the **project** (a sibling repository, `../../core/…`
+above your deno.json) is still unreachable, and the dev server says so when it
+serves the importer:
 
 ```
-WARN client BLANK SCREEN (boot): Failed to fetch dynamically imported module
+WARN import "../../core/lib/sse.ts" resolves to …, outside this project — … Declare its directory in deno.json "share"
 ```
 
-A symlink into `baseDir` does not help either; escaping symlinks are refused by
-design. **Prod is unaffected** — the bundler follows relative imports at build
-time.
+A symlink into `baseDir` does not help; escaping symlinks are refused by design.
 
 For two apps in one repository that must share pure modules, map the shared
 directory to a URL prefix instead of copying it:
@@ -264,13 +277,13 @@ exactly as they are.
 
 ## Quick reference
 
-| What                                  | Rule                                                            |
-| ------------------------------------- | --------------------------------------------------------------- |
-| Browser-reachable import              | Must resolve inside `baseDir` (dev) — or map it via `serveDirs` |
-| Cell `index.ts`                       | Browser-safe only — shared between server and UI                |
-| Server-only code (`@std/*`, `Deno.*`) | `*.server.ts` + dynamic import (string-concat as fallback)      |
-| Files loaded via dynamic import       | Must also have static import in `app.ts` for `deno compile`     |
-| `import type`                         | Always safe — erased at compile time                            |
+| What                                  | Rule                                                          |
+| ------------------------------------- | ------------------------------------------------------------- |
+| Browser-reachable import              | Inside the project (dev) — else declare `share` / `serveDirs` |
+| Cell `index.ts`                       | Browser-safe only — shared between server and UI              |
+| Server-only code (`@std/*`, `Deno.*`) | `*.server.ts` + dynamic import (string-concat as fallback)    |
+| Files loaded via dynamic import       | Must also have static import in `app.ts` for `deno compile`   |
+| `import type`                         | Always safe — erased at compile time                          |
 
 ## Auto-aliasing npm packages (dev mode)
 
@@ -408,11 +421,13 @@ export const db = new Database(Deno.env.get("DATABASE_URL")!);
 
 Anything that reaches this module from the client graph is refused with the
 importing file named, exactly as a `*.server.ts` leak is — dev boot and
-`deno task build` share one decider, so they cannot disagree. The module also
-throws if it is ever evaluated in a browser: unreachable in practice (the build
-refuses the bundle first), and there for the paths a build cannot see — a
-hand-assembled bundle, a `<script>` tag, a published package someone re-bundled.
-A silent success there means a database URL anyone can read.
+`deno task build` share one decider, so they cannot disagree. Over HTTP it is a
+`404` in dev and prod alike, again exactly like a `*.server.ts` file — the dev
+server never serves a module that declares the marker. The module also throws if
+it is ever evaluated in a browser: unreachable in practice (the build refuses
+the bundle first), and there for the paths a build cannot see — a hand-assembled
+bundle, a `<script>` tag, a published package someone re-bundled. A silent
+success there means a database URL anyone can read.
 
 `aio/client-only` is the mirror, and the two halves are deliberately **not**
 symmetric, because the failures are not:

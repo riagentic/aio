@@ -13,6 +13,7 @@ import {
   AIO_NESTED_DISPLAY_CANDIDATES,
   displayIsUp,
   displayOwner,
+  nestedDisplayAccepts,
   nestedDisplayCookie,
   nestedDisplayCookieFile,
   nestedDisplayEnv,
@@ -173,3 +174,56 @@ function hasTool(name: string): boolean {
   }
   return false;
 }
+
+Deno.test({
+  name:
+    "nestedDisplayAccepts: the server's own answer — a stale cookie file is refused, the right one accepted",
+  ignore: Deno.build.os === "windows",
+  async fn() {
+    // A fake X server on a display number nobody uses: it reads the setup
+    // request and answers 1 only for the cookie it was "started" with.
+    const display = ":971";
+    const sock = "/tmp/.X11-unix/X971";
+    const dir = await tempDir("x-accepts-");
+    const good = crypto.getRandomValues(new Uint8Array(16));
+    const stale = crypto.getRandomValues(new Uint8Array(16));
+    await Deno.mkdir("/tmp/.X11-unix", { recursive: true }).catch(() => {});
+    const listener = Deno.listen({ transport: "unix", path: sock });
+    const seen: string[] = [];
+    const served = (async () => {
+      for await (const conn of listener) {
+        const buf = new Uint8Array(256);
+        const n = (await conn.read(buf)) ?? 0;
+        const v = new DataView(buf.buffer);
+        const nameLen = v.getUint16(6, true), dataLen = v.getUint16(8, true);
+        const name = new TextDecoder().decode(buf.subarray(12, 12 + nameLen));
+        const at = 12 + nameLen + ((4 - (nameLen % 4)) % 4);
+        const data = buf.subarray(at, at + dataLen);
+        seen.push(`${buf[0]}:${v.getUint16(2, true)}:${name}:${n}`);
+        const ok = data.length === good.length &&
+          data.every((b, i) => b === good[i]);
+        await conn.write(new Uint8Array([ok ? 1 : 0]));
+        conn.close();
+      }
+    })();
+    try {
+      const file = (c: Uint8Array, f: string) => {
+        const p = `${dir}/${f}`;
+        Deno.writeFileSync(p, xauthorityEntry(display, c));
+        return p;
+      };
+      assertEquals(await nestedDisplayAccepts(display, file(good, "g")), true);
+      assertEquals(
+        await nestedDisplayAccepts(display, file(stale, "s")),
+        false,
+      );
+      // Little-endian "l", protocol 11, the record's auth name, whole message.
+      assertEquals(seen[0], `108:11:MIT-MAGIC-COOKIE-1:48`);
+    } finally {
+      listener.close();
+      await served.catch(() => {});
+      await Deno.remove(sock).catch(() => {});
+      await dropTempDir(dir);
+    }
+  },
+});

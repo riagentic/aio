@@ -15,7 +15,7 @@ import {
 } from "./app-dirs.ts";
 import { log } from "../diagnostics/logger-api.ts";
 import { EXIT_WAIT_MS } from "./shutdown-budget.ts";
-import { readDenoJsonSync } from "./deno-json.ts";
+import { locateDenoJsonAbove, readDenoJsonSync } from "./deno-json.ts";
 import { inheritedWorkerAppId } from "./cell-worker-protocol.ts";
 
 /** How long a lock may sit at `status:"starting"` before anyone — the next
@@ -314,18 +314,15 @@ export function appIdFromConfig(
 
 /** The deno.json that travels INSIDE a compiled binary, next to its entry.
  *  Read relative to `Deno.mainModule` (the VFS), never the launch directory —
- *  the same lookup `appDenoJson()` uses for the version in the boot banner.
- *  Kept local so this module stays free of a server-side import cycle. */
+ *  through THE app-config walk (`locateDenoJsonAbove`), the same one
+ *  `appDenoJson()` uses for the version in the boot banner. It used to be a
+ *  private copy that read only `deno.json` with `JSON.parse`: a `deno.jsonc`
+ *  app, or a `deno.json` with one comment in it, found no identity, fell back
+ *  to the binary's FILE NAME, and every versioned install
+ *  (`app-1.2.3` → `~/.app-1-2-3/`) started from empty state. */
 function _embeddedDenoJson(): unknown {
   try {
-    const main = new URL(Deno.mainModule);
-    for (const up of ["./", "../", "../../"]) {
-      try {
-        const text = Deno.readTextFileSync(new URL(`${up}deno.json`, main));
-        const parsed = JSON.parse(text);
-        if (parsed && typeof parsed === "object") return parsed;
-      } catch { /* not at this level — walk up */ }
-    }
+    return locateDenoJsonAbove(new URL(Deno.mainModule))?.config ?? null;
   } catch { /* no usable main module */ }
   return null;
 }

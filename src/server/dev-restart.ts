@@ -21,7 +21,17 @@
 
 import { dirname, fromFileUrl } from "@std/path";
 import { log } from "../diagnostics/logger-api.ts";
-import { instances, resolveAppId } from "./single-instance-lock.ts";
+import {
+  instances,
+  isLockOwnerAlive,
+  type LockData,
+  lockKey,
+  ownerIdentity,
+  readLock,
+  removeLockIf,
+  replaceLockIf,
+  resolveAppId,
+} from "./single-instance-lock.ts";
 
 /** Exit code a supervised child uses to ask for a fresh process. 75 =
  *  EX_TEMPFAIL — "try again", and outside the range apps use for errors. */
@@ -225,21 +235,48 @@ export async function restartForCellChange(
   _restarting = true;
   const blocked = await restartBlockedReason();
   const file = path.split("/").pop() ?? path;
+  // The watcher also restarts for the server ENTRY (routes, schedules, auth
+  // live there) and for a plain module the server imports — name each as
+  // what it is.
+  const real = (p: string): string => {
+    try {
+      return Deno.realPathSync(p);
+    } catch {
+      return p;
+    }
+  };
+  const declaresCell = (): boolean => {
+    try {
+      return /\bcell\s*\(\s*["'`]/.test(Deno.readTextFileSync(path));
+    } catch {
+      return false;
+    }
+  };
+  const what = Deno.mainModule.startsWith("file://") &&
+      real(fromFileUrl(Deno.mainModule)) === real(path)
+    ? "server entry"
+    : declaresCell()
+    ? "cell file"
+    : "server module";
   if (blocked) {
     _restarting = false;
     log.warn(
       "watch",
-      `cell file changed (${file}) — cells run in the server process and do ` +
+      `${what} changed (${file}) — it runs in the server process and does ` +
         `NOT hot-reload, and auto-restart is off (${blocked}). Restart to ` +
         `apply: stop and re-run \`deno task dev\`. (Client JSX hot-reloads, ` +
         `so you may be seeing new UI on old cell logic.)`,
     );
     return;
   }
-  log.info("watch", `cell file changed (${file}) — restarting the app`);
+  log.info("watch", `${what} changed (${file}) — restarting the app`);
   // Read BEFORE the shutdown releases the listener: afterwards there is no
   // bound port to read.
   const port = carry.port?.();
+  // …and this process's own lock, for the same reason: WHICH app this is
+  // (appId, home, profile — the lock key) is what the supervisor needs to
+  // hand the lock slot to its child and to recognise a rival start.
+  const self = ownLock();
   try {
     await shutdown();
   } catch (e) {
@@ -248,13 +285,91 @@ export async function restartForCellChange(
   if (isSupervisedChild()) {
     Deno.exit(RESTART_EXIT_CODE); // the supervisor launches the next one
   }
-  await superviseForever(port);
+  await superviseForever(port, self);
+}
+
+/** This process's lock, read before the shutdown removes it — null when it
+ *  holds none (an app booted with `singleton: false`) or it cannot be read. */
+function ownLock(): LockData | null {
+  try {
+    const mine = instances().find((i) => i.pid === Deno.pid);
+    return mine ? readLock(lockKey(mine.appId, mine.home, mine.profile)) : null;
+  } catch {
+    return null; // aio-ok: no lock dir — the supervisor runs without a slot
+  }
+}
+
+/** The lock of `self`'s app home as it stands, by the same key. */
+const slotOf = (self: LockData): string =>
+  lockKey(self.appId, self.home, self.profile);
+
+/** Put the RELAUNCHED child in the lock slot the old app just vacated.
+ *
+ *  Between the old app's shutdown (its lock gone) and the child's own
+ *  acquire (a module graph later — seconds), nothing named the app: `am
+ *  restart` in that window saw it NOT running, started a second instance on
+ *  a NEW port, and the child lost the race. A placeholder naming the child
+ *  (the way `am start` files one for its own child) makes the app visible
+ *  the whole time — as `starting`, on the port it is about to bind — so
+ *  `am restart` stops IT and reuses that port, and `am stop` reaches it.
+ *  Create-or-replace-a-dead-owner only: never over a live lock (a rival
+ *  start that took the slot keeps it), never over the child's own. */
+function fileChildPlaceholder(
+  self: LockData,
+  child: number,
+  port: number | undefined,
+): string | null {
+  try {
+    const data: LockData = {
+      ...self,
+      pid: child,
+      port: port ?? self.port,
+      status: "starting",
+      startedAt: Date.now(),
+      startToken: undefined,
+      startEpoch: undefined,
+      socketPath: undefined,
+      trojanPort: undefined,
+      ...ownerIdentity(child),
+    };
+    const seen = readLock(slotOf(self));
+    const wrote = !seen
+      ? replaceLockIf(null, data)
+      : seen.pid !== child && !isLockOwnerAlive(seen) &&
+        replaceLockIf(seen, data);
+    // The BYTES written — what `replaceLockIf` stores — so only this exact
+    // placeholder is ever taken back (see the removal after the child exits).
+    return wrote ? JSON.stringify(data) : null;
+  } catch (e) {
+    // aio-ok: the child still takes the slot itself when it boots — only the
+    // window stays open; said, not swallowed.
+    log.warn("watch", `could not file the relaunch's lock placeholder: ${e}`);
+    return null;
+  }
+}
+
+/** A LIVE instance of `self`'s app home that is neither this supervisor nor
+ *  its child `child` — a rival start (`am restart`, `am start`, a second
+ *  `deno task dev`) that took the slot. `null` without a known `self`. */
+function rivalOf(self: LockData | null, child: number): LockData | null {
+  if (!self) return null;
+  try {
+    const l = readLock(slotOf(self));
+    return l && l.pid !== child && l.pid !== Deno.pid && isLockOwnerAlive(l)
+      ? l
+      : null;
+  } catch {
+    return null; // aio-ok: unreadable slot — nothing to step aside for
+  }
 }
 
 /** Become the supervisor: launch the app as a child, relaunch it whenever it
  *  exits asking for a restart, and pass any other exit code through. `port`
  *  is the TCP port the first app was on — every child binds the same one. */
-async function superviseForever(port: number | undefined): Promise<never> {
+async function superviseForever(
+  port: number | undefined,
+  self: LockData | null,
+): Promise<never> {
   const real = await realArgv();
   const args = real ?? synthesizedArgs();
   if (!real) {
@@ -335,8 +450,17 @@ async function superviseForever(port: number | undefined): Promise<never> {
       stderr: "inherit",
     }).spawn();
     stop.child = child;
+    const placed = self ? fileChildPlaceholder(self, child.pid, port) : null;
     const status = await child.status;
     stop.child = null;
+    // A placeholder the child never replaced names a dead pid now — gone,
+    // so the next reader does not report an abrupt end that did not happen.
+    // THAT placeholder only, byte for byte: a lock the child wrote itself
+    // is left exactly as it ended — a graceful stop removed it already, and
+    // one still there after a SIGKILL or an OOM kill is the evidence the next
+    // boot reports ("did not shut down cleanly"). Removing it by pid made
+    // that end silent.
+    if (self && placed !== null) removeLockIf(slotOf(self), placed);
     if (status.code === RESTART_EXIT_CODE) {
       // Same `spawnedAt` guard the crash branch below uses. A restart that
       // arrives within a second of the spawn was not asked for by a human.
@@ -374,6 +498,13 @@ async function superviseForever(port: number | undefined): Promise<never> {
     ) {
       Deno.exit(status.code);
     }
+    // It died right after the relaunch because ANOTHER start of this app
+    // took the slot first (`am restart` / `am start` in the window before the
+    // child booted): the child was refused, and that instance IS the app now.
+    // Waiting for a save here left an app-less process no lock names —
+    // invisible to `am instances`, `am stop` and `am kill --stale`.
+    const rival = rivalOf(self, child.pid);
+    if (rival) stepAside(rival.pid);
     // It died right after the relaunch: the file that was just saved does not
     // load. This used to be `Deno.exit(1)` — a typo mid-edit ended the dev
     // session, and nothing on screen said the watcher was gone. Stay up, say
@@ -385,7 +516,10 @@ async function superviseForever(port: number | undefined): Promise<never> {
         `error above). The dev session stays up: fix it and save, and the ` +
         `app relaunches. Ctrl-C to quit.`,
     );
-    await waitForSourceChange();
+    // …and a rival that shows up WHILE waiting ends the wait too: the lock
+    // slot is polled beside the watcher, never only after the next save.
+    const late = await waitForSourceChange(() => rivalOf(self, 0)?.pid ?? null);
+    if (late !== null) stepAside(late);
     // While we waited, `am start` (or a second `deno task dev`) may have
     // brought the app up on its own. Relaunching would only be refused with
     // "Already running" — say which process owns it and step aside.
@@ -406,19 +540,31 @@ async function superviseForever(port: number | undefined): Promise<never> {
  *  relaunch. Best-effort by design: if the watch cannot be set up the wait
  *  ends immediately and the relaunch happens (at worst it fails again and
  *  this runs again). */
-async function waitForSourceChange(): Promise<void> {
+async function waitForSourceChange(
+  rival: () => number | null = () => null,
+): Promise<number | null> {
   let dir: string;
   try {
     dir = dirname(fromFileUrl(Deno.mainModule));
   } catch {
-    return;
+    return null;
   }
   let watcher: Deno.FsWatcher;
   try {
     watcher = Deno.watchFs(dir, { recursive: true });
   } catch {
-    return;
+    return null;
   }
+  // The rival poll closes the watcher, which ends the loop below.
+  let found: number | null = null;
+  const poll = setInterval(() => {
+    found = rival();
+    if (found !== null) {
+      try {
+        watcher.close();
+      } catch { /* aio-ok: already closed */ }
+    }
+  }, RIVAL_POLL_MS);
   log.info("watch", `waiting for a change under ${dir}`);
   try {
     for await (const ev of watcher) {
@@ -431,11 +577,28 @@ async function waitForSourceChange(): Promise<void> {
   } catch {
     /* watcher died — relaunch anyway */
   } finally {
+    clearInterval(poll);
     try {
       watcher.close();
     } catch { /* already closed */ }
   }
+  if (found !== null) return found;
   await new Promise((r) => setTimeout(r, 150));
+  return null;
+}
+
+/** How often a supervisor waiting for a save checks for a rival start. */
+const RIVAL_POLL_MS = 1_000;
+
+/** End this dev session because `pid` is the app now — said, then exit 0. */
+function stepAside(pid: number): never {
+  log.warn(
+    "watch",
+    `another start of this app took over (pid ${pid}) while the relaunch ` +
+      `was booting — this dev session ends; that one is the app now (am ` +
+      `status / am stop reach it)`,
+  );
+  Deno.exit(0);
 }
 
 /** The pid of a DIFFERENT live instance of this app, or null. Uses the same

@@ -169,7 +169,7 @@ export function hydrate(root: any, App: ComponentFn): MountHandle {
       // The server markup is gone, so there is no sequence left to match.
       state._ssrIds = false;
       _render(root, vnode, null, state.ctx);
-    }
+    } else _dropSplitTail(root, consumed);
     state.vnode = vnode;
     _flushAfterRender(state);
   } finally {
@@ -237,6 +237,7 @@ function _hydrateNodeInner(
 
   // Null placeholder — consume 1 comment node (AIO-107)
   if (vnode.tag === Symbol.for("aio.Null") as typeof vnode.tag) {
+    _dropSplitTail(parent, childIndex); // see `_dropSplitTail`
     const domNode = parent.childNodes[childIndex];
     if (domNode && domNode.nodeType === 8) {
       vnode._dom = domNode;
@@ -362,6 +363,7 @@ function _hydrateNodeInner(
       // (AIO-195) — createDom makes one and the SSR writers emit one, so
       // hydration must claim it. Without a `_dom` the container has no position,
       // and the next diff anchored its whole region at the parent's first child.
+      _dropSplitTail(parent, childIndex); // see `_dropSplitTail`
       const domNode = parent.childNodes[childIndex];
       if (domNode && domNode.nodeType === 8) {
         vnode._dom = domNode;
@@ -384,6 +386,7 @@ function _hydrateNodeInner(
   }
 
   // Element — consume exactly 1 DOM node, hydrate children inside it
+  _dropSplitTail(parent, childIndex); // see `_dropSplitTail`
   _unwrapImpliedTableSection(parent, childIndex, vnode.tag as string);
   const domNode = parent.childNodes[childIndex];
   if (!domNode || domNode.nodeType !== 1) return -1;
@@ -412,6 +415,7 @@ function _hydrateNodeInner(
       if (consumed < 0) return -1;
       childIdx += consumed;
     }
+    _dropSplitTail(el, childIdx);
   }
 
   // `<select value>` selects an <option>, so it can only be written once the
@@ -464,6 +468,31 @@ function _unwrapImpliedTableSection(
   parent.removeChild(node);
 }
 
+/** The remainders `_hydrateText` split off a merged text run. Each one is
+ *  CLAIMED by the next text child when the merge was the parser's; one that is
+ *  still unclaimed after the last child is not a sibling's text at all — it is
+ *  the tail of THIS child's server text, which differs from the client's (a
+ *  signal written between SSR and hydrate, or by a component later in the
+ *  same render). */
+const _splitTails = new WeakSet<Node>();
+
+/** Remove a split-off remainder no child claimed. It used to stay: owned by no
+ *  vnode, invisible to every diff, so the server's stale text (`s0` beside the
+ *  signal's current `""`) sat on the page for its whole life — the hydrated
+ *  page silently not the page the model describes.
+ *
+ *  Called at the END of a parent and wherever a NON-text node is claimed: SSR
+ *  separates text from a following element / `null` slot / empty region by
+ *  that node's own markup, so a remainder sitting in such a slot is never a
+ *  sibling's text. Checked only at the end, the claim saw the remainder instead
+ *  of its node — an empty region inserted a second anchor in front of it, the
+ *  next text child adopted it, and the server's anchor and text stayed behind
+ *  as orphans: `<p>{msg}{cond && <></>}z</p>` hydrated as `z z`. */
+function _dropSplitTail(parent: Node, idx: number): void {
+  const tail = parent.childNodes[idx];
+  if (tail && _splitTails.has(tail)) parent.removeChild(tail);
+}
+
 /** Claim the text node at `childIndex` for a child whose text is `want`.
  *
  *  Two text children are two nodes in the client tree but ONE node in parsed
@@ -501,7 +530,7 @@ function _hydrateText(
   const have = domNode.textContent ?? "";
   if (have !== want) {
     if (have.length > want.length && have.startsWith(want)) {
-      (domNode as Text).splitText(want.length);
+      _splitTails.add((domNode as Text).splitText(want.length));
     } else {
       domNode.textContent = want;
     }

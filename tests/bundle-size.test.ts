@@ -215,9 +215,23 @@ const CEILING_GZ = {
   // was measured with a bare esbuild, not the build's own plugin, so it was
   // bundling a graph nobody ships (90 KB gz against the 80 a page downloaded).
   // It now runs `aioBrowserPlugin()` like every other bundle here.
-  air: 79,
+  //
+  // Raised 79 → 82 for 1.0.12-beta (measured 82; app 84), +3 KB gz, measured
+  // per commit by bundling each one (`deno task bench:bundle`, app shell):
+  // v1.0.11-beta 79 · round 1 79 · round 2 80 · rounds 3–4 80 · round 5 82.
+  // `check:bundle-size` is not in `deno task test`, so the drift surfaced only
+  // at the release check. Every byte is a fix with a red-without-it test:
+  //   · round 5 (+~2 KB) — a tab whose session was revoked stops presenting
+  //     the dead credential, says "Signed out", renders `<SignIn/>` and
+  //     resumes on a sign-in in any tab (the GET /ws probe, the focus probe,
+  //     the signed-in/out events, `refuseUrlToken`); a server restart's
+  //     reload waits for the offline queue instead of dropping it; the IPC
+  //     watchdog retries an unanswered reconnect; 1008 closes name their
+  //     reason; the renderer's portal, range, select and style fixes.
+  //   · round 2 (+~1 KB) — client-runtime and renderer fixes of that round.
+  air: 82,
   /** The same, plus one cell — measured 2 KB, which is what a cell costs. */
-  app: 82,
+  app: 84,
 };
 
 const RUN = Deno.env.get("AIO_BUNDLE_SIZE") === "1";

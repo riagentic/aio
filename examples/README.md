@@ -36,8 +36,7 @@ the honest setting for data a user would miss. Tested in
 `disk/` is the one to read when your app has to leave the process: it walks the
 real filesystem and opens the desktop file manager, both from cell methods, with
 the Deno-only half in `disk.server.ts` behind a dynamic import
-([the rule](../docs/build/imports.md#2-server-only-code-name-it-serverts-and-dynamic-import-it)).
-It is also the reference for
+([the rule](../docs/build/imports.md#the-rules)). It is also the reference for
 [long-running server work](../docs/state/methods.md#long-running-server-work) —
 `cancelOn: { open: ["self", "disk:stop"] }` (a new folder supersedes the scan
 still running, Cancel stops it), a `scanning` flag, and the rule that a

@@ -61,7 +61,18 @@ export function navigateTo(route: string): void {
     dispatchEvent?: (e: Event) => boolean;
   };
   if (!g.history || !g.dispatchEvent) return;
-  g.history.pushState(null, "", route);
+  // The page it is ALREADY at replaces its entry — the router's `navigate`
+  // rule (and a plain `<a>`'s). Pushing left one duplicate entry per tray or
+  // notification click on the current route, and Back looked dead that often.
+  const here = (globalThis as { location?: { href?: string } }).location?.href;
+  let same = false;
+  try {
+    same = !!here && new URL(route, here).href === here;
+  } catch {
+    // aio-ok: an unparseable route is not the current URL — push it as given
+  }
+  if (same) g.history.replaceState(null, "", route);
+  else g.history.pushState(null, "", route);
   // `PopStateEvent` is a browser class; a runtime without it (a test) still
   // has `Event`, and the router listens by NAME.
   const Ev =

@@ -12,6 +12,7 @@ import {
   commitExists,
   rowStatus,
   STALE_DAYS,
+  uncommittedChanges,
 } from "../scripts/proof.ts";
 import { join } from "@std/path";
 import { dropTempDir, tempDir } from "../src/testing/temp-dir.ts";
@@ -129,4 +130,18 @@ Deno.test("proof matrix: commitExists asks the repo — a tagged commit yes; unt
   } finally {
     await dropTempDir(dir);
   }
+});
+
+Deno.test("proof: a gate run on uncommitted code records nothing — HEAD is not the code that ran", () => {
+  // A clean tree (or only this file, rewritten by an earlier gate in the same
+  // run) may record.
+  assertEquals(uncommittedChanges(""), []);
+  assertEquals(uncommittedChanges(" M proof-matrix.json\n"), []);
+  // Any other change — modified, staged, or a new file — makes the row a lie.
+  assertEquals(
+    uncommittedChanges(
+      " M src/server/aio.ts\nM  deno.json\n?? src/server/new.ts\n M proof-matrix.json\n",
+    ),
+    [" M src/server/aio.ts", "M  deno.json", "?? src/server/new.ts"],
+  );
 });

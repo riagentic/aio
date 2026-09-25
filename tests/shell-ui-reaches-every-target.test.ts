@@ -108,8 +108,11 @@ Deno.test("ui.layout: true still emits the layout defaults on both", () => {
 //
 // An APK's shell is written before `aio.run()` exists, so `ui.theme`,
 // `ui.layout` and `ui.dir` cannot be baked into it. They travel with the
-// bundle and `_applyShellUi` applies them on the first tick. Three of the four
-// were not applied at all:
+// bundle and `_applyShellUi` applies them on the first tick — WHEN `aio.run()`
+// runs in the page. A local APK's bundle does not run it yet (its entry
+// imports App.tsx only; the build warns by name — see
+// tests/android-run-options-warning.test.ts), so this pins the mechanism the
+// bake-in (todo.md) will rely on. Three of the four were not applied at all:
 //
 //   theme:"none"  the shell's always-on tokens sheet stayed, so the app that
 //                 asked for "no aio CSS on the page at all… not even the

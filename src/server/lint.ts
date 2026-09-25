@@ -8,6 +8,7 @@ import {
   SERVER_ONLY_SPECS,
 } from "./server-only-specs.ts";
 import { ESBUILD_SPEC } from "../build/esbuild-shared.ts";
+import { importOutsideApp } from "./outside-app.ts";
 import { hasDesktopSession } from "./open-external.ts";
 
 import { join } from "@std/path";
@@ -304,7 +305,7 @@ export async function lint(
       // resolves at runtime, the same way the transpiler loads it. Keeps `am`
       // (which imports aio.ts → lint.ts for VERSION) esbuild-free at install.
       const esbuildPkg = ESBUILD_SPEC; // shared pin (build/esbuild-shared.ts)
-      await import(esbuildPkg);
+      await importOutsideApp(esbuildPkg);
     } catch {
       r.warn.push(
         "esbuild not installed — dev mode needs it for TSX transpilation. " +

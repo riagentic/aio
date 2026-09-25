@@ -290,7 +290,7 @@ before 1.0.0-beta), and `--long` shows a `DATA` column when it differs from
 ## Accounts and trust (`am auth`, `am trust`)
 
 ```sh
-am auth users             # list accounts (apps running with auth: true)
+am auth users             # list accounts: role, email, 2FA, locked (auth: true)
 am auth create <id>       # add one (prints a generated password if none given)
 am auth passwd <id>       # set a password (also clears the lockout + sessions)
 am auth unlock <id>       # clear a lockout
@@ -412,6 +412,14 @@ before the restart, if that port is still free. If something else has taken it,
 a `note:` says so and the app picks a free one. `--port=N` or a declared port
 still wins, and the port restart reuses is never written into the launch record.
 
+**`restart` reports the app, not its own child.** Save a cell file and run
+`am restart` at once, and the app's dev watcher relaunches it while `am restart`
+launches its own: one wins the lock. When the watcher's did, restart used to say
+`did not start` (exit 1) with the app up. Now, when the instance holding the
+lock is this app (same appId, home and profile, this checkout, not the pid it
+stopped) and answers, restart reports THAT instance — its pid and port, exit 0 —
+with a `note:` on stderr that its own child stood down.
+
 `start` and `stop` both WAIT by default (`--no-wait` opts out; since 1.0.11 for
 `stop`, which used to return while the process was still alive). `restart`
 always waits for stop internally, then spawns and returns immediately. `stop`
@@ -464,6 +472,12 @@ Two rules make this predictable:
   directories and ports, so `aio.run({ appId: "relay" })` in each entry is what
   keeps them apart. If two resolve to the same id, `am` refuses and says which —
   sharing one `~/.<appId>/` is how two apps quietly open one database.
+
+**Each component runs as its `kind`.** A `"server"` component starts
+`--client=server-only`, a browser kind `--client=browser`, `"cli"`
+`--client=cli` — not the project's default client. An `"electron"` component
+keeps the project's client (a GUI client is never forced). An explicit
+`--client=` (or `--headless`/`--service`) on the command line wins.
 
 **`am` never invents a port.** A component that declares none gets a free one
 from the runtime — the same `findFreePort()` behind `deno task dev` — and
@@ -929,10 +943,14 @@ the commands add over `cp -r` is two refusals:
   internally inconsistent. `--force` overrides and marks the result
   `tornRisk: true`.
 - **`am restore` refuses another app's archive** (`meta.json` records the appId)
-  and refuses outright while the app runs — a running app would write its
-  in-memory pages back over what you restored. There is no `--force` for that.
-  It also refuses a directory that is not an archive at all (no `meta.json` and
-  no `state.db`): restoring nothing over your data is not a restore.
+  — and another PROFILE's: a `--profile=p1` backup into the default home, or a
+  default backup into `--profile=dev`, would leave a home boot refuses. It is
+  refused before anything moves (no `--force`), naming both and the command that
+  restores it into its own home (`am restore <dir> --profile=p1`). It refuses
+  outright while the app runs — a running app would write its in-memory pages
+  back over what you restored. There is no `--force` for that. It also refuses a
+  directory that is not an archive at all (no `meta.json` and no `state.db`):
+  restoring nothing over your data is not a restore.
 
 A restore **moves** the data it replaces to `data.replaced-<stamp>` rather than
 deleting it, so restoring the wrong archive is recoverable. The name is never

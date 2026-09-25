@@ -266,17 +266,16 @@ Deno.test("a git update source ignores every manifest-trust option", () => {
   );
 });
 
-Deno.test("two session TTLs: both set is refused, one set is warned", () => {
+Deno.test("two session TTLs: both set is refused, one set is fine", () => {
   const both = one({ sessions: { ttlMs: 1000 }, auth: { ttlMs: 2000 } });
   assertEquals(both.level, "error");
   assertStringIncludes(both.what, "neither wins outright");
   assertStringIncludes(both.what, "Max-Age");
 
-  // sessions-only under built-in auth: tokens honour it, the COOKIE falls back
-  // to a hardcoded 30 days, so the browser outlives the session.
-  const onlyStore = one({ sessions: { ttlMs: 1000 }, auth: true });
-  assertEquals(onlyStore.level, "warn");
-  assertStringIncludes(onlyStore.fix, "1000");
+  // sessions-only under built-in auth: the token takes the store default and
+  // the cookie's Max-Age follows the token's own expiry — nothing diverges
+  // (tests/auth-cookie-follows-session-ttl.test.ts proves the cookie half).
+  assertEquals(configConflicts({ sessions: { ttlMs: 1000 }, auth: true }), []);
 
   // No built-in auth → nothing issues a cookie, so nothing diverges.
   assertEquals(configConflicts({ sessions: { ttlMs: 1000 } }), []);
@@ -303,7 +302,6 @@ Deno.test("every conflict names a cause and an actionable fix", () => {
     { serverUrl: "x", client: "cli" },
     { ui: { height: 1 }, client: "cli" },
     { sessions: { ttlMs: 1 }, auth: { ttlMs: 2 } },
-    { sessions: { ttlMs: 1 }, auth: true },
     { updates: { source: "https://github.com/o/r", key: {} } },
   ];
   const seen = new Set<string>();

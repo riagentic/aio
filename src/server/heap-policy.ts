@@ -118,6 +118,16 @@ export function parseMaxHeap(
   const s = declared.trim().toLowerCase();
   if (s === "default") return null;
   const pct = s.match(/^(\d+(?:\.\d+)?)\s*%$/);
+  const size = pct ?? s.match(/^(\d+(?:\.\d+)?)\s*(gb|g|mb|m)$/);
+  // A zero size is the same nonsense `0` (number) is refused as — "0GB" and
+  // "0%" used to parse, floor to the default, and mean "default" silently.
+  if (size && !(Number(size[1]) > 0)) {
+    throw new Error(
+      `[aio] memory.maxHeap must be a positive size — got ${
+        JSON.stringify(declared)
+      }`,
+    );
+  }
   if (pct) {
     if (totalBytes === null) return null; // unknown machine — leave V8 alone
     return Math.floor((totalBytes * Number(pct[1]) / 100) / (1024 * 1024));

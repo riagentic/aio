@@ -887,15 +887,6 @@ export function NftThumb({ id }: { id: string }) {
     }),
     expect: "none use testCell()",
   },
-  {
-    name: "no test task (testing)",
-    files: app({
-      "deno.json": denoJson({
-        tasks: { dev: "x", "compile:browser": "y" },
-      }),
-    }),
-    expect: 'no "test" task in deno.json',
-  },
   // patterns
   {
     name: "more than three 'any'",
@@ -1123,6 +1114,14 @@ await aio.run({ perfBudget: { methods: { "models:scan": { timeout: 0 } } } });
     files: app({
       "src/s.ts":
         `export const open = async () => { const { createDB } = await import("aio"); return createDB; };\n`,
+    }),
+    expect: "resolves to undefined at RUNTIME",
+  },
+  {
+    name: "dynamic import('aio') mixing server-only and browser-safe names",
+    files: app({
+      "src/s2.ts":
+        `export const open = async () => { const { cell, createDB } = await import("aio"); return [cell, createDB]; };\n`,
     }),
     expect: "resolves to undefined at RUNTIME",
   },

@@ -27,6 +27,20 @@ type DiskState = {
   hasMore: boolean;
 };
 
+/** The folder one level up — POSIX (`/a/b`), drive (`C:\a`, `C:/a`) and UNC
+ *  (`\\srv\share\a`) paths alike; a root is its own parent. A POSIX-only
+ *  regex here made ↑ Up a silent no-op on every Windows path. Pure, so it is
+ *  tested with Windows-shaped strings on any OS. */
+export function parentOf(path: string): string {
+  const root =
+    /^(?:[A-Za-z]:[\\/]?|[\\/]{2}[^\\/]+[\\/][^\\/]+[\\/]?|[\\/])/.exec(path)
+      ?.[0] ?? "";
+  const rest = path.slice(root.length).replace(/[\\/]+$/, "");
+  const cut = Math.max(rest.lastIndexOf("/"), rest.lastIndexOf("\\"));
+  if (cut < 0) return root || path;
+  return root + rest.slice(0, cut);
+}
+
 export const disk = cell("disk", {
   // Live measurements — a size read five minutes ago is a lie, so nothing is
   // worth restoring. One word, and this app never persists a byte.
@@ -171,7 +185,7 @@ export const disk = cell("disk", {
 
     /** Up one level — a normal call, which supersedes any running scan. */
     async up(s: DiskState & MethodDraftMeta) {
-      const parent = s.path.replace(/\/[^/]+\/?$/, "") || "/";
+      const parent = parentOf(s.path);
       if (parent !== s.path) await disk.open(parent);
     },
 

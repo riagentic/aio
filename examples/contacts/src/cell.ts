@@ -43,7 +43,16 @@ export const contacts = cell("contacts", {
     update(s, id: number, patch: Partial<Omit<Contact, "id">>) {
       const row = s.contacts.find((c) => c.id === id);
       if (!row) throw new Error(`no contact ${id}`);
-      const next = { ...row, ...patch };
+      // Take only the editable fields. The type forbids `id`, but a call from
+      // `am dispatch`, a CLI or another client's JSON is not type-checked —
+      // `{ ...row, ...patch }` let `{ id: 2 }` put two rows on one primary
+      // key, and the table then refused to persist this cell at all.
+      const next = {
+        id: row.id,
+        name: (patch.name ?? row.name).trim(),
+        email: (patch.email ?? row.email).trim(),
+        note: (patch.note ?? row.note).trim(),
+      };
       assertValid(next);
       Object.assign(row, next);
     },

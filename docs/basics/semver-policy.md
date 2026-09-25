@@ -90,7 +90,7 @@ internal modules.
 - raising the minimum wire-protocol version (`min` in the hello) so an older
   client is refused
 - a persistence schema change without an automatic migration
-- changing a default (`persist`, `ui`, `transport`, …) in a way that alters
+- changing a default (`persist`, `visible`, `transport`, …) in a way that alters
   behavior of existing apps
 
 Additive changes (new exports, new optional config, new protocol messages

@@ -21,12 +21,15 @@ import {
   ensureElectronRuntime,
   ensureElectronZip,
   fetchVerifiedZip,
+  FUSED_SUFFIX,
 } from "../src/electron/electron-runtime-fetch.ts";
+import { FUSE_SENTINEL, fusesAreOff } from "../src/electron/electron-fuses.ts";
 import { dropTempDir, tempDir } from "../src/testing/temp-dir.ts";
 import { findElectronBin } from "../src/electron/electron-spawn.ts";
 import type { Log } from "../src/electron/electron-shared.ts";
 
 const V = "9.9.9";
+const FUSE_WIRE = `${FUSE_SENTINEL}\x01\x09101100011`;
 const SLUG = electronSlug();
 
 async function sha256Hex(bytes: Uint8Array): Promise<string> {
@@ -64,7 +67,9 @@ async function runtimeZip(tmp: string): Promise<string> {
   const stage = join(tmp, "zip-stage");
   const bin = electronBinIn(stage);
   await Deno.mkdir(join(bin, ".."), { recursive: true });
-  await Deno.writeTextFile(bin, "#!/bin/sh\n");
+  // With Electron's fuse wire as shipped (RunAsNode, NODE_OPTIONS and
+  // --inspect on), so the installer has real bytes to turn off.
+  await Deno.writeTextFile(bin, `#!/bin/sh\n${FUSE_WIRE}`);
   const zip = join(tmp, "runtime.zip");
   const p = await new Deno.Command("zip", {
     args: ["-q", "-r", zip, "."],
@@ -113,6 +118,27 @@ Deno.test("embedded runtime: installs from the carried zip, with its checksum, a
     });
     assertEquals(dir, electronRuntimeDir(V, SLUG));
     assert((await Deno.stat(electronBinIn(dir))).isFile);
+  });
+});
+
+Deno.test("embedded runtime: the carried runtime is unpacked with its fuses off, apart from an unfused one already cached", async () => {
+  await isolated(async (tmp) => {
+    const zip = await runtimeZip(tmp);
+    const sha = await sha256Hex(await Deno.readFile(zip));
+    const rt = (await bakedEmbeddedRuntime(await embeddedDist(tmp, zip, sha)))!;
+    // An unfused runtime of the same version already sits under the plain
+    // name (a download, or an app built before fuses).
+    const plain = await ensureElectronRuntime(V, SLUG, {
+      fetch: embeddedRuntimeFetch(rt),
+      log: () => {},
+    });
+    assert(!fusesAreOff(await Deno.readFile(electronBinIn(plain))));
+    const dir = await ensureElectronRuntime(V, SLUG, {
+      embedded: rt,
+      log: () => {},
+    });
+    assertEquals(dir, electronRuntimeDir(V, SLUG) + FUSED_SUFFIX);
+    assert(fusesAreOff(await Deno.readFile(electronBinIn(dir))));
   });
 });
 
@@ -170,7 +196,10 @@ Deno.test("findElectronBin (compiled): a carried runtime is unpacked, and the do
         return Promise.reject(new Error("downloaded"));
       },
     });
-    assertEquals(bin, electronBinIn(electronRuntimeDir(V, SLUG)));
+    assertEquals(
+      bin,
+      electronBinIn(electronRuntimeDir(V, SLUG) + FUSED_SUFFIX),
+    );
     assertEquals(downloads, 0);
     // It says what it does: unpacking, not downloading.
     assert(said.some((l) => l.includes("this app carries")), said.join("\n"));

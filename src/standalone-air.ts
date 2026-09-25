@@ -6,6 +6,17 @@ import { msg } from "./state/msg.ts";
 import type { Msg } from "./state/cell-types.ts";
 import { deepMerge } from "./state/deep-merge.ts";
 import {
+  applyCellMigrations,
+  type CellMigrationInfo,
+  detectShapeDrift,
+  downgradeParkKey,
+  refuseThenable,
+  runCellRestore,
+  shapeDriftSummary,
+} from "./state/cell-migrate.ts";
+import { cloneState } from "./state/immutable.ts";
+import type { Log } from "./diagnostics/logger-api.ts";
+import {
   createDispatch,
   type PerfBudget,
   type PerfCheck,
@@ -196,6 +207,11 @@ export { call } from "./state/cell-impl.ts";
 export { bindCell, composeCells } from "./state/cell.ts";
 export { createSelector } from "./selector.ts";
 export { degraded, degradedReport } from "./diagnostics/degraded.ts";
+// `db:` schema builders — the android bundle maps `aio` here, and a cell module
+// declares its table beside the cell (the UI imports that module). Same pure,
+// isomorphic constructors browser-air.ts and mod.ts ship (THE same objects),
+// so the name resolves and esbuild drops whatever the APK never calls.
+export { integer, pk, real, ref, table, text } from "./state/table-schema.ts";
 
 export { Show } from "./air/show.ts";
 export { on, watch } from "./state/watch.ts";
@@ -537,8 +553,10 @@ function _liveFor<A extends object>(app: A): A {
  *  that booted this instance. One capture per boot, for the refusal below. */
 function _bootSite(): string {
   const frames = (new Error().stack ?? "").split("\n").slice(1);
+  // `<anonymous>`: a built-in frame — `aio.run` boots inside a `new Promise`
+  // executor (so a refusal rejects), and that frame named no line at all.
   const own =
-    /\/src\/(standalone-air|testing\/|state\/|air\/)|ext:|node:|jsr\.io|deno\.land/;
+    /\/src\/(standalone-air|testing\/|state\/|air\/)|ext:|node:|jsr\.io|deno\.land|<anonymous>/;
   const site = frames.find((f) => !own.test(f)) ?? frames[frames.length - 1];
   return site?.trim().replace(/^at /, "") ?? "(unknown)";
 }
@@ -748,6 +766,21 @@ type StandaloneConfig<S, A, E> = {
    *  written can never be restored either — a blob left by an older build (or
    *  by a downgrade) must not refill a cell that asked for `persist: "none"`. */
   restorable?: Set<string>;
+  /** The composed cells' `version`/`onMigrate` and their `onRestore` hooks —
+   *  run on a restored store exactly as the server's boot runs them (aio-boot
+   *  4b/5, the SAME functions: `state/cell-migrate.ts`). Set, the store also
+   *  carries `__versions` (the stamp, monotonic, in the same bytes as the
+   *  state it describes) and every slice this build does not declare. */
+  cells?: {
+    migrations: Map<string, CellMigrationInfo>;
+    restores: Map<
+      string,
+      (state: Record<string, unknown>) => Record<string, unknown> | void
+    >;
+    /** Cells whose `onPersist` SHAPES what they store: their hooks are
+     *  handed the stored shape, not only the declared fields. */
+    shaped: Set<string>;
+  };
   perfCheck?: PerfCheck;
   perfBudget?: PerfBudget;
   freezeState?: boolean;
@@ -1051,13 +1084,20 @@ export function _watchForeignIframes(
 function restorableOnly(
   persisted: unknown,
   restorable: Set<string> | undefined,
+  declared?: Record<string, unknown>,
 ): unknown {
   if (!restorable || !persisted || typeof persisted !== "object") {
     return persisted;
   }
   const out: Record<string, unknown> = {};
   for (const [k, v] of Object.entries(persisted as Record<string, unknown>)) {
-    if (restorable.has(k)) out[k] = v;
+    // A declared cell comes back only when it persists. A key this build does
+    // NOT declare (a renamed cell, a parked `__` slice) is not a `persist:
+    // "none"` cell: it rides along, for boot to preserve (see initStandalone)
+    // — dropped here, the first write deleted it from the store.
+    if (restorable.has(k) || (declared !== undefined && !(k in declared))) {
+      out[k] = v;
+    }
   }
   return out;
 }
@@ -1145,7 +1185,7 @@ export function initStandalone<S, A, E>(
   const { reduce, execute } = config;
   const shouldPersist = config.persist !== false;
   // aio-ok(persist-decider): the ONE whole-state default — a raw initStandalone has no cells, so no filter exists; composed apps pass buildDBStateGetter below.
-  const getDBState = config.getDBState ?? ((s: S) => s as unknown);
+  const cellDBState = config.getDBState ?? ((s: S) => s as unknown);
   const getUIState = (s: S) => s;
   const persistKey = config.persistKey ?? STORAGE_KEY;
 
@@ -1171,23 +1211,185 @@ export function initStandalone<S, A, E>(
   }
 
   // Restore
-  let state = initialState;
+  // A composed app starts from a fresh COPY of its declared state, as the
+  // server's boot does (`cloneState`): the restore hooks below write into it,
+  // and the declared state is frozen.
+  let state = config.cells ? cloneState(initialState) : initialState;
   /** Why this run must NEVER write to `persistKey` — set when the restore
    *  FAILED on a value that is there and could not be set aside first. */
   let writesRefused: string | null = null;
   /** The restore set a corrupt value aside: `persistKey` is written with the
    *  starting state as soon as the writer exists (below). */
   let setAside = false;
+  /** The stored document as read (cells only) — set when a restore
+   *  happened, which is the only time the boot hooks below run. */
+  let stored: Record<string, unknown> | null = null;
+  const cellsCfg = config.cells;
+  const declared = initialState as Record<string, unknown>;
   if (shouldPersist) {
     const r = _restoreOrQuarantine(store, persistKey, (raw) => {
-      const persisted = restorableOnly(JSON.parse(raw), config.restorable);
+      const persisted = restorableOnly(
+        JSON.parse(raw),
+        config.restorable,
+        cellsCfg ? declared : undefined,
+      );
       state = deepMerge(
-        initialState as Record<string, unknown>,
+        // The fresh copy as the merge base (see `state`): `deepMerge` hands a
+        // key the store does not carry straight back by reference.
+        state as Record<string, unknown>,
         persisted as Record<string, unknown>,
       ) as S;
+      if (cellsCfg && persisted && typeof persisted === "object") {
+        stored = persisted as Record<string, unknown>;
+      }
     });
     writesRefused = r.writesRefused;
     setAside = r.setAside === true;
+  }
+
+  // ── The server's restore passes, on this runtime (aio-boot 4b / 5 / 5b) ──
+  // Without them the SAME app.ts lost data only once packaged: an APK update
+  // whose cell renamed a field (`version` + `onMigrate`) dropped the old
+  // value in the merge above and never ran the hook; a cell's `onRestore`
+  // never ran; and a stored cell this build no longer declares was deleted
+  // by the first write. tests/standalone-migrate-restore.test.ts.
+  /** The `__versions` stamp every write carries — monotonic per cell. */
+  const stamp: Record<string, number> = {};
+  /** Stored slices no declared cell owns — carried into every write, verbatim. */
+  const carried: Record<string, unknown> = {};
+  const hookLog = {
+    trace: () => {},
+    debug: () => {},
+    info: (m: string) => console.info(`[aio] ${m}`),
+    warn: (m: string) => console.warn(`[aio] \u26a0 ${m}`),
+    error: (m: string) => console.error(`[aio] \u2717 ${m}`),
+  } as unknown as Log;
+  if (cellsCfg) {
+    const raw = stored as Record<string, unknown> | null;
+    const v = raw?.__versions;
+    if (v && typeof v === "object" && !Array.isArray(v)) {
+      for (const [c, n] of Object.entries(v as Record<string, unknown>)) {
+        if (typeof n === "number" && Number.isFinite(n)) stamp[c] = n;
+      }
+    }
+    const storedVersions = { ...stamp };
+    for (const [c, info] of cellsCfg.migrations) {
+      if (info.version > 0) {
+        stamp[c] = Math.max(info.version, stamp[c] ?? 0);
+      }
+    }
+    if (raw) {
+      const s = state as Record<string, unknown>;
+      // Undeclared slices ride into state so the app's `onRestore` can
+      // migrate them (a rename is one hook), exactly as on the server.
+      for (const k of Object.keys(raw)) {
+        if (!(k in declared) && !k.startsWith("__")) s[k] = raw[k];
+      }
+      // A shaped cell's stored slice is read against what this build's
+      // `onPersist` writes for its declared state (the server's
+      // `shapeSchema`): the declared defaults first, the restored slice when
+      // the hook cannot take the defaults.
+      const schema: Record<string, unknown> = {};
+      for (const c of cellsCfg.shaped) {
+        for (const src of [declared[c], s[c]]) {
+          try {
+            const out = (cellDBState({ [c]: src } as S) as
+              | Record<string, unknown>
+              | undefined)?.[c];
+            if (out && typeof out === "object" && !Array.isArray(out)) {
+              schema[c] = JSON.parse(JSON.stringify(out));
+            }
+            break;
+          } catch {
+            // aio-ok: the persist path reports this same throw on its first
+            // write; here it only means the slice is read against the
+            // declared state instead.
+          }
+        }
+      }
+      // A store with NO `__versions` at all predates the stamp (every write
+      // since carries one, `{}` included), so its cells' versions are
+      // UNKNOWN — not 0. The build that wrote it may have declared `version:
+      // 2` already, and `onMigrate(s, 0)` over a slice that is in the current
+      // shape is the cookbook's `migratePrefs` reading a field that is gone:
+      // the user's value reset by an aio update that touched no app code. A
+      // slice that fits the declared shape is taken as current (stamped, no
+      // hook); one that does not is older, and migrates from 0 — the only
+      // way its renamed fields survive the merge.
+      if (!("__versions" in raw)) {
+        for (const [c, info] of cellsCfg.migrations) {
+          if (info.version <= 0 || !(c in raw) || c in storedVersions) {
+            continue;
+          }
+          const drift = detectShapeDrift(
+            { [c]: c in schema ? schema[c] : declared[c] },
+            { [c]: raw[c] },
+          ).filter((d) =>
+            d.issue === "unknown-field" || d.issue === "type-changed"
+          );
+          if (drift.length === 0) {
+            storedVersions[c] = info.version;
+            hookLog.info(
+              `migrate: ${c}'s store predates version stamps and its slice ` +
+                `matches the declared shape — stamped at v${info.version}, ` +
+                `onMigrate not run`,
+            );
+          }
+        }
+      }
+      const migratedRaw = new Map<string, Record<string, unknown>>();
+      // A throw is the server's refusal to boot (PERSIST_SCHEMA): nothing has
+      // been written, so the stored data is intact for a fixed build.
+      const report = applyCellMigrations(
+        s,
+        cellsCfg.migrations,
+        storedVersions,
+        hookLog,
+        raw,
+        declared,
+        cellsCfg.shaped.size ? { schema, migratedRaw } : undefined,
+      );
+      const migrated = new Set(
+        report.filter((r) =>
+          r.outcome === "migrated" || r.outcome === "downgrade"
+        ).map((r) => r.cell),
+      );
+      // Shape drift the migration did not account for — a field renamed or
+      // retyped with no `version` bump. The merge above already dropped it,
+      // and this run's first write deletes it from the store: said, as the
+      // server's boot says it (aio-boot 4b), never lost in silence.
+      const drift = detectShapeDrift({ ...declared, ...schema }, raw, {
+        skip: new Set(report.map((r) => r.cell)),
+      });
+      if (drift.length > 0) {
+        console.warn(`[aio] \u26a0 persist: ${shapeDriftSummary(drift)}`);
+      }
+      for (const r of report) {
+        if (r.outcome !== "downgrade") continue;
+        const key = downgradeParkKey(r.cell);
+        if (key in raw || raw[r.cell] === undefined) continue;
+        carried[key] = raw[r.cell];
+      }
+      for (const [id, hook] of cellsCfg.restores) {
+        const slice = s[id];
+        if (slice === undefined) continue;
+        s[id] = runCellRestore(
+          id,
+          hook,
+          slice as Record<string, unknown>,
+          // As the server's boot hands it (aio-boot step 5): the stored shape
+          // — or the migration's output, which IS this boot's stored slice.
+          cellsCfg.shaped.has(id)
+            ? {
+              stored: migratedRaw.get(id) ?? raw[id],
+              declared: declared[id],
+              retyped: migratedRaw.has(id) || !migrated.has(id),
+            }
+            : undefined,
+          hookLog,
+        );
+      }
+    }
   }
 
   const _reportOpts: ReportErrorOpts = {
@@ -1198,15 +1400,70 @@ export function initStandalone<S, A, E>(
   // onRestore — let user transform/validate restored state before UI renders
   if (config.onRestore) {
     try {
-      state = config.onRestore(state);
+      // MUTATE OR REPLACE — the server's rule (aio-boot step 5): a hook
+      // written `(s) => { s.net.online = false }` returns nothing, and
+      // `state = onRestore(state)` made the whole state `undefined` — the
+      // app died at boot, only once packaged.
+      const next = config.onRestore(state) as unknown;
+      refuseThenable(next);
+      if (next !== undefined && next !== state) {
+        if (next === null || typeof next !== "object") {
+          throw new Error(
+            `returned ${
+              next === null ? "null" : typeof next
+            } — return the state, or mutate it and return nothing`,
+          );
+        }
+        state = next as S;
+      }
     } catch (e) {
       const err = createAioError("HOOK_ERROR", e, { hookName: "onRestore" });
       reportAioError(err, _reportOpts);
     }
   }
+  if (cellsCfg) {
+    const raw = stored as Record<string, unknown> | null;
+    const s = state as Record<string, unknown>;
+    for (const k of Object.keys(raw ?? {})) {
+      // `__…` keys are framework-parked data (a pre-downgrade slice): never
+      // in state, carried by every write. The stamp is rebuilt, not carried.
+      if (k === "__versions") continue;
+      if (k.startsWith("__")) {
+        carried[k] = raw![k];
+        continue;
+      }
+      if (k in declared) continue;
+      if (k in s) {
+        carried[k] = s[k];
+        delete s[k];
+        console.warn(
+          `[aio] \u26a0 persist: stored cell "${k}" is not declared by this ` +
+            `build — its data is PRESERVED in the store, untouched. Migrate ` +
+            `it in onRestore (read state.${k}, move what you need, delete the ` +
+            `key to consume it), or re-declare the cell to get it back as-is.`,
+        );
+      }
+    }
+  }
 
   _state = getUIState(state);
   _stateSignal.set(_state);
+
+  /** What one write stores: the cells' persisted slices, plus — for a
+   *  composed app — the slices no declared cell owns and the version stamp,
+   *  in the SAME bytes, so a crash can never leave state without the version
+   *  that describes it (the server's one-transaction rule). */
+  const getDBState = (s: S): unknown => {
+    const doc = cellDBState(s);
+    if (!config.cells || !doc || typeof doc !== "object") return doc;
+    return {
+      ...carried,
+      ...(doc as Record<string, unknown>),
+      // Always, `{}` included: its presence is what tells the next boot this
+      // store was stamped (see the unstamped-store rule above).
+      __versions: stamp,
+    };
+  };
 
   // Persistence. A DURABLE store writes on the spot; a lazy one is debounced.
   const persistMs = config.persistDebounceMs ?? 100;
@@ -1550,6 +1807,14 @@ export function _resetState(): void {
   }
 }
 
+/** Write the pending debounced save NOW — for a harness teardown that must
+ *  keep the last change (`testUI({ persist: true })`), where `_resetState()`
+ *  deliberately cancels it. No-op when nothing persists or nothing is pending
+ *  beyond what the store already holds. */
+export function _flushPendingPersist(): void {
+  _flushPersist?.();
+}
+
 /** Full reset — state AND the cell registry. */
 export function _reset(): void {
   _resetState();
@@ -1651,6 +1916,10 @@ function bootStandalone(
   opts: {
     appId?: string;
     persist?: boolean | string;
+    /** The store key — default `aio:<appId>`. Only the in-process harness
+     *  passes its own (via `_HARNESS_PERSIST_KEY`), so a test never reads or
+     *  writes an app's real key; an app's `persistKey` never reaches here. */
+    persistKey?: string;
     onRestore?: (s: Record<string, unknown>) => Record<string, unknown>;
     circuitBreaker?: import("./state/cell-compose.ts").CircuitBreakerConfig;
     /** App-level defaults, applied exactly as `aio.run` applies them. */
@@ -1705,7 +1974,7 @@ function bootStandalone(
       reduce: composed.reduce,
       execute: composed.execute,
       persist: opts.persist !== false && opts.persist !== "none",
-      persistKey: `aio:${opts.appId ?? "app"}`,
+      persistKey: opts.persistKey ?? `aio:${opts.appId ?? "app"}`,
       // WHAT is written, and what may come back — the SAME rule the server's
       // persistence runs (state/cell-persist-filter.ts). Without it this
       // runtime wrote the whole composed state: a cell that said
@@ -1717,6 +1986,32 @@ function bootStandalone(
         s: Record<string, unknown>,
       ) => unknown,
       restorable: persistingCellIds(composed),
+      // The cells' boot hooks — collected exactly as the server's cells
+      // bridge collects them (`_cellMigrations` / `_cellRestores`).
+      cells: {
+        migrations: new Map(
+          composed.cells
+            .filter((f) => f.__aio.version > 0 || f.__aio.onMigrate)
+            .map((f) => [f.__aio.id, {
+              version: f.__aio.version,
+              initialState: f.__aio.state as Record<string, unknown>,
+              onMigrate: f.__aio.onMigrate as CellMigrationInfo["onMigrate"],
+            }]),
+        ),
+        restores: new Map(
+          composed.cells.filter((f) => f.__aio.onRestore).map((f) => [
+            f.__aio.id,
+            f.__aio.onRestore as (
+              s: Record<string, unknown>,
+            ) => Record<string, unknown> | void,
+          ]),
+        ),
+        shaped: new Set(
+          composed.cells.filter((f) => f.__aio.persistTransform).map((f) =>
+            f.__aio.id
+          ),
+        ),
+      },
       onRestore: opts.onRestore,
       perfBudget: opts.perfBudget,
       // push each committed state into per-cell signals so `counter.count`
@@ -1867,7 +2162,18 @@ export function ensureConnected(): void {
 // browser entry too (the test suite) must route to whichever runtime is live.
 _setRouterBoot(ensureConnected);
 
+/** The in-process harness's (testUI) per-run store key, passed to
+ *  `aio.run()` under this SYMBOL — never under `persistKey`. `persistKey` is a
+ *  documented SERVER option (default `"state"`); this runtime has always stored
+ *  under `aio:<appId>`, so honouring an app's `persistKey` here moved an
+ *  upgraded APK to a different native-store entry and its saved data was
+ *  silently never read. A symbol key cannot come from app config. */
+export const _HARNESS_PERSIST_KEY: unique symbol = Symbol(
+  "aio.harnessPersistKey",
+);
+
 type StandaloneRunConfig = {
+  [_HARNESS_PERSIST_KEY]?: string;
   appId: string;
   appVersion?: string;
   cells?: CellDef[];
@@ -1900,6 +2206,12 @@ type StandaloneRunConfig = {
  *  it. Without this, a scaffolded android app — whose template markup uses
  *  `.card` / `.row` / `.stack` — was themed under `deno task dev` and unstyled
  *  in its own APK, which is the WYSIDIWYSIP break the shells exist to prevent.
+ *
+ *  Runs only when `aio.run()` runs in the page — the in-process harnesses do.
+ *  A packaged APK's bundle does NOT: its entry imports App.tsx alone
+ *  (`makeEntryCode`), so this never fires on a phone today; the android build
+ *  says so by name (build/android-run-options.ts; todo.md "APK: bake app.ts
+ *  config into the bundle").
  *
  *  Observe-only and defensive: no document (a test, a worker) means nothing to
  *  do, and a shell without the deferred sheet is simply left alone. */
@@ -1964,17 +2276,23 @@ function runStandalone(
   const cells = cfg.cells && cfg.cells.length
     ? cfg.cells
     : [...getRegisteredCells().values()];
-  return Promise.resolve(
-    bootStandalone(cells, {
+  // A refusal to boot (a throwing `onMigrate`) REJECTS, as the server's async
+  // `aio.run` does — never a synchronous throw out of a Promise-returning call.
+  return new Promise((resolve) =>
+    resolve(bootStandalone(cells, {
       appId: cfg.appId,
       persist: cfg.persist,
+      // NEVER `cfg.persistKey` (a server option) — see _HARNESS_PERSIST_KEY.
+      persistKey: typeof cfg[_HARNESS_PERSIST_KEY] === "string"
+        ? cfg[_HARNESS_PERSIST_KEY]
+        : undefined,
       onRestore: cfg.onRestore,
       circuitBreaker: cfg.circuitBreaker,
       cellDefaults: cfg.cellDefaults,
       localFirst: cfg.localFirst,
       perfBudget: cfg.perfBudget as PerfBudget | undefined,
       effectTimeoutMs: cfg.effectTimeoutMs as number | undefined,
-    }),
+    }))
   );
 }
 

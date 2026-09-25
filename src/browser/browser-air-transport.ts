@@ -50,6 +50,7 @@ import {
   handleControlFrame,
   hasHttpOrigin,
   NO_TRANSPORT_MSG,
+  refuseUrlToken,
 } from "./browser-shared.ts";
 import {
   dec,
@@ -77,6 +78,8 @@ import {
 } from "../state/offline-queue.ts";
 import { encodeAction } from "../state/action-encode.ts";
 import { resetTT } from "../air/time-travel-panel.ts";
+import { authUser } from "./browser-auth-ui.ts";
+import { SIGNED_IN_EVENT, SIGNED_OUT_EVENT } from "./auth-client.ts";
 import {
   _noteClientPatch,
   _pauseClientVitals,
@@ -373,12 +376,24 @@ export function setSyncMessageHandler(
 }
 
 const _bootId: { current: string | null } = { current: null };
+// The dev shell's pre-bundle reload socket (`devWsScript`) reloads through
+// this too, so a dev restart keeps the offline queue exactly like prod does.
+(globalThis as Record<string, unknown>).__aioReloadWhenDrained = () =>
+  _reloadWhenDrained();
 const _ipc: AioIPCBridge | null = detectIPC();
 // The tray (ui.tray) relays a clicked item through the SHELL bridge, which
 // both Electron shells expose whatever the transport — so it is bound here,
 // once, beside the transport choice, not inside one of them.
 bindShellTray();
 let _ipcConnected = false;
+/** The bridge said it is OPEN (`onOpen`) and has not closed since. Distinct
+ *  from `_ipcConnected`, which turns true the moment a connect is ASKED for
+ *  (it is the re-entry guard): a frame written in that gap jumped every call
+ *  still waiting in the offline queue (which flushes only on open), and with
+ *  the backend down the main process parked it while this side counted it in
+ *  flight — the `__aio:close` answering the retry rejected it, and the main
+ *  process delivered it anyway on the next connection. Writes wait for this. */
+let _ipcOpen = false;
 /** The IPC bridge's onOpen/onMessage/onClose are registered once per page —
  *  the bridge has no unbind, so re-registering on reconnect duplicates frames. */
 let _ipcBound = false;
@@ -466,7 +481,7 @@ function _sendRaw(msg: string): boolean {
       return false;
     }
   }
-  if (_ipc && _ipcConnected) {
+  if (_ipc && _ipcOpen) {
     _ipc.send(msg);
     return true;
   }
@@ -492,7 +507,9 @@ function _route(line: string): void {
     } else console.warn("[aio:air] undecodable frame — dropped");
     return;
   }
-  if (handleControlFrame(f, _bootId, _protoMismatch)) return;
+  if (handleControlFrame(f, _bootId, _protoMismatch, _reloadWhenDrained)) {
+    return;
+  }
   if (f.t === "ack" && _retryRefusedCall(f.d)) return;
   if (routeCommand(f, _sendRaw)) return;
   switch (f.t) {
@@ -538,13 +555,144 @@ function _route(line: string): void {
   }
 }
 
+/** Longest a reload waits for the calls this page still owes the server. */
+const RELOAD_DRAIN_MAX_MS = 10_000;
+let _reloadPending = false;
+
+/** Reload the page — but not over the calls it still owes the server.
+ *
+ *  A restarted server announces itself with a new `boot` id on the very
+ *  connection the offline queue replays on: `onopen` hands the queue to the
+ *  pacer, which writes a burst and holds the rest, and the `boot` frame lands
+ *  right behind. Reloading on the spot threw away every call still queued,
+ *  paced or unacked — measured: 60 calls queued while the server was down, 0
+ *  of them applied when the page reloaded, and nothing said so. So the reload
+ *  waits until every queued and paced call has left the socket (bounded; past
+ *  the bound it reloads anyway and says so). */
+function _reloadWhenDrained(): void {
+  if (_reloadPending) return;
+  _reloadPending = true;
+  const t0 = Date.now();
+  // Frames only, not acks: a frame the socket has flushed is the server's to
+  // run whether this page lives or not, while a slow method's ack could hold
+  // a reload for as long as the method runs.
+  const owed = () =>
+    _carry.length + _queue.length + (_pacer?.length ?? 0) +
+    (_coreOfflineQueueFullness() > 0 ? 1 : 0) +
+    (_ws && _ws.bufferedAmount > 0 ? 1 : 0);
+  const tick = () => {
+    const left = owed();
+    if (left > 0 && Date.now() - t0 < RELOAD_DRAIN_MAX_MS) {
+      setTimeout(tick, 25);
+      return;
+    }
+    if (left > 0) {
+      console.warn(
+        `[aio:air] reloading with calls still unsent after ` +
+          `${RELOAD_DRAIN_MAX_MS}ms (the connection did not stay up) — the ` +
+          `page reload discards them; they did not reach the server.`,
+      );
+    }
+    location.reload();
+  };
+  tick();
+}
+
+/** Was the upgrade refused because this page's credential is dead?
+ *
+ *  A browser never sees the status of a refused WebSocket upgrade: the 401
+ *  the server answers a revoked or expired session with arrives as a bare
+ *  close (1006), exactly like a server that is down. So a signed-out tab
+ *  reconnected forever with the dead credential, said "Reconnecting…", held
+ *  calls it could never deliver — and a `?token=` is a PRESENTED credential,
+ *  so every attempt was charged to the address's failed-auth budget until the
+ *  server answered 429. The same URL as a plain GET passes the same auth gate
+ *  and is answered 401 for a dead credential (426 for a live one: /ws speaks
+ *  WebSocket only), and a fetch CAN read that. */
+async function _upgradeRefusedAsSignedOut(): Promise<boolean | null> {
+  try {
+    const r = await fetch(buildWsUrl().replace(/^ws/, "http"), {
+      credentials: "same-origin",
+    });
+    await r.body?.cancel();
+    return r.status === 401;
+  } catch {
+    // aio-ok: null = unreachable — the server is down, which the reconnect
+    // loop owns; it is no answer about the credential either way.
+    return null;
+  }
+}
+
+const SIGNED_OUT = "signed out — the session was revoked or expired";
+
+/** The credential is dead: stop presenting it, and say signed out — through
+ *  `authUser`, the identity `useUser()`/`<SignIn/>` render from — instead of
+ *  "Reconnecting…". A later sign-in (`authClient`, which `<SignIn/>` uses)
+ *  resumes the connection with the new session. */
+function _signedOut(): void {
+  _status("Signed out \u2014 sign in again");
+  _closed = true;
+  _terminal = SIGNED_OUT;
+  _connecting = false;
+  console.error(
+    `[aio:air] ${SIGNED_OUT}: the server refuses this page's credential, so ` +
+      `it stops reconnecting with it. Sign in again.`,
+  );
+  diagEmit({
+    type: "browser-air-transport:signed-out",
+    severity: "error",
+    source: "browser-air-transport",
+    message: "The server refused this page's session — signed out",
+    hint: "The login session or credential was revoked or expired; the page " +
+      "stops reconnecting until the user signs in again",
+  });
+  // Queued calls were made as the user who is gone — never replay them under
+  // whoever signs in next.
+  _dropQueue(SIGNED_OUT);
+  _rejectAllPending(new Error(SIGNED_OUT));
+  authUser.set(null);
+  // Before the event: the dev socket reads the token as the event lands.
+  refuseUrlToken();
+  globalThis.dispatchEvent?.(new Event(SIGNED_OUT_EVENT));
+  const resume = () => {
+    off();
+    if (_terminal !== SIGNED_OUT) return;
+    _terminal = null;
+    _terminalDropWarned = false;
+    _retry = 0;
+    // A client torn down meanwhile (no subscriber left) stays down: the
+    // next subscribe connects it, with the new session.
+    if (!_tornDown) _tryConnect();
+  };
+  // The user may sign in again in ANOTHER tab: the session cookie is shared,
+  // the event is that window's. So coming back to this tab asks again — one
+  // probe per return, never a loop presenting the dead credential.
+  const onFocus = () => {
+    if (_terminal !== SIGNED_OUT) return off();
+    void _upgradeRefusedAsSignedOut().then((out) => {
+      if (out !== false) return; // still refused, or no server to ask
+      resume();
+      // Said in THIS window too: the sign-in's own event fired in the other
+      // tab, and the dev reload socket (`devWsScript`) paused on signed-out
+      // resumes only on it — without this it stayed parked for good.
+      globalThis.dispatchEvent?.(new Event(SIGNED_IN_EVENT));
+    });
+  };
+  const off = () => {
+    globalThis.removeEventListener?.(SIGNED_IN_EVENT, resume);
+    globalThis.removeEventListener?.("focus", onFocus);
+  };
+  globalThis.addEventListener?.(SIGNED_IN_EVENT, resume);
+  globalThis.addEventListener?.("focus", onFocus);
+}
+
 /** A version gap is terminal: the two sides cannot read each other's frames,
  *  so stop rather than keep trading garbage, and stop RETRYING — reconnecting
  *  cannot close a version gap (mirrors the WS transport). */
 function _protoMismatch(reason: string) {
   _status("Protocol mismatch — reload/update the app");
   _closed = true; // stop the reconnect loop
-  _terminal = true; // …and keep it stopped: see `_tryConnect`
+  _terminal = "protocol version mismatch"; // …and keep it stopped: see `_tryConnect`
   // Terminal: nothing will ever flush this queue, so the queued frames are
   // gone — say so, and reject their callers TOO (rejectAll, not
   // rejectInFlight). A rejection is only honest when the frame is really dead.
@@ -555,6 +703,7 @@ function _protoMismatch(reason: string) {
   } catch { /* already closing */ }
   _ws = null;
   _ipcConnected = false;
+  _ipcOpen = false;
   _connecting = false;
 }
 
@@ -729,7 +878,11 @@ function _connectIPC() {
   _clearIpcWatchdog();
   _ipcWatchdog = setTimeout(() => {
     _ipcWatchdog = null;
-    if (_closed || _wasConnected) return; // opened (or torn down) meanwhile
+    // Opened (or torn down) meanwhile. `_ipcOpen`, never `_wasConnected`:
+    // that one stays true once the page has EVER connected, so the watchdog
+    // guarded the first connect only, and an unanswered reconnect was the
+    // silent dead end it exists to prevent.
+    if (_closed || _ipcOpen) return;
     console.warn(
       `[aio:air] IPC bridge did not open within ${IPC_CONNECT_TIMEOUT_MS}ms — retrying`,
     );
@@ -751,6 +904,19 @@ function _connectIPC() {
   _ipcBound = true;
   _ipc.onOpen(() => {
     _clearIpcWatchdog();
+    // The bridge is bound for the page's life and the main process announces
+    // opens on its own schedule: after a teardown (nothing asked) or a version
+    // gap (nothing may talk), an open is not this client's to take.
+    if (_closed || _terminal) return;
+    // The main process also announces an open on its OWN reconnect, while
+    // this side may still be waiting out a backoff: the bridge is open either
+    // way, so the pending retry has nothing left to do.
+    _ipcConnected = true;
+    _ipcOpen = true;
+    if (_reconnectTimer !== null) {
+      clearTimeout(_reconnectTimer);
+      _reconnectTimer = null;
+    }
     _connecting = false;
     _retry = 0;
     if (_wasConnected) _status("Connected", "#2a2", 2000);
@@ -769,7 +935,7 @@ function _connectIPC() {
     _wireDegradedRelay();
     if (!_ipcPingTimer) {
       _ipcPingTimer = setInterval(() => {
-        if (_ipc && _ipcConnected) _ipc.send(enc("ping"));
+        if (_ipc && _ipcOpen) _ipc.send(enc("ping"));
       }, 60_000);
     }
   });
@@ -777,6 +943,7 @@ function _connectIPC() {
   _ipc.onClose(() => {
     _clearIpcWatchdog();
     _ipcConnected = false;
+    _ipcOpen = false;
     _connecting = false;
     // The connection is known gone: fail the calls waiting on it NOW instead
     // of letting each one sit out its full 15s ack ceiling and report a
@@ -845,7 +1012,9 @@ function _connect() {
     throw new Error(`[aio:air] ${NO_TRANSPORT_MSG}`);
   }
   const ws = new WebSocket(buildWsUrl());
+  let opened = false;
   ws.onopen = () => {
+    opened = true;
     _connecting = false;
     _retry = 0;
     // A fresh budget per socket — the server's counters are per connection.
@@ -909,8 +1078,13 @@ function _connect() {
     _takeBackRefused(_takePacer());
     _written.clear();
     if (ev?.code === 1008) {
-      // The server's anti-abuse close. Said out loud: the reconnect below may
-      // be refused (429) for a few seconds while its block runs.
+      // A policy close. The server sends it for its message budget AND for a
+      // revoked session / credential ("session revoked", "credential
+      // revoked") — naming the budget for all three sent a signed-out user's
+      // developer off to raise `wsLimits`. Said out loud either way: the
+      // reconnect below may be refused (429 for a budget block, 401 for a
+      // credential that is gone).
+      const revoked = /revoked/i.test(ev.reason ?? "");
       console.error(
         `[aio:air] the server closed this connection: ${
           ev.reason || "policy violation"
@@ -922,8 +1096,12 @@ function _connect() {
         severity: "error",
         source: "browser-air-transport",
         message: `Server closed the connection: ${ev.reason || "1008"}`,
-        hint: "The server's per-connection message budget was exceeded; it " +
-          "may refuse reconnects briefly (see the server log for how long)",
+        hint: revoked
+          ? "The login session or credential this page connected with was " +
+            "revoked or expired; reconnects are refused until the user " +
+            "signs in again"
+          : "The server's per-connection message budget was exceeded; it " +
+            "may refuse reconnects briefly (see the server log for how long)",
       });
     }
     _pauseClientVitals();
@@ -937,6 +1115,16 @@ function _connect() {
     if (_closed) return;
     _connecting = true;
     if (_wasConnected) _status("Reconnecting\u2026");
+    // A tab that WAS connected and now cannot even open a socket may be
+    // holding a dead credential — ask before presenting it again.
+    if (!opened && _wasConnected) {
+      void _upgradeRefusedAsSignedOut().then((out) => {
+        if (_closed || _ws) return; // torn down or reconnected meanwhile
+        if (out) _signedOut();
+        else _scheduleReconnect();
+      });
+      return;
+    }
     _scheduleReconnect();
   };
   ws.onerror = () => ws.close();
@@ -985,14 +1173,14 @@ function _send(action: { type: string; payload?: unknown }) {
     throw err;
   }
   if (_terminal) {
-    // Nothing will ever flush the queue after a version gap (`_dropQueue`
-    // said so when it emptied it), so queueing here is a silent drop with a
+    // Nothing will flush the queue after a version gap or a sign-out
+    // (`_dropQueue` said so when it emptied it), so queueing here is a silent drop with a
     // promise that never settles. The caller hears the same verdict the
     // queued callers heard, now.
     if (cid) {
       _rejectAck(
         cid,
-        new Error("action was never sent — protocol version mismatch"),
+        new Error(`action was never sent — ${_terminal}`),
       );
     }
     _noteTerminalDrop(tagged.type);
@@ -1009,7 +1197,7 @@ function _send(action: { type: string; payload?: unknown }) {
       // path does.
       _enqueue(tagged);
     }
-  } else if (_ipc && _ipcConnected) {
+  } else if (_ipc && _ipcOpen) {
     // The SAME rule as the WS branch above, which it did not have: a bridge
     // that refuses the write is offline in every way that matters to this
     // action. Without this the throw propagated synchronously out of the cell
@@ -1029,27 +1217,32 @@ function _send(action: { type: string; payload?: unknown }) {
 
 // ── Wire transport into protocol layer ──────────────────────────────
 
-/** Set once a version gap has been diagnosed and never cleared: the two sides
+/** Why the connection is terminally closed, or null. A dead session (see
+ *  `_signedOut`) is cleared by a sign-in; a version gap never is.
+ *
+ *  Set once a version gap has been diagnosed and never cleared: the two sides
  *  cannot read each other's frames, and no reconnect can change what either
  *  side is running. `_closed` alone did not hold — `_tryConnect` resets it for
  *  every new subscriber (`client.subscribe`, `_waitForState`), so each one
  *  re-opened a socket the server refused again, and each refusal re-ran
  *  `_protoMismatch`: the queue emptied and every pending call rejected once
  *  per subscriber, for a page whose only remedy is a reload. */
-let _terminal = false;
+let _terminal: string | null = null;
 let _terminalDropWarned = false;
 function _noteTerminalDrop(type: string): void {
   if (_terminalDropWarned) return;
   _terminalDropWarned = true;
   console.warn(
     `[aio:air] "${type}" was not sent — the connection is terminally closed ` +
-      `(protocol version mismatch). Reload/update the app. Further drops ` +
+      `(${_terminal}). ${
+        _terminal === SIGNED_OUT ? "Sign in again." : "Reload/update the app."
+      } Further drops ` +
       `are not repeated.`,
   );
 }
 
 function _tryConnect() {
-  if (_terminal) return; // a version gap has no reconnect
+  if (_terminal) return; // a version gap (or a dead session) has no reconnect
   if (!_ws && !_ipcConnected && !_connecting) {
     _closed = false;
     _connecting = true;
@@ -1057,10 +1250,18 @@ function _tryConnect() {
   }
 }
 
-_setConnectFn(_tryConnect);
-_setSubscribeTriggers(_tryConnect, () => {});
+/** Set by teardown, cleared by the next connect request: a sign-in that
+ *  lands after the teardown must not resurrect the client on its own. */
+let _tornDown = false;
+const _requestConnect = () => {
+  _tornDown = false;
+  _tryConnect();
+};
+_setConnectFn(_requestConnect);
+_setSubscribeTriggers(_requestConnect, () => {});
 
 _setTeardownFn(() => {
+  _tornDown = true;
   _closed = true;
   _clearIpcWatchdog();
   if (_reconnectTimer !== null) {
@@ -1070,7 +1271,16 @@ _setTeardownFn(() => {
   _ws?.close();
   _ws = null;
   _ipcConnected = false;
+  _ipcOpen = false;
   _connecting = false;
+  // The core transport and the connected signal go down WITH the client. The
+  // WebSocket's `onclose` used to be the only thing that did this, and the
+  // IPC bridge has no close to wait for — so an Electron client stayed
+  // "connected" after its teardown, and `useCell().send` still went straight
+  // to the bridge through the installed core transport.
+  _coreSetTransport(null);
+  _coreSetConnected(false);
+  _syncOnline?.(false);
   _setDegradedRelay(null);
   _stopClientVitals();
   if (_ipcPingTimer) {
@@ -1105,7 +1315,7 @@ _setClientSend(_send);
 // refused write on it is a real failure that must still be counted.
 installConsoleIntercept(
   _sendRaw,
-  () => (_ws?.readyState === WebSocket.OPEN) || (!!_ipc && _ipcConnected),
+  () => (_ws?.readyState === WebSocket.OPEN) || (!!_ipc && _ipcOpen),
 );
 // …and in dev, the same problems ON THE PAGE, plus the two DOM audits and the
 // `am surface` / `am trigger` executor. All of it is in ONE dynamically

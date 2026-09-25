@@ -16,6 +16,8 @@
 //     most needs a rollback (an unattended service) has nobody to run one — and
 //     a rollback that FAILS keeps its marker and says so on every boot.
 import { dirname, isAbsolute, join, resolve } from "@std/path";
+import { dirname as posixDirname } from "@std/path/posix";
+import { dirname as winDirname } from "@std/path/windows";
 import { pruneVersions, reconcileInstalledVersion } from "./install-record.ts";
 import { isProcessAlive } from "./single-instance-lock.ts";
 import type { UpdateTarget } from "../build/ship.ts";
@@ -1090,8 +1092,13 @@ export function swapDirectoryDetached(opts: {
   args?: string[];
   /** Write the rollback marker before the shell is handed the move. */
   pending?: PendingMark;
-  /** Injected in tests; defaults to spawning the real shell. */
-  spawn?: (cmd: string, args: string[]) => void;
+  /** Injected in tests; defaults to spawning the real shell. `extra` carries
+   *  the environment and working directory the helper must run with. */
+  spawn?: (
+    cmd: string,
+    args: string[],
+    extra?: { env?: Record<string, string>; cwd?: string },
+  ) => void;
 }): { previous: string } {
   const previous = `${opts.current}.old-${opts.fromVersion}`;
   if (opts.pending) {
@@ -1105,44 +1112,131 @@ export function swapDirectoryDetached(opts: {
       startedAt: new Date().toISOString(),
     });
   }
-  const pid = Deno.pid;
-  const launcher = zipLauncher(opts.current);
-  const extra = opts.args ?? [];
-
-  const spawn = opts.spawn ?? ((cmd: string, args: string[]) => {
+  const spawn = opts.spawn ?? ((cmd, args, extra) => {
     new Deno.Command(cmd, {
       args,
+      ...(extra?.env ? { env: extra.env } : {}),
+      ...(extra?.cwd ? { cwd: extra.cwd } : {}),
       stdin: "null",
       stdout: "null",
       stderr: "null",
     }).spawn().unref();
   });
 
-  // NOTHING is interpolated into the script. Every path, the version and the
-  // replayed argv arrive as POSITIONAL ARGUMENTS, because the script text used
-  // to be built by string concatenation: an install directory containing a
-  // space broke it outright, and one containing `"; rm -rf ~; #` made it a
-  // self-injection sink reachable from a manifest field. The script itself is
-  // a constant, and it lives in the system temp directory — the one place that
-  // is inside neither install.
-  const script = Deno.build.os === "windows" ? WIN_SWAP_BAT : UNIX_SWAP_SH;
-  const path = Deno.makeTempFileSync({
-    prefix: "aio-swap-",
-    suffix: Deno.build.os === "windows" ? ".bat" : ".sh",
-  });
-  Deno.writeTextFileSync(path, script);
-  if (Deno.build.os !== "windows") Deno.chmodSync(path, 0o700);
-  const argv = [
-    String(pid),
-    opts.current,
+  const values: SwapValues = {
+    pid: Deno.pid,
+    current: opts.current,
     previous,
-    opts.staged,
-    launcher,
-    ...extra,
-  ];
-  if (Deno.build.os === "windows") spawn("cmd.exe", ["/c", path, ...argv]);
-  else spawn("/bin/sh", [path, ...argv]);
+    staged: opts.staged,
+    launcher: zipLauncher(opts.current),
+    args: opts.args ?? [],
+  };
+  // The unix script lives in the system temp directory — the one place that
+  // is inside neither install. Windows needs no file (see `_swapSpec`).
+  let scriptPath = "";
+  if (Deno.build.os !== "windows") {
+    scriptPath = Deno.makeTempFileSync({ prefix: "aio-swap-", suffix: ".sh" });
+    Deno.writeTextFileSync(scriptPath, UNIX_SWAP_SH);
+    Deno.chmodSync(scriptPath, 0o700);
+  }
+  const spec = _swapSpec(Deno.build.os, values, scriptPath);
+  spawn(spec.cmd, spec.args, { env: spec.env, cwd: spec.cwd });
   return { previous };
+}
+
+/** Everything the detached swap helper needs, as plain values. @internal */
+export interface SwapValues {
+  pid: number;
+  current: string;
+  previous: string;
+  staged: string;
+  launcher: string;
+  args: string[];
+}
+
+/** The detached swap helper's command line, as a PURE spec (testable from any
+ *  OS).
+ *
+ *  NOTHING is interpolated into script text. It used to be built by string
+ *  concatenation: an install directory containing a space broke it outright,
+ *  and one containing `"; rm -rf ~; #` made it a self-injection sink reachable
+ *  from a manifest field.
+ *
+ *  - unix: a constant `/bin/sh` script FILE (`scriptPath`), every value a
+ *    positional argument — sh never re-parses an argument.
+ *  - windows: NOT `cmd.exe /c <bat> …argv`. cmd re-parses its whole command
+ *    line and the batch expands `%1` before parsing, so an install path with
+ *    `&` (no space, so no quotes) ran the rest as a COMMAND, `%VAR%` expanded,
+ *    and `!` vanished under delayed expansion (the same class `openExternal`
+ *    fixed). PowerShell gets a constant script as `-EncodedCommand` (base64,
+ *    nothing to parse) and every value as an ENVIRONMENT VARIABLE, which
+ *    nothing parses. Its cwd is the install's parent: a helper whose current
+ *    directory is INSIDE the install holds a handle that makes Windows refuse
+ *    to move it. @internal */
+export function _swapSpec(
+  os: typeof Deno.build.os,
+  v: SwapValues,
+  scriptPath: string,
+): {
+  cmd: string;
+  args: string[];
+  env?: Record<string, string>;
+  cwd: string;
+} {
+  // By the TARGET os's rules, so the spec is the same from any host.
+  const cwd = os === "windows"
+    ? winDirname(v.current)
+    : posixDirname(v.current);
+  if (os !== "windows") {
+    return {
+      cmd: "/bin/sh",
+      args: [
+        scriptPath,
+        String(v.pid),
+        v.current,
+        v.previous,
+        v.staged,
+        v.launcher,
+        ...v.args,
+      ],
+      cwd,
+    };
+  }
+  const env: Record<string, string> = {
+    AIO_SWAP_PID: String(v.pid),
+    AIO_SWAP_CUR: v.current,
+    AIO_SWAP_PREV: v.previous,
+    AIO_SWAP_NEW: v.staged,
+    AIO_SWAP_LAUNCH: v.launcher,
+    AIO_SWAP_ARGC: String(v.args.length),
+  };
+  v.args.forEach((a, i) => (env[`AIO_SWAP_ARG_${i}`] = a));
+  return {
+    cmd: "powershell",
+    args: [
+      "-NoProfile",
+      "-NonInteractive",
+      "-WindowStyle",
+      "Hidden",
+      "-EncodedCommand",
+      encodePowerShell(WIN_SWAP_PS1),
+    ],
+    env,
+    cwd,
+  };
+}
+
+/** `-EncodedCommand` wants base64 of UTF-16LE. */
+function encodePowerShell(script: string): string {
+  const bytes = new Uint8Array(script.length * 2);
+  for (let i = 0; i < script.length; i++) {
+    const c = script.charCodeAt(i);
+    bytes[i * 2] = c & 0xff;
+    bytes[i * 2 + 1] = c >> 8;
+  }
+  let bin = "";
+  for (const b of bytes) bin += String.fromCharCode(b);
+  return btoa(bin);
 }
 
 /** Waits for the predecessor, swaps the two directories, starts the new
@@ -1160,29 +1254,35 @@ mv "$new" "$cur" || { mv "$prev" "$cur"; exit 1; }
 exec "$launch" "$@"
 `;
 
-const WIN_SWAP_BAT = `@echo off
-setlocal EnableDelayedExpansion
-rem aio update helper — written by swapDirectoryDetached. Every value is a
-rem positional argument; this file never contains one.
-set "PID=%~1"
-set "CUR=%~2"
-set "PREV=%~3"
-set "NEW=%~4"
-set "LAUNCH=%~5"
-shift & shift & shift & shift & shift
-set "ARGS="
-:collect
-if "%~1"=="" goto ready
-set "ARGS=!ARGS! "%~1""
-shift
-goto collect
-:ready
-rem \`ping\` as a sleep is the portable idiom here: \`timeout\` fails without a
-rem console, which a detached updater does not have.
-:wait
-tasklist /FI "PID eq %PID%" | find "%PID%" >nul && (ping -n 2 127.0.0.1 >nul & goto wait)
-if exist "%PREV%" rmdir /S /Q "%PREV%"
-move /Y "%CUR%" "%PREV%" >nul || exit /b 1
-move /Y "%NEW%" "%CUR%" >nul || (move /Y "%PREV%" "%CUR%" >nul & exit /b 1)
-start "" "%LAUNCH%" !ARGS!
+/** Constant: every value arrives in an `AIO_SWAP_*` environment variable.
+ *  Paths go through .NET (`[IO.Directory]::Move`, `Process.Start`) and
+ *  `-LiteralPath`, never a wildcard-expanding parameter: `Start-Process
+ *  -WorkingDirectory` treated an install dir named `…[1]` as a pattern and
+ *  refused it (measured, Windows 11). The launcher is a .bat, so cmd is
+ *  unavoidable for IT — but it is started by bare NAME from its own directory,
+ *  so the install path never appears on a command line cmd parses (a quoted
+ *  `%VAR%` still expands there, and ShellExecute of a .bat whose path holds
+ *  `&` never ran it — both measured). The replayed argv is quoted per the
+ *  Windows argv convention. */
+const WIN_SWAP_PS1 = `$ErrorActionPreference = 'Stop'
+$p = [int]$env:AIO_SWAP_PID
+$cur = $env:AIO_SWAP_CUR
+$prev = $env:AIO_SWAP_PREV
+$new = $env:AIO_SWAP_NEW
+$launch = $env:AIO_SWAP_LAUNCH
+$n = [int]$env:AIO_SWAP_ARGC
+$argv = @(for ($i = 0; $i -lt $n; $i++) { [Environment]::GetEnvironmentVariable("AIO_SWAP_ARG_$i") })
+Get-ChildItem Env: | Where-Object { $_.Name -like 'AIO_SWAP_*' } | ForEach-Object { Remove-Item -LiteralPath ("Env:" + $_.Name) }
+while (Get-Process -Id $p -ErrorAction SilentlyContinue) { Start-Sleep -Milliseconds 200 }
+if (Test-Path -LiteralPath $prev) { Remove-Item -LiteralPath $prev -Recurse -Force }
+try { [IO.Directory]::Move($cur, $prev) } catch { exit 1 }
+try { [IO.Directory]::Move($new, $cur) } catch { [IO.Directory]::Move($prev, $cur); exit 1 }
+$q = @($argv | ForEach-Object { '"' + (($_ -replace '(\\\\*)"', '$1$1\\"') -replace '(\\\\+)$', '$1$1') + '"' })
+$si = New-Object System.Diagnostics.ProcessStartInfo
+$si.FileName = 'cmd.exe'
+$si.Arguments = '/d /s /c "' + ((@('"' + [IO.Path]::GetFileName($launch) + '"') + $q) -join ' ') + '"'
+$si.WorkingDirectory = [IO.Path]::GetDirectoryName($launch)
+$si.UseShellExecute = $false
+$si.CreateNoWindow = $true
+[void][System.Diagnostics.Process]::Start($si)
 `;

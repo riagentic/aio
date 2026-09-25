@@ -159,14 +159,13 @@ Deno.test("uds: after an unmeasured patch, a state that reverts to the last FULL
       ]);
       await until(() => lines.length >= 1);
       assertEquals(decoded(lines).map((f) => f.t), ["patches"]);
-      // c reverts to v:1 — its text now equals the last FULL one — and the
-      // round carries only a patch this client does not subscribe to, so it
-      // takes the full-state fallback.
+      // c reverts to v:1 — its text now equals the last FULL one — and a
+      // round with no patches (a trailing flush) takes the full-state
+      // fallback. (A round whose patches are all outside this client's
+      // subscriptions sends it nothing at all — its view did not change;
+      // tests/uds-unmatched-subs-sends-nothing.test.ts.)
       state.c = { ...state.c, v: 1 };
-      state.d = { v: 1 };
-      uds.broadcastState([
-        { cell: "d", ops: [{ op: "replace", path: ["v"], value: 1 }] },
-      ]);
+      uds.broadcastState();
       await until(() => lines.length >= 2);
       const last = decoded(lines).at(-1);
       assert(

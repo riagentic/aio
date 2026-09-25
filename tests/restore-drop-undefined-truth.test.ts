@@ -61,9 +61,9 @@ Deno.test("restoreDropWatcher: a real undeclared value is still reported with th
   const watch = restoreDropWatcher(INITIAL, new Set(), (m) => warned.push(m));
   const doc = { jn: { meta: { a: 2, b: 3 }, n: 1 } };
   watch(doc);
-  // …and this one IS drift at the next boot, so the refusal wording stands.
+  // …and this one IS drift at the next boot, so it is still said.
   assertEquals(detectShapeDrift(INITIAL, roundTrip(doc)).length, 1);
   assertEquals(warned.length, 1, warned.join("\n"));
   assert(warned[0]!.includes("jn.meta.b (number)"), warned[0]);
-  assert(warned[0]!.includes("dev refuses to boot over it"), warned[0]);
+  assert(warned[0]!.includes("the next boot will NOT restore it"), warned[0]);
 });

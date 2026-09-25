@@ -78,6 +78,40 @@ function nearestKey(bad: string): string | null {
 
 // ── cell() ──────────────────────────────────────────────────────
 
+/** Keys read by EXACT comparison — `scope === "client"`, `worker === true`,
+ *  `diagnostics === false` — so any other value was quietly the default: a
+ *  `scope: "browser"` cell ran on the server and synced to every tab, a
+ *  `worker: "yes"` cell ran on the main thread, and a `diagnostics: "off"` (or
+ *  the app-level `{ dev: … }` shape) cell kept recording its method calls and
+ *  payloads — the privacy opt-out the author asked for, silently not taken. The
+ *  unknown-KEY refusal below exists for exactly this; a value aio does not
+ *  read is the same mistake one level down. */
+function refuseUnreadValues(
+  name: string,
+  config: Record<string, unknown>,
+): void {
+  const refuse = (key: string, want: string): never => {
+    throw new Error(
+      `[${name}] cell(): ${key} must be ${want}, got ${
+        JSON.stringify(config[key]) ?? String(config[key])
+      } — any other value is read as the default, silently.`,
+    );
+  };
+  const { scope, worker, diagnostics } = config;
+  if (scope !== undefined && scope !== "client" && scope !== "server") {
+    refuse("scope", '"client" or "server"');
+  }
+  if (worker !== undefined && typeof worker !== "boolean") {
+    refuse("worker", "a boolean");
+  }
+  if (diagnostics !== undefined && typeof diagnostics !== "boolean") {
+    refuse(
+      "diagnostics",
+      "false (keep this cell out of the diagnostic record)",
+    );
+  }
+}
+
 /** The ONE wording for "a persist filter on a sync cell" — thrown by `cell()`
  *  for the cell's own `persist`, and by composition for a `cellDefaults`
  *  filter that would land on a sync cell. */
@@ -291,6 +325,8 @@ export function cell(name: string, config: any): any {
   // write paths is a promise the framework cannot keep, so the combination is
   // now impossible. `cellDefaults.persist` reaching a sync cell is refused
   // at compose time by the same rule (aio-composition `refuseFilteredSyncCells`).
+  refuseUnreadValues(name, config as Record<string, unknown>);
+
   if (config.sync && config.persist !== undefined && config.persist !== "all") {
     throw new Error(persistFilterOnSyncCellMessage(name, config.persist));
   }

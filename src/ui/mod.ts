@@ -35,6 +35,8 @@ import {
   useSignal,
 } from "../air/aio-renderer.ts";
 import type { VChild, VNode } from "../air/vdom.ts";
+import { el } from "./h-spread.ts";
+import { RadioGroup, Switch } from "./controls.ts";
 
 // ── Shared prop helpers ──────────────────────────────────────────────
 
@@ -129,9 +131,28 @@ export interface TextareaProps extends Common {
   onInput?: (value: string, e: Event) => void;
 }
 
+/** Said once per process — see {@link Textarea}. */
+let _textareaChangeWarned = false;
+
 /** A multi-line text input. */
 export function Textarea(props: TextareaProps): VNode {
   const { invalid, onInput, class: cls } = props;
+  // `onChange` is NOT wrapped here, unlike Input/Select/Checkbox: it reaches
+  // the DOM as-is and receives the Event. The kit's docs promised the value,
+  // so `onChange={form.setBio}` handed a cell method an Event object. Kept as
+  // it shipped (an app reading `e.target.value` must not break) — and said
+  // once in dev, which is the only place the mismatch is visible.
+  if (
+    typeof props.onChange === "function" && !_textareaChangeWarned &&
+    (globalThis as Record<string, unknown>).__aioDev === true
+  ) {
+    _textareaChangeWarned = true;
+    console.warn(
+      "[aio-dev] <Textarea onChange> receives the DOM Event, not the value " +
+        "(unlike <Input onChange>) — read `e.target.value`, or use `onInput`, " +
+        "which receives the value.",
+    );
+  }
   return h("textarea", {
     ...rest(props, ["invalid", "onInput", "class"]),
     rows: props.rows ?? 3,
@@ -171,7 +192,7 @@ export function Select(props: SelectProps): VNode {
       disabled: opt.disabled,
     }, opt.label ?? opt.value);
   });
-  return h("select", {
+  return el("select", {
     ...rest(props, ["options", "value", "invalid", "onChange", "class"]),
     // `value` on the SELECT, not `selected` on each option.
     //
@@ -192,7 +213,9 @@ export function Select(props: SelectProps): VNode {
     onChange: onChange
       ? (e: Event) => onChange((e.target as HTMLSelectElement).value, e)
       : undefined,
-  }, ...opts);
+    // `el`, not `...opts`: one argument per option crashed the render past
+    // ~120k options (V8's argument cap) — see `h-spread.ts`.
+  }, opts);
 }
 
 /** Props for {@link Checkbox} — checked state with an optional inline label. */
@@ -272,13 +295,24 @@ function nameControl(child: unknown, label: string): boolean {
   const v = child as VNode;
   if (!("tag" in v) || !v.props) return false;
   const p = v.props as Record<string, unknown>;
+  // Switch and RadioGroup are controls too. They were missing, so
+  // `<Field label="Dark mode"><Switch/></Field>` rendered an unnamed switch
+  // (and the dev a11y check blamed the author for it), and a RadioGroup in a
+  // Field was a group with no name.
   const isControl = typeof v.tag === "string"
     ? v.tag === "input" || v.tag === "select" || v.tag === "textarea"
     : v.tag === Input || v.tag === Select || v.tag === Textarea ||
-      v.tag === Checkbox;
+      v.tag === Checkbox || v.tag === Switch || v.tag === RadioGroup;
   if (isControl) {
+    // A Switch with its OWN string `label` keeps it — the Field heading must
+    // not replace the name written beside it. Checkbox is NOT included: 1.0.11
+    // shipped `<Field label="Notifications"><Checkbox label="Email me"/>` as
+    // `NotificationsCheckbox`, and that testUI/am name is frozen surface.
+    const ownLabel = v.tag === Switch && typeof p.label === "string" &&
+      p.label.trim() !== "";
     if (
-      p["aria-label"] === undefined && p.t === undefined &&
+      !ownLabel && p["aria-label"] === undefined &&
+      p["aria-labelledby"] === undefined && p.t === undefined &&
       p["data-testid"] === undefined
     ) p["aria-label"] = label;
     return true;
@@ -389,10 +423,12 @@ export function Table<Row extends Record<string, unknown>>(
         ),
       ),
     )
-    : h(
+    // `el`, not a spread: one argument per row crashed the render past ~120k
+    // rows (V8's argument cap) — see `h-spread.ts`.
+    : el(
       "tbody",
       null,
-      ...rows.map((row, i) =>
+      rows.map((row, i) =>
         h(
           "tr",
           {
@@ -793,8 +829,13 @@ export function Spinner(props: Common = {}): VNode {
   return h("span", {
     ...rest(props, ["class"]),
     class: joinClass("aio-spinner", props.class as string | undefined),
-    role: "status",
-    "aria-label": "Loading",
+    // The caller's attributes win — the kit's promise is that extra
+    // attributes "never fight your markup", and `<Spinner aria-label="Saving">`
+    // was announced as "Loading" regardless. `??`, not spread order: a wrapper
+    // passing `aria-label={props.label}` with no label must keep the default,
+    // not blank the name.
+    role: props.role ?? "status",
+    "aria-label": props["aria-label"] ?? "Loading",
   });
 }
 
@@ -858,9 +899,12 @@ export function Avatar(props: AvatarProps): VNode {
       ...common,
       class: joinClass("aio-avatar", cls),
       style,
-      role: "img",
-      "aria-label": name,
-      title: name,
+      // A caller's `aria-label`/`title` (a presence suffix, a translated
+      // label) wins over the bare name — and an `undefined` one keeps it
+      // (see Spinner).
+      role: common.role ?? "img",
+      "aria-label": common["aria-label"] ?? name,
+      title: common.title ?? name,
     },
     src
       ? h("img", {
@@ -944,7 +988,10 @@ export function Pagination(props: PaginationProps): VNode {
     {
       ...rest(props, ["page", "pages", "onPage", "window", "class"]),
       class: joinClass("aio-page", cls),
-      "aria-label": "Pagination",
+      // A caller's `aria-label` wins: two pagers on one page (above and below
+      // a table) are two landmarks that need two names, and the one they
+      // passed was silently replaced by "Pagination". (`??` — see Spinner.)
+      "aria-label": props["aria-label"] ?? "Pagination",
     },
     btn("‹", prev, { disabled: prev === page, aria: "Previous page" }),
     ...pageWindow(clamp(near), last, win).map((p) =>
@@ -1208,7 +1255,7 @@ export {
 export { Markdown, type MarkdownProps } from "./markdown.ts";
 // An embedded web page, with the two traps closed (a reactive `src` is a
 // navigation loop; unmounting destroys the guest's login). See ./browser.ts.
-export { Browser, type BrowserProps } from "./browser.ts";
+export { Browser, type BrowserProps, type HostKey } from "./browser.ts";
 // Scoped styles: a class name nobody else can collide with, content-addressed
 // so it is stable across server and client. See ./css.ts.
 export { collectCss, css, cx } from "./css.ts";

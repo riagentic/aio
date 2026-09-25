@@ -41,6 +41,36 @@ testUI(App, "named form without options still works", (ui) => {
   assertEquals(ui.html().match(/class="n"[^>]*>([^<]*)</)?.[1], "0");
 });
 
+// A seeded KEY the cell does not have is WARNED, like `t.init(seed)` warns a
+// typo: it used to land as a stray key the component never reads — a fixture
+// that looked pinned and pinned nothing. Not refused: 1.0.11 accepted it, and
+// the surface is frozen (tests/testui-seed-optional-key.test.tsx).
+Deno.test("seed: an unknown key is warned, at mount and mid-test", async () => {
+  const said: string[] = [];
+  const orig = console.warn;
+  console.warn = (...a: unknown[]) => void said.push(a.map(String).join(" "));
+  try {
+    {
+      await using _ui = await testUI(App, {
+        seed: { "named-opts-hw": { gpuz: ["a"] } },
+      });
+    }
+    assertEquals(said.length, 1, said.join(" | "));
+    assert(said[0]!.includes('"gpuz"'), said[0]);
+    assert(said[0]!.includes("gpus"), `names the real keys: ${said[0]}`);
+    await using ui = await testUI(App);
+    ui.seed({ "named-opts-hw": { gpuz: ["a"] } });
+    assertEquals(said.length, 2, said.join(" | "));
+    assert(said[1]!.includes('"gpuz"'), said[1]);
+    ui.seed({ "named-opts-hw": { gpus: ["x"] } }); // a real key still seeds
+    await ui.settle();
+    assertEquals(said.length, 2, "a real key is not warned");
+    assertEquals(ui.html().match(/class="n"[^>]*>([^<]*)</)?.[1], "1");
+  } finally {
+    console.warn = orig;
+  }
+});
+
 Deno.test("waitFor timeout: names what's there without dumping the whole tree", async () => {
   await using ui = await testUI(App);
   let msg = "";

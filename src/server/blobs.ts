@@ -234,11 +234,7 @@ function makeStore(dir: string): BlobStore {
     let name = await readName(dir, id);
     if (name === undefined && opts?.name !== undefined) {
       try {
-        await Deno.writeTextFile(
-          metaPath(dir, id),
-          JSON.stringify({ name: opts.name }),
-        );
-        name = opts.name;
+        name = await recordFirstName(id, opts.name);
       } catch (e) {
         // The bytes ARE landed, so this is not a failed put and must not
         // throw. But the returned BlobInfo used to carry the name from the
@@ -253,6 +249,53 @@ function makeStore(dir: string): BlobStore {
       }
     }
     return { id, size, ...(name !== undefined ? { name } : {}) };
+  }
+
+  /** Record `name` as the blob's name unless another put got there first,
+   *  and return the name that IS recorded.
+   *
+   *  First-name-wins must hold under concurrency, not just in sequence. It
+   *  was read-then-write: two concurrent puts of the same bytes both read "no
+   *  name", both wrote, the last write won — and the loser's caller was
+   *  handed back its OWN name while `info()` reported the other one. So the
+   *  metadata is written whole to a temp file and published with a hard link,
+   *  which fails when the name is taken: exactly one writer wins, and every
+   *  reader sees a complete file or none. */
+  async function recordFirstName(id: string, name: string): Promise<string> {
+    const tmp = join(dir, `.tmp-${crypto.randomUUID()}.json`);
+    await Deno.writeTextFile(tmp, JSON.stringify({ name }), {
+      createNew: true,
+    });
+    try {
+      await Deno.link(tmp, metaPath(dir, id));
+      return name;
+    } catch (e) {
+      if (!(e instanceof Deno.errors.AlreadyExists)) {
+        // A filesystem without hard links (FAT/exFAT): exclusive create is
+        // still first-wins; only its tiny write window is not atomic.
+        try {
+          await Deno.writeTextFile(
+            metaPath(dir, id),
+            JSON.stringify({ name }),
+            {
+              createNew: true,
+            },
+          );
+          return name;
+        } catch (e2) {
+          if (!(e2 instanceof Deno.errors.AlreadyExists)) throw e2;
+        }
+      }
+      // Another put recorded a name first — report THAT one.
+      const won = await readName(dir, id);
+      if (won === undefined) throw e;
+      return won;
+    } finally {
+      await Deno.remove(tmp).catch(() => {
+        // aio-ok: the temp name file is gone already when the link or the
+        // exclusive create consumed it — either way no name is lost
+      });
+    }
   }
 
   async function info(id: string): Promise<BlobInfo | null> {

@@ -363,7 +363,12 @@ export function fixRemoveCreateRootImport(
  *  "no behaviour change". Pure. */
 export function callTimeoutSites(src: string): number[] {
   const out: number[] = [];
-  for (const m of codeMatches(src, /\bcall\s*\(\s*\{/g)) {
+  // A MEMBER call is not aio's `call`: `fn.call({ timeout: 5 })` is
+  // Function.prototype.call with a `this` object, and `client.call({ timeout })`
+  // is some other library's option — both were reported as a REMOVED aio option
+  // (error severity) and rewritten to `timeoutMs` by --safe-fix, changing what
+  // the code passes. aio's `call` is a bare import, never a property.
+  for (const m of codeMatches(src, /(?<!\.\s*)\bcall\s*\(\s*\{/g)) {
     const open = m.index! + m[0].length - 1;
     out.push(...topLevelKeyOffsets(src, open, "timeout"));
   }
@@ -393,11 +398,46 @@ export function fixCallTimeoutMs(filePath: string): () => Promise<boolean> {
   };
 }
 
+/** Does this deno.json task run the APP (its entry module)? THE scope of every
+ *  task-flag finding and of its rewrite. `--key=`, `--cert=`, `--server-url`
+ *  are ordinary flag names: a `"sign": "deno run -A scripts/sign.ts
+ *  --key=prod.pem"` task is some other program's command line, and it used to
+ *  be reported as a renamed aio flag and REWRITTEN to `--tls-key=` by
+ *  --safe-fix — breaking a script aio never runs. Pure. */
+export function taskRunsApp(cmd: string, entry: string | null): boolean {
+  const want = entry ? normTaskPath(entry) : "";
+  // A whole TOKEN, never a substring: entry `app.ts` is inside
+  // `scripts/webapp.ts`, and that program's `--key=` got rewritten.
+  return want !== "" && taskTokens(cmd).some((t) => normTaskPath(t) === want);
+}
+
+/** Does this task run SOME script (`deno run … <file>.ts`)? The fallback scope
+ *  for REPORTING a renamed flag when no app entry is detectable — never for
+ *  the rewrite, which cannot tell the app from another program then. Pure. */
+export function taskRunsScript(cmd: string): boolean {
+  const t = taskTokens(cmd);
+  const run = t.findIndex((x, i) => x === "deno" && t[i + 1] === "run");
+  return run !== -1 &&
+    t.slice(run + 2).some((x) => /^[^-].*\.(?:[mc]?[jt]s|[jt]sx)$/.test(x));
+}
+
+/** A task's command line as tokens: split on whitespace and shell operators,
+ *  surrounding quotes dropped. Pure. */
+function taskTokens(cmd: string): string[] {
+  return cmd.split(/[\s;&|()]+/).filter(Boolean)
+    .map((t) => t.replace(/^(["'])(.*)\1$/, "$2"));
+}
+
+/** `./src/app.ts` and `src\app.ts` name the same file as `src/app.ts`. */
+function normTaskPath(p: string): string {
+  return p.replace(/\\/g, "/").replace(/^(?:\.\/)+/, "");
+}
+
 /** Rewrite deprecated flags inside `deno.json` tasks. `--cert=`/`--key=` became
  *  `--tls-cert=`/`--tls-key=` (the bare names collided with the auth `key`
  *  concept); `--headless` is a BUILD flag that a run task must not pass — the
- *  runtime equivalent is `--client=server-only`. `entry` scopes the second
- *  rewrite to tasks that actually run the app. */
+ *  runtime equivalent is `--client=server-only`. `entry` scopes EVERY rewrite
+ *  to tasks that actually run the app ({@link taskRunsApp}). */
 export function fixTaskFlags(
   entry: string | null,
 ): (projectDir: string) => Promise<boolean> {
@@ -406,7 +446,7 @@ export function fixTaskFlags(
       const tasks = config.tasks;
       if (!tasks) return;
       for (const [name, cmd] of Object.entries(tasks)) {
-        if (typeof cmd !== "string") continue;
+        if (typeof cmd !== "string" || !taskRunsApp(cmd, entry)) continue;
         let next = cmd
           .replace(/(?<![\w-])--cert=/g, "--tls-cert=")
           .replace(/(?<![\w-])--key=/g, "--tls-key=")
@@ -417,12 +457,10 @@ export function fixTaskFlags(
           .replace(/(?<![\w-])--server-url(?![\w=-])/g, "--connect")
           .replace(/\s*(?<![\w-])--zero-port(?![\w=-])/g, "")
           .replace(/\s*(?<![\w-])--backup-logs(?![\w=-])/g, "");
-        if (entry && next.includes(entry)) {
-          next = next.replace(
-            /(?<![\w-])--headless(?![\w=-])/g,
-            "--client=server-only",
-          );
-        }
+        next = next.replace(
+          /(?<![\w-])--headless(?![\w=-])/g,
+          "--client=server-only",
+        );
         tasks[name] = next;
       }
     });
@@ -456,6 +494,19 @@ export function fixAddAioEntry(
  *  that destructure (or property-access) a server-only symbol — the lazy
  *  variant of fixServerEntryImport. Only touches the matched statements,
  *  never a bare `import("aio")` used for browser-safe symbols. */
+/** The destructured names of `const { … } = await import("aio")` that
+ *  `aio/server` does NOT export — the names a whole-statement repoint to
+ *  `"aio/server"` would turn into `undefined`. Empty = the rewrite is safe.
+ *  `aio/server` carries only the server-only set, so `{ aio, createDB }` used
+ *  to be repointed wholesale and `aio` came back undefined — the "safe" fix
+ *  broke the line it fixed. ONE decider for the rule's [manual] and the fix's
+ *  decline. Pure. */
+export function dynamicDestructureNonServer(inner: string): string[] {
+  return inner.split(",").map((n) => n.trim()).filter(Boolean)
+    .map((n) => n.replace(/^\.\.\./, "").split(/[:=]/)[0]!.trim())
+    .filter((n) => !SERVER_ONLY_AIO_SYMBOLS.has(n));
+}
+
 export function fixDynamicServerEntryImport(
   filePath: string,
 ): () => Promise<boolean> {
@@ -463,19 +514,26 @@ export function fixDynamicServerEntryImport(
   return async () => {
     try {
       const src = await Deno.readTextFile(filePath);
+      // Code only — the rule reports code sites only, and a generator's
+      // template literal spelling the same statement is not this file's import.
+      const mask = codeMask(src);
       let changed = false;
       let out = src.replace(
-        /\{([^}]*)\}\s*=\s*await\s+import\(\s*(["'])aio\2\s*\)/g,
-        (whole, inner: string) => {
-          if (!SERVER_ONLY.test(inner)) return whole;
+        // `[^{}]`, not `[^}]`: the match must START at the destructure's own
+        // `{`. `[^}]*` let it start at an enclosing function body's `{`, so
+        // the "names" were a whole code span ("const { createDB").
+        /\{([^{}]*)\}\s*=\s*await\s+import\(\s*(["'])aio\2\s*\)/g,
+        (whole, inner: string, _q: string, at: number) => {
+          if (mask[at] !== 1 || !SERVER_ONLY.test(inner)) return whole;
+          if (dynamicDestructureNonServer(inner).length > 0) return whole;
           changed = true;
           return whole.replace(/(["'])aio\1/, "$1aio/server$1");
         },
       );
       out = out.replace(
         /\(\s*await\s+import\(\s*(["'])aio\1\s*\)\s*\)\s*\.\s*(\w+)/g,
-        (whole, _q: string, prop: string) => {
-          if (!SERVER_ONLY.test(prop)) return whole;
+        (whole, _q: string, prop: string, at: number) => {
+          if (mask[at] !== 1 || !SERVER_ONLY.test(prop)) return whole;
           changed = true;
           return whole.replace(/(["'])aio\1/, "$1aio/server$1");
         },
@@ -739,6 +797,62 @@ function planAnnotation(
  *   • anything not confidently rewritable — a non-`s` draft param, an opaque
  *     alias annotation, an unparseable union — leaves the whole METHOD
  *     unfixed (the report stays; conservative beats broken). */
+const CONTROL_KEYWORDS = new Set([
+  "if",
+  "for",
+  "while",
+  "switch",
+  "catch",
+  "with",
+]);
+
+/** Does the `{` at `open` (in MASKED source) open a FUNCTION body — an arrow
+ *  (`=> {`), a `function (…) {`, a nested method shorthand `name(…) {`, or one
+ *  of those with a return-type annotation — rather than a control block or an
+ *  object literal? Conservative in the direction that matters: a false "yes"
+ *  only makes the fix decline. Pure. */
+function opensFunctionBody(masked: string, open: number): boolean {
+  let j = open - 1;
+  while (j >= 0 && /\s/.test(masked[j]!)) j--;
+  if (masked[j] === ">" && masked[j - 1] === "=") return true; // `=> {`
+  // `(…): T {` — an annotated function/method. Look back a bounded window for
+  // a `)` followed by `:` and a type with no statement punctuation in it.
+  if (/\)\s*:\s*[^;{}=]*$/.test(masked.slice(Math.max(0, open - 200), open))) {
+    return true;
+  }
+  if (masked[j] !== ")") return false;
+  // Find the matching `(` and read the word before it.
+  let depth = 0;
+  let k = j;
+  for (; k >= 0; k--) {
+    const ch = masked[k]!;
+    if (ch === ")") depth++;
+    else if (ch === "(") {
+      depth--;
+      if (depth === 0) break;
+    }
+  }
+  if (k < 0) return false;
+  const word = /([$\w]+)\s*$/.exec(masked.slice(Math.max(0, k - 40), k))?.[1];
+  return !(word && CONTROL_KEYWORDS.has(word));
+}
+
+/** Is offset `at` inside a function nested in the method body that opens at
+ *  `bodyOpen`? Walks the braces enclosing `at` from the inside out. Pure. */
+function insideNestedFunction(
+  masked: string,
+  bodyOpen: number,
+  at: number,
+): boolean {
+  const stack: number[] = [];
+  for (let i = bodyOpen + 1; i < at; i++) {
+    const ch = masked[i];
+    if (ch === "{") stack.push(i);
+    else if (ch === "}") stack.pop();
+  }
+  return stack.some((o) => opensFunctionBody(masked, o));
+}
+
 /** One `return <effect>` statement the fix looked at, and its verdict.
  *  `reason === null` means "will be rewritten"; anything else is the decline,
  *  in the words the report prints. */
@@ -761,6 +875,7 @@ function planReturnEffects(src: string): {
   verdicts: EffectSiteVerdict[];
 } {
   const methods = methodSpans(src);
+  const masked = codeText(src);
   /** Innermost method whose body contains `at`. */
   const enclosing = (at: number): MethodSpan | null => {
     let best: MethodSpan | null = null;
@@ -809,6 +924,17 @@ function planReturnEffects(src: string): {
         start,
         end: end + 1,
         reason: "the safe fix declines: not inside a recognizable cell method",
+      });
+      continue;
+    }
+    if (insideNestedFunction(masked, method.bodyOpen, start)) {
+      verdicts.push({
+        start,
+        end: end + 1,
+        reason: "the safe fix declines: this `return` belongs to a function " +
+          "nested inside the method (a callback or a helper) — its value goes " +
+          "to that function's caller, not to the cell, so rewriting it to " +
+          "`s.$do(...)` would change what the code does",
       });
       continue;
     }
@@ -1338,10 +1464,12 @@ export function fixInsertKeyFalse(filePath: string): () => Promise<boolean> {
     const open = masked.indexOf("{", m.index + m[0].length - 1);
     const end = balancedEnd(src, open, masked);
     if (end === -1) return false;
-    // Probe the MASKED body: a `key:` mentioned in a comment must not
-    // decline the fix, and one inside a string is not a config key.
-    const body = masked.slice(open, end + 1);
-    if (/[^$\w.]key\s*:/.test(body)) return false; // already decided
+    // A TOP-LEVEL `key:` only — the rule's own question (`_topLevelKeys`).
+    // Any `key:` in the body used to decline, so `tls: { cert, key: "k.pem" }`
+    // (the documented TLS option) made the fix refuse forever while the rule
+    // kept reporting it `[fixable]`. Mask-aware, so a `key:` in a comment or a
+    // string is nothing.
+    if (topLevelKeyOffsets(src, open, "key").length > 0) return false;
     const nl = src.indexOf("\n", open);
     const lineStart = src.lastIndexOf("\n", m.index) + 1;
     const baseIndent = /^[ \t]*/.exec(src.slice(lineStart))?.[0] ?? "";
@@ -1603,7 +1731,15 @@ export function scheduleBlockingToTop(src: string): string | null {
     },
   );
   if (!changed) return null;
-  if (!/import\s*\{[^}]*\bblocking\b[^}]*\}\s*from\s*["']aio["']/.test(out)) {
+  // Imported under its OWN name? `blocking as b` binds `b`, not `blocking` —
+  // counting it as present left every rewritten `blocking(` unresolved.
+  const bound = [...out.matchAll(/import\s*\{([^}]*)\}\s*from\s*["']aio["']/g)]
+    .some((m) =>
+      m[1]!.split(",").some((n) =>
+        /^(?:blocking|blocking\s+as\s+blocking)$/.test(n.trim())
+      )
+    );
+  if (!bound) {
     const re = /import\s*\{([^}]*)\}\s*from\s*(["']aio["'])/;
     out = re.test(out)
       ? out.replace(

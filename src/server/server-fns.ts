@@ -21,6 +21,7 @@ import type { AioUser } from "./aio-types.ts";
 import type { Access } from "../state/cell-types.ts";
 import { serializeReturn } from "../protocol/return-value.ts";
 import { log } from "../diagnostics/logger-api.ts";
+import { _diagScopeNow } from "../diagnostics/diagnostic-bus.ts";
 import type { AioErrorCode } from "../diagnostics/error.ts";
 import type { Remote } from "../protocol/protocol-types.ts";
 
@@ -29,6 +30,135 @@ type FnMap = Record<string, (...args: any[]) => any>;
 
 const _registry = new Map<string, FnMap>();
 const _access = new Map<string, Access>();
+/** The app each namespace was registered AS (`_diagScopeNow()` — the scope
+ *  every `aio.run()` runs in). One process can host several apps, and the
+ *  registry is one map: app B — open, no auth — served a namespace app A had
+ *  registered behind its user auth, to an anonymous client of B's. A
+ *  namespace registered inside an app is served over the network by that app
+ *  only; one registered outside any app (a module's top level) has no app to
+ *  belong to and is served by every app, as before.
+ *
+ *  Ownership PASSES ON when the owner closes (`_serverFnsAppLive`): the
+ *  module that registered it is cached, so the next app to import it — a
+ *  restart, the next `testServer()` in a file — never registers it again. A
+ *  closed owner kept refusing it forever ("not registered"), and held its
+ *  scope alive. But it passes only to an app that BOOTS AFTER the close (the
+ *  first one, which adopts it): an app already live beside the owner never
+ *  takes it over — else A's `vault`, behind A's auth, was served anonymously
+ *  by an open sibling B the moment A closed. */
+const _owner = new Map<string, object>();
+/** Namespaces whose owner closed, waiting for the next app to boot → the
+ *  closed owner's app id. Strings only — a closed app's scope is never held. */
+const _orphaned = new Map<string, string>();
+/** Each live app's id, by its scope — to name it in a refusal. */
+const _appIdOf = new WeakMap<object, string>();
+/** Refusals already warned — once per namespace and app. */
+const _refusedWarned = new WeakMap<object, Set<string>>();
+
+/** Whether the app serving this call may serve `ns` — its own, or unowned.
+ *  A caller outside any app cannot be placed, and is answered as before. */
+function servedHere(ns: string): boolean {
+  const owner = _owner.get(ns);
+  if (owner === undefined && !_orphaned.has(ns)) return true;
+  const here = _diagScopeNow();
+  if (here === undefined || here === owner) return true;
+  // Refused — said on THIS side (never to the caller, see `callServerFn`).
+  const seen = _refusedWarned.get(here) ?? new Set<string>();
+  _refusedWarned.set(here, seen);
+  if (!seen.has(ns)) {
+    seen.add(ns);
+    log.warn(
+      "sfn",
+      `serverFns(${JSON.stringify(ns)}) is not served by app ` +
+        `${JSON.stringify(_appIdOf.get(here) ?? "?")}: ` +
+        (owner === undefined
+          ? `the app that registered it has closed, and it passes only to ` +
+            `an app booted AFTER that close — this one was already running. `
+          : `another app in this process registered it (${
+            JSON.stringify(_appIdOf.get(owner) ?? "?")
+          }). `) +
+        `Its clients get "not registered". To serve it here, register it ` +
+        `outside any app (a module's top level — every app serves it) or ` +
+        `from this app's own onStart.`,
+    );
+  }
+  return false;
+}
+
+// ── Shared namespaces are said out loud ─────────────────────────────────────
+//
+// A namespace registered outside any app — `export const api = serverFns(…)`
+// at a module's top level, the documented pattern — cannot be placed, so every
+// app in the process serves it. In a one-app process that is exactly right.
+// With a second app it means app B (open, no auth) answers app A's `vault`:
+// the silent kind of wrong. So once two apps are live, each such namespace is
+// named ONCE, with the apps serving it and the two ways to make it one app's.
+
+/** The apps serving in this process, in boot order. */
+const _liveApps: string[] = [];
+/** Namespaces already announced — once each, for the process's life. */
+const _announced = new Set<string>();
+
+function announceShared(ns: string): void {
+  if (
+    _owner.has(ns) || _orphaned.has(ns) || _announced.has(ns) ||
+    _liveApps.length < 2
+  ) return;
+  _announced.add(ns);
+  const apps = _liveApps.map((a) => JSON.stringify(a)).join(", ");
+  log.warn(
+    "sfn",
+    `serverFns(${JSON.stringify(ns)}) was registered outside any app, so ` +
+      `EVERY app in this process serves it over the wire — now ${apps}. ` +
+      `A client of one app reaches functions another app may keep behind its ` +
+      `auth. Register it inside the app that owns it (from onStart, or a ` +
+      `module imported there — then only that app serves it), or gate it ` +
+      `with an access: rule (access rules fail closed).`,
+  );
+}
+
+/** An app starts serving (its boot — called in its scope). Adopts the
+ *  namespaces a closed owner left (see `_owner`), announces the shared ones
+ *  once a second app is live, and returns the "it stopped" call, which hands
+ *  what the app owned on to the NEXT app to boot. @internal */
+export function _serverFnsAppLive(appId: string): () => void {
+  const scope = _diagScopeNow();
+  _liveApps.push(appId);
+  if (scope !== undefined) {
+    _appIdOf.set(scope, appId);
+    for (const [ns, prev] of _orphaned) {
+      _owner.set(ns, scope);
+      // A restart of the owner is the point of the hand-off; any OTHER app
+      // taking it over now serves functions it never registered — say so.
+      if (prev !== appId) {
+        log.warn(
+          "sfn",
+          `serverFns(${JSON.stringify(ns)}) was registered by app ` +
+            `${JSON.stringify(prev)}, which closed; ${JSON.stringify(appId)} ` +
+            `booted next and now serves it over the wire (its module was ` +
+            `already loaded, so no app can register it again). If ` +
+            `${JSON.stringify(appId)} must not expose it, gate it with an ` +
+            `access: rule (access rules fail closed).`,
+        );
+      }
+    }
+    _orphaned.clear();
+  }
+  for (const ns of _registry.keys()) announceShared(ns);
+  let gone = false;
+  return () => {
+    if (gone) return;
+    gone = true;
+    const i = _liveApps.indexOf(appId);
+    if (i >= 0) _liveApps.splice(i, 1);
+    if (scope === undefined) return;
+    for (const [ns, owner] of [..._owner]) {
+      if (owner !== scope) continue;
+      _owner.delete(ns);
+      _orphaned.set(ns, appId); // the next app to BOOT adopts it; no live one does
+    }
+  };
+}
 
 /** Register a namespace of server functions (call in a *.server.ts file —
  *  the browser bundle must never contain the bodies). Returns the map for
@@ -47,7 +177,10 @@ export function serverFns<T extends FnMap>(
     );
   }
   _registry.set(ns, fns);
+  const owner = _diagScopeNow();
+  if (owner !== undefined) _owner.set(ns, owner);
   if (opts?.access !== undefined) _access.set(ns, opts.access);
+  announceShared(ns);
   return fns;
 }
 
@@ -135,6 +268,10 @@ export async function invokeServerFn(
     code?: string;
   }
 > {
+  // Another app's namespace is answered exactly like one that does not
+  // exist: this app has no such function, and saying more would tell an
+  // anonymous caller what a sibling app keeps behind its auth.
+  if (!servedHere(ns)) return notRegistered(ns, name);
   if (!serverFnAllowed(ns, user, name, args)) {
     log.warn(
       `[aio] auth: serverFn "${ns}.${name}" denied for ${
@@ -155,13 +292,7 @@ export async function invokeServerFn(
   // Object.prototype builtins (constructor, valueOf, …); those are not
   // registered server functions and must fail loud like any unknown name.
   const fn = fns && Object.hasOwn(fns, name) ? fns[name] : undefined;
-  if (typeof fn !== "function") {
-    return {
-      ok: false,
-      error:
-        `serverFn "${ns}.${name}" is not registered on the server (check the *.server.ts module is imported by the entry)`,
-    };
-  }
+  if (typeof fn !== "function") return notRegistered(ns, name);
   let value: unknown;
   try {
     value = await fn(...args);
@@ -201,8 +332,22 @@ export async function invokeServerFn(
   return { ok: true, value: safe };
 }
 
+function notRegistered(ns: string, name: string): {
+  ok: false;
+  error: string;
+} {
+  return {
+    ok: false,
+    error:
+      `serverFn "${ns}.${name}" is not registered on the server (check the *.server.ts module is imported by the entry)`,
+  };
+}
+
 /** Test isolation. */
 export function _resetServerFns(): void {
   _registry.clear();
   _access.clear();
+  _owner.clear();
+  _orphaned.clear();
+  _announced.clear();
 }

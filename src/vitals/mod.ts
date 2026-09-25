@@ -2,6 +2,7 @@
 // Wires all probes together into a single VitalsSystem.
 
 import { getLogger, log } from "../diagnostics/logger-api.ts";
+import { withVitalsUnit } from "../diagnostics/logger-vitals.ts";
 import type {
   VitalAlert,
   VitalLayer,
@@ -42,6 +43,11 @@ export type VitalsSystem = {
     state: Record<string, unknown>,
   ) => Record<string, number>;
   pressureMonitor: PressureMonitorAPI | null;
+  /** The RESOLVED thresholds (defaults merged with the app's config) — the
+   *  ones the probes grade against. `/__aio/vitals` draws its gauges against
+   *  these; with fixed capacities, a tuned app's gauge disagreed with the
+   *  status the server was reporting for the same number. */
+  thresholds: VitalThresholds;
   /** Whether per-client send throttling is active (`vitals.backpressure`,
    *  default on). This flag is the ONLY reader of that option — it used to
    *  have none at all: the switch type-checked, was accepted, and changed
@@ -78,6 +84,39 @@ export function resolveThresholds(
   };
 }
 
+/** Say so when a threshold the config accepts is one nothing reads.
+ *
+ *  `thresholds.render` has had no reader since the render meter replaced the
+ *  render probe: the browser grades staleness against `renderBudget`. And the
+ *  browser's RTT probe is built on the BUILT-IN transport tiers — the config
+ *  never reaches the page — so a custom `transport.degraded`/`.warning` changes
+ *  nothing either; the server reads `transport.frozen` alone. Both were
+ *  accepted and dropped without a word, which is how a tuned budget looks
+ *  configured while the defaults keep grading. Warn, never refuse: the shape
+ *  type-checks and booted on 1.0.11. */
+function warnUnreadThresholds(custom?: Partial<VitalThresholds>): void {
+  if (!custom) return;
+  if (custom.render !== undefined) {
+    log.warn(
+      "vitals",
+      "vitals.thresholds.render is set but nothing reads it — the browser " +
+        "grades render staleness against `renderBudget: { staleness, " +
+        "pendingPatches }` on aio.run; move the budget there",
+    );
+  }
+  const t = custom.transport;
+  const d = DEFAULT_THRESHOLDS.transport;
+  if (t && (t.degraded !== d.degraded || t.warning !== d.warning)) {
+    log.warn(
+      "vitals",
+      "vitals.thresholds.transport.degraded/.warning are set but nothing " +
+        "reads them — only transport.frozen is used (the server's liveness " +
+        `watchdog); the browser's RTT probe grades on the built-in ` +
+        `${d.degraded}/${d.warning}ms tiers`,
+    );
+  }
+}
+
 // ─── Factory ────────────────────────────────────────────────────────────────
 
 /** Create the unified vitals system from config — wires probes, diagnostics, and pressure monitoring.
@@ -89,6 +128,7 @@ export function createVitalsSystem(
   budgets: BudgetLedger = budgetsFor(),
 ): VitalsSystem {
   const thresholds = resolveThresholds(config.thresholds);
+  warnUnreadThresholds(config.thresholds);
   const hintsEnabled = config.hints !== false;
   const onAlert = config.onVitalAlert;
 
@@ -177,6 +217,7 @@ export function createVitalsSystem(
     status: VitalAlert["status"],
     measured: number,
     threshold: number,
+    unit: "ms" | "actions" = "ms",
   ) {
     // NOTE: no early return on "no user callbacks". The diagnostic-bus emit
     // below is what feeds the logger, amui and `am`, so bailing out here made
@@ -200,13 +241,15 @@ export function createVitalsSystem(
     // `perf:reduce` budget lines and never a vitals one. It is also the sink
     // that survives when the diagnostic bus is a no-op (prod).
     try {
-      getLogger()?.vitals?.(
-        layer,
-        status,
-        measured,
-        threshold,
-        hint ?? undefined,
-      );
+      const sink = getLogger();
+      withVitalsUnit(unit, () =>
+        sink?.vitals?.(
+          layer,
+          status,
+          measured,
+          threshold,
+          hint ?? undefined,
+        ));
     } catch (e) {
       log.error("vitals", `writing the vitals line threw — ${e}`);
     }
@@ -219,7 +262,7 @@ export function createVitalsSystem(
       log.error("vitals", `onVitalAlert hook threw — ${e}`);
     }
     try {
-      reporter?.onAlert(alert);
+      reporter?.onAlert(alert, unit);
     } catch (e) {
       log.error("vitals", `reporter.onAlert threw — ${e}`);
     }
@@ -269,8 +312,19 @@ export function createVitalsSystem(
     //
     // The WORST client speaks for the layer: a freeze alert is raised per
     // client, and the layer is degraded exactly when some client is.
+    //
+    // Worst by STATUS first, gap second. Ranking by gap alone let a socket
+    // that never heartbeats (a CLI client, the dev reload socket — registered,
+    // never graded, its gap growing for the life of the socket) outrank the
+    // client that actually froze: the layer read "healthy", and rule 3 never
+    // fired for the very alert it exists for.
+    const rank = (s: string) => s === "frozen" ? 1 : 0;
     const worst = rows.reduce<{ status: string; gap: number } | null>(
-      (m, r) => (m === null || r.gap > m.gap ? r : m),
+      (m, r) =>
+        m === null || rank(r.status) > rank(m.status) ||
+          (rank(r.status) === rank(m.status) && r.gap > m.gap)
+          ? r
+          : m,
       null,
     );
     const frozenSince = serverTransport.getAllClients()
@@ -321,7 +375,13 @@ export function createVitalsSystem(
         : loopStatus === "warning"
         ? tiers.warning
         : tiers.degraded;
-      fireAlert("loop", loopStatus, measured, threshold);
+      fireAlert(
+        "loop",
+        loopStatus,
+        measured,
+        threshold,
+        driver === "queue" ? "actions" : "ms",
+      );
     }
     serverTransport.checkAllClients();
   }
@@ -330,6 +390,7 @@ export function createVitalsSystem(
     loopProbe,
     serverTransport,
     pressureMonitor,
+    thresholds,
     backpressureEnabled: config.backpressure !== false,
     onClientRecovered: (fn) => {
       _recoveredListeners.add(fn);

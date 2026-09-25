@@ -799,8 +799,12 @@ export function decide(opts: {
   // re-downloading its own bytes once, forever, on every channel that does not
   // bump a version.
   const localSha = opts.local.installedSha256;
+  // Case-blind: a manifest may state its digest in UPPERCASE (the validator
+  // accepts it), while a digest measured from the installed file is lowercase
+  // — an exact compare offered the running build back as a "rebuild" on
+  // every check.
   const rebuild = cmp === 0 && !!m.sha256 && !!localSha &&
-    localSha !== m.sha256;
+    localSha.toLowerCase() !== m.sha256.toLowerCase();
 
   if (cmp < 0) {
     // Not an error worth alarming anyone about: it is what a channel switch

@@ -312,6 +312,57 @@ Deno.test("strict: type() into a hidden input is refused", async () => {
   }
 });
 
+Deno.test("strict: hover() and focus() on a hidden element are refused", async () => {
+  // A browser fires no mouseenter on a `display:none` element and focuses
+  // neither an invisible nor a disabled control; the harness ran onMouseEnter
+  // and onFocus on the hidden button, reporting success for both.
+  const seen: string[] = [];
+  const App = () =>
+    h(
+      "div",
+      null,
+      h("button", {
+        t: "ghost",
+        style: "display:none",
+        onMouseEnter: () => seen.push("hover"),
+        onFocus: () => seen.push("focus"),
+      }, "Ghost"),
+      h("input", {
+        t: "off",
+        disabled: true,
+        "aria-label": "off",
+        onFocus: () => seen.push("focus-disabled"),
+      }),
+      h("button", {
+        t: "shown",
+        disabled: true,
+        onMouseEnter: () => seen.push("hover-disabled"),
+      }, "Shown"),
+    );
+  const ui = await testUI(App as ComponentFn);
+  try {
+    const hov = await assertRejects(() => ui.ghost.hover(), Error);
+    assert(hov.message.includes("not visible"), hov.message);
+    // testUI's own guard names the element (the shared trigger names a tag).
+    assert(hov.message.includes('testUI: cannot hover "ghost"'), hov.message);
+    const foc = await assertRejects(() => ui.ghost.focus(), Error);
+    assert(foc.message.includes("not visible"), foc.message);
+    assert(foc.message.includes('testUI: cannot focus "ghost"'), foc.message);
+    const dis = await assertRejects(() => ui.off.focus(), Error);
+    assert(dis.message.includes("disabled"), dis.message);
+    assert(dis.message.includes('testUI: cannot focus "off"'), dis.message);
+    // A disabled but VISIBLE control still takes hover, as in a browser.
+    await ui.shown.hover();
+    assertEquals(
+      seen,
+      ["hover-disabled"],
+      "no hidden element reached a handler",
+    );
+  } finally {
+    await ui.dispose();
+  }
+});
+
 // ── 5. the cheap ones that were still silent ─────────────────────────
 
 Deno.test("hover: mouseenter does not bubble to ancestors", async () => {

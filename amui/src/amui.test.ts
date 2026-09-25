@@ -103,12 +103,12 @@ testCell(
       s.scanning === false && Array.isArray(s.projects) && s.projects.length > 0
     );
     // Prefer a real aio app if the scan ordered a non-aio neighbor first.
-    const path = t.getState().projects.find((p) => p.meta?.isAio)?.path ??
-      t.getState().projects[0]?.path;
-    assert(path, "discovery found at least one project to select");
-    await t.send.select(path);
+    const id = t.getState().projects.find((p) => p.meta?.isAio)?.id ??
+      t.getState().projects[0]?.id;
+    assert(id, "discovery found at least one project to select");
+    await t.send.select(id);
     t.expect.state((s) =>
-      s.selectedPath === path &&
+      s.selectedId === id &&
       s.detail !== null &&
       s.detail.name.length > 0 &&
       s.detail.meta.isAio === true &&
@@ -193,6 +193,7 @@ Deno.test("discoverProjects: roots cover ~/aio-apps + cwd; excludes the framewor
 
 // ── reconcileDetail (pure) — the external start/stop reconciliation ──────────
 const baseDetail = (over: Partial<ProjectDetail> = {}): ProjectDetail => ({
+  id: "/p",
   path: "/p",
   name: "p",
   running: true,
@@ -223,6 +224,7 @@ const baseDetail = (over: Partial<ProjectDetail> = {}): ProjectDetail => ({
   ...over,
 });
 const proj = (running: DiscoveredProject["running"]): DiscoveredProject => ({
+  id: "/p",
   path: "/p",
   name: "p",
   meta: {
@@ -598,6 +600,24 @@ Deno.test("readProjectMeta: parses an aio deno.json (name, target, tasks, isAio)
   }
 });
 
+// deno.json's `target` was renamed `client` in alpha52 — what `am create`
+// writes and the runtime reads. amui read only the old key, so every app
+// scaffolded since showed "target: browser (default)", an electron one too.
+Deno.test("readProjectMeta: reads the shell from `client` (the old `target` still works)", async () => {
+  const dir = await Deno.makeTempDir();
+  try {
+    await Deno.writeTextFile(
+      `${dir}/deno.json`,
+      JSON.stringify({ title: "desk", client: "electron" }),
+    );
+    const m = await readProjectMeta(dir);
+    assertEquals(m.target, "electron");
+    assert(m.isAio, "a `client` key marks an aio project");
+  } finally {
+    await Deno.remove(dir, { recursive: true });
+  }
+});
+
 Deno.test("readProjectMeta: parses jsonc with trailing + block comments", async () => {
   const dir = await Deno.makeTempDir();
   try {
@@ -654,6 +674,59 @@ Deno.test("runTask: cancel via signal terminates promptly (never hangs)", async 
     assertEquals(r.ended, "cancelled");
     assert(dt < 15_000, `returned promptly, took ${Math.round(dt)}ms`);
   } finally {
+    await Deno.remove(dir, { recursive: true });
+  }
+});
+
+// amui is an aio app, and after a dev restart (its own source changed — an
+// update of the framework it lives in) it runs as a SUPERVISED child with
+// AIO_PORT = its own port, AIO_PARENT_PID and AIO_DEV_SUPERVISED in its env.
+// Start and Run-task inherited all three: every app amui started tried to bind
+// amui's port ("port N already in use … held by aio app amui") while amui said
+// "started", and would have died with amui's supervisor. Measured as a user.
+Deno.test("startApp / runTask: the runtime env of amui itself never reaches the app", async () => {
+  const { startApp, runTask } = await import("./server/proc.server.ts");
+  const dir = await Deno.makeTempDir();
+  const keys = ["AIO_PORT", "AIO_PARENT_PID", "AIO_DEV_SUPERVISED"];
+  const prev = keys.map((k) => Deno.env.get(k));
+  const read = JSON.stringify(keys) +
+    ".map((k) => Deno.env.get(k) ?? null)";
+  const probe = "console.log(JSON.stringify(" + read + "))";
+  try {
+    await Deno.mkdir(`${dir}/src`);
+    await Deno.writeTextFile(
+      `${dir}/src/app.ts`,
+      "Deno.writeTextFileSync(" + JSON.stringify(dir + "/seen.json") +
+        ", JSON.stringify(" + read + "));\n",
+    );
+    await Deno.writeTextFile(
+      `${dir}/deno.json`,
+      JSON.stringify({ tasks: { probe: "deno eval '" + probe + "'" } }),
+    );
+    Deno.env.set("AIO_PORT", "1");
+    Deno.env.set("AIO_PARENT_PID", String(Deno.pid));
+    Deno.env.set("AIO_DEV_SUPERVISED", "1");
+
+    const t = await runTask(dir, "probe", new AbortController().signal);
+    assertEquals(t.code, 0, t.output);
+    const line = t.output.split("\n").find((l) => l.startsWith("["));
+    assertEquals(line, "[null,null,null]", t.output);
+
+    const r = await startApp(dir, "server-only");
+    assertEquals(r.ok, true, r.error);
+    let seen: string | null = null;
+    for (let i = 0; i < 300 && seen === null; i++) {
+      try {
+        seen = await Deno.readTextFile(`${dir}/seen.json`);
+      } catch {
+        await new Promise((res) => setTimeout(res, 50));
+      }
+    }
+    assertEquals(seen, "[null,null,null]");
+  } finally {
+    keys.forEach((k, i) =>
+      prev[i] === undefined ? Deno.env.delete(k) : Deno.env.set(k, prev[i]!)
+    );
     await Deno.remove(dir, { recursive: true });
   }
 });

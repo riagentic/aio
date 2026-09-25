@@ -112,12 +112,18 @@ function inputEv(
 
 /** Why `el` is invisible to a user, or null when it is on screen.
  *
- *  Walks the ancestor chain, because a computed `display` is the element's OWN
- *  specified value: a `<button>` inside a `display:none` wrapper computes
- *  `inline-block` and looks perfectly clickable to a naive check (measured in
- *  happy-dom and true of real browsers too). An `[hidden]` attribute is read
- *  directly for the same reason — happy-dom does not apply the UA stylesheet
- *  rule that turns it into `display:none`. */
+ *  Walks the ancestor chain for `display`, because a computed `display` is the
+ *  element's OWN specified value: a `<button>` inside a `display:none` wrapper
+ *  computes `inline-block` and looks perfectly clickable to a naive check
+ *  (measured in happy-dom and true of real browsers too). `visibility` is the
+ *  opposite — it INHERITS and a child may override it: a `visibility:visible`
+ *  child of a `visibility:hidden` parent is painted and takes events in a
+ *  browser, so only the element's own computed value decides.
+ *
+ *  An `[hidden]` attribute is only the UA stylesheet's `display:none`, which
+ *  author CSS overrides (`<b hidden style="display:block">` is shown).
+ *  happy-dom does not apply that UA rule at all, so `authorDisplay` tells an
+ *  author `display` apart from the tag's default. */
 export function hiddenReason(el: AnyEl): string | null {
   if (String(el?.type ?? "").toLowerCase() === "hidden") {
     return `it is an <input type="hidden"> — it has no box and no keyboard focus`;
@@ -135,20 +141,54 @@ export function hiddenReason(el: AnyEl): string | null {
   const where = (n: AnyEl) =>
     n === el ? "" : ` (on the enclosing <${String(n.tagName).toLowerCase()}>)`;
   let node: AnyEl = el;
+  // Only an ELEMENT has a style: `ui.window` / the document target has none,
+  // and happy-dom's computed style for one throws on the property read.
+  let vis: string | undefined;
+  if (el?.nodeType === 1) vis = computed(el)?.visibility || undefined;
   for (let depth = 0; node && node.nodeType === 1 && depth < 200; depth++) {
-    if (node.hidden === true) {
-      return `it has the \`hidden\` attribute${where(node)}`;
-    }
     const cs = computed(node);
     const display = cs?.display ?? node.style?.display;
     if (display === "none") return `\`display: none\`${where(node)}`;
-    const vis = cs?.visibility ?? node.style?.visibility;
-    if (vis === "hidden" || vis === "collapse") {
-      return `\`visibility: ${vis}\`${where(node)}`;
+    if (node.hidden === true && !authorDisplay(w, node, display)) {
+      return `it has the \`hidden\` attribute${where(node)}`;
+    }
+    // No computed style: the nearest inline `visibility` is what inherits.
+    if (vis === undefined && node.style?.visibility) {
+      vis = node.style.visibility;
     }
     node = node.parentElement ?? node.parentNode;
   }
+  if (vis === "hidden" || vis === "collapse") return `\`visibility: ${vis}\``;
   return null;
+}
+
+/** Does author CSS give a `[hidden]` element a `display` (which beats the UA
+ *  `[hidden] { display: none }`)? A real engine already applied that rule, so a
+ *  computed value other than `none` IS the author's. happy-dom never applies
+ *  it, so there the computed value is compared with the tag's default, measured
+ *  in a scratch document so the app's own DOM (and its observers) never see
+ *  a probe element. An author value equal to that default is indistinguishable
+ *  from none and stays refused — the conservative side. */
+function authorDisplay(w: AnyEl, n: AnyEl, display: string | undefined) {
+  if (n.style?.display) return true;
+  if (!display) return false;
+  try {
+    const doc = n.ownerDocument.implementation.createHTMLDocument("");
+    const probe = (tag: string, hidden: boolean) => {
+      const e = doc.createElement(tag);
+      if (hidden) e.setAttribute("hidden", "");
+      doc.body.appendChild(e);
+      return String(w.getComputedStyle(e)?.display ?? "");
+    };
+    // A browser computes nothing for a window-less document (happy-dom does):
+    // a real engine, whose non-`none` value is therefore the author's.
+    if (probe("div", false) === "") return true;
+    if (probe(n.tagName, true) === "none") return true; // UA rule applied
+    const base = probe(n.tagName, false);
+    return base !== "" && display !== base;
+  } catch {
+    return false;
+  }
 }
 
 /** What a real user physically cannot do — decided ONCE, here.
@@ -1331,6 +1371,19 @@ export function triggerAction(
       triggerKeyUp(el, key ?? "Enter", mods);
       break;
     case "hover": {
+      // A pointer cannot rest on what is not rendered: a browser fires no
+      // mouseenter on a `display:none` element. Visibility ONLY — a disabled
+      // control still takes hover (its tooltip is the point). The same rule
+      // testUI's `hover()` applies, here so `am trigger` cannot be laxer.
+      const invisible = hiddenReason(el);
+      if (invisible) {
+        const tag = String(el?.tagName ?? "element").toLowerCase();
+        throw new Error(
+          `cannot hover <${tag}> — it is not visible: ${invisible}\n` +
+            `  a browser delivers no event to it; show it first, or assert ` +
+            `on the state that hides it`,
+        );
+      }
       // Chromium's order: pointerover, pointerenter, mouseover, mouseenter,
       // pointermove, mousemove. `*enter` does NOT bubble in a browser —
       // dispatching it with bubbles:true ran every ancestor's onMouseEnter as
@@ -1347,6 +1400,8 @@ export function triggerAction(
       break;
     }
     case "focus": {
+      // A browser focuses neither a disabled control nor an invisible one.
+      assertOperable(el, "focus");
       // Focus leaving an edited field commits it, as a click would.
       const prev = activeOf(el.ownerDocument);
       if (prev && prev !== el) fireChangeIfEdited(prev);

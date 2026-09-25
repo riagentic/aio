@@ -407,9 +407,10 @@ export function misplacedIconHint(misplaced: string, appDir: string): string {
 export async function writeDefaultIcon(
   base: string,
   appName: string,
+  id = appName,
 ): Promise<void> {
-  await Deno.writeTextFile(`${base}.svg`, appIconSvg(appName));
-  await Deno.writeFile(`${base}.png`, await appIconPng(appName, 512));
+  await Deno.writeTextFile(`${base}.svg`, appIconSvg(appName, 512, id));
+  await Deno.writeFile(`${base}.png`, await appIconPng(appName, 512, id));
 }
 
 /** The app's own `.ico`, beside its `icon.png`. */

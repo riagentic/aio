@@ -2,7 +2,7 @@
 // deno.json `"client"`.
 //
 // Field report (real Windows 11, 2026-09-17): an Electron app's `browser`
-// target (`mushradar-0.1.2-windows.exe`) booted as `client electron
+// target (`maps-0.1.2-windows.exe`) booted as `client electron
 // (deno.json)`, found no Electron beside it, and started a silent ~100 MB
 // download on the user's first double-click. Nothing was baked into the
 // binary, so the app's own deno.json decided.

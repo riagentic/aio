@@ -198,18 +198,25 @@ export function pad(s: string, w: number, align: "left" | "right" = "left") {
  *  under a shallow indent — which is how a paragraph is set. */
 export function wrap(text: string, w: number, firstW = w): string[] {
   const out: string[] = [];
-  for (const para of text.split("\n")) {
+  for (const raw of text.split("\n")) {
+    // A line's leading indent is layout the author wrote (an example command
+    // under a sentence, an aligned continuation) and is kept — on every line
+    // this one wraps into. Splitting on spaces used to make it an empty first
+    // "word" that the next word replaced, so the indent silently vanished.
+    const ind = /^ */.exec(raw)![0];
+    const para = raw.slice(ind.length);
     let line = "";
     for (const word of para.split(/ +/)) {
-      const budget = out.length === 0 && line !== "" ? firstW : w;
+      const budget = (out.length === 0 && line !== "" ? firstW : w) -
+        ind.length;
       if (!line) line = word;
       else if (width(line) + 1 + width(word) <= budget) line += " " + word;
       else {
-        out.push(line);
+        out.push(ind + line);
         line = word;
       }
     }
-    out.push(line);
+    out.push(line ? ind + line : line);
   }
   return out;
 }

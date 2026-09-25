@@ -1,6 +1,7 @@
 // VDOM event delegation — single root listener per event type instead of per-element.
 // Non-bubbling events (focus, blur, scroll, etc.) remain per-element.
 
+import { devHooks } from "./dev-hooks.ts";
 import { _notifyContained } from "./hook-error.ts";
 import { batch } from "../state/signal.ts";
 
@@ -152,6 +153,7 @@ export function _ensureDelegation(root: Element, evt: string): void {
             handler(e);
           } catch (err) {
             console.error("[aio] event handler error:", err);
+            devHooks.readOnlyHint?.(err);
           }
           // Respect stopPropagation — check if propagation was stopped
           if (e.cancelBubble) break;
@@ -255,6 +257,9 @@ export function _wrapHandler(
       batch(() => handler(e));
     } catch (err) {
       console.error(`[aio] event handler error (on${evt}):`, err);
+      // A write to state from a handler lands HERE, never on the global
+      // `error` event the read-only hint also listens to.
+      devHooks.readOnlyHint?.(err);
       // …and the harness, if one is listening. Contained is right for an app;
       // reported as a PASS is not right for a test.
       _notifyContained(`event handler (on${evt})`, err);

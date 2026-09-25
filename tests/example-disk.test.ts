@@ -178,3 +178,29 @@ Deno.test("example disk: the UI renders a scan and drills into a folder", async 
     await Deno.remove(root, { recursive: true });
   }
 });
+
+// ── `up()` works on every OS's paths ─────────────────────────────────────────
+//
+// `up()` used `/\/[^/]+\/?$/` — POSIX only. On Windows `s.path` is
+// `C:\Users\me`, the regex never matched, the parent equalled the path and
+// the ↑ Up button silently did nothing.
+Deno.test("example disk: parentOf climbs POSIX, drive and UNC paths", async () => {
+  const { parentOf } = await import("../examples/disk/src/cell.ts");
+  const cases: [string, string][] = [
+    ["/home/me/src", "/home/me"],
+    ["/home/me/", "/home"],
+    ["/home", "/"],
+    ["/", "/"],
+    ["C:\\Users\\me", "C:\\Users"],
+    ["C:\\Users\\me\\", "C:\\Users"],
+    ["C:\\Users", "C:\\"],
+    ["C:\\", "C:\\"],
+    ["C:/Users/me", "C:/Users"],
+    ["C:/Users", "C:/"],
+    ["\\\\srv\\share\\dir\\sub", "\\\\srv\\share\\dir"],
+    ["\\\\srv\\share\\dir", "\\\\srv\\share\\"],
+    ["\\\\srv\\share\\", "\\\\srv\\share\\"],
+  ];
+  assertEquals(cases.length, 13);
+  for (const [path, want] of cases) assertEquals(parentOf(path), want, path);
+});

@@ -167,6 +167,26 @@ Deno.test("cli-tool: a typo is refused with exit 2; no server is exit 1 on stder
   );
 });
 
+// `--json` is the example's contract for scripts, and `args()` keeps it for
+// its own refusals (a typo'd command or flag is `{"error"}` on stdout). The
+// example's OWN usage refusals — `add` with no text, `done` with no id —
+// called `fail()` without `json`, so a script got `error: …` on stderr and an
+// empty stdout that `JSON.parse` throws on, from the one mode promised to be
+// parseable. Checked before the server is needed: both refuse on the args.
+Deno.test("cli-tool: the example's own usage refusals honour --json", async () => {
+  const dead = `ws://127.0.0.1:${freePort()}/ws`;
+  // `--url` at a dead port: the refusal must come from the args, never the
+  // connection — so these run the same with or without a server.
+  const cases = [["add"], ["done"], ["done", "x"]];
+  assertEquals(cases.length, 3);
+  for (const c of cases) {
+    const r = await todo([...c, "--json", `--url=${dead}`]);
+    assertEquals(r.code, 2, `${c.join(" ")}: ${r.err}`);
+    const err = JSON.parse(r.out).error as string;
+    assertMatch(err, /^todo (add|done) </, c.join(" "));
+  }
+});
+
 Deno.test("cli-tool: serve + add/list/done/--json/--watch against the real server", async () => {
   const port = freePort();
   const url = `ws://127.0.0.1:${port}/ws`;

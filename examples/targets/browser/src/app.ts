@@ -1,4 +1,4 @@
-// ex-browser — `compile:browser` target example — zero-config: cells self-register on
+// ex-browser — `--targets=browser` example — zero-config: cells self-register on
 // import; appId/title/version infer from deno.json, baseDir from the entry.
 // Dev: deno task dev   Build: deno task compile
 import "./cell/counter.ts";

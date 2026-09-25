@@ -17,6 +17,7 @@ import {
   buildRegistry,
   destroyAll as _destroyAll,
   initAll as _initAll,
+  type RemoteLifecycle,
 } from "./cell-compose-registry.ts";
 
 enablePatches();
@@ -27,6 +28,52 @@ export type {
   CircuitBreakerConfig,
   ComposedCells,
 } from "./cell-compose-types.ts";
+
+/** A composition's circuit-breaker counter, for failures of its cells that
+ *  happen outside its reduce/execute — a `worker: true` cell's method runs in
+ *  another isolate. Not on `ComposedCells` (the public shape is frozen).
+ *  @internal */
+const _errorCounters = new WeakMap<object, (cell: string) => void>();
+
+/** Count one error against `cell` in `composed`'s breaker — see
+ *  `_errorCounters`. @internal */
+export function _countCellError(composed: object, cell: string): void {
+  _errorCounters.get(composed)?.(cell);
+}
+
+/** A composition's `health()[i].lastAction` recorder, for the method calls of
+ *  its cells that reduce in another isolate — a `worker: true` cell's action
+ *  never reaches this reduce, so its health row said `lastAction: undefined`
+ *  for the whole life of the app while the same cell in-isolate named its
+ *  last call. Not on `ComposedCells`, for the same reason as `_errorCounters`.
+ *  @internal */
+const _actionNoters = new WeakMap<
+  object,
+  (cell: string, type: string) => void
+>();
+
+/** Record `type` as `cell`'s last action in `composed` — see `_actionNoters`.
+ *  @internal */
+export function _noteCellAction(
+  composed: object,
+  cell: string,
+  type: string,
+): void {
+  _actionNoters.get(composed)?.(cell, type);
+}
+
+/** Per composition: hand the lifecycle of the cells another isolate runs to
+ *  that isolate — see `RemoteLifecycle`. Not on `ComposedCells`, for the same
+ *  reason as `_errorCounters`. @internal */
+const _remoteSetters = new WeakMap<object, (r: RemoteLifecycle) => void>();
+
+/** Bind `composed`'s remote lifecycle — see `_remoteSetters`. @internal */
+export function _setRemoteLifecycle(
+  composed: object,
+  remote: RemoteLifecycle,
+): void {
+  _remoteSetters.get(composed)?.(remote);
+}
 
 /** Compose an array of cells into a single dispatch/reduce/execute pipeline with dependency resolution. */
 export function composeCells(
@@ -106,13 +153,14 @@ export function composeCells(
   const cellLastAction = new Map<string, { type: string; at: number }>();
 
   // ── Registry (includes countCellError, setCbApp, clearCell) ──
-  const { registry, countCellError, setCbApp, clearCell } = buildRegistry(
-    cells,
-    disabledCells,
-    cellLastAction,
-    opts?.circuitBreaker,
-    _reportError,
-  );
+  const { registry, countCellError, setCbApp, clearCell, setRemote } =
+    buildRegistry(
+      cells,
+      disabledCells,
+      cellLastAction,
+      opts?.circuitBreaker,
+      _reportError,
+    );
 
   // ── Perf tracker ──
   let _lastBreakdown: ReduceBreakdown | undefined;
@@ -214,7 +262,7 @@ export function composeCells(
     _destroyAll(cells, app, _reportError, countCellError, clearCell, skip);
   };
 
-  return {
+  const composed: import("./cell-compose-types.ts").ComposedCells = {
     appId: opts?.appId ?? "",
     initialState,
     reduce: rootReduce,
@@ -230,4 +278,11 @@ export function composeCells(
     registry,
     ...(_perfCheck ? { lastBreakdown: () => _lastBreakdown } : {}),
   };
+  _errorCounters.set(composed, countCellError);
+  _remoteSetters.set(composed, setRemote);
+  _actionNoters.set(
+    composed,
+    (cell, type) => cellLastAction.set(cell, { type, at: Date.now() }),
+  );
+  return composed;
 }

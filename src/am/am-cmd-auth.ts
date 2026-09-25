@@ -15,7 +15,11 @@
 // out or seeding the first admin before the app ever boots.
 
 import { resolveAmAppId } from "./am-utils.ts";
-import { openUserStore, type UserStore } from "../server/auth-users.ts";
+import {
+  accountLockoutOf,
+  openUserStore,
+  type UserStore,
+} from "../server/auth-users.ts";
 import { openSessionStore, type SessionStore } from "../server/sessions.ts";
 import type { GlobalFlags } from "./am-types.ts";
 import { detectMode, out, outError, usage } from "./am-output.ts";
@@ -72,6 +76,59 @@ const generatePassword = _generatePassword;
 const flag = (args: string[], name: string): string | undefined =>
   args.find((a) => a.startsWith(`--${name}=`))?.slice(name.length + 3);
 
+/** Per subcommand: the `--k=v` fields it reads, and how many positionals. */
+const AUTH_SHAPE: Readonly<
+  Record<string, { fields: readonly string[]; positionals: number }>
+> = {
+  users: { fields: [], positionals: 0 },
+  create: { fields: ["password", "role", "email"], positionals: 1 },
+  passwd: { fields: ["password"], positionals: 1 },
+  role: { fields: [], positionals: 2 },
+  totp: { fields: [], positionals: 2 },
+  unlock: { fields: [], positionals: 1 },
+  verify: { fields: [], positionals: 1 },
+  revoke: { fields: [], positionals: 1 },
+  rm: { fields: [], positionals: 1 },
+};
+
+/** The refusal for arguments `am auth <sub>` would drop, or null.
+ *
+ *  Fields are read ONLY as `--name=value`, so `am auth create alice --role
+ *  admin` read no role — `--role` matched nothing and `admin` was a second
+ *  positional nobody reads — and created a plain user under a success line.
+ *  A mistyped field (`--emial=`) vanished the same way. An operator console
+ *  that seeds admins must not guess. Pure. @internal */
+export function _authArgsError(
+  sub: string,
+  rest: readonly string[],
+): string | null {
+  const shape = AUTH_SHAPE[sub];
+  if (!shape) return null; // the unknown-subcommand refusal says it better
+  for (const a of rest) {
+    if (!a.startsWith("--")) continue;
+    const name = a.slice(2).split("=", 1)[0]!;
+    if (!shape.fields.includes(name)) {
+      return `am auth ${sub}: unknown flag --${name}` + (shape.fields.length
+        ? ` — takes: ${
+          shape.fields.map((f) => `--${f}=…`).join(" ")
+        }`
+        : ` — it takes no flags`) +
+        `\n\n${USAGE}`;
+    }
+    if (!a.includes("=")) {
+      return `am auth ${sub}: --${name} takes its value with '=': ` +
+        `--${name}=<value>`;
+    }
+  }
+  const positional = rest.filter((a) => !a.startsWith("--"));
+  if (positional.length > shape.positionals) {
+    return `am auth ${sub}: unexpected argument ${
+      JSON.stringify(positional[shape.positionals])
+    } — it would have been ignored\n\n${USAGE}`;
+  }
+  return null;
+}
+
 export async function cmdAuth(
   args: string[],
   flags: GlobalFlags,
@@ -81,6 +138,11 @@ export async function cmdAuth(
   if (!sub) {
     usage(USAGE, flags);
     return;
+  }
+  const argsError = _authArgsError(sub, rest);
+  if (argsError) {
+    outError(argsError, mode);
+    Deno.exit(1);
   }
 
   // `--app` is a GLOBAL am flag; ignoring it here meant `am --app=other auth
@@ -122,12 +184,17 @@ export async function cmdAuth(
   try {
     switch (sub) {
       case "users": {
+        // `locked` is the column the rescue path starts from (who needs
+        // `am auth unlock`?) — ADDED; `email` keeps its 1.0.11 "—" in JSON
+        // too, because the surface is frozen and scripts compare it.
+        const lockout = accountLockoutOf(users);
         const rows = users.list().map((u) => ({
           id: u.id,
           role: u.role,
           email: u.email ?? "—",
           verified: u.verified,
           totp: u.totpEnabled,
+          locked: lockout?.locked(u.id) ?? false,
           created: new Date(u.createdAt).toISOString().slice(0, 10),
         }));
         if (mode === "json") out(rows, mode);
@@ -138,7 +205,7 @@ export async function cmdAuth(
               `${r.id.padEnd(24)} ${r.role.padEnd(8)} ${r.email.padEnd(28)} ` +
                 `${r.verified ? "✓verified" : "unverified"}${
                   r.totp ? " 2FA" : ""
-                }  ${r.created}`,
+                }${r.locked ? " locked" : ""}  ${r.created}`,
               mode,
             );
           }
@@ -270,11 +337,15 @@ export async function cmdAuth(
         // name that is not there. `revoke` is the incident command: a typo'd
         // id reporting `{"sessionsRevoked":0}` and exit 0 reads as "done"
         // while the real account's sessions are still live.
-        if (!users.get(id!)) {
+        const rec = users.get(id!);
+        if (!rec) {
           outError(`no such user: ${id}`, mode);
           Deno.exit(1);
         }
-        const n = sessionStore().revokeUser(id!);
+        // The account's STORED id: `get` normalizes (NFC + trim) and the
+        // session table matches exactly, so the raw spelling revoked nothing
+        // and still reported success.
+        const n = sessionStore().revokeUser(rec!.id);
         // Sessions are not the only thing that authenticates: a reset token or
         // a TOTP `pending` captured before the revocation would mint a BRAND
         // NEW session afterwards. "Revoke everything" has to mean everything.

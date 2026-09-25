@@ -78,6 +78,9 @@ export function parseCacheName(
   // regex that only knew the two-part form filed them as "not ours" and made
   // them permanently unreclaimable.
   //
+  // `-fused` is a runtime a self-contained app unpacked with its fuses off
+  // (FUSED_SUFFIX): the same Electron, so the same identity.
+  //
   // The OS half is a CLOSED LIST, not `[a-z0-9]+`, and that is load-bearing:
   // with a wildcard, `43.4.1-linux-x64` parses as version `43.4.1-linux` +
   // slug `x64` (the optional prerelease group happily eats `-linux`), so
@@ -86,7 +89,7 @@ export function parseCacheName(
   // tests/electron-cache-prune.test.ts, which is the one that exists to say
   // the shipped runtime is never offered.
   const m =
-    /^(\d+\.\d+\.\d+(?:-[0-9A-Za-z.]+)?)-(linux|win32|darwin|windows|macos)(?:-([a-z0-9]+))?$/
+    /^(\d+\.\d+\.\d+(?:-[0-9A-Za-z.]+)?)-(linux|win32|darwin|windows|macos)(?:-([a-z0-9]+))?(?:-fused)?$/
       .exec(name);
   if (!m) return { version: null, slug: null };
   return { version: m[1]!, slug: m[3] ? `${m[2]}-${m[3]}` : m[2]! };

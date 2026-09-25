@@ -230,8 +230,14 @@ function mergeLWWPerKey(
   let conflict = false;
 
   for (const key of allKeys) {
-    const inLocal = key in local;
-    const inRemote = key in remote;
+    // OWN keys only. `key in local` also answered true for every key the
+    // prototype carries, so a remote-only `constructor` / `toString` /
+    // `valueOf` key (a word-count or tag record) was "on both sides": merged
+    // against `Object.prototype.constructor`, reported as a conflict nobody
+    // made, and — when local was newer — the remote value was replaced by a
+    // native FUNCTION in the merged record.
+    const inLocal = Object.hasOwn(local, key);
+    const inRemote = Object.hasOwn(remote, key);
     if (inLocal && !inRemote) {
       merged[key] = local[key];
     } else if (!inLocal && inRemote) {

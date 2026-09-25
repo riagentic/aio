@@ -169,14 +169,15 @@ A listed action keeps its type, sequence, timestamp and the state **paths** it
 changed — "what did it touch" still works — while its payload and the
 before/after values it wrote become `"[redacted]"`. One list governs every sink;
 they cannot disagree. That includes the diagnostic **checkpoint**, which holds
-current state rather than actions (minus every `persist: "none"` cell, which is
-never in it) and so cannot redact per action: the whole slice of a listed cell
-is withheld (`"[redacted]"` in place of the state), and the file is created
-`0600` like the journal. An async method's write-set commit (`cell:__setMethod`)
-is covered by whichever pattern covers the method itself, so an exact
-`"vault:unlockWith"` protects both. A trailing `*` matches by prefix, because a
-list of individual method names is the list that goes stale the day someone adds
-another unlock method — and a stale redaction list fails open.
+current state rather than actions (minus every `persist: "none"` cell and every
+`persist`-excluded field, which are never in it) and so cannot redact per
+action: the whole slice of a listed cell is withheld (`"[redacted]"` in place of
+the state), and the file is created `0600` like the journal. An async method's
+write-set commit (`cell:__setMethod`) is covered by whichever pattern covers the
+method itself, so an exact `"vault:unlockWith"` protects both. A trailing `*`
+matches by prefix, because a list of individual method names is the list that
+goes stale the day someone adds another unlock method — and a stale redaction
+list fails open.
 
 **A redacted action cannot be replayed.** Its payload _is_ its arguments, and
 they were deliberately never written, so boot **skips** it and says so:
@@ -229,7 +230,8 @@ once. `am restore` has no such override — a running app holds the databases op
 and would write its in-memory pages straight back over the restored file. The
 data being replaced is **moved** to `data.replaced-<timestamp>` (`-2`, `-3`, …
 when that name is taken), never deleted, so restoring the wrong archive is
-undoable.
+undoable. It is a copy like a backup: a `persist: "none"` slice an older build
+left in it is scrubbed at the next boot, like every other copy.
 
 Nothing stops you doing it by hand — that's the point of one directory:
 
@@ -258,6 +260,33 @@ picked — `~/.<appId>-dev`, `/srv/aio/<appId>-dev`, `/opt/w-dev` — with the s
 another app or profile. `aio.run({ profiles: false })` refuses all of it.
 `am remove --data` lists profile homes and never removes them. See
 [profiles](../clients/app-manager.md#profiles-several-copies-of-one-app).
+
+An app that opens its own files BEFORE `aio.run()` (a vault, a migration, a
+health check) asks for the same home with `resolveHome()` from `aio/server` —
+the answer `aio.run()` will reach, profile applied, refused the same way, and
+the same inside a `worker: true` cell:
+
+```ts
+import { aio, cell } from "aio";
+import { resolveHome } from "aio/server";
+import { join } from "@std/path";
+
+const { home, profile } = resolveHome({ appId: "wallet" }); // + appDir, profiles, appFlags
+console.log(profile ? `profile ${profile}` : "everyday data");
+// Anything the app opens first lives under `home`, like aio's own files.
+await Deno.mkdir(join(home, "data", "vault"), { recursive: true });
+
+const wallet = cell("wallet", { state: { balance: 0 }, methods: {} });
+await aio.run({
+  appId: "wallet",
+  dbPath: join(home, "data", "state.db"),
+  cells: [wallet],
+});
+```
+
+Under a profile, an explicit `dbPath` (config or `--db-path`) outside the
+profile's home refuses to boot, naming both paths — it would open the everyday
+database under the profile's lock and logs.
 
 ```ts
 await aio.run({

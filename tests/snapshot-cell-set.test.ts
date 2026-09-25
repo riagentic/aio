@@ -99,13 +99,15 @@ Deno.test("am snapshot load: the WRONG app's file is refused, state untouched", 
       "a refused snapshot must not have touched the state",
     );
 
-    // `--force` is the operator saying they meant it — the same body, loaded.
+    // `--force` is the operator saying they meant it — the body loads the way
+    // a restart would read it: the cell this app does not declare is dropped
+    // (with a warning), never kept in live state only to vanish at restart.
     const forced = await postSnapshot(port, { nosuchcell: { x: 1 } }, true);
     assertEquals(forced.status, 200);
     await forced.body?.cancel();
     assertEquals(
       (app.getState() as Record<string, unknown>).nosuchcell,
-      { x: 1 },
+      undefined,
     );
   } finally {
     await app.close();

@@ -117,6 +117,7 @@ import { routeAmLogsToStderr } from "./am/am-log.ts";
 import {
   misplacedFlagError,
   PASSTHROUGH,
+  strayArgsWarning,
   unknownFlagError,
 } from "./am/am-flags.ts";
 
@@ -511,6 +512,8 @@ async function main(): Promise<void> {
   // stderr, so `--json` on stdout still parses.
   const misplaced = misplacedFlagError(cmd, Deno.args);
   if (misplaced) console.error(`warning: ${misplaced}`);
+  const stray = strayArgsWarning(cmd, args);
+  if (stray) console.error(`warning: ${stray}`);
   try {
     await handler(argsForHandler(args, cmd in PASSTHROUGH), flags);
   } catch (e) {

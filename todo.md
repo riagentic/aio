@@ -580,7 +580,10 @@ the order worth doing:
   enable at boot — but that carry landed in the SAME release the reporter
   measured black-on-dark on, so reading cannot tell whether it works or whether
   `_applyShellUi` never enables it. One APK boot settles it. The only report
-  item that could not be bucketed by reading.
+  item that could not be bucketed by reading. **Answered by reading after all
+  (2026-09-25): `_applyShellUi` never runs in a local APK** — its entry does not
+  import `app.ts`. See "APK: bake app.ts config into the bundle" under Android /
+  iOS.
 - **`am start --scratch`** (mdview A3): one flag for a distinct appId + private
   nested display + throwaway data home removed on stop.
 - **`am build` does not label an unproven target** (frustration F7 residual) —
@@ -1060,6 +1063,19 @@ defects fixed, see CHANGELOG). Still open, from the same audit:
       artifact dir ships in dist; simulator-only `.app`; icon alpha;
       `MARKETING_VERSION` with a suffix; no shared scheme; no UIScene.
 - [ ] A real phone (proof row `android (device)`), once one is attached.
+- [ ] **APK: bake app.ts config into the bundle** (answers the APK theme item
+      (§3) above, found 2026-09-25). A local APK never runs `app.ts`:
+      `makeEntryCode` (`src/build/client-bundle.ts`) imports `App.tsx` only, so
+      NOTHING passed to `aio.run({...})` reaches the phone —
+      `ui.theme`/`layout`/`lang`/`dir` (`_applyShellUi` never fires), the hooks,
+      `persist`, `cellDefaults`, `localFirst`, `circuitBreaker`, `perfBudget`.
+      Verified by bundling examples/counter for android: its inputs are
+      `App.tsx` + `cell.ts`, no `app.ts`. Today the build WARNS naming each
+      option the entry sets (`src/build/android-run-options.ts`, a source scan;
+      `tests/android-run-options-warning.test.ts`). The fix: a build-time config
+      probe that evaluates the entry's SERIALIZABLE options and bakes them into
+      the bundle for `runStandalone`, with the hooks still refused by name (they
+      are server code). Then shrink the warning to what is left.
 
 ### ~~Two browser-bundle gaps left after report 9 (2026-09-13)~~ — DONE
 

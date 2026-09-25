@@ -55,6 +55,18 @@ if (Deno.args[0] === "serve") {
     },
   });
 
+  // Usage first: a malformed command is refused on its args alone — naming
+  // the right spelling, with or without a server — and as `{"error"}` under
+  // `--json` like every other refusal (`args()` does the same for typos).
+  const usage = (msg: string) => fail(msg, { code: EXIT.usage, json: a.json });
+  if (a.command === "add" && !a.rest.join(" ").trim()) {
+    usage("todo add <text...>");
+  }
+  const doneId = Number(a.rest[0]);
+  if (a.command === "done" && !Number.isInteger(doneId)) {
+    usage("todo done <id>");
+  }
+
   // WHERE the server is. `serve` binds a FREE port unless one is named, so a
   // hard-coded ws://localhost:8000 was wrong on nearly every run: `todo list`
   // said "no server" against a server that was running. The lock the app
@@ -91,15 +103,11 @@ if (Deno.args[0] === "serve") {
   try {
     switch (a.command) {
       case "add":
-        if (!a.rest.length) fail("todo add <text...>", { code: EXIT.usage });
         await todos.add(a.rest.join(" "));
         break;
-      case "done": {
-        const id = Number(a.rest[0]);
-        if (!Number.isInteger(id)) fail("todo done <id>", { code: EXIT.usage });
-        await todos.done(id);
+      case "done":
+        await todos.done(doneId);
         break;
-      }
       case "clear":
         await todos.clear();
         break;

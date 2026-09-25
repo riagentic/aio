@@ -14,7 +14,7 @@ import { readDenoJsonSync } from "./server/deno-json.ts";
 import { basename, join } from "@std/path";
 import { resolveSdk } from "./build/build-helpers.ts";
 import { resolveEntry } from "./build/build-config.ts";
-import { androidApplicationId } from "./build/build-android.ts";
+import { apkApplicationId } from "./build/build-android.ts";
 import { soleArtifact } from "./build/build-manifest.ts";
 
 const dec = new TextDecoder();
@@ -180,10 +180,14 @@ async function main(): Promise<void> {
   if ("error" in found) fail(found.error);
   const apkPath = (found as { path: string }).path;
   const apk = basename(apkPath);
-  // THE applicationId rule (build-android.ts), applied to the APK label —
-  // which the build sets to the binary name. A re-derived regex here was a
-  // second decider waiting to drift.
-  const appId = androidApplicationId(apk.replace(/\.apk$/, ""));
+  // THE applicationId rule (build-android.ts), applied to the label the APK
+  // was built from — its placed name minus the version token — or to the
+  // explicit `android.applicationId`, exactly as the build did. A re-derived
+  // rule here was a second decider waiting to drift.
+  const android = readDenoJsonSync(Deno.cwd())?.config?.android as
+    | { applicationId?: string }
+    | undefined;
+  const appId = apkApplicationId(apk, android?.applicationId);
   if (!appId) fail(`APK name "${apk}" produces no valid applicationId`);
 
   // 3) Start the dev server (the app reaches it via localhost + adb reverse).
@@ -260,17 +264,28 @@ async function main(): Promise<void> {
     } catch { /* gone */ }
     fail("adb install failed (see above)");
   }
-  await run(adb, [
+  const start = await run(adb, [
     "shell",
     "am",
     "start",
     "-n",
     `${appId}/aio.app.MainActivity`,
   ]);
-  console.log(
-    `[dev:android] ✓ ${apk} launched on "${avd}" → ${devUrl}\n` +
-      "  edit your app and reload in the emulator; Ctrl-C to stop the server.",
-  );
+  // `am start` exits 0 on "Activity class does not exist" — its output says
+  // whether it launched. A launch that did not launch is reported, never ✓;
+  // the dev server still runs, so the app can be opened from the launcher.
+  if (start.code !== 0 || /Error/.test(start.out + start.err)) {
+    console.error(
+      `[dev:android] ⚠ installed ${apk}, but could not start ${appId}\n` +
+        `  ${(start.out + start.err).trim().split("\n").pop() ?? ""}\n` +
+        `  open it from the emulator's launcher → ${devUrl}; Ctrl-C to stop the server.`,
+    );
+  } else {
+    console.log(
+      `[dev:android] ✓ ${apk} launched on "${avd}" → ${devUrl}\n` +
+        "  edit your app and reload in the emulator; Ctrl-C to stop the server.",
+    );
+  }
 
   // 5) Keep the server in the foreground; tear it down on exit.
   const stop = () => {

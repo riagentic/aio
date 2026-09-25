@@ -44,6 +44,11 @@ const CELL_MODULE_NAMES: Record<string, string> = {
   degraded: `void degraded("x");`,
   degradedReport: `void degradedReport;`,
   serverImport: `void serverImport;`,
+  // A `db:` table is declared next to the cell whose rows it stores (the row
+  // type is the cell's), and the UI imports that module — so the schema
+  // builders ride into the browser graph (docs/persistence/sqlite.md).
+  table:
+    `void table({ id: pk(), a: text(), b: integer(), c: real(), d: ref("t") });`,
 };
 
 async function bundleRefusals(name: string, body: string): Promise<string[]> {
@@ -67,6 +72,8 @@ async function bundleRefusals(name: string, body: string): Promise<string[]> {
       ? ", sleep"
       : name === "self"
       ? ", schedule"
+      : name === "table"
+      ? ", pk, text, integer, real, ref"
       : "";
     await Deno.writeTextFile(
       `${dir}/cell.ts`,

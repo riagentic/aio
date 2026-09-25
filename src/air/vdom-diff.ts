@@ -36,6 +36,7 @@ import {
   removeDom,
 } from "./vdom-remove.ts";
 import { createDom } from "./vdom-render.ts";
+import { _detachReused } from "./vdom-reuse.ts";
 import { _getActiveDelegationRoot, _setDelegationRoot } from "./vdom-events.ts";
 import {
   _devWarn,
@@ -403,8 +404,13 @@ function _liveRegionFirst(
   ov: VNode,
   oldDom: Node | null,
 ): Node | null {
-  const own = getDom(ov);
-  if (own && isChildOf(own, parent)) return own;
+  // The children FIRST, even when the container's own copy is still attached:
+  // a copy can be attached and still wrong. A child component whose keyed
+  // output reorders on its own (`<>{"x"}<em key/></>` → `<><em key/>{"x"}</>`)
+  // MOVES the text node the enclosing fragment holds as its first — the node
+  // is in `parent`, just no longer first, so the region was read as starting
+  // one node late and a sibling this pass added landed past the region's end
+  // (after the footer that follows it).
   if (ov._rendered === undefined) {
     for (const child of ov.children) {
       if (_domNodeCount(child) === 0) continue;
@@ -413,6 +419,8 @@ function _liveRegionFirst(
       break;
     }
   }
+  const own = getDom(ov);
+  if (own && isChildOf(own, parent)) return own;
   return own ?? oldDom;
 }
 
@@ -473,6 +481,9 @@ function _diffComponent(
   // later returned an element the reconciler appended it to the parent
   // instead of putting it back where it was written (R-10).
   if (rendered == null) rendered = nullSlot();
+  // A vnode this output MOVES while it is still mounted where the old output
+  // put it gets a fresh copy first — see vdom-reuse.ts.
+  rendered = _detachReused(rendered, ov._rendered);
   nv._rendered = rendered;
   try {
     ctx.hooks?.afterComponent(nv, rendered, hookState);
@@ -514,9 +525,18 @@ function _mountPortalContent(target: Node, vnode: VNode, ctx: RenderCtx): void {
   const anchor = ctx.doc.createComment("");
   target.appendChild(anchor);
   vnode._anchor = anchor;
-  for (const child of vnode.children) {
-    const dom = createDom(child, ctx, false, target);
-    if (dom) target.appendChild(dom);
+  // Built in front of an END marker so a nested same-target Portal's region
+  // lands after this one, never inside it — see the Portal branch of
+  // `createDom`.
+  const end = ctx.doc.createComment("");
+  target.appendChild(end);
+  try {
+    for (const child of vnode.children) {
+      const dom = createDom(child, ctx, false, target);
+      if (dom) target.insertBefore(dom, end);
+    }
+  } finally {
+    if (end.parentNode === target) target.removeChild(end);
   }
 }
 
@@ -580,7 +600,24 @@ function _diffPortal(nv: VNode, ov: VNode, ctx: RenderCtx): void {
       const anchor = nv._anchor && isChildOf(nv._anchor, target)
         ? nv._anchor
         : null;
-      _diffChildren(target, nv.children, ov.children, ctx, false, anchor);
+      // Close the region with a temporary END marker for the length of the
+      // diff: a nested same-target Portal this diff creates appends to the
+      // target, and without the marker a child this diff adds AFTER it (the
+      // region's end is "the end of the target") landed behind the nested
+      // region — the interleave the Portal branch of `createDom` describes.
+      let end: Comment | null = null;
+      if (anchor) {
+        let total = 0;
+        for (const c of ov.children) total += _domNodeCount(c);
+        const last = _advance(anchor, total);
+        end = ctx.doc.createComment("");
+        target.insertBefore(end, last ? last.nextSibling : null);
+      }
+      try {
+        _diffChildren(target, nv.children, ov.children, ctx, false, anchor);
+      } finally {
+        if (end && end.parentNode === target) target.removeChild(end);
+      }
     }
   } finally {
     _setDelegationRoot(prevDelegation);

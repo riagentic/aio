@@ -31,3 +31,22 @@ if (!target.endsWith(".aio-test-home")) {
 await Deno.remove(target, { recursive: true }).catch((e) => {
   if (!(e instanceof Deno.errors.NotFound)) throw e;
 });
+
+// `--stores=<dir>`: test:serial's sandboxed per-user stores. They live under
+// `$INIT_CWD` like the app home (the env points there), so they are cleaned
+// here, by the same absolute path — never by a repo-relative `rm` that misses
+// them when the task runs from a subdirectory. Same guard: only that path.
+const storesArg = Deno.args.find((a) => a.startsWith("--stores="));
+if (storesArg) {
+  const stores = resolve(storesArg.slice("--stores=".length));
+  if (!stores.endsWith(".aio-test-shards/serial/stores")) {
+    console.error(
+      `reset-test-home: refusing to delete ${stores} — ` +
+        `--stores must end with .aio-test-shards/serial/stores`,
+    );
+    Deno.exit(1);
+  }
+  await Deno.remove(stores, { recursive: true }).catch((e) => {
+    if (!(e instanceof Deno.errors.NotFound)) throw e;
+  });
+}

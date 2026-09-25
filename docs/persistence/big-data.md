@@ -174,17 +174,20 @@ const app: AioApp = await aio.run({
   cells: [files],
   routes: {
     "/upload/:name": route(async (ctx) => {
-      if (!ctx.req.body) {
-        return ctx.json({ error: "empty body" }, { status: 400 });
-      }
       // request.body → blobs.put — hashed and spooled chunk by chunk.
-      const info = await app.blobs!.put(ctx.req.body, {
+      // (Deno hands even a bodyless POST a stream, so `!ctx.req.body` never
+      // fires: an empty upload is caught by its SIZE, after the put.)
+      const info = await app.blobs!.put(ctx.req.body ?? new Uint8Array(), {
         name: ctx.params.name,
       });
+      if (info.size === 0) {
+        await app.blobs!.delete(info.id);
+        return ctx.json({ error: "empty body" }, { status: 400 });
+      }
       // Metadata into state (tiny); bytes stay on disk.
       await files.record({
         id: info.id,
-        name: ctx.params.name,
+        name: ctx.params.name ?? info.id,
         size: info.size,
       });
       // The client renders it via the immutable, Range-capable blob URL.

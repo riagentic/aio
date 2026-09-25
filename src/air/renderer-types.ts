@@ -49,6 +49,12 @@ export interface ComponentInstance {
   _ctx: RenderCtx;
   /** Root state reference for per-mount pending queue isolation. */
   _root: RootState;
+  /** The event-delegation root this component's elements were wired under —
+   *  a Portal's TARGET inside a portal, not the mount root. A self re-render
+   *  runs with the mount root active, and handlers it re-registered were
+   *  owned by a root that is not an ancestor of the portal's content, so
+   *  every click inside a stateful modal died after its first re-render. */
+  _delegationRoot?: Element | null;
   /** Callbacks to run after first mount. */
   /** A callback may RETURN a cleanup — `_flushMounts` registers it. The
    *  declared `void` return is TypeScript's own rule: a `() => void` callback

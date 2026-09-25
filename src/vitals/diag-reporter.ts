@@ -38,6 +38,8 @@ export type ServerDiagReporterConfig = {
 export function createServerDiagReporter(config: ServerDiagReporterConfig) {
   const lastStatus = new Map<string, DiagEvent["kind"]>();
   const lastConsoleEmit = new Map<string, number>();
+  // Transport disconnects not yet matched by a recovery — one per client.
+  let openDisconnects = 0;
 
   // Named `emitLines`, not `log`: the local emitter used to be called `log`
   // and now the framework logger is in scope under that name — one of them
@@ -59,10 +61,10 @@ export function createServerDiagReporter(config: ServerDiagReporterConfig) {
   ): DiagEvent["kind"] | null {
     // Priority (server): disconnect > stale > slow > recovered
     // (freeze is client-side only — not handled here)
-    const frozenClients = transport.clients.filter((c) =>
-      c.status === "frozen"
-    );
-    if (alert.layer === "transport" && frozenClients.length > 0) {
+    // Keyed on the ALERT's own status. Keyed on "is any client frozen", a
+    // recovery of client B while client A stayed frozen printed a second
+    // DISCONNECTED line — the moment a client came back read as one leaving.
+    if (alert.layer === "transport" && alert.status === "frozen") {
       return "disconnect";
     }
 
@@ -100,7 +102,8 @@ export function createServerDiagReporter(config: ServerDiagReporterConfig) {
     kind: DiagEvent["kind"],
     alert: VitalAlert,
     loop: LoopSnapshot,
-    transport: TransportSnapshot,
+    _transport: TransportSnapshot,
+    unit: string,
   ): DiagEvent {
     const detail: DiagEvent["detail"] = {};
     const hint = alert.hint;
@@ -114,8 +117,11 @@ export function createServerDiagReporter(config: ServerDiagReporterConfig) {
       detail.drainRate = loop.drainRate;
       detail.hint = hint?.suggestion;
     } else if (kind === "disconnect") {
-      const frozen = transport.clients.find((c) => c.status === "frozen");
-      detail.frozenFor = frozen?.frozenFor;
+      // The alert's own measurement — the gap of the client that just froze.
+      // The first frozen row in the snapshot is whichever froze EARLIEST, so
+      // with two clients down the new one was reported as unreachable for the
+      // old one's minute.
+      detail.frozenFor = alert.measured;
       detail.hint = hint?.suggestion ??
         "client unreachable — check network or process";
     } else if (kind === "stale") {
@@ -128,9 +134,14 @@ export function createServerDiagReporter(config: ServerDiagReporterConfig) {
     }
 
     const summaries: Record<string, string> = {
-      slow: `SLOW DISPATCH — ${detail.trigger ?? "unknown"} took ${
-        detail.reduceMs ?? "?"
-      }ms (budget: ${alert.threshold}ms)`,
+      // The loop layer has two drivers. The queue driver's numbers are an
+      // ACTION COUNT against the queue limit — printed as "took <last
+      // reduce>ms (budget: 50ms)", a queue flood read as a fast dispatch.
+      slow: unit === "actions"
+        ? `SLOW DISPATCH — queue ${alert.measured} actions deep (limit: ${alert.threshold} actions)`
+        : `SLOW DISPATCH — ${detail.trigger ?? "unknown"} took ${
+          detail.reduceMs ?? "?"
+        }ms (budget: ${alert.threshold}ms)`,
       disconnect: `DISCONNECTED — client unreachable for ${
         ((detail.frozenFor ?? 0) / 1000).toFixed(1)
       }s`,
@@ -154,7 +165,9 @@ export function createServerDiagReporter(config: ServerDiagReporterConfig) {
   }
 
   return {
-    onAlert(alert: VitalAlert) {
+    /** `unit` — what `alert.measured`/`threshold` count: `"ms"`, or
+     *  `"actions"` for the loop layer's queue driver. */
+    onAlert(alert: VitalAlert, unit = "ms") {
       const loop = config.getLoopSnapshot();
       const transport = config.getTransportSnapshot();
       const kind = mapAlertToKind(alert, loop, transport);
@@ -164,13 +177,23 @@ export function createServerDiagReporter(config: ServerDiagReporterConfig) {
       const key = alert.layer;
       const prevKind = lastStatus.get(key);
       if (kind === "recovered") {
-        if (!prevKind || prevKind === "recovered") return; // no prior degradation
+        // A transport recovery is per CLIENT, so it is counted against the
+        // disconnects still open, not deduped per LAYER: per layer swallowed
+        // the second of two clients coming back, and none at all swallowed
+        // nothing — a recovery with no disconnect before it would print.
+        if (alert.layer === "transport") {
+          if (openDisconnects === 0) return; // no prior degradation
+          openDisconnects--;
+        } else if (!prevKind || prevKind === "recovered") {
+          return; // no prior degradation
+        }
         lastStatus.set(key, "recovered");
       } else {
+        if (kind === "disconnect") openDisconnects++;
         lastStatus.set(key, kind);
       }
 
-      const event = buildEvent(kind, alert, loop, transport);
+      const event = buildEvent(kind, alert, loop, transport, unit);
 
       // Always fire hook (no throttling). Guarded: this runs from a timer,
       // so a throwing user hook would otherwise take the process down.

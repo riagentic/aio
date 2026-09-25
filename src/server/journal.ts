@@ -62,6 +62,127 @@ function redactsWorkerPatch(
   return cell !== undefined && redact.redactsCell(cell);
 }
 
+/** The cell whose call a journal line records — a worker batch's payload
+ *  cell, else the `cell:` prefix of the write-set's origin or of the type;
+ *  `""` for a framework line that names none. What decides whether a line is
+ *  a `persist: "none"` cell's ({@linkcode JournalEntry.unstored}) — at the
+ *  append, in aio.ts, and in the copy scrub. Pure. */
+export function unstoredCellOf(
+  type: string,
+  payload: unknown,
+  origin?: string,
+): string {
+  const worker = workerPatchCell(type, payload);
+  if (worker !== undefined) return worker;
+  const of = origin ?? type;
+  const i = of.indexOf(":");
+  return i > 0 ? of.slice(0, i) : "";
+}
+
+/** A journal file's text with every `persist: "none"` cell's value taken
+ *  out — what the copy scrub (aio-boot.ts `scrubStoreCopies`) writes over a
+ *  journal an `am backup` / `am restore` / a set-aside kept. A call on such a
+ *  cell becomes the line this build writes ({@linkcode JournalEntry.unstored});
+ *  a time-travel / reaction line loses that cell's slice; a torn line naming
+ *  the cell keeps only its seq(s) — it was never replayable, and its bytes
+ *  may be the secret. Every other line is kept byte for byte. `cells` names
+ *  what was taken out (empty ⇒ nothing to write).
+ *
+ *  EXCEPT a call some cell `listensTo` (`listened`, full action types): a
+ *  line an older build wrote is the ONLY record of the reaction it caused on
+ *  a persisted cell (this build journals that reaction as data beside the
+ *  call; older ones did not), and a reaction cannot be re-derived without
+ *  the argument it may read. Scrubbing it lost an acked write the day the
+ *  copy was restored. It is kept, and named in `kept` (cell → the call
+ *  types) for the caller to SAY. Pure. */
+export function scrubUnstoredLines(
+  text: string,
+  none: ReadonlySet<string>,
+  listened: ReadonlySet<string> = new Set(),
+): { text: string; cells: string[]; kept: Record<string, string[]> } {
+  const gone = new Set<string>();
+  const kept: Record<string, Set<string>> = {};
+  const scrubEntry = (e: JournalEntry): boolean => {
+    if (e.type === TT_RESTORE_TYPE) {
+      const tt = e.payload as Partial<TimeTravelRestore> | undefined;
+      let hit = false;
+      for (const k of ["cells", "keyframes", "deltas"] as const) {
+        const m = tt?.[k] as Record<string, unknown> | undefined;
+        if (!m || typeof m !== "object") continue;
+        for (const c of Object.keys(m)) {
+          if (!none.has(c)) continue;
+          delete m[c];
+          gone.add(c);
+          hit = true;
+        }
+      }
+      return hit;
+    }
+    if (e.type === SYNC_REACTION_TYPE) {
+      const c = (e.payload as { cell?: unknown } | undefined)?.cell;
+      if (typeof c !== "string" || !none.has(c)) return false;
+      e.payload = REDACTED;
+      e.unstored = true;
+      gone.add(c);
+      return true;
+    }
+    const c = unstoredCellOf(e.type, e.payload, e.origin);
+    if (!none.has(c)) return false;
+    if (e.payload === REDACTED && e.unstored === true) return false;
+    if (listened.has(e.type)) {
+      (kept[c] ??= new Set()).add(e.type);
+      return false;
+    }
+    e.payload = REDACTED;
+    e.unstored = true;
+    delete e.redacted;
+    gone.add(c);
+    return true;
+  };
+  const names = [...none].map((c) => c.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"));
+  const tornHit = names.length === 0
+    ? null
+    : new RegExp(`"(?:${names.join("|")})"?:|"cell":"(?:${names.join("|")})"`);
+  let changed = false;
+  const out = text.split("\n").map((line) => {
+    if (!line.trim()) return line;
+    let e: JournalEntry;
+    try {
+      e = JSON.parse(line) as JournalEntry;
+    } catch {
+      if (!tornHit?.test(line)) return line;
+      // Still torn (no closing brace), still carrying its seqs — so a reader
+      // counts it as the lost entry it is and never re-issues its seq.
+      for (const c of none) if (line.includes(`"${c}`)) gone.add(c);
+      changed = true;
+      const seqs = [
+        ...new Set([...line.matchAll(/"seq":(\d+)/g)].map((x) => x[1])),
+      ];
+      return `{${seqs.map((s) => `"seq":${s}`).join(",")}`;
+    }
+    if (typeof e?.seq !== "number" || typeof e.type !== "string") return line;
+    let hit: boolean;
+    if (e.type === BATCH_TYPE) {
+      const inner = (e as { entries?: unknown }).entries;
+      hit = Array.isArray(inner) &&
+        inner.map((x) =>
+          x !== null && typeof x === "object" &&
+          typeof (x as JournalEntry).type === "string" &&
+          scrubEntry(x as JournalEntry)
+        ).some(Boolean);
+    } else hit = scrubEntry(e);
+    if (!hit) return line;
+    changed = true;
+    return JSON.stringify(e);
+  });
+  const keptOut = Object.fromEntries(
+    Object.entries(kept).map(([c, t]) => [c, [...t].sort()]),
+  );
+  return changed
+    ? { text: out.join("\n"), cells: [...gone].sort(), kept: keptOut }
+    : { text, cells: [], kept: keptOut };
+}
+
 /** The store row that holds a SYNC cell's journal watermark.
  *
  *  A `sync: true` cell is not in the KV snapshot — its durable record is the
@@ -472,6 +593,18 @@ export type JournalEntry = {
    *  payload already names the cells, each taken past its own watermark — so
    *  a build that predates the field reads the line exactly as before. */
   only?: string[];
+  /** Set when the entry is a call on a `persist: "none"` cell: its payload
+   *  (the arguments — for such a cell, its state) is withheld, as the
+   *  store withholds the state (see {@linkcode unstoredCellOf}).
+   *
+   *  Not a refusal like `redacted`: that cell's state is never restored, so
+   *  its own calls have nothing to re-apply — replaying them put the value
+   *  back in memory after a crash, which a clean restart never does — and
+   *  what a call did to PERSISTED cells is journalled beside it as data
+   *  (aio.ts `_journalReaction`). Replay skips it without a word. A build
+   *  that predates the field sees the `"[redacted]"` payload and skips it
+   *  as redacted — the safe direction. */
+  unstored?: true;
 };
 
 export type Journal = {
@@ -537,6 +670,10 @@ export type Journal = {
   rebase(): void;
   /** Where the journal lives. */
   readonly path: string;
+  /** Is `cell` one whose calls this journal withholds (`persist: "none"`,
+   *  see {@linkcode JournalEntry.unstored})? Optional so a journal double in a
+   *  test stays valid. */
+  unstored?(cell: string): boolean;
   /** The highest seq appended so far. */
   currentSeq(): number;
   /** {@linkcode Journal.currentSeq}, taken by a save in the synchronous turn
@@ -701,6 +838,9 @@ export function replayJournal<S, A>(
     // again re-ran it on a state that holds it (an idempotency guard threw,
     // "COULD NOT be replayed") and re-applied its reactions.
     if (e.fmt === undefined && e.seq < retiredBelow) continue;
+    // A `persist: "none"` cell's call: nothing to restore, by design (see
+    // `JournalEntry.unstored`) — not a loss, so not in `skipped`.
+    if (e.unstored === true) continue;
     if (isUnreplayable(e)) {
       skipped.push({ seq: e.seq, type: e.type, reason: "redacted" });
       continue;
@@ -1042,9 +1182,13 @@ export function createJournal(
      *  Built once at boot (`makeRedactor`) and shared with the timeline and
      *  action log, so the three sinks cannot disagree about what is secret. */
     redact?: Redactor;
+    /** The `persist: "none"` cells: a call on one is written with its
+     *  payload withheld ({@linkcode JournalEntry.unstored}). */
+    unstored?: ReadonlySet<string>;
   } = {},
 ): Journal {
   const redacted = opts.redact ?? noRedaction;
+  const unstoredCells = opts.unstored ?? new Set<string>();
   const wmPath = path + ".wm";
   // The tmp files a crash between `replaceFileSync`'s write and rename left
   // (see `sweepStaleTmps`): the journal's, its base's, its watermark's —
@@ -1298,7 +1442,13 @@ export function createJournal(
       // are written (aio.ts: a redacted cell's state is never put in them).
       const stateLine = action.type === TT_RESTORE_TYPE ||
         action.type === SYNC_REACTION_TYPE;
-      const hide = !stateLine &&
+      // A call on a `persist: "none"` cell: its arguments are its state, and
+      // the journal must not hold what the store refuses to.
+      const unstored = !stateLine &&
+        unstoredCells.has(
+          unstoredCellOf(action.type, action.payload, action.origin),
+        );
+      const hide = !stateLine && !unstored &&
         (isRedactedAction(redacted, action.type, action.origin) ||
           redactsWorkerPatch(redacted, action.type, action.payload));
       // One pass that both serializes the line and names every value JSON
@@ -1309,7 +1459,7 @@ export function createJournal(
         seq: s,
         fmt: JOURNAL_FORMAT,
         type: action.type,
-        payload: hide ? REDACTED : action.payload,
+        payload: hide || unstored ? REDACTED : action.payload,
         ts,
         ...(action.origin !== undefined ? { origin: action.origin } : {}),
         // The caller, so replay re-reduces under the identity the action
@@ -1329,6 +1479,7 @@ export function createJournal(
         // the config that redacted it (a journal written under
         // `redactActions` is still there after the option is removed).
         ...(hide ? { redacted: true as const } : {}),
+        ...(unstored ? { unstored: true as const } : {}),
       });
       // A time-travel line is STATE, not call arguments: the persist path
       // already names every value in it that JSON would change, and the
@@ -1527,6 +1678,7 @@ export function createJournal(
     },
     rebase: () => recordBase(),
     path,
+    unstored: (cell) => unstoredCells.has(cell),
     currentSeq: () => seq,
     capture(cell) {
       for (const fn of captureListeners) fn(cell);

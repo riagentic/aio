@@ -109,11 +109,153 @@ Deno.test("it renders a plain <webview>, so Electron's own API stays reachable",
   assertEquals(typeof v.props.use, "function", "it is applied imperatively");
 });
 
-Deno.test("keepAlive is what decides whether the guest survives an unmount", () => {
-  // The prop is the whole contract, so the shape is pinned: with it the
-  // element is parked, without it the default (destroyed) is unchanged.
-  const withKeep = Browser({ src: "https://a.test/", keepAlive: "reader" });
-  const without = Browser({ src: "https://a.test/" });
-  assertEquals(typeof withKeep.props.use, "function");
-  assertEquals(typeof without.props.use, "function");
+// ── Mounted, through the real renderer ──────────────────────────────────────
+// The rules above hold for one call; these hold for a component that
+// RE-RENDERS, which every app's does. The mount used to be a closure written
+// inside `Browser`, so each render handed the renderer a new action and it
+// ran the teardown and the mount again: with `keepAlive` a guest was torn
+// down on the first re-render — the docstring's own `onNavigate` → state →
+// re-render example.
+
+import { h } from "../src/air/vdom.ts";
+import { signal } from "../src/air/aio-renderer.ts";
+import { testUI } from "../src/testing/ui-test.ts";
+import { _clearKept } from "../src/ui/browser.ts";
+
+async function mountedBrowser() {
+  const url = signal("https://a.test/");
+  const show = signal(true);
+  const tick = signal(0);
+  const navs: string[] = [];
+  const refs: (Element | null)[] = [];
+  const ui = await testUI(() =>
+    h(
+      "div",
+      { id: "host" },
+      `tick ${tick.value}`,
+      show.value
+        ? h(Browser, {
+          src: url.value,
+          keepAlive: "reader",
+          onNavigate: (u: string) => navs.push(u),
+          ref: (el: Element | null) => refs.push(el),
+        })
+        : null,
+      // After the guest, so a removal that throws leaves it stale.
+      h("span", { id: "after" }, `after ${tick.value}`),
+    )
+  );
+  const guests = () => [...ui.document.querySelectorAll("webview")];
+  const parent = (el: Element) => el.parentElement?.id;
+  return { ui, url, show, tick, guests, parent, refs };
+}
+
+Deno.test("keepAlive: a re-render leaves the guest on the page, and a src change navigates it", async () => {
+  const { ui, url, tick, guests, parent, refs } = await mountedBrowser();
+  try {
+    await ui.settle();
+    const first = guests();
+    assertEquals(first.length, 1);
+    assertEquals(parent(first[0]!), "host");
+    tick.set(1);
+    await ui.settle();
+    assertEquals(guests().length, 1);
+    assertEquals(
+      parent(guests()[0]!),
+      "host",
+      "an unrelated re-render must not park the guest",
+    );
+    url.set("https://b.test/");
+    await ui.settle();
+    assertEquals(guests()[0], first[0], "the same guest, not a new one");
+    assertEquals(parent(guests()[0]!), "host");
+    assertEquals(guests()[0]!.getAttribute("src"), "https://b.test/");
+    // Mounted ONCE: a re-render that tore the guest down and mounted it again
+    // tells `ref` null and then the element, every time.
+    assertEquals(refs, [first[0]]);
+  } finally {
+    await ui.dispose();
+    _clearKept();
+  }
+});
+
+// `keepAlive` used to MOVE the guest into a display:none holder and back.
+// Electron destroys a `<webview>` on any move (real Electron:
+// tests/electron-browser-keepalive-e2e.test.ts), so every restore showed a
+// dead, blank element. It now keeps where the guest WAS, and the next mount
+// under the id opens there.
+async function remountable(keepAlive: string | undefined) {
+  const url = signal("https://a.test/");
+  const show = signal(true);
+  const tick = signal(0);
+  const ui = await testUI(() =>
+    h(
+      "div",
+      { id: "host", "data-tick": tick.value },
+      show.value ? h(Browser, { src: url.value, keepAlive }) : null,
+    )
+  );
+  const guests = () => [...ui.document.querySelectorAll("webview")];
+  return { ui, url, show, tick, guests };
+}
+
+/** The guest browsed away from `src` on its own (a link click). */
+const browse = (el: Element, to: string) =>
+  Object.assign(el, { getURL: () => to });
+
+Deno.test("keepAlive: a remount opens the page the last guest was on, and nothing is moved or hidden", async () => {
+  const { ui, show, tick, guests } = await remountable("reader");
+  try {
+    await ui.settle();
+    assertEquals(guests().length, 1);
+    browse(guests()[0]!, "https://a.test/page2");
+    show.set(false);
+    await ui.settle();
+    assertEquals(guests().length, 0, "the element leaves with its render");
+    show.set(true);
+    await ui.settle();
+    assertEquals(guests().length, 1);
+    assertEquals(guests()[0]!.parentElement?.id, "host");
+    assertEquals(guests()[0]!.getAttribute("src"), "https://a.test/page2");
+    // The unchanged prop on the next render does not send it back to `src`.
+    tick.set(1);
+    await ui.settle();
+    assertEquals(guests()[0]!.getAttribute("src"), "https://a.test/page2");
+  } finally {
+    await ui.dispose();
+    _clearKept();
+  }
+});
+
+Deno.test("keepAlive: a src changed while unmounted wins over the kept page", async () => {
+  const { ui, url, show, guests } = await remountable("reader");
+  try {
+    await ui.settle();
+    browse(guests()[0]!, "https://a.test/page2");
+    show.set(false);
+    await ui.settle();
+    url.set("https://b.test/");
+    show.set(true);
+    await ui.settle();
+    assertEquals(guests()[0]!.getAttribute("src"), "https://b.test/");
+  } finally {
+    await ui.dispose();
+    _clearKept();
+  }
+});
+
+Deno.test("without keepAlive a remount starts over at src", async () => {
+  const { ui, show, guests } = await remountable(undefined);
+  try {
+    await ui.settle();
+    browse(guests()[0]!, "https://a.test/page2");
+    show.set(false);
+    await ui.settle();
+    show.set(true);
+    await ui.settle();
+    assertEquals(guests()[0]!.getAttribute("src"), "https://a.test/");
+  } finally {
+    await ui.dispose();
+    _clearKept();
+  }
 });

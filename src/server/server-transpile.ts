@@ -5,6 +5,7 @@ import {
   ESBUILD_SPEC,
   stopEsbuildService,
 } from "../build/esbuild-shared.ts";
+import { importOutsideApp } from "./outside-app.ts";
 
 export type EsbuildMessage = {
   text: string;
@@ -33,7 +34,7 @@ async function getTransform() {
     // or compiling an app. Prevents `deno install am` from pulling ~10MB of
     // esbuild it doesn't use (and the ETXTBSY it hits under concurrent esbuild).
     const esbuildPkg = ESBUILD_SPEC; // shared pin (build/esbuild-shared.ts)
-    const mod = await import(esbuildPkg);
+    const mod = await importOutsideApp(esbuildPkg);
     transformFn = mod.transform as (
       input: string,
       opts: Record<string, unknown>,
@@ -153,7 +154,7 @@ export function fmtEsbuildError(err: unknown, file: string): string {
   return String(err);
 }
 
-// Converts .ts/.tsx to browser-ready JS via esbuild (cached, invalidated on file change)
+// Converts .ts/.tsx/.jsx to browser-ready JS via esbuild (cached, invalidated on file change)
 export async function transpile(
   source: string,
   filepath: string,
@@ -167,7 +168,13 @@ export async function transpile(
     transpileCache.set(npath, cached);
     return cached.code;
   }
-  const loader = filepath.endsWith(".tsx") ? "tsx" as const : "ts" as const;
+  // By extension, as the bundler picks it: `.jsx` is JSX without types.
+  const lower = filepath.toLowerCase();
+  const loader = lower.endsWith(".tsx")
+    ? "tsx" as const
+    : lower.endsWith(".jsx")
+    ? "jsx" as const
+    : "ts" as const;
   const jsxOpts = ESBUILD_JSX; // shared dev==prod JSX config
   let result: TransformResult;
   try {

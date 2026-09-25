@@ -243,7 +243,7 @@ export function _writeProp(
       }
       for (const [sk, sv] of Object.entries(newStyle)) {
         if (oldStyle[sk] !== sv) {
-          style.setProperty(_camelToKebab(sk), _styleValue(sk, sv));
+          _setStyleProp(style, _camelToKebab(sk), _styleValue(sk, sv));
         }
       }
       return;
@@ -286,6 +286,7 @@ export function _writeProp(
       return;
     }
     if (_isEchoable(el, k) && _staleEcho(el as EchoEl, k, v)) return;
+    if (k === "selected") _noteSelectedProp(el, Boolean(v));
     // deno-lint-ignore no-explicit-any
     (el as any)[k] = v;
     return;
@@ -327,6 +328,23 @@ export function _writeProp(
   else el.setAttribute(_attrName(k), String(v));
 }
 
+/** `setProperty` for one style-object declaration, honouring `!important`.
+ *
+ *  The priority is not part of a CSS VALUE, so `setProperty("color",
+ *  "red !important")` is an invalid value the CSSOM silently ignores: a mount
+ *  wrote nothing, an update left the OLD declaration standing, while SSR —
+ *  which pastes the pair into the attribute — shipped the rule working. The
+ *  flag goes in `setProperty`'s priority argument, as the CSSOM spells it. */
+export function _setStyleProp(
+  style: CSSStyleDeclaration,
+  name: string,
+  value: string,
+): void {
+  const m = /\s*!\s*important\s*$/i.exec(value);
+  if (m) style.setProperty(name, value.slice(0, m.index), "important");
+  else style.setProperty(name, value);
+}
+
 /** Put a `_DOM_PROPS` prop back to the element's DEFAULT — the ONE removal,
  *  shared by a prop that left the props object and a prop set to null.
  *
@@ -340,9 +358,29 @@ export function _writeProp(
 export function _clearDomProp(el: HTMLElement, k: string): void {
   // deno-lint-ignore no-explicit-any
   const e = el as any;
+  if (k === "selected") _noteSelectedProp(el, false);
   e[k] = typeof e[k] === "boolean" ? false : "";
   const attr = _propAttr(el.tagName.toLowerCase(), k);
   if (attr) el.removeAttribute(attr);
+}
+
+/** The `<option>`s whose `selected` PROP is currently true.
+ *
+ *  The prop is written as the PROPERTY, which sets no `selected` attribute, so
+ *  `defaultSelected` cannot answer "which option does this model select by
+ *  default" — and a `<select>` whose `value` prop leaves must go back to
+ *  exactly that (see `_resetSelect` in vdom-props.ts). */
+const _selectedByProp = new WeakSet<Element>();
+
+function _noteSelectedProp(el: HTMLElement, on: boolean): void {
+  if (on) _selectedByProp.add(el);
+  else _selectedByProp.delete(el);
+}
+
+/** Does the model select this option by default — a `selected` attribute in
+ *  the markup, or a `selected` prop aio wrote? */
+export function _defaultSelected(o: HTMLOptionElement): boolean {
+  return o.defaultSelected || _selectedByProp.has(o);
 }
 
 /** `<select multiple value={["en", "de"]}>` — select exactly the options whose

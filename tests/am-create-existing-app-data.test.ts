@@ -128,3 +128,47 @@ Deno.test("am create --json: `existingData` names the old app's home (report 9b 
     }
   });
 });
+
+// `am create x --mirror` (bare — the spelling the help's `--mirror[=<path>]`
+// and the module doc offer for framework development) parsed to `""`, which
+// the create path read as "no mirror": the app was pinned to the newest
+// RELEASE and linked to a provisioned worktree, not the checkout. The
+// `--aio-version` below is a tripwire so the regression fails fast (a missing
+// path pin) instead of provisioning a release worktree; a mirror ignores it.
+Deno.test("am create --mirror (bare): links and path-pins the checkout am runs from", async () => {
+  await withAppsDir(async () => {
+    const cwd = await tempDir("aio-create-cwd-");
+    const orig = Deno.cwd();
+    const lines: string[] = [];
+    const log = console.log, err = console.error, exit = Deno.exit;
+    console.log = (...a: unknown[]) => lines.push(a.map(String).join(" "));
+    console.error = (...a: unknown[]) => lines.push(a.map(String).join(" "));
+    // deno-lint-ignore no-explicit-any
+    (Deno as any).exit = (c?: number) => {
+      throw new Error(`exit ${c}: ${lines.join("\n")}`);
+    };
+    try {
+      Deno.chdir(cwd);
+      await cmdCreate(
+        ["mirrored", "--mirror", "--aio-version=path:/nonexistent-aio-x"],
+        { json: true } as GlobalFlags,
+      );
+    } finally {
+      console.log = log;
+      console.error = err;
+      Deno.exit = exit;
+      Deno.chdir(orig);
+    }
+    try {
+      const doc = JSON.parse(lines.at(-1)!) as Record<string, unknown>;
+      assertEquals(doc.aioVersion, `path:${ROOT}`);
+      assertEquals(doc.framework, ROOT);
+      assertEquals(
+        await Deno.realPath(join(cwd, "mirrored", "dep", "aio")),
+        await Deno.realPath(ROOT),
+      );
+    } finally {
+      await dropTempDir(cwd);
+    }
+  });
+});

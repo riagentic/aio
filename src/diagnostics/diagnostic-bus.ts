@@ -163,7 +163,14 @@ export function isDiagDev(): boolean {
  * No-op in prod mode. Applies dedup, inserts into ring buffer, notifies listeners.
  */
 export function diagEmit(event: Omit<DiagnosticEvent, "ts">): void {
-  if (!_dev) return;
+  if (!_dev) {
+    // Prod keeps ONE path: an error, to the listeners that asked for it
+    // (`prodErrors`). Feedback auto-capture is built on this bus, and with
+    // the early return alone a shipped app — the one nobody watches — never
+    // captured a report while the same fault did in dev.
+    if (event.severity === "error") _emitProdError(event);
+    return;
+  }
 
   const now = Date.now();
   const scope = _diagScopeNow();
@@ -221,7 +228,9 @@ export function diagEmit(event: Omit<DiagnosticEvent, "ts">): void {
     } catch (err) {
       try {
         _reportBrokenListener(fn, err);
-      } catch { /* the reporter's own sink is down — the fan-out still runs */ }
+      } catch {
+        // aio-ok: the reporter's own sink is down — the fan-out still runs
+      }
     }
   }
 }
@@ -248,12 +257,42 @@ function _reportBrokenListener(fn: DiagnosticListener, err: unknown): void {
   );
 }
 
+/** Listeners that receive `severity: "error"` events in prod too. */
+const _prodErrorListeners = new WeakSet<DiagnosticListener>();
+
+/** The prod path of `diagEmit`: no ring, no dedup (the one caller dedups
+ *  itself), only the listeners that opted in — each guarded, as in dev. */
+function _emitProdError(event: Omit<DiagnosticEvent, "ts">): void {
+  const full: DiagnosticEvent = { ...event, ts: Date.now() };
+  const scope = _diagScopeNow();
+  if (scope !== undefined) _eventScope.set(full, scope);
+  for (const fn of [..._listeners]) {
+    if (!_prodErrorListeners.has(fn)) continue;
+    try {
+      fn(full);
+    } catch (err) {
+      try {
+        _reportBrokenListener(fn, err);
+      } catch {
+        // aio-ok: the reporter's own sink is down — the fan-out still runs
+      }
+    }
+  }
+}
+
 /**
  * Subscribe to diagnostic events.
  * Returns an unsubscribe function.
+ *
+ * `prodErrors`: also receive `severity: "error"` events in prod, where the
+ * bus is otherwise off.
  */
-export function diagSubscribe(fn: DiagnosticListener): () => void {
+export function diagSubscribe(
+  fn: DiagnosticListener,
+  opts: { prodErrors?: boolean } = {},
+): () => void {
   _listeners.add(fn);
+  if (opts.prodErrors) _prodErrorListeners.add(fn);
   return () => {
     _listeners.delete(fn);
   };

@@ -75,12 +75,16 @@ export type DevHooks = {
     | null;
   /** The live-client UI surface/trigger executor (`ui-remote.ts`). */
   uiRemote: UiRemoteApi | null;
+  /** The AIO2 hint for a handler that wrote read-only state
+   *  (`dev-readonly-hint.ts`) — called with what the handler threw. */
+  readOnlyHint: ((err: unknown) => void) | null;
 };
 
 export const devHooks: DevHooks = {
   auditContrast: null,
   auditIdSelectors: null,
   uiRemote: null,
+  readOnlyHint: null,
 };
 
 /** Called by the dev chunk as it loads. Partial: a chunk that grows a hook

@@ -296,6 +296,19 @@ function diffUnkeyed(
   for (let i = nextChildren.length; i < oldChildren.length; i++) {
     removeDom(parent, oldChildren[i]!, ctx, oldDoms[i] ?? null);
   }
+  // A surviving child that occupies NO node (a Portal, a component that
+  // rendered nothing) is positioned by the node that FOLLOWS its slot — and
+  // when everything after it just departed, that node is gone. A detached
+  // anchor makes `_diff` APPEND, so its replacement (`{portal}` → `<p/>`, or
+  // a fragment led by a portal wrapped in another) landed at the PARENT's end,
+  // past the region's following siblings. Everything after it departed, so the
+  // slot now ends the region: `regionEnd` is its position.
+  for (let i = 0; i < Math.min(nextChildren.length, oldChildren.length); i++) {
+    const d = oldDoms[i];
+    if (
+      d && _domNodeCount(oldChildren[i]!) === 0 && !isChildOf(d, parent)
+    ) oldDoms[i] = regionEnd;
+  }
 
   const max = nextChildren.length;
   for (let i = 0; i < max; i++) {
@@ -583,7 +596,18 @@ function diffKeyed(
             ? _nextLive(lastPlaced)
             : _firstLive(parent);
           parent.insertBefore(newDom, anchor);
-          lastPlaced = newDom;
+          // A multi-node child (Fragment, or a component rendering one)
+          // arrives as a DocumentFragment the insertion EMPTIES — it is
+          // nobody's position, and anchoring on it sent every later sibling
+          // to the parent's END (a keyed list turning unkeyed rendered
+          // `<>…</>` then `<p/>` AFTER the region's following sibling). Walk
+          // to the span's last node, exactly as the keyed branch below does.
+          const node: Node | null = anchor
+            ? anchor.previousSibling
+            : parent.lastChild;
+          if (_domNodeCount(nc as VNode | string | number) > 0 && node) {
+            lastPlaced = node;
+          }
         }
       }
       continue;
@@ -596,8 +620,17 @@ function diffKeyed(
     usedKeys.add(key);
 
     if (oc) {
-      // Existing node — diff in place
-      diffFn(parent, nc, oc, ctx, isSvg);
+      // Existing node — diff in place. An old child that occupies NO node (a
+      // Portal, a component rendering one) has no position of its own, so it
+      // is handed the slot it holds — right after `lastPlaced` — exactly as
+      // `_diff` documents `oldDom`. Without it a same-key row turning from a
+      // Portal into an element (`editing ? <Portal key/> : <li key/>`) was
+      // APPENDED at the parent's end: after the rows below it, or past a
+      // fragment's own anchor — and, being "stable", never moved back.
+      const slot = _domNodeCount(oc) === 0
+        ? (lastPlaced ? _nextLive(lastPlaced) : _firstLive(parent))
+        : null;
+      diffFn(parent, nc, oc, ctx, isSvg, slot);
       const dom = nc._dom ?? oc._dom;
       // AIO-177: a Fragment/boundary/component child spans N nodes — move the
       // whole span, not just its first node.

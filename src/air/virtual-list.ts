@@ -116,8 +116,14 @@ export function useVirtualList<T>(
   > = computed(() => {
     const items = getItems();
     const scrollTop = scrollTopSig.value;
-    const visibleCount = Math.ceil(containerHeight / safeItemHeight) +
-      2 * overscan;
+    // The rows the viewport CUTS count too: scrolled off a row boundary, the
+    // viewport spans one row more than `containerHeight / itemHeight` (a
+    // partial row at the top AND one at the bottom). Overscan used to hide
+    // that; with `overscan: 0` the bottom row was never rendered and the list
+    // showed a blank strip for as long as the scroll was not row-aligned.
+    const visibleCount = Math.ceil(
+      ((scrollTop % safeItemHeight) + containerHeight) / safeItemHeight,
+    ) + 2 * overscan;
     // The window start is clamped at BOTH ends. The upper clamp is the one
     // that was missing: when `items` SHRINKS under a scrolled list (a filter
     // typed into a search box, a page of results replaced by a shorter one)

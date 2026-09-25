@@ -164,8 +164,9 @@ binary overrides the author, the same rule `expose` follows.
 
 Four auth modes:
 
-1. **Public** (default, incl. `--expose`) — no framework auth, all clients are
-   anonymous
+1. **Public** (default on loopback; `--expose` with no auth configured gets a
+   generated shared key instead — `key: false` keeps it public) — no framework
+   auth, all clients are anonymous
 2. **Single key** (`key: true` / `key: "..."`) — persisted or fixed token, all
    users are anonymous but verified; pair the aio client with the printed code
 3. **Per-user tokens** (`users` config) — static token -> user mapping with
@@ -504,6 +505,14 @@ export const api = serverFns("api", {
 The predicate form receives the invoked function name and its args too —
 `(user, fn, ...args) => boolean` — for per-function or row-level checks.
 
+**Several apps in one process** (library mode, `testApps`): a namespace
+registered at a module's top level belongs to no app, so **every** app in the
+process serves it over the wire — an open app answers an authed app's functions.
+Once a second app is live, aio warns once per such namespace, naming it and the
+apps. Register it inside the app that owns it (from `onStart`, or a module
+imported there — then only that app serves it), or gate it with an `access`
+rule, which fails closed.
+
 ### Sessions (`sessions: true`)
 
 Static tokens never expire and can't be revoked. The built-in session store
@@ -561,6 +570,20 @@ const app = await aio.run({ cells: [/* … */], auth: true });
   are still anonymous**, because a sign-in page's logo is one of them: never
   write private uploads into the app directory — put them in the blob store
   (`/__aio/blobs/*` is always gated).
+- **Every app route (`routes:`) requires a signed-in user** — in both per-user
+  modes (`auth: true` and `users`/`resolveUser`). Only the shell is public: an
+  anonymous request to a declared route gets `401` naming the route, never the
+  handler (and never the SPA shell with a `200`). So a webhook receiver on an
+  `auth: true` app cannot be called anonymously. There is no per-route "public"
+  flag; the ways in are:
+  - **a Bearer credential the sender presents** — add `users` (a static service
+    key mapped to a user such as `{ id: "payments", role: "service" }`) or
+    `resolveUser` next to `auth: true`; a request carrying
+    `Authorization: Bearer <key>` resolves to that user and the route runs with
+    it (sessions are tried first, then `users`/`resolveUser`);
+  - **a separate app without `auth`** for senders that can only sign their
+    payload (an HMAC header, not a Bearer token): receive there, verify the
+    signature in the handler, and hand the result on.
 - `auth: { signup: false }` disables open registration — seed accounts with
   `app.auth.create("root", password, "admin")`.
 - **Admin screens: `serverAuth()`.** The same store, ambient — usable inside any
@@ -799,11 +822,12 @@ with a one-time warning.
 ### Account lockout
 
 Independent of the per-IP budget: **5 consecutive wrong passwords lock the
-account for 15 minutes** (login answers `423`), and even the correct password is
-refused while locked. A successful login resets the counter. Timing is uniform
-across unknown/locked/wrong paths — one PBKDF2 each, no enumeration. Guesses for
-one account are checked one at a time, so a burst fired at once gets exactly the
-five tries sequential attempts get.
+account for 15 minutes**, and even the correct password is refused while locked
+— login answers `423` to the correct password only; a wrong one keeps answering
+`401`, so a guesser learns nothing about the lock state. A successful login
+resets the counter. Timing is uniform across unknown/locked/wrong paths — one
+PBKDF2 each, no enumeration. Guesses for one account are checked one at a time,
+so a burst fired at once gets exactly the five tries sequential attempts get.
 
 **Wrong TOTP codes count against the same counter.** With a second factor
 enrolled, a correct password is half a login and does not reset it; a correct
@@ -848,6 +872,17 @@ seconds stops holding up the others, keeps its sockets open on their last
 verdict, is not called again until it answers, and its verdict is applied when
 it lands — warned every round it lasts. A re-check that returns a different user
 (a changed role) sends that socket its new view at once.
+
+The browser tab on the other end learns it too. A browser cannot read the 401 a
+refused WebSocket upgrade gets, so when a tab that was connected cannot open a
+socket again it asks the same URL over plain HTTP; a 401 means its credential is
+dead. The tab then stops reconnecting (a `?token=` would otherwise be charged as
+a failed login on every attempt), shows "Signed out", rejects the calls it had
+queued, and sets `useUser()` to `null` — so `<SignIn/>` renders. A sign-in
+through `authClient` (which `<SignIn/>` uses) resumes the connection, and so
+does a sign-in in another tab, the next time this tab is focused. The refused
+`?token=` in the page URL is never presented again; the new session rides the
+cookie.
 
 ### Brute-force protection
 

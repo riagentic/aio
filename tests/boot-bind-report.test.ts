@@ -281,3 +281,54 @@ Deno.test({
     }
   },
 });
+
+// ── No false alarm about the share link aio itself prints ─────────────
+
+Deno.test({
+  name:
+    "boot report: an --expose boot with a key does not call its own ?token= share link insecure",
+  async fn() {
+    // Every keyed --expose boot used to warn "token auth via URL query
+    // parameter is insecure" — while printing the `?token=` share link two
+    // lines later. The warning that means something fires in server.ts when a
+    // request is actually authenticated by a URL token; a boot-time alarm on
+    // every exposed app is noise that trains operators to ignore warnings.
+    const dir = await scaffold(`bind-${crypto.randomUUID().slice(0, 8)}`);
+    const sandbox = await tempDir("aio-bind-sandbox-");
+    try {
+      const home = await tempDir("aio-bind-home-");
+      const r = await new Deno.Command(Deno.execPath(), {
+        env: {
+          DENO_COVERAGE_DIR: _childCovDir,
+          AIO_APPS_DIR: home,
+          HOME: sandbox,
+          AIO_HOME: join(sandbox, "aio-home"),
+          AIO_VERSIONS_DIR: join(sandbox, "versions"),
+          AIO_FEEDBACK_DIR: join(sandbox, "feedback"),
+          AIO_INSTALL_ROOT: join(sandbox, "install"),
+        },
+        args: [
+          "run",
+          "-A",
+          join(dir, "src", "app.ts"),
+          "--expose",
+          `--port=${freePort()}`,
+        ],
+        cwd: dir,
+        stdout: "piped",
+        stderr: "piped",
+      }).output();
+      const dec = new TextDecoder();
+      const out = dec.decode(r.stdout) + dec.decode(r.stderr);
+      assertEquals(r.code, 0, out);
+      // The premise: this boot HAS a key and prints the ?token= link.
+      assertStringIncludes(out, "?token=");
+      assert(
+        !out.includes("query parameter is insecure"),
+        `boot warned about the share link it printed itself\n${out}`,
+      );
+    } finally {
+      await Deno.remove(dir, { recursive: true }).catch(() => {});
+    }
+  },
+});

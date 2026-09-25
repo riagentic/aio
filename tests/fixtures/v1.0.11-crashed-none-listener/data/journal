@@ -1,0 +1,4 @@
+{"seq":2,"fmt":2,"type":"vault:setTok","payload":{"args":["SECRET-BB"]},"ts":1790276104851,"cause":"input","v":{"vault":0}}
+{"seq":3,"fmt":2,"type":"audit:bump","payload":{"args":[]},"ts":1790276104853,"cause":"input","v":{"audit":0}}
+{"seq":4,"fmt":2,"type":"vault:setOther","payload":{"args":["SECRET-OTHER"]},"ts":1790276104854,"cause":"input","v":{"vault":0}}
+{"seq":5,"fmt":2,"type":"vault:setTok","payload":{"args":["SECRET-CCC"]},"ts":1790276104856,"cause":"input","v":{"vault":0}}

@@ -106,10 +106,12 @@ Deno.test({
         true,
         "untouched",
       );
+      // Forced: loaded as a restart reads it — the undeclared cell is dropped.
       app.loadSnapshot!(foreign, { force: true });
-      assertEquals((app.getState() as Record<string, unknown>).somebodyElse, {
-        x: 1,
-      });
+      assertEquals(
+        (app.getState() as Record<string, unknown>).somebodyElse,
+        undefined,
+      );
     } finally {
       cli?.close();
       await app.close();

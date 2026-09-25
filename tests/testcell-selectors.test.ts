@@ -68,3 +68,77 @@ Deno.test("testCell: selector binding is restored afterwards", async () => {
     "the parameterized selector is re-bound to THIS harness too",
   );
 });
+
+// A deps-form selector takes the FULL state second and its accessor args
+// behind it — the server bind's rule. testCell passed the first arg in the
+// full-state slot, so `lineTotal("a")` answered 0 here and 30 in bootCells.
+const shop = cell("tc-deps-sel", {
+  state: { qty: { a: 3 } as Record<string, number>, rate: 10 },
+  selectors: {
+    lineTotal: {
+      deps: ["tc-deps-sel"],
+      fn: (
+        s: { qty: Record<string, number> },
+        [self]: unknown[],
+        id: string,
+      ) => (s.qty[id] ?? 0) * (self as { rate: number }).rate,
+    },
+  },
+  methods: {
+    add(s, id: string) {
+      s.qty[id] = (s.qty[id] ?? 0) + 1;
+    },
+  },
+});
+const shopSel = shop as unknown as { lineTotal(id: string): number };
+
+testCell(
+  shop,
+  "a parameterized deps selector answers as bootCells does",
+  async (t) => {
+    assertEquals(shopSel.lineTotal("a"), 30);
+    await t.send.add("a");
+    assertEquals(shopSel.lineTotal("a"), 40, "follows the live slice");
+  },
+);
+
+Deno.test("deps selector: bootCells agrees with testCell", async () => {
+  await using _h = await bootCells([shop]);
+  assertEquals(shopSel.lineTotal("a"), 30);
+});
+
+// The cell's STATE getters too: unbound, `cell.n` was the creation-time
+// getter over the DECLARED initial, so a method reading its own cell through
+// the def saw 0 under testCell while every booted runtime saw the live value.
+const peeker = cell("tc-live-getter", {
+  state: { n: 0, seen: -1 },
+  methods: {
+    inc(s) {
+      s.n++;
+    },
+    async peek(s) {
+      await Promise.resolve();
+      s.seen = (peeker as unknown as { n: number }).n;
+    },
+  },
+});
+
+testCell(
+  peeker,
+  "a state getter on the def reads the live slice",
+  async (t) => {
+    await t.send.inc();
+    await t.send.inc();
+    assertEquals(
+      (peeker as unknown as { n: number }).n,
+      2,
+      "the def getter is live",
+    );
+    await t.send.peek();
+    assertEquals(
+      t.state.seen,
+      2,
+      "a method reading the def sees the live value",
+    );
+  },
+);

@@ -17,6 +17,7 @@ import {
 } from "../diagnostics/contexts.ts";
 import { _ackSink } from "./ack-sink.ts";
 import { trackPath } from "./state-subs.ts";
+import { CLIENT_ONLY_SUB } from "../protocol/broadcast-utils.ts";
 import { nameIsTaken } from "./cell-helpers.ts";
 import {
   applyCellFieldFilter,
@@ -427,6 +428,16 @@ export function guardHiddenReplay<S extends object>(def: CellDef, draft: S): S {
   ) as unknown as S;
 }
 
+/** Subscribe the server to this cell's deltas — never by id for a
+ *  `scope: "client"` cell: no server has one, so the id could only name a cell
+ *  the server does not know, and it warns about those (`warnUnknownSubs`, a
+ *  typo'd id). The read still subscribes to `CLIENT_ONLY_SUB`, which names no
+ *  cell, so a page that reads only client cells narrows to nothing, as 1.0.11's
+ *  id did — tracking nothing left it on the wildcard, every server delta. */
+function trackCell(def: CellDef): void {
+  trackPath(def.__aio.scope === "client" ? CLIENT_ONLY_SUB : def.__aio.id);
+}
+
 /** Install signal-backed getters on a cell for each state key, and wrap
  *  action creators with dispatch so `counter.increment()` sends to server.
  *  After this, `counter.count` reads from the cell signal (auto-tracked). */
@@ -479,7 +490,7 @@ export function bindCellReactive(
         // connect-time value. trackPath makes "auto-tracked" true for deltas
         // too. No-op on the server (never bound reactively) and harmless in
         // standalone/test (no transport → no __subs sent).
-        trackPath(cellName);
+        trackCell(def);
         // tracked read — auto-tracked by AIR renderer
         const s = clientSlice(def, sig.value);
         const v = s == null
@@ -534,7 +545,7 @@ export function bindCellReactive(
           .selectorDeps ?? {});
       Object.defineProperty(def, key, {
         value: (...args: unknown[]) => {
-          trackPath(cellName);
+          trackCell(def);
           // Selectors run in client context and see the ui-FILTERED slice —
           // the same data any client holds after a broadcast, so a selector
           // cannot leak a ui-excluded secret wherever the UI runs.
@@ -563,9 +574,10 @@ export function bindCellReactive(
               if (prop === cellName) return own;
               const other = _cellSignals.get(prop);
               if (!other) return undefined;
-              trackPath(prop);
               // Cross-cell reads honor the OTHER cell's ui filter too.
               const otherDef = _cellRegistry.get(prop);
+              if (otherDef) trackCell(otherDef);
+              else trackPath(prop);
               const otherSlice = ((otherDef
                 ? clientSlice(otherDef, other.value)
                 : other.value) ??

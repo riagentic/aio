@@ -596,7 +596,9 @@ export async function verifyShipManifest(
   const claims = await verifyManifestClaims(manifest, expect);
   if (!claims.ok) return claims;
   const sha256 = await sha256Hex(binary);
-  if (sha256 !== manifest.sha256) {
+  // Case-blind, like the updater's validator and compares: an UPPERCASE
+  // digest (PowerShell's `Get-FileHash`) is the same digest.
+  if (sha256 !== String(manifest.sha256).toLowerCase()) {
     return {
       ok: false,
       reason: "sha256 mismatch — binary does not match manifest",

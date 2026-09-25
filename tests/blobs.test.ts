@@ -458,3 +458,58 @@ Deno.test("blobs: put does not claim a name it could not record", async () => {
     await Deno.chmod(meta, 0o644);
   });
 });
+
+// A gated blob must not be `Cache-Control: public`: RFC 9111 §3.5 lets a
+// shared cache store a response to an Authorization-bearing request ONLY when
+// it says `public` (or s-maxage/must-revalidate) — so `public` licensed a
+// proxy/CDN to keep authenticated bytes and serve them to anyone holding the
+// URL, bypassing the gate the docs promise. `private` keeps the browser's
+// immutable cache and forbids the shared one; an open app stays `public`.
+Deno.test("blobs over HTTP: gated blobs are Cache-Control private, open ones public", async () => {
+  const mk = () =>
+    cell(`blobcc-${crypto.randomUUID().slice(0, 6)}`, {
+      state: { n: 0 },
+      methods: {},
+    });
+  const cacheControl = async (
+    srv: Awaited<ReturnType<typeof testServer>>,
+    headers: Record<string, string>,
+  ) => {
+    const info = await srv.app.blobs!.put(enc_.encode(crypto.randomUUID()));
+    const r = await srv.fetch(srv.app.blobs!.url(info.id), { headers });
+    assertEquals(r.status, 200);
+    await r.body?.cancel();
+    return r.headers.get("cache-control");
+  };
+  {
+    await using srv = await testServer({
+      cells: [mk()],
+      users: { "tok-alice": { id: "alice", role: "user" } },
+    });
+    assertEquals(
+      await cacheControl(srv, { Authorization: "Bearer tok-alice" }),
+      "private, max-age=31536000, immutable",
+    );
+  }
+  {
+    await using srv = await testServer({ cells: [mk()], auth: true });
+    const su = await srv.fetch("/__aio/auth/signup", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ id: "bob", password: "password123" }),
+    });
+    assertEquals(su.status, 201);
+    const { token } = await su.json() as { token: string };
+    assertEquals(
+      await cacheControl(srv, { Authorization: `Bearer ${token}` }),
+      "private, max-age=31536000, immutable",
+    );
+  }
+  {
+    await using srv = await testServer({ cells: [mk()] });
+    assertEquals(
+      await cacheControl(srv, {}),
+      "public, max-age=31536000, immutable",
+    );
+  }
+});

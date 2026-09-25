@@ -427,6 +427,7 @@ function _staleCredentialHint(): string {
 
 import type { Access } from "../state/cell-types.ts";
 import { log } from "../diagnostics/logger-api.ts";
+import { _diagScopeNow } from "../diagnostics/diagnostic-bus.ts";
 
 /** Evaluate a cell's declarative access rule for a network caller.
  *  Same vocabulary as serverFns' access (one `Access` type, alpha52): true = any authenticated user,
@@ -493,7 +494,34 @@ function isThenable(v: unknown): boolean {
 
 const AUTH_FAIL_MAX = 10;
 const AUTH_FAIL_WINDOW_MS = 5 * 60_000;
-const _authFails = new Map<string, number[]>();
+
+// ONE LEDGER PER APP. The failure, work and signup budgets below are keyed by
+// client address — and one process can host several apps (library mode,
+// `testApps`), each running in its own app scope (`_diagScopeNow()`). As
+// module-level maps they were one ledger for the whole process: 11 signups on
+// app B answered app A's FIRST signup with a 429, and failed logins on B
+// locked the same address out of A. Each app now draws on its own; code
+// outside any app (a bare `createServer`, a unit test) keeps the process one.
+type AuthLedger = {
+  fails: Map<string, number[]>;
+  work: Map<string, number[]>;
+  signups: Map<string, number[]>;
+};
+const _newLedger = (): AuthLedger => ({
+  fails: new Map(),
+  work: new Map(),
+  signups: new Map(),
+});
+let _processLedger = _newLedger();
+let _ledgerOf = new WeakMap<object, AuthLedger>();
+/** The ledger of the app running this code — or the process's, outside any. */
+function _ledger(): AuthLedger {
+  const scope = _diagScopeNow();
+  if (scope === undefined) return _processLedger;
+  let l = _ledgerOf.get(scope);
+  if (!l) _ledgerOf.set(scope, l = _newLedger());
+  return l;
+}
 
 /** True when this client key has exhausted its failed-auth budget. */
 export function authFailBudgetExceeded(
@@ -501,11 +529,12 @@ export function authFailBudgetExceeded(
   now = Date.now(),
 ): boolean {
   const key = clientKey ?? "*";
-  const fails = _authFails.get(key);
+  const failMap = _ledger().fails;
+  const fails = failMap.get(key);
   if (!fails) return false;
   const fresh = fails.filter((t) => now - t < AUTH_FAIL_WINDOW_MS);
-  if (fresh.length === 0) _authFails.delete(key);
-  else _authFails.set(key, fresh);
+  if (fresh.length === 0) failMap.delete(key);
+  else failMap.set(key, fresh);
   return fresh.length >= AUTH_FAIL_MAX;
 }
 
@@ -529,11 +558,11 @@ const SWEEP_EVERY = 256;
  *  correct failure — they are the ones closest to expiring anyway. */
 const AUTH_FAIL_MAX_KEYS = 10_000;
 let _sinceSweep = 0;
-function _sweepExpired(now: number): void {
-  for (const [key, ts] of _authFails) {
+function _sweepExpired(failMap: Map<string, number[]>, now: number): void {
+  for (const [key, ts] of failMap) {
     const newest = ts[ts.length - 1];
     if (newest === undefined || now - newest >= AUTH_FAIL_WINDOW_MS) {
-      _authFails.delete(key);
+      failMap.delete(key);
     }
   }
 }
@@ -545,27 +574,28 @@ export function recordAuthFail(
   now = Date.now(),
 ): void {
   const key = clientKey ?? "*";
-  if (_authFails.size >= AUTH_FAIL_MAX_KEYS && !_authFails.has(key)) {
-    _sweepExpired(now);
+  const failMap = _ledger().fails;
+  if (failMap.size >= AUTH_FAIL_MAX_KEYS && !failMap.has(key)) {
+    _sweepExpired(failMap, now);
     // Map iteration is insertion-ordered, so the front IS the oldest. Drop
     // back to 90% rather than exactly one, so a saturated map does not pay an
     // eviction on every single request.
     const target = Math.floor(AUTH_FAIL_MAX_KEYS * 0.9);
-    for (const k of _authFails.keys()) {
-      if (_authFails.size <= target) break;
-      _authFails.delete(k);
+    for (const k of failMap.keys()) {
+      if (failMap.size <= target) break;
+      failMap.delete(k);
     }
   }
-  const prior = _authFails.get(key) ?? [];
+  const prior = failMap.get(key) ?? [];
   const fails = prior.filter((t) => now - t < AUTH_FAIL_WINDOW_MS);
   fails.push(now);
   if (fails.length > AUTH_FAIL_MAX) {
     fails.splice(0, fails.length - AUTH_FAIL_MAX);
   }
-  _authFails.set(key, fails);
+  failMap.set(key, fails);
   if (++_sinceSweep >= SWEEP_EVERY) {
     _sinceSweep = 0;
-    _sweepExpired(now);
+    _sweepExpired(failMap, now);
   }
   log.warn(
     `[aio] auth: failed auth from ${key} (${detail}) — ${fails.length}/${AUTH_FAIL_MAX} in window`,
@@ -602,9 +632,6 @@ const AUTH_WORK_WINDOW_MS = 60_000;
 /** Accounts one client key may create in a window. A person signs up once. */
 const SIGNUP_MAX = 10;
 const SIGNUP_WINDOW_MS = 60 * 60_000;
-
-const _authWork = new Map<string, number[]>();
-const _signups = new Map<string, number[]>();
 
 /** Charge one unit against `map` and report whether it stayed within `max`.
  *  Bounded the same way `_authFails` is: newest `max` stamps per key, and the
@@ -660,11 +687,12 @@ export function refundAuthWork(
   now = Date.now(),
 ): void {
   const key = clientKey ?? "*";
-  const stamps = _authWork.get(key);
+  const work = _ledger().work;
+  const stamps = work.get(key);
   if (!stamps || stamps.length === 0) return;
   // Drop the most recent stamp — the one this request just charged.
   stamps.pop();
-  if (stamps.length === 0) _authWork.delete(key);
+  if (stamps.length === 0) work.delete(key);
   void now;
 }
 
@@ -673,7 +701,7 @@ export function chargeAuthWork(
   now = Date.now(),
 ): boolean {
   return _charge(
-    _authWork,
+    _ledger().work,
     clientKey ?? "*",
     AUTH_WORK_MAX,
     AUTH_WORK_WINDOW_MS,
@@ -687,7 +715,7 @@ export function chargeSignup(
   now = Date.now(),
 ): boolean {
   return _charge(
-    _signups,
+    _ledger().signups,
     clientKey ?? "*",
     SIGNUP_MAX,
     SIGNUP_WINDOW_MS,
@@ -697,9 +725,8 @@ export function chargeSignup(
 
 /** Test isolation. */
 export function _resetAuthFails(): void {
-  _authFails.clear();
-  _authWork.clear();
-  _signups.clear();
+  _processLedger = _newLedger();
+  _ledgerOf = new WeakMap(); // every app's too — a test resets from outside
 }
 
 // ── Host gate — DNS-rebinding defense (ONE decider) ──────────────────────────

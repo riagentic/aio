@@ -12,6 +12,7 @@
 import { join } from "@std/path";
 import {
   certConstrainedNameTypes,
+  certNotAfter,
   certSubjectAltNames,
   dnsWithinSubtree,
   generateRoot,
@@ -343,9 +344,10 @@ export const ROOT_PERMITTED_IPS: readonly (readonly [string, string])[] = [
 const _saidUnderConstrained = new Set<string>();
 
 /** A root already on disk may be older than the constraints it should carry,
- *  and `loadOrCreateAioRoot` reuses one VERBATIM forever — there is no "the
- *  root looks out of date" path, deliberately, because regenerating it would
- *  break every browser that trusted the old one without asking first.
+ *  and `loadOrCreateAioRoot` reuses one VERBATIM until it nears expiry —
+ *  there is no "the root looks out of date" path, deliberately, because
+ *  regenerating it would break every browser that trusted the old one
+ *  without asking first.
  *
  *  So the machine cannot fix itself here; it can only refuse to be quiet. A
  *  root written before the rfc822Name/URI bases existed constrains DNS and IP
@@ -404,6 +406,24 @@ function warnIfRootUnderConstrained(certPem: string, certPath: string): void {
   );
 }
 
+/** Replace the machine root this long before it expires — the same margin
+ *  as a leaf, so a chain never outlives its own anchor. */
+const ROOT_RENEW_MS = 30 * 86_400_000;
+
+/** The root's `notAfter` when it is expired or inside the renewal margin,
+ *  else null. An UNREADABLE root is not replaced here — silently swapping a
+ *  root the person trusted is worse than keeping it — and
+ *  `warnIfRootUnderConstrained` reports it loudly. */
+function rootExpiring(certPem: string): Date | null {
+  let notAfter: Date;
+  try {
+    notAfter = certNotAfter(certPem);
+  } catch {
+    return null;
+  }
+  return notAfter.getTime() - Date.now() < ROOT_RENEW_MS ? notAfter : null;
+}
+
 export async function loadOrCreateAioRoot(): Promise<
   { certPath: string; keyPath: string; cert: string; created: boolean }
 > {
@@ -414,12 +434,29 @@ export async function loadOrCreateAioRoot(): Promise<
     if (Deno.build.os !== "windows") Deno.chmodSync(dir, 0o700);
   } catch { /* best-effort */ }
 
+  let expiring: Date | null = null;
   try {
     const cert = await Deno.readTextFile(certPath);
     await Deno.stat(keyPath);
-    warnIfRootUnderConstrained(cert, certPath);
-    return { certPath, keyPath, cert, created: false };
+    expiring = rootExpiring(cert);
+    if (expiring === null) {
+      warnIfRootUnderConstrained(cert, certPath);
+      return { certPath, keyPath, cert, created: false };
+    }
   } catch { /* generate below */ }
+  if (expiring !== null) {
+    // Reused "verbatim, forever" meant: from the day its 10 years ran out,
+    // every chain it anchored failed verification, on every app at once,
+    // with no line saying why. A new root needs a new `am trust` — and that
+    // is exactly what the person is told.
+    log.warn(
+      `tls: ⚠ this machine's aio root at ${certPath} ${
+        expiring.getTime() < Date.now() ? "expired" : "expires"
+      } on ${expiring.toISOString()} — generating a new one. Browsers and ` +
+        `clients that trusted the old root must trust the new one: re-run ` +
+        `\`am trust\`. Every aio app re-issues its leaf automatically.`,
+    );
+  }
 
   // Names the SOFTWARE, not one app — this is what the user sees in their
   // browser's certificate manager, and it must be recognisable enough to
@@ -467,6 +504,59 @@ async function issueLeaf(
   await writePrivateKey(keyPath, keyPem);
 }
 
+/** Re-issue a cached leaf this long before it expires — issuing is cheap and
+ *  invisible to a client pinned to the root, an expired leaf is a handshake
+ *  failure with no cause anyone can see. */
+const LEAF_RENEW_MS = 30 * 86_400_000;
+
+/** Covering the right addresses is not enough for a cached leaf to be reused:
+ *
+ *  • it must not be (about to be) EXPIRED — leaves live 825 days, and reusing
+ *    one "verbatim, forever" served a dead certificate from day 826 on;
+ *  • when it was issued from the machine root, it must be from the root that
+ *    is on disk NOW. The root-rotation advice ("delete the root, re-run
+ *    `am trust` — every app re-issues its leaf automatically") was not true:
+ *    the old leaf, and the OLD root inside its chain, were served on, and a
+ *    client pinning the new root failed the handshake. A chain whose root is
+ *    gone from disk is the same case — the root was deleted.
+ *
+ *  A legacy self-signed leaf (a single certificate, no root anywhere) keeps
+ *  being reused while it is valid: it IS the anchor its clients pinned. */
+async function leafStillValid(
+  pem: string,
+  caCertPath: string | null,
+  certPath: string,
+): Promise<boolean> {
+  let notAfter: Date;
+  try {
+    notAfter = certNotAfter(pem);
+  } catch {
+    return false; // unreadable ⇒ re-issue rather than serve it
+  }
+  if (notAfter.getTime() - Date.now() < LEAF_RENEW_MS) {
+    log.warn(
+      `tls: the cached certificate ${certPath} ${
+        notAfter.getTime() < Date.now() ? "expired" : "expires"
+      } on ${notAfter.toISOString()} — re-issuing it.`,
+    );
+    return false;
+  }
+  const certs = pem.match(
+    /-----BEGIN CERTIFICATE-----[\s\S]*?-----END CERTIFICATE-----/g,
+  ) ?? [];
+  if (certs.length < 2) return true; // legacy self-signed leaf
+  if (caCertPath === null) return false; // its root was deleted
+  const root = (await Deno.readTextFile(caCertPath)).match(
+    /-----BEGIN CERTIFICATE-----[\s\S]*?-----END CERTIFICATE-----/,
+  )?.[0];
+  if (root !== undefined && certs.at(-1) === root) return true;
+  log.warn(
+    `tls: the cached certificate ${certPath} was issued by a machine root ` +
+      `that is no longer ${caCertPath} — re-issuing it under the current one.`,
+  );
+  return false;
+}
+
 /** Load existing cert from dir or generate a new self-signed one.
  *  Cert persists across restarts — deleted cert triggers regeneration.
  *
@@ -482,6 +572,18 @@ export async function loadOrCreateCert(
    *  the legacy shared `aio-local` name. */
   appId?: string,
 ): Promise<TlsCert> {
+  // Half a pair is a misconfiguration, not a request for a self-signed cert:
+  // `--tls-cert=x` without `--tls-key` used to fall through to the generated
+  // cert, so the operator's certificate was silently not served.
+  if (!!customCert !== !!customKey) {
+    throw new Error(
+      `tls: ${customCert ? "a certificate" : "a key"} was given ` +
+        `(${customCert ?? customKey}) without its ${
+          customCert ? "key" : "certificate"
+        } — pass both --tls-cert and --tls-key (or tls: { cert, key }), ` +
+        `or neither for the generated certificate.`,
+    );
+  }
   // User-provided cert takes precedence
   if (customCert && customKey) {
     return {
@@ -526,6 +628,11 @@ export async function loadOrCreateCert(
   const haveCA = await Deno.stat(caCertPath).then(() => true).catch(() =>
     false
   );
+  // An expiring root is replaced BEFORE a cached leaf is judged: the leaf
+  // check compares its chain's root with the one on disk, so a replaced root
+  // re-issues the leaf, and an expired root is never served on inside a leaf
+  // that is itself still valid.
+  if (haveCA) await loadOrCreateAioRoot();
 
   // ── A cert from a previous boot ────────────────────────────────────────
   //
@@ -539,7 +646,8 @@ export async function loadOrCreateCert(
   } catch { /* none yet */ }
 
   if (existing !== null) {
-    const fresh = sansCover(await certSans(certPath), want);
+    const fresh = sansCover(await certSans(certPath), want) &&
+      await leafStillValid(existing, haveCA ? caCertPath : null, certPath);
     if (fresh) {
       const key = await Deno.readTextFile(keyPath);
       // The file on disk IS the chain, so this is byte-identical to what a

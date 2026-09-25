@@ -18,6 +18,7 @@
 import { h, type VNode } from "../air/vdom.ts";
 import { type Signal, signal } from "../state/signal.ts";
 import { authClient } from "./auth-client.ts";
+import { detectIPC, hasHttpOrigin } from "./browser-shared.ts";
 import type { AioUser, AuthFeatures } from "../protocol/protocol-types.ts";
 
 /** Current identity — undefined: not yet resolved, null: anonymous. */
@@ -33,8 +34,16 @@ const _features: Signal<AuthFeatures | null> = signal<AuthFeatures | null>(
 
 let _fetched = false;
 
+/** Nothing could ever answer `/me`: no HTTP origin and no IPC bridge — the
+ *  server-side render behind `am surface` with no client connected. There is
+ *  no session there, so the identity is resolved (anonymous) from the first
+ *  render. It used to fire a relative fetch that could only fail, so the FIRST
+ *  render said `undefined` (loading) and every later one `null` — `am surface`
+ *  showed two different UIs for one unchanged app. */
+const _noSessionPossible = (): boolean => !hasHttpOrigin() && !detectIPC();
+
 const _fetchMe = (): void => {
-  if (_fetched) return;
+  if (_fetched || _noSessionPossible()) return;
   _fetched = true;
   fetch("/__aio/auth/me", { credentials: "same-origin" })
     .then((r) => r.json())
@@ -49,7 +58,8 @@ const _fetchMe = (): void => {
  *  components in sync with login/logout. */
 export function useUser(): AioUser | null | undefined {
   _fetchMe();
-  return authUser.value;
+  const user = authUser.value; // tracked either way
+  return user === undefined && _noSessionPossible() ? null : user;
 }
 
 /** Sign the current session out and reload into the anonymous shell. */
@@ -119,9 +129,19 @@ const ERROR_TEXT: Record<string, string> = {
   external_identity: "That account signs in with your identity provider.",
   body_too_large: "That request was too large.",
 };
+/** SignIn's own wording for a failure, else the auth client's sentence.
+ *
+ *  Keyed by the error's CODE. It used to be keyed by `e.message` — but
+ *  `AuthError`'s message is already the client's translated sentence, so this
+ *  table never matched and every line above was dead: a wrong second-factor
+ *  code, which burns the pending token and drops the person back at the
+ *  password form, said "That code is not correct." instead of "sign in
+ *  again". */
 const friendly = (e: unknown): string => {
   const msg = e instanceof Error ? e.message : String(e);
-  return ERROR_TEXT[msg] ?? msg;
+  const code = (e as { code?: unknown } | null)?.code;
+  return (typeof code === "string" ? ERROR_TEXT[code] : undefined) ??
+    ERROR_TEXT[msg] ?? msg;
 };
 
 const done = (): void => {

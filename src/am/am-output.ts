@@ -268,7 +268,13 @@ export function outError(
       ? dot.index + 1
       : -1;
     const head = cut > 0 ? msg.slice(0, cut).trim() : msg;
-    const body = cut > 0 ? msg.slice(cut).replace(/\n/g, " ").trim() : "";
+    // The body keeps the line breaks the author wrote (`wrap` honours them):
+    // joining them into one paragraph ran a usage list's lines together and
+    // buried an indented example command mid-sentence. Only the separator at
+    // the cut — the newline, or the space after the period — is dropped.
+    const body = cut > 0
+      ? msg.slice(cut).replace(/^(?: +|\n)/, "").trimEnd()
+      : "";
     console.error(block("bad", head, body || undefined, fix, { indent: "" }));
   }
 }

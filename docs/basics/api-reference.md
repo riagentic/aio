@@ -235,20 +235,20 @@ reads state through `useAio()` / a cell handle.
 
 ## Selectors
 
-| API                                   | Description                                        |
-| ------------------------------------- | -------------------------------------------------- |
-| `createSelector(...inputs, resultFn)` | Memoized selector -- recomputes when inputs change |
-| `createSliceSelector(cell)`           | Scoped selector -- auto-wraps with cell slice      |
+| API                                   | Description                                         |
+| ------------------------------------- | --------------------------------------------------- |
+| `createSelector(...inputs, resultFn)` | Memoized selector -- recomputes when inputs change  |
+| `createSliceSelector(selector)`       | `{ get, derive(fn) }` over one slice (`aio/extras`) |
 
 ## Persistence
 
-| Config                                                   | Description                                           |
-| -------------------------------------------------------- | ----------------------------------------------------- |
-| `persist: true`                                          | Auto-persist state to SQLite (`state.db`)             |
-| `persist: "all" \| "none" \| { include } \| { exclude }` | Per-cell persistence filter                           |
-| `visible: "all" \| "none" \| { include } \| { exclude }` | Per-cell visibility filter (`ui:` = deprecated alias) |
-| `visible: { include, forUser }`                          | Per-cell visibility with per-user transform           |
-| `cellDefaults: { visible, persist }`                     | App-level defaults for all cells (`ui` = deprecated)  |
+| Config                                                   | Description                                                              |
+| -------------------------------------------------------- | ------------------------------------------------------------------------ |
+| `aio.run({ persist: true })`                             | App-level: auto-persist state to SQLite (`state.db`) — not a cell option |
+| `persist: "all" \| "none" \| { include } \| { exclude }` | Per-cell persistence filter                                              |
+| `visible: "all" \| "none" \| { include } \| { exclude }` | Per-cell visibility filter (`ui:` = removed)                             |
+| `visible: { include, forUser }`                          | Per-cell visibility with per-user transform                              |
+| `cellDefaults: { visible, persist }`                     | App-level defaults for all cells (`ui` = removed)                        |
 
 ## Action Interception
 
@@ -281,7 +281,7 @@ reads state through `useAio()` / a cell handle.
 | `VitalsConfig`                                                                                                                                                 | Client diagnostic config -- see [Vitals](../debugging/vitals.md)                                                                                                                                                                                                                                                                                                                                                                                      |
 | `VitalAlert`                                                                                                                                                   | `{ id, layer, status, duration, measured, threshold, hint, ts }`                                                                                                                                                                                                                                                                                                                                                                                      |
 | `MemoryConfig`                                                                                                                                                 | Heap monitoring config -- `{ enabled, interval, warnThreshold, criticalThreshold, trendWindow, machineWarnFraction, growthReportRatio, onMemoryPressure }`; `trendWindow` = samples kept for trend detection (default 10). Every key is read by the monitor; an unknown key is refused at boot with a did-you-mean, and the alpha70-removed `gcStressRatio` (accepted, never read) is refused by name -- see [Production](../debugging/production.md) |
-| `ScheduleEffect`                                                                                                                                               | `{ _schedule: true, key, type, ... }` from sync methods                                                                                                                                                                                                                                                                                                                                                                                               |
+| `ScheduleEffect`                                                                                                                                               | `{ type: "__schedule", kind, id, … }` — what `schedule.*` returns, run through `s.$do`                                                                                                                                                                                                                                                                                                                                                                |
 | `NotifyEffect`                                                                                                                                                 | `{ type: "__notify", title, ... }` — what `notify()` returns                                                                                                                                                                                                                                                                                                                                                                                          |
 | `NotifyOptions`                                                                                                                                                | What `notify()` takes                                                                                                                                                                                                                                                                                                                                                                                                                                 |
 | `TrayConfig`                                                                                                                                                   | `ui.tray` as an object: `{ tooltip?, menu?, closeToTray? }` ([tray](../clients/electron.md#system-tray-uitray))                                                                                                                                                                                                                                                                                                                                       |

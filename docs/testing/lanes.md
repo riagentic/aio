@@ -22,7 +22,15 @@ spawns, is pinned off the first 4 cores (`taskset`) and niced; `check:release`
 runs every gate in the same fence. `AIO_TEST_FREE_CORES=N` keeps N cores free.
 Processes, not `deno test --parallel`: that shares `Deno.cwd()` and `Deno.env`
 between files, and dozens of tests change both. Each process gets its own
-`AIO_APPS_DIR` (`.aio-test-shards/<n>/.aio-test-home`).
+`AIO_APPS_DIR` (`.aio-test-shards/<n>/.aio-test-home`) and its own per-user
+stores beside it (`.aio-test-shards/<n>/stores/`): `AIO_VERSIONS_DIR`,
+`AIO_FEEDBACK_DIR`, `AIO_INSTALL_ROOT` and an empty `AIO_HOME` — a test never
+provisions into the real `~/.local/lib/aio-versions` that every pinned app runs.
+A single-file `deno test` gets the same from the harness and from every
+`tempDir()`. The run snapshots the real version store and the install's worktree
+registry before the first shard and fails, naming the entry, if anything was
+added, changed or removed; `check:home-clean` also fails on a store entry whose
+worktree points into a test sandbox.
 
 - **Real-window tests run one at a time**, all in shard 0, beside the others. A
   test is one when its own source names `testDisplayEnv`, `Xephyr`,

@@ -20,7 +20,7 @@ import { isRedactedAction, noRedaction, REDACTED } from "./redact.ts";
 import { actionOrigin } from "./action-kind.ts";
 import type { Redactor } from "./redact.ts";
 import { isDiagnosticsOptOut } from "./diagnostics-optout.ts";
-import { WORKER_PATCH_ACTION } from "../state/cell-compose-reduce.ts";
+import { WORKER_PATCH_ACTION } from "./action-kind.ts";
 
 /** The cell an action belongs to: the `cell:` prefix of its type, or — for a
  *  `worker: true` cell's patch batch, whose type names no cell — the cell in
@@ -166,6 +166,19 @@ export function initDiagnostics(
    *  `setToken(t)` was called with) in cleartext, in 1.0.11, on every call. */
   const unkept = (cell: string | undefined): boolean =>
     cell !== undefined && cpView !== null && !(cell in cpView({ [cell]: 0 }));
+  /** What the view leaves of one key's value inside a KEPT cell — a field a
+   *  `persist: { exclude | include }` keeps off disk comes back REDACTED, a
+   *  dot-path exclude below the key is projected out. The same view, asked
+   *  of a one-key slice, so the field rule is not restated here: debug.log
+   *  printed `token ""→"TOPSECRET"` for exactly the field the checkpoint
+   *  beside it dropped. */
+  const keptValue = (cell: string, key: string, v: unknown): unknown => {
+    if (cpView === null || key === "_root") return v;
+    const slice = cpView({ [cell]: { [key]: v } })[cell];
+    return slice !== null && typeof slice === "object" && key in slice
+      ? (slice as Record<string, unknown>)[key]
+      : REDACTED;
+  };
   let cpWriter: ReturnType<typeof createCheckpoint> | null = null;
   if (opts.checkpoint) {
     recovered = readCheckpoint(logDir);
@@ -253,8 +266,12 @@ export function initDiagnostics(
   }
 
   // ── Diagnostic bus → structured logger ──
+  // Unsubscribed at stop: the subscription closes over this whole instance
+  // (checkpoint view, health getter → the app's config), and the bus is one
+  // per process — kept, every closed app stayed reachable from it forever.
+  let unsubscribeBus: (() => void) | null = null;
   if (opts.diagnosticBus !== false) {
-    diagSubscribe((ev) => {
+    unsubscribeBus = diagSubscribe((ev) => {
       if (ev.severity === "error") log.error("diag", ev.message);
       else if (ev.severity === "warning") log.warn("diag", ev.message);
     });
@@ -325,7 +342,11 @@ export function initDiagnostics(
                   from: REDACTED,
                   to: REDACTED,
                 }))
-                : d.changes,
+                : d.changes.map((c) => ({
+                  key: c.key,
+                  from: keptValue(d.cell, c.key, c.from),
+                  to: keptValue(d.cell, c.key, c.to),
+                })),
             ),
           );
         }
@@ -342,7 +363,12 @@ export function initDiagnostics(
           redact,
           action.type,
           actionOrigin(action.type, action.payload),
-        ) || unkept(actionCell(action.type, action.payload));
+        ) || unkept(actionCell(action.type, action.payload)) ||
+          // A `worker: true` cell's patch batch names no cell in its type —
+          // its ops are the values the method stored — so it goes by the
+          // payload's cell, the answer the journal and timeline give it.
+          (action.type === WORKER_PATCH_ACTION &&
+            redact.redactsCell(actionCell(action.type, action.payload) ?? ""));
         actionLog!.append(action.type, hide ? REDACTED : action.payload);
       });
     }
@@ -376,6 +402,8 @@ export function initDiagnostics(
   }
 
   async function onStop(): Promise<void> {
+    unsubscribeBus?.();
+    unsubscribeBus = null;
     if (actionLog) await actionLog.flush();
     if (cpWriter) await cpWriter.flush();
   }
@@ -391,10 +419,13 @@ export function initDiagnostics(
       // The checkpoint an OLDER build left is rewritten through the view at
       // once when it holds anything the view drops — not on this run's first
       // write, which may never come (tests/hosts.test.ts, boot step).
+      // Compared by CONTENT, not by cell count: the view also drops fields a
+      // `persist: { exclude }` keeps off disk, inside cells it keeps. The
+      // state was parsed from JSON, so both sides serialize.
       if (recovered && cpWriter) {
         const kept = v(recovered.state);
         if (
-          Object.keys(kept).length !== Object.keys(recovered.state).length
+          JSON.stringify(kept) !== JSON.stringify(recovered.state)
         ) cpWriter.rewriteNow(recovered);
       }
       // …and so is what an older build wrote to the action log for a cell

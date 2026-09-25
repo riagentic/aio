@@ -16,6 +16,7 @@ import { _hasRawHtml } from "./vdom-types.ts";
 import { _notANode } from "./vdom-create.ts";
 import {
   escapeHtml as _escapeHtml,
+  keepLeadingNewline,
   RAW_TEXT_ELEMENTS,
   rawTextContent,
   ssrCloseSelect,
@@ -153,6 +154,7 @@ function _renderSync(
   if (selfClosing) return html;
   const areaText = _ssrTextareaText(vnode);
   const inSelect = ssrOpenSelect(render, tag, ownValue);
+  const start = html.length;
   try {
     if (_hasRawHtml(vnode.props)) {
       html += (vnode.props.dangerouslySetInnerHTML as { __html: string })
@@ -174,6 +176,7 @@ function _renderSync(
   } finally {
     ssrCloseSelect(render, inSelect);
   }
+  html = html.slice(0, start) + keepLeadingNewline(tag, html.slice(start));
   html += `</${tag}>`;
   return html;
 }
@@ -555,19 +558,39 @@ async function* _stream(
   try {
     if (_hasRawHtml(vnode.props)) {
       yield (vnode.props.dangerouslySetInnerHTML as { __html: string }).__html;
-    } else if (areaText !== null) yield areaText;
+    } else if (areaText !== null) yield keepLeadingNewline(tag, areaText);
     else if (RAW_TEXT_ELEMENTS.has(tag)) {
       for (const child of vnode.children) {
         if (typeof child === "string" || typeof child === "number") {
           yield rawTextContent(tag, String(child), isDevMode());
         } else yield* _stream(child, scope);
       }
+    } else if (tag === "pre" || tag === "listing") {
+      yield* _keepLeadingNewline(tag, vnode.children, scope);
     } else for (const child of vnode.children) yield* _stream(child, scope);
   } finally {
     ssrCloseSelect(render, inSelect);
   }
   yield `</${tag}>`;
   return 1;
+}
+
+/** A `<pre>`'s children with `keepLeadingNewline` applied to the first
+ *  non-empty chunk — the only one that can start the element's text. */
+async function* _keepLeadingNewline(
+  tag: string,
+  children: VNode["children"],
+  scope: SsrContexts,
+): AsyncGenerator<string, void, unknown> {
+  let first = true;
+  for (const child of children) {
+    for await (const chunk of _stream(child, scope)) {
+      if (first && chunk !== "") {
+        first = false;
+        yield keepLeadingNewline(tag, chunk);
+      } else yield chunk;
+    }
+  }
 }
 
 /** Yield what a region held back, and empty it. Module-level on purpose: a

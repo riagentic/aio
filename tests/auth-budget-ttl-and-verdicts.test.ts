@@ -198,3 +198,42 @@ Deno.test("setTotpSecret: a non-base32 secret is refused, naming the reason", as
     await Deno.remove(dir, { recursive: true }).catch(() => {});
   }
 });
+
+// ── 3b. …and the refusal never quotes the secret ────────────────────────────
+//
+// The message quoted the first 12 characters. A TOTP secret is a credential,
+// and an app's `catch` that logs `e.message` then writes most of a 16-char
+// secret into a log file. The message says the SHAPE (length, where the first
+// bad character sits), which is all a caller needs to find the mistake.
+Deno.test("setTotpSecret: the refusal never quotes the secret's characters", async () => {
+  const dir = await tempDir("aio-totp-mask-");
+  const path = `${dir}/auth.db`;
+  const sessions = openSessionStore(path);
+  const users = openUserStore(path, { sessions: () => sessions });
+  try {
+    await users.create("dave", PW);
+    const secrets = ["0123456789abcdef", "SECRETXYZ!2345", "k9q8w7e6r5t4"];
+    assertEquals(secrets.length, 3);
+    for (const s of secrets) {
+      let msg = "";
+      try {
+        users.setTotpSecret("dave", s);
+      } catch (e) {
+        msg = (e as Error).message;
+      }
+      assert(msg.includes("base32"), `refused: ${msg}`);
+      assert(
+        msg.includes(`${s.length} characters`),
+        `names the length: ${msg}`,
+      );
+      for (let i = 0; i + 4 <= s.length; i++) {
+        const frag = s.slice(i, i + 4);
+        assert(!msg.includes(frag), `leaks ${JSON.stringify(frag)}: ${msg}`);
+      }
+    }
+  } finally {
+    users.close();
+    sessions.close();
+    await Deno.remove(dir, { recursive: true }).catch(() => {});
+  }
+});

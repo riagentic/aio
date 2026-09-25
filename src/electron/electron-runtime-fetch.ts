@@ -26,6 +26,7 @@
  * boundary matrix lets build → electron, never the reverse. The build-side
  * wrappers in `build/electron-runtime.ts` delegate here.
  */
+import { electronFuseBinary, fuseElectronFile } from "./electron-fuses.ts";
 import { basename, dirname, join } from "@std/path";
 import { log as flog } from "../diagnostics/logger-api.ts";
 import { homedir } from "../server/paths.ts";
@@ -169,6 +170,9 @@ async function sha256Hex(bytes: Uint8Array<ArrayBuffer>): Promise<string> {
     .map((b) => b.toString(16).padStart(2, "0"))
     .join("");
 }
+
+/** The cache-directory suffix of a runtime whose fuses are off. */
+export const FUSED_SUFFIX = "-fused";
 
 /** Where a fetched runtime lives: one directory per version+slug, shared by
  *  the launcher and every build on this machine, so a runtime is downloaded
@@ -669,7 +673,11 @@ export async function ensureElectronRuntime(
     ? embeddedRuntimeFetch(opts.embedded)
     : opts.fetch ?? fetch;
   const mirror = opts.mirror ?? Deno.env.get("ELECTRON_MIRROR") ?? undefined;
-  const dir = electronRuntimeDir(version, slug);
+  // A runtime from the zip a self-contained app CARRIES ships with its fuses
+  // off (electron-fuses.ts), so it lives apart: an unfused runtime a download
+  // or an older app left under the plain name must never stand in for it.
+  const dir = electronRuntimeDir(version, slug) +
+    (opts.embedded ? FUSED_SUFFIX : "");
   if (await runtimeUsable(dir, slug)) {
     log(`${OK} runtime ${version} (${slug}) — cached`);
     await touchRuntimeUse(dir);
@@ -737,6 +745,7 @@ export async function ensureElectronRuntime(
           { cause: e },
         );
       }
+      if (opts.embedded) await fuseElectronFile(electronFuseBinary(stage, os));
       await Deno.writeTextFile(
         join(stage, STAMP),
         `${url}\nsha256:${actual}\n`,

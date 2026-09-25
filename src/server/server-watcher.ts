@@ -4,7 +4,15 @@
 import { UI_ENTRY } from "./app-files.ts";
 import { isServerOnlyFile } from "../entries.ts";
 import { enc } from "../protocol/envelope.ts";
-import { basename, dirname, fromFileUrl, join, resolve } from "@std/path";
+import {
+  basename,
+  dirname,
+  fromFileUrl,
+  isAbsolute,
+  join,
+  relative,
+  resolve,
+} from "@std/path";
 import { DENO_JSON_NAMES, parseDenoJson } from "./deno-json.ts";
 import type { GraphResult } from "./graph-validator.ts";
 import { type ProdGraphCheck, validateGraph } from "./graph-validator.ts";
@@ -49,6 +57,11 @@ export interface WatcherDeps {
    *  process and cannot hot-reload, so dev restarts the process; without a
    *  handler the watcher falls back to warning once per file. */
   onCellChange?: (path: string) => void;
+  /** The file that runs `aio.run()` (default: `Deno.mainModule`). It holds
+   *  the routes, schedules, auth and every other boot option, and it runs in
+   *  THIS process — so an edit to it is handled exactly like a cell edit
+   *  (restart, or a warning when dev cannot restart). Injected by tests. */
+  serverEntry?: string;
   /** How long graph validation gets before the reload goes out without it.
    *  Injected only by tests — see {@link GRAPH_TIMEOUT_MS}. */
   graphTimeoutMs?: number;
@@ -150,6 +163,14 @@ export interface FileWatcher {
   start: () => boolean;
   /** Schedule a reload for a changed path (called externally too) */
   scheduleReload: (path: string) => void;
+  /** A file the dev server serves as a module — from the app root, or from
+   *  OUTSIDE the watched roots (a relative import that left the app root —
+   *  `SRC_TREE_PREFIX` — or a `serveDirs`/`share` root). Its edits reload
+   *  exactly like an app-root `.ts` edit, whatever its extension. Outside the
+   *  roots only that FILE is reported: its directory is watched
+   *  non-recursively and every other name in it is ignored, so the watch set
+   *  is the served graph, never the project. */
+  watchServed: (file: string) => void;
   /** Whether the watcher is currently active */
   readonly active: boolean;
   /** Clean up watcher, timers, sentinel */
@@ -199,6 +220,74 @@ export function createFileWatcher(deps: WatcherDeps): FileWatcher {
    *  claim the root is missing. */
   let _rootSeen = false;
   const graphTimeoutMs = deps.graphTimeoutMs ?? GRAPH_TIMEOUT_MS;
+  const realOrSelf = (p: string): string => {
+    try {
+      return Deno.realPathSync(p);
+    } catch {
+      return p;
+    }
+  };
+  /** Real path of the server entry, or null (not a local file). */
+  const entrySpec = deps.serverEntry ?? Deno.mainModule;
+  const serverEntryReal = entrySpec.startsWith("file://")
+    ? realOrSelf(fromFileUrl(entrySpec))
+    : entrySpec.startsWith("/") || /^[A-Za-z]:[\\/]/.test(entrySpec)
+    ? realOrSelf(entrySpec)
+    : null;
+  const isServerEntry = (p: string): boolean =>
+    serverEntryReal !== null &&
+    (p === serverEntryReal || realOrSelf(p) === serverEntryReal);
+  /** The server's own module graph is walked only for an entry INSIDE the
+   *  app dir — a host process (a test runner, a library embedding) has an
+   *  entry that is not the app's, and its graph says nothing about the app. */
+  const baseReal = realOrSelf(absBaseDir);
+  const entryRel = serverEntryReal === null
+    ? null
+    : relative(baseReal, serverEntryReal);
+  const serverGraphRoot = entryRel !== null && entryRel !== "" &&
+      !entryRel.startsWith("..") && !isAbsolute(entryRel)
+    ? serverEntryReal
+    : null;
+  /** Is `p` statically or dynamically imported from the server entry? Such a
+   *  module is loaded by THIS process (a helper a cell method or a route
+   *  calls), so a browser reload cannot apply an edit to it. Framework and
+   *  package imports are external to this walk; only the app's own files are
+   *  visited. */
+  const inServerGraph = async (p: string): Promise<boolean> => {
+    if (serverGraphRoot === null) return false;
+    try {
+      const g = await validateGraph(
+        serverGraphRoot,
+        deps.importMapObj,
+        (src: string, f: string) => transpile(src, f),
+      );
+      const want = realOrSelf(p);
+      for (const m of g.modules.keys()) {
+        if (m === p || m === want || realOrSelf(m) === want) return true;
+      }
+    } catch (e) {
+      debug(`watch: server-graph walk failed — ${e}`);
+    }
+    return false;
+  };
+  /** A server-side file changed: restart (dev), or say it did not apply. */
+  const serverSideChanged = (path: string, what: string): void => {
+    if (deps.onCellChange) {
+      // Dev restarts the process itself — the handler warns instead when it
+      // can't (prod-ish permissions, opt-out).
+      deps.onCellChange(path);
+    } else if (!_warnedCellFiles.has(path)) {
+      _warnedCellFiles.add(path);
+      log.warn(
+        "watch",
+        `${what} changed (${
+          path.split("/").pop()
+        }) — it runs in the server process and does NOT hot-reload. ` +
+          `Restart to apply: stop and re-run \`deno task dev\`. ` +
+          `(Client JSX hot-reloads, so you may be seeing new UI on old cell logic.)`,
+      );
+    }
+  };
 
   // Teach the browser-error classifier how to tell "App.tsx itself is gone"
   // from "a module App.tsx imports is broken". Without it the overlay guesses,
@@ -226,6 +315,15 @@ export function createFileWatcher(deps: WatcherDeps): FileWatcher {
   // --- Watcher state ---
   let fsWatcher: Deno.FsWatcher | null = null;
   let configWatcher: Deno.FsWatcher | null = null;
+  /** Every file the page loads as a module (see `watchServed`), both as
+   *  handed in and as their real path — event paths carry the one the OS
+   *  resolved, which differs where a directory is a symlink. */
+  const servedFiles = new Set<string>();
+  /** Their directories — one non-recursive watcher over all of them,
+   *  re-opened when a new directory joins (rare: the page's first load). */
+  const servedDirs = new Set<string>();
+  let servedWatcher: Deno.FsWatcher | null = null;
+  let _shutDown = false;
   let watcherActive = false;
   const _warnedCellFiles = new Set<string>(); // a field report: warn once per cell file
   /** `*.server.ts` files already warned about this session — see the reload
@@ -305,10 +403,12 @@ export function createFileWatcher(deps: WatcherDeps): FileWatcher {
       }
       return; // never a browser reload — nothing in the served graph changed
     }
-    // Skip editor temp files, swap files, lockfiles, etc.
+    // Skip editor temp files, swap files, lockfiles, etc. — and any other
+    // file, unless the page loads it as a module (see `watchServed`): a
+    // served `.js`/`.mjs`/`.jsx` is source, a `dist/` bundle is not.
     const dot = path.lastIndexOf(".");
     const ext = dot >= 0 ? path.slice(dot) : "";
-    if (!RELOAD_EXT.has(ext)) return;
+    if (!RELOAD_EXT.has(ext) && !servedFiles.has(path)) return;
     debug(`watch: changed ${path}`);
     // a changed cell file does NOT hot-reload — cells run in the
     // server process, so the client reload shows the NEW UI reading OLD cell
@@ -343,22 +443,22 @@ export function createFileWatcher(deps: WatcherDeps): FileWatcher {
     if (!path.endsWith(".css")) {
       try {
         const src = Deno.readTextFileSync(path);
-        if (/\bcell\s*\(\s*["'`]/.test(src)) {
-          if (deps.onCellChange) {
-            // Dev restarts the process itself — the handler
-            // warns instead when it can't (prod-ish permissions, opt-out).
-            deps.onCellChange(path);
-          } else if (!_warnedCellFiles.has(path)) {
-            _warnedCellFiles.add(path);
-            log.warn(
-              "watch",
-              `cell file changed (${
-                path.split("/").pop()
-              }) — cells run in the server process and do NOT hot-reload. ` +
-                `Restart to apply: stop and re-run \`deno task dev\`. ` +
-                `(Client JSX hot-reloads, so you may be seeing new UI on old cell logic.)`,
-            );
-          }
+        // The server ENTRY runs in this process too, and a browser reload
+        // cannot apply it: an edited route, schedule or auth option used to
+        // print "reloaded src/app.ts" while the server kept serving the old
+        // one — a new route answered with the SPA shell.
+        if (isServerEntry(path)) serverSideChanged(path, "server entry");
+        else if (/\bcell\s*\(\s*["'`]/.test(src)) {
+          serverSideChanged(path, "cell file");
+        } else if (!isServerOnlyFile(path)) {
+          // A plain module the server itself imports (a pricing helper a
+          // method calls) used to print "reloaded" while every server call
+          // kept running the old copy. `*.server.ts` keeps its own warning
+          // above.
+          const changedPath = path;
+          void inServerGraph(changedPath).then((hit) => {
+            if (hit) serverSideChanged(changedPath, "server module");
+          });
         }
       } catch { /* unreadable — skip */ }
     }
@@ -606,6 +706,89 @@ export function createFileWatcher(deps: WatcherDeps): FileWatcher {
     })();
   }
 
+  /** The recursive roots `startWatcher` watches — `watch: false` has none. */
+  function watchRoots(): string[] {
+    if (deps.watch === false) return [];
+    const roots = Array.isArray(deps.watch) && deps.watch.length > 0
+      ? deps.watch.map((p) => resolve(absBaseDir, p))
+      : [absBaseDir];
+    // …and the framework itself, when this app imports it by path. See
+    // `frameworkWatchRoot`. An explicit `watch: [...]` is left alone: an app
+    // that narrowed the watcher (because its boot reloads gigabytes) has
+    // said what it wants watched, and this would widen it again.
+    const fw = Array.isArray(deps.watch)
+      ? null
+      : frameworkWatchRoot(deps.importMapObj, absBaseDir);
+    if (fw) roots.push(fw);
+    return roots;
+  }
+
+  function _under(root: string, p: string): boolean {
+    return p === root || p.startsWith(root + "/") || p.startsWith(root + "\\");
+  }
+
+  function openServedWatcher(): void {
+    try {
+      servedWatcher?.close();
+    } catch { /* aio-ok: already closed — it is being replaced */ }
+    servedWatcher = null;
+    if (servedDirs.size === 0 || _shutDown) return;
+    let w: Deno.FsWatcher;
+    try {
+      w = Deno.watchFs([...servedDirs], { recursive: false });
+    } catch (e) {
+      log.warn(
+        "watch",
+        `cannot watch ${
+          [...servedDirs].join(", ")
+        } (${e}) — edits to the modules served from there will NOT reload ` +
+          `the page. Reload it by hand after changing them.`,
+      );
+      return;
+    }
+    servedWatcher = w;
+    (async () => {
+      try {
+        for await (const event of w) {
+          if (event.kind === "access") continue;
+          for (const path of event.paths) {
+            if (servedFiles.has(path)) scheduleReload(path);
+          }
+        }
+      } catch { /* aio-ok: closed — re-opened over a new set, or shut down */ }
+    })();
+  }
+
+  function watchServed(file: string): void {
+    // `watch: false` turned live reload off — nothing to record or watch.
+    if (deps.watch === false || _shutDown) return;
+    const abs = resolve(file);
+    // Called on every served module request: a known file costs one lookup.
+    if (servedFiles.has(abs)) return;
+    let real = abs;
+    try {
+      real = Deno.realPathSync(abs);
+    } catch {
+      /* aio-ok: not there (yet) — the spelling handed in is all there is */
+    }
+    // Recorded wherever it lives: `scheduleReload` reloads on a served
+    // module whatever its extension (`.js`/`.mjs`/`.jsx` included), and on
+    // nothing else of those — build output the page never loads stays out.
+    servedFiles.add(abs);
+    servedFiles.add(real);
+    // An explicit `watch: [...]` said what to watch — the app's call, as for
+    // the framework root: no watch is added outside it.
+    if (Array.isArray(deps.watch)) return;
+    // Already inside a recursive root: its events arrive there, and a second
+    // watch would double every one.
+    if (watchRoots().some((r) => _under(r, abs) || _under(r, real))) return;
+    const dir = dirname(real);
+    if (servedDirs.has(dir)) return;
+    servedDirs.add(dir);
+    deps.debug(`watcher: also watching served module dir ${dir}`);
+    openServedWatcher();
+  }
+
   function startWatcher(): boolean {
     // `watch: false` — not started at all. Everything else about dev is
     // unchanged; this is the one thing turned off, and it is turned off by
@@ -616,18 +799,11 @@ export function createFileWatcher(deps: WatcherDeps): FileWatcher {
       return false;
     }
     try {
-      const roots = Array.isArray(deps.watch) && deps.watch.length > 0
-        ? deps.watch.map((p) => resolve(absBaseDir, p))
-        : [absBaseDir];
-      // …and the framework itself, when this app imports it by path. See
-      // `frameworkWatchRoot`. An explicit `watch: [...]` is left alone: an app
-      // that narrowed the watcher (because its boot reloads gigabytes) has
-      // said what it wants watched, and this would widen it again.
-      const fw = Array.isArray(deps.watch)
-        ? null
-        : frameworkWatchRoot(deps.importMapObj, absBaseDir);
+      const roots = watchRoots();
+      const fw = roots.length > 1 && !Array.isArray(deps.watch)
+        ? roots[roots.length - 1]
+        : null;
       if (fw) {
-        roots.push(fw);
         deps.debug(`watcher: also watching the framework checkout at ${fw}`);
       }
       const paths = _sentinelOk ? [...roots, SENTINEL] : roots;
@@ -739,9 +915,14 @@ export function createFileWatcher(deps: WatcherDeps): FileWatcher {
   }
 
   function shutdown(): void {
+    _shutDown = true;
     setUiRootProbe(undefined); // a dead watcher must not answer for a live one
     if (reloadTimer) clearTimeout(reloadTimer);
     fsWatcher?.close();
+    try {
+      servedWatcher?.close();
+    } catch { /* aio-ok: already closed — shutdown is idempotent */ }
+    servedWatcher = null;
     try {
       configWatcher?.close();
     } catch { /* already closed */ }
@@ -758,6 +939,7 @@ export function createFileWatcher(deps: WatcherDeps): FileWatcher {
   return {
     start,
     scheduleReload,
+    watchServed,
     get active() {
       return watcherActive;
     },

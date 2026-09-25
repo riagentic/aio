@@ -122,9 +122,9 @@ link, which is exactly what a rich client does in production.
 
 Two apps in one process share every module — the logger, the diagnostic bus, the
 `degraded()` registry are each one object. Each `aio.run()` runs **as its app**,
-and everything its boot starts (routes, sockets, timers armed in `onStart` or in
-a method, the control listener) carries that app with it, so these facts stay
-the app's own:
+and what its boot starts carries that app with it — its routes, sockets and
+control listener, cell methods, and timers and promises armed in `onStart` or in
+a method — so these facts stay the app's own:
 
 | Fact                           | Per app                                                                                                                                                     |
 | ------------------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------- |
@@ -135,11 +135,50 @@ the app's own:
 | Feedback reports               | the feedback and updates cells are bound per app; auto-capture files only that app's errors                                                                 |
 | Dev `diag` frames              | a socket receives its own app's diagnostics, never another app's                                                                                            |
 | Control credential, rate limit | closing one app leaves the other's credential armed; the trojan rate limit is counted per app                                                               |
+| Browser console lines          | a client's forwarded console lines land in its own app's `logs/client.log`, rate-limited per app                                                            |
+| Auth budgets                   | signup, auth-work and failed-login budgets are counted per app: signups on B never answer A's with a 429                                                    |
+| Call ceilings                  | `effectTimeoutMs` / `perfBudget` bound that app's `await cell.method()` only; a sibling's boot or `close()` never changes them                              |
+| `serverFns` namespaces         | a namespace registered inside an app (in `onStart`, or a module imported there) is served over the wire by that app only                                    |
+| `spawn()` children             | closing one app kills only the unclaimed children that app started                                                                                          |
 
 Code that runs outside **any** app — a module's top level, a test calling `log`
 directly — has no app to belong to: its log lines go to the most recently booted
 app that is still running, and a diagnostic or `degraded()` failure it records
-is visible to every app.
+is visible to every app. A child it `spawn()`s is killed by the first app to
+shut down, and its `await cell.method()` on a cell bound to no app waits by the
+last booted app's ceilings.
+
+A `serverFns` namespace registered there (`export const api = serverFns(…)` at
+top level, the usual pattern) is served by **every** app. Once a second app is
+live, aio warns once per such namespace, naming it and the apps: register it
+inside the app that owns it (from `onStart`, or a module imported there), or
+gate it with an `access` rule, which fails closed.
+
+When the app that owns a namespace closes, the **next app to boot** takes it
+over, because its module is already loaded and `serverFns(…)` will not run
+again, so this is how a restarted app gets its functions back. An app already
+running beside the closed owner never takes it (it would serve functions kept
+behind the owner's auth). If the app that takes it over has a different app id,
+aio warns, naming both apps.
+
+A server the app starts **itself** is the exception: Deno runs a `Deno.serve`
+handler (or any listener callback the runtime fires) in its own ambient context,
+not the one that started the server, so its handler runs outside any app — a
+child it `spawn()`s is killed by the first app to shut down, its lines go to the
+last booted app. Wrap the handler with a snapshot taken in `onStart`:
+
+```ts
+import { AsyncLocalStorage } from "node:async_hooks";
+
+onStart: (() => {
+  const asThisApp = AsyncLocalStorage.snapshot(); // this app's context
+  Deno.serve({ port: 8081 }, (req) => asThisApp(handle, req));
+});
+```
+
+A closed app's scope is no app's. Code it still surrounds runs as code outside
+any app — including the next `Deno.test`, after an app's method made Deno pin
+that scope as the process's ambient context (`await import("npm:…")` does).
 
 `feedback` and `updates` are off under `libraryMode`, which `testApps` sets —
 the per-app feedback guarantees are pinned in a child process
@@ -147,7 +186,10 @@ the per-app feedback guarantees are pinned in a child process
 `tests/two-apps-app-scope.test.ts`,
 `tests/two-apps-one-process-singletons.test.ts`,
 `tests/two-apps-diag-relay.test.ts`,
-`tests/tls-control-listener-app-scope.test.ts`.
+`tests/tls-control-listener-app-scope.test.ts`,
+`tests/two-apps-process-registries.test.ts`,
+`tests/serverfns-shared-namespace-warns.test.ts`,
+`tests/app-scope-ends-at-close.test.ts`.
 
 ## Which harness
 

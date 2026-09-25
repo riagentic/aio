@@ -457,6 +457,14 @@ export function noDesktopSessionWarning(
     `--client=server-only to say no window is wanted.`;
 }
 
+/** @internal The dev Electron window's generated icon: the title's letter on
+ *  the APPID's hue — the key the theme and every packaged icon tint on. The
+ *  title hashed alone gave every app with no title the "AIO App" fallback's
+ *  colour, unrelated to its own buttons. */
+export function devWindowIcon(title: string, appId: string): Promise<string> {
+  return appIconPngBase64(title, 256, appId);
+}
+
 /** Run lifecycle startup — set globals, fire hooks, log info, launch client */
 export function startLifecycle<S, A>(deps: LifecycleDeps<S, A>): void {
   const {
@@ -637,11 +645,12 @@ export function startLifecycle<S, A>(deps: LifecycleDeps<S, A>): void {
     if (v !== undefined && v !== null && v !== "") facts[k] = String(v);
   };
 
-  if (expose && token) {
-    log.warn(
-      "token auth via URL query parameter is insecure in expose mode — use an Authorization header instead",
-    );
-  }
+  // No boot-time "?token= is insecure" alarm: aio itself prints the `?token=`
+  // share link below, so warning on every keyed --expose boot was noise that
+  // trains operators to skip warnings. The alarm that carries information is
+  // server.ts's `_warnTokenInUrl`, fired when a request is ACTUALLY
+  // authenticated by a URL token.
+  //
   // `!perUserAuth` covers users/resolveUser/auth:true; `!token` covers the
   // shared app key. Only an app with NONE of them is actually open.
   if (expose && !perUserAuth && !token) {
@@ -1010,7 +1019,7 @@ export function startLifecycle<S, A>(deps: LifecycleDeps<S, A>): void {
     // launch, so the dev window is identified exactly like the packaged one
     // (which reads dist/icon.png, written by the same generator). A failure to
     // draw it must never stop the app from starting — it is an icon.
-    appIconPngBase64(title, 256)
+    devWindowIcon(title, appId)
       .catch(() => "")
       .then((defaultIcon) =>
         launchElectron(

@@ -24,6 +24,8 @@
 // unit-testable and the module is safe to import from the server, which serves
 // the favicon.
 
+import { slugify } from "../server/single-instance-lock.ts";
+
 /** Pen width of the monogram, in the 0–100 cap-height glyph space. */
 const STROKE = 11;
 /** Fraction of the icon's edge the cap height occupies. */
@@ -177,7 +179,14 @@ function hueOf(name: string): number {
   // A default icon, not a TypeError that fails the whole bundle. (The e2e
   // bundle-smoke harness builds with a hand-rolled BuildConfig and hit exactly
   // that: an icon crashing a build is strictly worse than no icon.)
-  const s = (name || "app").trim().toLowerCase();
+  //
+  // Hashed as the SLUG the name resolves to, because the name arrives in two
+  // spellings of one identity: the theme and the favicon pass the appId
+  // (`my-notes`), every packaged icon and the dev window icon pass the display
+  // title (`My Notes`) — and hashing each as written drew a cyan taskbar icon
+  // over pink buttons. `slugify` is THE appId decider, so a title and the id it
+  // becomes cannot hash apart; an id is already a slug, so no theme moves.
+  const s = slugify(name || "app");
   for (let i = 0; i < s.length; i++) {
     h ^= s.charCodeAt(i);
     h = Math.imul(h, 0x01000193) >>> 0;
@@ -268,9 +277,11 @@ function placed(name: string, size: number): { pts: Pt[][]; width: number } {
 /** The app's default icon as an SVG document.
  *
  *  Self-contained and font-free: it renders identically in a browser tab, a
- *  `.desktop` entry and a README. */
-export function appIconSvg(name: string, size = 512): string {
-  const { bg0, bg1, fg } = iconColors(name);
+ *  `.desktop` entry and a README. `name` draws the LETTER; `id` keys the HUE —
+ *  pass the appId, the key the theme tints on, so a title that is not the
+ *  appId's spelling (or the "AIO App" fallback) cannot draw another colour. */
+export function appIconSvg(name: string, size = 512, id = name): string {
+  const { bg0, bg1, fg } = iconColors(id);
   const { pts, width } = placed(name, size);
   const d = pts
     .map((line) =>
@@ -282,12 +293,12 @@ export function appIconSvg(name: string, size = 512): string {
     )
     .join(" ");
   const r = (size * RADIUS_RATIO).toFixed(2);
-  const id = `g${hueOf(name)}`;
+  const gid = `g${hueOf(id)}`;
   return `<svg xmlns="http://www.w3.org/2000/svg" width="${size}" height="${size}" viewBox="0 0 ${size} ${size}">
-  <defs><linearGradient id="${id}" x1="0" y1="0" x2="0" y2="1">
+  <defs><linearGradient id="${gid}" x1="0" y1="0" x2="0" y2="1">
     <stop offset="0" stop-color="${bg0}"/><stop offset="1" stop-color="${bg1}"/>
   </linearGradient></defs>
-  <rect width="${size}" height="${size}" rx="${r}" fill="url(#${id})"/>
+  <rect width="${size}" height="${size}" rx="${r}" fill="url(#${gid})"/>
   <path d="${d}" fill="none" stroke="${fg}" stroke-width="${
     width.toFixed(2)
   }" stroke-linecap="round" stroke-linejoin="round"/>
@@ -329,9 +340,13 @@ const cover = (d: number) => Math.max(0, Math.min(1, 0.5 - d));
 
 /** Render the default icon as RGBA pixels. Exported for the PNG writer and for
  *  tests, which assert on coverage rather than on file bytes. */
-export function appIconPixels(name: string, size: number): Uint8Array {
-  const { bg0, bg1, fg } = iconColors(name);
-  const hue = hueOf(name);
+export function appIconPixels(
+  name: string,
+  size: number,
+  id = name,
+): Uint8Array {
+  const { bg0, bg1, fg } = iconColors(id);
+  const hue = hueOf(id);
   const c0 = hsl(hue, 0.68, 0.82);
   const c1 = hsl((hue + 24) % 360, 0.62, 0.68);
   const cf = hsl(hue, 0.70, fgLightness(hue) / 100);
@@ -421,8 +436,9 @@ function chunk(type: string, data: Uint8Array): Uint8Array {
 export async function appIconPng(
   name: string,
   size = 512,
+  id = name,
 ): Promise<Uint8Array> {
-  const px = appIconPixels(name, size);
+  const px = appIconPixels(name, size, id);
   const stride = size * 4;
   const raw = new Uint8Array(size * (stride + 1));
   for (let y = 0; y < size; y++) {
@@ -464,8 +480,9 @@ export async function appIconPng(
 export async function appIconPngBase64(
   name: string,
   size = 256,
+  id = name,
 ): Promise<string> {
-  const png = await appIconPng(name, size);
+  const png = await appIconPng(name, size, id);
   let s = "";
   for (let i = 0; i < png.length; i += 0x8000) {
     s += String.fromCharCode(...png.subarray(i, i + 0x8000));

@@ -508,7 +508,17 @@ export function openUserStore(
       WHERE id = ? AND locked_until <= ?`,
   );
   const selLock = db.prepare("SELECT locked_until FROM users WHERE id = ?");
-  const updTotp = db.prepare("UPDATE users SET totp = ? WHERE id = ?");
+  // A NEW secret starts a new replay record: `totp_step` is the step the OLD
+  // secret last spent, and left in place it refused the new authenticator's
+  // first valid code as a "replay" when enrolment followed a 2FA login inside
+  // the same 30 s step. Re-staging the SAME secret keeps the record, so this
+  // never reopens a spent code.
+  const updTotp = db.prepare(
+    totpStepColumn
+      ? "UPDATE users SET totp_step = CASE WHEN totp IS ?1 THEN totp_step " +
+        "ELSE 0 END, totp = ?1 WHERE id = ?2"
+      : "UPDATE users SET totp = ?1 WHERE id = ?2",
+  );
   const updTotpOn = db.prepare(
     "UPDATE users SET totp_on = ? WHERE id = ? AND totp IS NOT NULL",
   );
@@ -870,9 +880,14 @@ export function openUserStore(
       // wrong while the caller still knows what it passed.
       const clean = String(secretB32 ?? "").replace(/=+$/, "").toUpperCase();
       if (!clean || /[^A-Z2-7]/.test(clean)) {
+        // The SHAPE, never the characters: the secret is a credential, and an
+        // app's catch that logs e.message would write it into a log file.
+        const bad = clean.search(/[^A-Z2-7]/);
         throw new Error(
           `setTotpSecret: the secret must be base32 (A-Z and 2-7). Got ` +
-            `${JSON.stringify(String(secretB32).slice(0, 12))}… — every TOTP ` +
+            `${clean.length} characters` +
+            (bad >= 0 ? `, the first invalid one at position ${bad + 1}` : "") +
+            ` (not shown: it is a credential) — every TOTP ` +
             `code is derived by decoding it, so this would be accepted here ` +
             `and then fail every login for this account.`,
         );

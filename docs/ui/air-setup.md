@@ -18,9 +18,9 @@ const App = () => (
 mount(document.getElementById("root")!, App);
 ```
 
-Zero external dependencies. A page that renders an aio component downloads **79
-KB gzipped** (67 KB brotli); the counter app — that page plus one cell — is **80
-KB gzipped** (69 KB brotli). That is the whole client: the renderer, the signal
+Zero external dependencies. A page that renders an aio component downloads **82
+KB gzipped** (71 KB brotli); the counter app — that page plus one cell — is **84
+KB gzipped** (73 KB brotli). That is the whole client: the renderer, the signal
 runtime, the WebSocket protocol, the offline queue and the CRDT merge, not a
 view layer you then add a store and a transport to. `deno task bench:bundle`
 prints the numbers, and `tests/bundle-size.test.ts` fails if this paragraph

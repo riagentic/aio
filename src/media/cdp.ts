@@ -33,10 +33,18 @@ export async function cdpConnect(
   const listeners = new Map<string, Set<(params: unknown) => void>>();
   let id = 0;
   await new Promise<void>((resolve, reject) => {
-    const t = setTimeout(
-      () => reject(new Error(`CDP connect timed out after ${timeoutMs}ms`)),
-      timeoutMs,
-    );
+    const t = setTimeout(() => {
+      // The socket is abandoned, so it is CLOSED — not left connecting. A
+      // target that accepted the TCP connection and never answered the
+      // upgrade kept it open forever: the caller got its timeout error and
+      // then the process never exited (`am shot` hung after reporting it).
+      ws.onopen = null;
+      ws.onerror = null;
+      try {
+        ws.close();
+      } catch { /* aio-ok: already closing — the point is that it is */ }
+      reject(new Error(`CDP connect timed out after ${timeoutMs}ms`));
+    }, timeoutMs);
     ws.onopen = () => {
       clearTimeout(t);
       resolve();

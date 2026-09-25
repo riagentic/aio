@@ -377,7 +377,6 @@ export const LEDGER: readonly string[] = [
   "src/server/auth-totp.ts|_resetTotpReplay",
   "src/server/blobs.ts|_resetBlobStores",
   "src/server/client-log.ts|_rateSlotCount",
-  "src/server/config.ts|unknownBuildKeys",
   "src/server/config.ts|_resetConfigConflicts",
   "src/server/graph-validator.ts|extractImports",
   "src/server/pairing.ts|currentPin",

@@ -11,6 +11,7 @@
 // edits. Reusing it would make an update depend on the state of somebody's
 // working tree.
 import { join } from "@std/path";
+import { readDenoJson } from "./deno-json.ts";
 import type { DataContract } from "../build/ship.ts";
 import type { Log } from "../diagnostics/logger-api.ts";
 
@@ -53,17 +54,18 @@ async function run(
   }
 }
 
-/** Does this app's deno.json declare the named task? */
+/** Does this app's deno.json declare the named task? Through THE reader
+ *  (`readDenoJson`): both names Deno accepts, parsed as JSONC. It read only
+ *  `deno.json`, with a regex that stripped whole-line `//` comments, so a
+ *  `deno.jsonc` app — or a trailing comment, or a block comment — "had no
+ *  compile task" and every update from its repository was refused. A config
+ *  that does not parse THROWS, naming the file: "no compile task" would be a
+ *  wrong reason. */
 async function hasTask(dir: string, task: string): Promise<boolean> {
-  try {
-    const raw = await Deno.readTextFile(join(dir, "deno.json"));
-    const cfg = JSON.parse(raw.replace(/^\s*\/\/.*$/gm, "")) as {
-      tasks?: Record<string, unknown>;
-    };
-    return !!cfg.tasks?.[task];
-  } catch {
-    return false;
-  }
+  const cfg = (await readDenoJson(dir))?.config as
+    | { tasks?: Record<string, unknown> }
+    | undefined;
+  return !!cfg?.tasks?.[task];
 }
 
 /** The artifact a build just produced, found by TIME rather than by name.
@@ -158,9 +160,14 @@ export async function rebuildFromGit(opts: {
   await new Promise((r) => setTimeout(r, 1100));
 
   log.info("updates", `building ${head.out.slice(0, 8)}…`);
-  const built = await hasTask(src, "compile")
+  let noTask = "no `compile` task in the repo's deno.json";
+  const declared = await hasTask(src, "compile").catch((e) => {
+    noTask = e instanceof Error ? e.message : String(e);
+    return false;
+  });
+  const built = declared
     ? await run("deno", ["task", "compile"], src)
-    : { ok: false, out: "", err: "no `compile` task in the repo's deno.json" };
+    : { ok: false, out: "", err: noTask };
   if (!built.ok) {
     return {
       ok: false,

@@ -71,6 +71,24 @@ Deno.test("formatCellState: THE dump both assertion APIs print", () => {
   assertStringIncludes(big, "truncated");
 });
 
+Deno.test("formatCellState: a SHARED reference prints its value, not [Circular]", () => {
+  // Structural sharing is not a cycle: `s.selected = s.items[0]` reaches one
+  // object twice. The dump printed the second as "[Circular]", hiding the
+  // field a failing assertion was about.
+  const item = { id: 7 };
+  assertEquals(
+    formatCellState({ items: [item], selected: item }),
+    '{"items":[{"id":7}],"selected":{"id":7}}',
+  );
+  // A real cycle below a shared value is still caught.
+  const node: Record<string, unknown> = { id: 1 };
+  node.parent = node;
+  assertStringIncludes(
+    formatCellState({ a: node, b: node }),
+    '"b":{"id":1,"parent":"[Circular]"}',
+  );
+});
+
 const dxUi = cell("dx-ui", {
   state: { items: [] as string[] },
   methods: {

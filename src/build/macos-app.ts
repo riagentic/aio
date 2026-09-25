@@ -100,13 +100,16 @@ export function icnsFromSlots(
  *  rasterized at its EXACT pixel size (the monogram renderer is resolution
  *  independent), so every icon the Dock asks for is native. Verified by
  *  `iconutil -c iconset` on a real Mac, which is the only test that matters. */
-export async function icnsFromName(name: string): Promise<Uint8Array> {
+export async function icnsFromName(
+  name: string,
+  id = name,
+): Promise<Uint8Array> {
   const cache = new Map<number, Uint8Array>();
   const parts: Uint8Array[] = [];
   for (const { type, size } of ICNS_PNG_TYPES) {
     let png = cache.get(size);
     if (!png) {
-      png = await appIconPng(name, size);
+      png = await appIconPng(name, size, id);
       cache.set(size, png);
     }
     const el = new Uint8Array(8 + png.length);

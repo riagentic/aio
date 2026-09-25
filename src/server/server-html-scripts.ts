@@ -11,11 +11,36 @@ export function devWsScript(): string {
     const _devWsOk = /^https?:$/.test(location.protocol) && !window.__aioIPC
     if (!_devWsOk) console.debug('[aio] reload WS skipped: ' + (window.__aioIPC ? 'IPC bridge delivers reload' : 'no HTTP origin (' + location.protocol + ')'))
     const proto = location.protocol === 'https:' ? 'wss:': 'ws:'
-    const _tk = new URLSearchParams(location.search).get('token')
-    const _wsUrl = proto + '//' + location.host + '/ws' + (_tk ? '?token=' + encodeURIComponent(_tk): '')
+    // Read per attempt, like the bundle's buildWsUrl — minus a token the
+    // server already refused: after a sign-in the page URL still carries it,
+    // and the new session rides the cookie.
+    let _deadTk = null
+    const _wsUrl = () => {
+      let _tk = new URLSearchParams(location.search).get('token')
+      if (_tk === _deadTk) _tk = null
+      return proto + '//' + location.host + '/ws' + (_tk ? '?token=' + encodeURIComponent(_tk): '')
+    }
     let _bootId = null
+    // Paused while the transport says signed out (SIGNED_OUT_EVENT in
+    // browser/auth-client.ts): every retry presented the dead ?token=, was
+    // charged to the failed-auth budget, and at 429 blocked signing back in.
+    // A sign-in (SIGNED_IN_EVENT) resumes it.
+    let _devOut = false, _devLive = false, _devT = null
+    addEventListener('aio:signed-out', () => { _devOut = true; clearTimeout(_devT); _deadTk = new URLSearchParams(location.search).get('token') })
+    addEventListener('aio:signed-in', () => { if (!_devOut) return; _devOut = false; if (!_devLive) _devWs() })
+    // One decider for "signed out": the listener above cancels a pending retry,
+    // and onclose never arms one while signed out.
+    const _devRetry = () => { if (!_devLive) _devWs() }
+    // Reload through the bundle's transport when it is up: it first lets the
+    // calls this page still owes the server leave the socket (see
+    // _reloadWhenDrained). A bare reload here, on the boot id of a restarted
+    // server, threw away the offline queue that restart was replaying — in
+    // dev only, since prod has no dev socket. Before the bundle loads there
+    // is no queue to wait for.
+    const _reload = () => typeof window.__aioReloadWhenDrained === 'function' ? window.__aioReloadWhenDrained() : location.reload()
     function _devWs() {
-      const ws = new WebSocket(_wsUrl)
+      _devLive = true
+      const ws = new WebSocket(_wsUrl())
       // v2 envelope (B4b): every frame is {v:2,t,d}
       ws.onmessage = ev => {
         if (typeof ev.data !== 'string' || ev.data[0] !== '{') return
@@ -34,19 +59,19 @@ export function devWsScript(): string {
           if (!errs.length) console.error('[aio:graph] the import graph is invalid — not reloading')
           return
         }
-        if (f.t === 'graph-clear') { ws.close(); location.reload(); return }
-        if (f.t === 'reload') { ws.close(); location.reload() }
+        if (f.t === 'graph-clear') { ws.close(); _reload(); return }
+        if (f.t === 'reload') { ws.close(); _reload() }
         else if (f.t === 'css') {
           document.querySelectorAll('link[rel="stylesheet"]').forEach(link => {
             if (link.href.startsWith(location.origin)) link.href = link.href.split('?')[0] + '?t=' + Date.now()
           })
         } else if (f.t === 'boot') {
           const id = f.d && f.d.id
-          if (_bootId && _bootId !== id) { ws.close(); location.reload() }
+          if (_bootId && _bootId !== id) { ws.close(); _reload() }
           _bootId = id
         }
       }
-      ws.onclose = () => setTimeout(_devWs, 2000)
+      ws.onclose = () => { _devLive = false; if (!_devOut) _devT = setTimeout(_devRetry, 2000) }
       ws.onerror = (e) => console.warn('[aio] reload WS error:', e)
       ws.onopen = () => console.debug('[aio] reload WS connected')
     }

@@ -90,7 +90,7 @@ function parseCookbook(text: string): Recipe[] {
       assert(
         path,
         `${DOC} recipe ${s.n}: a block's first line must name its file, ` +
-          `e.g. \`// src/cells/tasks.ts\` — that name is what this test ` +
+          `e.g. \`// src/cell/tasks.ts\` — that name is what this test ` +
           `writes it to disk as`,
       );
       files.push({
@@ -109,7 +109,7 @@ function parseCookbook(text: string): Recipe[] {
 /** Files a recipe names as "your own" — the doc says what each must provide;
  *  these are the stand-ins the drivers run against. */
 const SUPPORT: Record<string, string> = {
-  "src/cells/weather-api.ts": `
+  "src/cell/weather-api.ts": `
 export let calls = 0;
 export function fetchWeather(city: string): Promise<number> {
   calls++;
@@ -145,7 +145,7 @@ const DRIVERS: Record<number, string> = {
   1: `
 import { assertEquals } from "@std/assert";
 import { testCell, testUI } from "aio/testing";
-import { tasks } from "../src/cells/tasks.ts";
+import { tasks } from "../src/cell/tasks.ts";
 import TaskList from "../src/TaskList.tsx";
 
 testUI(TaskList, "recipe 1: a typed task reaches the cell", async (ui) => {
@@ -167,7 +167,7 @@ testCell(tasks, "recipe 1: toggle and remove", async (t) => {
 `,
   2: `
 import { testCell } from "aio/testing";
-import { view } from "../src/cells/view.ts";
+import { view } from "../src/cell/view.ts";
 
 testCell(view, "recipe 2: client-scoped state still dispatches", async (t) => {
   await t.send.setFilter("done");
@@ -178,7 +178,7 @@ testCell(view, "recipe 2: client-scoped state still dispatches", async (t) => {
   3: `
 import { assert, assertEquals } from "@std/assert";
 import { testUI } from "aio/testing";
-import { signup } from "../src/cells/signup.ts";
+import { signup } from "../src/cell/signup.ts";
 import SignupForm from "../src/SignupForm.tsx";
 
 testUI(SignupForm, "recipe 3: invalid submit is refused, valid one lands", async (ui) => {
@@ -197,7 +197,7 @@ testUI(SignupForm, "recipe 3: invalid submit is refused, valid one lands", async
   4: `
 import { assertEquals } from "@std/assert";
 import { testUI } from "aio/testing";
-import { likes } from "../src/cells/likes.ts";
+import { likes } from "../src/cell/likes.ts";
 import LikeButton from "../src/LikeButton.tsx";
 
 testUI(LikeButton, "recipe 4: the count moves before the method finishes", async (ui) => {
@@ -211,7 +211,7 @@ testUI(LikeButton, "recipe 4: the count moves before the method finishes", async
 `,
   5: `
 import { testCell } from "aio/testing";
-import { bench } from "../src/cells/bench.ts";
+import { bench } from "../src/cell/bench.ts";
 
 testCell(bench, "recipe 5: both siblings land in one commit", async (t) => {
   await t.send.run();
@@ -225,8 +225,8 @@ testCell(bench, "recipe 5: both siblings land in one commit", async (t) => {
   6: `
 import { assertEquals } from "@std/assert";
 import { bootCells } from "aio/testing";
-import { weather } from "../src/cells/weather.ts";
-import * as api from "../src/cells/weather-api.ts";
+import { weather } from "../src/cell/weather.ts";
+import * as api from "../src/cell/weather-api.ts";
 
 Deno.test("recipe 6: an identical call inside the ttl does not re-run", async () => {
   const h = await bootCells([weather]);
@@ -248,7 +248,7 @@ Deno.test("recipe 6: an identical call inside the ttl does not re-run", async ()
   7: `
 import { assert, assertEquals } from "@std/assert";
 import { bootCells } from "aio/testing";
-import { search } from "../src/cells/search.ts";
+import { search } from "../src/cell/search.ts";
 
 Deno.test("recipe 7: the older search loses", async () => {
   const h = await bootCells([search]);
@@ -270,7 +270,7 @@ Deno.test("recipe 7: the older search loses", async () => {
   8: `
 import { assertEquals } from "@std/assert";
 import { bootCells } from "aio/testing";
-import { article } from "../src/cells/article.ts";
+import { article } from "../src/cell/article.ts";
 
 Deno.test("recipe 8: close() aborts the in-flight open()", async () => {
   const h = await bootCells([article]);
@@ -289,7 +289,7 @@ Deno.test("recipe 8: close() aborts the in-flight open()", async () => {
   9: `
 import { assert, assertEquals } from "@std/assert";
 import { bootCells } from "aio/testing";
-import { digest } from "../src/cells/digest.ts";
+import { digest } from "../src/cell/digest.ts";
 
 Deno.test("recipe 9: the interval fires on the virtual clock", async () => {
   const h = await bootCells([digest]);
@@ -312,7 +312,7 @@ Deno.test("recipe 9: the interval fires on the virtual clock", async () => {
 `,
   10: `
 import { assertEquals } from "@std/assert";
-import { migratePrefs, type Prefs } from "../src/cells/prefs.ts";
+import { migratePrefs, type Prefs } from "../src/cell/prefs.ts";
 
 Deno.test("recipe 10: v1 data becomes v2 data", () => {
   const v1 = { dark: true } as unknown as Prefs;
@@ -324,7 +324,7 @@ Deno.test("recipe 10: v1 data becomes v2 data", () => {
   11: `
 import { assert } from "@std/assert";
 import { testMultiClient } from "aio/testing";
-import { vault } from "../src/cells/vault.ts";
+import { vault } from "../src/cell/vault.ts";
 
 Deno.test("recipe 11: the secret is off the wire AND the door is shut", async () => {
   await using m = await testMultiClient({ cells: [vault] }, 1);
@@ -374,7 +374,7 @@ testUI(Account, "recipe 13: the signed-in branch renders the identity", {
   14: `
 import { assert, assertEquals } from "@std/assert";
 import { testServer } from "aio/testing";
-import { tasks } from "../src/cells/tasks.ts";
+import { tasks } from "../src/cell/tasks.ts";
 import { apiRoutes } from "../src/routes/api.ts";
 
 Deno.test("recipe 14: the JSON endpoint answers over real HTTP", async () => {
@@ -399,7 +399,7 @@ Deno.test("recipe 14: the JSON endpoint answers over real HTTP", async () => {
   15: `
 import { assert, assertEquals } from "@std/assert";
 import { testServer } from "aio/testing";
-import { files } from "../src/cells/files.ts";
+import { files } from "../src/cell/files.ts";
 import { uploadRoutes } from "../src/routes/upload.ts";
 
 Deno.test("recipe 15: bytes to disk, metadata to the cell", async () => {
@@ -461,7 +461,7 @@ Deno.test("recipe 16: the title follows the route", async () => {
   17: `
 import { assertEquals } from "@std/assert";
 import { testUI } from "aio/testing";
-import { palette } from "../src/cells/palette.ts";
+import { palette } from "../src/cell/palette.ts";
 import Palette from "../src/Palette.tsx";
 
 testUI(Palette, "recipe 17: Escape reaches a binding no element owns", async (ui) => {
@@ -475,7 +475,7 @@ testUI(Palette, "recipe 17: Escape reaches a binding no element owns", async (ui
   18: `
 import { assertEquals } from "@std/assert";
 import { testUI } from "aio/testing";
-import { view } from "../src/cells/view.ts";
+import { view } from "../src/cell/view.ts";
 import * as media from "../src/media.ts";
 import CameraView from "../src/CameraView.tsx";
 
@@ -508,7 +508,7 @@ testUI(Dashboard, "recipe 19: the panel fails, the page lives", (ui) => {
   20: `
 import { assert, assertEquals } from "@std/assert";
 import { bootCells } from "aio/testing";
-import { thumbs } from "../src/cells/thumbs.ts";
+import { thumbs } from "../src/cell/thumbs.ts";
 
 Deno.test("recipe 20: a worker cell is called like any other", async () => {
   const h = await bootCells([thumbs]);

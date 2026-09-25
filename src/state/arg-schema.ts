@@ -102,7 +102,22 @@ export function validateMethodArgs(
     // the wrong index. Appended AFTER the existing phrase, which agents grep.
     const slot = `(args.${method}[${i}])`;
     if (typeof spec === "function") {
-      const verdict = spec(out[i]);
+      const verdict: unknown = spec(out[i]);
+      if (verdict instanceof Promise) {
+        // An `async (v) => …` predicate: the same refusal, by name, as an
+        // async schema — "the check returned false" sent the reader hunting
+        // a false that the predicate never returned.
+        verdict.catch(() => {
+          // aio-ok: the verdict is refused unread below; only silence its rejection
+        });
+        throw new Error(
+          `${where} ${slot}: the predicate is ASYNCHRONOUS (it returned a ` +
+            `Promise), and aio checks arguments on the dispatch path, which ` +
+            `is synchronous for a sync method.\n` +
+            `  fix: make the predicate synchronous, or validate inside the ` +
+            `method itself where you can await it.`,
+        );
+      }
       if (verdict !== true) {
         throw new Error(
           `${where} is invalid ${slot}: ${

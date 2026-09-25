@@ -118,3 +118,36 @@ testUI(
     assertEquals(ui.html().includes("note "), true);
   },
 );
+
+// examples/README.md sells this example as the update offer, the blocked case,
+// download progress "and a 'report a problem' path" — and `app.ts` turns
+// `feedback: true` on — but the component had no way to file a report. The
+// config line did nothing a user could reach, in the example whose subject is
+// reaching the people using the app.
+testUI(
+  App,
+  "example updates: a user can report a problem, and is told where it went",
+  {
+    seed: {
+      feedback: {
+        enabled: true,
+        status: "saved",
+        last: {
+          id: "r1",
+          path: "/data/reports/r1.json",
+          createdAt: "2026-01-01T00:00:00.000Z",
+          delivered: false,
+        },
+        pending: 1,
+        error: null,
+      },
+    },
+  },
+  (ui) => {
+    assert(
+      ui.present("ReportAProblemButton", "element"),
+      "the example files problem reports from its UI",
+    );
+    assertStringIncludes(ui.html(), "/data/reports/r1.json");
+  },
+);

@@ -110,6 +110,25 @@ Deno.test("forUser parity: testUI { user } sees exactly that user's rows", async
   assertStringIncludes(ui.html(), "count:2");
 });
 
+Deno.test("forUser parity: an expectCell failure prints the view the predicate read, not the server's", async () => {
+  // The predicate reads alice's filtered view; the failure used to dump the
+  // SERVER slice — both users' rows — so `items.length === 2` failed beside a
+  // dump showing two items, and printed a row this client can never see.
+  await using ui = await testUI(App, {
+    cells: [orders],
+    user: { id: "alice", role: "member" },
+  });
+  let msg = "";
+  try {
+    await ui.expectCell(orders, (c) => c.items.length === 2);
+  } catch (e) {
+    msg = String(e);
+  }
+  assertStringIncludes(msg, "expectCell failed for cell 'fuOrders'");
+  assertStringIncludes(msg, '"items":[{"id":"1","owner":"alice"}]');
+  assertEquals(msg.includes('"owner":"bob"'), false, "no row alice cannot see");
+});
+
 Deno.test("forUser parity: a throwing filter fails CLOSED in testUI, as on the wire", async () => {
   const lines: string[] = [];
   setLogger({

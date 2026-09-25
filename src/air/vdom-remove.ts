@@ -288,15 +288,19 @@ export function removeDom(
   // Portal: remove children from target DOM
   if (typeof vnode === "object" && vnode.tag === Portal) {
     const target = vnode.props.target as Node;
-    if (target) {
+    // Every MOUNTED portal has an `_anchor` (see the Portal branch of
+    // `createDom`); one without it never put anything in its target. Walking
+    // it from `target.firstChild` treated the target's own content as this
+    // portal's: a hydration mismatch tears down the whole unmounted tree, and
+    // a `<Portal target={document.body}>Saved</Portal>` in it deleted the
+    // page's first body node (a site header outside the app) as its "text".
+    if (target && vnode._anchor) {
       // Walk from the portal's own region anchor, not `target.firstChild` —
       // that is the OTHER portal's content when two share a target, and
       // removing this portal by it deleted their nodes instead of its own.
-      let cursor: Node | null = vnode._anchor
-        ? _advance(vnode._anchor, 1)
-        : target.firstChild;
+      let cursor: Node | null = _advance(vnode._anchor, 1);
       for (const child of vnode.children) {
-        const at = getDom(child) ?? cursor;
+        const at = _liveFirstDom(child) ?? cursor;
         cursor = _advance(at, _domNodeCount(child));
         removeDom(target, child, ctx, at);
       }
@@ -318,14 +322,19 @@ export function removeDom(
       (vnode.tag === ErrorBoundary || vnode.tag === Suspense) &&
       vnode._rendered != null
     ) {
-      removeDom(parent, vnode._rendered, ctx, getDom(vnode) ?? posDom);
+      removeDom(parent, vnode._rendered, ctx, _liveFirstDom(vnode) ?? posDom);
       return;
     }
     // Walk the region positionally so bare-text children — which have no `_dom`
-    // — are located by POSITION, the only thing that identifies them.
-    let cursor: Node | null = getDom(vnode) ?? posDom;
+    // — are located by POSITION, the only thing that identifies them. The
+    // positions are the LIVE ones (`_liveFirstDom`): a fragment's and a
+    // component's `_dom` are copies that go stale when a component below
+    // re-renders on its own and swaps its root, and a walk started from a
+    // detached copy ran off the end — the bare text after it was never
+    // found, and stayed on the page after its whole region was removed.
+    let cursor: Node | null = _liveFirstDom(vnode) ?? posDom;
     for (const child of vnode.children) {
-      const at = getDom(child) ?? cursor;
+      const at = _liveFirstDom(child) ?? cursor;
       cursor = _advance(at, _domNodeCount(child));
       removeDom(parent, child, ctx, at);
     }
@@ -343,7 +352,7 @@ export function removeDom(
   if (typeof vnode === "object" && typeof vnode.tag === "function") {
     ctx.hooks?.unmountComponent(vnode);
     if (vnode._rendered != null) {
-      removeDom(parent, vnode._rendered, ctx, vnode._dom ?? posDom);
+      removeDom(parent, vnode._rendered, ctx, _liveFirstDom(vnode) ?? posDom);
     }
     return;
   }
@@ -438,6 +447,23 @@ export function removeDom(
         if (typeof child === "object") _removeDomCleanup(child, ctx);
       }
     }
-    parent.removeChild(dom);
+    // The same guard as the deferred path above: an action's cleanup may have
+    // MOVED its element already, and `removeChild` of a node that is no
+    // longer this parent's child throws — which failed the whole re-render of
+    // the component that unmounted it.
+    if (isChildOf(dom, parent)) parent.removeChild(dom);
+  } else if (
+    typeof vnode === "object" && typeof vnode.tag === "string" && vnode._dom
+  ) {
+    // Not in `parent` any more — something outside the renderer took it out
+    // (an action that moved or replaced its element). There is nothing to
+    // REMOVE, but the vnode is still leaving
+    // the tree, so it is still UNMOUNTED: skipping this left its actions'
+    // teardown unrun and its signal bindings live, for good.
+    cleanupSignalBindings(vnode._dom as Element);
+    _cleanupActions(vnode._dom as HTMLElement);
+    for (const child of _cleanupChildren(vnode)) {
+      if (typeof child === "object") _removeDomCleanup(child, ctx);
+    }
   }
 }

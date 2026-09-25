@@ -12,6 +12,7 @@
 // (compose the cells). Same components, same signals, same behaviour.
 
 import { createContext, onMount, useContext } from "./aio-renderer.ts";
+import { isSignal } from "./signal-binding.ts";
 import {
   _isSsrRendering,
   _registerSsrCapture,
@@ -320,19 +321,37 @@ export function Link(
     }
     return false;
   }
+  // The author's own `onClick` runs first, and a `preventDefault()` in it
+  // keeps the link from routing — the anchor contract. It was overwritten by
+  // the spread below, so `<Link onClick={closeMenu}>` navigated and never
+  // closed the menu, with nothing said anywhere.
+  const own = rest.onClick as ((e: Event) => void) | undefined;
   function handleClick(e: Event) {
+    if (typeof own === "function") own(e);
+    if (e.defaultPrevented) return;
     if (ownedByBrowser(e as MouseEvent)) return;
     e.preventDefault();
     navigate(to, { replace: rep });
   }
+  // `class` is the spelling aio apps write, and it and `className` land on the
+  // same attribute — so the active class REPLACED a `class` the author set
+  // (`<NavLink class="nav">` rendered `class="active"` on its own page).
+  // Both are folded into one before the active class is added — when both
+  // are strings. A SIGNAL class stays bound, passed through as 1.0.11 did:
+  // folding it wrote its source text as the class, frozen.
+  const bound = isSignal(rest.class) || isSignal(rest.className);
+  const base = bound
+    ? rest.className
+    : [rest.class, rest.className].filter(Boolean).join(" ") || undefined;
   const cls = isActive && activeClass
-    ? [rest.className, activeClass].filter(Boolean).join(" ")
-    : rest.className;
+    ? [base, activeClass].filter(Boolean).join(" ")
+    : base;
   const sty = isActive && activeStyle
     ? { ...rest.style, ...activeStyle }
     : rest.style;
+  const { class: _class, ...attrs } = rest;
   return h("a", {
-    ...rest,
+    ...(bound ? rest : attrs),
     // Under the route base, as `navigate` resolves it (`_appHref`).
     href: _appHref(to),
     onClick: handleClick,

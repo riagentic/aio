@@ -184,21 +184,25 @@ export default function App() {
       stderr: "null",
     }).spawn();
 
-    const client = await waitFor("app client", async () => {
+    // The newest browser client, re-read on every poll: under load the tab
+    // may reconnect (a new index) before it has mounted, and a client picked
+    // once would be asked for its surface forever.
+    const client = await waitFor("mounted", async () => {
       const cs = await (await fetch(`${base}/__aio/trojan/clients`))
         .json() as { index: number; type: string }[];
-      const apps = cs.filter((c) => c.type === "browser");
-      return apps.length ? apps[0]! : null;
-    });
-    await waitFor("mounted", async () => {
-      const res = await fetch(`${base}/__aio/trojan/surface/${client.index}`);
+      const app = cs.filter((c) => c.type === "browser").at(-1);
+      if (!app) return null;
+      const res = await fetch(`${base}/__aio/trojan/surface/${app.index}`);
       if (!res.ok) {
         await res.body?.cancel();
         return null;
       }
       return JSON.stringify(await res.json()).includes("AddButton")
-        ? true
+        ? app
         : null;
+    }).catch((e) => {
+      console.error(`--- app + client output ---\n${logBuf.slice(-4000)}`);
+      throw e;
     });
 
     const trig = await (await fetch(

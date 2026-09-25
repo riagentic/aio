@@ -66,6 +66,12 @@ const OWNERS: Record<string, [Owner, string]> = {
     "one test file that defines classes clears them itself. A leaked class is " +
     "also inert: the name is a hash of the rule, so nothing can collide with it",
   ],
+  _resetDarkOsLightPage: [
+    "MANUAL",
+    "a once-per-page dev warning. Only dev-diagnostics installs the check " +
+    "(never testUI), so it never fires in another test; the one test file " +
+    "that drives it resets it between cases",
+  ],
   _resetDevOverlay: [
     "MANUAL",
     "the overlay installs ONCE per page and is never uninstalled by the " +

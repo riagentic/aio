@@ -125,6 +125,16 @@ export type ToWorker =
      *  refused write differently from the identical cell on the main isolate. */
     refusalsReject: boolean;
   }
+  /** The main isolate is wired (server, broadcast, time travel) and is running
+   *  its own cells' `onInit` — run THIS cell's, once per boot.
+   *
+   *  Not part of `init`: that message is sent at spawn, long before the main
+   *  isolate can apply a patch (its `broadcast`/`broadcastTT` do not exist
+   *  yet), and it is re-sent on every re-seed (time travel, snapshot load).
+   *  An `onInit` run from `init` therefore dispatched into an unwired main
+   *  isolate at boot — REDUCE_ERROR, the write kept by the worker and lost on
+   *  main — and ran AGAIN on every re-seed. */
+  | { t: "start" }
   /** Run one action. `id` correlates the reply. */
   | { t: "call"; id: number; action: Msg; ctx?: AmbientContext }
   /** A cancelOn TRIGGER fired on the other side of the thread.
@@ -141,6 +151,12 @@ export type ToWorker =
    *  composed the same cell def and so registered the same edge, and letting
    *  it resolve the edge itself keeps one decider. */
   | { t: "cancel"; type: string }
+  /** `app.cells.disable` / `enable` (or the circuit breaker) on the owner —
+   *  run the cell's own registry here, so `onDestroy`/`onInit` and the state
+   *  reset happen on the thread that owns the cell. `disable` is answered with
+   *  `disabled`. */
+  | { t: "disable" }
+  | { t: "enable" }
   /** Graceful stop — the worker aborts its in-flight methods, streams their
    *  final writes home as patches, then acks with `closed`. */
   | { t: "close" };
@@ -169,6 +185,29 @@ export type FromWorker =
   /** Effects the method returned — executed on the main isolate (schedules and
    *  cross-cell dispatches live there). */
   | { t: "effects"; list: Msg[] }
+  /** A cell error this isolate's composition reported (`INIT_ERROR` from an
+   *  `onInit`, `EFFECT_ASYNC_ERROR` from a method, …) — carried home so the
+   *  app's `onError` sink hears it, as it hears the same error from the same
+   *  cell on the main isolate. The worker's composition used to report to
+   *  nobody: a bare log line inside the worker, and `onError` never called. */
+  | {
+    t: "cell-error";
+    code: string;
+    message: string;
+    stack?: string;
+    name?: string;
+    context: Record<string, unknown>;
+    correlationId?: string;
+  }
+  /** Call `id` did not run: the executor answered it from another call (a
+   *  `concurrency: "first"` adopter, a `ttl` hit). Posted the moment that is
+   *  decided, so the owner's `$pending` stops counting it — an adopter of a
+   *  ten-second call otherwise counted as a second running call for all ten
+   *  seconds, where the same cell on the main isolate never counted it. */
+  | { t: "adopted"; id: number }
+  /** A `disable` ran: `ok` false = `onDestroy` threw and the cell rolled back
+   *  (reported as a `cell-error`), so the owner rolls back too. */
+  | { t: "disabled"; ok: boolean }
   /** The call settled. `ret` is the method's transported return value.
    *
    *  `refused` carries a rejection the reduce recorded in THIS isolate — the

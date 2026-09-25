@@ -6,12 +6,13 @@ import type { DB } from "../db/mod.ts";
 import {
   checkTableShape,
   type DirtyHint,
+  planSyncedMark,
   planTablesIncremental,
   refusedWriteDetail,
   type TableIndex,
 } from "../db/state-sync.ts";
 import type { CellPatches } from "./aio-dispatch.ts";
-import type { TableDef } from "./sql.ts";
+import { pkColumn, type TableDef } from "./sql.ts";
 import {
   createAioError,
   PERSIST_WRITTEN_ANYWAY,
@@ -109,6 +110,10 @@ export interface PersistenceConfig {
   syncCells?: Set<string>;
   /** Cell version map — keyed by cell id. Persisted alongside state for migration detection. */
   cellVersions?: Record<string, number>;
+  /** Each cell's declared-shape fingerprint (`shapeFingerprint`). Stamped
+   *  per WRITTEN cell into `<appId>:__shapes`, in the same transaction as the
+   *  slice, so the next boot knows which declaration wrote what it reads. */
+  cellShapes?: Record<string, string>;
   /** App ID — used as prefix for version key in KV */
   appId?: string;
   /** Opt-in journal: the current journal seq — captured at
@@ -172,6 +177,12 @@ export interface PersistenceManager {
   lastCycleError(): Error | null;
   setShuttingDown(): void;
   resetPrevState(): void;
+  /** These cells now hold a slice this build's methods did not write (a
+   *  snapshot load of data drifted from the declaration): their shape stamp
+   *  is REMOVED with their next write and never re-stamped by this process,
+   *  so the next dev boot judges that drift as a declaration change. Optional
+   *  so a stand-in manager need not carry it. */
+  unstampShapes?(cells: readonly string[]): void;
   /** @internal test probe — per-table pass counts (`hinted` = the O(change)
    *  row-set pass, `full` = a whole-table walk) across every window planned.
    *  Optional so a stand-in manager need not carry it. */
@@ -286,10 +297,26 @@ export function createPersistenceManager(
     }
   }
   let _baselineOverride = cfg.dbBaselineOverride;
+  // The override is what `loadTables` read: an ARRAY of rows per table. A
+  // `shape: "map"` binding holds its rows as a pk-keyed object, and the
+  // baseline must be in the bound shape — handed the raw array, the shape
+  // gate below refused it ("bound with shape \"map\" to … an array") and
+  // EVERY app with a map binding failed to boot. Keyed exactly as
+  // `placeLoadedTables` keys the state value (`String(row[pk])`).
+  const inBoundShape = (t: string, rows: unknown): unknown => {
+    const def = dbSchema?.[t];
+    const pk = def ? pkColumn(def) : null;
+    if (def?.shape !== "map" || !pk || !Array.isArray(rows)) return rows;
+    return Object.fromEntries(
+      (rows as Record<string, unknown>[]).map((r) => [String(r[pk]), r]),
+    );
+  };
   const baseline = (): Record<string, unknown> => {
     const v = tableState();
     if (_baselineOverride) {
-      for (const [t, rows] of Object.entries(_baselineOverride)) v[t] = rows;
+      for (const [t, rows] of Object.entries(_baselineOverride)) {
+        v[t] = inBoundShape(t, rows);
+      }
     }
     return v;
   };
@@ -574,12 +601,32 @@ export function createPersistenceManager(
   // transaction closes the window: either the state and the version that
   // describes it are both there, or neither is.
   let _storedVersions: Record<string, number> | null = null;
+  /** The stored `<appId>:__shapes` map; null until read, and left null when
+   *  the read failed — no shape is stamped then, which only keeps the next
+   *  dev boot as strict as it was. */
+  let _storedShapes: Record<string, string> | null = null;
+  /** Cells `unstampShapes` named — sticky for this process: whatever this
+   *  build's methods write on top of a foreign slice, the slice is not theirs. */
+  const _foreignShapes = new Set<string>();
 
   /** Read the stored version map once, before anything plans a write. The
    *  stamp is MONOTONIC per cell, which requires knowing what is stored: a
    *  failed read must NOT be treated as `{}` (that would let an older build
    *  stamp a newer file downward, which is the bug this guards). */
   async function _loadStoredVersions(): Promise<void> {
+    if (cfg.cellShapes && kvDb && cfg.appId && _storedShapes === null) {
+      try {
+        _storedShapes =
+          await kvDb.get<Record<string, string>>(`${cfg.appId}:__shapes`) ??
+            {};
+      } catch (e) {
+        log.warn(
+          `persist: could not read the stored shape stamps ` +
+            `(${cfg.appId}:__shapes) — ${e}. Not stamped this cycle; a dev ` +
+            `boot then treats drift as a declaration change (refuses).`,
+        );
+      }
+    }
     if (!kvDb || !cfg.appId || _storedVersions !== null) return;
     try {
       _storedVersions =
@@ -601,7 +648,7 @@ export function createPersistenceManager(
   /** WHAT gets stamped — one decider, used by both the planned (in-transaction)
    *  and the direct write paths. Empty when nothing needs stamping or when the
    *  stored map could not be read. */
-  function _versionStamp(): {
+  function _versionStamp(written: readonly string[] = []): {
     pairs: [string, unknown][];
     commit: () => void;
   } {
@@ -627,10 +674,35 @@ export function createPersistenceManager(
         next = merged;
       }
     }
+    // Shapes: only the cells whose slice THIS write carries — a cell left
+    // untouched on disk still holds what an earlier declaration wrote, and
+    // stamping it with this one would vouch for bytes it never wrote.
+    let nextShapes: Record<string, string> | null = null;
+    if (cfg.cellShapes && _storedShapes !== null) {
+      const merged = { ..._storedShapes };
+      for (const cell of written) {
+        if (_foreignShapes.has(cell)) {
+          // Removed, not left: a stamp from before the load would vouch for
+          // bytes this write replaces with the foreign slice.
+          if (Object.hasOwn(merged, cell)) {
+            delete merged[cell];
+            nextShapes = merged;
+          }
+          continue;
+        }
+        const fp = cfg.cellShapes[cell];
+        if (fp !== undefined && merged[cell] !== fp) {
+          merged[cell] = fp;
+          nextShapes = merged;
+        }
+      }
+      if (nextShapes) pairs.push([`${cfg.appId}:__shapes`, nextShapes]);
+    }
     return {
       pairs,
       commit: () => {
         if (next) _storedVersions = next;
+        if (nextShapes) _storedShapes = nextShapes;
       },
     };
   }
@@ -639,8 +711,8 @@ export function createPersistenceManager(
    *  ships today). Same decider, same monotonicity — but NOT atomic with the
    *  snapshot, which is why the planned path above is the one every real app
    *  takes. */
-  async function _stampVersions(): Promise<void> {
-    const stamp = _versionStamp();
+  async function _stampVersions(written: readonly string[]): Promise<void> {
+    const stamp = _versionStamp(written);
     if (!stamp.pairs.length) return;
     try {
       for (const [k, v] of stamp.pairs) await kvDb!.set(k, v);
@@ -728,6 +800,8 @@ export function createPersistenceManager(
     for (const t of tables) _dirty[t] = "all";
   }
 
+  /** Tables this process has already recorded in SYNCED_TABLES. */
+  const _syncMarked = new Set<string>();
   /** The `db:` table writes for ONE state read, grouped by owning cell. A
    *  group the planner refuses (a bad row) is returned in `refused` and costs
    *  its own cell — never another cell's tables. */
@@ -801,13 +875,20 @@ export function createPersistenceManager(
           _tableIndex,
           dirty,
         );
+        // The first committed window of each table (per process) also
+        // records it as synced, in the same transaction — see SYNCED_TABLES.
+        const unmarked = tables.filter((t) => !_syncMarked.has(t));
         groups.push({
           cell,
           tables,
-          stmts: plan.stmts.filter((s) => s.sql !== FK_DEFER),
+          stmts: [
+            ...plan.stmts.filter((s) => s.sql !== FK_DEFER),
+            ...planSyncedMark(unmarked),
+          ],
           commit: () => {
             advance(tables);
             plan.commit();
+            for (const t of unmarked) _syncMarked.add(t);
             log.debug(`persist: sqlite synced (${tables.join(", ")})`);
           },
         });
@@ -996,7 +1077,8 @@ export function createPersistenceManager(
       }
       const rows = kv.planSetMulti?.(persistKey, toWrite, removedKeys) ??
         null;
-      const stamp = _versionStamp();
+      const written = Object.keys(toWrite);
+      const stamp = _versionStamp(written);
       const planned = asyncDb !== null && rows !== null;
       const wm = planned && whole ? _planWatermark(seq) : [];
       return {
@@ -1019,7 +1101,7 @@ export function createPersistenceManager(
             _lastGood.delete(k);
           }
           if (planned) stamp.commit(); // stamped inside the transaction above
-          else await _stampVersions();
+          else await _stampVersions(written);
           if (wm.length) _committedWm = seq;
           // The watermark advances only on a committed write of EVERY cell.
           if (whole) cfg.onPersisted?.(seq);
@@ -1057,7 +1139,11 @@ export function createPersistenceManager(
       toStore = out;
     }
     const row = kv.planSet?.(persistKey, toStore) ?? null;
-    const stamp = _versionStamp();
+    // A kept cell is written back with its OLD bytes — not this build's.
+    const written = perCell
+      ? Object.keys(doc).filter((c) => !keep.includes(c))
+      : [];
+    const stamp = _versionStamp(written);
     const planned = asyncDb !== null && row !== null;
     const wm = planned && whole ? _planWatermark(seq) : [];
     return {
@@ -1077,7 +1163,7 @@ export function createPersistenceManager(
           _lastGood.set(k, e.ref); // the bytes this row now holds
         }
         if (planned) stamp.commit(); // stamped inside the transaction above
-        else await _stampVersions();
+        else await _stampVersions(written);
         if (wm.length) _committedWm = seq;
         // The watermark advances only on a committed write of EVERY cell.
         if (whole) cfg.onPersisted?.(seq);
@@ -1570,6 +1656,9 @@ export function createPersistenceManager(
     lastCycleError: () => _cycleError,
     setShuttingDown,
     resetPrevState,
+    unstampShapes: (cells) => {
+      for (const c of cells) _foreignShapes.add(c);
+    },
     _windowStats: () => ({ ..._passes }),
   };
 }

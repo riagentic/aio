@@ -14,16 +14,18 @@ import {
   resolveSdk,
 } from "./build-helpers.ts";
 import { ANDROID_TEMPLATE } from "./android-template.ts";
+import { androidRunOptionsWarning } from "./android-run-options.ts";
+import { warn } from "./build-say.ts";
 import { androidLocalHTML, htmlOpen } from "../server/server-html-gen.ts";
 import type { BuildConfig } from "./build-config.ts";
-import type { BuildVersion } from "./build-version.ts";
+import { type BuildVersion, stripVersionToken } from "./build-version.ts";
 import { appIconPng } from "./app-icon.ts";
 import {
   APP_STYLE,
   BUILD_SCRATCH_DIR,
   BUNDLE_JS,
 } from "../server/app-files.ts";
-import { HEY, NO, NOTE, OK } from "../diagnostics/fmt.ts";
+import { HEY, NO, OK } from "../diagnostics/fmt.ts";
 import { count } from "../diagnostics/fmt.ts";
 
 /** The app version an APK declares, from THE resolved build version.
@@ -246,7 +248,7 @@ export async function buildAndroid(cfg: BuildConfig): Promise<void> {
     const label = appTitle ?? binaryName;
     await Deno.writeFile(
       join(mipmapDir, "ic_launcher.png"),
-      await appIconPng(label, 192),
+      await appIconPng(label, 192, binaryName),
     );
     console.log(`${OK} default icon for "${label}"`);
   }
@@ -451,7 +453,25 @@ ${htmlOpen()}
   console.log(`${OK} connect page`);
 }
 
-async function _writeLocalAssets(
+/** Warn, naming each `aio.run()` option the app's entry sets that a local APK
+ *  never sees (see android-run-options.ts). An unreadable entry is not a build
+ *  failure — the bundle step already resolved it — so it only skips the scan. */
+export async function _warnRunOptions(
+  cfg: Pick<BuildConfig, "root" | "configEntry">,
+): Promise<void> {
+  let src: string;
+  try {
+    src = await Deno.readTextFile(join(cfg.root, cfg.configEntry));
+  } catch {
+    // aio-ok: no readable entry → nothing to scan; the bundle step owns that error.
+    return;
+  }
+  const w = androidRunOptionsWarning(src, cfg.configEntry);
+  if (w) warn(w.headline, w.body, w.fix);
+}
+
+/** Exported for its test only (the warning below). */
+export async function _writeLocalAssets(
   cfg: BuildConfig,
   assetsDir: string,
 ): Promise<void> {
@@ -466,25 +486,20 @@ async function _writeLocalAssets(
   // Raw title: androidLocalHTML escapes it itself (escHtml in headContent).
   // The packaged APK's shell renders the same default dev does, keyed on the
   // same identity — an app that is one colour on the desktop and another on
-  // the phone is not one app. `ui.theme` is set in code, which a build cannot
-  // read, so the shell carries BOTH: the inert tokens (active) and the full
-  // look (disabled), and `_applyShellUi` in the standalone runtime enables the
-  // second one when the app asked for it.
+  // the phone is not one app. The shell carries BOTH the inert tokens (active)
+  // and the full look (disabled) so a runtime that knows `ui.theme` can enable
+  // the second — but see below: today nothing on the phone knows it.
   const androidHtml = androidLocalHTML(appTitle ?? binaryName, hasCSS, {
     themeName: binaryName,
   });
-  // Never a silent drop (.katana/core.md): the packaged shell is written before
-  // `aio.run()` exists, so the `<head>` keys set in code cannot reach it. Two
-  // of them now travel with the bundle instead (`ui.theme` as a disabled sheet
-  // the standalone runtime enables, `ui.lang` set at boot); the rest cannot,
-  // and a build that quietly stops being the app the config describes is the
-  // bug this line exists to prevent.
-  console.log(
-    `${NOTE} the packaged shell is built before aio.run() runs — ` +
-      "ui.head, ui.viewport and ui.showStatus cannot reach it " +
-      "(ui.theme, ui.layout, ui.dir and ui.lang do, applied at boot). " +
-      "Use --android --remote if your app depends on them.",
-  );
+  // Never a silent drop (.katana/core.md). The shell is written before
+  // `aio.run()` exists, AND the APK's bundle entry imports only App.tsx
+  // (`makeEntryCode`) — the app's entry module never runs on the phone, so
+  // every `aio.run()` option (ui.*, hooks, persist, cellDefaults, localFirst…)
+  // is lost, however much of it the standalone runtime could honour. This used
+  // to claim "ui.theme, ui.layout, ui.dir and ui.lang do [reach it], applied
+  // at boot" — false for every APK ever built. Name what THIS app loses.
+  await _warnRunOptions(cfg);
   await Deno.copyFile(join(dist, BUNDLE_JS), join(assetsDir, BUNDLE_JS));
   await Deno.writeTextFile(join(assetsDir, "index.html"), androidHtml);
   if (hasCSS) {
@@ -625,6 +640,23 @@ export function androidApplicationId(
   const sanitized = label.replace(/[^a-z0-9]/g, "");
   if (!sanitized || !/^[a-z]/.test(sanitized)) return null;
   return `app.aio.${sanitized}`;
+}
+
+/** The applicationId a placed APK was built with, from its file name — for
+ *  the callers that install and launch it (`dev:android`, `install:android`).
+ *  The fleet names the APK `<label>-<version>.apk` (`myapp-0.1.3-dev.apk` was
+ *  built as `myapp-dev`), and deno.json `android.applicationId` overrides the
+ *  label exactly as it did in the build. Deriving it from the raw file name
+ *  launched `app.aio.myapp013dev` — a package that is not installed. */
+export function apkApplicationId(
+  apkFile: string,
+  explicit?: string,
+): string | null {
+  const name = apkFile.replaceAll("\\", "/").split("/").pop() ?? apkFile;
+  return androidApplicationId(
+    stripVersionToken(name.replace(/\.apk$/, "")),
+    explicit,
+  );
 }
 
 /** Android's own rule for a package name: ≥2 segments, each starting with a

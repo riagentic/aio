@@ -234,6 +234,12 @@ export {
 // `serverImport` is documented "in the cell" (docs/testing/ui-testing.md) and
 // has no imports.
 export { serverImport } from "./state/server-import.ts";
+// `db:` schema builders: a table is declared beside the cell whose rows it
+// stores (the row type is the cell's), and the UI imports that module. Pure
+// data constructors in an isomorphic module (mod.ts reaches the SAME objects
+// through src/server/sql.ts), so the name resolves here and esbuild drops
+// whatever a page never calls.
+export { integer, pk, real, ref, table, text } from "./state/table-schema.ts";
 
 // ── Server-only names, as browser facades that refuse when CALLED ─────
 // docs/auth/auth.md and docs/debugging/performance.md import these into a

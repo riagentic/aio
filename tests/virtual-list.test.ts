@@ -364,3 +364,18 @@ Deno.test("virtualList: overscan does not go beyond items.length", () => {
   assertEquals(lastVisible.index, 9);
   assertEquals(vl.visible.length, 10);
 });
+
+Deno.test("virtualList: overscan 0 renders the partly visible bottom row when scrolled off a row boundary", () => {
+  const items = Array.from({ length: 100 }, (_, i) => i);
+  const vl = useVirtualList({
+    items,
+    itemHeight: 40,
+    containerHeight: 400,
+    overscan: 0,
+  });
+  // Viewport 20..420 shows rows 0 (20..40) through 10 (400..420).
+  vl.onScroll({ target: { scrollTop: 20 } } as unknown as Event);
+  const idx = vl.visible.map((v) => v.index);
+  assertEquals(idx[0], 0);
+  assertEquals(idx[idx.length - 1], 10);
+});

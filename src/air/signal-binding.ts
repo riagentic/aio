@@ -13,6 +13,7 @@ import {
   _controlDrifted,
   _isControlled,
   _RESERVED_PROPS,
+  _setStyleProp,
   _writeProp,
 } from "./prop-write.ts";
 
@@ -54,7 +55,16 @@ export function bindSignalProps(
 ): void {
   const cleanups: (() => void)[] = [];
 
-  for (const [k, v] of Object.entries(props)) {
+  const entries = Object.entries(props);
+  // A bound `value` binds LAST on an <input>, as applyProps writes it last:
+  // the browser clamps a range value against the min/max/step it has at
+  // assignment, so `value={v} max={m}` bound in source order mounted at 100.
+  // Effects run on creation, so binding order is write order.
+  if (el.tagName === "INPUT") {
+    const vi = entries.findIndex(([k]) => k === "value");
+    if (vi >= 0) entries.push(entries.splice(vi, 1)[0]!);
+  }
+  for (const [k, v] of entries) {
     if (_RESERVED_PROPS.has(k)) continue;
 
     if (isSignal(v)) {
@@ -88,7 +98,8 @@ export function bindSignalProps(
           const styleProp = camelToKebab(sk);
           const dispose = effect(() => {
             const val = sig.value;
-            el.style.setProperty(
+            _setStyleProp(
+              el.style,
               styleProp,
               val == null ? "" : styleValue(sk, val),
             );

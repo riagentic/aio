@@ -132,15 +132,16 @@ fill and your buttons keep the ink chosen for the old colour, which is how an
 accessible palette turns into white-on-yellow. The generated palette is checked
 against WCAG AA across the hue wheel; a hand-set one is yours to check.
 
-| Token                                            | What it colours                      |
-| ------------------------------------------------ | ------------------------------------ |
-| `--aio-bg` · `--aio-surface` · `--aio-surface-2` | page, cards, insets                  |
-| `--aio-text` · `--aio-muted` · `--aio-border`    | body copy, secondary copy, hairlines |
-| `--aio-accent` · `--aio-on-accent`               | accent fill and the ink on it        |
-| `--aio-accent-ink`                               | the accent as text (links, badges)   |
-| `--aio-danger` · `--aio-ok` · `--aio-warn`       | status                               |
-| `--aio-r-1…4` · `--aio-s-1…6` · `--aio-page`     | radii, spacing, page width           |
-| `--aio-shadow-1/2` · `--aio-ring` · `--aio-tint` | elevation, focus, accent wash        |
+| Token                                            | What it colours                                                                                                                                                                 |
+| ------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `--aio-bg` · `--aio-surface` · `--aio-surface-2` | page, cards, insets                                                                                                                                                             |
+| `--aio-text` · `--aio-muted` · `--aio-border`    | body copy, secondary copy, hairlines                                                                                                                                            |
+| `--aio-accent` · `--aio-on-accent`               | accent fill and the ink on it                                                                                                                                                   |
+| `--aio-accent-ink`                               | the accent as text (links, badges)                                                                                                                                              |
+| `--aio-danger` · `--aio-ok` · `--aio-warn`       | status                                                                                                                                                                          |
+| `--aio-on-danger`                                | the ink on a danger fill (`.danger`) — solved from `--aio-danger` (white or black, whichever reads better), so an app that sets only `--aio-danger` still gets a readable label |
+| `--aio-r-1…4` · `--aio-s-1…6` · `--aio-page`     | radii, spacing, page width                                                                                                                                                      |
+| `--aio-shadow-1/2` · `--aio-ring` · `--aio-tint` | elevation, focus, accent wash                                                                                                                                                   |
 
 Two accent tokens rather than one, because a fill and a label answer different
 questions: a fill is measured against its own text, text is measured against the
@@ -186,6 +187,21 @@ Automatic, via `prefers-color-scheme` — there is nothing to wire. Both schemes
 are checked against WCAG AA for body text, accent text and accent fills across
 the whole hue wheel (`tests/app-theme.test.ts`), so no app's generated colour
 can be the unreadable one.
+
+### Dark OS, light page
+
+Under `"tokens"` (the default), `"none"`, and `"auto"` once the app ships its
+own `style.css`, the `--aio-*` tokens and the kit's colours switch to their dark
+variant on a dark OS — but nothing paints the page. The browser canvas stays
+white, so the kit's light text lands on white (about 1.15:1, unreadable). In dev
+the page warns once (`[aio] Dark OS, light page…`). Fix it with one line:
+
+- `ui.theme: "auto"` (or `"full"`) — aio paints the page for both schemes;
+- `:root { color-scheme: light dark }` in your CSS — the canvas follows the OS;
+- or paint the page yourself for dark mode:
+  `@media (prefers-color-scheme: dark) { body { background: var(--aio-bg); color: var(--aio-text) } }`.
+
+An app that already paints its own dark page is unaffected and gets no warning.
 
 ## Building **on** the default, safely
 

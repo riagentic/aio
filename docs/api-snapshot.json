@@ -3800,17 +3800,18 @@
         },
         "ResolvedTarget": {
           "kind": "interface",
-          "sig": "f6dbbad07731f24d",
+          "sig": "07852ad8903d85ff",
           "members": {
             "name": "req:2fb40568533c1a6d",
             "kind": "req:2fb40568533c1a6d",
             "entry": "opt:2fb40568533c1a6d",
             "ui": "opt:2fb40568533c1a6d",
             "appName": "opt:2fb40568533c1a6d",
+            "title": "opt:2fb40568533c1a6d",
             "platforms": "opt:6941c580c10685fb"
           },
           "sigs": [
-            "f6dbbad07731f24d"
+            "07852ad8903d85ff"
           ]
         },
         "targetForFlags": {
@@ -3826,16 +3827,17 @@
         },
         "TargetOverride": {
           "kind": "interface",
-          "sig": "f6307e16f1ec0583",
+          "sig": "84f24584e68df7df",
           "members": {
             "kind": "opt:2fb40568533c1a6d",
             "entry": "opt:2fb40568533c1a6d",
             "ui": "opt:2fb40568533c1a6d",
             "name": "opt:2fb40568533c1a6d",
+            "title": "opt:2fb40568533c1a6d",
             "platforms": "opt:6941c580c10685fb"
           },
           "sigs": [
-            "f6307e16f1ec0583"
+            "84f24584e68df7df"
           ]
         },
         "TARGETS": {
@@ -5654,6 +5656,17 @@
             "f6c36923a5dd3ea4"
           ]
         },
+        "resolveHome": {
+          "kind": "function",
+          "sig": "419ffdefc65a167e",
+          "members": {
+            "param0": "req:27b3d703577e9786|",
+            "return": "req:5f0dcb284a01b1ef"
+          },
+          "sigs": [
+            "b3e5124d9ca4f4cb"
+          ]
+        },
         "route": {
           "kind": "function",
           "sig": "a3c0d8d3a76a575d",
@@ -7024,7 +7037,7 @@
         },
         "BrowserProps": {
           "kind": "interface",
-          "sig": "31c166435935db98",
+          "sig": "b0e178ae79b47386",
           "members": {
             "src": "req:2fb40568533c1a6d",
             "keepAlive": "opt:2fb40568533c1a6d",
@@ -7032,10 +7045,12 @@
             "onNavigate": "opt:db1e2795ea17ab9d",
             "class": "opt:2fb40568533c1a6d",
             "style": "opt:13f82d5fa6ff79be",
-            "ref": "opt:04d883de840d96cc"
+            "ref": "opt:04d883de840d96cc",
+            "hostKeys": "opt:1a1f5c423a7cdab2",
+            "onHostKey": "opt:8795c442147c672a"
           },
           "sigs": [
-            "31c166435935db98"
+            "b0e178ae79b47386"
           ]
         },
         "Button": {
@@ -7282,6 +7297,22 @@
         "Fragment": {
           "kind": "variable",
           "sig": "unpinned"
+        },
+        "HostKey": {
+          "kind": "interface",
+          "sig": "8d9f02834b13b022",
+          "members": {
+            "key": "req:2fb40568533c1a6d",
+            "code": "req:2fb40568533c1a6d",
+            "ctrlKey": "req:0ecca0fe3beba89b",
+            "shiftKey": "req:0ecca0fe3beba89b",
+            "altKey": "req:0ecca0fe3beba89b",
+            "metaKey": "req:0ecca0fe3beba89b",
+            "repeat": "req:0ecca0fe3beba89b"
+          },
+          "sigs": [
+            "8d9f02834b13b022"
+          ]
         },
         "Input": {
           "kind": "function",
@@ -8452,6 +8483,10 @@
           "sig": "bool"
         },
         "build --data": {
+          "kind": "flag",
+          "sig": "value"
+        },
+        "build --display-name": {
           "kind": "flag",
           "sig": "value"
         },

@@ -3,6 +3,7 @@ import { fromFileUrl, join, resolve, toFileUrl } from "@std/path";
 import { locateDenoJsonAbove } from "./deno-json.ts";
 import { resolveShare, type ShareRoot } from "./app-dirs.ts";
 import { ESBUILD_SPEC } from "../build/esbuild-shared.ts";
+import { importOutsideApp } from "./outside-app.ts";
 import {
   BUNDLE_ENTRY_KEY,
   bundleClient,
@@ -579,7 +580,7 @@ async function prodGraphErrors(opts: {
       "the build refuses the same declaration — fix it in deno.json.",
     );
   }
-  const esbuild = await import(ESBUILD_SPEC) as EsbuildModule;
+  const esbuild = await importOutsideApp<EsbuildModule>(ESBUILD_SPEC);
   const bundle = await bundleClient({
     esbuild,
     root,
@@ -731,6 +732,25 @@ export async function validateGraph(
     }
 
     if (source.length > MAX_FILE_SIZE) {
+      stack.delete(filePath);
+      return;
+    }
+
+    // A JSON module (`import data from "./x.json" with { type: "json" }`) is
+    // data, not code: the browser and the bundler both load it as JSON. Fed
+    // to the TS transpiler it was a "syntax error" and the page became the
+    // diagnostic page. Checked as what it is; it imports nothing.
+    if (filePath.toLowerCase().endsWith(".json")) {
+      try {
+        JSON.parse(source);
+      } catch (err) {
+        errors.push({
+          file: filePath,
+          category: "transpile-error",
+          message: `Invalid JSON: ${(err as Error).message}`,
+          fix: `Fix the JSON in ${filePath}.`,
+        });
+      }
       stack.delete(filePath);
       return;
     }

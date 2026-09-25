@@ -133,9 +133,12 @@ export function resolveAppKey(
   }
 }
 
-/** Path to the persisted key file (for tooling like `am profile`). */
-export function appKeyPath(appId: string): string {
-  return appDirs(appId).appKey;
+/** Path to the persisted key file (for tooling like `am profile`).
+ *  `home` is the addressed INSTANCE's data home (its lock's `home`): a
+ *  `--profile`/`--home` instance keeps its key under its own home, and the
+ *  appId alone names the default instance's. */
+export function appKeyPath(appId: string, home?: string): string {
+  return appDirs(appId, home).appKey;
 }
 
 // ── Local control credential (`<data>/control.key`) ──────────────────────────
@@ -172,8 +175,8 @@ export function appKeyPath(appId: string): string {
 
 /** `<data>/control.key` — the local operator's credential for the dev control
  *  plane. Owner-only, per-boot, never sent to any other machine. */
-export function controlKeyPath(appId: string): string {
-  return join(appDirs(appId).data, "control.key");
+export function controlKeyPath(appId: string, home?: string): string {
+  return join(appDirs(appId, home).data, "control.key");
 }
 
 /** Either the credential, or the reason there isn't one — never a silent miss. */
@@ -258,8 +261,13 @@ export function mintControlKey(appId: string): ControlKeyResult {
  *  Refuses a credential the filesystem says is not exclusively ours — a
  *  group/world-readable file, or one owned by another uid, is either leaked or
  *  planted, and using it either way is worse than reporting it. */
-export function readControlKey(appId: string): ControlKeyResult {
-  const path = controlKeyPath(appId);
+export function readControlKey(
+  appId: string,
+  home?: string,
+): ControlKeyResult {
+  // `home`: the addressed instance's (see appKeyPath) — a profile instance
+  // mints its credential under its own home, not the default one.
+  const path = controlKeyPath(appId, home);
   let st: Deno.FileInfo;
   try {
     st = Deno.statSync(path);

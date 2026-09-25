@@ -18,7 +18,7 @@
 // runtimes import it. Nothing is reimplemented on either side.
 import type { CellFieldFilter } from "./cell-types.ts";
 import type { ComposedCells } from "./cell-compose.ts";
-import { applyCellFieldFilter } from "./state-filter.ts";
+import { applyCellFieldFilter, restoreExcluded } from "./state-filter.ts";
 
 /** One composed cell, as this module reads it. */
 type ComposedCell = ComposedCells["cells"][number];
@@ -121,4 +121,60 @@ export function buildDBStateGetter(
     }
     return result;
   };
+}
+
+/** One cell's slice with every field `filter` keeps OUT of the store put back
+ *  to its value in `base` (or removed, where `base` has none) — i.e. what a
+ *  restart would hold for those fields. Identity is kept when nothing differs.
+ *
+ *  The restore half of {@linkcode buildDBStateGetter}'s field filter, for a
+ *  state that did NOT come from the store: journal replay (`base` = the boot
+ *  state) and the dev checkpoint restore (`base` = the state the store
+ *  restore produced). One reading of the filter for both, dot paths included.
+ *
+ *  @decider */
+export function unpersistedFromBase(
+  filter: CellFieldFilter,
+  base: Record<string, unknown>,
+  now: Record<string, unknown>,
+): Record<string, unknown> {
+  if (filter === "all") return now;
+  if (filter === "none") return base;
+  const was = base;
+  let slice = now;
+  const revert = (key: string) => {
+    if (slice[key] === was[key] && (key in slice) === (key in was)) return;
+    if (slice === now) slice = { ...now };
+    if (key in was) slice[key] = was[key];
+    else delete slice[key];
+  };
+  if ("include" in filter) {
+    // Top level only — `persist.include` refuses dot paths at definition.
+    const kept = new Set(filter.include);
+    for (const key of new Set([...Object.keys(now), ...Object.keys(was)])) {
+      if (!kept.has(key)) revert(key);
+    }
+    return slice;
+  }
+  // A filter object that names NEITHER key keeps everything — the answer
+  // `fieldIncluded`, the store's own projection and the startup report all
+  // give it (it is a type error, so it arrives from JS, from a runtime-built
+  // `cellDefaults`, or from `onPersist` written inside `persist:`; boot says
+  // so out loud). Reading `undefined` as iterable here made the first boot
+  // after a CRASH throw before the server started, and every boot after it.
+  if (!("exclude" in filter)) return now;
+  for (const path of filter.exclude) {
+    // BOTH READINGS, as the store's own projection takes them: the key
+    // literally named `path` (a no-op when the cell has none), and the
+    // dotted path under its head. Putting back a literal `"a.b"` the store
+    // never wrote is the same divergence this function exists to close.
+    revert(path);
+    if (path.includes(".")) {
+      slice = restoreExcluded(slice, was, path.split(".")) as Record<
+        string,
+        unknown
+      >;
+    }
+  }
+  return slice;
 }

@@ -23,7 +23,7 @@ Start here. Covers what every app needs.
 - [Lifecycle](lifecycle.md) — onInit, onDestroy, aio.run(), runtime control
 - [Composition](composition.md) — cross-cell communication
 - [Scheduling](scheduling.md) — timers, intervals, cron
-- [Cell Visibility](cell-visibility.md) — per-cell ui/persist filters
+- [Cell Visibility](cell-visibility.md) — per-cell visible/persist filters
 
 ## Writing state many times a second
 

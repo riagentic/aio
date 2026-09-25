@@ -31,6 +31,7 @@ import {
 import {
   type AppDirs,
   appDirs,
+  appHome,
   ensureAppDirs,
   registeredProfile,
 } from "../server/app-dirs.ts";
@@ -44,6 +45,19 @@ import {
 } from "../server/single-instance-lock.ts";
 
 // ── Shared helpers ─────────────────────────────────────────
+
+/** `--app=<id>` plus the home this run was aimed at (`--profile` / `--home`):
+ *  a "stop it first" hint without it sends the user to the DEFAULT instance
+ *  while the profile they meant keeps running. */
+function targetArgs(appId: string): string {
+  const profile = registeredProfile(appId);
+  if (profile !== undefined) return `--app=${appId} --profile=${profile}`;
+  const home = appDirs(appId).home;
+  if (resolve(home) !== resolve(appHome(appId))) {
+    return `--app=${appId} --home=${home}`;
+  }
+  return `--app=${appId}`;
+}
 
 /** The running pid, or null when the app isn't up. */
 function livePid(appId: string): number | null {
@@ -288,8 +302,9 @@ export async function cmdBackup(
   if (pid !== null && !force) {
     outError(
       `"${appId}" is running (pid ${pid}) — copying a live SQLite database can ` +
-        `capture a torn write. Run "am stop --app=${appId}" first, or ` +
-        `"am backup --force" to accept the risk.`,
+        `capture a torn write. Run "am stop ${targetArgs(appId)}" ` +
+        `first, or "am backup ${targetArgs(appId)} --force" to ` +
+        `accept the risk.`,
       mode,
     );
     Deno.exit(1);
@@ -404,7 +419,7 @@ async function holdForMaintenance(
       maintenanceOp(r.existing)
         ? maintenanceMessage(appId, r.existing)
         : `"${appId}" is running (pid ${r.existing.pid}) — run ` +
-          `"am stop --app=${appId}" first`,
+          `"am stop ${targetArgs(appId)}" first`,
       mode,
     );
   }
@@ -554,7 +569,8 @@ export async function cmdRestore(
     // Not overridable: the running app has the databases open and would write
     // its in-memory pages over whatever we just restored.
     outError(
-      `"${appId}" is running (pid ${pid}) — run "am stop --app=${appId}" first`,
+      `"${appId}" is running (pid ${pid}) — run ` +
+        `"am stop ${targetArgs(appId)}" first`,
       mode,
     );
     Deno.exit(1);
@@ -610,6 +626,32 @@ export async function cmdRestore(
       mode,
     );
     Deno.exit(1);
+  }
+  // The PROFILE, too: `meta.json` travels with the archive and says whose home
+  // it is, and boot refuses a home another profile wrote (`homeOwnerError` —
+  // strict for a requested home, profiles-only for the plain one). A `p1`
+  // archive restored into the default home exited 0 here and left an app that
+  // would not start. Same rule as boot, checked BEFORE anything moves; not
+  // overridable — `--force` would only buy an unbootable app.
+  if (meta !== null && meta !== "corrupt") {
+    const had = typeof meta.profile === "string" ? meta.profile : undefined;
+    const want = registeredProfile(appId);
+    const requested = flags.profile !== undefined || flags.home !== undefined;
+    if (had !== want && (requested || had !== undefined)) {
+      const who = (p?: string) => p ? `profile "${p}"` : `the default home`;
+      outError(
+        `${basename(src)} is a backup of ${who(had)} of "${meta.appId}", ` +
+          `and ${d.home} is ${who(want)} — restored there, the app would ` +
+          `refuse to boot (its data/meta.json would name ${who(had)}). ` +
+          `Nothing was touched.\n` +
+          `  fix: am restore ${src} --app=${appId}` +
+          (had ? ` --profile=${had}` : "") +
+          `   (restores it into its own home)` +
+          (force ? `\n  (--force does not apply: the app could not boot)` : ""),
+        mode,
+      );
+      Deno.exit(1);
+    }
   }
 
   // HOLD the app's lock from the copy to the swap: "stopped" was checked

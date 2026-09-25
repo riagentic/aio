@@ -72,6 +72,15 @@ as `__set…` entries naming it, so its call is judged by those; on a cell with 
 hidden field every async call's arguments are withheld, because a call still
 running when the report is taken has not written the field yet.
 
+A report is also written to disk, so a cell's `persist` declaration screens it
+the same way, by the same rules: a `persist: "none"` cell is withheld whole, and
+a field a `persist: { exclude | include }` keeps off disk is omitted from
+`state` and from the timeline's values and payloads — each named in `truncated`.
+
+The log tail and the diagnostics carry no credential aio itself printed: the
+share-link `?token=` and the pair code the `--expose` boot banner writes to
+`app.log` are masked (`…`).
+
 The report is the surface that leaves the machine. `am timeline` and the
 `/__aio/trojan/timeline` route are the local, dev-only operator view — like
 `/__aio/trojan/state`, they show values unscreened by `visible`, and honour
@@ -128,7 +137,9 @@ feedback: { sink: async (report) => { … } }               // anything else
 Delivery is attempted **after** the report is safely on disk, and never instead
 of it. An app has no idea whether a destination is reachable, and losing a
 report because a server was down is the one outcome worth engineering against —
-`feedback.last.delivered` says which happened.
+`feedback.last.delivered` says which happened. A `url` that has not answered
+within 15 seconds counts as not delivered (logged), so a stuck collector never
+leaves a report stuck in `"capturing"`.
 
 If you do send reports off the machine, tell your users: a report contains
 application state, and that is their data.

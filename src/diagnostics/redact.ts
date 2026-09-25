@@ -187,6 +187,19 @@ export function redactUrlToken(text: string): string {
   return text.replace(URL_TOKEN, `$1${TOKEN_MASK}`);
 }
 
+/** The pair code the `--expose` boot banner prints (aio-lifecycle.ts:
+ *  `pair code: 123456`) — a live, one-shot credential that pulls the app's
+ *  profile (cert + key). */
+const PAIR_CODE = /(pair code:\s*)\d{6}/g;
+
+/** Every credential aio itself writes into a log line on purpose — the
+ *  share-link token ({@linkcode redactUrlToken}) and the pair code — masked,
+ *  for a copier that takes log lines somewhere ELSE: a problem report tails
+ *  app.log and POSTs it to the feedback URL. */
+export function redactLogCredentials(text: string): string {
+  return redactUrlToken(text).replace(PAIR_CODE, `$1${TOKEN_MASK}`);
+}
+
 /** {@linkcode redactUrlToken} as JavaScript SOURCE — a function expression —
  *  for the generated Electron main scripts, which run outside Deno and cannot
  *  import it. Built from the same pattern and mask, so the two cannot drift

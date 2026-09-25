@@ -19,7 +19,7 @@
 // It is a net, not a guarantee: a process killed with SIGKILL (an outer
 // `timeout` on a hung test) never runs it. That case is `deno task clean:tmp`.
 
-import { aioTestRoot } from "./test-strict.ts";
+import { _sandboxHomeStores, aioTestRoot } from "./test-strict.ts";
 import { pruneDeadLockDirsTagged } from "../server/single-instance-lock.ts";
 
 /** A test that pointed `AIO_APPS_DIR` into a temp dir made a scoped lock dir
@@ -65,6 +65,10 @@ function arm(): void {
  *  when the directory came from somewhere else (a fixture, a build output). */
 export function keepTempDir(dir: string): string {
   arm();
+  // A test that makes a temp dir is a test — including one that never calls a
+  // harness (tests/am-version-pin.test.ts wrote the REAL version store that
+  // way). Every call, not once: see `_sandboxHomeStores`.
+  _sandboxHomeStores();
   registry.add(dir);
   return dir;
 }

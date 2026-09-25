@@ -27,7 +27,7 @@ import { BUILD_BOOL_FLAGS, BUILD_VALUE_FLAGS } from "../build/build-flags.ts";
  *  annotation is a WIDENING for every consumer — with the literal type,
  *  `VERSION === "1.0.0-alpha76"` was a compile error for having no overlap;
  *  now it is an ordinary comparison. */
-export const VERSION: string = "1.0.11-beta";
+export const VERSION: string = "1.0.12-beta";
 
 /** What `--version` prints: what this artifact IS, and what it was built with.
  *
@@ -834,7 +834,9 @@ export function electronOnlyFlagRefusal(
     `${what} only applies when client is electron (current client: "${client}")`,
     `${undo}, or run with --client=electron. ` +
       (what.startsWith("--width") || what.startsWith("--height")
-        ? `A browser page takes its size from aio.run({ ui: { width, height } }).`
+        // No page can size the tab it runs in — ui.width/height reach only
+        // an Electron window (docs/basics/quickstart.md, "Window size").
+        ? `A browser tab has no size an app can set — aio.run({ ui: { width, height } }) sizes the Electron window only.`
         : `A ${client} client has no Electron window for it to act on.`),
   );
 }

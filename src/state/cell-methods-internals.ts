@@ -2,7 +2,12 @@
 
 import { eventArgWarning } from "./event-arg.ts";
 import { isScheduleEffect, type ScheduleEffect } from "./schedule.ts";
-import { trackCall, trackPending } from "./method-cancel.ts";
+import {
+  _noteCallAdopted,
+  abortedByShutdown,
+  trackCall,
+  trackPending,
+} from "./method-cancel.ts";
 import { _isTTPausedRefusal, markInflight } from "./dispatch.ts";
 import { isOwnEffect, type OwnEffect } from "./own.ts";
 import { isNotifyEffect } from "./notify.ts";
@@ -15,6 +20,7 @@ import {
   createReadWatch,
   resolveCall,
   setKey,
+  signalWasRead,
   snapshotForRead,
 } from "./cell-impl.ts";
 import {
@@ -780,7 +786,58 @@ export function buildMethodsReducer(
 
 // ── Executor builder ───────────────────────────────────────────────────
 
-/** Build the CellExecuteFn for a methods-based cell (async method dispatch + effect handlers). */
+/** `transaction` is read by SHAPE — `true` or an object turns it on — so
+ *  every other value turned it off without a word: `transaction: "yes"` (or
+ *  `"serializable"`, the mode's own name) left a ledger cell on live reads and
+ *  incremental commits, a typo'd key (`{ serialise: true }`) never serialized,
+ *  and a misspelled `conflict` (`"Abort"`) fell through to the COMMIT-ANYWAY
+ *  branch — the one outcome an author who asked for aborts must not get. The
+ *  type refuses all of these; the dev server does not type-check, so the
+ *  runtime has to. Called by `cell()` for every cell (the executor, where the
+ *  `serialize: false` sibling lives, exists only when a method is async).
+ *  @internal */
+export function refuseMalformedTransaction(
+  name: string,
+  tx: unknown,
+): void {
+  if (tx === undefined || typeof tx === "boolean") return;
+  const fix = `FIX: \`transaction: true\`, \`false\`, or an object with ` +
+    `\`serialize?: boolean\` and \`conflict?: "abort" | "warn"\`.`;
+  if (tx === null || typeof tx !== "object" || Array.isArray(tx)) {
+    throw new Error(
+      `[cell:${name}] transaction: ${
+        JSON.stringify(tx) ?? String(tx)
+      } is not a transaction setting — only \`true\` or an object turns ` +
+        `transactions on, so this value would leave them silently OFF. ${fix}`,
+    );
+  }
+  const o = tx as Record<string, unknown>;
+  for (const k of Object.keys(o)) {
+    if (k !== "serialize" && k !== "conflict") {
+      throw new Error(
+        `[cell:${name}] transaction: unknown key "${k}" — aio would never ` +
+          `read it. ${fix}`,
+      );
+    }
+  }
+  if (o.serialize !== undefined && typeof o.serialize !== "boolean") {
+    throw new Error(
+      `[cell:${name}] transaction.serialize must be a boolean, got ${
+        JSON.stringify(o.serialize) ?? String(o.serialize)
+      }. ${fix}`,
+    );
+  }
+  if (
+    o.conflict !== undefined && o.conflict !== "abort" && o.conflict !== "warn"
+  ) {
+    throw new Error(
+      `[cell:${name}] transaction.conflict must be "abort" or "warn", got ${
+        JSON.stringify(o.conflict) ?? String(o.conflict)
+      } — anything else would commit over a conflict as "warn" does. ${fix}`,
+    );
+  }
+}
+
 /** The app identity a scoped app carries (`_appId`, set by the runtime that
  *  composed the cells) — `""` when it has none, the wildcard scope. */
 function appIdOf(app: unknown): string {
@@ -788,6 +845,7 @@ function appIdOf(app: unknown): string {
   return typeof id === "string" ? id : "";
 }
 
+/** Build the CellExecuteFn for a methods-based cell (async method dispatch + effect handlers). */
 export function buildMethodsExecutor(
   name: string,
   prefix: string,
@@ -905,6 +963,11 @@ export function buildMethodsExecutor(
         // A `first` dedup or a `ttl` hit. The caller ADOPTS the other call's
         // outcome — resolving it with `undefined` instead is the first-wins
         // bug the report shipped.
+        //
+        // Not run, so not counted by `$pending` here — and a worker cell's
+        // owner, which counted it at the thread hop, has to hear that now,
+        // not when the adopted outcome lands (cell-worker-host.ts).
+        _noteCallAdopted(_callId);
         decision.outcome.then(
           (o) =>
             resolveCall(
@@ -972,6 +1035,16 @@ export function buildMethodsExecutor(
       // trigger is gone (never aborted). That is also exactly why
       // `cancelOn: "self"` can abort its elders but never the incoming call.
       const controller = new AbortController();
+      // Does this call's fired signal ABORT its transaction? A cancelOn
+      // trigger always does. Shutdown's abort does only when the body READ
+      // `s.$signal` — a body that never looked cannot have stood down, so it
+      // ran to completion and its write-set is a whole transaction, not half
+      // of one. Discarding it was the silent loss of every call queued behind
+      // `serialize: true` at `close()` (each starts with the fired signal).
+      const txAborted = (): boolean =>
+        controller.signal.aborted &&
+        (!abortedByShutdown(controller.signal) ||
+          signalWasRead(controller.signal));
       // The owning app's identity (method-cancel.ts AppScope): two apps in one
       // process may each hold a `cell("ledger", …)`, and a cancel in one must
       // never reach the other. The scoped app carries it as `_appId`; a
@@ -1292,16 +1365,17 @@ export function buildMethodsExecutor(
             // transaction must not persist half of itself, and whatever the
             // method deliberately published mid-flight via `s.$commit()` is
             // already committed and survives.
-            if (transactional && controller.signal.aborted) {
+            if (transactional && txAborted()) {
               const dropped = batcher.pending().length;
               batcher.discard();
               dropTxEffects();
               if (dropped > 0) {
-                log.debug(
-                  "cell",
-                  `${name} ${_method}(): cancelled — ${dropped} buffered ` +
-                    `write(s) discarded (transaction abort)`,
-                );
+                // Shutdown's discard is a loss the caller did not ask for —
+                // say so where it is seen; a cancelOn discard is the point.
+                const msg = `${name} ${_method}(): cancelled — ${dropped} ` +
+                  `buffered write(s) discarded (transaction abort)`;
+                if (abortedByShutdown(controller.signal)) log.warn("cell", msg);
+                else log.debug("cell", msg);
               }
               // A cancelled transaction still has to answer for what it
               // ALREADY published: an `s.$commit()` earlier in the method
@@ -1333,7 +1407,7 @@ export function buildMethodsExecutor(
             // before this method awaited its effect-return and its own commit
             // machinery; an abort that lands in between must still abort — the
             // whole point of holding the tracking open past the body.
-            if (transactional && controller.signal.aborted) {
+            if (transactional && txAborted()) {
               batcher.discard();
               dropTxEffects();
               await batcher.settled(); // same reason as the branch above
@@ -1436,6 +1510,10 @@ export function buildMethodsExecutor(
             }
           })
           .catch((e: Error) => {
+            // Asked BEFORE the abort below empties the batch: did any of this
+            // call's writes commit? Never for a transaction (discarded), yes
+            // for an async method that wrote before it threw.
+            const committed = !transactional && batcher.wrote();
             // Transactional abort: a throw/cancel discards the whole
             // buffered write-set — no partial commit.
             if (transactional) {
@@ -1473,12 +1551,21 @@ export function buildMethodsExecutor(
                 cellName: name,
                 actionType: `${prefix}:${_method}`,
                 ...(isDeliberateRejection(e)
-                  ? { rejected: rejectionLine(`${prefix}:${_method}`, e) }
+                  ? {
+                    rejected: rejectionLine(
+                      `${prefix}:${_method}`,
+                      e,
+                      committed,
+                    ),
+                  }
                   : {}),
               }));
             } else if (isDeliberateRejection(e)) {
               // A refusal, not a crash — method-rejection.ts.
-              log.info("cell", rejectionLine(`${prefix}:${_method}`, e));
+              log.info(
+                "cell",
+                rejectionLine(`${prefix}:${_method}`, e, committed),
+              );
             } else {
               log.error("cell", `${name} ${_method}() threw: ${e}`);
             }

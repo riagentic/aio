@@ -86,11 +86,11 @@ let _stateReqPath: string | null = null; // sync dedupe for StateTab auto-load
 // Refresh) the path-change block below is skipped, so the guards would keep
 // their stale value and the State / Git-Repo tabs would never re-fetch. Always
 // route selection through here.
-function reselect(path: string) {
+function reselect(id: string) {
   _stateReqPath = null;
   _codebaseReqPath = null;
   _logReqPath = null;
-  manager.select(path);
+  manager.select(id);
 }
 
 function toggleDir(path: string) {
@@ -154,14 +154,14 @@ function StatusChip(
 // ── sidebar ──────────────────────────────────────────────────────────────────
 function Sidebar() {
   const q = search.value.toLowerCase();
-  const selected = manager.selectedPath;
+  const selected = manager.selectedId;
   const all = manager.projects;
   const running = all.filter((p) => p.running).length;
   const projects = all.filter((
     p,
   ) => (q
     ? p.name.toLowerCase().includes(q) || p.path.toLowerCase().includes(q)
-    : showAll.value || p.running || p.path === selected)
+    : showAll.value || p.running || p.id === selected)
   );
   return (
     <div
@@ -339,11 +339,11 @@ function Sidebar() {
             </div>
           )
           : projects.map((p) => {
-            const sel = selected === p.path;
+            const sel = selected === p.id;
             return (
               <div
-                key={p.path}
-                {...press(() => reselect(p.path))}
+                key={p.id}
+                {...press(() => reselect(p.id))}
                 title={p.path}
                 style={{
                   padding: "9px 10px",
@@ -458,7 +458,7 @@ function Header({ d }: { d: ProjectDetail }) {
           <button
             type="button"
             style={btn}
-            onClick={() => reselect(d.path)}
+            onClick={() => reselect(d.id)}
           >
             ⟳ Refresh
           </button>
@@ -486,7 +486,7 @@ function Header({ d }: { d: ProjectDetail }) {
                   type="button"
                   style={{ ...btnGhost, borderColor: C.blueDim, color: C.blue }}
                   onClick={() =>
-                    confirm(`Restart ${d.name}?`) && manager.restart(d.path)}
+                    confirm(`Restart ${d.name}?`) && manager.restart(d.id)}
                 >
                   ↻ Restart
                 </button>
@@ -494,7 +494,7 @@ function Header({ d }: { d: ProjectDetail }) {
                   type="button"
                   style={{ ...btnGhost, borderColor: C.redDim, color: C.red }}
                   onClick={() =>
-                    confirm(`Stop ${d.name}?`) && manager.stop(d.path)}
+                    confirm(`Stop ${d.name}?`) && manager.stop(d.id)}
                 >
                   ■ Stop
                 </button>
@@ -504,7 +504,7 @@ function Header({ d }: { d: ProjectDetail }) {
               <button
                 type="button"
                 style={{ ...btn, borderColor: C.greenDim, color: C.green }}
-                onClick={() => manager.start(d.path)}
+                onClick={() => manager.start(d.id)}
               >
                 ▶ Start
               </button>
@@ -874,7 +874,7 @@ function CellsTab({ d }: { d: ProjectDetail }) {
       !f.dir && /\.(tsx?|jsx?)$/.test(f.name)
     );
   const openSource = (name: string) => {
-    manager.openCellSource(d.path, name);
+    manager.openCellSource(d.id, name);
     activeTab.set("codebase");
   };
   const args = (name: string) => dispatchArgs.value[name] ?? "";
@@ -888,7 +888,7 @@ function CellsTab({ d }: { d: ProjectDetail }) {
     const call = payload ? `${name}:${m}(${payload})` : `${name}:${m}()`;
     const note = payload ? "" : "\n\nIt will be called with NO arguments.";
     if (!confirm(`Run ${call} on ${d.name}?${note}`)) return;
-    manager.dispatch(d.path, `${name}:${m}`, payload);
+    manager.dispatch(d.id, `${name}:${m}`, payload);
   };
   return (
     <div>
@@ -1029,13 +1029,13 @@ function StateTab({ d }: { d: ProjectDetail }) {
   // re-dispatches. Never auto-polled; pulled on demand only.
   if (
     typeof document !== "undefined" &&
-    manager.detailStatePath !== d.path && _stateReqPath !== d.path
+    manager.detailStatePath !== d.id && _stateReqPath !== d.id
   ) {
-    _stateReqPath = d.path;
-    manager.loadState(d.path);
+    _stateReqPath = d.id;
+    manager.loadState(d.id);
   }
   const loading = manager.detailStateLoading;
-  const loaded = manager.detailStatePath === d.path;
+  const loaded = manager.detailStatePath === d.id;
   const err = manager.detailStateError;
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: "10px" }}>
@@ -1044,7 +1044,7 @@ function StateTab({ d }: { d: ProjectDetail }) {
           type="button"
           style={btn}
           disabled={loading}
-          onClick={() => manager.loadState(d.path)}
+          onClick={() => manager.loadState(d.id)}
         >
           {loading ? "loading…" : "⟳ Reload"}
         </button>
@@ -1113,10 +1113,10 @@ function LogsTab({ d }: { d: ProjectDetail }) {
   // Lazy first load on tab view (sync guard mirrors StateTab's pattern).
   if (
     typeof document !== "undefined" && manager.logs === null &&
-    !manager.logLoading && _logReqPath !== d.path
+    !manager.logLoading && _logReqPath !== d.id
   ) {
-    _logReqPath = d.path;
-    manager.loadLogs(d.path);
+    _logReqPath = d.id;
+    manager.loadLogs(d.id);
   }
   return (
     <LogView
@@ -1127,8 +1127,8 @@ function LogsTab({ d }: { d: ProjectDetail }) {
       path={manager.logPath}
       truncated={manager.logTruncated}
       follow={manager.logFollow}
-      onReload={() => manager.loadLogs(d.path)}
-      onSource={(src: LogSource) => manager.loadLogs(d.path, src)}
+      onReload={() => manager.loadLogs(d.id)}
+      onSource={(src: LogSource) => manager.loadLogs(d.id, src)}
       onToggleFollow={() => manager.setLogFollow(!manager.logFollow)}
     />
   );
@@ -1554,10 +1554,10 @@ function CodebaseTab({ d }: { d: ProjectDetail }) {
   if (src === "repo" && repoRoot) {
     if (
       typeof document !== "undefined" && manager.codebaseTree === null &&
-      !manager.codebaseLoading && _codebaseReqPath !== d.path
+      !manager.codebaseLoading && _codebaseReqPath !== d.id
     ) {
-      _codebaseReqPath = d.path;
-      manager.loadCodebase(d.path);
+      _codebaseReqPath = d.id;
+      manager.loadCodebase(d.id);
     }
   }
 
@@ -1672,7 +1672,7 @@ export default function App() {
     if (typeof document === "undefined") return;
     // Live metric poll for the selected running app.
     const tick = setInterval(() => {
-      if (manager.selectedPath && manager.detail?.running) manager.tick();
+      if (manager.selectedId && manager.detail?.running) manager.tick();
     }, 2500);
     // Periodic rescan to catch apps starting/stopping.
     const scan = setInterval(() => {
@@ -1683,9 +1683,9 @@ export default function App() {
     const logs = setInterval(() => {
       if (
         activeTab.value === "logs" && manager.logFollow &&
-        manager.selectedPath && manager.detail?.running && !manager.logLoading
+        manager.selectedId && manager.detail?.running && !manager.logLoading
       ) {
-        manager.loadLogs(manager.selectedPath);
+        manager.loadLogs(manager.selectedId);
       }
     }, 2000);
     return () => {
@@ -1697,8 +1697,8 @@ export default function App() {
 
   const d = manager.detail;
   // Reset the JSON tree expansion when switching projects.
-  if (d && d.path !== _lastPath) {
-    _lastPath = d.path;
+  if (d && d.id !== _lastPath) {
+    _lastPath = d.id;
     resetTree();
     resetStateView();
     resetFiles();

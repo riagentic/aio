@@ -1341,8 +1341,8 @@ export async function launchElectron(
   const bin = await findElectronBin(log, { distDir, signal });
   if (!bin || signal?.aborted) return null;
   // The cache holds both a downloaded runtime and one unpacked from the exe
-  // itself — the same path, so the path cannot tell them apart; whether this
-  // binary CARRIES one can.
+  // itself (under a `-fused` name); whether this binary CARRIES one is the
+  // decider, not the path.
   const mode = bin.includes("node_modules")
     ? "dev"
     : bin.includes(join("aio", "tools", "electron"))

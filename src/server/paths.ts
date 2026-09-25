@@ -1,7 +1,7 @@
 // Path resolution utilities — extracted from aio.ts (AIO-52)
 // Pure functions for resolving KV, SQLite, UDS, and data directory paths.
 
-import { dirname, fromFileUrl, join, resolve } from "@std/path";
+import { dirname, fromFileUrl, isAbsolute, join, resolve } from "@std/path";
 import {
   _chooseLockDir,
   hash8,
@@ -15,10 +15,63 @@ export { isPipePath };
 
 /** True when running inside a compiled binary (AppImage, deno compile) */
 export function isCompiled(): boolean {
-  if (Deno.env.get("APPIMAGE")) return true;
-  // Deno compile VFS: modules embedded at file:///tmp/deno-compile-<app>/...
-  if (import.meta.url.includes("/deno-compile-")) return true;
-  return !import.meta.url.startsWith("file://");
+  let execPath: string | undefined;
+  try {
+    execPath = Deno.execPath();
+  } catch {
+    // aio-ok: no read permission — the segment rung falls back to generic
+  }
+  return _compiledFrom(
+    import.meta.url,
+    // Undefined inside a Worker (a worker cell): there is no main module.
+    (Deno.mainModule as string | undefined) ?? "",
+    Deno.env.get("APPIMAGE"),
+    execPath,
+  );
+}
+
+/** The decision behind {@linkcode isCompiled}, over its signals. Pure.
+ *
+ *  `deno compile` serves the project's modules from a VFS at
+ *  `<temp dir>/deno-compile-<binary name>/…` (measured, Deno 2.9: the temp dir
+ *  follows `TMPDIR`, the name is the executable's basename without `.exe` —
+ *  the same in a Worker) — but a module reached through an ABSOLUTE specifier
+ *  (an import map value `"/abs/aio/mod.ts"`, a framework checkout outside the
+ *  project) keeps its real `file:///abs/…` URL inside the binary. Asking only
+ *  THIS module's URL then said "not compiled" inside a compiled binary, and
+ *  every `isCompiled()` gate — dev mode itself among them — ran the artifact
+ *  as a dev checkout. The ENTRY is always the project's own file, so the main
+ *  module answers as well.
+ *
+ *  The segment matched is the EXACT one for the running executable
+ *  (`/deno-compile-<stem>/`), never a bare `deno-compile-` substring: a dev
+ *  checkout at `/home/x/deno-compile-lab/src/app.ts` run by `deno` is not a
+ *  binary, and matching loosely ran dev as prod. Without an `execPath` (no
+ *  read permission) the generic segment is the best signal left. */
+export function _compiledFrom(
+  moduleUrl: string,
+  mainModule: string,
+  appImage: string | undefined,
+  execPath?: string,
+): boolean {
+  if (appImage) return true;
+  const base = execPath === undefined
+    ? undefined
+    : execPath.split(/[\\/]/).pop() ?? "";
+  // Both spellings of a Windows name: real Windows 11 (Deno 2.9.7) KEEPS
+  // `.exe` (`Temp\deno-compile-myapp.exe\…`); the stem form is kept too. A
+  // URL carries the name percent-encoded (`my app` → `my%20app`).
+  const names = base === undefined
+    ? []
+    : [...new Set([base, base.replace(/\.exe$/i, "")])];
+  const segs = base
+    ? names.flatMap((
+      n,
+    ) => [`/deno-compile-${n}/`, `/deno-compile-${encodeURI(n)}/`])
+    : ["/deno-compile-"];
+  if (segs.some((seg) => moduleUrl.includes(seg))) return true;
+  if (segs.some((seg) => mainModule.includes(seg))) return true;
+  return !moduleUrl.startsWith("file://");
 }
 
 /** Ordered `baseDir` (THE app dir) candidates, most authoritative first — the
@@ -67,6 +120,30 @@ export function baseDirCandidates(opts: {
   } catch { /* unusual entry (data:, http:) — the cwd fallback answers */ }
   if (opts.compiled || out.length === 0) push(join(opts.cwd, "src"));
   return out as [string, ...string[]];
+}
+
+/** Ordered candidates for ONE `assets` mount directory, most authoritative
+ *  first — for `aio.run({ assets })`.
+ *
+ *  A relative mount (`{ "/media": "./media" }`) resolved against the CWD alone,
+ *  so a compiled binary — which EMBEDS the folder (`assetIncludes` puts it in
+ *  `--include`) — 404'd every file the moment it was launched from anywhere
+ *  but its project directory: the copy it carried was never looked at.
+ *
+ *  The CWD folder stays FIRST: it is the live one — the files a running app
+ *  writes into its mount, and what 1.0.11 served. The copy embedded under the
+ *  project root the binary shipped with (`embeddedRoot`, the directory of its
+ *  embedded deno.json) is the fallback, for a launch from anywhere else.
+ *  Uncompiled, and for an absolute path, it is the CWD answer alone. */
+export function assetDirCandidates(dir: string, opts: {
+  cwd: string;
+  compiled: boolean;
+  embeddedRoot: string | null;
+}): [string, ...string[]] {
+  const fromCwd = resolve(opts.cwd, dir);
+  if (!opts.compiled || !opts.embeddedRoot || isAbsolute(dir)) return [fromCwd];
+  const embedded = resolve(opts.embeddedRoot, dir);
+  return embedded === fromCwd ? [fromCwd] : [fromCwd, embedded];
 }
 
 /** Ordered `dist/` candidates for prod-detection in a COMPILED binary, most

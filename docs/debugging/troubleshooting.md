@@ -262,7 +262,7 @@ circuitBreaker: {
 }
 ```
 
-Re-enable: fix root cause, restart app.
+Re-enable: fix root cause, then `app.cells.enable("name")` (or restart the app).
 
 ---
 

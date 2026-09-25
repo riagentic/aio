@@ -64,7 +64,6 @@ export const PASSTHROUGH: Readonly<Record<string, string>> = {
   dev: "= deno task dev — flags go to the app",
   build: "= deno task build — fleet flags go to the build",
   compile: "= deno task compile — flags go to the build",
-  publish: "release flags (--dir --channel --notes --targets --key --data …)",
   // NOT `--dir`: `am create` refuses it by name ("there is no --dir; cd where
   // you want it first"), and a note advertising a refused flag is the same
   // defect as a help omitting a real one. The full list lives in
@@ -74,7 +73,6 @@ export const PASSTHROUGH: Readonly<Record<string, string>> = {
   lab: "VM flags (--ram --cpus --disk --apk --tunnel …)",
   ui: "flags are forwarded to amui (`am ui --client=browser`)",
   upgrade: "hands off to the installer for am / an app / a checkout",
-  fix: "repair flags, some forwarded to deno",
   auth: "per-subcommand fields (--email --password --role …)",
 };
 
@@ -179,6 +177,27 @@ export const VERB_FLAGS: Readonly<Record<string, readonly string[]>> = {
   // deletes, and it still prints the plan first; `--days`/`--keep` widen
   // or narrow what the plan offers.
   prune: ["--yes", "-y", "--days", "--keep"],
+  // `fix` and `publish` were PASSTHROUGH ("some forwarded to deno", "release
+  // flags"), but neither forwards anything: each reads its own flags by exact
+  // spelling and nothing else. So a typo was not someone else's to reject — it
+  // was nobody's. `am fix --dry` ran the REAL repair (relinking dep/aio,
+  // rewriting tasks) with `"dryRun":false`, and `am publish --chanel=beta`
+  // published to the prod channel. Gated here like every verb that owns its
+  // flags; the lists are exactly what am-cmd-fix.ts / am-cmd-publish.ts read.
+  fix: ["--dry-run", "--check", "--no-download", "--migrate-tasks", "--aio"],
+  publish: [
+    "--channel",
+    "--dir",
+    "--targets",
+    "--target",
+    "--no-build",
+    "--key",
+    "--data",
+    "--version",
+    "--notes",
+    "--min-from",
+    "--allow-dirty",
+  ],
   uninstall: [],
   remove: ["--no-run"],
   installed: [],
@@ -219,6 +238,17 @@ export const RECOGNISED_NOT_OFFERED: Record<string, readonly string[]> = {
   shot: ["--pose"],
 };
 
+/** Verbs whose positionals are free VALUES, where `-abc` is data, not a
+ *  flag: a method argument, text typed into a field, an expression, a query,
+ *  an expected value. Only their `--word` flags are judged. */
+const FREE_VALUE_VERBS: ReadonlySet<string> = new Set([
+  "dispatch",
+  "trigger",
+  "eval",
+  "sql",
+  "expect",
+]);
+
 export function unknownFlags(
   command: string,
   argv: readonly string[],
@@ -229,6 +259,17 @@ export function unknownFlags(
   const bad: string[] = [];
   for (const a of argv) {
     if (a === "--") break;
+    // A SHORT flag (`-n`, `-w`) is the same typo in one dash: `am timeline
+    // -n 1` printed the whole timeline and `am state -w` the whole state,
+    // exit 0, because only `--word` was ever judged. The shorts am owns
+    // (`-f -l -h -i -c`) are consumed by `parseGlobalFlags` and never reach
+    // here; a verb's own (`prune -y`) is in its table. Verbs whose arguments
+    // are free VALUES (a method argument, typed text, SQL) are not judged — a
+    // leading dash there is data. A negative number is never a flag.
+    if (/^-[A-Za-z]/.test(a) && !FREE_VALUE_VERBS.has(command)) {
+      if (!known.includes(a)) bad.push(a);
+      continue;
+    }
     const name = flagName(a);
     if (name === null) continue;
     if (GLOBAL_FLAGS.includes(name) || known.includes(name)) continue;
@@ -270,7 +311,7 @@ export const SCOPED_GLOBAL_FLAGS: Readonly<Record<string, readonly string[]>> =
     "--as-server": ["dispatch"],
     "--body": ["dispatch"],
     "--args": ["dispatch"],
-    "--data": ["remove"],
+    "--data": ["remove", "publish"],
   };
 
 /** The warning for a global flag this verb does not read, or null. Pure — the
@@ -356,6 +397,13 @@ export function unknownFlagError(
   argv: readonly string[],
 ): string | null {
   const bad = unknownFlags(command, argv);
+  // am's OWN `-i`, reaching here only because `parseGlobalFlags` had no value
+  // to take with it (`am surface -i --json`, a trailing `-i`). Calling it
+  // "unknown flag -i (did you mean --ui?)" blamed a flag am owns.
+  if (bad.includes("-i")) {
+    return `am ${command}: -i needs a value — -i N (= --client-index=N) ` +
+      `picks the client by index\n  am help ${command}`;
+  }
   if (bad.length === 0) return null;
   const suggestions = bad
     .map((b) => {
@@ -371,4 +419,53 @@ export function unknownFlagError(
     `  every command also takes --app=X --port=N --home=<dir> --json ` +
     `--quiet --wait[=N] (am help lists the rest)\n` +
     `  am help ${command}`;
+}
+
+/** Verbs that read NO positional argument. A word after one was dropped in
+ *  silence: `am timeline 5` (meaning "the last five") printed every entry,
+ *  `am persist counter` persisted everything, `am errors 10` listed them all
+ *  — each exit 0, looking like the argument was honoured. The same defect as
+ *  a misplaced global flag, so the same answer: WARNED on stderr and run
+ *  anyway (a script passing one must keep working — the surface is frozen),
+ *  never again mistakable for an argument that worked. */
+export const NO_POSITIONALS: ReadonlySet<string> = new Set([
+  "timeline",
+  "clients",
+  "health",
+  "metrics",
+  "errors",
+  "schedules",
+  "tables",
+  "config",
+  "persist",
+  "heap",
+  "instances",
+  "migrations",
+  "version",
+  "pair",
+]);
+
+/** The warning for positionals given to a verb that reads none, or null.
+ *  `args` are the verb's arguments after `parseGlobalFlags` (global flags
+ *  already consumed); everything that is not a `-flag` is a positional, and
+ *  after a bare `--` everything is. Pure. */
+export function strayArgsWarning(
+  command: string,
+  args: readonly string[],
+): string | null {
+  if (!NO_POSITIONALS.has(command)) return null;
+  const end = args.indexOf("--");
+  const stray = [
+    ...(end === -1 ? args : args.slice(0, end)).filter((a) =>
+      !a.startsWith("-")
+    ),
+    ...(end === -1 ? [] : args.slice(end + 1)),
+  ];
+  if (stray.length === 0) return null;
+  const hint = command === "timeline" || command === "errors"
+    ? ` — for the last N, pass --lines=N`
+    : "";
+  return `am ${command} takes no arguments — ignored: ${
+    stray.map((a) => JSON.stringify(a)).join(" ")
+  }${hint}\n  am help ${command}`;
 }

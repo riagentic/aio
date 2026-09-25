@@ -25,7 +25,7 @@ the methods and selectors that operate on it.
                                      method(draft, ...args)
                                        │         │
                                        │         ▼
-                                       │    returned effects[]
+                                       │    s.$do(effect)
                                        ▼    (schedule / own)
                                      new state    │
                                        │          ▼

@@ -4,6 +4,7 @@
 // code paths, driven end to end.
 import { assert, assertEquals, assertStringIncludes } from "@std/assert";
 import { join } from "@std/path";
+import { dropTempDir, tempDir } from "../src/testing/temp-dir.ts";
 import {
   findBuiltArtifact,
   rebuildFromGit,
@@ -34,19 +35,27 @@ async function git(args: string[], cwd: string): Promise<void> {
 
 /** A repository holding a tiny app whose `compile` task emits an executable
  *  that answers `--aio-data-contract` — the shape rebuildFromGit expects. */
-async function repo(opts: { contract?: string; buildFails?: boolean } = {}) {
+async function repo(
+  opts: { contract?: string; buildFails?: boolean; jsonc?: boolean } = {},
+) {
   const root = await Deno.makeTempDir({ prefix: "aio-git-src-" });
   const contract = opts.contract ??
     '{"schema":1,"cells":{"notes":{"version":1,"migratesFrom":1}}}';
 
-  await Deno.writeTextFile(
-    join(root, "deno.json"),
-    JSON.stringify({
+  const cfg = JSON.stringify(
+    {
       name: "demo",
       version: "1.0.0",
       imports: { aio: "jsr:@riagentic/aio" },
       tasks: { compile: "deno run -A make.ts" },
-    }),
+    },
+    null,
+    2,
+  );
+  await Deno.writeTextFile(
+    join(root, opts.jsonc ? "deno.jsonc" : "deno.json"),
+    // A `deno.jsonc` with a trailing comment — legal JSONC, as Deno reads it.
+    opts.jsonc ? cfg.replace('"demo",', '"demo", // the app') : cfg,
   );
   await Deno.writeTextFile(
     join(root, "make.ts"),
@@ -92,6 +101,27 @@ Deno.test("git rebuild: clones the ref, builds it, and reports the artifact + co
   } finally {
     await Deno.remove(src, { recursive: true });
     await Deno.remove(work, { recursive: true });
+  }
+});
+
+Deno.test("git rebuild: a deno.jsonc app's compile task is found (JSONC, both names)", async () => {
+  // `hasTask` read only `deno.json`, stripping whole-line `//` comments with a
+  // regex: a `deno.jsonc` app "had no compile task" and every update from its
+  // repository was refused.
+  const src = await repo({ jsonc: true });
+  const work = await tempDir("aio-git-work-");
+  try {
+    const r = await rebuildFromGit({
+      source: src,
+      ref: "main",
+      workDir: work,
+      log: silentLog,
+    });
+    assert(r.ok, r.ok ? "" : r.error);
+    if (r.ok) assertStringIncludes(r.artifact, "dist/app");
+  } finally {
+    await Deno.remove(src, { recursive: true });
+    await dropTempDir(work);
   }
 });
 

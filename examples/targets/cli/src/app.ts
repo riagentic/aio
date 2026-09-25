@@ -1,4 +1,4 @@
-// ex-cli — `compile:cli` target example — zero-config except the one
+// ex-cli — `--targets=cli` example — zero-config except the one
 // behavioral choice: this app has no UI (client: "server-only").
 // Dev: deno task dev   Build: deno task compile
 import "./cell/counter.ts";

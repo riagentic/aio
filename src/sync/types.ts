@@ -147,7 +147,7 @@ export interface AckMessage {
 export interface SyncRequest {
   clientId: string;
   /** Per-SESSION nonce of the requesting engine — the same nonce its op ids
-   *  carry (`clientId-session-counter`).
+   *  carry (`clientId-session-counter.random`).
    *
    *  `clientId` is persisted, so two live clients can share one: a cloned
    *  browser profile, a copied Electron app directory, a restored backup.
@@ -157,6 +157,13 @@ export interface SyncRequest {
    *  client built before the field simply omits it and the server falls back
    *  to the client-id rule. */
   session?: string;
+  /** The session's PRIVATE key — sent only here, never in an op or a
+   *  broadcast. The session nonce is public (it is in every op id), so the
+   *  server binds the session to the connection whose announce carries this
+   *  key, and a reconnect with the same key moves it; an op frame under a
+   *  session bound to another connection is refused. Optional: an engine
+   *  built before it binds nothing, as before. */
+  sessionKey?: string;
   /** Monotonic per-engine id of this request, echoed on the response.
    *
    *  Two catch-ups can be in flight at once (a reconnect while a manual

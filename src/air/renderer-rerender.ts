@@ -16,6 +16,7 @@ import {
 import type { ComponentFn, RenderCtx, VDomHooks, VNode } from "./vdom.ts";
 import { _diff, ErrorBoundary, Portal, Suspense } from "./vdom.ts";
 import { _cleanupChildren, _removeDomCleanup } from "./vdom-remove.ts";
+import { _detachReused } from "./vdom-reuse.ts";
 import { _profilingOn } from "./component-profile.ts";
 import {
   _isDevToolsConnected,
@@ -42,7 +43,11 @@ import {
   _suspenseRetries,
 } from "./renderer-state.ts";
 import { _flushPending } from "./renderer-flush.ts";
-import { _inEventHandler } from "./vdom-events.ts";
+import {
+  _getActiveDelegationRoot,
+  _inEventHandler,
+  _setDelegationRoot,
+} from "./vdom-events.ts";
 import {
   _currentLifecycleHook,
   _inLifecycleCallback,
@@ -224,6 +229,24 @@ function _checkHookOrder(
       `reading another ref's value. Call them unconditionally at the top of ` +
       `the body; put the condition inside the value instead.`,
   );
+}
+
+/** Stamp data-component on the component's root element — an explicit
+ *  opt-in, NOT ambient dev. It is the one dev feature here that changes the
+ *  DOM rather than observing it, and SSR does not write it, so arming it with
+ *  `__aioDev` made every hydrated component look like a server/client
+ *  divergence. Called from BOTH render paths (mount/diff and self re-render). */
+function _stampDevComponent(vnode: VNode): void {
+  if (
+    isDevModeExplicit() && typeof vnode.tag === "function" && vnode._dom &&
+    (vnode._dom as { nodeType?: number }).nodeType === 1
+  ) {
+    const el = vnode._dom as Element;
+    const name = (vnode.tag as { name?: string }).name;
+    if (name && name !== "_" && name !== "Component") {
+      el.setAttribute("data-component", name);
+    }
+  }
 }
 
 export function _rerenderComponent(inst: ComponentInstance): void {
@@ -444,12 +467,21 @@ export function _rerenderComponent(inst: ComponentInstance): void {
   // removed the anchor entirely, so the next null→element insert had nothing
   // to insert before and appended.
   if (rendered == null) rendered = nullSlot();
+  // The same `children` come back on a self re-render: one this output MOVES
+  // while it is still mounted gets a fresh copy first — see vdom-reuse.ts.
+  rendered = _detachReused(rendered, oldRendered);
   vnode._rendered = rendered;
   _instanceStack.push(inst);
 
   const ctx = inst._ctx;
   inst._sweepEpoch = _discardEpochNow();
   _isolationBases.push(_boundaryStack.length);
+  // Handlers this diff wires belong to the root the component was MOUNTED
+  // under (a Portal's target), not the flush's root — see `_delegationRoot`.
+  const prevDelegation = _getActiveDelegationRoot();
+  if (inst._delegationRoot !== undefined) {
+    _setDelegationRoot(inst._delegationRoot);
+  }
   try {
     // The component's own `_dom` is BOTH the position of the output being
     // replaced and the answer for where it ended up: a component that renders
@@ -465,6 +497,9 @@ export function _rerenderComponent(inst: ComponentInstance): void {
       vnode._dom ?? null,
     );
     vnode._dom = dom ?? undefined;
+    // The self re-render path never reaches `afterSubtree`, so a NEW root
+    // element (one view giving way to the next) went unstamped.
+    _stampDevComponent(vnode);
 
     if (_devStart) {
       inst._dtRenders = (inst._dtRenders ?? 0) + 1;
@@ -484,6 +519,7 @@ export function _rerenderComponent(inst: ComponentInstance): void {
       inst._triggerSignals = undefined;
     }
   } finally {
+    _setDelegationRoot(prevDelegation);
     // Before the pops: the owner a discarded subtree's signals are lent to is
     // found on the instance stack.
     if (inst._sweepEpoch !== _discardEpochNow()) {
@@ -1026,6 +1062,7 @@ export function _createHooks(rootState: RootState): VDomHooks {
           selfTriggered: false,
           _ctx: rootState.ctx,
           _root: rootState,
+          _delegationRoot: _getActiveDelegationRoot(),
           mountCallbacks: collector.mountCallbacks,
           cleanupCallbacks: collector.cleanupCallbacks,
           // Carry the name over from the render collector, so a hook that
@@ -1051,6 +1088,7 @@ export function _createHooks(rootState: RootState): VDomHooks {
         inst.oldRendered = rendered;
         inst.parentDom = hs.parentDom;
         inst.isSvg = hs.isSvg;
+        inst._delegationRoot = _getActiveDelegationRoot();
         inst.prevProps = { ...vnode.props };
         inst.prevChildren = vnode.children;
         inst.selfTriggered = false;
@@ -1103,21 +1141,7 @@ export function _createHooks(rootState: RootState): VDomHooks {
         _sweepAfterRender(vnode._rendered, owner._ctx);
       }
 
-      // Stamp data-component on the component's root element — an explicit
-      // opt-in, NOT ambient dev. It is the one dev feature here that changes
-      // the DOM rather than observing it, and SSR does not write it, so
-      // arming it with `__aioDev` made every hydrated component look like a
-      // server/client divergence.
-      if (
-        isDevModeExplicit() && typeof vnode.tag === "function" && vnode._dom &&
-        (vnode._dom as { nodeType?: number }).nodeType === 1
-      ) {
-        const el = vnode._dom as Element;
-        const name = (vnode.tag as { name?: string }).name;
-        if (name && name !== "_" && name !== "Component") {
-          el.setAttribute("data-component", name);
-        }
-      }
+      _stampDevComponent(vnode);
 
       // AIO-390: QUEUE onMount now that the subtree's DOM + refs are built, so
       // `ref.current` is the real node inside onMount. Children queue before

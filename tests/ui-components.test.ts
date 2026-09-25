@@ -89,6 +89,7 @@ Deno.test("ui: every kit token falls back to the theme's equivalent", () => {
     "--aio-ui-ink-soft": "--aio-muted",
     "--aio-ui-line": "--aio-border",
     "--aio-ui-danger": "--aio-danger",
+    "--aio-ui-on-danger": "--aio-on-danger",
     "--aio-ui-radius": "--aio-r-2",
     "--aio-ui-font": "--aio-font",
   };

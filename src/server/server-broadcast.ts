@@ -431,6 +431,16 @@ export function createBroadcaster(deps: BroadcastDeps): Broadcaster {
               msgToSend = encRaw("patches", patchJson);
               sentKind = "patch";
             }
+          } else {
+            // Nothing in this round is in this client's view (`subs`
+            // filtered every patch out; compaction never empties a non-empty
+            // op list), and it owes no debt — so its view did not change and
+            // there is nothing to send. Falling through sent a FULL state
+            // whenever the memo was stale, i.e. after every patch round: a
+            // client subscribed to one cell paid its whole view each time an
+            // unrelated cell changed. Pinned by
+            // tests/broadcast-unmatched-subs-sends-nothing.test.ts.
+            continue;
           }
         }
 

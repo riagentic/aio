@@ -394,7 +394,7 @@ Deno.test("directory swap: a path with a space and a quote survives it", async (
   // The old string-concatenated script broke on the first space. An install
   // directory chosen by a user, or a version string from a manifest, is not
   // ours to assume anything about.
-  if (Deno.build.os === "windows") return; // the cmd.exe branch is asserted above
+  if (Deno.build.os === "windows") return; // windows: tests/updates-swap-windows.test.ts
   const dir = await tmp();
   try {
     const current = join(dir, `My App "v1"`);
@@ -433,6 +433,9 @@ Deno.test("directory swap: handed to a shell OUTSIDE both directories", async ()
   // The constraint that shapes this: a process cannot move the directory it is
   // running from, and on Windows the running .exe inside it is locked outright.
   // So neither the old install nor the new one can perform the swap.
+  // Windows passes values through the environment instead of a script file:
+  // tests/updates-swap-windows.test.ts asserts that branch from any OS.
+  if (Deno.build.os === "windows") return;
   const dir = await tmp();
   try {
     const current = join(dir, "MyApp");
@@ -451,14 +454,14 @@ Deno.test("directory swap: handed to a shell OUTSIDE both directories", async ()
     assertEquals(previous, `${current}.old-1.0.0`);
     const call = spawned as unknown as { cmd: string; args: string[] };
     assert(
-      call.cmd === "/bin/sh" || call.cmd === "cmd.exe",
+      call.cmd === "/bin/sh",
       "the swapper must be the system shell, which lives in neither directory",
     );
     // Every value is a POSITIONAL ARGUMENT. It used to be concatenated into a
     // `/bin/sh -c` string, so an install directory containing a space broke the
     // update outright and one containing `"; rm -rf ~; #` was a self-injection
     // sink reachable from a manifest field.
-    const script = call.args.find((a) => /aio-swap-.*\.(sh|bat)$/.test(a));
+    const script = call.args.find((a) => /aio-swap-.*\.sh$/.test(a));
     assert(
       script,
       `the script is a FILE, not a string: ${call.args.join(" ")}`,
@@ -472,7 +475,7 @@ Deno.test("directory swap: handed to a shell OUTSIDE both directories", async ()
       assert(call.args.includes(value), `"${value}" is passed as an argument`);
     }
     assert(
-      call.args.some((a) => a.endsWith("run.sh") || a.endsWith("run.bat")),
+      call.args.some((a) => a.endsWith("run.sh")),
       "starts the new launcher",
     );
     await dropSwapScript(script);
@@ -482,7 +485,7 @@ Deno.test("directory swap: handed to a shell OUTSIDE both directories", async ()
 });
 
 Deno.test("directory swap: the generated script really performs the swap", async () => {
-  if (Deno.build.os === "windows") return; // the cmd.exe branch is asserted above
+  if (Deno.build.os === "windows") return; // windows: tests/updates-swap-windows.test.ts
   const dir = await tmp();
   try {
     const current = join(dir, "MyApp");

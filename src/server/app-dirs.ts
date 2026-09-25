@@ -21,7 +21,14 @@
 //
 // See docs/specs/2026-07-26-data-dir-and-updates.md.
 
-import { basename, dirname, join, resolve } from "@std/path";
+import {
+  basename,
+  dirname,
+  isAbsolute,
+  join,
+  relative,
+  resolve,
+} from "@std/path";
 import { sweepStaleTmps, uuidTmpBefore } from "../diagnostics/tmp-sweep.ts";
 import { homedir } from "./paths.ts";
 
@@ -404,7 +411,25 @@ export function appDirs(appId: string, configured?: string): AppDirs {
  *  this rule lived only in the inner boot, the logger — initialised earlier —
  *  resolved the default instead and wrote a libraryMode app's logs to
  *  `~/.<appId>/logs`, i.e. exactly the place libraryMode exists to avoid. */
-export function resolveAppDirs(opts: {
+export function resolveAppDirs(opts: AppDirsRequest): AppDirs {
+  return recordAppDirs(opts.appId, planAppDirs(opts));
+}
+
+/** Record a {@linkcode planAppDirs} decision — the only registry write, so a
+ *  caller can refuse a plan (a dbPath outside it) before anything is kept. */
+export function recordAppDirs(
+  appId: string,
+  plan: ReturnType<typeof planAppDirs>,
+): AppDirs {
+  if (plan.profile) _profiles.set(appId, plan.profile);
+  else _profiles.delete(appId);
+  if (plan.requested) _requested.add(appId);
+  else _requested.delete(appId);
+  return plan.dirs;
+}
+
+/** What {@linkcode resolveAppDirs} decides from. */
+export type AppDirsRequest = {
   appId: string;
   appDir?: string;
   libraryMode?: boolean;
@@ -414,7 +439,15 @@ export function resolveAppDirs(opts: {
   request?: HomeRequest;
   /** `aio.run({ profiles: false })` — a request is REFUSED, not ignored. */
   profiles?: boolean;
-}): AppDirs {
+};
+
+/** THE decision {@linkcode resolveAppDirs} records — with no registry write,
+ *  so `resolveHome()` can ask it before boot without changing what the boot
+ *  then decides. Reads the filesystem (meta.json, foreign-folder checks);
+ *  writes nothing. */
+export function planAppDirs(
+  opts: AppDirsRequest,
+): { dirs: AppDirs; profile?: string; requested: boolean } {
   const { appId, appDir, libraryMode, baseDir } = opts;
   const req = libraryMode ? undefined : opts.request;
   if (req && (req.home !== undefined || req.profile !== undefined)) {
@@ -432,10 +465,7 @@ export function resolveAppDirs(opts: {
       reservedAppHomeError(appId, dirs.home) ??
       homeOwnerError(dirs, appId, profile);
     if (refusal) throw new Error(refusal);
-    if (profile) _profiles.set(appId, profile);
-    else _profiles.delete(appId);
-    _requested.add(appId);
-    return dirs;
+    return { dirs, profile, requested: true };
   }
   // libraryMode with NO directory named by the author: `AIO_APPS_DIR`, when
   // set, places it like any app (`<root>/<appId>`). The cwd default ignored
@@ -466,9 +496,33 @@ export function resolveAppDirs(opts: {
     const owner = homeOwnerError(dirs, appId, undefined, true);
     if (owner) throw new Error(owner);
   }
-  _profiles.delete(appId);
-  _requested.delete(appId);
-  return dirs;
+  return { dirs, requested: false };
+}
+
+/** `null` unless an explicit `dbPath` lies OUTSIDE a requested `home` — the
+ *  refusal then. Under `--profile`/`--home` aio moves the lock, logs and
+ *  meta.json to the profile's home, but a `dbPath` the app computed from the
+ *  default home kept opening the EVERYDAY database: a profile in name only,
+ *  silently (a wallet app's field report, 1.0.11). An in-memory database
+ *  splits nothing. Pure. */
+export function dbPathOutsideHomeError(
+  dbPath: string | undefined,
+  home: string,
+  source: string | undefined,
+): string | null {
+  if (
+    !dbPath || dbPath.startsWith(":memory:") ||
+    dbPath.startsWith("file::memory:")
+  ) return null;
+  const rel = relative(resolve(home), resolve(dbPath));
+  const inside = rel !== "" && rel.split(/[\\/]/)[0] !== ".." &&
+    !isAbsolute(rel);
+  if (inside) return null;
+  return `${source ?? "a profile/home request"} runs this app from ` +
+    `${resolve(home)}, but dbPath ${resolve(dbPath)} lies outside it — the ` +
+    `database would stay in another home while the lock, logs and meta.json ` +
+    `move. Derive dbPath (and every path the app opens) from resolveHome() ` +
+    `in "aio/server".`;
 }
 
 /** The folder a {@linkcode HomeRequest} names: a profile NAME → its

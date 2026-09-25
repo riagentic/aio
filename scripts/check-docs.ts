@@ -1219,7 +1219,10 @@ export async function readAllDocs(): Promise<DocFile[]> {
       lines: (await Deno.readTextFile(entry.path)).split("\n"),
     });
   }
-  for (const rel of ["README.md", "CLAUDE.md"]) {
+  // examples/README.md is where a newcomer picks an example, and it links into
+  // docs/ by heading — unwalked, its `imports.md#…` link to the rule `disk/`
+  // teaches pointed at a heading that never existed.
+  for (const rel of ["README.md", "CLAUDE.md", "examples/README.md"]) {
     out.push({ rel, lines: (await Deno.readTextFile(SRC(rel))).split("\n") });
   }
   return out.sort((a, b) => a.rel.localeCompare(b.rel));

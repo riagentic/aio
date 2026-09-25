@@ -50,7 +50,7 @@ three are the same thing in aio: methods on a cell. Nothing about persistence or
 broadcast appears in your code — `persist` and `visible` default to `"all"`.
 
 ```ts
-// src/cells/tasks.ts
+// src/cell/tasks.ts
 import { cell } from "aio";
 
 export type Task = { id: number; text: string; done: boolean };
@@ -82,7 +82,7 @@ list re-renders when a method writes it. No store, no fetch, no `useEffect`.
 // src/TaskList.tsx
 import type { JSX } from "aio";
 import { useLocal } from "aio/air";
-import { type Task, tasks } from "./cells/tasks.ts";
+import { type Task, tasks } from "./cell/tasks.ts";
 
 export default function TaskList(): JSX.Element {
   const { local: draft, set: setDraft } = useLocal("");
@@ -136,7 +136,7 @@ reactive reads) that is never registered with the server, never synced and never
 written to disk.
 
 ```ts
-// src/cells/view.ts
+// src/cell/view.ts
 import { cell } from "aio";
 
 export type Filter = "all" | "active" | "done";
@@ -169,7 +169,7 @@ than disabling the button on first paint.
 // src/SignupForm.tsx
 import type { JSX } from "aio";
 import { useForm } from "aio/air";
-import { signup } from "./cells/signup.ts";
+import { signup } from "./cell/signup.ts";
 
 const form = useForm({
   email: {
@@ -216,7 +216,7 @@ export default function SignupForm(): JSX.Element {
 ```
 
 ```ts
-// src/cells/signup.ts
+// src/cell/signup.ts
 import { cell } from "aio";
 
 export const signup = cell("signup", {
@@ -243,7 +243,7 @@ moment the real value changes. The method is still the only writer.
 // src/LikeButton.tsx
 import type { JSX } from "aio";
 import { useOptimistic } from "aio/air";
-import { likes } from "./cells/likes.ts";
+import { likes } from "./cell/likes.ts";
 
 export default function LikeButton(): JSX.Element {
   const [shown, addOptimistic] = useOptimistic(
@@ -266,7 +266,7 @@ export default function LikeButton(): JSX.Element {
 ```
 
 ```ts
-// src/cells/likes.ts
+// src/cell/likes.ts
 import { cell, sleep } from "aio";
 
 export const likes = cell("likes", {
@@ -291,7 +291,7 @@ second commit, and your uncommitted writes are invisible to it. `s.$call` runs
 the sibling's body against **your** draft, in **your** commit.
 
 ```ts
-// src/cells/bench.ts
+// src/cell/bench.ts
 import { cell, type MethodDraftCalls } from "aio";
 
 type State = { status: string; samples: { kind: string; n: number }[] };
@@ -328,7 +328,7 @@ identical call (same method, same arguments) resolves from the previous result
 without running the body.
 
 ```ts
-// src/cells/weather.ts
+// src/cell/weather.ts
 import { cell } from "aio";
 import { fetchWeather } from "./weather-api.ts";
 
@@ -360,7 +360,7 @@ one's to ARRIVE. `concurrency: "newest"` aborts the in-flight call when a new
 one starts.
 
 ```ts
-// src/cells/search.ts
+// src/cell/search.ts
 import { cell, sleep } from "aio";
 
 export const search = cell("search", {
@@ -387,7 +387,7 @@ is another method of the same cell; a foreign cell's action creator
 (`nav.leave`) works the same way.
 
 ```ts
-// src/cells/article.ts
+// src/cell/article.ts
 import { cell, type MethodDraftMeta, self, sleep } from "aio";
 
 type ArticleState = { body: string; loading: boolean };
@@ -425,7 +425,7 @@ Effects go through `s.$do`, never a `return` and never `setInterval`.
 `schedule.after(id, ms, action)` is the one-shot (and the debounce).
 
 ```ts
-// src/cells/digest.ts
+// src/cell/digest.ts
 import { cell, schedule, self } from "aio";
 
 export const digest = cell("digest", {
@@ -460,7 +460,7 @@ without an `onMigrate` boots with a loud warning rather than quietly keeping the
 old shape.
 
 ```ts
-// src/cells/prefs.ts
+// src/cell/prefs.ts
 import { cell } from "aio";
 
 export type Prefs = { theme: "light" | "dark"; tags: string[] };
@@ -498,7 +498,7 @@ with `visible: "none"` still has every method callable by any connected client,
 with the return value travelling straight back. Say both.
 
 ```ts
-// src/cells/vault.ts
+// src/cell/vault.ts
 import { cell } from "aio";
 
 export const vault = cell("vault", {
@@ -526,7 +526,7 @@ takes a role string or a predicate `(user, name, ...args) => boolean` when
 view. The server keeps the whole table; each socket receives its slice.
 
 ```ts
-// src/cells/notes.ts
+// src/cell/notes.ts
 import { cell } from "aio";
 
 export type Note = { id: number; owner: string; text: string };
@@ -555,7 +555,7 @@ export const notes = cell("notes", {
 ```tsx
 // src/NoteList.tsx
 import type { JSX } from "aio";
-import { type Note, notes } from "./cells/notes.ts";
+import { type Note, notes } from "./cell/notes.ts";
 
 export default function NoteList(): JSX.Element {
   return (
@@ -609,7 +609,7 @@ handler.
 ```ts
 // src/routes/api.ts
 import { type RawRouteHandler, route } from "aio";
-import { tasks } from "../cells/tasks.ts";
+import { tasks } from "../cell/tasks.ts";
 
 export const apiRoutes: Record<string, RawRouteHandler> = {
   "/api/tasks": route((ctx) => ctx.json({ items: tasks.items }), {
@@ -640,7 +640,7 @@ only the metadata in the cell, where it syncs to every client for free.
 ```ts
 // src/routes/upload.ts
 import { type RawRouteHandler, route } from "aio";
-import { files } from "../cells/files.ts";
+import { files } from "../cell/files.ts";
 
 const MAX = 10_000_000;
 
@@ -678,7 +678,7 @@ export function uploadRoutes(dir: string): Record<string, RawRouteHandler> {
 ```
 
 ```ts
-// src/cells/files.ts
+// src/cell/files.ts
 import { cell } from "aio";
 
 export type FileMeta = { id: string; name: string; size: number };
@@ -706,7 +706,7 @@ gives it back on unmount, so two pages cannot fight over the title.
 // src/PostPage.tsx
 import type { JSX } from "aio";
 import { useHead, useRoute } from "aio/air";
-import { posts } from "./cells/posts.ts";
+import { posts } from "./cell/posts.ts";
 
 export default function PostPage(): JSX.Element {
   const { params, matched } = useRoute<{ id: string }>("/posts/:id");
@@ -722,7 +722,7 @@ export default function PostPage(): JSX.Element {
 ```
 
 ```ts
-// src/cells/posts.ts
+// src/cell/posts.ts
 import { cell } from "aio";
 
 export type Post = { title: string; summary: string };
@@ -756,7 +756,7 @@ hand-rolled listener always gets wrong.
 // src/Palette.tsx
 import type { JSX } from "aio";
 import { onGlobalKey } from "aio/air";
-import { palette } from "./cells/palette.ts";
+import { palette } from "./cell/palette.ts";
 
 export default function Palette(): JSX.Element {
   onGlobalKey("k", () => palette.open(), { mod: true }); // ⌘K / Ctrl-K
@@ -771,7 +771,7 @@ export default function Palette(): JSX.Element {
 ```
 
 ```ts
-// src/cells/palette.ts
+// src/cell/palette.ts
 import { cell } from "aio";
 
 export const palette = cell("palette", {
@@ -805,7 +805,7 @@ opens and closes the device on every paint.
 import type { JSX } from "aio";
 import { useResource } from "aio/air";
 import { closeCamera, openCamera } from "./media.ts";
-import { view } from "./cells/view.ts";
+import { view } from "./cell/view.ts";
 
 export default function CameraView(): JSX.Element {
   const cam = useResource({
@@ -870,7 +870,7 @@ methods in their own Deno isolate on their own OS thread, so the work can only
 stall THAT cell — the rest of the app keeps dispatching and broadcasting.
 
 ```ts
-// src/cells/thumbs.ts
+// src/cell/thumbs.ts
 import { cell } from "aio";
 
 export const thumbs = cell("thumbs", {

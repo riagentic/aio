@@ -5,7 +5,7 @@
 // not a position — and in dev, index 0 is usually the reload socket, which has
 // no UI. Every guide used to print `am surface 0` / `am trigger 0 …`, so the
 // first thing a reader copied was the one form that fails.
-import { assertEquals } from "@std/assert";
+import { assert, assertEquals } from "@std/assert";
 import { walk } from "https://deno.land/std@0.208.0/fs/walk.ts";
 
 const ROOT = new URL("../", import.meta.url).pathname;
@@ -39,4 +39,25 @@ Deno.test("the regex catches the taught spellings (self-check)", () => {
   assertEquals(BAD.test('deno task am trigger 0 "App:X" click'), true);
   assertEquals(BAD.test("am surface --json"), false);
   assertEquals(BAD.test("am surface 03"), false);
+});
+
+// The same rule for what `am` PRINTS. The hint under a headless `am surface`
+// (no client connected yet) said "open the app …, then am surface 0" — the
+// one spelling the docs had just been cleared of, printed at the exact moment
+// a client is about to connect with whatever counter the server hands it.
+Deno.test("am's own hints never teach `am surface 0` / `am trigger 0`", async () => {
+  const hits: string[] = [];
+  const dir = `${ROOT}src/am`;
+  let scanned = 0;
+  for await (const e of walk(dir, { exts: [".ts"], includeDirs: false })) {
+    scanned++;
+    const lines = (await Deno.readTextFile(e.path)).split("\n");
+    lines.forEach((l, i) => {
+      // Comments may name the old spelling to explain why it is gone.
+      if (/^\s*(\/\/|\*|\/\*)/.test(l)) return;
+      if (BAD.test(l)) hits.push(`${e.path.replace(ROOT, "")}:${i + 1}`);
+    });
+  }
+  assert(scanned > 10, `scanned only ${scanned} files`);
+  assertEquals(hits, [], "drop the index — am drives the newest UI client");
 });

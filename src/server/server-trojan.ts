@@ -20,6 +20,7 @@
 import v8 from "node:v8";
 import { measureCellState } from "../diagnostics/memory-monitor.ts";
 import { CELL_METHOD_SEP } from "../state/cell-helpers.ts";
+import { getRegisteredCells } from "../state/cell-reactive.ts";
 import { serializeReturn } from "../protocol/return-value.ts";
 import {
   _dispatchRefusal,
@@ -43,6 +44,7 @@ import {
 } from "./server-ws.ts";
 import { disarmLocalControl, TROJAN_PREFIX } from "./server-auth.ts";
 import { generatePin, PIN_TTL_MS } from "./pairing.ts";
+import { mask as maskSql } from "../db/sql-shape.ts";
 
 /** Client info visible to trojan introspection endpoints */
 export interface TrojanClientInfo {
@@ -816,6 +818,19 @@ async function handlePost(
         // fails loud about the right thing.
         const known = Object.hasOwn(methods, cell) ? methods[cell] : undefined;
         if (!known) {
+          // A `scope: "client"` cell is defined and booted — in the browser.
+          // It never registers with the server store, so "not booted" was a
+          // false answer that sent the user hunting for a boot bug.
+          if (getRegisteredCells().get(cell)?.__aio.scope === "client") {
+            return err(
+              `cell "${cell}" is client-scoped (scope: "client") — its state ` +
+                `lives in each browser tab, never on the server, so there is ` +
+                `nothing here to dispatch to. Drive it through the UI: ` +
+                `\`am surface\` to find the element, then ` +
+                `\`am trigger "<path>" <action>\`. Dispatch does nothing.`,
+              404,
+            );
+          }
           return err(
             `unknown cell "${cell}" — not booted (cells: ${
               Object.keys(methods).join(", ") || "none"
@@ -1221,18 +1236,17 @@ async function handlePost(
           403,
         );
       }
-      // Build a scan copy for the guards. Order matters: strip COMMENTS FIRST
-      // (line `-- …`, block `/* … */`), THEN mask string literals. Doing it the
-      // other way let an unbalanced quote inside a comment make the literal-mask
-      // swallow a following `;DROP…` (the quote-run spanned the newline). This
-      // copy is only for the guards; the real query still runs verbatim, so
-      // over-stripping can at worst cause a conservative rejection, never a
-      // bypass. (Guards are defense-in-depth over SQLite's single-statement
-      // prepare + the SELECT-only allowlist.)
-      const scrubbed = query
-        .replace(/--[^\n]*/g, "")
-        .replace(/\/\*[\s\S]*?\*\//g, "")
-        .replace(/'(?:[^']|'')*'/g, "''");
+      // Build a scan copy for the guards with the db tier's SQL LEXER — one
+      // left-to-right pass that knows a quote opens a literal and `--` / `/*`
+      // open a comment, whichever comes first. Two regexes (comments, then
+      // literals) could not know that: a `--` INSIDE `'…'` ate the literal's
+      // closing quote, the literal pass then blanked everything up to the
+      // next quote, and `WITH … (SELECT '--')\nDELETE FROM t WHERE 'b' = 'b'`
+      // scanned clean — then ran, one valid statement, and deleted the table.
+      // Comments and the insides of literals and quoted names are blanked;
+      // the real query still runs verbatim. (Guards are defense-in-depth over
+      // SQLite's single-statement prepare + the SELECT-only allowlist.)
+      const scrubbed = maskSql(query, true);
       // Multi-statement guard: check for ';' AFTER literal+comment stripping so
       // a semicolon inside a string literal (WHERE name='a;b') isn't falsely
       // rejected while a chained ';DROP…' can't hide. SQLite's prepare() runs

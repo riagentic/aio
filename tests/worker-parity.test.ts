@@ -149,6 +149,8 @@ async function boot(
   const child = new Deno.Command(Deno.execPath(), {
     args: ["run", "-A", join(dir, "app.ts")],
     cwd: dir,
+    // Its home under the test dir, never `~/.worker-parity-e2e`.
+    env: { AIO_APPS_DIR: join(dir, "apps") },
     stdout: "piped",
     stderr: "piped",
   }).spawn();

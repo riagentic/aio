@@ -266,7 +266,12 @@ Filtering is per **cell**: a subscription to `orders.items` still receives every
 patch for the `orders` cell. A client that has sent no `subs` frame yet — and
 any client that never sends one (`connectCli`, a raw WebSocket) — receives all
 cells. A `subs` list over 1024 paths, or an empty one, is refused whole with a
-server warning, and the client keeps the list it had (initially: every cell).
+server warning, and the client keeps the list it had (initially: every cell). A
+path naming a cell the server does not have (a typo'd id) is accepted, but
+warned once per id, with the ids that do exist — it would receive nothing. A
+`scope: "client"` cell is never sent in `subs` by id (no server has one): its
+read sends `$client`, which names no cell, so a page that reads only client
+cells receives no server cell's deltas.
 
 ## State shape design
 

@@ -367,9 +367,24 @@ export function createDom(
       const anchor = ctx.doc.createComment("");
       target.appendChild(anchor);
       vnode._anchor = anchor;
-      for (const child of vnode.children) {
-        const childDom = createDom(child, ctx, false, target);
-        if (childDom) target.appendChild(childDom);
+      // The region is built in front of a temporary END marker, not appended
+      // to the target. A Portal nested inside this one with the SAME target
+      // (a dropdown inside a modal, both into `document.body`) appends its own
+      // region to the target while this one is still being built — and a
+      // plain append then put this portal's LATER children after it, so the
+      // two regions interleaved. Every positional walk over this region then
+      // counted the other portal's nodes as its own: text updates landed in
+      // the wrong node and closing the modal left its text in the body. With
+      // the marker the nested region always lands AFTER this one.
+      const end = ctx.doc.createComment("");
+      target.appendChild(end);
+      try {
+        for (const child of vnode.children) {
+          const childDom = createDom(child, ctx, false, target);
+          if (childDom) target.insertBefore(childDom, end);
+        }
+      } finally {
+        if (end.parentNode === target) target.removeChild(end);
       }
     } finally {
       _setDelegationRoot(prevDelegation);

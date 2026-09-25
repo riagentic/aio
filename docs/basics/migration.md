@@ -163,23 +163,23 @@ const counter = cell("counter", {
 
 ## Mapping existing patterns
 
-| You have                          | AIO equivalent                                                 |
-| --------------------------------- | -------------------------------------------------------------- |
-| REST API endpoints                | Actions via WebSocket, no HTTP needed                          |
-| Database reads/writes             | Cell-level `persist`/`ui` config + auto SQLite persistence     |
-| SQLite / raw SQL                  | Built-in `app.db` -- [3-tier SQLite](../persistence/sqlite.md) |
-| `setInterval` / `setTimeout`      | Declarative `schedule.every` / `schedule.after`                |
-| cron jobs                         | `schedule.cron` -- runs in-process                             |
-| React state + useEffect           | Direct cell access -- all state lives on server                |
-| Multiple useState hooks           | Cell state + `useLocal()` for ephemeral UI                     |
-| WebSocket setup                   | Delete it -- direct cell access handles everything             |
-| createRoot / ReactDOM             | Delete it -- framework mounts `export default` from App        |
-| HMR / hot reload                  | Delete it -- built-in, no config                               |
-| State management (Redux, Zustand) | `cell()` replaces store + slices + selectors                   |
-| XState / state machines           | `status` state field + guard lines in methods                  |
-| Express middleware                | `beforeReduce` in `aio.run()` config                           |
-| Health checks                     | `GET /__aio/health` -- auto-generated                          |
-| Cell flags                        | `app.cells.enable/disable()` -- runtime control                |
+| You have                          | AIO equivalent                                                  |
+| --------------------------------- | --------------------------------------------------------------- |
+| REST API endpoints                | Actions via WebSocket, no HTTP needed                           |
+| Database reads/writes             | Cell-level `persist`/`visible` config + auto SQLite persistence |
+| SQLite / raw SQL                  | Built-in `app.db` -- [3-tier SQLite](../persistence/sqlite.md)  |
+| `setInterval` / `setTimeout`      | Declarative `schedule.every` / `schedule.after`                 |
+| cron jobs                         | `schedule.cron` -- runs in-process                              |
+| React state + useEffect           | Direct cell access -- all state lives on server                 |
+| Multiple useState hooks           | Cell state + `useLocal()` for ephemeral UI                      |
+| WebSocket setup                   | Delete it -- direct cell access handles everything              |
+| createRoot / ReactDOM             | Delete it -- framework mounts `export default` from App         |
+| HMR / hot reload                  | Delete it -- built-in, no config                                |
+| State management (Redux, Zustand) | `cell()` replaces store + slices + selectors                    |
+| XState / state machines           | `status` state field + guard lines in methods                   |
+| Express middleware                | `beforeReduce` in `aio.run()` config                            |
+| Health checks                     | `GET /__aio/health` -- auto-generated                           |
+| Cell flags                        | `app.cells.enable/disable()` -- runtime control                 |
 
 ## Mental shift: state lives on the server
 

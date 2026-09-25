@@ -30,12 +30,15 @@ import {
   resolveVisibility,
   scopeSelectors,
   validateFieldFilters,
+  warnFilterShape,
+  warnUnmatchedNestedExcludes,
   warnUnmatchedSyncFields,
 } from "./cell-helpers.ts";
 import {
   buildMethodsExecutor,
   buildMethodsMachine,
   buildMethodsReducer,
+  refuseMalformedTransaction,
 } from "./cell-methods-internals.ts";
 import { declaredArgCount } from "./arg-arity.ts";
 import { log } from "../diagnostics/logger-api.ts";
@@ -193,6 +196,16 @@ export function createCellFromMethods<
     visibility,
     persistFilter,
   );
+  warnUnmatchedNestedExcludes(
+    name,
+    config.state as Record<string, unknown>,
+    visibility,
+    persistFilter,
+    (m) => log.warn("cell", m),
+  );
+  // A `visible:` key nothing reads, or a `persist:` that is no filter at all —
+  // both booted on 1.0.11 doing something other than what they say.
+  warnFilterShape(name, visibility, config.persist, (m) => log.warn("cell", m));
   // The CRDT half of the same rule: `sync: { merge }` / `sync: { identity }`
   // are keyed by top-level state field, and a key that names none is never
   // read — the field falls back to last-write-wins with nothing said. Warned
@@ -218,6 +231,24 @@ export function createCellFromMethods<
   // (src/state/removals.ts).
   const foreignHandlers = new Map<string, string>();
   const listensToTriggers: (string | { type: string })[] = [];
+  // Both are keyed BY METHOD. A bare value — `ttl: 5000` for "cache the
+  // whole cell", `listensTo: true` — has no keys to walk, so it configured
+  // nothing, silently: a cache that never hits looks exactly like no cache.
+  for (const key of ["ttl", "listensTo"] as const) {
+    const v = config[key] as unknown;
+    if (
+      v !== undefined && v !== false && (v === null || typeof v !== "object")
+    ) {
+      throw new Error(
+        `[cell:${name}] ${key}: ${
+          JSON.stringify(v) ?? String(v)
+        } is not a per-method map — it configures nothing. Write ` +
+          (key === "ttl"
+            ? `\`ttl: { someAsyncMethod: 5000 }\` (ms per method).`
+            : `\`listensTo: { mySyncMethod: other.method }\`.`),
+      );
+    }
+  }
   if (config.listensTo) {
     if (Array.isArray(config.listensTo)) {
       refuseRetired(removalOf("listensTo: [...]"), `cell:${name}`);
@@ -385,6 +416,7 @@ export function createCellFromMethods<
       cancelTriggers = { ...(cancelTriggers ?? {}), [mk]: "self" };
     }
   }
+  refuseMalformedTransaction(name, config.transaction);
   // `ttl` names methods too, and a typo there is silent in the other
   // direction: a cache that never hits looks exactly like no cache.
   const ttlCfg = config.ttl as Record<string, number> | undefined;

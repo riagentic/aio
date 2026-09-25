@@ -250,23 +250,88 @@ export function createOwnManager(log: Log): {
     }
   }
 
-  function toDisposer(resource: OwnResource): OwnDisposer | null {
-    if (typeof resource === "function") return resource;
-    if (resource && typeof resource === "object") {
-      if (typeof (resource as { close?: unknown }).close === "function") {
-        return () => (resource as { close(): void }).close();
-      }
-      if (typeof (resource as { dispose?: unknown }).dispose === "function") {
-        return () => (resource as { dispose(): void }).dispose();
+  /** Async acquisitions in flight: id → the mark of the one that currently
+   *  holds the slot. A replace, a dispose or a shutdown drops the mark, and
+   *  the resource is then released the moment it arrives instead of landing
+   *  in a slot that has moved on. */
+  const opening = new Map<string, object>();
+
+  /** What releases `resource`, or null when there is nothing to release.
+   *
+   *  Only functions and `close`/`dispose` objects used to count — every other
+   *  return was dropped without a word, and the resource leaked for the life
+   *  of the process. That included the platform's own disposables:
+   *  a runtime HTTP server (`serve()`) and a spawned child process carry
+   *  neither method, only `Symbol.asyncDispose` — so `own.set("srv", () =>
+   *  serve(…))` looked owned, and replace, disable and shutdown all left
+   *  the server listening. The standard dispose symbols are honoured now, and
+   *  anything else non-empty is reported rather than silently kept. */
+  function toDisposer(id: string, resource: unknown): OwnDisposer | null {
+    if (resource === undefined || resource === null) return null;
+    if (typeof resource === "function") return resource as OwnDisposer;
+    if (typeof resource === "object") {
+      const r = resource as Record<string | symbol, unknown>;
+      for (
+        const key of [
+          "close",
+          "dispose",
+          (Symbol as { dispose?: symbol }).dispose,
+          (Symbol as { asyncDispose?: symbol }).asyncDispose,
+        ]
+      ) {
+        if (key !== undefined && typeof r[key] === "function") {
+          return () => (r[key] as () => unknown).call(r);
+        }
       }
     }
+    log.error(
+      `own: factory '${id}' returned ${
+        typeof resource === "object" ? "an object" : `a ${typeof resource}`
+      } that is not a disposer — nothing will be released for it on ` +
+        `replace, dispose or shutdown. Return a function that tears the ` +
+        `resource down, or an object with close()/dispose()/` +
+        `[Symbol.dispose]/[Symbol.asyncDispose].`,
+    );
     return null;
   }
 
+  /** An ASYNC factory (`async () => { … return () => w.close() }`) type-checks —
+   *  a Promise-returning function is assignable to one returning `void` — and
+   *  its Promise was handed to the disposer check, which found no `close` on
+   *  it and kept nothing: the resource it opened was never released, by
+   *  replace, dispose or shutdown, and nothing said so. The slot now takes
+   *  what the Promise resolves to, unless it moved on meanwhile — then the
+   *  late resource is released on arrival. */
+  function acquireLater(id: string, pending: PromiseLike<unknown>): void {
+    const mark = {};
+    opening.set(id, mark);
+    Promise.resolve(pending).then((res) => {
+      const disposer = toDisposer(id, res);
+      if (opening.get(id) === mark) {
+        opening.delete(id);
+        if (disposer) disposers.set(id, disposer);
+        log.debug(`own: acquired '${id}' (async)`);
+        return;
+      }
+      if (disposer) {
+        log.debug(`own: '${id}' was replaced or disposed while opening`);
+        release(id, disposer);
+      }
+    }, (e) => {
+      if (opening.get(id) === mark) opening.delete(id);
+      log.error(`own: factory '${id}' rejected: ${e}`);
+    });
+  }
+
   function runDisposer(id: string): void {
+    opening.delete(id); // an async acquisition still opening is superseded
     const dispose = disposers.get(id);
     if (!dispose) return;
     disposers.delete(id);
+    release(id, dispose);
+  }
+
+  function release(id: string, dispose: OwnDisposer): void {
     try {
       // The app's OWN code, exactly as the factory is — see the note there.
       const r = inServerOrigin(dispose);
@@ -283,6 +348,7 @@ export function createOwnManager(log: Log): {
   function handle(effect: OwnEffect): void {
     validateId(effect.id);
     if (effect.kind === "dispose") {
+      opening.delete(effect.id);
       if (disposers.has(effect.id)) {
         runDisposer(effect.id);
         log.debug(`own: disposed '${effect.id}'`);
@@ -332,7 +398,15 @@ export function createOwnManager(log: Log): {
       // manager, well outside the body that emitted it, so the marker has to
       // be put back on here. (call-origin.ts,
       // tests/access-origin-boundaries.test.tsx)
-      const disposer = toDisposer(inServerOrigin(factory));
+      const got: unknown = inServerOrigin(factory);
+      if (
+        got !== null && typeof got === "object" &&
+        typeof (got as { then?: unknown }).then === "function"
+      ) {
+        acquireLater(effect.id, got as PromiseLike<unknown>);
+        return;
+      }
+      const disposer = toDisposer(effect.id, got);
       if (disposer) disposers.set(effect.id, disposer);
       log.debug(`own: acquired '${effect.id}'`);
     } catch (e) {
@@ -351,6 +425,7 @@ export function createOwnManager(log: Log): {
    *  reverse dependency order. A Map preserves insertion order, so the fix is
    *  to walk it backwards. */
   function disposeAll(): void {
+    opening.clear(); // still opening: released on arrival
     for (const id of [...disposers.keys()].reverse()) runDisposer(id);
   }
 
@@ -362,6 +437,9 @@ export function createOwnManager(log: Log): {
    *  disagreed about the most obvious id an app would pick. */
   function disposeByPrefix(prefix: string): void {
     const p = prefix + ":";
+    for (const id of [...opening.keys()]) {
+      if (id === prefix || id.startsWith(p)) opening.delete(id);
+    }
     // LIFO, for the same reason as disposeAll.
     for (const id of [...disposers.keys()].reverse()) {
       if (id === prefix || id.startsWith(p)) {

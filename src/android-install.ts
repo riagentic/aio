@@ -30,8 +30,8 @@
  */
 import { isAbsolute, join } from "@std/path";
 import { resolveSdk } from "./build/build-helpers.ts";
-import { androidApplicationId } from "./build/build-android.ts";
-import { stripVersionToken } from "./build/build-version.ts";
+import { apkApplicationId } from "./build/build-android.ts";
+import { readDenoJsonSync } from "./server/deno-json.ts";
 import { outDirOf } from "./build/build-manifest.ts";
 import { APP_STYLE } from "./server/app-files.ts";
 
@@ -405,10 +405,15 @@ async function main(): Promise<void> {
 
   // The label the build derived the application id from — the file name
   // minus `.apk` and minus THE build version the fleet placed in it
-  // (`myapp-1.2.345-client.apk` was built as `myapp-client`).
-  const appId = androidApplicationId(
-    stripVersionToken(apk.replace(/\.apk$/, "")),
-  );
+  // (`myapp-1.2.345-client.apk` was built as `myapp-client`) — unless the
+  // project's deno.json names `android.applicationId`, which the build used
+  // instead. Only for the project's own APK: `--apk=` may name any file.
+  const explicit = flag("apk") === undefined
+    ? (readDenoJsonSync(Deno.cwd())?.config?.android as
+      | { applicationId?: string }
+      | undefined)?.applicationId
+    : undefined;
+  const appId = apkApplicationId(apk, explicit);
   if (!has("no-launch") && appId) {
     const start = await run(adb, [
       "-s",

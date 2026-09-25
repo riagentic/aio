@@ -12,6 +12,7 @@
 // so every hop out of amui into aio's server internals goes through here.
 export { httpGet, trojanGet, trojanPost } from "../../../src/am/am-http.ts";
 export { envelopeJsonPayload } from "../../../src/am/am-cmd-state.ts";
+export { maintenanceMessage } from "../../../src/am/am-utils.ts";
 export {
   instances,
   isProcessAlive,

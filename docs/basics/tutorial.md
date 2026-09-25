@@ -177,7 +177,7 @@ on conditions and timeouts, add `until`/`race`/`sleep` from `aio` — see
 
 ## 6. Persistence and UI Visibility
 
-Both `persist` and `ui` accept: `"all"` (default), `"none"`,
+Both `persist` and `visible` accept: `"all"` (default), `"none"`,
 `{ include: [...] }`, or `{ exclude: [...] }`. Set app-wide defaults with
 `cellDefaults`.
 
@@ -191,11 +191,8 @@ const settings = cell("settings", {
 ```
 
 > A secret needs **both** excludes: `persist` controls what reaches the
-> persisted snapshot on disk, `ui` controls what reaches browsers. Excluding
-> only one leaks it through the other.
-
-```ts
-```
+> persisted snapshot on disk, `visible` controls what reaches browsers.
+> Excluding only one leaks it through the other.
 
 When state shape changes between app versions, add a migration:
 

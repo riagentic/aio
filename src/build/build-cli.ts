@@ -2,6 +2,7 @@
  * @module
  * Build CLI — compiles a headless Deno CLI binary (no browser bundle, no Electron).
  */
+import { minifyDeclared, runCompile } from "./minify-server.ts";
 import { artifactName } from "./platforms.ts";
 import { join } from "@std/path";
 import {
@@ -17,6 +18,8 @@ import { BUILD_STAMP_FILE } from "./build-version.ts";
 import type { BuildConfig } from "./build-config.ts";
 import { NO } from "../diagnostics/fmt.ts";
 import { compiled } from "./build-say.ts";
+import { warnMachineBoundImports } from "./machine-bound-imports.ts";
+import { DENO_JSON_NAMES, readDenoJson } from "../server/deno-json.ts";
 
 /** The scaffold's conventional module for a `cli-client` target: a CLI that
  *  talks to a remote aio server, which is a DIFFERENT program from the app's
@@ -59,7 +62,17 @@ export function cliCompileArgs(opts: {
   excludes: string[];
   v8Flags: string[];
   target?: string;
+  /** The app's deno.json `client` — see `bakedClientArgs`. Honoured only
+   *  when `assets` embeds that deno.json: the unbaked binary falls back to
+   *  the EMBEDDED file, and `deno compile` embeds it on its own only when the
+   *  app imports it — so a hand-written `"client": "cli"` app compiled
+   *  without it booted as Electron. */
+  declaredClient?: unknown;
 }): string[] {
+  const embedsConfig = opts.assets.some((a, i) =>
+    opts.assets[i - 1] === "--include" &&
+    (DENO_JSON_NAMES as readonly string[]).includes(a)
+  );
   return _compileArgv({
     hasDist: false, // a CLI serves no browser bundle
     // A remote CLI client talks to a server and opens no database of its own.
@@ -76,6 +89,7 @@ export function cliCompileArgs(opts: {
       doRemote: opts.doRemote,
       doElectron: false,
       doHeadless: false,
+      declaredClient: embedsConfig ? opts.declaredClient : undefined,
     }),
   });
 }
@@ -130,10 +144,18 @@ export async function buildCli(cfg: BuildConfig): Promise<void> {
   const assets = await assetIncludes(root, cliEntry);
   const v8Flags = await v8FlagsArg(root);
   if (v8Flags.length) console.log(`${v8Flags[0]}`);
+  // Absolute / file: import-map values pin the binary to this machine.
+  await warnMachineBoundImports(root);
+  // The deno.json the binary embeds — the same rung (`client`, else the
+  // retired `target`) the compiled app falls back to.
+  const dj = (await readDenoJson(root))?.config;
+  const declaredClient = dj?.client ?? dj?.target;
 
+  const minify = await minifyDeclared(root);
   const ok = await withDevExcluded(nmDir, async (excludes) => {
-    const result = await new Deno.Command("deno", {
-      args: cliCompileArgs({
+    const result = await runCompile(
+      root,
+      cliCompileArgs({
         doRemote,
         out: cliTarget,
         entry: cliEntry,
@@ -141,11 +163,11 @@ export async function buildCli(cfg: BuildConfig): Promise<void> {
         excludes,
         v8Flags,
         target: cfg.targetTriple,
+        declaredClient,
       }),
-      stdout: "inherit",
-      stderr: "inherit",
-    }).output();
-    if (result.code !== 0) return false;
+      minify,
+    );
+    if (!result.success) return false;
     // …and then RUN IT — the same rule `runDenoCompile` applies to every other
     // compiled target, and for the same reason: `deno compile` exiting 0 says
     // nothing about whether the artifact boots. A project path with a space

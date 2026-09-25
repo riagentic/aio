@@ -1,4 +1,4 @@
-// ex-browser-remote — `compile:browser:remote` target example — zero-config
+// ex-browser-remote — `--targets=server-app` example — zero-config
 // except the one behavioral choice below.
 // Dev: deno task dev   Build: deno task compile
 import "./cell/counter.ts";

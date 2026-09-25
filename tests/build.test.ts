@@ -1361,7 +1361,9 @@ Deno.test("writeServiceFile: a cross-compiled server's unit names the artifact t
         platform: foreign,
       } as unknown as Parameters<typeof writeServiceFile>[0],
     );
-    const unit = await Deno.readTextFile(join(dir, "svc.service"));
+    // Named like that artifact too, so a host unit and this one never share
+    // a file name in dist/ (R6).
+    const unit = await Deno.readTextFile(join(dir, `svc-${foreign}.service`));
     assertStringIncludes(unit, `sudo cp svc-${foreign} /usr/local/bin/svc`);
     assertStringIncludes(unit, "ExecStart=/usr/local/bin/svc ");
   } finally {

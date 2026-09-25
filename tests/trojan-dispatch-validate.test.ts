@@ -11,6 +11,7 @@ import {
   resetTrojanRateLimit,
   type TrojanDeps,
 } from "../src/server/server-trojan.ts";
+import { cell } from "../mod.ts";
 
 function makeDeps() {
   const dispatched: { type: string }[] = [];
@@ -95,6 +96,31 @@ Deno.test("trojan dispatch: an unknown cell is a 404 ERROR", async () => {
   const r = await dispatch(deps, { type: "rud.bogusmethod" });
   assertEquals(r.status, 404);
   assert(String(r.body.error).includes("unknown cell"), r.body.error as string);
+  assertEquals(dispatched.length, 0);
+});
+
+Deno.test("trojan dispatch: a client-scoped cell says it lives in the browser, not 'not booted'", async () => {
+  // `scope: "client"` cells never register with the server store, so the
+  // dispatch route used to answer "unknown cell … not booted" — for a cell the
+  // app plainly defines and boots, in the browser. The reply must say WHY the
+  // server cannot run it and where it does run.
+  const id = `view${crypto.randomUUID().slice(0, 8)}`;
+  cell(id, {
+    scope: "client",
+    state: { filter: "" },
+    methods: {
+      setFilter(s, f: string) {
+        s.filter = f;
+      },
+    },
+  });
+  const { deps, dispatched } = makeDeps();
+  const r = await dispatch(deps, { type: `${id}:setFilter`, args: ["x"] });
+  assertEquals(r.status, 404);
+  const e = String(r.body.error);
+  assert(!e.includes("not booted"), e);
+  assertStringIncludes(e, "client-scoped");
+  assertStringIncludes(e, "am trigger");
   assertEquals(dispatched.length, 0);
 });
 

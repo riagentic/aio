@@ -29,6 +29,14 @@ const BANNED_EVERYWHERE: [term: string, reason: string][] = [
   ["aio/react", "entry point removed — react interop is island() in aio/air"],
   ['"aio/boot"', "entry point removed — boot via aio.run"],
   ["to-v2.md", "renamed — the migration guide is docs/upgrade/restructure.md"],
+  // alpha76: a method that RETURNS an effect is refused ("spelled
+  // `s.$do(effect)` now"). concepts.md's AIO7 rule and two data-flow diagrams
+  // still taught the returned form — the rule a newcomer reads first.
+  ["returned effects", "removed in alpha76 — effects go through s.$do(…)"],
+  [
+    "returned schedule/own",
+    "removed in alpha76 — effects go through s.$do(…)",
+  ],
 ];
 
 /** Banned only when the term appears on a line WITHOUT migration context —

@@ -257,8 +257,8 @@ Deno.test({
       const statusBroken = await pollDom(cdp1, "aio-status", 5_000);
       cdp1.close();
       proc.kill();
+      await proc.status; // a sleep here raced a loaded machine
       proc = null;
-      await new Promise((r) => setTimeout(r, 300)); // let Electron exit + port free
 
       assertEquals(
         statusBroken === "Loading" || statusBroken === "",
@@ -275,8 +275,10 @@ Deno.test({
       const fixedFile = join(dir, "main-fixed.cjs");
       await Deno.writeTextFile(fixedFile, fixedScript);
 
-      proc = await launchElectron(fixedFile, CDP_PORT);
-      const target2 = await waitForCdpPage(CDP_PORT);
+      // A fresh port: part 1's Electron can never answer part 2's probe.
+      const cdpPort2 = freePort();
+      proc = await launchElectron(fixedFile, cdpPort2);
+      const target2 = await waitForCdpPage(cdpPort2);
       const cdp2 = await cdpSession(target2.webSocketDebuggerUrl);
       const statusFixed = await pollDom(cdp2, "aio-status", 8_000);
       cdp2.close();
@@ -291,6 +293,7 @@ Deno.test({
       try {
         proc?.kill();
       } catch { /* already gone */ }
+      await proc?.status;
       await server.shutdown().catch(() => {});
       try {
         uds.shutdown();

@@ -38,6 +38,7 @@ import {
   WORKER_CLOSE_DRAIN_MS,
 } from "./cell-worker-protocol.ts";
 import {
+  _onCallAdopted,
   abortAllInflight,
   notifyMethodCancel,
   settlePending,
@@ -161,7 +162,29 @@ function bindOwnStateReads(
 export function startCellWorkerHost(cell: CellDef): Promise<never> {
   const name = cell.__aio.id;
   // aio-ok(persist-decider): a worker replica — its slice streams home and the MAIN isolate's host persists it through the filter.
-  const composed = composeCells([cell], { perfCheck: false });
+  const composed = composeCells([cell], {
+    perfCheck: false,
+    // Home, to the owner's `onError` sink — see FromWorker["cell-error"].
+    onCellError: (err) => {
+      const cause = err.original ?? err;
+      const msg: FromWorker = {
+        t: "cell-error",
+        code: err.code,
+        message: err.message,
+        stack: cause.stack,
+        name: cause.name,
+        context: { ...err.context },
+        correlationId: err.correlationId,
+      };
+      try {
+        post(msg);
+      } catch {
+        // aio-ok: an uncloneable context value — the error still goes home,
+        // named, without it (never lost to a DataCloneError).
+        post({ ...msg, context: { cellName: err.context.cellName } });
+      }
+    },
+  });
   isolatePeerCells(name);
 
   // The MAIN isolate owns the caller-side ceiling (registerCall there carries
@@ -187,6 +210,8 @@ export function startCellWorkerHost(cell: CellDef): Promise<never> {
   // before the final persist flush. Committed data already lives on the main
   // isolate; teardown noise dies with this thread.
   let closing = false;
+  /** Set while a `disable` runs — see its handler. */
+  let disabledLocally = false;
   /** The owner's `refusalsReject`, as `init` reports it. Until it arrives no
    *  call has been served, so the default is only ever the 1.x one. */
   let refusalsReject = false;
@@ -203,6 +228,8 @@ export function startCellWorkerHost(cell: CellDef): Promise<never> {
    *  the seed — so the method's side effect happened TWICE while the state
    *  recorded it once. */
   let seeded = false;
+  /** Has this cell's `onInit` run? Once per boot — see the `start` message. */
+  let started = false;
 
   // Owned resources acquired by THIS cell, in THIS isolate.
   //
@@ -227,10 +254,15 @@ export function startCellWorkerHost(cell: CellDef): Promise<never> {
     error: (m) => log.error("cell-worker", `${name}: ${m}`),
   });
 
+  // A disable releases what the cell owns, as the owner's does for its own
+  // cells (aio.ts `_onScheduleReady`) — and the owns live HERE. The owner
+  // cancels the schedules: they run on its scheduler.
+  composed.registry.setOnDisable((prefix) => ownWorker.disposeByPrefix(prefix));
+
   /** Ship whatever this commit produced. Streamed (not batched to the end of a
    *  call) so `s.status = "working"` before an await reaches clients now. */
   const flush = (): void => {
-    if (closing || !seeded) {
+    if (closing || disabledLocally || !seeded) {
       pending = [];
       return;
     }
@@ -314,6 +346,16 @@ export function startCellWorkerHost(cell: CellDef): Promise<never> {
   );
   bindOwnStateReads(cell, () => state);
 
+  // `callId` → the owner's call `id`, for the calls in flight here. The owner
+  // counts every call it posts in `$pending`; the ones this executor answers
+  // from another call are reported back so it stops (see FromWorker
+  // "adopted"). Never unsubscribed: the watcher lives as long as the thread.
+  const callIds = new Map<string, number>();
+  _onCallAdopted((callId) => {
+    const id = callIds.get(callId);
+    if (id !== undefined) post({ t: "adopted", id });
+  });
+
   self.onmessage = async (ev: MessageEvent<ToWorker>) => {
     const msg = ev.data;
     if (msg.t === "init") {
@@ -339,14 +381,49 @@ export function startCellWorkerHost(cell: CellDef): Promise<never> {
       state = { [name]: { ...msg.state } };
       pending = []; // seeding is not a change to broadcast
       seeded = true;
-      // AFTER the seed, never at construction. `onInit` is allowed to
-      // dispatch, and until this point there was no authoritative state to
-      // dispatch against and no main-isolate wiring to ship the result to.
+      // NOT `initAll` here: `init` is also the RE-SEED message (time travel,
+      // snapshot load), and at spawn the main isolate cannot apply a patch
+      // yet. `onInit` waits for `start` — see ToWorker["start"].
+      post({ t: "ready", cell: name });
+      return;
+    }
+    if (msg.t === "start") {
+      // AFTER the seed (FIFO: `init` is always posted first), and once per
+      // boot. `onInit` is allowed to dispatch, and only now is there both an
+      // authoritative state to dispatch against and a wired main isolate to
+      // ship the result to.
+      if (started) return;
+      started = true;
       composed.initAll({
         dispatch: (a: Msg) => void dispatch(a),
         getState: () => state,
       });
-      post({ t: "ready", cell: name });
+      return;
+    }
+    if (msg.t === "disable" || msg.t === "enable") {
+      // The owner's `app.cells.disable`/`enable` (or its circuit breaker):
+      // THIS composition's registry, so the hooks run where the cell's
+      // resources live and this copy of the slice resets/re-inits, and a
+      // disabled cell refuses its own writes here as the owner's door does.
+      const app = {
+        dispatch: (a: Msg) => void dispatch(a),
+        getState: () => state,
+      };
+      if (msg.t === "enable") {
+        composed.registry.enable(name, app);
+        return;
+      }
+      // The reset is not shipped: the owner has already refused this cell
+      // (its door drops a disabled cell's patches) and resets its own copy
+      // on the reply. The lifecycle dispatch here is synchronous — no reduce
+      // is running between messages — so exactly its patches are dropped.
+      disabledLocally = true;
+      try {
+        composed.registry.disable(name, app);
+      } finally {
+        disabledLocally = false;
+      }
+      post({ t: "disabled", ok: !composed.registry.isEnabled(name) });
       return;
     }
     if (msg.t === "cancel") {
@@ -408,6 +485,7 @@ export function startCellWorkerHost(cell: CellDef): Promise<never> {
     // carry that home, where the main side settles ITS registry.
     const callId = (action as { payload?: { _callId?: string } }).payload
       ?._callId;
+    if (callId) callIds.set(callId, id);
     try {
       const settled = callId ? registerCall(callId) : null;
       if (settled) settled.catch(() => {}); // observed via await below; never unhandled
@@ -470,6 +548,8 @@ export function startCellWorkerHost(cell: CellDef): Promise<never> {
           ? (e as { code: string }).code
           : undefined,
       });
+    } finally {
+      if (callId) callIds.delete(callId);
     }
   };
 

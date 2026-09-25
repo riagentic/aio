@@ -26,6 +26,7 @@
 // Server-only (`aio/server`): it spawns processes and sends signals.
 
 import { log } from "../diagnostics/logger-api.ts";
+import { _diagScopeNow } from "../diagnostics/diagnostic-bus.ts";
 
 /** How a child process ended: its exit code, the signal that killed it (if
  *  any), and the success shorthand. */
@@ -75,7 +76,9 @@ export type SpawnStdin = {
 export type SpawnHandle = {
   /** The child's process-group id — its own, never the app's. */
   readonly pid: number;
-  /** Settles when the child and everything it started are gone. */
+  /** Settles when the child has exited and its output has been read. A
+   *  grandchild that outlives it stays in the group — `kill()` and shutdown's
+   *  reaper still reach it. */
   readonly status: Promise<SpawnStatus>;
   /** SIGSTOP the whole group. Throws where that has no meaning (Windows). */
   pause(): void;
@@ -255,7 +258,10 @@ export async function spawn(
   }
 
   const stdin = opts.stdin ? _stdin(child.stdin, status, cmd) : undefined;
-  return _track(_handle(pgid, status, grace, opts.signal, cmd, stdin), cmd);
+  return _track(
+    _handle(pgid, status, child.status, grace, opts.signal, cmd, stdin),
+    cmd,
+  );
 }
 
 // ── The live-child registry ─────────────────────────────────────────────────
@@ -272,53 +278,215 @@ export async function spawn(
 // developer's machine until something runs out. Silence is the wrong answer to
 // that; so shutdown kills whatever is still running and SAYS SO, naming the
 // command, and `own` remains the way to do it earlier and on purpose.
-const _live = new Map<number, { cmd: string; handle: SpawnHandle }>();
+//
+// Each child also remembers the APP that started it (`_diagScopeNow()` — the
+// scope every `aio.run()` runs in). One process can host several apps, and a
+// registry that did not know whose child was whose let app B's shutdown kill
+// the transcode app A had just started, with A still running. A child started
+// outside any app has no app to belong to and stays every app's, as before.
+const _live = new Map<
+  number,
+  { cmd: string; handle: SpawnHandle; owner: object | undefined }
+>();
+
+/** Whether `owner`'s shutdown reaps this child: its own, or an unowned one.
+ *  No owner asked for ⇒ every child (the process-wide form). */
+function _reapedBy(
+  v: { owner: object | undefined },
+  owner: object | undefined,
+): boolean {
+  return owner === undefined || v.owner === undefined || v.owner === owner;
+}
 
 function _track(handle: SpawnHandle, cmd: string): SpawnHandle {
-  _live.set(handle.pid, { cmd, handle });
-  const forget = () => _live.delete(handle.pid);
-  handle.status.then(forget, forget);
+  const entry = { cmd, handle, owner: _diagScopeNow() };
+  _live.set(handle.pid, entry);
+  // The CHILD exiting is not the GROUP being gone: `sh -c "worker &"` exits at
+  // once and leaves the worker running in the group. Forgetting the pid on the
+  // child's exit let shutdown's reaper report "nothing left" over a live
+  // worker. POSIX: the handle settles `_groupGoneOf` only once the leader has
+  // exited AND no live member is left (see `_handle`); Windows (`taskkill /T`
+  // walks the tree) has only the status.
+  const forget = () => {
+    if (_live.get(handle.pid) === entry) _live.delete(handle.pid);
+  };
+  (_groupGoneOf.get(handle) ?? handle.status).then(forget, forget);
   return handle;
+}
+
+/** POSIX handle → settles when its leader exited and its group is empty. */
+const _groupGoneOf = new WeakMap<SpawnHandle, Promise<unknown>>();
+
+/** How often a group whose leader exited is re-checked for survivors. */
+const GROUP_POLL_MS = 250;
+
+/** The two process-group operations `_handle` needs — injectable so the
+ *  "group gone, pgid recycled" decision is testable without pid reuse.
+ *  @internal */
+export type GroupSys = {
+  /** Does group `pgid` still have a LIVE (non-zombie) member? */
+  alive(pgid: number): boolean;
+  /** Deliver `sig` to the whole group. Throws like `Deno.kill`. */
+  signal(pgid: number, sig: Deno.Signal): void;
+};
+
+const _posixSys: GroupSys = {
+  alive: _groupAlive,
+  signal: (pgid, sig) => Deno.kill(-pgid, sig),
+};
+
+/** Is any process of group `pgid` still alive? Signal 0 probes without
+ *  delivering; EPERM means a member exists under another uid. Signal 0 also
+ *  succeeds for a ZOMBIE, and a zombie is never reaped where nothing waits on
+ *  orphans (Deno as PID 1 in a container) — so on Linux a group counts alive
+ *  only if /proc shows a member that is not a zombie. */
+function _groupAlive(pgid: number): boolean {
+  try {
+    Deno.kill(-pgid, 0);
+  } catch (e) {
+    if (e instanceof Deno.errors.PermissionDenied) return true;
+    _liveHint.delete(pgid);
+    return false;
+  }
+  return Deno.build.os === "linux" ? _procGroupHasLive(pgid) : true;
+}
+
+/** `/proc/<pid>/stat` → state and process group. `comm` may hold spaces and
+ *  parens, so fields are counted from the LAST `)`. Pure. @internal */
+export function _procStat(
+  text: string,
+): { state: string; pgrp: number } | null {
+  const r = text.lastIndexOf(")");
+  if (r < 0) return null;
+  const f = text.slice(r + 2).split(" "); // state ppid pgrp …
+  const pgrp = Number(f[2]);
+  return f[0] && Number.isInteger(pgrp) && pgrp > 0
+    ? { state: f[0], pgrp }
+    : null;
+}
+
+/** Last live member seen per group: re-checked first, so polling a group that
+ *  stays alive costs one read, not a /proc scan. */
+const _liveHint = new Map<number, string>();
+
+function _procMemberLive(pgid: number, pid: string): boolean {
+  try {
+    const st = _procStat(Deno.readTextFileSync(`/proc/${pid}/stat`));
+    return st !== null && st.pgrp === pgid && st.state !== "Z" &&
+      st.state !== "X";
+  } catch {
+    return false; // exited between the listing and the read
+  }
+}
+
+function _procGroupHasLive(pgid: number): boolean {
+  const hint = _liveHint.get(pgid);
+  if (hint !== undefined && _procMemberLive(pgid, hint)) return true;
+  _liveHint.delete(pgid);
+  try {
+    for (const e of Deno.readDirSync("/proc")) {
+      const c = e.name.charCodeAt(0);
+      if (c < 48 || c > 57) continue; // only the numeric (pid) entries
+      if (_procMemberLive(pgid, e.name)) {
+        _liveHint.set(pgid, e.name);
+        return true;
+      }
+    }
+  } catch {
+    return true; // no /proc to look in (or no read permission): trust signal 0
+  }
+  return false;
 }
 
 /** Children spawned through `spawn()` that are still running, as
  *  `pid → command`. Empty is the healthy answer at shutdown. @internal */
-export function _liveSpawned(): Map<number, string> {
-  return new Map([..._live].map(([pid, v]) => [pid, v.cmd]));
+export function _liveSpawned(owner?: object): Map<number, string> {
+  return new Map(
+    [..._live].filter(([, v]) => _reapedBy(v, owner)).map((
+      [pid, v],
+    ) => [pid, v.cmd]),
+  );
 }
 
 /** Kill every child still running, as whole process groups. Called by
  *  shutdown's Phase 7 after `own` disposal has had its chance, so anything
- *  reaching here is a child nobody claimed.
+ *  reaching here is a child nobody claimed. `owner` (an app scope) limits it
+ *  to that app's children plus unowned ones; omitted, it is every child.
  *
  *  Returns how many it had to kill — zero on a tidy app, and the caller is
  *  expected to say so out loud when it is not. Never throws: a child that has
  *  already gone, or a signal the platform refuses, must not be the thing that
  *  stops a shutdown. */
-export async function killAllSpawned(): Promise<number> {
-  const victims = [..._live.values()];
+export async function killAllSpawned(owner?: object): Promise<number> {
+  const victims = [..._live].filter(([, v]) => _reapedBy(v, owner));
   if (victims.length === 0) return 0;
-  await Promise.allSettled(victims.map((v) => v.handle.kill()));
-  _live.clear();
+  await Promise.allSettled(victims.map(([, v]) => v.handle.kill()));
+  for (const [pid] of victims) _live.delete(pid);
   return victims.length;
 }
 
-/** POSIX handle — every signal goes to `-pgid`, never to a bare pid. */
-function _handle(
+/** POSIX handle — every signal goes to `-pgid`, never to a bare pid.
+ *  `exited` settles when the LEADER exits (before its output is drained).
+ *  @internal */
+export function _handle(
   pgid: number,
   status: Promise<SpawnStatus>,
+  exited: Promise<unknown>,
   grace: number,
   signal: AbortSignal | undefined,
   cmd: string,
   stdin?: SpawnStdin,
+  sys: GroupSys = _posixSys,
 ): SpawnHandle {
   let paused = false;
   let done = false;
-  status.then(() => {
+  // Once the leader has exited AND the group has no live member, the pgid is
+  // free for the kernel to hand to an UNRELATED process group — so from then
+  // on nothing here may signal it again: kill()/abort/the SIGKILL timer all
+  // become no-ops, and the abort listener and poll are dropped.
+  let gone = false;
+  let resolveGone!: () => void;
+  const gonePromise = new Promise<void>((r) => resolveGone = r);
+  const killers = new Set<ReturnType<typeof setTimeout>>();
+  let poll: ReturnType<typeof setInterval> | undefined;
+  let unwire = () => {};
+  const markGone = () => {
+    if (gone) return;
+    gone = true;
+    for (const t of killers) clearTimeout(t);
+    killers.clear();
+    clearInterval(poll);
+    unwire();
+    resolveGone();
+  };
+  /** Is there anything left to signal? A live leader holds the pgid; after it
+   *  exits, only a live member does. */
+  const reachable = (): boolean => {
+    if (gone) return false;
+    if (!done || sys.alive(pgid)) return true;
+    markGone();
+    return false;
+  };
+  const onExit = () => {
     done = true;
-  }).catch(() => {
-    done = true;
-  });
+    if (!reachable()) return;
+    // Survivors (`sh -c "worker &"`): re-check, unref'd so it never holds the
+    // process open, until the group empties.
+    poll = setInterval(reachable, GROUP_POLL_MS);
+    Deno.unrefTimer(poll);
+  };
+  exited.then(onExit, onExit);
+
+  // To the group regardless of the child: after the child exited, the group
+  // can still hold the grandchildren it started — but never once it is gone.
+  const toGroup = (sig: Deno.Signal) => {
+    if (!reachable()) return;
+    try {
+      sys.signal(pgid, sig);
+    } catch {
+      // aio-ok: gone, or not ours to signal — nothing left to reach
+    }
+  };
 
   const send = (sig: Deno.Signal) => {
     if (done) return;
@@ -326,7 +494,7 @@ function _handle(
       // NEGATIVE pid = the whole group. This is the line the field report's
       // `Deno.Command("kill", ["-STOP", "-1234"])` could not do: procps kill
       // takes that as a flag, exits 0, and signals nothing.
-      Deno.kill(-pgid, sig);
+      sys.signal(pgid, sig);
     } catch (e) {
       if (e instanceof Deno.errors.NotFound) return; // already gone
       throw e;
@@ -356,27 +524,61 @@ function _handle(
         send("SIGCONT");
         paused = false;
       }
-      send("SIGTERM");
-      const killer = setTimeout(() => send("SIGKILL"), grace);
+      if (!reachable()) return await status;
+      // TERM reaches the survivors of an exited child too, and the SIGKILL
+      // timer is NOT cancelled by the child's exit: a grandchild that ignores
+      // TERM outlives its parent, and cancelling on the parent's exit orphaned
+      // it exactly as the hand-rolled versions did. It IS cancelled once the
+      // group is gone (markGone), since the pgid may then be someone else's.
+      toGroup("SIGTERM");
+      const killer = setTimeout(() => {
+        killers.delete(killer);
+        toGroup("SIGKILL");
+      }, grace);
+      killers.add(killer);
+      const deadline = Date.now() + grace + 1000;
       try {
-        return await status;
+        const st = await status;
+        while (reachable() && Date.now() < deadline) {
+          await new Promise((r) => setTimeout(r, 20));
+        }
+        return st;
       } finally {
         clearTimeout(killer);
+        killers.delete(killer);
       }
     },
   };
 
-  if (signal) {
-    if (signal.aborted) void handle.kill();
-    else {
-      signal.addEventListener("abort", () => {
-        handle.kill().catch((e) =>
-          log.warn("spawn", `killing "${cmd}" after abort failed: ${e}`)
-        );
-      }, { once: true });
-    }
-  }
+  unwire = _wireAbort(signal, handle, cmd);
+  if (gone) unwire();
+  _groupGoneOf.set(handle, gonePromise);
   return handle;
+}
+
+/** Kill `handle` when `signal` aborts — and AT ONCE when it is already
+ *  aborted, since an `abort` listener added after the fact never fires. One
+ *  copy for both platforms: the Windows branch carried only the listener, so
+ *  a job spawned under an already-cancelled `$signal` ran to completion.
+ *  Returns the remover for the listener (a no-op when none was added).
+ *  @internal */
+export function _wireAbort(
+  signal: AbortSignal | undefined,
+  handle: Pick<SpawnHandle, "kill">,
+  cmd: string,
+): () => void {
+  const none = () => {};
+  if (!signal) return none;
+  const kill = () =>
+    void handle.kill().catch((e) =>
+      log.warn("spawn", `killing "${cmd}" after abort failed: ${e}`)
+    );
+  if (signal.aborted) {
+    kill();
+    return none;
+  }
+  signal.addEventListener("abort", kill, { once: true });
+  return () => signal.removeEventListener("abort", kill);
 }
 
 /** Windows has no process groups or SIGSTOP. `taskkill /T` walks the tree, so
@@ -435,11 +637,7 @@ function _spawnWindows(
       }
     },
   };
-  if (opts.signal) {
-    opts.signal.addEventListener("abort", () => void handle.kill(), {
-      once: true,
-    });
-  }
+  _wireAbort(opts.signal, handle, cmd);
   return handle;
 }
 

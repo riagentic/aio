@@ -53,9 +53,26 @@ export function isDeliberateRejection(e: unknown): boolean {
   return e.message.length > 0;
 }
 
-/** The one line a refusal prints (info level). */
-export function rejectionLine(actionType: string, e: unknown): string {
+/** The one line a refusal prints (info level).
+ *
+ *  `committed`: the method is an async, NON-transactional one that had
+ *  already written before it threw. Those writes are not rolled back — an
+ *  async method commits as it goes — so "no state changed" would be a lie
+ *  beside the state that did change. Only a sync method, a `transaction:
+ *  true` one, or an async one that threw before writing leaves state as it
+ *  was. */
+export function rejectionLine(
+  actionType: string,
+  e: unknown,
+  committed = false,
+): string {
   const why = e instanceof Error ? e.message : String(e);
+  if (committed) {
+    return `${actionType} rejected: ${why} — the method threw it AFTER ` +
+      `writing, and those earlier writes STAY committed (an async method ` +
+      `commits as it goes; \`transaction: true\` makes it all-or-nothing). ` +
+      `The caller's await rejects with it`;
+  }
   return `${actionType} rejected: ${why} — the method threw it, so no state ` +
     `changed and the caller's await rejects with it`;
 }
