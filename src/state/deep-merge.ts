@@ -26,7 +26,7 @@ export function isPlainObject(v: unknown): v is Record<string, unknown> {
  * inert as OWN properties, and dropping them silently lost user data — see the
  * dictionary note on `deepMerge`.)
  */
-function setOwn(
+export function setOwn(
   target: Record<string, unknown>,
   key: string,
   value: unknown,

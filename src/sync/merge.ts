@@ -2,6 +2,7 @@
 import type { HLC, MergeStrategy } from "./types.ts";
 import { compareHLC } from "./hlc.ts";
 import { mergeText3 } from "./merge-text.ts";
+import { setOwn } from "../state/deep-merge.ts";
 
 /**
  * Outcome of merging a single field: resolved value and whether a conflict occurred.
@@ -238,13 +239,17 @@ function mergeLWWPerKey(
     // native FUNCTION in the merged record.
     const inLocal = Object.hasOwn(local, key);
     const inRemote = Object.hasOwn(remote, key);
+    // `setOwn`, never `merged[key] =`: a record parsed from JSON may carry an
+    // own "__proto__" key, and assigning it invokes the prototype setter in a
+    // browser — the key vanished and its value became the merged record's
+    // prototype.
     if (inLocal && !inRemote) {
-      merged[key] = local[key];
+      setOwn(merged, key, local[key]);
     } else if (!inLocal && inRemote) {
-      merged[key] = remote[key];
+      setOwn(merged, key, remote[key]);
     } else {
       const result = mergeLWW(local[key], localHlc, remote[key], remoteHlc);
-      merged[key] = result.value;
+      setOwn(merged, key, result.value);
       if (result.conflict) conflict = true;
     }
   }

@@ -1558,7 +1558,14 @@ export function createServerSyncHandler(
         ownPrefix !== null
           // …except one another connection submitted under it while its
           // owner was away (see `_foreign`): the owner never had it.
-          ? o.id.startsWith(ownPrefix) && !_foreign.has(o.id)
+          //
+          // The WHOLE prefix, never `startsWith`: a client id may itself
+          // contain `-` (it is a UUID), so a writer announcing clientId
+          // `<victim>-<victimSession>` owns ops whose ids START with the
+          // victim's prefix — and a prefix test served its ops to nobody but
+          // the server and the other peers, hiding them from the victim's
+          // catch-up for good.
+          ? sessionPrefix(o.id) === ownPrefix && !_foreign.has(o.id)
           : o.hlc[2] === sync.clientId;
 
       (async () => {
