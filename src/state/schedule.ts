@@ -314,6 +314,7 @@ export function validateSchedules(defs: readonly unknown[]): void {
           SCHEDULE_DOC,
         );
       }
+      warnCronVixieDiff(value, fields);
     }
     if (
       trigger === "at" && typeof value === "string" && value &&
@@ -521,6 +522,60 @@ export function cronCatchesUp(pattern: string): boolean {
   return minute.startsWith("*");
 }
 
+/** Patterns already told they read differently from Vixie cron. Bounded: past
+ *  the cap nothing more is said (a pattern built per call must not grow it). */
+const _vixieWarned = new Set<string>();
+
+/** Say — once per pattern, dev and prod — when this cron's day rule differs
+ *  from Vixie cron's. aio decides "restricted" by what a day field EXPANDS to
+ *  (fewer than every day); Vixie by its TEXT (a `*`-led field is unrestricted,
+ *  any other is a restriction). The OR rule applies only when both day fields
+ *  are restricted, so the two disagree on a `*` step beside a restricted field
+ *  (`0 0 *` + `/2 * 1`: aio OR, Vixie AND) and on an explicit full range beside
+ *  one (`0 0 1-31 * 1`: aio AND — Mondays; Vixie OR — every day). Changing the
+ *  reading would move existing schedules silently, so it stays — and is said.
+ *  @internal */
+export function warnCronVixieDiff(pattern: string, f: CronFields): void {
+  const parts = pattern.trim().split(/\s+/);
+  const domFull = f.dom.length === 31;
+  const dowFull = f.dow.length === 7;
+  const aioOr = !domFull && !dowFull;
+  const vixieOr = !parts[2]!.startsWith("*") && !parts[4]!.startsWith("*");
+  // Same rule — or both fields full: every day either way.
+  if (aioOr === vixieOr || (domFull && dowFull)) return;
+  if (_vixieWarned.has(pattern) || _vixieWarned.size >= 256) return;
+  _vixieWarned.add(pattern);
+  const days: [string, string][] = [
+    [parts[2]!, "day-of-month"],
+    [parts[4]!, "day-of-week"],
+  ];
+  if (aioOr) {
+    const named = days.filter(([t]) => t.startsWith("*"))
+      .map(([t, n]) => `${n} "${t}"`).join(" and ");
+    log.warn(
+      "schedule",
+      `cron "${pattern}": ${named} is a restriction here, so a day matches ` +
+        `when EITHER day field matches (the OR rule). Vixie cron reads a ` +
+        `"*"-led day field as unrestricted, so there a day must match BOTH. ` +
+        `For the OR reading, write the step as a range ("1-31/2" for ` +
+        `day-of-month, "0-6/2" for day-of-week) and this is not said again; ` +
+        `for the BOTH reading, keep one day field "*" and check the other ` +
+        `condition in the action. See docs/state/scheduling.md.`,
+    );
+    return;
+  }
+  const [full, other] = domFull ? [days[0]!, days[1]!] : [days[1]!, days[0]!];
+  log.warn(
+    "schedule",
+    `cron "${pattern}": ${full[1]} "${full[0]}" covers every day, so it is ` +
+      `no restriction here and a day must match ${other[1]} "${other[0]}". ` +
+      `Vixie cron reads an explicit range as a restriction, so there EITHER ` +
+      `day field matching is enough — every day. Write "*" for ${full[1]} ` +
+      `for this reading and this is not said again; for every day, write ` +
+      `"*" in both day fields. See docs/state/scheduling.md.`,
+  );
+}
+
 /** The parsed fields, or a throw. A pattern that can NEVER match is a typo,
  *  and it is knowable here, in O(months × doms) — so it fails at the call
  *  site like every other invalid schedule instead of being discovered at the
@@ -537,6 +592,7 @@ function _checkCron(id: string, pattern: string): CronFields {
         } (e.g. "0 0 30 2 *": February has no 30th).`,
     );
   }
+  warnCronVixieDiff(pattern, fields);
   return fields;
 }
 

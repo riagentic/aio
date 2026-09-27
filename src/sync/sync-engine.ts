@@ -1336,7 +1336,13 @@ export function createSyncEngine(deps: SyncEngineDeps): SyncEngine {
         unconfirmed,
         deps.reducer,
       ).optimistic;
-      for (const field of Object.keys(after)) {
+      // Keys of BOTH sides: a field the remote op deleted is absent from
+      // `after`, and a local edit to it is as much a conflict as any.
+      const fields = new Set([
+        ...Object.keys(confirmed),
+        ...Object.keys(after),
+      ]);
+      for (const field of fields) {
         const remoteChanged = !_sameValue(confirmed[field], after[field]);
         const localOverrides = !_sameValue(
           confirmed[field],
@@ -1344,6 +1350,14 @@ export function createSyncEngine(deps: SyncEngineDeps): SyncEngine {
         );
         if (!remoteChanged || !localOverrides) continue;
         const strategy = mergeCfg[field] ?? "lww";
+        // Both sides wrote the SAME value: nothing was lost, so it is no
+        // conflict ("fires onConflict when values differ" — crdt.md), and
+        // every strategy but one merges equal values to that value. The
+        // exception is `counter`: equal counters are two deltas to add.
+        if (
+          strategy !== "counter" &&
+          _sameValue(beforeRebase[field], after[field])
+        ) continue;
         if (strategy !== "lww") {
           try {
             const m = mergeField(

@@ -41,7 +41,7 @@ import { _setCallDeadlineClock, _setCallTimeouts } from "./state/cell-impl.ts";
 import { _setSleepClock } from "./state/async-helpers.ts";
 import { bindCell, bindCellReactive, type CellDef } from "./state/cell.ts";
 import { _whileCellsBoot, makeUnboundGuard } from "./state/cell-catalog.ts";
-import { composeCells } from "./state/cell-compose.ts";
+import { _countCellError, composeCells } from "./state/cell-compose.ts";
 import {
   buildDBStateGetter,
   persistingCellIds,
@@ -65,7 +65,7 @@ import {
 } from "./state/method-cancel.ts";
 import { _setRouterBoot } from "./air/router.ts";
 import { _installRouterListeners } from "./air/router-core.ts";
-import { _setRouteBase } from "./air/router-core.ts";
+import { _getRouteBase, _setRouteBase } from "./air/router-core.ts";
 import type { SignInProps } from "./browser/browser-auth-ui.ts";
 import type {
   serverAuth as ServerAuth,
@@ -78,6 +78,10 @@ import { showDesktopNotification } from "./browser/desktop-notify.ts";
 import { notifyPayload } from "./state/notify.ts";
 import { LARGE_STATE_DOC } from "./state/large-state-doc.ts";
 import { utf8Size } from "./protocol/utf8-size.ts";
+import {
+  composedShapeGuard,
+  withShapeGuard,
+} from "./state/declared-shape-guard.ts";
 import {
   NATIVE_STORE_GLOBAL,
   NATIVE_STORE_KEY_GLOBAL,
@@ -410,19 +414,46 @@ export const blocking: typeof ServerBlocking = /* @__PURE__ */ Object.assign(
   },
 );
 
+/** The URL of the script this bundle is — `currentScript` exists only while
+ *  the bundle's top level runs, so it is taken here, not at boot. */
+const _bundleSrc: string | undefined = typeof document !== "undefined"
+  ? (document.currentScript as HTMLScriptElement | null)?.src || undefined
+  : undefined;
+
 /** Makes the packaged shell's document the app's route root. The android
  *  asset loader serves `…/assets/index.html`, so `location.pathname` starts
  *  there and `<Route path="/">` would never match; adopt its directory as the
  *  route base and rewrite the URL (no load) to `<dir>/`. A no-op wherever the
  *  document is already served from a directory (dev server, browser, tests).
- *  Exported for the test that pins it. */
-export function _adoptShellPath(): void {
+ *
+ *  A `web` build deployed under a sub-path (a GitHub Pages project site at
+ *  `/repo/`) is served from a directory — but not the origin's root, so no
+ *  `<Route>` ever matched. The shell loads the bundle as `./app.js`, so the
+ *  directory the bundle came from IS the app's root: adopted as the base
+ *  when the page is under it. A root-hosted app's bundle is `/app.js`, base
+ *  "" — unchanged. Exported for the test that pins it. */
+export function _adoptShellPath(
+  bundleSrc: string | undefined = _bundleSrc,
+): void {
   if (typeof location === "undefined" || typeof history === "undefined") return;
   const p = location.pathname;
-  if (!/\/index\.html$/.test(p)) return;
-  const base = p.slice(0, -"/index.html".length);
-  history.replaceState(null, "", base + "/" + location.search + location.hash);
-  _setRouteBase(base);
+  if (/\/index\.html$/.test(p)) {
+    const base = p.slice(0, -"/index.html".length);
+    history.replaceState(
+      null,
+      "",
+      base + "/" + location.search + location.hash,
+    );
+    _setRouteBase(base);
+    return;
+  }
+  if (!bundleSrc) return;
+  const dir = new URL(".", bundleSrc);
+  if (dir.origin !== location.origin) return;
+  const base = dir.pathname.slice(0, -1);
+  if (
+    base && base !== _getRouteBase() && (p === base || p.startsWith(base + "/"))
+  ) _setRouteBase(base);
 }
 
 /** Extracts return types of all function members into a union */
@@ -1003,16 +1034,33 @@ export function _pickPersistStore(g: {
       // the store that does work — and the line still names the store.
     }
     const nativeRestore: _PersistStore["restore"] = (k) => {
-      const v = native.get(k);
+      let v = native.get(k);
+      if (typeof v !== "string" && typeof native.has !== "function") {
+        // An activity copied from 1.0.7 has no `has`: a null here is "never
+        // written" OR "the read failed", and the first write then replaces
+        // what is on disk. Nothing on this side can tell them apart — so read
+        // once more (a transient IO error clears), and say what is at stake.
+        v = native.get(k);
+        if (typeof v !== "string") {
+          console.warn(
+            `[aio] ⚠ persistence: the native store answered nothing for ` +
+              `"${k}", and this APK's own MainActivity (copied from aio ` +
+              `1.0.7) has no exists() to tell "never saved" from "saved but ` +
+              `unreadable" (see logcat, tag "aio"). If this app had state, ` +
+              `the next change REPLACES it — copy class AioNativeStore from ` +
+              `aio's android-template.`,
+          );
+        }
+      }
       if (typeof v === "string") return { raw: v };
       // `null` is "never written" OR "written, and the read threw"
       // (MainActivity.kt catches the read and logs it). Ask BEFORE anything
       // else — before adoption, and even when there is nothing to adopt:
       // the second meaning booted the app from its initial state, and its
       // first dispatch wrote that over the real file. `has` is a stat, not
-      // a read; an older/overlaid bridge without it behaves as before, and
-      // a `has` that throws answers "present", the side that overwrites
-      // nothing.
+      // a read; an older/overlaid bridge without it is read twice and
+      // warned about (above), and a `has` that throws answers "present",
+      // the side that overwrites nothing.
       let present: boolean;
       try {
         present = typeof native.has === "function" && native.has(k) === true;
@@ -1228,7 +1276,7 @@ function restorableOnly(
  *  - stored and read, `apply` succeeds → restored.
  *  - stored, read, but `apply` throws (corrupt JSON, a blob the merge
  *    refuses) → the raw text is copied byte-for-byte to
- *    `<key>.corrupt-<ms>` in the SAME store and read back to prove it landed;
+ *    `<key>.corrupt-<length>-<hash>` in the SAME store and read back to prove it landed;
  *    only then is `<key>` written again — at once, with the state this run
  *    started from (`setAside`, which the caller acts on). Waiting for the
  *    app's first change left the corrupt blob under `<key>`, so every launch
@@ -1271,7 +1319,16 @@ function _restoreOrQuarantine(
     apply(raw);
     return { writesRefused: null };
   } catch (e) {
-    const aside = `${key}.corrupt-${Date.now()}`;
+    // Named by CONTENT, not by time: `<key>` is replaced only by a reset
+    // write that succeeds, and one that fails (a shaper that throws, a
+    // refused native write) left the same blob to be set aside again at
+    // every launch — a new full-size copy each time, until the quota was
+    // full. The same bytes now land on the same name.
+    let h = 0x811c9dc5;
+    for (let i = 0; i < raw.length; i++) {
+      h = Math.imul(h ^ raw.charCodeAt(i), 0x01000193);
+    }
+    const aside = `${key}.corrupt-${raw.length}-${(h >>> 0).toString(16)}`;
     try {
       store.write(aside, raw);
       if (store.read(aside) !== raw) {
@@ -1342,6 +1399,8 @@ export function initStandalone<S, A, E>(
   /** The restore set a corrupt value aside: `persistKey` is written with the
    *  starting state as soon as the writer exists (below). */
   let setAside = false;
+  /** Stored `persist: "none"` slices the restore dropped — see below. */
+  let unkept: string[] = [];
   /** The stored document as read (cells only) — set when a restore
    *  happened, which is the only time the boot hooks below run. */
   let stored: Record<string, unknown> | null = null;
@@ -1366,6 +1425,11 @@ export function initStandalone<S, A, E>(
         config.restorable,
         cellsCfg ? declared : undefined,
       );
+      if (persisted && typeof persisted === "object" && doc) {
+        unkept = Object.keys(doc).filter((k) =>
+          !Object.hasOwn(persisted, k) && !Object.hasOwn(clientStored, k)
+        );
+      }
       state = deepMerge(
         // The fresh copy as the merge base (see `state`): `deepMerge` hands a
         // key the store does not carry straight back by reference.
@@ -1709,6 +1773,43 @@ export function initStandalone<S, A, E>(
   // The corrupt original is proven set aside: replace it NOW, so the next
   // launch reads valid data instead of setting aside another copy of it.
   if (setAside) writeNow("reset");
+  // A `persist: "none"` slice an older build left is not restored — and not
+  // left on disk until the first change either (an APK is killed, not
+  // closed, so that change may never come). The server scrubs at boot too.
+  else if (unkept.length > 0) {
+    writeNow("scrub");
+    console.info(
+      `[aio] persist: removed the stored slice(s) of persist:"none" ` +
+        `cell(s) ${unkept.join(", ")} — left by an older build`,
+    );
+  }
+  // …and from the pre-upgrade copy an APK that moved to the native store
+  // leaves in localStorage (kept, as a downgrade's fallback — not as a place
+  // for a slice this build refuses to keep). Every boot: the cell may have
+  // become `persist: "none"` long after the adoption.
+  if (shouldPersist && store.kind === "native" && config.restorable) {
+    try {
+      const ls = (globalThis as { localStorage?: Storage }).localStorage;
+      const old = ls?.getItem(persistKey);
+      const doc = typeof old === "string" ? JSON.parse(old) : null;
+      if (doc && typeof doc === "object" && !Array.isArray(doc)) {
+        const gone = Object.keys(doc).filter((k) =>
+          Object.hasOwn(declared, k) && !config.restorable!.has(k) &&
+          !cellsCfg?.clientOnly?.has(k)
+        );
+        if (gone.length > 0) {
+          for (const k of gone) delete doc[k];
+          ls!.setItem(persistKey, JSON.stringify(doc));
+        }
+      }
+    } catch (e) {
+      console.error(
+        `[aio] ✗ persist: could not scrub persist:"none" slices from ` +
+          `the pre-upgrade localStorage copy of "${persistKey}" (${e}) — ` +
+          `those bytes may remain there.`,
+      );
+    }
+  }
 
   // Belt and braces for the LAZY store only: the app going to the background
   // (Android pauses the WebView, a browser tab is hidden or closed) is the
@@ -2073,6 +2174,8 @@ function bootStandalone(
      *  writes an app's real key; an app's `persistKey` never reaches here. */
     persistKey?: string;
     onRestore?: (s: Record<string, unknown>) => Record<string, unknown>;
+    /** See `_HARNESS_SHAPE_GUARD`. */
+    shapeGuard?: boolean;
     circuitBreaker?: import("./state/cell-compose.ts").CircuitBreakerConfig;
     refusalsReject?: boolean;
     /** App-level defaults, applied exactly as `aio.run` applies them. */
@@ -2146,7 +2249,16 @@ function bootStandalone(
   const app = initStandalone<Record<string, unknown>, Msg, Msg>(
     composed.initialState,
     {
-      reduce: composed.reduce,
+      reduce: withShapeGuard(
+        composed.reduce,
+        opts.shapeGuard
+          ? composedShapeGuard(composed, {
+            strict: true,
+            warn: (m) => console.warn(`[aio] \u26a0 ${m}`),
+          })
+          : undefined,
+        (cell) => _countCellError(composed, cell),
+      ),
       execute: composed.execute,
       persist: opts.persist !== false && opts.persist !== "none",
       persistKey: opts.persistKey ?? `aio:${opts.appId ?? "app"}`,
@@ -2329,9 +2441,23 @@ function callTimeoutsOf(
  *  cell registry. Called by the generated bundle entry before mount, so cell
  *  methods are bound by the time the first component renders. Idempotent. */
 export function ensureConnected(): void {
+  // The bundle a web build or an APK ships auto-mounts through HERE, never
+  // through `aio.run` — which was the only caller of these two: the APK's
+  // "/assets/index.html" never became "/", a sub-path web build never took
+  // its base, and Back (`popstate`) moved the URL but no `<Route>`. Both are
+  // idempotent.
+  _adoptShellPath();
+  _installRouterListeners();
   if (_cellApp) return;
   const cells = [...getRegisteredCells().values()];
-  if (cells.length) bootStandalone(cells);
+  // A web build's shell names its app (`__aioConfig.appId`), so its store is
+  // `aio:<appId>` — two aio web apps on one origin must not share `aio:app`.
+  // The APK shell names none: its saved state stays under `aio:app`.
+  const id = (globalThis as { __aioConfig?: { appId?: unknown } })
+    .__aioConfig?.appId;
+  if (cells.length) {
+    bootStandalone(cells, typeof id === "string" && id ? { appId: id } : {});
+  }
 }
 // The router's "boot before the first route renders" step, on this runtime.
 // Installed at load AND on every run (below): a process that has loaded the
@@ -2348,8 +2474,19 @@ export const _HARNESS_PERSIST_KEY: unique symbol = Symbol(
   "aio.harnessPersistKey",
 );
 
+/** The in-process harnesses (bootCells/testUI) set this: every committed
+ *  write runs the server boot's declared-shape guard, dev-strict (a write
+ *  that changes a persisted field's declared type THROWS), whether or not the
+ *  harness persists — the server installs it on every persisting boot, and a
+ *  harness more lenient than dev manufactures green-test-broken-prod. A
+ *  symbol, so app config cannot reach it. */
+export const _HARNESS_SHAPE_GUARD: unique symbol = Symbol(
+  "aio.harnessShapeGuard",
+);
+
 type StandaloneRunConfig = {
   [_HARNESS_PERSIST_KEY]?: string;
+  [_HARNESS_SHAPE_GUARD]?: boolean;
   appId: string;
   appVersion?: string;
   cells?: CellDef[];
@@ -2472,6 +2609,7 @@ function runStandalone(
         ? cfg[_HARNESS_PERSIST_KEY]
         : undefined,
       onRestore: cfg.onRestore,
+      shapeGuard: cfg[_HARNESS_SHAPE_GUARD] === true,
       circuitBreaker: cfg.circuitBreaker,
       refusalsReject: cfg.refusalsReject,
       cellDefaults: cfg.cellDefaults,

@@ -58,6 +58,7 @@ import {
 } from "../server/single-instance-lock.ts";
 import { EXIT_WAIT_MS } from "../server/shutdown-budget.ts";
 import { HEY } from "../diagnostics/fmt.ts";
+import { STDOUT_IS_LOG_ENV } from "../diagnostics/logger-format.ts";
 import { VERSION } from "../server/aio-cli.ts";
 import {
   amIsInteractive,
@@ -1048,9 +1049,14 @@ export async function cmdStart(
     args: spec.args,
     // Inherited PLUS the containment decision. Spread, never replaced: the
     // child needs PATH, HOME and the user's own environment to boot at all.
-    ...(Object.keys(plan.env).length > 0
-      ? { env: { ...Deno.env.toObject(), ...plan.env } }
-      : {}),
+    // And told that its stdout is a log FILE, so the `--expose` banner's
+    // share-link token and pair code are masked there as in every other log
+    // file (the key file the banner names still holds the key).
+    env: {
+      ...Deno.env.toObject(),
+      ...plan.env,
+      [STDOUT_IS_LOG_ENV]: "1",
+    },
     // THE cwd the launch record above claims — the same value, not a second
     // decision. Without it the child inherited am's OWN cwd: `cd src && am
     // start` recorded `cwd: <root>` in launch.json and the lock (which `am

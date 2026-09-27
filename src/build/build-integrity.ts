@@ -6,7 +6,7 @@
 import { join } from "@std/path";
 import { sha256Hex } from "./ship.ts";
 import { bundleFrameworkEntries } from "./esbuild-shared.ts";
-import type { BuildConfig } from "./build-config.ts";
+import { type BuildConfig, isStandalone } from "./build-config.ts";
 
 // ── Integrity verification ────────────────────────────────────────────────────
 
@@ -76,7 +76,7 @@ export function makeHttpPlugin(cfg: BuildConfig): any {
   // frameworkBase is `<pkg>/src/` (build-config derives it from this module's
   // own URL); the shared entry table is PACKAGE-ROOT relative.
   const pkgRoot = new URL("../", base).href;
-  const entries = bundleFrameworkEntries(cfg.doAndroid);
+  const entries = bundleFrameworkEntries(isStandalone(cfg));
 
   return {
     name: "aio-http",

@@ -21,14 +21,23 @@
 
 const _counts = new Map<string, number>();
 const _listeners = new Set<(key: string, n: number) => void>();
+/** Calls ever STARTED here — monotone, never reset, so a caller can ask "did a
+ *  call start between these two moments?" (air's control-restore.ts). */
+let _started = 0;
 
 /** Adjust the in-flight count for `cell:method`. Returns the new count. */
 export function bumpPending(key: string, delta: number): number {
+  if (delta > 0) _started++;
   const next = Math.max(0, (_counts.get(key) ?? 0) + delta);
   if (next === 0) _counts.delete(key);
   else _counts.set(key, next);
   for (const l of _listeners) l(key, next);
   return next;
+}
+
+/** How many calls have started in this runtime, ever (see `_started`). */
+export function pendingStarted(): number {
+  return _started;
 }
 
 /** How many calls to `cell:method` are in flight. */

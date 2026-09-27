@@ -174,6 +174,12 @@ export interface ServerSetupDeps<S, A> {
   getState: () => S;
   getUIState: (s: S, user?: AioUser) => unknown;
   dispatch: (action: A) => Promise<unknown> | void;
+  /** True once the dispatch loop left `open` (the app is shutting down). A
+   *  network call arriving then is refused at the door, BEFORE anything runs,
+   *  and told to re-send (`retryAfterMs`) — the only refusal a client may
+   *  safely re-send, since a DISPATCH_DRAINING/CLOSED raised INSIDE a running
+   *  method can follow writes that already landed. */
+  closing?: () => boolean;
   app: {
     snapshot: () => string;
     loadSnapshot: (json: string, opts?: { force?: boolean }) => void;
@@ -567,6 +573,10 @@ export async function setupTransport<S, A>(
   const httpSocketPath = zp.useHttpSocket
     ? resolveSocketPath(appId, "http")
     : undefined;
+  /** How long a client holds a call refused at the shutdown door before it
+   *  re-sends it — the socket closes well inside it, so the call goes to the
+   *  client's offline queue and lands on the restarted server. */
+  const SHUTDOWN_RETRY_MS = 500;
   // Network-borne dispatch: auth-gate → dispatch → resolve with the method's
   // RETURN value. Shared by the WS server and the UDS listener so both give an
   // awaiting caller (browser ack, trojan, CLI) the real value, and both enforce
@@ -580,6 +590,19 @@ export async function setupTransport<S, A>(
     // dispatches never pass through here, so server code always bypasses.
     const a = action as Record<string, unknown>;
     const type = typeof a?.type === "string" ? a.type as string : "";
+    if (deps.closing?.()) {
+      return Promise.reject(
+        Object.assign(
+          createAioError(
+            "DISPATCH_DRAINING",
+            "the server is shutting down — this call was refused before it " +
+              "ran (not applied); re-send it once the server is back",
+            { actionType: type },
+          ),
+          { retryAfterMs: SHUTDOWN_RETRY_MS },
+        ),
+      );
+    }
     const cellAccess = config._cellAccess;
     if (cellAccess && cellAccess.size > 0 && type.includes(":")) {
       const cellName = type.slice(0, type.indexOf(":"));

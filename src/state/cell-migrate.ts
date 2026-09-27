@@ -92,8 +92,18 @@ export function detectShapeDrift(
     // schema made that ordinary case look like a type change, and dev REFUSED
     // TO BOOT for every app that had ever been used once — the drift this
     // check exists for is a field renamed or removed (declared `undefined`),
-    // which is still caught below.
-    if (dk === "null" || sk === "null") return;
+    // which is still caught below. A declared `undefined` (`x: undefined as
+    // T | undefined`) is the same "not yet" and carries no shape either —
+    // `deepMerge` restores whatever is stored there.
+    if (dk === "null" || sk === "null" || dk === "undefined") return;
+    // A live value is stored as what its `toJSON` returns (a `Date` → its ISO
+    // string): judged as that, it matches a string declaration and restores
+    // intact. (Parsed stored data never carries a function.)
+    const json = (stor as { toJSON?: unknown } | undefined)?.toJSON;
+    if (
+      dk !== sk && typeof json === "function" &&
+      kindOf(json.call(stor)) === dk
+    ) return;
     if (dk !== sk) {
       out.push({
         cell,

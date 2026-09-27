@@ -106,3 +106,71 @@ Deno.test("am remove --data --force: the app's data goes, its profile homes stay
     await dropTempDir(base);
   }
 });
+
+Deno.test("am remove <app>-dev --data --force: a folder whose meta.json says it is ANOTHER app's profile is refused, and kept", async () => {
+  // `am remove myapp-dev --data` derives `<apps>/myapp-dev` from the name —
+  // the same folder `myapp --profile=dev` derives. Its data/meta.json says
+  // whose it is; the delete went ahead on the name alone, and the live check
+  // looked only at `myapp-dev`'s instances, never at `myapp@dev`'s.
+  const base = await tempDir("am-rm-foreign-owner-");
+  try {
+    const home = join(base, "home");
+    const apps = join(base, "apps");
+    const cwd = join(base, "cwd");
+    for (const d of [home, apps, cwd, join(base, "run")]) {
+      await Deno.mkdir(d, { recursive: true, mode: 0o700 });
+    }
+    const profile = join(apps, `${APP}-dev`);
+    await Deno.mkdir(join(profile, "data"), { recursive: true });
+    await Deno.writeTextFile(
+      join(profile, "data", "meta.json"),
+      JSON.stringify({ appId: APP, profile: "dev" }),
+    );
+    await Deno.writeTextFile(join(profile, "data", "keep.txt"), "user file\n");
+
+    const o = await new Deno.Command(Deno.execPath(), {
+      args: [
+        "run",
+        "-A",
+        "--config",
+        CONFIG,
+        AM,
+        "remove",
+        `${APP}-dev`,
+        "--data",
+        "--force",
+        "--json",
+      ],
+      cwd,
+      clearEnv: true,
+      env: {
+        PATH: Deno.env.get("PATH") ?? "/usr/bin:/bin",
+        DENO_DIR: await denoDirOf(),
+        HOME: home,
+        AIO_APPS_DIR: apps,
+        AIO_INSTALL_ROOT: join(home, "app"),
+        DENO_INSTALL_ROOT: join(home, ".deno"),
+        XDG_RUNTIME_DIR: join(base, "run"),
+        AIO_AM_NO_DELEGATE: "1",
+        NO_COLOR: "1",
+      },
+      stdin: "null",
+      stdout: "piped",
+      stderr: "piped",
+    }).output();
+    const said = `${new TextDecoder().decode(o.stdout)}\n${
+      new TextDecoder().decode(o.stderr)
+    }`;
+    assert(o.code !== 0, `the delete was not refused: ${said}`);
+    assert(
+      await exists(join(profile, "data", "keep.txt")),
+      `am remove ${APP}-dev --data deleted profile "dev" of ${APP}: ${said}`,
+    );
+    assert(
+      said.includes(`profile \\"dev\\"`) || said.includes(`profile "dev"`),
+      `the refusal names no owner: ${said}`,
+    );
+  } finally {
+    await dropTempDir(base);
+  }
+});

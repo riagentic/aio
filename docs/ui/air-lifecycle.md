@@ -132,7 +132,9 @@ Call it in the body, **unconditionally** — never inside an `if` or a loop.
 Unlike `onMount` and `onCleanup`, which just append to a list and are safe to
 call conditionally, `onUnmount` takes a hook slot (that is how it registers once
 rather than once per render), so it follows `useRef`'s rule instead of theirs.
-In dev, calling it conditionally is reported as hook-order drift.
+In dev, calling it conditionally is reported as hook-order drift — and, when the
+hook count stays the same (`if (a) onUnmount(A); else onUnmount(B)`), as one
+`onUnmount` taking another's slot, naming both call sites.
 
 ```tsx
 function NftThumb({ id }: { id: string }) {

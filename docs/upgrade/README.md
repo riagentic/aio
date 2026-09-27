@@ -26,6 +26,9 @@ app, that is a bug in aio, not a step you missed.
 - **[The aio restructure (alpha27+)](restructure.md)** — every restructure
   breaking change with before → after recipes (methods-only cells, instances,
   SQLite-only persistence, `aio/extras`, wire catalog)
+- [1.0.13-beta → **1.0.14-beta**](from-1.0.13-beta-to-1.0.14-beta.md) — nothing
+  is removed and the surface does not move. New: the `web` build target (a
+  standalone PWA). Tests may see `testUI` refuse an unanswered dialog.
 - [1.0.12-beta → **1.0.13-beta**](from-1.0.12-beta-to-1.0.13-beta.md) — nothing
   is removed and the surface does not move. New, opt-in: set
   `electron.permissions` to deny child windows and guests everything but what

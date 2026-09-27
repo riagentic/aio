@@ -1,6 +1,6 @@
 // A corrupt saved state is set aside ONCE, not once per launch.
 //
-// The restore sets a corrupt `<key>` aside as `<key>.corrupt-<ms>` (see
+// The restore sets a corrupt `<key>` aside as `<key>.corrupt-<length>-<hash>` (see
 // standalone-restore-never-overwrites.test.ts) — and then left the corrupt
 // blob under `<key>` until the app's first change. A launch that ended before
 // a change (killed, closed at once, a crash in the first render) therefore
@@ -69,4 +69,56 @@ Deno.test("restore: a corrupt value is set aside once — launches that never ch
     1,
     "said once, at the one launch that found it",
   );
+});
+
+Deno.test("restore: a corrupt value is set aside once even when the reset write that follows fails", async () => {
+  // The other door: `<key>` is replaced only by a write that SUCCEEDS. A
+  // shaper that throws (or a refused native write) left the corrupt blob
+  // under `<key>`, and every launch set aside another full-size copy of it —
+  // the quota fill the reset exists to prevent, one launch at a time.
+  const files = new Map<string, string>([[KEY, CORRUPT]]);
+  const prev = Object.getOwnPropertyDescriptor(globalThis, "AioNativeStore");
+  Object.defineProperty(globalThis, "AioNativeStore", {
+    configurable: true,
+    writable: true,
+    value: {
+      get: (k: string) => files.get(k) ?? null,
+      has: (k: string) => files.has(k),
+      set: (k: string, v: string) => {
+        files.set(k, v);
+        return true;
+      },
+      describe: () => "/data/user/0/app.aio.x/files/aio-store",
+    },
+  });
+  const realError = console.error;
+  const realInfo = console.info;
+  console.error = () => {};
+  console.info = () => {};
+  try {
+    for (let launch = 0; launch < 5; launch++) {
+      _reset();
+      initStandalone<S, { type: string }, never>({ count: 0 }, {
+        reduce: (s) => ({ state: s, effects: [] }),
+        execute: () => {},
+        persistKey: KEY,
+        persistDebounceMs: 1,
+        getDBState: () => {
+          throw new Error("a shaper that throws");
+        },
+      });
+      await new Promise((r) => setTimeout(r, 3));
+    }
+  } finally {
+    console.error = realError;
+    console.info = realInfo;
+    _reset();
+    if (prev) Object.defineProperty(globalThis, "AioNativeStore", prev);
+    else delete (globalThis as Record<string, unknown>).AioNativeStore;
+  }
+  const aside = [...files.keys()].filter((k) =>
+    k.startsWith(`${KEY}.corrupt-`)
+  );
+  assertEquals(aside.length, 1, `one copy per launch: ${[...files.keys()]}`);
+  assertEquals(files.get(aside[0]!), CORRUPT, "the copy is byte-exact");
 });

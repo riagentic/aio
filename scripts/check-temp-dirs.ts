@@ -36,6 +36,7 @@
 //   deno task check:tempdirs --list    every counted call, file:line
 import { codeText } from "../src/diagnostics/code-mask.ts";
 import { justified as okMarker } from "../src/diagnostics/ok-marker.ts";
+import { likelyNew, mtimeUnder } from "./ratchet-kit.ts";
 
 /** Unregistered temp-directory creations allowed in `tests/`.
  *
@@ -125,7 +126,9 @@ if (import.meta.main) {
     console.error(
       `✗ ${n} unregistered temp dirs in tests/ (ceiling ${CEILING}).\n` + fix +
         `  Run with --list to see all of them. Recently added, most likely:\n` +
-        hits.slice(-(n - CEILING)).map((h) => `      tests/${h.file}:${h.line}`)
+        likelyNew(hits, n - CEILING, mtimeUnder(ROOT)).map((h) =>
+          `      tests/${h.file}:${h.line}`
+        )
           .join("\n"),
     );
     Deno.exit(1);

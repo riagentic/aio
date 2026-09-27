@@ -136,6 +136,21 @@ binary overrides the author, the same rule `expose` follows.
 > automatic HTTPS impossible on Windows (it ships none); nothing on `PATH` is
 > consulted now, on any OS.
 
+> **What the root's limits hold against, per verifier.** The root carries
+> critical name constraints (loopback, `.local`, RFC1918 — DNS, IP, email and
+> URI names) and a `serverAuth`-only extendedKeyUsage, so a stolen root key
+> cannot mint a trusted certificate for a public site. That holds on openssl,
+> rustls, NSS, Go, Windows and macOS (macOS applies the constraints but not the
+> root's EKU). It does **not** hold on Java's `CertPathValidator` or
+> Android/Conscrypt: both skip a trust anchor's own extensions (RFC 5280 §6.1
+> starts after the anchor), so on a machine that installed the root, whoever can
+> read `~/.aio/ca` can impersonate any site to those clients. `otherName` (the
+> Windows UPN form) cannot be constrained portably and relies on the EKU, which
+> macOS does not read. These are verifier behaviours, not something the
+> certificate can fix: keep `~/.aio/ca` private, and prefer a real certificate
+> (`tls: { cert, key }`) over installing the aio root into a Java or Android
+> trust store.
+
 > **Machine-to-machine.** The self-signed default is what a _browser_ can click
 > through; a program cannot. Deno's `WebSocket` has no API to pass a CA, so an
 > aio client dialing an aio server over `wss://` must be launched with
@@ -202,6 +217,10 @@ await aio.run({ cells: [myCell], users });
 - Browser: append `?token=alice-secret-123` to URL
 - Or use `Authorization: Bearer alice-secret-123` header
 - Token verified via timing-safe comparison (prevents timing attacks)
+- Use long random tokens: the failure budget throttles wrong guesses, but a
+  valid token is always served, so a short one is guessable at network speed.
+  Boot warns (dev and prod) for any token under 16 chars or ~80 bits — generate
+  one with `openssl rand -base64 24` or `crypto.randomUUID()`
 - Resolved `AioUser` available in hooks (`onAction`, `onEffect`, `onConnect`,
   `onDisconnect`)
 - WebSocket connections without valid token are rejected with 401
@@ -724,13 +743,19 @@ await aio.run({
   any login); one whose provider never does gets `403 email_unverified` from the
   callback until the operator runs `am auth verify <id>`. With OIDC configured,
   boot warns once that this applies to SSO accounts.
+- An account whose verification token expired asks for a new one without a
+  session: `POST /__aio/auth/verify/resend { id }` **always returns 200** (no
+  account enumeration) and mails a fresh 24h token when the account exists, has
+  an email and is not yet verified.
 - `POST /__aio/auth/reset/request { id }` **always returns 200** (no account
   enumeration) and mails a 15-minute one-shot reset token when the account has
   an email. `POST /__aio/auth/reset { token, password }` sets the new password.
-- Both mail triggers have their own budget, never the failed-login one: 10 mails
+- Every mail trigger has its own budget, never the failed-login one: 10 mails
   per 5 minutes per account for `verify/request` (then `429`), per client key
   and id and per client key for `reset/request` (then a silent `200`, nothing
-  mailed).
+  mailed), per client key and per account for `verify/resend` (then a silent
+  `200`; its per-account budget is its own, so anonymous resends cannot use up
+  the signed-in owner's `verify/request`).
 - `POST /__aio/auth/password { old, new }` (authenticated) rotates the password.
 - Tokens are stored hashed and are strictly one-shot.
 
@@ -1140,7 +1165,7 @@ every internet client does. The same rule gates `/__aio/trojan/*`.
 | Token regenerates on restart                 | Compile targets pin the token via env or config; `am` tooling doesn't capture it                                                                                                                                                                                                                                 |
 | `users:` tokens are static secrets in source | Use environment variables: `'alice-token': Deno.env.get('ALICE_TOKEN')!`                                                                                                                                                                                                                                         |
 | `--expose` origin policy                     | Origin is always validated (exposed or not) on the WebSocket upgrade, and on a state-changing HTTP request that carries a cookie or reaches an unexposed/open app from this machine: see [Cross-origin requests](#cross-origin-requests); `strictOrigin: true` additionally requires the header on the WebSocket |
-| DNS rebinding                                | The `Host` header is validated on every request: loopback names, IP literals, the bound host and `allowedOrigins` pass; any other domain is 403                                                                                                                                                                  |
+| DNS rebinding                                | The `Host` header is validated on every request: loopback names, IP literals, the bound host, this machine's hostname, the DNS names in the served TLS certificate and `allowedOrigins` pass; any other domain is 403                                                                                            |
 
 ### Intended deployment model
 

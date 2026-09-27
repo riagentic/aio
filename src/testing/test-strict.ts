@@ -193,13 +193,21 @@ export function aioTestDir(prefix: string): string {
   return Deno.makeTempDirSync({ dir: aioTestRoot(), prefix });
 }
 
-let _sandboxed = false;
+// Every arm, not once: a test that hands `AIO_APPS_DIR` back by DELETING it
+// (the `prev === undefined` restore) left every later harness in the process
+// on the REAL `~/.<appId>` — the version-store hole, one variable over. The
+// dir itself is made once and re-pinned after such a delete.
+let _appsDir: string | undefined;
+let _appsWarned = false;
 function _sandboxAppDirs(): void {
-  if (_sandboxed) return;
-  _sandboxed = true;
   try {
-    if (Deno.env.get("AIO_APPS_DIR")) return; // runner already pinned it
+    if (Deno.env.get("AIO_APPS_DIR")) return; // runner (or the test) pinned it
+    if (_appsDir !== undefined) {
+      Deno.env.set("AIO_APPS_DIR", _appsDir);
+      return;
+    }
     const dir = aioTestDir("apps-");
+    _appsDir = dir;
     Deno.env.set("AIO_APPS_DIR", dir);
     globalThis.addEventListener("unload", () => {
       try {
@@ -226,6 +234,8 @@ function _sandboxAppDirs(): void {
     // without --allow-env/--allow-write would stop working, and the guard is
     // protective rather than load-bearing for correctness), so it is loud
     // instead — once, naming the fix.
+    if (_appsWarned) return;
+    _appsWarned = true;
     console.warn(
       `[aio:testing] could not sandbox app directories (${
         e instanceof Error ? e.message : e

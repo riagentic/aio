@@ -100,6 +100,11 @@ export type AioMeta = {
    *  this window uses. `electronProfileName`; absent ⇒ the title's slug, which
    *  is what a default-home app has always had. */
   profileName?: string;
+  /** Where a SECOND launch of this app asks the running window to come to
+   *  the front (`showRequestPath`, beside the lock): the window watches for
+   *  the file, removes it — the answer the second launch waits for — and
+   *  shows, restores and focuses itself. Absent ⇒ no lock, no watch. */
+  showFile?: string;
 };
 
 /** The app's `electron: { … }` block, as the window meta that carries it.
@@ -276,12 +281,19 @@ function __aioOrigin(u) {
     return x.origin !== 'null' ? x.origin : x.protocol + '//' + x.host;
   } catch { return ''; }
 }
+// The app's window and origin, once the shell has them (tmplIpcGuard's
+// __aioIpcBind). A redirect can land that window on another site; the site
+// is then not the app, whatever origin it asks from.
+let __aioAppWc = null;
+let __aioAppOrigin = '';
 function __aioAppPage(wc, requesting) {
   if (!wc || typeof wc.getType !== 'function' || wc.getType() !== 'window') return false;
   // An openWindow child window keeps its own origin's permissions by default
   // (1.0.12); electron.permissions says it is never the app.
   if (__aioPermAllow !== null && __aioChildWindows.has(wc)) return false;
-  return !requesting || __aioOrigin(requesting) === __aioOrigin(wc.getURL());
+  const cur = wc.getURL();
+  if (__aioAppWc !== null && wc === __aioAppWc && cur && __aioOrigin(cur) !== __aioAppOrigin) return false;
+  return !requesting || __aioOrigin(requesting) === __aioOrigin(cur);
 }
 function __aioPermOk(wc, permission, requesting) {
   if (__aioPermAllow === null) {
@@ -316,6 +328,20 @@ function __aioPermDenied(wc, permission, requesting) {
         ' gets no permissions (clipboard, camera, microphone, geolocation, ' +
         "notifications…). Only the app's own page can hold them."));
 }
+// Without electron.permissions an openWindow child window — someone else's
+// site — keeps what its own origin asks for (1.0.12; taking it away would
+// break apps). Never silently: each such grant is said once, with the fix.
+function __aioPermChildGrant(wc, permission, requesting) {
+  if (__aioPermAllow !== null || permission === 'fullscreen' || !__aioChildWindows.has(wc)) return;
+  const origin = __aioOrigin(requesting);
+  const key = 'child ' + permission + ' ' + origin;
+  if (__aioPermSaid.has(key) || __aioPermSaid.size >= 256) return;
+  __aioPermSaid.add(key);
+  console.warn('[aio:electron] permission "' + permission + '" GRANTED to openWindow child window ' +
+    (origin || '(unknown origin)') + ' — without electron.permissions a child window holds what ' +
+    'its own origin asks for (clipboard-read included). Declare electron: { permissions } in ' +
+    'aio.run() to deny it (docs/clients/electron.md#permissions).');
+}
 function __aioGuardSession(ses) {
   if (!ses || __aioPermSeen.has(ses)) return;
   __aioPermSeen.add(ses);
@@ -323,18 +349,98 @@ function __aioGuardSession(ses) {
     const requesting = (details && details.requestingUrl) || (wc && wc.getURL()) || '';
     const ok = __aioPermOk(wc, permission, requesting);
     if (!ok) __aioPermDenied(wc, permission, requesting);
+    else __aioPermChildGrant(wc, permission, requesting);
     cb(ok);
   });
   ses.setPermissionCheckHandler((wc, permission, requestingOrigin) => {
     const ok = __aioPermOk(wc, permission, requestingOrigin);
-    if (!ok && !__aioProbed.has(permission)) {
-      __aioPermDenied(wc, permission, requestingOrigin);
+    if (!__aioProbed.has(permission)) {
+      if (!ok) __aioPermDenied(wc, permission, requestingOrigin);
+      else __aioPermChildGrant(wc, permission, requestingOrigin);
     }
     return ok;
   });
 }
+// An app that embeds a <webview> and declares no electron.permissions: the
+// guest gets nothing, but the app's own page (and any openWindow child) holds
+// every permission it asks for — clipboard-read too, the door a copied seed
+// phrase leaves by. Said once, at the first guest, with the fix.
+let __aioGuestSaid = false;
+app.on('web-contents-created', (_e, wc) => {
+  if (__aioPermAllow !== null || __aioGuestSaid) return;
+  if (!wc || typeof wc.getType !== 'function' || wc.getType() !== 'webview') return;
+  __aioGuestSaid = true;
+  console.warn('[aio:electron] this app embeds a <webview> and declares no electron.permissions: ' +
+    "the guest gets no permissions, but the app's own page and openWindow child windows hold " +
+    'every permission they ask for (clipboard-read included). Declare the list, e.g. ' +
+    'aio.run({ electron: { permissions: { "clipboard-sanitized-write": ["app"] } } }) — ' +
+    'docs/clients/electron.md#permissions.');
+});
 app.on('session-created', __aioGuardSession);
 app.on('ready', () => __aioGuardSession(require('electron').session.defaultSession));`;
+}
+
+/** 🔒 aio's IPC answers the app's own page only.
+ *
+ *  Every `__aio:*` channel (send, openWindow, print, window controls…) used to
+ *  answer ANY sender: a `<webview>` guest whose app-dir preload calls
+ *  `ipcRenderer.send`, an `openWindow` child window's preload, or a document
+ *  of another origin that reached the main window. This shadows `ipcMain` for
+ *  the whole generated script — so no handler, present or future, can be
+ *  registered unguarded — and admits a message only from the TOP frame of the
+ *  app's window showing the app's own origin. Everything else is refused and
+ *  said once per channel and origin; an `invoke` rejects with the reason.
+ *  The shell calls `__aioIpcBind(win, _appOrigin)` once both exist; before
+ *  that, nothing is admitted. Expects `__aioOrigin`, `__aioAppWc` and
+ *  `__aioAppOrigin` (tmplPermissionGuard). */
+export function tmplIpcGuard(): string {
+  return `
+let __aioIpcWin = null;
+let __aioIpcOrigin = '';
+function __aioIpcBind(win, origin) {
+  __aioIpcWin = win; __aioIpcOrigin = origin;
+  __aioAppWc = win.webContents; __aioAppOrigin = origin; // tmplPermissionGuard
+}
+const __aioIpcSaid = new Set();
+function __aioIpcRefusal(event) {
+  try {
+    const f = event && event.senderFrame;
+    if (!f) return 'a frame that is gone';
+    if (!__aioIpcWin || __aioIpcWin.isDestroyed()) return 'a sender while the app window does not exist';
+    if (event.sender !== __aioIpcWin.webContents) {
+      return 'another window or a <webview> guest (' + (__aioOrigin(f.url) || 'unknown origin') + ')';
+    }
+    if (f.parent !== null) return 'a subframe (' + (__aioOrigin(f.url) || 'unknown origin') + ')';
+    const o = __aioOrigin(f.url);
+    if (o !== __aioIpcOrigin) return 'a page of another origin (' + (o || 'unknown') + ')';
+    return null;
+  } catch (e) { return 'a sender that could not be checked (' + ((e && e.message) || e) + ')'; }
+}
+function __aioIpcAdmit(channel, event) {
+  const why = __aioIpcRefusal(event);
+  if (why === null) return null;
+  const reason = 'IPC "' + channel + '" REFUSED from ' + why +
+    " — only the app's own page (the window's top frame, " + (__aioIpcOrigin || 'not loaded yet') + ') may use it';
+  const key = channel + ' ' + why;
+  if (!__aioIpcSaid.has(key) && __aioIpcSaid.size < 256) {
+    __aioIpcSaid.add(key);
+    console.warn('[aio:electron] ' + reason);
+  }
+  return reason;
+}
+const ipcMain = (() => {
+  const raw = require('electron').ipcMain;
+  return {
+    on: (channel, fn) => raw.on(channel, (event, ...a) => {
+      if (__aioIpcAdmit(channel, event) === null) return fn(event, ...a);
+    }),
+    handle: (channel, fn) => raw.handle(channel, (event, ...a) => {
+      const refused = __aioIpcAdmit(channel, event);
+      if (refused !== null) throw new Error(refused);
+      return fn(event, ...a);
+    }),
+  };
+})();`;
 }
 
 /** Die with the aio server that launched this window.
@@ -581,7 +687,23 @@ export function tmplWillNavigate(
       console.warn('[aio:electron] navigation blocked (unparsable URL): ' + navUrl);
       return;
     }
+    let cur = null;
+    try { cur = new URL(win.webContents.getURL()); } catch {}
+    // The window is on ANOTHER site — where the app's own flow sent it (the
+    // SSO button's 302 to the identity provider; see will-redirect below).
+    // That page's navigations are its own and load, as in a browser: vetoed,
+    // the provider's login form was handed to the system browser and the
+    // window sat on the provider forever, so SSO could never come back. The
+    // page there has neither IPC nor permissions, whatever it loads.
+    if (cur && (cur.protocol === 'http:' || cur.protocol === 'https:') && !_sameApp(cur)) return;
     if (_sameApp(u)) {
+      // /__aio/auth/ is the server's login flow, never a client route: the
+      // SSO button's /__aio/auth/oidc/start, handed to the router, only
+      // pushState'd a path no route matches — built-in SSO in a window never
+      // reached the server. It loads, as in a browser. Only the auth flow:
+      // any other /__aio/ link (a blob without \`download\`, the pairing page)
+      // loaded for real would replace the app document with no way back.
+      if (u.pathname.startsWith('/__aio/auth/')) return;
       // A RELOAD of the document already showing must proceed: it is the dev
       // live-reload, and the only way a page ever gets a new document.
       // location.reload() reaches will-navigate carrying the CURRENT url
@@ -597,8 +719,6 @@ export function tmplWillNavigate(
       // elsewhere reloaded the whole window: a white flash, a re-mounted tree
       // and a new connection on every app's most frequent navigation. A field
       // report renamed its home page to /chat to escape it (report 9 §5.3).
-      let cur = null;
-      try { cur = new URL(win.webContents.getURL()); } catch {}
       const noHash = (x) => x.protocol + '//' + x.host + x.pathname + x.search;
       const isReload = cur && cur.href
         ? noHash(cur) === noHash(u)
@@ -619,6 +739,29 @@ ${
     } else {
       console.warn('[aio:electron] navigation blocked (not this app, not http): ' + navUrl);
     }
+  });
+  // 🔒 A server-side redirect is a navigation too, and will-navigate never
+  // sees it: a same-app URL answering 302 to another site puts that site in
+  // the app's window. It LOADS, as it always has — an app's own flow (a
+  // login route that 302s to an identity provider) must keep working — but
+  // the window is then not the app: tmplIpcGuard refuses its IPC and
+  // tmplPermissionGuard its permissions, because both compare the window's
+  // current origin with the app's. Said once per site. Main frame only: a
+  // subframe loads under its own origin and never gets the bridge. The
+  // details object is Electron >= 25's shape; the positionals are older ones.
+  const _redirSaid = new Set();
+  win.webContents.on('will-redirect', (event, legacyUrl, _inPlace, legacyMain) => {
+    const navUrl = typeof event.url === 'string' ? event.url : legacyUrl;
+    const isMainFrame = typeof event.isMainFrame === 'boolean' ? event.isMainFrame : legacyMain;
+    if (isMainFrame === false) return;
+    let u;
+    try { u = new URL(navUrl); } catch { return; } // Chromium fails it itself
+    if (_sameApp(u)) return;
+    const site = u.protocol + '//' + u.host;
+    if (_redirSaid.has(site) || _redirSaid.size >= 64) return;
+    _redirSaid.add(site);
+    console.warn('[aio:electron] a redirect took the app window to ' + site +
+      " — it loads there, but it is not the app: aio's IPC and the app's permissions are refused to it");
   });
   win.webContents.setWindowOpenHandler(({ url }) => {
     // window.open / target=_blank to an external site → system browser, not a
@@ -771,9 +914,32 @@ function tmplHostKeyRelay(): string {
   return `    // Host-key relay (see tmplHostKeyRelay in electron-shared.ts).
     const _hkHost = win.webContents;
     const _hkGid = guest.id;
-    _hkHost.executeJavaScript(${
-    find("_hkGid", `return w.getAttribute(${JSON.stringify(HOST_KEYS_ATTR)});`)
-  }).then((raw) => {
+    // The element answers [attribute] — [null] when nothing is declared —
+    // or null when no <webview> answers to this guest's id YET: at
+    // did-attach-webview the renderer's element usually knows its id, but
+    // not always (measured, Electron 44: 2 attaches in 40 on a loaded box),
+    // and reading that miss as "nothing declared" dropped the relay silently.
+    // A host or guest destroyed (the window closed) between two reads stops
+    // the read silently — executeJavaScript on it would only reject.
+    const _hkGone = () => guest.isDestroyed() || _hkHost.isDestroyed();
+    const _hkRead = (tries) => _hkGone() ? Promise.resolve(null) : _hkHost.executeJavaScript(${
+    find(
+      "_hkGid",
+      `return [w.getAttribute(${JSON.stringify(HOST_KEYS_ATTR)})];`,
+    )
+  }).then((found) => {
+      if (found !== null || tries <= 0 || _hkGone()) return found;
+      return new Promise((ok) => setTimeout(ok, 50)).then(() => _hkRead(tries - 1));
+    });
+    _hkRead(100).then((found) => {
+      if (found === null) {
+        if (!_hkGone()) {
+          console.warn('[aio:electron] <webview> ${HOST_KEYS_ATTR} not read: no <webview> in the page answered to ' +
+            'this guest (id ' + _hkGid + ') within 5 s — a declared key will not be relayed from it.');
+        }
+        return;
+      }
+      const raw = found[0];
       if (raw === null || raw === undefined) return; // nothing declared
       let keys = null;
       try { keys = JSON.parse(raw); } catch {}
@@ -807,6 +973,7 @@ function tmplHostKeyRelay(): string {
         });
       });
     }, (e) => {
+      if (_hkGone()) return; // closed mid-read: nothing left to relay to
       console.warn('[aio:electron] could not read the <webview> host keys: ' + String((e && e.message) || e));
     });`;
 }
@@ -1348,8 +1515,22 @@ export function tmplRendererDiagnostics(hasMountSignal: boolean): string {
     if (_known) { _rlog('info', _known + (src ? ' (' + src + ':' + ln + ')' : '')); return; }
     _rlog(lv === 'error' ? 'error' : 'warn', String(msg) + (src ? ' (' + src + ':' + ln + ')' : ''));
   });
+  // A renderer that DIED (killed, OOM, crashed) leaves a dead window behind —
+  // no page, no input, forever — while the server still reads "healthy". So
+  // the window reloads, the way a browser's crashed tab does; a renderer that
+  // keeps dying is not reloaded in a loop (3 per minute), and that is said.
+  let _goneAt = [];
   win.webContents.on('render-process-gone', (_e, d) => {
     _rlog('error', 'renderer process gone: ' + (d && d.reason) + ' (exit code ' + (d && d.exitCode) + ')');
+    if ((d && d.reason === 'clean-exit') || __aioQuitting || win.isDestroyed()) return;
+    const now = Date.now();
+    _goneAt = _goneAt.filter((t) => now - t < 60000).concat(now);
+    if (_goneAt.length > 3) {
+      _rlog('error', 'the renderer died ' + _goneAt.length + ' times in a minute — not reloading it again; restart the app');
+      return;
+    }
+    _rlog('warn', 'reloading the window after its renderer died');
+    win.webContents.reload();
   });
   win.webContents.on('preload-error', (_e, p, err) => {
     _rlog('error', 'preload failed: ' + ((err && err.message) || err) + ' (' + p + ')');
@@ -1462,7 +1643,8 @@ export function shellBridgePreload(
  *  file exists to prevent. `iconExpr` is a JS expression the shell supplies
  *  for a nativeImage (or null, or a promise of either); `title` the tooltip
  *  fallback. Expects `win`, `app`, `ipcMain` and `__aioQuitting` in scope.
- *  Always emits `__aioHiding` — the UDS shell's close handler reads it. */
+ *  Always emits `__aioHiding` — the UDS shell's close handler reads it — and
+ *  the second-launch watch on `meta.showFile`. */
 export function tmplTray(
   meta: AioMeta | undefined,
   iconExpr: string,
@@ -1479,11 +1661,58 @@ export function tmplTray(
   const TRAY = ${JSON.stringify(cfg)};
   let __aioHiding = false;
   ipcMain.on('__aio:focus', () => { if (!win.isDestroyed()) { win.show(); win.focus(); } });
+  // ── A second launch brings THIS window back (showFile) ──
+  // The desktop convention: launching a running app again shows its window —
+  // hidden to the tray, minimized or behind others — and the second launch
+  // ends quietly. Its request is a file beside the lock; removing it is the
+  // answer it waits for.
+  const SHOW_FILE = ${JSON.stringify(meta?.showFile ?? null)};
+  if (SHOW_FILE) {
+    const __aioShowReq = () => {
+      try { require('fs').unlinkSync(SHOW_FILE); } catch { return; }
+      if (win.isDestroyed()) return;
+      if (win.isMinimized()) win.restore();
+      win.show(); win.focus();
+    };
+    try {
+      const __aioShowW = require('fs').watch(require('path').dirname(SHOW_FILE), (_e, f) => {
+        if (!f || f === require('path').basename(SHOW_FILE)) __aioShowReq();
+      });
+      app.on('will-quit', () => __aioShowW.close());
+    } catch (e) { console.error('[aio] a second launch cannot show this window: ' + (e && e.message || e)); }
+    __aioShowReq(); // a request made before the watch began
+  }
   if (TRAY) {
+    // Linux: is there a tray HOST (a StatusNotifierWatcher on the session
+    // bus)? Electron's new Tray() does not throw without one — the icon just
+    // never appears, and a close-to-tray window hidden there had no way back.
+    // null = unknown (no dbus-send): the old behaviour, hide.
+    let __aioTrayHost = null;
+    if (TRAY.closeToTray && process.platform === 'linux') {
+      require('child_process').execFile('dbus-send', ['--session', '--print-reply', '--dest=org.freedesktop.DBus',
+        '/org/freedesktop/DBus', 'org.freedesktop.DBus.NameHasOwner', 'string:org.kde.StatusNotifierWatcher'],
+        { timeout: 3000 }, (err, out) => {
+          if (err && err.code === 'ENOENT') return;
+          __aioTrayHost = !err && /boolean true/.test(String(out));
+        });
+    }
+    let __aioNoHostSaid = false;
     if (TRAY.closeToTray) {
       // Close = hide. A real quit — the tray's Quit, Cmd+Q, app.quit() — sets
       // __aioQuitting (before-quit) before 'close' fires, so it passes.
-      win.on('close', (e) => { if (!__aioQuitting) { __aioHiding = true; e.preventDefault(); win.hide(); } });
+      win.on('close', (e) => {
+        if (__aioQuitting) return;
+        __aioHiding = true; e.preventDefault();
+        if (__aioTrayHost !== false) { win.hide(); return; }
+        // No tray to come back from: minimize, so the taskbar still has it.
+        win.minimize();
+        if (!__aioNoHostSaid) {
+          __aioNoHostSaid = true;
+          console.warn('[aio] ui.tray closeToTray: this desktop has no system tray host (no ' +
+            'org.kde.StatusNotifierWatcher on the session bus) — the window was minimized ' +
+            'instead of hidden. Launching the app again also brings it back.');
+        }
+      });
     }
     (async () => {
       const { Tray, Menu, nativeImage } = require('electron');

@@ -152,16 +152,23 @@ private class AioNativeStore(private val dir: File) {
      *  it in: on the second meaning that silently replaces the app's real
      *  state with a snapshot from before the upgrade, and reports it as a
      *  successful adoption. One nullable return cannot separate the two, so
-     *  this does — `isFile` is a stat, it does not read the bytes, and it
-     *  cannot fail the way the read did.
+     *  this does — a stat, it does not read the bytes.
      *
      *  Answering TRUE is the safe side (the page then refuses to overwrite),
-     *  so a throw here answers true rather than "no". */
+     *  so only ENOENT answers "no". `File.isFile` is not enough: it answers
+     *  false for a stat that FAILED (EACCES, EIO) as well — the same
+     *  ambiguity one level down, and the first write then replaced the file
+     *  it could not see. */
     @JavascriptInterface
     fun exists(k: String, key: String): Boolean {
         admit(k)
         return try {
-            fileFor(key).isFile
+            android.system.Os.stat(fileFor(key).absolutePath)
+            true
+        } catch (e: android.system.ErrnoException) {
+            if (e.errno == android.system.OsConstants.ENOENT) return false
+            android.util.Log.e("aio", "native store HAS failed for $key: $e")
+            true
         } catch (e: Exception) {
             android.util.Log.e("aio", "native store HAS failed for $key: $e")
             true

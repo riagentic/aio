@@ -322,3 +322,110 @@ Deno.test("claimHome: only the EXACT lock just judged may share the home", async
     await dropTempDir(dir);
   }
 });
+
+Deno.test("claimHome: the same lock PATH on another host (or pid namespace) is another process", async () => {
+  // A data home on a shared volume (NFS, a volume two containers mount):
+  // each side has its OWN lock dir at the same path, so the holder's `lock`
+  // text equals ours while the lock file it names is one this acquire never
+  // saw — and "the exact lock just judged" let a second writer onto one
+  // state.db. The OS lock on the claim works across both; the text now
+  // says where the holder runs.
+  const { claimHome } = await import("../src/server/single-instance-lock.ts");
+  const dir = await tempDir("claim-host-");
+  try {
+    const a = claimHome(dir, { appId: "c", port: 0, key: "c" });
+    assert(a.ok);
+    const info = `${dir}/.aio-instance.json`;
+    const text = JSON.parse(await Deno.readTextFile(info));
+    // (Only where this host knows its own machine id — the text says so.)
+    const others = [
+      ...(text.machine !== undefined ? [{ machine: "another-machine" }] : []),
+      { ns: -1 },
+    ];
+    for (const other of others) {
+      await Deno.writeTextFile(info, JSON.stringify({ ...text, ...other }));
+      const b = claimHome(dir, { appId: "c", port: 0, key: "c" });
+      if (b.ok) b.close();
+      assertEquals(b.ok, false, `shared with ${JSON.stringify(other)}`);
+    }
+    if (a.ok) a.close();
+  } finally {
+    await dropTempDir(dir);
+  }
+});
+
+Deno.test("claimHome: a hostname change never refuses a boot — only a LIVE holder elsewhere does", async () => {
+  // macOS renames the machine with the network (DHCP, Bonjour). A claim
+  // keyed on the hostname refused the SAME machine's own lock after a
+  // rename: a laptop app that would not boot. The machine is named by a
+  // stable identity instead, and a hostname in the text decides nothing.
+  const { claimHome } = await import("../src/server/single-instance-lock.ts");
+  const dir = await tempDir("claim-rename-");
+  try {
+    const a = claimHome(dir, { appId: "c", port: 0, key: "c" });
+    assert(a.ok);
+    const info = `${dir}/.aio-instance.json`;
+    const text = JSON.parse(await Deno.readTextFile(info));
+    await Deno.writeTextFile(
+      info,
+      JSON.stringify({ ...text, host: "old-name.local" }),
+    );
+    const b = claimHome(dir, { appId: "c", port: 0, key: "c" });
+    if (b.ok) b.close();
+    assertEquals(b.ok, true, "refused its own lock after a hostname change");
+    // A DEAD holder is always reclaimable, whatever its text says: the OS
+    // lock dies with the process, so no machine/namespace text can refuse.
+    a.close();
+    await Deno.writeTextFile(
+      info,
+      JSON.stringify({ ...text, machine: "another-machine", ns: -1 }),
+    );
+    const c = claimHome(dir, { appId: "c", port: 0, key: "c" });
+    assertEquals(c.ok, true, "a dead holder's home was not reclaimable");
+    if (c.ok) c.close();
+  } finally {
+    await dropTempDir(dir);
+  }
+});
+
+Deno.test("claimHome: a process that cannot read its machine id never refuses its own lock on machine", async () => {
+  // `/etc/machine-id` unreadable to THIS process (a denied read, a sandbox)
+  // while the holder recorded one: "unknown" is not "another machine". Only
+  // two KNOWN ids that differ refuse; the pid-namespace check still stands.
+  const dir = await tempDir("claim-noid-");
+  try {
+    const lock =
+      new URL("../src/server/single-instance-lock.ts", import.meta.url)
+        .href;
+    const script = `
+      const { claimHome } = await import(${JSON.stringify(lock)});
+      const dir = ${JSON.stringify(dir)};
+      const a = claimHome(dir, { appId: "c", port: 0, key: "c" });
+      if (!a.ok) Deno.exit(3);
+      const info = dir + "/.aio-instance.json";
+      const text = JSON.parse(Deno.readTextFileSync(info));
+      if (text.machine !== undefined) Deno.exit(4); // the id was readable
+      Deno.writeTextFileSync(info, JSON.stringify({ ...text, machine: "0".repeat(32) }));
+      const b = claimHome(dir, { appId: "c", port: 0, key: "c" });
+      if (b.ok) b.close();
+      a.close();
+      Deno.exit(b.ok ? 0 : 5);
+    `;
+    const file = join(dir, "probe.ts");
+    await Deno.writeTextFile(file, script);
+    const out = await new Deno.Command(Deno.execPath(), {
+      args: [
+        "run",
+        "-A",
+        "--deny-read=/etc/machine-id,/var/lib/dbus/machine-id",
+        `--config=${new URL("../deno.json", import.meta.url).pathname}`,
+        file,
+      ],
+      stdout: "piped",
+      stderr: "piped",
+    }).output();
+    assertEquals(out.code, 0, new TextDecoder().decode(out.stderr));
+  } finally {
+    await dropTempDir(dir);
+  }
+});

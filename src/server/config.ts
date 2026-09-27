@@ -287,6 +287,7 @@ export const VALID_AIO_CONFIG_KEYS = new Set<string>([
   "_refusalsReject",
   "_workerCells",
   "_workerEntry",
+  "_harnessShapeGuard",
   "_cellBreaker",
   "_healthGetter",
   "_cellHealth",
@@ -367,6 +368,7 @@ export const VALID_FEATURES_CONFIG_KEYS = new Set<string>([
   "electron",
   "libraryMode",
   "_workerEntry", // internal: testServer({ workers: "real" })
+  "_harnessShapeGuard", // internal: testServer's declared-type guard
   "syncIntervalMs",
   "fullStateThreshold",
   "routes",

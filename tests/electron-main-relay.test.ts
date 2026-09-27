@@ -48,8 +48,11 @@ ctrl.on('data', (d) => {
       // An ipcMain 'on' event carries a REPLY leg back to the frame that sent
       // it (Electron's IpcMainEvent.reply) — that is how a main-side answer
       // reaches the renderer that asked. Reported so a test can read it.
+      // Sent by the app window's top frame, on the page it loaded —
+      // the one sender aio's IPC admits (tmplIpcGuard).
       else if (m.cmd === 'ipc') {
-        const evt = { reply: (channel, ...args) => ev({ ev: 'ipcReply', channel, args }) };
+        const evt = { sender: webContents, senderFrame: { url: _loadedUrl, parent: null },
+          reply: (channel, ...args) => ev({ ev: 'ipcReply', channel, args }) };
         for (const f of (ipcH[m.channel] || [])) f(evt, m.arg);
       }
       // ipcRenderer.invoke: settles a promise in the renderer. Report which
@@ -59,7 +62,7 @@ ctrl.on('data', (d) => {
         (async () => {
           try {
             if (!h) throw new Error("No handler registered for '" + m.channel + "'");
-            ev({ ev: 'invoke', id: m.id, ok: true, value: await h({}, m.arg) });
+            ev({ ev: 'invoke', id: m.id, ok: true, value: await h({ sender: webContents, senderFrame: { url: _loadedUrl, parent: null } }, m.arg) });
           } catch (e) { ev({ ev: 'invoke', id: m.id, ok: false, error: String(e && e.message || e) }); }
           ev({ ev: 'done', id: m.id });
         })();
@@ -92,6 +95,10 @@ ctrl.on('data', (d) => {
   }
 });
 let _curUrl = '';
+// The app page the (first) window loaded — the IPC sender's frame url. Some cases
+// below move _curUrl to aio://app/ on the http shell; the relay is what they
+// test, and the sender check has its own file (electron-ipc-sender-guard).
+let _loadedUrl = '';
 const webContents = {
   on: (e, fn) => { (wcH[e] = wcH[e] || []).push(fn); },
   // What the shell reads to tell a RELOAD (same url) from a route change.
@@ -107,7 +114,7 @@ class BrowserWindow {
   // the only way to see what SANDBOX a child window actually got.
   constructor(o) { this.opts = o; this.webContents = webContents; ev({ ev: 'newWindow', opts: o }); }
   on() {} center() {} setIcon() {} setMenuBarVisibility() {}
-  loadURL(u) { _curUrl = u; ev({ ev: 'loadURL', url: u }); }
+  loadURL(u) { _curUrl = u; _loadedUrl = _loadedUrl || u; ev({ ev: 'loadURL', url: u }); }
   isDestroyed() { return false; }
   isVisible() { return process.env.AIO_STUB_HIDDEN !== '1'; }
   isMinimized() { return false; }

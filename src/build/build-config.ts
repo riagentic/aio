@@ -158,6 +158,13 @@ export interface BuildConfig {
   doAndroid: boolean;
   /** `--ios`: the `ios-client` Xcode project (there is no iOS app target). */
   doIos: boolean;
+  /** `--web`: the standalone web app (PWA) — a static directory, no binary. */
+  doWeb?: boolean;
+  /** The bundle is the STANDALONE one (no server: cells run in the page, an
+   *  IIFE that auto-mounts) — a local APK or the web target. Optional so a
+   *  config built by hand before it existed still type-checks; every bundle
+   *  shape decision reads it through `isStandalone`, never `doAndroid`. */
+  standalone?: boolean;
   doClient: boolean;
   doCli: boolean;
   doRemote: boolean;
@@ -306,11 +313,33 @@ export function _androidCamera(raw: unknown): boolean | null {
 export function refuseBadBuildArgs(args: readonly string[]): void {
   assertKnownFlags(args);
   // Two shell targets in one build: the second would silently win.
-  const shells = ["--electron", "--android", "--ios", "--cli", "--client"]
+  const shells = [
+    "--electron",
+    "--android",
+    "--ios",
+    "--web",
+    "--cli",
+    "--client",
+  ]
     .filter((f) => args.includes(f));
   if (shells.length > 1) {
     console.error(
       `${NO} conflicting flags: ${shells.join(" + ")} — pick one shell target`,
+    );
+    Deno.exit(1);
+  }
+  // `--web` is a static directory: no binary to compile or run as a service,
+  // no server to be a client of. Each of these used to be accepted and then
+  // ignored (the web build returns before compiling) — refused by name.
+  const offWeb = ["--compile", "--remote", "--service", "--headless"]
+    .filter((f) => args.includes(f));
+  if (args.includes("--web") && offWeb.length > 0) {
+    console.error(
+      `${NO} --web builds a static directory (no binary, no server), so ` +
+        `${offWeb.join(", ")} would do nothing.\n` +
+        "       fix: drop it, or build the target it means — `browser` " +
+        "(a binary), `server` (headless), `android-client` / `cli-client` " +
+        "(connect to a server).",
     );
     Deno.exit(1);
   }
@@ -331,6 +360,15 @@ export function refuseBadBuildArgs(args: readonly string[]): void {
   }
 }
 
+/** Does this build make the standalone bundle? `standalone` when set, else
+ *  what it means — so a hand-built config that says only `doAndroid: true`
+ *  still gets the APK's bundle, never a silent browser one. */
+export function isStandalone(
+  cfg: Pick<BuildConfig, "standalone" | "doAndroid" | "doWeb">,
+): boolean {
+  return cfg.standalone ?? (cfg.doAndroid || cfg.doWeb === true);
+}
+
 /** Load and validate build configuration from CLI flags + deno.json */
 export async function loadBuildConfig(): Promise<BuildConfig> {
   refuseBadBuildArgs(Deno.args);
@@ -348,6 +386,7 @@ export async function loadBuildConfig(): Promise<BuildConfig> {
   const doElectron = Deno.args.includes("--electron");
   const doAndroid = Deno.args.includes("--android");
   const doIos = Deno.args.includes("--ios");
+  const doWeb = Deno.args.includes("--web");
   const doClient = Deno.args.includes("--client");
   const doCli = Deno.args.includes("--cli");
   const doRemote = Deno.args.includes("--remote");
@@ -557,6 +596,8 @@ export async function loadBuildConfig(): Promise<BuildConfig> {
     doElectron,
     doAndroid,
     doIos,
+    doWeb,
+    standalone: doAndroid || doWeb,
     doClient,
     doCli,
     doRemote,

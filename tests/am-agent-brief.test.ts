@@ -211,6 +211,30 @@ Deno.test("am agent: the brief stays inside its context budget", () => {
   );
 });
 
+// Two field-report lessons the brief now carries, pinned so a trim cannot
+// quietly drop them: a standalone APK runs no Deno and no server (an app
+// shipped one expecting its server cells and aio.run options), and JSX takes
+// React's camelCase attribute names (`autocomplete=` is a type error).
+Deno.test("am agent: ship says what a standalone APK is; practice names camelCase attributes", () => {
+  const ship = agentBrief({ version: "test", task: "ship" });
+  assert(
+    /standalone APK.*NO Deno, NO server/.test(ship),
+    "ship: standalone APK line",
+  );
+  assert(
+    ship.includes("nothing given to aio.run reaches it"),
+    "ship: run options",
+  );
+  assert(ship.includes("onBackButton"), "ship: Back button");
+  assert(/web: static PWA directory/.test(ship), "ship: the web target");
+  assert(/standalone APK: no Deno, no server/.test(MIN), "--min keeps it");
+  assert(
+    /attribute names.*camelCase: autoComplete/.test(ALL) &&
+      ALL.includes("NO: autocomplete= (type error)"),
+    "practice: JSX attribute names",
+  );
+});
+
 Deno.test("am agent: the rules that protect the user come FIRST", () => {
   // A model that reads only the top of what it is handed still has to get the
   // destructive habits. Order is load-bearing here, not cosmetic.

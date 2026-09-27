@@ -116,7 +116,8 @@ const cfg: BuildConfig = {
   dist: join(root, "dist"),
   out: join(root, "dist", "app.js"),
   frameworkSrcDir: "",            // isRemote ⇒ the framework has no local files
-  doElectron: false, doAndroid: false, doClient: false, doCli: false,
+  doElectron: false, doAndroid: false, doWeb: false, standalone: false,
+  doClient: false, doCli: false,
   doRemote: false, doCompile: false, doForce: true, doRelease: false,
   doService: false, doHeadless: false,
   androidDevUrl: undefined,

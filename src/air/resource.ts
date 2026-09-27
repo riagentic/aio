@@ -60,7 +60,17 @@ export function resource<S, T>(
       error.set(undefined);
     });
 
-    fetcher(sourceValue, { signal: ac.signal }).then(
+    // A fetcher that throws SYNCHRONOUSLY (a plain function, not `async`) has
+    // failed exactly like one that rejects. Escaping here, the throw left
+    // `loading` true for good and `error` empty — and threw out of
+    // `resource()` itself on the first fetch.
+    let pending: Promise<T>;
+    try {
+      pending = fetcher(sourceValue, { signal: ac.signal });
+    } catch (e) {
+      pending = Promise.reject(e);
+    }
+    pending.then(
       (result) => {
         if (ac.signal.aborted || disposed) return;
         batch(() => {

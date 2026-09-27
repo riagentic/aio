@@ -465,6 +465,7 @@ ${htmlOpen()}
  *  failure — the bundle step already resolved it — so it only skips the scan. */
 export async function _warnRunOptions(
   cfg: Pick<BuildConfig, "root" | "configEntry">,
+  shell: "apk" | "web" = "apk",
 ): Promise<void> {
   let src: string;
   try {
@@ -473,7 +474,7 @@ export async function _warnRunOptions(
     // aio-ok: no readable entry → nothing to scan; the bundle step owns that error.
     return;
   }
-  const w = androidRunOptionsWarning(src, cfg.configEntry);
+  const w = androidRunOptionsWarning(src, cfg.configEntry, shell);
   if (w) warn(w.headline, w.body, w.fix);
 }
 
@@ -532,6 +533,7 @@ export async function _writeLocalAssets(
 export async function _packAssetMounts(
   root: string,
   assetsDir: string,
+  into = "the APK",
 ): Promise<void> {
   const taken = new Set(["index.html", BUNDLE_JS, APP_STYLE]);
   for (const m of assetMounts((await readDenoJson(root))?.config, root)) {
@@ -542,8 +544,8 @@ export async function _packAssetMounts(
       segs.some((s) => s === "" || s === "." || s === "..")
     ) {
       throw new Error(
-        `${NO} deno.json assets["${m.prefix}"] cannot be packaged into the ` +
-          `APK: a mount must be a sub-path like "/text", and not one of ` +
+        `${NO} deno.json assets["${m.prefix}"] cannot be packaged into ` +
+          `${into}: a mount must be a sub-path like "/text", and not one of ` +
           `${[...taken].join(", ")} — the page's own files live there.`,
       );
     }
@@ -551,12 +553,12 @@ export async function _packAssetMounts(
     const refuse = (why: string) =>
       new Error(
         `${NO} deno.json assets["${m.prefix}"] cannot be ` +
-          `packaged into the APK: ${why}`,
+          `packaged into ${into}: ${why}`,
       );
     if (await realPathInside(src, assetsDir)) {
       throw refuse(
         `it contains the build output (${assetsDir}), so packaging it would ` +
-          `copy the APK into itself. Point the mount at a directory that ` +
+          `copy the build into itself. Point the mount at a directory that ` +
           `does not hold dist/.`,
       );
     }

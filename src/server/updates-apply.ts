@@ -421,6 +421,10 @@ export type PendingUpdate = {
    *  confirms it first thing: at exit, the confirm's prune of the kept-aside
    *  copy (async) and its log line (the logger had flushed) never happened. */
   confirmedAt?: string;
+  /** What went wrong AFTER the old build's shutdown — the retirement of its
+   *  profile, or the relaunch itself. Its logger was closed by then, so the
+   *  line is carried here and said by the next boot that judges the marker. */
+  handoverError?: string;
   attempts: number;
   startedAt: string;
 };
@@ -572,7 +576,7 @@ export function readPending(dataDir: string): PendingUpdate | null {
     // just lost, and pretending there is none is how a broken build becomes
     // permanent.
     log.error(
-      `[aio] update: ${path} is not readable JSON (${text.length} bytes) — ` +
+      `update: ${path} is not readable JSON (${text.length} bytes) — ` +
         `the rollback for an in-flight update is lost. Delete it once the app ` +
         `is running the version you want.`,
     );
@@ -585,7 +589,7 @@ export function readPending(dataDir: string): PendingUpdate | null {
     typeof p.attempts !== "number"
   ) {
     log.error(
-      `[aio] update: ${path} is missing required fields (from/to/previous/` +
+      `update: ${path} is missing required fields (from/to/previous/` +
         `attempts) — the rollback for an in-flight update is lost. Delete it ` +
         `once the app is running the version you want.`,
     );
@@ -1341,19 +1345,94 @@ export function spawnSwapHelper(
     os?: typeof Deno.build.os;
     windowless?: typeof startWindowless;
     spawn?: (cmd: string, o: Deno.CommandOptions) => void;
+    /** How long the helper has to claim its start file. */
+    claimWaitMs?: number;
   } = {},
 ): void {
   const os = deps.os ?? Deno.build.os;
   const start = deps.spawn ??
     ((c: string, o: Deno.CommandOptions) =>
       void new Deno.Command(c, o).spawn().unref());
-  if (os !== "windows") return start(cmd, swapHelperOptions(args, extra, os));
-  const started = (deps.windowless ?? startWindowless)(
+  // On Linux through the shell that drops every inherited descriptor, as the
+  // relaunch is: the helper outlives this process and starts the new version.
+  if (os !== "windows") {
+    return start(
+      ...relaunchCommand(cmd, swapHelperOptions(args, extra, os), os),
+    );
+  }
+  // Proof the script RUNS: its first act claims this file (WIN_SWAP_PS1). A
+  // PowerShell that policy refuses after it started — AppLocker through the
+  // cmd.exe door, a script-block rule through either — exits in silence, and
+  // the app quit with nothing to swap or restart it.
+  const go = Deno.makeTempFileSync({ prefix: "aio-swap-go-" });
+  const withGo = { ...extra, env: { ...extra?.env, AIO_SWAP_GO: go } };
+  try {
+    spawnWindowsHelper(cmd, args, withGo, os, deps.windowless, start);
+  } catch (e) {
+    Deno.removeSync(go);
+    throw e;
+  }
+  const wait = deps.claimWaitMs ?? SWAP_CLAIM_WAIT_MS;
+  if (!claimedWithin(go, wait)) {
+    throw new Error(
+      `${cmd} started but never ran the update helper within ` +
+        `${wait / 1000} s — PowerShell is likely blocked by policy ` +
+        `(AppLocker, Constrained Language Mode) or an antivirus`,
+    );
+  }
+}
+
+/** How long a Windows swap helper has to show it runs. A cold PowerShell
+ *  under an antivirus scan takes seconds; a late one finds its file gone and
+ *  exits, so erring short costs one update, never a half swap. */
+const SWAP_CLAIM_WAIT_MS = 20_000;
+
+/** Did the helper claim `go` within `ms`? At the bound this side takes it
+ *  back: removed here, a helper that starts later finds nothing and exits;
+ *  already gone, the helper won. Blocking: the caller is handing over and
+ *  exits right after. */
+function claimedWithin(go: string, ms: number): boolean {
+  const tick = new Int32Array(new SharedArrayBuffer(4));
+  const end = Date.now() + ms;
+  while (Date.now() < end) {
+    try {
+      Deno.statSync(go);
+    } catch (e) {
+      if (e instanceof Deno.errors.NotFound) return true;
+    }
+    Atomics.wait(tick, 0, 0, 50);
+  }
+  // Only GONE is a claim: a removal that fails for any other reason proves
+  // nothing about the helper, and "claimed" would quit with none running.
+  try {
+    Deno.removeSync(go);
+    return false;
+  } catch (e) {
+    return e instanceof Deno.errors.NotFound; // claimed at the very bound
+  }
+}
+
+/** Start the Windows helper: windowless, else through a detached cmd.exe. */
+function spawnWindowsHelper(
+  cmd: string,
+  args: string[],
+  extra: { env?: Record<string, string>; cwd?: string },
+  os: typeof Deno.build.os,
+  windowless: typeof startWindowless | undefined,
+  start: (cmd: string, o: Deno.CommandOptions) => void,
+): void {
+  const started = (windowless ?? startWindowless)(
     windowsCommandLine([cmd, ...args]),
     { ...Deno.env.toObject(), ...extra?.env },
     extra?.cwd,
   );
   if (typeof started === "number") return;
+  // PowerShell itself was refused (AppLocker: 1260). cmd.exe would start and
+  // be refused the same PowerShell in silence — the app exits, nothing
+  // restarts it. Thrown, the caller keeps this version running and says so.
+  if (started.startsWith("CreateProcessW failed")) {
+    throw new Error(`${cmd} could not start: ${started}`);
+  }
   // cmd.exe refuses a command line over 8191 characters, and the helper's
   // encoded script is longer: it rides in the environment, and a short
   // bootstrap runs it (the script clears every AIO_SWAP_* variable first).
@@ -2002,12 +2081,28 @@ pid="$1"; cur="$2"; prev="$3"; new="$4"; launch="$5"; mark="$6"; token="$7"
 failed="$8"; wait="$9"
 shift 9
 rm -f "$0"
-# A move is retried: a process that is closing (and a scanner) can hold the
-# directory for a moment.
-try_mv() {
-  i=0
-  until mv "$1" "$2" 2>/dev/null; do
-    i=$((i + 1)); [ "$i" -lt 50 ] || return 1; sleep 0.2
+# Put "$2" at "$1"'s name and "$1" at "$3" (which must not exist), retried: a
+# process that is closing (and a scanner) can hold a directory for a
+# moment. The name
+# is never left empty through a retry: where mv can exchange (GNU coreutils
+# >= 9.5, a filesystem with RENAME_EXCHANGE) it holds an install at every
+# instant; elsewhere the two renames run back to back and a failed second one
+# undoes the first at once — a SIGKILL or a power loss mid-retry must never
+# leave no app, since nothing inside the install can repair it.
+# 0 = done; 1 = "$1" could not be moved aside; 3 = "$2" could not go in (the
+# first move undone); 2 = stuck half-way.
+swap_in() {
+  i=0; r=1
+  while :; do
+    if mv -T --exchange "$2" "$1" 2>/dev/null; then
+      mv "$2" "$3" 2>/dev/null && return 0
+      mv -T --exchange "$2" "$1" 2>/dev/null || return 2
+    elif mv "$1" "$3" 2>/dev/null; then
+      r=3
+      mv "$2" "$1" 2>/dev/null && return 0
+      mv "$3" "$1" 2>/dev/null || return 2
+    fi
+    i=$((i + 1)); [ "$i" -lt 50 ] || return "$r"; sleep 0.2
   done
 }
 # The swap could not be made: the first-boot token becomes the failed record,
@@ -2060,19 +2155,18 @@ claimed() {
 }
 while kill -0 "$pid" 2>/dev/null; do sleep 0.2; done
 rm -rf "$prev"
-if [ -e "$prev" ] || ! try_mv "$cur" "$prev"; then
-  note "the running version could not be moved aside"
-  exec "$launch" "$@"
-fi
-if ! try_mv "$new" "$cur"; then
-  if try_mv "$prev" "$cur"; then
-    note "the new version could not be moved into place"
-    rm -rf "$new"
-    exec "$launch" "$@"
-  fi
-  note "the new version could not be moved into place, nor the old one back"
-  start "$@"
-fi
+r=1
+[ -e "$prev" ] || { swap_in "$cur" "$new" "$prev"; r=$?; }
+case "$r" in
+  0) ;;
+  1) note "the running version could not be moved aside"
+     exec "$launch" "$@" ;;
+  3) note "the new version could not be moved into place"
+     rm -rf "$new"
+     exec "$launch" "$@" ;;
+  *) note "the new version could not be moved into place, nor the old one back"
+     start "$@" ;;
+esac
 [ -n "$token" ] && [ -f "$token" ] || exec "$launch" "$@"
 "$launch" "$@" </dev/null &
 i=0
@@ -2100,11 +2194,13 @@ for sig in TERM KILL; do
   done
 done
 rm -f "$mark"
-try_mv "$cur" "$new" || unrolled "the new version could not be moved out of the way" "$@"
-if ! try_mv "$prev" "$cur"; then
-  try_mv "$new" "$cur" || unrolled "the old version could not be moved back into place, nor the new one" "$@"
-  unrolled "the old version could not be moved back into place" "$@"
-fi
+swap_in "$cur" "$prev" "$new"
+case "$?" in
+  0) ;;
+  1) unrolled "the new version could not be moved out of the way" "$@" ;;
+  3) unrolled "the old version could not be moved back into place" "$@" ;;
+  *) unrolled "the old version could not be moved back into place, nor the new one" "$@" ;;
+esac
 rm -rf "$new"
 exec "$launch" "$@"
 `;
@@ -2120,6 +2216,10 @@ exec "$launch" "$@"
  *  `&` never ran it — both measured). The replayed argv is quoted per the
  *  Windows argv convention. */
 const WIN_SWAP_PS1 = `$ErrorActionPreference = 'Stop'
+# First: claim the start file, the updater's proof that this script runs. Gone
+# means the updater gave up waiting and kept its version: nothing to do.
+$go = $env:AIO_SWAP_GO
+if ($go) { try { [IO.File]::Move($go, $go + '.run') } catch { exit 0 }; try { [IO.File]::Delete($go + '.run') } catch {} }
 $p = [int]$env:AIO_SWAP_PID
 $cur = $env:AIO_SWAP_CUR
 $prev = $env:AIO_SWAP_PREV
@@ -2174,6 +2274,22 @@ function Move-Dir($a, $b) {
   }
   return $false
 }
+# Put $b at $a's name and $a at $c. The two moves run back to back and a
+# failed second one is undone at once, the pair retried: the name is never
+# empty through a retry, which a kill or a power loss would make permanent
+# (nothing inside the install can repair it). 0 = done; 1 = $a could not be
+# moved aside; 3 = $b could not go in (the first move undone); 2 = stuck.
+function Swap-In($a, $b, $c) {
+  $r = 1
+  for ($i = 0; $i -lt 50; $i++) {
+    if ($i -gt 0) { Start-Sleep -Milliseconds 200 }
+    try { [IO.Directory]::Move($a, $c) } catch { continue }
+    $r = 3
+    try { [IO.Directory]::Move($b, $a); return 0 } catch {}
+    if (-not (Move-Dir $c $a)) { return 2 }
+  }
+  return $r
+}
 function Write-Failed($why) {
   if (-not $token -or -not [IO.File]::Exists($token)) { return }
   try {
@@ -2198,15 +2314,11 @@ function Remove-Dir($d) { try { Remove-Item -LiteralPath $d -Recurse -Force } ca
 while (Get-Process -Id $p -ErrorAction SilentlyContinue) { Start-Sleep -Milliseconds 200 }
 for ($i = 0; $i -lt 150 -and (Get-Running).Count -gt 0; $i++) { Start-Sleep -Milliseconds 200 }
 if (Test-Path -LiteralPath $prev) { Remove-Dir $prev }
-if ((Test-Path -LiteralPath $prev) -or -not (Move-Dir $cur $prev)) {
-  Write-Failed 'the running version could not be moved aside'; Start-App; exit 1
-}
-if (-not (Move-Dir $new $cur)) {
-  if (Move-Dir $prev $cur) {
-    Write-Failed 'the new version could not be moved into place'; Remove-Dir $new; Start-App; exit 1
-  }
-  Write-Failed 'the new version could not be moved into place, nor the old one back'; Start-Any; exit 1
-}
+$r = 1
+if (-not (Test-Path -LiteralPath $prev)) { $r = Swap-In $cur $new $prev }
+if ($r -eq 1) { Write-Failed 'the running version could not be moved aside'; Start-App; exit 1 }
+if ($r -eq 3) { Write-Failed 'the new version could not be moved into place'; Remove-Dir $new; Start-App; exit 1 }
+if ($r -eq 2) { Write-Failed 'the new version could not be moved into place, nor the old one back'; Start-Any; exit 1 }
 if (-not $token -or -not [IO.File]::Exists($token)) { Start-App; exit 0 }
 Start-App
 for ($i = 0; $i -lt $wait; $i++) {
@@ -2224,12 +2336,10 @@ for ($i = 0; $i -lt 50; $i++) {
   Start-Sleep -Milliseconds 200
 }
 Remove-File $mark
-if (-not (Move-Dir $cur $new)) { Set-Unrolled 'the new version could not be moved out of the way'; exit 1 }
-if (-not (Move-Dir $prev $cur)) {
-  if (Move-Dir $new $cur) { Set-Unrolled 'the old version could not be moved back into place' }
-  else { Set-Unrolled 'the old version could not be moved back into place, nor the new one' }
-  exit 1
-}
+$r = Swap-In $cur $prev $new
+if ($r -eq 1) { Set-Unrolled 'the new version could not be moved out of the way'; exit 1 }
+if ($r -eq 3) { Set-Unrolled 'the old version could not be moved back into place'; exit 1 }
+if ($r -eq 2) { Set-Unrolled 'the old version could not be moved back into place, nor the new one'; exit 1 }
 Remove-Dir $new
 Start-App
 `;

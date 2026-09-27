@@ -21,10 +21,10 @@ wait, `am stop`/`status`) — `dev` is your terminal and your Ctrl-C.
 runnable apps and remote/thin-client artifacts alike. Two axes, expressed in the
 names themselves:
 
-- **App / server targets** (`browser`, `electron`, `android`, `cli`, `server`) —
-  self-contained artifacts. `server` is the headless role (it was spelled
-  `service` before alpha52); it builds the exposed `--remote` binary + systemd
-  unit.
+- **App / server targets** (`browser`, `electron`, `android`, `web`, `cli`,
+  `server`) — self-contained artifacts. `server` is the headless role (it was
+  spelled `service` before alpha52); it builds the exposed `--remote` binary +
+  systemd unit.
 - **Client targets** (`electron-client`, `android-client`, `ios-client`,
   `cli-client`) — thin clients that connect to a separately-running aio server.
   iOS has no Deno, so it has ONLY a client target: an Xcode project on any host,
@@ -35,6 +35,7 @@ names themselves:
 │ browser          │ binary + system browser (127.0.0.1)         │
 │ electron         │ desktop AppImage/zip, server inside         │
 │ android          │ APK, standalone (no server)                 │
+│ web              │ static PWA directory, offline (no server)   │
 │ cli              │ headless binary + WS client API             │
 │ server           │ headless exposed server + systemd unit      │
 │ server-app       │ exposed server WITH its page + systemd unit │
@@ -217,7 +218,9 @@ without discarding its declared entry.
 > `dist/` is bundle STAGING, not a destination: it is embedded into the binary
 > wholesale (`deno compile --include dist/`) and every build wipes what it does
 > not own there. Chaining single-target builds that all write into it loses the
-> earlier artifacts.
+> earlier artifacts. A `dist/` the project brought with it — holding none of the
+> files an aio build stages there and no `manifest.json` — is refused, its files
+> named, instead of emptied.
 >
 > Give each build its own destination instead — `build.ts` takes **`--out=`**:
 >
@@ -306,6 +309,7 @@ target's systemd unit is written for Linux platforms only, named like its binary
 | `electron*` → **Linux**                | ❌ needs a Linux host **of that arch** — an AppImage is assembled by `appimagetool`, a native binary                                  |
 | `electron-client` → **Windows, macOS** | ❌ by design — the connect-page client is an AppImage, Linux only; build `electron` or `cli-client`                                   |
 | `android*`                             | ❌ by design — the APK is platform-independent, so it is built **once**, on any host                                                  |
+| `web`                                  | ❌ by design — the same static files on every OS, built **once**, on any host                                                         |
 | `ios-client`                           | ❌ by design — the Xcode project is the same on every host; `xcodebuild` (macOS) makes the `.app`                                     |
 
 So on a Linux x86_64 box, `--targets=electron --all-platforms` gives you the
@@ -436,6 +440,7 @@ host binary under a foreign name.
 | `browser`         | app    | self-contained binary serving the browser app |
 | `electron`        | app    | Electron desktop app (AppImage / zip)         |
 | `android`         | app    | Android APK (bundled assets)                  |
+| `web`             | app    | static PWA directory (no server, offline)     |
 | `cli`             | app    | headless CLI binary                           |
 | `electron-client` | client | standalone Electron connect-page AppImage     |
 | `android-client`  | client | Android client APK (connects to a server)     |
@@ -506,6 +511,7 @@ scaffolding (the AppImage `AppDir`, the generated Gradle project) lives in
 | `--android`                               | Build APK via Gradle                                                                                                                                 |
 | `--ios`                                   | Write the `ios-client` Xcode project (with `--remote`); `.app` on macOS                                                                              |
 | `--android --remote`                      | Build client-only APK — connect page, no local dispatch (target `android-client`)                                                                    |
+| `--web`                                   | Write the standalone web app / PWA directory `<bin>-web/` (target `web`)                                                                             |
 | `--compile --service`                     | Compile binary + generate systemd unit file                                                                                                          |
 | `--compile --service --remote`            | Same, with `--expose` in systemd ExecStart                                                                                                           |
 | `--compile --service --headless`          | Same, with `--headless` in systemd ExecStart                                                                                                         |
@@ -958,6 +964,58 @@ await cli.ready;
 cli.subscribe((s) => console.log("state:", JSON.stringify(s)));
 ```
 
+## web (standalone PWA)
+
+The standalone app — the same bundle an APK carries: `App.tsx` and the cells it
+imports, running in the page, state in page storage, **no Deno and no server** —
+as a static directory any HTTPS host serves. On an iPhone, Safari's Share →
+**Add to Home Screen** installs it as a full-screen app with its own icon; that
+is the iPhone target for an app that needs no server (iOS runs no Deno, so there
+is no iOS app target — see `ios-client` for one that connects to a server).
+
+```jsonc
+// deno.json
+"build": { "targets": ["browser", "web"] }
+// or one component per target:
+"build": { "targets": { "browser": {}, "web": { "ui": "AppWeb.tsx" } } }
+```
+
+`deno task build --targets=web` places `dist/<name>-<version>-web/`:
+
+```
+index.html             the shell: title, stylesheet, the Apple Home Screen tags
+manifest.webmanifest   name, icons and colours from deno.json (the appId's hue)
+app.js  style.css      the standalone bundle (an auto-mounting classic script)
+icon.png | icon-192.png icon-512.png   yours, or the generated monogram
+sw.js                  the offline cache
+<assets mounts>        deno.json "assets" — fetch them with a RELATIVE URL
+```
+
+- **Offline.** `sw.js` precaches every file of the build under a cache named by
+  a hash of all of them, answers from it first, serves the shell for a
+  navigation the host has no file for (a reload on a client route, however deep)
+  or cannot reach (offline) — loading the build from the deploy root, not from
+  the route's directory — and drops older builds' caches when it takes over. A
+  new build is a new `sw.js`, which is what makes a browser install it —
+  deploying the directory **is** the update. Every script, stylesheet and wasm
+  file is checked against its digest as it is cached (pages and images are not:
+  a host may rewrite those — an injected snippet, an image optimizer): a CDN
+  edge still serving the previous build fails the update, the previous build
+  keeps serving whole, and the browser tries again later — never the new version
+  holding the old bytes. A browser that refuses the worker (plain `http` off
+  localhost, `file://`) logs
+  `[aio] offline cache (service worker) not registered` in the console; the app
+  still runs online.
+- **Deploy it as it is** — copy the directory to the host, at the origin's root
+  or under a sub-path (a GitHub Pages project site at `/repo/`): routes are read
+  relative to the directory `app.js` is served from, so `<Route path="/">`
+  matches `/repo/` and `<Link to="/about">` is `/repo/about`. `am publish` names
+  it and sets it aside: the updater's manifests are for programs.
+- **What does not reach it** is what the APK loses too: `aio.run({...})` options
+  (the build names each one the app sets), `*.server.ts` modules (refused), and
+  anything that needs a server. An app whose UI needs its server builds the
+  `browser` target, or gives `web` its own `ui`.
+
 ## Standalone runtime (`initStandalone`)
 
 For Android builds, aio uses a client-side dispatch loop instead of a server:
@@ -1105,10 +1163,11 @@ cannot be used at boot, the app does not write over it:
   of that run**; a restart reads it again. Said at boot and on the first refused
   save (`console.error`, logcat).
 - **corrupt** (it reads, but is not valid state): the raw text is copied
-  byte-for-byte to `<key>.corrupt-<ms>` in the same store and read back before
-  anything else is written; the app then starts from its initial state, and the
-  boot line names the copy. If the copy cannot be made, it falls back to the
-  refusal above.
+  byte-for-byte to `<key>.corrupt-<length>-<hash>` in the same store (named by
+  content, so the same blob is never copied twice) and read back before anything
+  else is written; the app then starts from its initial state, and the boot line
+  names the copy. If the copy cannot be made, it falls back to the refusal
+  above.
 - **nothing stored** is a first run, and saves normally.
 
 The same rule holds for `localStorage` in a browser preview.

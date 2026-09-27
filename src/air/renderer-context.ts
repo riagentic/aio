@@ -150,17 +150,39 @@ export function useContextSelector<T, R>(
   let value!: R;
   let first = true;
   const changed = signal(0);
-  effect(() => {
-    const next = selector(sig.value);
-    if (first) {
-      first = false;
+  // A first run that throws takes no subscriber with it (an effect's rule),
+  // so the render itself subscribes to the whole context before the throw
+  // leaves: the next context value renders again and may select. Without it a
+  // reader whose selector threw once (an ErrorBoundary's child, a try/catch)
+  // never heard of the context again.
+  try {
+    effect(() => {
+      let next: R;
+      try {
+        next = selector(sig.value);
+      } catch (e) {
+        // The first run is this render's: its throw is the render's. A LATER
+        // throw used to stop here, in the effect's log line, while the reader
+        // kept showing the last good selection for a context it no longer
+        // matches. Re-render instead, so the throw reaches the render — and the
+        // ErrorBoundary above it — exactly as a first render's would.
+        if (first) throw e;
+        untrack(() => changed.set(changed.peek() + 1));
+        return;
+      }
+      if (first) {
+        first = false;
+        value = next;
+        return;
+      }
+      if (Object.is(next, value)) return;
       value = next;
-      return;
-    }
-    if (Object.is(next, value)) return;
-    value = next;
-    untrack(() => changed.set(changed.peek() + 1));
-  });
+      untrack(() => changed.set(changed.peek() + 1));
+    });
+  } catch (e) {
+    void sig.value;
+    throw e;
+  }
   void changed.value;
   return value;
 }

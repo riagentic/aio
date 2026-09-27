@@ -35,7 +35,9 @@
  *
  *  To lower it: delete a bare `[aio] ` (the column already says it), or move a
  *  `[aio:<tag>] ` into the category argument — `log.warn("<tag>", "…")`. */
-const CEILING = 54;
+const CEILING = 52;
+
+import { type Hit, likelyNew, mtimeUnder } from "./ratchet-kit.ts";
 
 const ROOT = new URL("../src/", import.meta.url).pathname;
 
@@ -55,23 +57,22 @@ const PREFIXED =
   /log\.(?:trace|debug|info|warn|error)\(\s*[`"'](?:\\n)*\[(?:aio|AIO)(?::[^\]]*|-[a-z]+)?\]/g;
 
 const files = (await walk(ROOT, [])).sort();
-const hits: string[] = [];
+const hits: Hit[] = [];
 for (const file of files) {
   const src = await Deno.readTextFile(file);
   PREFIXED.lastIndex = 0;
   let m: RegExpExecArray | null;
   while ((m = PREFIXED.exec(src))) {
-    hits.push(
-      `src/${file.slice(ROOT.length)}:${
-        src.slice(0, m.index).split("\n").length
-      }`,
-    );
+    hits.push({
+      file: file.slice(ROOT.length),
+      line: src.slice(0, m.index).split("\n").length,
+    });
   }
 }
 
 if (Deno.args.includes("--list")) {
   for (const h of hits) {
-    console.log(`  ${h}`);
+    console.log(`  src/${h.file}:${h.line}`);
   }
 }
 
@@ -83,7 +84,9 @@ if (n > CEILING) {
       `    log.warn("[aio] x")          → log.warn("x")\n` +
       `    log.warn("[aio:sync] x")     → log.warn("sync", "x")\n` +
       `  Run with --list to see all of them. Newest:\n` +
-      hits.slice(-(n - CEILING)).map((h) => `      ${h}`).join("\n"),
+      likelyNew(hits, n - CEILING, mtimeUnder(ROOT)).map((h) =>
+        `      src/${h.file}:${h.line}`
+      ).join("\n"),
   );
   Deno.exit(1);
 }

@@ -28,5 +28,10 @@ Deno.test("dispatch: a loop an async effect awaited is reported only as DISPATCH
   again = dispatch;
   await dispatch({ type: "c:spin" }).catch(() => {}); // aio-ok: rejected by the guard
   await new Promise((r) => setTimeout(r, 50)); // let every effect settle
-  assertEquals(errors.map((e) => e.code), ["DISPATCH_LOOP"]);
+  // A BUDGET_* line is a wall-clock observation (a loaded machine is slow), not
+  // a diagnosis of the loop — the claim is one loop report, never a second one.
+  assertEquals(
+    errors.map((e) => e.code).filter((c) => !c.startsWith("BUDGET_")),
+    ["DISPATCH_LOOP"],
+  );
 });

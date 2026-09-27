@@ -173,25 +173,67 @@ async function porcelain(): Promise<string | null> {
   }
 }
 
+/** What the tree was at one instant: HEAD, and its uncommitted changes
+ *  (`null`: git could not say). */
+export type TreeStamp = { head: string; dirty: string[] | null };
+
+/** The tree as it is now. A gate takes one when it STARTS and hands it to
+ *  {@linkcode recordProof}: the end alone cannot see a tree that was dirty
+ *  and then reverted, or a HEAD that moved during a 72-hour soak. */
+export async function treeStamp(): Promise<TreeStamp> {
+  const p = await porcelain();
+  return {
+    head: await shortCommit(),
+    dirty: p === null ? null : uncommittedChanges(p),
+  };
+}
+
+/** Why a row must NOT be written, or null. `end` is the tree at record time,
+ *  `start` the gate's stamp from when it began (optional). A tree git cannot
+ *  read is refused, unless there is no git at all (`head` "unknown" — a
+ *  tarball, whose row the matrix prints as stale). Pure. */
+export function proofRefusal(
+  end: TreeStamp,
+  start?: TreeStamp,
+): string | null {
+  const stamps = [[end, "now"], [start, "when the gate started"]] as const;
+  for (const [t, when] of stamps) {
+    if (!t) continue;
+    if (t.dirty === null) {
+      if (t.head !== "unknown") {
+        return `git could not list the tree's changes ${when}`;
+      }
+    } else if (t.dirty.length > 0) {
+      return `the working tree had ${t.dirty.length} uncommitted ` +
+        `change(s) ${when} (e.g. ${t.dirty[0]!.slice(3).trim()})`;
+    }
+  }
+  if (start && start.head !== end.head) {
+    return `HEAD moved during the run (${start.head} → ${end.head})`;
+  }
+  return null;
+}
+
 /** Record that `target` was proven in `env`. Called BY the gated test, on
  *  success — so the ledger cannot claim a run that did not happen.
  *
- *  Not from a tree with uncommitted changes: the row names HEAD, and HEAD is
- *  not the code that ran — a row that says "proven at <commit>" about other
- *  code is the claim-without-evidence this file exists to end. Said, not
- *  silent. */
+ *  Not from a tree with uncommitted changes, nor — given the gate's `start`
+ *  stamp ({@linkcode treeStamp}) — one that had them or another HEAD when the
+ *  gate began: the row names HEAD, and HEAD is then not the code that ran. A
+ *  row that says "proven at <commit>" about other code is the
+ *  claim-without-evidence this file exists to end. Said, not silent. */
 export async function recordProof(
   target: string,
   env: string,
   detail?: string,
+  start?: TreeStamp,
 ): Promise<void> {
-  const dirty = uncommittedChanges((await porcelain()) ?? "");
-  if (dirty.length > 0) {
+  const end = await treeStamp();
+  const why = proofRefusal(end, start);
+  if (why) {
     console.warn(
-      `[aio] proof: ${target}/${env} passed but is NOT recorded — the working ` +
-        `tree has ${dirty.length} uncommitted change(s) (e.g. ${
-          dirty[0]!.slice(3).trim()
-        }), so HEAD is not the code that ran. Commit, then run the gate again.`,
+      `[aio] proof: ${target}/${env} passed but is NOT recorded — ${why}, ` +
+        `so HEAD is not the code that ran. Commit, then run the gate again.`,
     );
     return;
   }
@@ -201,7 +243,7 @@ export async function recordProof(
   entries.push({
     target,
     env,
-    commit: await shortCommit(),
+    commit: end.head,
     date: new Date().toISOString().slice(0, 10),
     detail,
   });

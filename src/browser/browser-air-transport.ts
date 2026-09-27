@@ -271,15 +271,28 @@ function _coreAction(frame: string): QueuedAction | null {
 /** The server dropped a call's frame before running it and said when a re-send
  *  will be taken (`AckPayload.retryAfterMs`). Hold the call and send it again,
  *  instead of failing a write that was never attempted. Returns true when the
- *  ack was consumed that way; false lets it settle the caller as usual. */
+ *  ack was consumed that way; false lets it settle the caller as usual.
+ *
+ *  A refusal because the server is SHUTTING DOWN is the same case: nothing
+ *  was applied, and the socket is about to close. It was rejected instead —
+ *  and a fire-and-forget call swallows its rejection by design — so a click in
+ *  the shutdown window of a restart vanished without a trace, while a click a
+ *  moment later was queued offline and replayed. */
 let _retryNoted = false;
+let _shutdownRetryNoted = false;
 function _retryRefusedCall(d: unknown): boolean {
-  const { cid, ok, retryAfterMs, error } = (d ?? {}) as {
+  const { cid, ok, error, code } = (d ?? {}) as {
     cid?: unknown;
     ok?: unknown;
-    retryAfterMs?: unknown;
     error?: unknown;
+    code?: unknown;
   };
+  // Re-sent ONLY on the server's `retryAfterMs` — its word that the call never
+  // ran. The code alone is not that word: a DISPATCH_DRAINING raised inside a
+  // running method (an inner call refused mid-shutdown) follows writes that
+  // already landed, and re-sending it applied them twice.
+  const closing = code === "DISPATCH_CLOSED" || code === "DISPATCH_DRAINING";
+  const retryAfterMs = (d as { retryAfterMs?: unknown } | null)?.retryAfterMs;
   if (typeof cid !== "string") return false;
   const entry = _written.get(cid);
   _written.delete(cid);
@@ -297,7 +310,14 @@ function _retryRefusedCall(d: unknown): boolean {
   // re-queue this call, not reject it.
   _unwriteAck(cid);
   const again: OutFrame = { ...entry, tries: (entry.tries ?? 0) + 1 };
-  if (!_retryNoted) {
+  if (closing && !_shutdownRetryNoted) {
+    _shutdownRetryNoted = true;
+    console.warn(
+      `[aio:air] the server refused a call because it is shutting down ` +
+        `(${code}, not applied) — held and re-sent, so it lands once the ` +
+        `server is back. Further re-sends are not repeated here.`,
+    );
+  } else if (!closing && !_retryNoted) {
     _retryNoted = true;
     console.warn(
       // The server's own reason, not a guess at it: a budget drop is per

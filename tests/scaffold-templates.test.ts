@@ -75,7 +75,10 @@ Deno.test("assets: the mount and the directory ship TOGETHER", () => {
   assertEquals(json.assets, { "/media": "./media" });
   assert(f["media/hello.txt"], "the directory the mount points at must exist");
   // …and the UI actually fetches through the mount, so the first run proves it.
-  assert(f["src/App.tsx"]!.includes("/media/hello.txt"));
+  // RELATIVE, as docs/build/targets.md says: an absolute "/media/…" misses
+  // the mount wherever the page is not at the origin's root (an APK, a web
+  // build on a sub-path).
+  assert(f["src/App.tsx"]!.includes('fetch("media/hello.txt")'));
 });
 
 Deno.test("the other templates carry no `assets` key", () => {

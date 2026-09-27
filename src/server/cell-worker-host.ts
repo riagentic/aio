@@ -31,6 +31,11 @@ import { createOwnManager } from "../state/own.ts";
 import { routeEffect } from "../state/route-effect.ts";
 import type { CellDef, Msg } from "../state/cell-types.ts";
 import {
+  createDeclaredShapeGuard,
+  shapeDriftDeciders,
+  withShapeGuard,
+} from "../state/declared-shape-guard.ts";
+import {
   type AmbientContext,
   type FromWorker,
   parseCellWorkerName,
@@ -282,11 +287,13 @@ export function startCellWorkerHost(cell: CellDef): Promise<never> {
   // Named, not inline, because `init` fills in what this isolate cannot know
   // yet. `createDispatch` reads `freezeState` off this object at commit time
   // for exactly that reason — see the comment at its use site.
+  /** Set by `init` — see its `strictTypes`. */
+  let guard: ((type: string, patches: unknown) => void) | undefined;
   const dispatchDeps: Parameters<
     typeof createDispatch<Record<string, unknown>, Msg, Msg>
   >[0] = {
     reduce: (s, action) => {
-      const r = composed.reduce(s, action);
+      const r = withShapeGuard(composed.reduce, guard)(s, action);
       // ComposedCells types `reduce` without the patch side-channel (the main
       // runtime reads it the same way, aio-dispatch.ts).
       const p = (r as unknown as {
@@ -324,8 +331,13 @@ export function startCellWorkerHost(cell: CellDef): Promise<never> {
             : "";
           if (prefix === name) {
             // Our own machinery (async-method triggers) — must run here.
+            // The store's promise handed back, as the main isolate's executor
+            // does (cell-compose-execute.ts): an async method's batcher awaits
+            // it to learn whether its write-set was accepted. `void`ed, a
+            // write-set whose reduce threw resolved the call as success here
+            // and rejected it on the main isolate.
             composed.execute(
-              { dispatch: (a: Msg) => void dispatch(a), getState: () => state },
+              { dispatch: (a: Msg) => dispatch(a), getState: () => state },
               e,
             );
             return;
@@ -384,6 +396,21 @@ export function startCellWorkerHost(cell: CellDef): Promise<never> {
       // before any message arrives), so the reply decides what the in-process
       // caller sees. See the `refused` note below.
       refusalsReject = msg.refusalsReject === true;
+      // The owner's dev refusal of a declared-type change, run HERE: the
+      // owner only sees committed patches. Refuse-only — every warning the
+      // guard says is said by the owner's guard over those patches.
+      guard = msg.strictTypes === undefined
+        ? undefined
+        : createDeclaredShapeGuard({
+          template: {
+            [name]: (composed.initialState as Record<string, unknown>)[name],
+          },
+          persist: { [name]: msg.strictTypes },
+          unknownKeys: () => [],
+          typeChanges: shapeDriftDeciders.typeChanges,
+          strict: true,
+          warn: () => {},
+        });
       // The authoritative slice — persistence and migrations already ran on the
       // main isolate, so this is the state of record, not our defaults.
       state = { [name]: { ...msg.state } };

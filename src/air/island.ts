@@ -54,6 +54,11 @@ export function island<M = unknown>(config: IslandConfig<M>): ComponentFn {
   let localModuleCache: M | null = null;
   let localModulePromise: Promise<M> | null = null;
 
+  /** `config.load()`, with a synchronous throw as a rejected load — it used
+   *  to escape the island's onMount, reported as a generic effect failure
+   *  instead of "Failed to load module". */
+  const _load = (): Promise<M> => new Promise<M>((r) => r(config.load()));
+
   function loadModule(): Promise<M> {
     // With cacheKey: use global cache
     if (cacheKey !== undefined) {
@@ -61,7 +66,7 @@ export function island<M = unknown>(config: IslandConfig<M>): ComponentFn {
       if (cached?.module) return Promise.resolve(cached.module as M);
       if (cached?.promise) return cached.promise as Promise<M>;
 
-      const promise = config.load().then((mod) => {
+      const promise = _load().then((mod) => {
         _moduleCache.set(cacheKey, { module: mod, promise: null });
         return mod;
       }).catch((err) => {
@@ -76,7 +81,7 @@ export function island<M = unknown>(config: IslandConfig<M>): ComponentFn {
     // Without cacheKey: use local closure cache (original behavior)
     if (localModuleCache) return Promise.resolve(localModuleCache);
     if (!localModulePromise) {
-      localModulePromise = config.load().then((mod) => {
+      localModulePromise = _load().then((mod) => {
         localModuleCache = mod;
         return mod;
       }).catch((err) => {

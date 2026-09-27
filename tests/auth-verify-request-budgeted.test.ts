@@ -166,3 +166,55 @@ Deno.test("mail triggers never spend the failed-login budget", async () => {
     await dropTempDir(dir);
   }
 });
+
+// The anonymous resend door must not spend the signed-in user's own budget:
+// it charged the same `verify:<id>` key as verify/request, so anyone who could
+// name an account blocked its owner's verify/request with a burst of resends.
+Deno.test("verify/resend cannot exhaust the account's own verify/request", async () => {
+  _resetAuthFails();
+  const { cell, aio } = await import("../mod.ts");
+  const port = freePort();
+  const base = `http://127.0.0.1:${port}`;
+  const dir = await tempDir("aio-verify-resend-");
+  const app = await aio.run({
+    cells: [cell("vr3", { state: { n: 0 }, access: true, visible: "all" })],
+    appId: `test-verify-resend-${Deno.pid}`,
+    client: "server-only",
+    persist: false,
+    libraryMode: true,
+    auth: { sendMail: () => {} },
+    port,
+    baseDir: dir,
+  });
+  try {
+    const signup = await fetch(`${base}/__aio/auth/signup`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        id: "alice",
+        password: "password123",
+        email: "alice@example.com",
+      }),
+    });
+    assertEquals(signup.status, 201);
+    const { token } = await signup.json();
+    for (let i = 0; i < 20; i++) {
+      const r = await fetch(`${base}/__aio/auth/verify/resend`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ id: "alice" }),
+      });
+      await r.body?.cancel();
+    }
+    const r = await fetch(`${base}/__aio/auth/verify/request`, {
+      method: "POST",
+      headers: { authorization: `Bearer ${token}` },
+    });
+    await r.body?.cancel();
+    assertEquals(r.status, 200, "the owner's own verify/request is served");
+  } finally {
+    _resetAuthFails();
+    await app.close();
+    await dropTempDir(dir);
+  }
+});

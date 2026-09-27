@@ -640,6 +640,44 @@ Deno.test("decide: same version, DIFFERENT bytes is an offer", () => {
   }
 });
 
+// Build A of 2.0.0, re-published as build B, B installed — then a CDN edge
+// still caching A's manifest (or anyone replaying it: its signature is
+// genuine) offered A back as "same version, new build", and the next fresh
+// edge offered B: the install flip-flopped between builds. A manifest released
+// BEFORE the installed build is older, whatever its digest.
+Deno.test("decide: an OLDER build of the running version is not a rebuild — a stale or replayed manifest is current", () => {
+  const d = decide({
+    current: "2.0.0",
+    manifest: manifest({
+      sha256: "a".repeat(64),
+      releasedAt: "2026-08-08T00:00:00.000Z",
+    }),
+    local: {
+      ...local,
+      installedSha256: "b".repeat(64),
+      installedReleasedAt: "2026-08-09T00:00:00.000Z",
+    },
+    canInstall,
+  });
+  assertEquals(d.kind, "current");
+  if (d.kind === "current") assertStringIncludes(d.reason, "older build");
+  // A newer one still is: the release date only ever holds a rebuild BACK.
+  const newer = decide({
+    current: "2.0.0",
+    manifest: manifest({
+      sha256: "c".repeat(64),
+      releasedAt: "2026-08-10T00:00:00.000Z",
+    }),
+    local: {
+      ...local,
+      installedSha256: "b".repeat(64),
+      installedReleasedAt: "2026-08-09T00:00:00.000Z",
+    },
+    canInstall,
+  });
+  assertEquals(newer.kind, "offer");
+});
+
 Deno.test("decide: same version, same bytes is current", () => {
   const sha = "a".repeat(64);
   const d = decide({

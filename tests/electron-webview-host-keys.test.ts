@@ -42,13 +42,16 @@ type Input = {
 };
 
 /** A host document with webview elements: `executeJavaScript` evaluates the
- *  shell's script against it, exactly as the renderer would. */
-function fakeShell(attr: string | null, gid = 7) {
+ *  shell's script against it, exactly as the renderer would. `late`: this
+ *  guest's element does not know its id for the first N reads (measured on
+ *  Electron 44 at did-attach-webview, ~1 attach in 20 on a loaded box). */
+function fakeShell(attr: string | null, gid = 7, late = 0) {
   const winHandlers: Record<string, Handler> = {};
   const guestHandlers: Record<string, Handler[]> = {};
   const warnings: string[] = [];
   const events: { type: string; detail: HostKey; bubbles: boolean }[] = [];
   const scripts: string[] = [];
+  let hostGone = false;
   const el = (id: number | "throws", a: string | null) => ({
     getWebContentsId() {
       if (id === "throws") throw new Error("not attached");
@@ -63,7 +66,11 @@ function fakeShell(attr: string | null, gid = 7) {
   const document = {
     querySelectorAll: (sel: string) =>
       sel === "webview"
-        ? [el("throws", null), el(gid + 1, '["a"]'), el(gid, attr)]
+        ? [
+          el("throws", null),
+          el(gid + 1, '["a"]'),
+          late-- > 0 ? el("throws", attr) : el(gid, attr),
+        ]
         : [],
   };
   class CustomEvent {
@@ -81,9 +88,12 @@ function fakeShell(attr: string | null, gid = 7) {
       winHandlers[ev] = fn;
     },
     setWindowOpenHandler() {},
-    isDestroyed: () => false,
+    isDestroyed: () => hostGone,
     executeJavaScript(code: string) {
       scripts.push(code);
+      if (hostGone) {
+        return Promise.reject(new Error("Object has been destroyed"));
+      }
       return Promise.resolve(
         new Function("document", "CustomEvent", `return ${code}`)(
           document,
@@ -131,6 +141,7 @@ function fakeShell(attr: string | null, gid = 7) {
       await flush();
     },
     listeners: () => (guestHandlers["before-input-event"] ?? []).length,
+    destroyHost: () => void (hostGone = true),
     events,
     warnings,
     scripts,
@@ -160,6 +171,27 @@ Deno.test("host keys: a declared keydown reaches THIS guest's element, with modi
     metaKey: false,
     repeat: true,
   });
+  assertEquals(s.warnings, []);
+});
+
+Deno.test("host keys: an element that does not know its guest yet is read again, not taken for 'nothing declared'", async () => {
+  const s = fakeShell('["Escape"]', 7, 2);
+  await s.attach();
+  // Two misses, 50 ms apart, then the element answers: the relay is armed.
+  await new Promise((r) => setTimeout(r, 300));
+  assertEquals(s.listeners(), 1);
+  await s.press({ type: "keyDown", key: "Escape", code: "Escape" });
+  assertEquals(s.events.length, 1);
+  assertEquals(s.warnings, []);
+});
+
+Deno.test("host keys: a host window closed while its guest's element is still being read stops silently", async () => {
+  const s = fakeShell('["Escape"]', 7, 1000);
+  await s.attach();
+  s.destroyHost(); // the window closes during the 50 ms wait between reads
+  const reads = s.scripts.length;
+  await new Promise((r) => setTimeout(r, 200));
+  assertEquals(s.scripts.length, reads, "no read of a destroyed host");
   assertEquals(s.warnings, []);
 });
 
@@ -300,15 +332,24 @@ ${tmplWillNavigate("_appOrigin")}
   win.webContents.on('did-attach-webview', (_e, guest) => {
     guest.on('did-finish-load', async () => {
       try {
-        await new Promise((r) => setTimeout(r, 300));
-        const sub = guest.mainFrame.frames[0];
+        // Wait for STATES, never for a fixed time: the relay is armed once the
+        // host answers its attribute read (tmplHostKeyRelay), and the keys
+        // reach the host asynchronously.
+        const until = async (fn) => {
+          for (let i = 0; i < 100; i++) { if (await fn()) return; await new Promise((r) => setTimeout(r, 50)); }
+        };
+        const sub = await (async () => { await until(() => guest.mainFrame.frames.length > 0); return guest.mainFrame.frames[0]; })();
+        await until(() => sub.executeJavaScript("!!document.getElementById('i')"));
+        await until(() => guest.listenerCount('before-input-event') > 0);
         await sub.executeJavaScript("document.getElementById('i').focus()");
         guest.focus();
         guest.sendInputEvent({ type: 'keyDown', keyCode: 'a' });
         guest.sendInputEvent({ type: 'keyUp', keyCode: 'a' });
         guest.sendInputEvent({ type: 'keyDown', keyCode: 'Escape', modifiers: ['shift'] });
         guest.sendInputEvent({ type: 'keyUp', keyCode: 'Escape', modifiers: ['shift'] });
-        await new Promise((r) => setTimeout(r, 700));
+        await until(async () => (await sub.executeJavaScript('window.__k')).length >= 2 &&
+          (await win.webContents.executeJavaScript('window.__got')).length >= 1);
+        // The undeclared "a" went first: had it been relayed, it is here by now.
         out({
           iframe: await sub.executeJavaScript('window.__k'),
           host: await win.webContents.executeJavaScript('window.__got'),

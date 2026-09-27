@@ -226,13 +226,19 @@ export async function recordShotVideo(
         `screen, or it is hidden, minimised or occluded (a window that is not ` +
         `composited paints nothing). The video is one still picture.`
       : undefined;
+    // The encode's own speed, said: the in-page encoder can run far slower
+    // than real time, and "encoded in 780s" alone does not say which one ran.
+    const encodeSeconds = (Date.now() - started) / 1000;
+    const speed = `${(seconds / Math.max(encodeSeconds, 0.001)).toFixed(1)}×`;
     out(
       mode === "pretty"
         ? `wrote ${opts.path} (${mb(done.bytes.length)}, ${
           seconds.toFixed(1)
         }s, ${rec.frames.length} frames, ${done.width}×${done.height} ${done.codec}, encoded in ${
-          ((Date.now() - started) / 1000).toFixed(1)
-        }s) — ${url}` + (warning ? `\n  ! ${warning}` : "")
+          encodeSeconds.toFixed(1)
+        }s by ${done.encoder} — ${speed} real time) — ${url}` +
+          (warning ? `\n  ! ${warning}` : "") +
+          (done.fallback ? `\n  ! ${done.fallback}` : "")
         : {
           file: opts.path,
           bytes: done.bytes.length,
@@ -241,6 +247,9 @@ export async function recordShotVideo(
           width: done.width,
           height: done.height,
           codec: done.codec,
+          encoder: done.encoder,
+          encodeSeconds,
+          ...(done.fallback ? { encoderFallback: done.fallback } : {}),
           url,
           ...(warning ? { warning } : {}),
         },

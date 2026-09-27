@@ -5,6 +5,7 @@ import { resolveSignalProp } from "./signal-binding.ts";
 import {
   attrNameOf,
   camelToKebab as _camelToKebab,
+  dropSlotMarkers,
   escapeAttr as _escapeAttr,
   escapeHtml as _escapeHtml,
   keepLeadingNewline,
@@ -15,6 +16,7 @@ import {
   ssrOpenSelect,
   ssrOptionProps,
   styleValue as _styleValue,
+  TEXT_CONTENT_ELEMENTS,
   VOID_ELEMENTS,
 } from "./ssr-utils.ts";
 import { isDevMode } from "../state/dev-flag.ts";
@@ -932,13 +934,15 @@ function _rts(
           inner.n++;
           html += rawTextContent(tag, String(child), isDevMode());
         } else {
-          html += _rts(child, inner, scope);
+          html += dropSlotMarkers(_rts(child, inner, scope));
         }
       }
     } else {
       const inner: SsrNodes = { n: 0 };
+      const text = TEXT_CONTENT_ELEMENTS.has(tag);
       for (const child of vnode.children) {
-        html += _rts(child, inner, scope);
+        const out = _rts(child, inner, scope);
+        html += text ? dropSlotMarkers(out) : out;
       }
     }
   } finally {

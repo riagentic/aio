@@ -272,7 +272,8 @@ notes state changes.
 
 We set `singleton: true` in the config. When the user double-clicks the app
 while it's already running, the second process detects the lock file
-(`/tmp/aio/aio-notes.lock`), sees the first process is alive, and exits. Stale
+(`/tmp/aio/aio-notes.lock`), sees the first process is alive, asks its window to
+come to the front (restored from a minimize or the tray), and exits 0. Stale
 locks from crashed processes are cleaned up automatically.
 
 Alternatives: `singleton: true, takeover: true` kills the old instance and

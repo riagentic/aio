@@ -23,7 +23,10 @@ single `state.db`. On restart, persisted state is **deep-merged** with
   (dev and production alike) goes on without it, says so by name, and the next
   write removes it from disk. The same goes for a value a method writes with the
   wrong type (`s.count += "abc"` over a declared number): the declared default
-  comes back. Declare it, or declare the object as `{}` (an open record).
+  comes back — so dev **refuses** that write (the method throws, nothing
+  commits) and production keeps it and warns naming the field. A field declared
+  `null` or `undefined` has no fixed type and takes any value. Declare it, or
+  declare the object as `{}` (an open record).
 
 Writes are **debounced** (`persistDebounceMs`, default 100 ms), so a method that
 has returned is committed in memory and broadcast, but not yet on disk. What
@@ -174,8 +177,11 @@ the hook returns.
 the dev checkpoint (`logs/checkpoint.json`), which can be read back by
 `onCheckpointRestore` and so leaves every `persist: "none"` cell out — and every
 field a `persist: { exclude }` (or `include`) keeps off disk; a restored
-checkpoint brings those fields back exactly as a restart does. Since 1.0.11 it
-also keeps the cell's **payloads** out of `logs/actions.jsonl` and the
+checkpoint brings those fields back exactly as a restart does. `onPersist` does
+**not** run on the checkpoint (it is assigned back into live state, so it keeps
+the live shape): a field that must never reach disk belongs in
+`persist: { exclude }`, not only in an `onPersist` that drops it. Since 1.0.11
+it also keeps the cell's **payloads** out of `logs/actions.jsonl` and the
 state-diff debug log: a `setToken(t)` call's argument IS the state the cell must
 never keep, so the line records that the action ran, with its payload redacted.
 Lines an older build wrote are rewritten once, in place. Under `journal: true`
@@ -356,7 +362,11 @@ The two writes that the next boot would undo are said **when they happen**, in
 dev and production, once per path, naming the method: a `delete` of a declared
 key (`state write: … deleting a declared key does not survive a restart`), and a
 key added under an object `state:` declares with keys
-(`state write: … does not declare "y" under that (closed) object`).
+(`state write: … does not declare "y" under that (closed) object`). A value
+whose type differs from the declared one
+(`state write: … wrote "c.count" as
+string but … declares it number`) is refused
+in dev and said in production.
 
 Adding a field really is safe — stored data without it deep-merges and the
 declared value fills the gap — but you should not have to work that out from

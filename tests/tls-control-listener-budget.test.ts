@@ -11,6 +11,7 @@ import { createServer } from "../src/server/server.ts";
 import { loadOrCreateCert } from "../src/server/tls.ts";
 import { _resetAuthFails } from "../src/server/server-auth.ts";
 import { freePort } from "../src/testing/server-test.ts";
+import { dropTempDir, tempDir } from "../src/testing/temp-dir.ts";
 
 Deno.test("control listener (TLS): wrong keys hit 429; the right key is still served", async () => {
   _resetAuthFails();
@@ -58,5 +59,50 @@ Deno.test("control listener (TLS): wrong keys hit 429; the right key is still se
     _resetAuthFails();
     await server.shutdown();
     await Deno.remove(dir, { recursive: true });
+  }
+});
+
+// A token-LESS request is not an attack signal (the main listener's rule): the
+// control listener charged it anyway, so ordinary credential-less local calls
+// filled the 127.0.0.1 bucket and the next local `/__aio/pair` answered 429.
+Deno.test("control listener (TLS): tokenless requests do not spend the failure budget", async () => {
+  _resetAuthFails();
+  const dir = await tempDir("aio-ctl-budget-");
+  const cert = await loadOrCreateCert(join(dir, "tls"));
+  const server = createServer({
+    port: freePort(),
+    title: "ctl",
+    getUIState: () => ({}),
+    dispatch: () => {},
+    baseDir: dir,
+    debug: () => {},
+    prod: true,
+    distDir: join(dir, "dist"),
+    token: "k-" + crypto.randomUUID(),
+    cert: cert.cert,
+    key: cert.key,
+  });
+  try {
+    const deadline = Date.now() + 5_000;
+    while (!server.trojanPort && Date.now() < deadline) {
+      await new Promise((r) => setTimeout(r, 20));
+    }
+    const base = `http://127.0.0.1:${server.trojanPort}`;
+    const statuses: number[] = [];
+    for (let i = 0; i < 15; i++) {
+      const r = await fetch(`${base}/`);
+      await r.body?.cancel();
+      statuses.push(r.status);
+    }
+    const wrong = await fetch(`${base}/`, {
+      headers: { authorization: "Bearer wrong" },
+    });
+    await wrong.body?.cancel();
+    statuses.push(wrong.status);
+    assertEquals(statuses, Array(16).fill(401));
+  } finally {
+    _resetAuthFails();
+    await server.shutdown();
+    await dropTempDir(dir);
   }
 });

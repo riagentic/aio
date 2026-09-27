@@ -87,7 +87,7 @@
         },
         "AioMeta": {
           "kind": "typeAlias",
-          "sig": "7dd233a6ce9e7a54",
+          "sig": "66cf6d8ec2e4e2f4",
           "members": {
             "title": "opt:2fb40568533c1a6d",
             "width": "opt:f6522636230fa080",
@@ -98,10 +98,11 @@
             "permissions": "opt:8da42e37586d60a5",
             "chrome": "opt:0cb8e5493e58cfb7",
             "tray": "opt:bb7b2f54156b6da6",
-            "profileName": "opt:2fb40568533c1a6d"
+            "profileName": "opt:2fb40568533c1a6d",
+            "showFile": "opt:2fb40568533c1a6d"
           },
           "sigs": [
-            "7dd233a6ce9e7a54"
+            "66cf6d8ec2e4e2f4"
           ]
         },
         "AioUser": {
@@ -365,7 +366,7 @@
         },
         "CellsConfig": {
           "kind": "typeAlias",
-          "sig": "8e9f69b92e2a3280",
+          "sig": "dd5eacb5588ffd78",
           "members": {
             "appId": "opt:2fb40568533c1a6d",
             "cells": "opt:58dbae2820cab862",
@@ -426,6 +427,7 @@
             "electron": "opt:e2fce43e3ac71e0d",
             "libraryMode": "opt:0ecca0fe3beba89b",
             "_workerEntry": "opt:2fb40568533c1a6d",
+            "_harnessShapeGuard": "opt:0ecca0fe3beba89b",
             "syncIntervalMs": "opt:f6522636230fa080",
             "fullStateThreshold": "opt:f6522636230fa080",
             "routes": "opt:7e9873e6efab3ac8",
@@ -457,7 +459,7 @@
             "onCheckpointRestore": "opt:bc30aaf8d4dd00e2"
           },
           "sigs": [
-            "8e9f69b92e2a3280"
+            "dd5eacb5588ffd78"
           ]
         },
         "CellState": {
@@ -8716,6 +8718,10 @@
         "build --version": {
           "kind": "flag",
           "sig": "value"
+        },
+        "build --web": {
+          "kind": "flag",
+          "sig": "bool"
         }
       }
     }

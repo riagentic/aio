@@ -22,6 +22,9 @@ export const BUILD_BOOL_FLAGS = [
   "--electron",
   "--android",
   "--ios",
+  // The standalone web app (a PWA): the standalone bundle + shell + web
+  // manifest + offline service worker, as a static directory. No binary.
+  "--web",
   "--cli",
   "--client",
   "--remote",

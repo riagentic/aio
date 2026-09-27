@@ -54,6 +54,7 @@ export { signal } from "../state/signal.ts";
 // the side effect — `connectAioDevTools().tree` reads through it).
 import "./devtools-tree.ts";
 import { _setHydrateDoc } from "./renderer-hydrate.ts";
+import { _cancelDriftChecks } from "./control-drift.ts";
 
 // -- Re-exports (public API -- all importers use aio-renderer.ts) ------
 export type { MountHandle } from "./renderer-types.ts";
@@ -407,6 +408,7 @@ export function _unmount(handle: MountHandle): void {
   }
 
   state.root.innerHTML = "";
+  _cancelDriftChecks(state.root);
 }
 
 function _unmountTree(

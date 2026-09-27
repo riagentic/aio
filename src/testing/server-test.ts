@@ -344,6 +344,9 @@ export async function testServer<S = unknown>(
           appId: `test-${crypto.randomUUID().slice(0, 8)}`,
           ...runConfig,
           ...(workerEntryUrl ? { _workerEntry: workerEntryUrl } : {}),
+          // The declared-type write guard a dev app runs (it persists by
+          // default), though the harness does not persist.
+          _harnessShapeGuard: true,
           // Forced — a test must never let aio.run() call Deno.exit(), and the
           // port / dir are ours to manage.
           libraryMode: true,

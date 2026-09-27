@@ -1,7 +1,8 @@
 /**
  * @module
  * Record a live Chromium page (an Electron window) as a video: the page's own
- * screencast while recording, its own WebCodecs encoder afterwards.
+ * screencast while recording; afterwards host ffmpeg when it is on PATH, else
+ * the page's own WebCodecs encoder.
  *
  * Recording and encoding are two phases on purpose. While recording, the only
  * work added to the app is what Chromium already does to paint — frames are
@@ -12,7 +13,15 @@
 
 import type { CdpSession } from "./cdp.ts";
 import { fromB64, toB64, type VideoFormat } from "./chunks.ts";
-import { openPageEncoder, planFrames } from "./encoder.ts";
+import {
+  codecCandidates,
+  openPageEncoder,
+  planFrames,
+  type PlannedFrame,
+} from "./encoder.ts";
+import { encodeWithFfmpeg } from "./ffmpeg.ts";
+import { muxMp4 } from "./mp4.ts";
+import { muxWebm } from "./webm.ts";
 
 /** One recorded frame: when it was painted, and where its JPEG is. */
 export type RecordedFrame = { us: number; path: string };
@@ -134,21 +143,72 @@ export async function recordScreencast(
  *  carries more than a few megabytes of base64. */
 const BATCH_BYTES = 6 * 1024 * 1024;
 
-/** Encode a recording into a `format` file's bytes, in the page behind `cdp`.
- *  The video is the size of the first frame. `progress` is told how many
- *  frames are done. */
+/** Which encoder `encodeRecording` uses: `"auto"` (the default) is host
+ *  ffmpeg when it is on PATH, else the page's WebCodecs encoder; the other two
+ *  name one and fail rather than fall back. */
+export type VideoEncoderChoice = "auto" | "ffmpeg" | "page";
+
+/** Encode a recording into a `format` file's bytes — with host ffmpeg when it
+ *  is on PATH (seconds per clip), else in the page behind `cdp` (WebCodecs,
+ *  measured 15–30× slower than real time inside an app window). Both write
+ *  the same frames at the same times through the same container writers.
+ *  An ffmpeg that is present and FAILS is never a silent bad file: the page
+ *  encodes instead, and `fallback` (also warned) says why. The video is the
+ *  size of the first frame. `progress` is told how many frames are done. */
 export async function encodeRecording(
   cdp: CdpSession,
   rec: Recording,
   format: VideoFormat,
   progress?: (done: number, total: number) => void,
+  opts: { encoder?: VideoEncoderChoice } = {},
 ): Promise<
-  { bytes: Uint8Array; codec: string; width: number; height: number }
+  {
+    bytes: Uint8Array;
+    codec: string;
+    width: number;
+    height: number;
+    /** What encoded it: `"ffmpeg libx264"`, `"ffmpeg libvpx"`, `"page"`. */
+    encoder: string;
+    /** Why ffmpeg was skipped or failed, when it was on PATH but not used. */
+    fallback?: string;
+  }
 > {
   const size = jpegSize(await Deno.readFile(rec.frames[0]!.path));
   if (!size) throw new Error("[aio:video] the first frame is not a JPEG");
-  const enc = await openPageEncoder(cdp, format, size.width, size.height);
   const plan = planFrames(rec.frames.map((f) => f.us), rec.endUs);
+  const choice = opts.encoder ?? "auto";
+  let fallback: string | undefined;
+  if (choice !== "page") {
+    const w = Math.max(2, size.width & ~1);
+    const h = Math.max(2, size.height & ~1);
+    codecCandidates(format, w, h); // a size no codec takes is refused first
+    try {
+      const got = await ffmpegEncode(rec, format, size, w, h, plan, progress);
+      if (got === null && choice === "ffmpeg") {
+        throw new Error("[aio:video] no ffmpeg on PATH");
+      }
+      if (got !== null) {
+        return {
+          bytes: format === "webm"
+            ? muxWebm({ width: w, height: h }, got.chunks, rec.endUs)
+            : muxMp4(
+              { width: w, height: h, avcC: got.avcC! },
+              got.chunks,
+              rec.endUs,
+            ),
+          codec: got.codec,
+          width: w,
+          height: h,
+          encoder: got.encoder,
+        };
+      }
+    } catch (e) {
+      if (choice === "ffmpeg") throw e;
+      fallback = e instanceof Error ? e.message : String(e);
+      console.warn(`${fallback} — encoding in the page instead (slower)`);
+    }
+  }
+  const enc = await openPageEncoder(cdp, format, size.width, size.height);
   let batch: { image?: string; mime: string; us: number; key: boolean }[] = [];
   let bytes = 0;
   const flush = async (done: number) => {
@@ -172,5 +232,35 @@ export async function encodeRecording(
     codec: enc.codec,
     width: enc.width,
     height: enc.height,
+    encoder: "page",
+    ...(fallback ? { fallback } : {}),
   };
+}
+
+/** The ffmpeg half of {@linkcode encodeRecording}: `null` when there is no
+ *  ffmpeg. Frames that change size mid-recording (a resized window) are
+ *  fitted by the page encoder only, so that case throws here and falls back. */
+async function ffmpegEncode(
+  rec: Recording,
+  format: VideoFormat,
+  size: { width: number; height: number },
+  w: number,
+  h: number,
+  plan: PlannedFrame[],
+  progress?: (done: number, total: number) => void,
+) {
+  const jpeg = async (src: number) => {
+    const b = await Deno.readFile(rec.frames[src]!.path);
+    const s = jpegSize(b);
+    if (!s || s.width !== size.width || s.height !== size.height) {
+      throw new Error(
+        `[aio:video] frame ${src} is ${
+          s ? `${s.width}×${s.height}` : "not a JPEG"
+        }, ` +
+          `not ${size.width}×${size.height} — ffmpeg does not fit a resized window`,
+      );
+    }
+    return b;
+  };
+  return await encodeWithFfmpeg(format, w, h, plan, jpeg, progress);
 }

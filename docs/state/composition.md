@@ -78,7 +78,8 @@ what a listener sees depends on how the action arrived:
   a sync op): the listener **still runs**, as it always has. Its reaction is
   kept, and a journal replay makes the same decision again, so a restart gives
   the same state. If a listener must only count accepted actions, check the
-  source's state in the handler.
+  source's state in the handler. Dev says so once per action and listener
+  (`… was REFUSED (…), and its listensTo listener "…" still ran`).
 - **A sync op** (a client write to a `sync: true` cell): the listener **does not
   run**. The op is answered `op-rejected` and deleted from the op-log, so the
   write never happened for its origin, for any peer, or after a restart — and

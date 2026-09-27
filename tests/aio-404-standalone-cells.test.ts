@@ -96,3 +96,28 @@ Deno.test("aio-404: standalone restore from localStorage on next run", async () 
   _resetAioRuntime();
   _reset();
 });
+
+Deno.test("aio-404: ensureConnected keys a web shell's store by its appId, an APK's stays aio:app", () => {
+  // A web build's shell names its app (`__aioConfig.appId`), so two aio web
+  // apps on one origin never share one `aio:app` entry. The APK shell names
+  // none, and its saved state stays where every shipped APK wrote it.
+  const g = globalThis as { __aioConfig?: Record<string, unknown> };
+  const boot = (id: string, cfg: Record<string, unknown> | undefined) => {
+    _reset();
+    storage.clear();
+    storage.set("aio:app", JSON.stringify({ [id]: { n: 1 } }));
+    storage.set("aio:webapp", JSON.stringify({ [id]: { n: 2 } }));
+    if (cfg) g.__aioConfig = cfg;
+    const c = cell(id, { state: { n: 0 }, methods: {} });
+    try {
+      ensureConnected();
+      return (c as unknown as { n: number }).n;
+    } finally {
+      delete g.__aioConfig;
+      _resetAioRuntime();
+      _reset();
+    }
+  };
+  assertEquals(boot("sakeyweb", { appId: "webapp" }), 2);
+  assertEquals(boot("sakeyapk", undefined), 1);
+});

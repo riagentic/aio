@@ -22,7 +22,12 @@ const App = () =>
 ```
 
 If the import rejects, the error propagates to the nearest `ErrorBoundary`.
-Multiple lazy components under one `Suspense`: fallback shows until all resolve.
+
+`lazy` defers **evaluating and rendering** the module, not downloading it: aio
+ships the browser app as ONE bundle (no esbuild `splitting`), so the imported
+module is already in the bytes the page loaded. Use it to keep a heavy module's
+top-level work off first paint; it does not shrink the download. Multiple lazy
+components under one `Suspense`: fallback shows until all resolve.
 
 ---
 
@@ -395,6 +400,13 @@ Deno.serve((req) => {
 });
 ```
 
+A stream sends each chunk as soon as it is rendered, so a component that throws
+AFTER the first chunk cannot take back what was sent: the generator throws at
+that pull, and the response ends part-way (the status line is long gone). Put a
+region that may throw inside an `<ErrorBoundary>` — it buffers its children and
+sends either all of them or its fallback, never half — or use `renderToString`
+when the page must be all or nothing.
+
 ### Hydration
 
 ```tsx
@@ -405,7 +417,9 @@ hydrate(document.getElementById("root")!, App);
 ```
 
 Walks existing DOM, attaches listeners, binds signals. Falls back to full render
-on mismatch.
+on mismatch. Server nodes past an element's last client child (the server
+rendered more than the client does) are removed, with a dev warning, as a
+diverging attribute is repaired.
 
 ---
 

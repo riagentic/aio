@@ -25,11 +25,84 @@ import { ELECTRON_VERSION_FILE } from "../electron/electron-runtime-fetch.ts";
  *  tested predicate is the fix: adding a staged file means adding it here, and
  *  a test can ask the question directly. */
 export function keepInDistStaging(name: string): boolean {
-  return name === BUNDLE_JS || name === APP_STYLE ||
-    name === APP_ICON || name === ELECTRON_VERSION_FILE ||
-    // The client bundle's source map — how a forwarded browser error names
-    // the author's file instead of `app.js:1:22073`.
-    name === BUNDLE_MAP;
+  return DIST_STAGED.includes(name);
+}
+
+/** The files every build stages in dist/ — see {@linkcode keepInDistStaging}. */
+export const DIST_STAGED: readonly string[] = [
+  BUNDLE_JS,
+  APP_STYLE,
+  APP_ICON,
+  ELECTRON_VERSION_FILE,
+  // The client bundle's source map — how a forwarded browser error names
+  // the author's file instead of `app.js:1:22073`.
+  BUNDLE_MAP,
+];
+
+/** The entries of a `dist/` no aio build ever wrote — non-empty, yet holding
+ *  none of the files every build stages there ({@linkcode keepInDistStaging})
+ *  and no release `manifest.json` — else []. Dotfiles (`.DS_Store`) decide
+ *  nothing. Pure.
+ *
+ *  dist/ is exempt from the out-dir guard because aio owns it; a project that
+ *  arrived with a `dist/` of its OWN (a web build's output, hand-placed files)
+ *  had all of it deleted by its first `deno task build`, under a green
+ *  summary. */
+export function foreignDist(entries: readonly string[]): string[] {
+  const named = entries.filter((e) => !e.startsWith("."));
+  const ours = named.some((e) => keepInDistStaging(e) || e === "manifest.json");
+  return ours ? [] : [...named].sort();
+}
+
+/** The refusal for a foreign `dist` directory (see {@linkcode foreignDist}),
+ *  or null when it is aio's, empty or absent. Every path that empties dist/
+ *  asks this first. */
+export async function foreignDistRefusal(dist: string): Promise<string | null> {
+  const entries: string[] = [];
+  try {
+    for await (const e of Deno.readDir(dist)) entries.push(e.name);
+  } catch (e) {
+    if (!(e instanceof Deno.errors.NotFound)) throw e;
+  }
+  const foreign = foreignDist(entries);
+  if (foreign.length === 0) return null;
+  const shown = foreign.slice(0, 5).join(", ") +
+    (foreign.length > 5 ? `, … (${foreign.length} in all)` : "");
+  return `refusing to build: ${dist} holds files no aio build put there ` +
+    `(${shown}), and dist/ is aio's staging dir, emptied on every build: ` +
+    `they would be DELETED.\n  fix: move them out of dist/ first (dist/ ` +
+    `cannot be renamed — the build always stages there).`;
+}
+
+/** The refusal for an artifact directory a build is about to EMPTY (the web
+ *  site, the iOS project) when no aio build wrote it — it holds entries
+ *  (dotfiles aside) but not `mark`, a file whose text includes `sign` — or
+ *  null when it is aio's, empty or absent. The same rule as dist/: a user
+ *  folder that happens to share the artifact's name is never emptied. */
+export async function foreignArtifactRefusal(
+  dir: string,
+  mark: string,
+  sign: string,
+): Promise<string | null> {
+  const entries: string[] = [];
+  try {
+    for await (const e of Deno.readDir(dir)) {
+      if (!e.name.startsWith(".")) entries.push(e.name);
+    }
+  } catch (e) {
+    if (!(e instanceof Deno.errors.NotFound)) throw e;
+  }
+  if (entries.length === 0) return null;
+  try {
+    if ((await Deno.readTextFile(`${dir}/${mark}`)).includes(sign)) return null;
+  } catch (e) {
+    if (!(e instanceof Deno.errors.NotFound)) throw e;
+  }
+  const shown = entries.sort().slice(0, 5).join(", ") +
+    (entries.length > 5 ? `, … (${entries.length} in all)` : "");
+  return `refusing to build: ${dir} holds files no aio build put there ` +
+    `(${shown}), and the build empties that directory: they would be ` +
+    `DELETED.\n  fix: move or rename that directory first.`;
 }
 
 // ── the directory itself ────────────────────────────────────────────────────
@@ -49,15 +122,56 @@ export function keepInDistStaging(name: string): boolean {
  *  A bind mount is only the loudest victim. An open `cd dist`, a file watcher,
  *  an editor's tree and a `docker run -v` all hold the inode, and replacing it
  *  silently strands every one of them. Nothing wants the directory replaced;
- *  what the build wants is for it to be empty, and that is what this does. */
-export async function emptyDir(dir: string): Promise<void> {
+ *  what the build wants is for it to be empty, and that is what this does.
+ *
+ *  `last`: the paths (relative, `/`-separated) that prove the directory is
+ *  aio's — the file its foreign-directory check looks for. They go LAST, so a
+ *  build interrupted mid-clean leaves a directory that still says whose it is:
+ *  removed in readdir order, the proof could go first, and the next build
+ *  refused the half-emptied folder as a user's, to be deleted by hand. */
+export async function emptyDir(
+  dir: string,
+  last: readonly string[] = [],
+): Promise<void> {
+  const held = await clearExcept(dir, last);
+  // Each held head in ONE removal: a nested proof (`App/x.swift`) removed
+  // before its directory left an empty `App/` that proves nothing.
+  for (const head of held) {
+    try {
+      await Deno.remove(`${dir}/${head}`, { recursive: true });
+    } catch (e) {
+      if (!(e instanceof Deno.errors.NotFound)) throw e;
+    }
+  }
+}
+
+/** Remove everything in `dir` except the `keep` paths (and the directories
+ *  on the way to them); returns the top-level names kept. */
+async function clearExcept(
+  dir: string,
+  keep: readonly string[],
+): Promise<string[]> {
+  const held = new Map<string, string[]>();
+  for (const p of keep) {
+    const [head = "", ...rest] = p.split("/");
+    held.set(head, [
+      ...(held.get(head) ?? []),
+      ...(rest.length ? [rest.join("/")] : []),
+    ]);
+  }
   try {
     for await (const e of Deno.readDir(dir)) {
+      if (held.has(e.name)) continue;
       await Deno.remove(`${dir}/${e.name}`, { recursive: true });
     }
   } catch (e) {
-    if (!(e instanceof Deno.errors.NotFound)) throw e;
+    if (e instanceof Deno.errors.NotFound) return [];
+    throw e;
   }
+  for (const [head, rest] of held) {
+    if (rest.length) await clearExcept(`${dir}/${head}`, rest);
+  }
+  return [...held.keys()];
 }
 
 /** Move every entry of `from` into `to`, leaving both directories themselves

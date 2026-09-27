@@ -24,7 +24,7 @@ import {
 import { appDirs, installRoot } from "./server/app-dirs.ts";
 import { BUILD_VERSION_ENV } from "./server/app-version.ts";
 import { forwardedToFleet, targetForFlags, TARGETS } from "./build-all.ts";
-import { keepInDistStaging } from "./build/dist-staging.ts";
+import { foreignDistRefusal, keepInDistStaging } from "./build/dist-staging.ts";
 import { notATargetMessage } from "./build/build-target-hint.ts";
 import { appIdFromConfig, slugify } from "./server/single-instance-lock.ts";
 import { ensureEmbeddedBundle, runBundle } from "./build/build-bundle.ts";
@@ -32,6 +32,7 @@ import { buildClient } from "./build/build-client.ts";
 import { buildCli } from "./build/build-cli.ts";
 import { buildAndroid } from "./build/build-android.ts";
 import { buildIos } from "./build/build-ios.ts";
+import { buildWeb } from "./build/build-web.ts";
 import {
   recoverInterruptedLinks,
   runDenoCompile,
@@ -68,6 +69,7 @@ export async function build(cfg?: BuildConfig): Promise<void> {
     doElectron,
     doAndroid,
     doIos,
+    doWeb,
     doClient,
     doCli,
     doCompile,
@@ -102,7 +104,9 @@ export async function build(cfg?: BuildConfig): Promise<void> {
     await ensureEmbeddedBundle(cfg, mainConfig);
   }
 
-  if (!doCompile && !doAndroid && !doIos && !doClient && !doCli) return;
+  if (!doCompile && !doAndroid && !doIos && !doWeb && !doClient && !doCli) {
+    return;
+  }
 
   // ── Stamp THE app version into the artifact ─────────────────────────────
   // `.aio/build-version.json` is embedded by `deno compile` (build-compile's
@@ -163,6 +167,10 @@ export async function build(cfg?: BuildConfig): Promise<void> {
     await buildIos(cfg);
     return; // the project under dist/ios IS the artifact — nothing to compile
   }
+  if (doWeb) {
+    await buildWeb(cfg);
+    return; // a static directory — nothing to compile
+  }
 
   // ── Clean dist/ before compile ───────────────────────────────────────────
   // dist/ is embedded WHOLESALE (`deno compile --include dist/`), so anything
@@ -170,7 +178,13 @@ export async function build(cfg?: BuildConfig): Promise<void> {
   // this build writes" without shipping the previous target's leftovers. That
   // is why dist/ is staging and never a destination: `--out=` (default: the
   // project root) is where artifacts land, and loadBuildConfig refuses an
-  // --out inside dist/ (R-4).
+  // --out inside dist/ (R-4). A headless build never bundled, so this is the
+  // first thing to empty dist/ — never one the project brought with it.
+  const distRefusal = await foreignDistRefusal(dist);
+  if (distRefusal) {
+    console.error(`✗ ${distRefusal}`);
+    Deno.exit(1);
+  }
   try {
     for await (const entry of Deno.readDir(dist)) {
       if (keepInDistStaging(entry.name)) continue;

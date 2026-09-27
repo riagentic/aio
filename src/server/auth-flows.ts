@@ -7,6 +7,7 @@
 //   GET  /__aio/auth/me
 //   POST /__aio/auth/password       (authed) { old, new } — rotates sessions
 //   POST /__aio/auth/verify/request (authed) — email a verification token
+//   POST /__aio/auth/verify/resend  { id } — always 200 (no enumeration)
 //   POST /__aio/auth/verify         { token }
 //   POST /__aio/auth/reset/request  { id } — always 200 (no enumeration)
 //   POST /__aio/auth/reset          { token, password } — revokes all sessions
@@ -218,7 +219,30 @@ async function _spendTotpCode(
   return totpReplayOf(store)?.accept(subject, step) ?? true;
 }
 
-/** Handle /__aio/auth/* — returns null for any other path. */
+/** What a user store throws because of the REQUEST — the client's to fix. */
+const REQUEST_REFUSALS = new Set([
+  "invalid_id",
+  "reserved_id",
+  "password_too_short",
+  "user_exists",
+]);
+
+/** A store refusal the request earned (`409`/`400`), or — anything else — the
+ *  STORE failing (auth.db deleted, disk full), which is rethrown for
+ *  `handleAuthFlow`'s 503. Every error used to answer `400` here, so a dead
+ *  auth.db told each client its request was bad and logged nothing. */
+const refusalOf = (e: unknown): Response => {
+  const msg = e instanceof Error ? e.message : String(e);
+  if (!REQUEST_REFUSALS.has(msg)) throw e;
+  return json(msg === "user_exists" ? 409 : 400, { error: msg });
+};
+
+/** Handle /__aio/auth/* — returns null for any other path.
+ *
+ *  A throw from any route is the server's fault, never the client's: logged
+ *  at error level and answered `503 auth_unavailable` (the detail stays in
+ *  the log — it names server paths). Uncaught, it reached Deno's default
+ *  handler: a bare 500 on stderr, outside the app's log. */
 export async function handleAuthFlow(
   req: Request,
   url: URL,
@@ -226,6 +250,25 @@ export async function handleAuthFlow(
   clientKey: string | undefined,
 ): Promise<Response | null> {
   if (!url.pathname.startsWith("/__aio/auth/")) return null;
+  try {
+    return await authRoute(req, url, cfg, clientKey);
+  } catch (e) {
+    log.error(
+      "auth",
+      `${req.method} ${url.pathname} failed — ${
+        e instanceof Error ? (e.stack ?? e.message) : String(e)
+      }`,
+    );
+    return json(503, { error: "auth_unavailable" });
+  }
+}
+
+async function authRoute(
+  req: Request,
+  url: URL,
+  cfg: AuthFlows,
+  clientKey: string | undefined,
+): Promise<Response | null> {
   const route = `${req.method} ${url.pathname.slice("/__aio/auth/".length)}`;
   const cookieName = cfg.cookieName ?? SESSION_COOKIE;
   /** The cookie lives exactly as long as the session it carries — read from
@@ -438,7 +481,7 @@ export async function handleAuthFlow(
         if (msg === "user_exists") {
           recordAuthFail(clientKey, `signup collision for id=${id}`);
         }
-        return json(msg === "user_exists" ? 409 : 400, { error: msg });
+        return refusalOf(e);
       }
       if (email && cfg.sendMail) {
         const token = cfg.users.issueToken("verify", id, VERIFY_TTL_MS);
@@ -646,11 +689,16 @@ export async function handleAuthFlow(
       }
       // The old password was RIGHT — its work unit goes back (see `login`).
       refundAuthWork(clientKey);
+      let changed: boolean;
       try {
-        await cfg.users.setPassword(user.id, newPw);
+        changed = await cfg.users.setPassword(user.id, newPw);
       } catch (e) {
-        return json(400, { error: e instanceof Error ? e.message : String(e) });
+        return refusalOf(e);
       }
+      // The account was REMOVED while the new hash was computed (`remove`
+      // revoked this session already). Issuing one here would mint a fresh
+      // session for an account that no longer exists.
+      if (!changed) return json(401, { error: "login_required" });
       // `setPassword` IS the rotation: it clears the lockout, burns every
       // outstanding one-shot token and revokes every session (stolen ones
       // included). This route deliberately does not repeat any of that — a
@@ -682,6 +730,49 @@ export async function handleAuthFlow(
         subject: `Verify your ${cfg.appTitle} account`,
         text: `Your verification token: ${token}`,
       });
+      return json(200, { ok: true });
+    }
+
+    case "verify/resend": {
+      // The SELF-SERVICE door for an unverified account whose token expired:
+      // with `requireVerified`, login is refused `403 email_unverified` and
+      // `verify/request` needs a session — so without this the only way back
+      // was the operator. Shaped exactly like reset/request: ALWAYS 200 (no
+      // enumeration), a decoy token on a miss (same write cost), mail sent
+      // fire-and-forget (never on the response path).
+      if (!cfg.sendMail) return MAIL_OFF();
+      const id = str(body()?.id);
+      if (id) {
+        // Two caps, either refuses silently: per client (one source spraying
+        // accounts) and per ACCOUNT — on a key of its own, never the one
+        // `verify/request` charges: this door is anonymous, so sharing that
+        // key let anyone who can name an account exhaust its owner's
+        // signed-in verify/request.
+        const rec = cfg.users.get(id);
+        const perClient = chargeMail(`resend:${abuseBucket(clientKey)}`);
+        if (!chargeMail(`verify-resend:${rec?.id ?? id}`) || !perClient) {
+          return json(200, { ok: true });
+        }
+        log.info("auth", `mail request: verify resend for id=${id}`);
+        // An external identity is verified by its provider, not by a mailed
+        // token — treated like a miss, as reset/request does.
+        const send = rec !== null && !isExternalId(rec.id) && !!rec.email &&
+          !rec.verified;
+        const token = cfg.users.issueToken(
+          "verify",
+          send ? rec.id : "\u0000decoy",
+          VERIFY_TTL_MS,
+        );
+        if (send) {
+          void Promise.resolve(
+            cfg.sendMail({
+              to: rec.email!,
+              subject: `Verify your ${cfg.appTitle} account`,
+              text: `Your verification token: ${token}`,
+            }),
+          ).catch((e) => log.warn(`auth: verify mail send failed — ${e}`));
+        }
+      }
       return json(200, { ok: true });
     }
 
@@ -763,11 +854,17 @@ export async function handleAuthFlow(
       if (isExternalId(stored.subject)) {
         return json(403, { error: "external_identity" });
       }
+      let changed: boolean;
       try {
-        await cfg.users.setPassword(stored.subject, password);
+        changed = await cfg.users.setPassword(stored.subject, password);
       } catch (e) {
-        return json(400, { error: e instanceof Error ? e.message : String(e) });
+        return refusalOf(e);
       }
+      // No such account any more — removed after the token was minted, or
+      // while the new hash was computed. `setPassword` changed nothing, so
+      // "ok" (and the "reset completed" log line) would be a lie: the token
+      // is spent on nothing, exactly like an expired one.
+      if (!changed) return json(401, { error: "invalid_or_expired_token" });
       // Proof of mailbox control: the email is verified. Sessions, tokens and
       // the lockout are `setPassword`'s job (above) — one decider.
       cfg.users.markVerified(stored.subject);
@@ -877,6 +974,10 @@ export async function handleAuthFlow(
         return json(200, { ok: true, cleared });
       }
       recordAuthFail(clientKey, `totp disable failed for id=${user.id}`);
+      // Over budget AND wrong: "back off", like every sibling route.
+      if (authFailBudgetExceeded(clientKey)) {
+        return json(429, { error: "too_many_attempts" });
+      }
       return json(401, { error: "invalid_credentials" });
     }
 

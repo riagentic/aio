@@ -20,6 +20,7 @@ import {
 import { attrNameOf as _attrName } from "./ssr-utils.ts";
 import { _DOM_PROPS } from "./vdom-types.ts";
 import { isDevMode } from "../state/dev-flag.ts";
+import { _recordControlled } from "./control-drift.ts";
 import {
   _CHANGE_TARGETS,
   _DELEGATED_EVENTS,
@@ -322,6 +323,7 @@ export function applyProps(
   // back to the state's value at all. This is the diff's per-render hook, so
   // the re-assert happens here — the decider is shared, not copied.
   reassertControlledSignalProps(el, next);
+  _recordControlled(el, next);
 }
 
 /** The props a range/number input sanitizes its `value` against. */

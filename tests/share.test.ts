@@ -17,6 +17,8 @@ import {
   type StaticDeps,
 } from "../src/server/server-static.ts";
 
+import { _shareRoots } from "../src/server/server.ts";
+import { dropTempDir, tempDir } from "../src/testing/temp-dir.ts";
 const ROOT = new URL("..", import.meta.url).pathname;
 
 // ── the resolver ─────────────────────────────────────────────────────────────
@@ -215,7 +217,7 @@ const configEntry = mainConfig.entry ?? "src/app.ts";
 await runBundle({
   root, dist: root + "/dist", out: root + "/dist/app.js",
   frameworkSrcDir: ${JSON.stringify(ROOT + "src")},
-  isRemote: false, doAndroid: false, doForce: true,
+  isRemote: false, doAndroid: false, standalone: false, doForce: true,
   configEntry, appDir: resolveAppDir(root, configEntry), uiEntry: "App.tsx",
   // deno-lint-ignore no-explicit-any
 } as any, mainConfig);
@@ -294,4 +296,31 @@ Deno.test({
       await Deno.remove(outside, { recursive: true });
     }
   },
+});
+
+// ── the dev server's lookup ──────────────────────────────────────────────────
+
+// The dev server found the share's deno.json one folder up from the UI dir
+// only — the graph check's old bug, one door over. An entry two folders deep
+// (`src/agent/app.ts`, as docs/build/targets.md recommends) got NO share in
+// dev while the bundle, reading the project root, resolved it: `/shared/…`
+// answered 404 in dev and worked in the binary.
+Deno.test("share: the dev server finds the declaration for an entry two folders deep, as the build does", async () => {
+  const repo = await tempDir("aio-share-nested-");
+  try {
+    await Deno.mkdir(join(repo, ".git"));
+    await Deno.mkdir(join(repo, "shared"));
+    const app = join(repo, "apps", "a");
+    await Deno.mkdir(join(app, "src", "agent"), { recursive: true });
+    await Deno.writeTextFile(
+      join(app, "deno.json"),
+      JSON.stringify({ share: ["../../shared"] }),
+    );
+    for (const ui of [join(app, "src"), join(app, "src", "agent")]) {
+      const roots = _shareRoots(ui);
+      assertEquals(roots?.map((r) => r.prefix), ["/shared"], ui);
+    }
+  } finally {
+    await dropTempDir(repo);
+  }
 });

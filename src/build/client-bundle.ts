@@ -49,14 +49,15 @@ export function appImportSpecifier(
 }
 
 /** The bundle entry point.
- *  Android (standalone WebView) auto-mounts — the generated index.html loads
- *  the bundle as a classic script, so there is no importer to call mount(). */
-export function makeEntryCode(doAndroid: boolean, appImport: string): string {
+ *  Standalone (a local APK, the web target) auto-mounts — the generated
+ *  index.html loads the bundle as a classic script, so there is no importer
+ *  to call mount(). */
+export function makeEntryCode(standalone: boolean, appImport: string): string {
   // The stamps are NOT part of the entry: they go in as esbuild's `banner`,
   // which is prepended verbatim AFTER minification — so the text a reader
   // matches (a stale-bundle check, the artifact e2e) survives, and the
   // globals they set are still the first statements the bundle runs.
-  if (doAndroid) {
+  if (standalone) {
     return `\
 import { mount as _mount } from 'aio/renderer'
 import { ensureConnected } from 'aio/air'
@@ -161,7 +162,13 @@ export type ClientBundleOpts = {
   root: string;
   appDir: string;
   uiEntry: string;
-  doAndroid: boolean;
+  /** The standalone bundle (a local APK, the web target): standalone-air, an
+   *  IIFE that auto-mounts. False = the browser bundle (ESM, `mount()`). */
+  standalone?: boolean;
+  /** @deprecated The former name of `standalone`, still honoured: an app
+   *  build script that passes it keeps getting the standalone bundle rather
+   *  than a silent browser one. */
+  doAndroid?: boolean;
   /** The app's deno.json `imports`. */
   imports: Record<string, string>;
   shares: readonly ShareRoot[];
@@ -216,15 +223,18 @@ const IIFE_META_DEFINE = {
 };
 
 /** Build the browser bundle. One esbuild invocation, one option set. */
-export async function bundleClient(o: ClientBundleOpts): Promise<ClientBundle> {
+export async function bundleClient(
+  opts: ClientBundleOpts,
+): Promise<ClientBundle> {
   const t0 = performance.now();
+  const o = { ...opts, standalone: opts.standalone ?? opts.doAndroid ?? false };
   const isRemote = !o.frameworkSrcDir;
   // THE `aio*` table (bundleFrameworkEntries) is package-root relative;
   // frameworkSrcDir is `<pkg>/src`. A remote (JSR) framework has no local
   // files at all — makeHttpPlugin applies the SAME table against the fetched
   // package instead.
   const aioImports = isRemote ? {} : Object.fromEntries(
-    Object.entries(bundleFrameworkEntries(o.doAndroid)).map((
+    Object.entries(bundleFrameworkEntries(o.standalone)).map((
       [spec, rel],
     ) => [spec, join(resolve(o.frameworkSrcDir, ".."), rel)]),
   );
@@ -242,7 +252,7 @@ export async function bundleClient(o: ClientBundleOpts): Promise<ClientBundle> {
     if (k.endsWith("/")) continue;
     if (!v.startsWith("npm:") && !v.startsWith("jsr:")) alias[k] = v;
   }
-  const format = o.doAndroid ? "iife" : "esm";
+  const format = o.standalone ? "iife" : "esm";
   // The stamps (when written) and, for a classic script, the import.meta shim.
   const banner = [o.write?.banner, format === "iife" ? IIFE_META_BANNER : ""]
     .filter(Boolean).join("\n");
@@ -253,7 +263,7 @@ export async function bundleClient(o: ClientBundleOpts): Promise<ClientBundle> {
       ? [makeHttpPlugin(
         {
           frameworkBase: o.frameworkBase,
-          doAndroid: o.doAndroid,
+          standalone: o.standalone,
           root: o.root,
         } as BuildConfig,
       )]
@@ -284,7 +294,7 @@ export async function bundleClient(o: ClientBundleOpts): Promise<ClientBundle> {
       // build had to delete it in a `finally`).
       stdin: {
         contents: makeEntryCode(
-          o.doAndroid,
+          o.standalone,
           appImportSpecifier(o.root, o.appDir, o.uiEntry),
         ),
         resolveDir: o.root,
@@ -425,7 +435,7 @@ export type BundleJudgement = {
 export async function judgeClientBundle(
   b: Pick<ClientBundle, "inputs" | "entryKey" | "format" | "code">,
   root: string,
-  opts: { shell?: "browser" | "electron" } = {},
+  opts: { shell?: "browser" | "electron"; signal?: AbortSignal } = {},
 ): Promise<BundleJudgement> {
   const t0 = performance.now();
   const cache = new Map<string, string | undefined>();
@@ -466,8 +476,10 @@ export async function judgeClientBundle(
   const globals = audit.findings.filter((f) => f.rule === "node-global");
   const ev = await evaluateBundle(b.code, b.format, 10_000, {
     userAgent: EVAL_USER_AGENT[opts.shell ?? "browser"],
+    signal: opts.signal,
   });
-  if (ev.ok) {
+  // Stopped (the dev server closed mid-check): no verdict, so no refusal.
+  if (ev.ok || ev.name === "aborted") {
     return {
       ok: true,
       findings: [],

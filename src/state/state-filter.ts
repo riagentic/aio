@@ -580,6 +580,14 @@ function matchIncludePath(
   return { kind: "ancestor", rest: segs.slice(j) };
 }
 
+/** How many OBJECT keys an op path ends with — the run of string segments
+ *  after its last array index (the whole path when there is none). */
+function objectDepth(path: readonly (string | number)[]): number {
+  let n = 0;
+  for (const s of path) n = typeof s === "number" ? 0 : n + 1;
+  return n;
+}
+
 /** Filter patch entries per-cell based on strategy map.
  *  Returns undefined → full-state fallback needed,
  *  [] → nothing to send, PatchEntry[] → filtered patches.
@@ -629,17 +637,33 @@ export function filterPatchesByStrategy(
         const deeps = (ff.deepIncludes ?? []).filter((segs) => segs[0] === seg);
         if (deeps.length === 0) continue; // field not included at all
         let within = false;
+        let leaf = false;
         const ancestorRests: string[][] = [];
         for (const segs of deeps) {
           const m = matchIncludePath(op.path, segs);
           if (m.kind === "within") {
             within = true;
+            leaf = typeof op.path[op.path.length - 1] !== "number" &&
+              op.path.filter((s) => typeof s !== "number").length ===
+                segs.length;
             break;
           }
           if (m.kind === "ancestor") ancestorRests.push(m.rest);
         }
+        // Off every included path — not in the projection at all.
+        if (!within && ancestorRests.length === 0) continue;
+        // A key that VANISHES from the projection (a remove, or a value with
+        // nothing included left in it) takes its parent with it when nothing
+        // else included remains there — the frame has no `profile` at all
+        // once `profile.name` is gone, while the client, patched, kept
+        // `profile: {}`. Which of the two it is depends on siblings this op
+        // does not show, so under an OBJECT parent the round falls back to
+        // full state. Directly under the cell or under an array element the
+        // parent stays either way, and the op is exact.
+        const nestedKey = objectDepth(op.path) >= 2;
         // The op targets the included path or something under it — send it.
         if (within) {
+          if (leaf && op.op === "remove" && nestedKey) return undefined;
           kept.push(op);
           continue;
         }
@@ -648,6 +672,7 @@ export function filterPatchesByStrategy(
         // the branch too). A replacement carries the whole ancestor value, so
         // only the included sub-branches of it are sent.
         if (!("value" in op)) {
+          if (nestedKey) return undefined;
           kept.push(op);
           continue;
         }
@@ -663,9 +688,20 @@ export function filterPatchesByStrategy(
             ? picked
             : mergePicked(projected, picked);
         }
-        // Nothing included survives in this value — the client's projection is
-        // unchanged by it, so there is nothing to send.
-        if (projected !== MISSING) kept.push({ ...op, value: projected });
+        if (projected !== MISSING) {
+          kept.push({ ...op, value: projected });
+          continue;
+        }
+        // Nothing included survives in this value — but the client may hold
+        // what the value REPLACED (`s.profile = null` after `profile.name`
+        // was shown), and an array element still projects: to `{}`, which an
+        // `add` must deliver or every later index is off by one.
+        if (typeof op.path[op.path.length - 1] === "number") {
+          kept.push({ ...op, value: {} });
+        } else if (op.op === "replace") {
+          if (nestedKey) return undefined;
+          kept.push({ op: "remove", path: op.path });
+        }
         continue;
       }
       // exclude mode: top-level drop, then deep-path handling

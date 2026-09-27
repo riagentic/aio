@@ -193,10 +193,13 @@ Strictly better DX.
 
 |                      | AIR                                  | React                           | Best (Solid)                      |
 | -------------------- | ------------------------------------ | ------------------------------- | --------------------------------- |
-| **Code splitting**   | `lazy(() => import(...))`            | `React.lazy(() => import(...))` | `lazy(() => import(...))`         |
+| **Code splitting**   | `lazy(() => import(...))`¹           | `React.lazy(() => import(...))` | `lazy(() => import(...))`         |
 | **Loading boundary** | `<Suspense fallback={...}>`          | `<Suspense fallback={...}>`     | Same                              |
 | **Async data**       | `resource(source, fetcher)` built-in | None built-in (TanStack Query)  | `createResource(source, fetcher)` |
 | **Streaming SSR**    | `renderToStream()` async generator   | `renderToPipeableStream()`      | Same concept                      |
+
+¹ Deferred evaluation only: aio ships one bundle, so the module is downloaded
+with the page (see [AIR Advanced](air-advanced.md#code-splitting)).
 
 ### Verdict: ✅ Best approach
 
@@ -270,12 +273,12 @@ flexible for multi-target apps (browser + Electron + local).
 
 ## 13. SSR & Hydration
 
-|                       | AIR                                           | React                              | Best (Qwik)                           |
-| --------------------- | --------------------------------------------- | ---------------------------------- | ------------------------------------- |
-| **String render**     | `renderToString(vnode)`                       | `renderToString(element)`          | Same                                  |
-| **Streaming**         | `renderToStream()` async generator            | `renderToPipeableStream()`         | Same                                  |
-| **Hydration**         | `hydrate()` — walks DOM, fallback on mismatch | `hydrateRoot()` — patches in place | Qwik: resumable (zero hydration cost) |
-| **Mismatch handling** | Full re-render fallback (safe)                | Patch in place (may corrupt)       | No mismatch possible                  |
+|                       | AIR                                                                                             | React                              | Best (Qwik)                           |
+| --------------------- | ----------------------------------------------------------------------------------------------- | ---------------------------------- | ------------------------------------- |
+| **String render**     | `renderToString(vnode)`                                                                         | `renderToString(element)`          | Same                                  |
+| **Streaming**         | `renderToStream()` async generator                                                              | `renderToPipeableStream()`         | Same                                  |
+| **Hydration**         | `hydrate()` — walks DOM, fallback on mismatch                                                   | `hydrateRoot()` — patches in place | Qwik: resumable (zero hydration cost) |
+| **Mismatch handling** | Wrong node → full re-render; diverging attrs repaired, surplus server nodes removed (dev warns) | Patch in place (may corrupt)       | No mismatch possible                  |
 
 ### Verdict: ❌ Not the best, but safer than React
 

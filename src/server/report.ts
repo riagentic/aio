@@ -476,10 +476,10 @@ function safeSize(v: unknown): number {
 }
 
 /** Read the last N lines of the app log, if there is one — with the
- *  credentials aio prints there on purpose masked. The `--expose` boot banner
- *  writes the share link (`?token=<the app key>`) and the pair code into
- *  app.log for the operator; on a quiet app they are inside the tail, and a
- *  report is POSTed off the machine. */
+ *  credentials the `--expose` boot banner prints (the share link's
+ *  `?token=<the app key>` and the pair code) masked. The logger masks them on
+ *  their way to disk; this is the second lock, for a log an older build wrote
+ *  whole, since a report is POSTed off the machine. */
 async function tailLog(logsDir: string, lines: number): Promise<string[]> {
   try {
     const text = await Deno.readTextFile(join(logsDir, "app.log"));

@@ -49,12 +49,14 @@ Deno.test("revoked session: the tab stops reconnecting and shows signed out", as
   // browser's cookie jar: a sign-in's session lands in a cookie, which every
   // later request and upgrade to this host carries.
   let upgrades = 0;
+  let lastWsUrl = "";
   let jar = "";
   const RealWS = WebSocket;
   g.WebSocket = class extends RealWS {
     constructor(u: string | URL) {
       super(u, jar ? { headers: { cookie: jar } } as never : undefined);
       upgrades++;
+      lastWsUrl = String(u);
     }
   };
   const realFetch = globalThis.fetch;
@@ -134,6 +136,12 @@ Deno.test("revoked session: the tab stops reconnecting and shows signed out", as
     assert(jar !== "", "the sign-in set a session cookie");
     for (let i = 0; i < 150 && !connected.value; i++) await sleep(20);
     assertEquals(connected.value, true, "a sign-in reconnected the tab");
+    // …on the cookie alone: the dead URL token is never presented again (the
+    // server would give way to the cookie, but charge every such attempt).
+    assert(
+      !lastWsUrl.includes("token="),
+      `the reconnect presented the refused URL token: ${lastWsUrl}`,
+    );
   } finally {
     console.debug = orig.debug;
     console.error = orig.error;

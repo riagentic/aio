@@ -91,29 +91,42 @@ async function highWaterTs(db: DB): Promise<number> {
          SELECT MAX(compacted_ts) AS ts FROM sync_meta)`,
     );
     return rows[0]?.ts ?? 0;
-  } catch {
+  } catch (e) {
     // Pre-migration DB (no compacted_ts column) — the op-log alone still
     // covers every ts that has a row.
+    if (!isMissingSchema(e)) throw e;
     try {
       const { rows } = await db.query<{ ts: number | null }>(
         "SELECT MAX(server_ts) AS ts FROM sync_ops",
       );
       return rows[0]?.ts ?? 0;
-    } catch {
+    } catch (e) {
+      if (!isMissingSchema(e)) throw e;
       return 0; // fresh DB / no table yet — wall clock is correct
     }
   }
 }
 
+/** The ONE error the schema fallbacks here exist for: a table or column an
+ *  older (or not-yet-migrated) store lacks. Anything else — a locked or
+ *  unreadable file, a closed handle, I/O — is a real failure, and answering
+ *  "0 / no snapshot" for it silently re-based cursors and catch-ups. */
+function isMissingSchema(e: unknown): boolean {
+  return /no such (table|column)/i.test(
+    e instanceof Error ? e.message : String(e),
+  );
+}
+
 /** Seed the issuer from the durable high-water mark once per database, so a
  *  restart — or a switch to another store in the same process — resumes
  *  strictly ABOVE every value that store ever issued (see
- *  {@linkcode highWaterTs}). Best-effort: on query failure the wall clock
- *  still applies. */
+ *  {@linkcode highWaterTs}). A failed read throws and leaves the store
+ *  unseeded — issuing on the wall clock alone could stamp below a cursor a
+ *  client already holds. */
 async function seedServerTs(db: DB): Promise<void> {
   if (_seededDbs.has(db)) return;
+  const hw = await highWaterTs(db); // a throw leaves it unseeded: retried next call
   _seededDbs.add(db);
-  const hw = await highWaterTs(db);
   if (hw > _lastServerTs) _lastServerTs = hw;
 }
 
@@ -304,7 +317,8 @@ export async function getOpServerTs(
       if (typeof r.ts === "number" && r.ts > 0) return r.ts;
     }
     return null;
-  } catch {
+  } catch (e) {
+    if (!isMissingSchema(e)) throw e;
     // Pre-migration tombstone table (no server_ts column) — unknown, and the
     // ack degrades to its pre-alpha43 shape rather than lying.
     return null;
@@ -421,7 +435,8 @@ export async function hasSyncSnapshot(db: DB, cell: string): Promise<boolean> {
       [cell],
     );
     return (rows[0]?.n ?? 0) > 0;
-  } catch {
+  } catch (e) {
+    if (!isMissingSchema(e)) throw e;
     return false; // no table yet — nothing to be missing
   }
 }
@@ -488,7 +503,8 @@ export async function getCompactedTs(db: DB, cell: string): Promise<number> {
       [cell],
     );
     return rows[0]?.compacted_ts ?? 0;
-  } catch {
+  } catch (e) {
+    if (!isMissingSchema(e)) throw e;
     // Pre-migration database (column absent): treat as "unknown", which the
     // caller handles conservatively.
     return 0;

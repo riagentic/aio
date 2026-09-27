@@ -186,6 +186,39 @@ export function _buildUserResolver(config: {
   return null;
 }
 
+/** Below either bound a static `users:` token is WEAK. A VALID credential is
+ *  served over the failure budget by design (the budget throttles failed
+ *  authentication, never service), so the budget slows a guesser but never
+ *  stops one: a short token falls at network speed. 16 chars / 80 bits is
+ *  what `openssl rand -base64 16` or `crypto.randomUUID()` clears. */
+export const WEAK_TOKEN_MIN_CHARS = 16;
+export const WEAK_TOKEN_MIN_BITS = 80;
+
+/** Estimated guessing entropy of a token, in bits: length × log2 of the
+ *  alphabet its character classes imply. An UPPER bound (a dictionary phrase
+ *  scores as random), so a token it calls weak is weak. */
+export function tokenEntropyBits(token: string): number {
+  // Hex is its own alphabet (`openssl rand -hex 8` is 16 chars, 64 bits).
+  if (/^[0-9a-f]+$|^[0-9A-F]+$/.test(token)) return token.length * 4;
+  const alphabet = (/[a-z]/.test(token) ? 26 : 0) +
+    (/[A-Z]/.test(token) ? 26 : 0) + (/[0-9]/.test(token) ? 10 : 0) +
+    (/[^a-zA-Z0-9]/.test(token) ? 33 : 0);
+  return alphabet ? [...token].length * Math.log2(alphabet) : 0;
+}
+
+/** The users whose static token is weak (see `WEAK_TOKEN_MIN_*`), by id —
+ *  never the token itself: this feeds a log line. */
+export function weakStaticTokenUsers(
+  users: Record<string, AioUser>,
+): string[] {
+  return Object.entries(users)
+    .filter(([t]) =>
+      [...t].length < WEAK_TOKEN_MIN_CHARS ||
+      tokenEntropyBits(t) < WEAK_TOKEN_MIN_BITS
+    )
+    .map(([, u]) => u.id);
+}
+
 // ── Control-plane gate (/__aio/trojan/*) ─────────────────────────────────────
 
 import { mintControlKey, removeControlKey } from "./app-key.ts";

@@ -206,6 +206,7 @@ The update check (`updates`) compares `major.minor.build` as plain SemVer:
 | `1.2.345` | `1.2.346`                   | offered                             |
 | `1.2.345` | `1.2.345`, different sha256 | offered (same version, new build)   |
 | `1.2.345` | `1.2.345`, same sha256      | current                             |
+| `1.2.345` | `1.2.345`, an older build   | current (released before it)        |
 | `1.2.345` | `1.2.344`                   | current (not offered)               |
 | `1.2.345` | `1.2.345-dirty.…`           | current — a prerelease of what runs |
 

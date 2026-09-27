@@ -60,6 +60,15 @@ type BuildManifest = {
   }[];
 };
 
+/** A directory artifact? A missing path is not one — fileFormat reports it. */
+function isDirectory(path: string): boolean {
+  try {
+    return Deno.statSync(path).isDirectory;
+  } catch {
+    return false; // aio-ok: a missing file is fileFormat's to report
+  }
+}
+
 /** What KIND of artifact this file is (`artifactFormat`), or null for a
  *  companion the build wrote beside one (a systemd unit, a checksum, a desktop
  *  entry).
@@ -340,6 +349,10 @@ export async function cmdPublish(
    *  (`.dmg`), which no update target installs, and a platform's other
    *  programs (see {@link pickUpdateArtifact}). */
   const downloads: { file: string; platform: string }[] = [];
+  /** Directory artifacts (the `web` build, the iOS project): no manifest can
+   *  name a directory, and a static site updates through its own service
+   *  worker — deployed as it is, said so, never signed as a program. */
+  const directories: string[] = [];
   const only = flag("target");
   /** An explicitly supplied data contract — see the spread in `shipApp` below. */
   const dataFlag = flag("data");
@@ -359,6 +372,10 @@ export async function cmdPublish(
     // program is.
     const programs: string[] = [];
     for (const a of t.artifacts ?? []) {
+      if (isDirectory(join(distDir, a.file))) {
+        directories.push(a.file);
+        continue;
+      }
       const format = fileFormat(join(distDir, a.file));
       if (format === null) skipped.push(a.file);
       else if (format === "DMG") {
@@ -629,6 +646,8 @@ export async function cmdPublish(
       // The same fact the text output prints: a scripted publisher must be
       // able to see what was built and NOT published.
       skipped,
+      /** Directory artifacts (a `web` build): deployed as they are. */
+      directories,
       /** Copied beside the manifests for download only — no manifest names
        *  them (a `.dmg`, the Windows `.zip`). */
       downloads: downloads.map((d) => d.file),
@@ -717,6 +736,13 @@ export async function cmdPublish(
       : []),
     // Loud, not a footnote: a built file that went out with no manifest may
     // be a whole platform missing from this release.
+    ...(directories.length > 0
+      ? [
+        `  not published (a directory — deploy it as it is; a web build ` +
+        `updates through its own service worker): ${directories.join(", ")}`,
+        ``,
+      ]
+      : []),
     ...(skipped.length > 0
       ? [
         `  ⚠ NOT published (not a program aio recognises — a companion file, ` +

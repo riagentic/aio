@@ -111,6 +111,7 @@ await runBundle({
   frameworkSrcDir: ${JSON.stringify(ROOT + "src")},
   isRemote: false,
   doAndroid: ${android},
+  standalone: ${android},
   doForce: ${force},
   configEntry,
   appDir: resolveAppDir(root, configEntry),

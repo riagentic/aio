@@ -15,10 +15,16 @@ import {
 import { createUpdatesRuntime } from "../src/server/updates-runtime.ts";
 import { resolveUpdates } from "../src/server/updates-core.ts";
 import {
+  failedUpdatePath,
   firstBootPath,
   readPending,
   writePending,
 } from "../src/server/updates-apply.ts";
+import {
+  judgePendingUpdate,
+  startUpdates,
+} from "../src/server/updates-boot.ts";
+import type { UpdatesSlot } from "../src/state/updates-cell.ts";
 import { readTrust, writeTrust } from "../src/server/updates-check.ts";
 import type { Log } from "../src/diagnostics/logger.ts";
 
@@ -220,6 +226,60 @@ Deno.test("updates e2e: publish → check → apply replaces the artifact", asyn
     const pending = readPending(r.dataDir);
     assertEquals(pending?.from, "1.0.0");
     assertEquals(pending?.to, "2.0.0");
+  } finally {
+    await Deno.remove(r.root, { recursive: true });
+  }
+});
+
+// A relaunch that fails runs after shutdown too: its line reached no log. It
+// is carried on the marker, and the next boot of the new version says it.
+Deno.test("updates e2e: a handover that fails after shutdown is said by the next boot", async () => {
+  const r = await rig();
+  try {
+    await publish(r, { version: "2.0.0", channel: "prod" });
+    let loggerOpen = true;
+    const errors: string[] = [];
+    const rt = createUpdatesRuntime({
+      config: resolveUpdates({
+        source: `file://${r.releases}`,
+        channel: "prod",
+      }),
+      dataDir: r.dataDir,
+      appVersion: "1.0.0",
+      local: { schema: 1, cells: { todos: 1 } },
+      exposed: false,
+      log: {
+        ...silentLog,
+        error: (...a: unknown[]) =>
+          void (loggerOpen && errors.push(a.map(String).join(" "))),
+      } as Log,
+      argv: [],
+      artifact: r.artifact,
+      canInstall: ["binary"],
+      exit: () => {},
+      relaunch: () => {
+        throw new Deno.errors.PermissionDenied("spawn refused");
+      },
+      shutdown: () => Promise.resolve(void (loggerOpen = false)),
+    });
+    assertEquals((await rt.check({ dismissed: null })).kind, "offer");
+    await rt.apply();
+    await settle(rt);
+    assertEquals(errors, []);
+    const said: string[] = [];
+    const push = (...a: unknown[]) => void said.push(a.map(String).join(" "));
+    await judgePendingUpdate(
+      r.dataDir,
+      { info: push, debug: push, warn: push, error: push } as unknown as Log,
+      "2.0.0",
+    );
+    assertStringIncludes(
+      said.join("\n"),
+      "during the handover 1.0.0 → 2.0.0: update handover FAILED " +
+        "(PermissionDenied: spawn refused)",
+    );
+    // Said once: the marker no longer carries it.
+    assertEquals(readPending(r.dataDir)?.handoverError, undefined);
   } finally {
     await Deno.remove(r.root, { recursive: true });
   }
@@ -609,6 +669,9 @@ Deno.test("updates e2e: a .zip release is verified, unpacked, and handed to the 
 // A policy (AppLocker) that refuses the swap helper used to leave the log
 // saying "the new version is installed" with the marker in place, and the app
 // gone. Nothing was swapped: it is said, undone, and this version restarts.
+// The refusal runs AFTER shutdown, when the logger is gone (VM-measured: the
+// line reached no file) — so it is kept in the failed record, and the
+// relaunched version names it at boot and dismisses the release.
 Deno.test("updates e2e: a swap helper that cannot start — not installed, undone, this version restarts", async () => {
   if (Deno.build.os === "windows") return;
   const r = await rig();
@@ -621,6 +684,7 @@ Deno.test("updates e2e: a swap helper that cannot start — not installed, undon
     const errors: string[] = [];
     const relaunched: string[] = [];
     let staged = "";
+    let loggerOpen = true;
     const rt = createUpdatesRuntime({
       config: resolveUpdates({
         source: `file://${r.releases}`,
@@ -632,7 +696,8 @@ Deno.test("updates e2e: a swap helper that cannot start — not installed, undon
       exposed: false,
       log: {
         ...silentLog,
-        error: (...a: unknown[]) => void errors.push(a.join(" ")),
+        error: (...a: unknown[]) =>
+          void (loggerOpen && errors.push(a.join(" "))),
       } as Log,
       argv: ["--x"],
       artifact: install,
@@ -652,12 +717,40 @@ Deno.test("updates e2e: a swap helper that cannot start — not installed, undon
         Deno.writeTextFileSync(firstBootPath(r.dataDir), "{}");
         throw new Deno.errors.PermissionDenied("blocked by policy");
       },
-      shutdown: () => Promise.resolve(),
+      shutdown: () => Promise.resolve(void (loggerOpen = false)),
     });
     assertEquals((await rt.check({ dismissed: null })).kind, "offer");
     await rt.apply();
     await settle(rt);
-    assertStringIncludes(errors.join("\n"), "2.0.0 was NOT installed");
+    assertEquals(errors, [], "logged after shutdown: that line is lost");
+    const rec = JSON.parse(Deno.readTextFileSync(failedUpdatePath(r.dataDir)));
+    assertEquals([rec.from, rec.to], ["1.0.0", "2.0.0"]);
+    assertStringIncludes(rec.swapFailed, "blocked by policy");
+    // The relaunched 1.0.0 says it, and does not offer 2.0.0 again.
+    const said: string[] = [];
+    const push = (...a: unknown[]) => void said.push(a.map(String).join(" "));
+    startUpdates({
+      updates: { source: "https://example.invalid/rel", check: 60_000 },
+      dataDir: r.dataDir,
+      appName: "demo",
+      appVersion: "1.0.0",
+      local: { schema: 1, cells: {} },
+      exposed: false,
+      log: {
+        info: push,
+        debug: push,
+        warn: push,
+        error: push,
+      } as unknown as Log,
+      argv: [],
+      slot: { runtime: null, cell: null } as unknown as UpdatesSlot,
+    }).stop();
+    assertStringIncludes(
+      said.join("\n"),
+      "update 1.0.0 → 2.0.0 could not be installed: the update helper " +
+        "could not start (PermissionDenied: blocked by policy), so 1.0.0 " +
+        "was started again",
+    );
     assertEquals(readPending(r.dataDir), null);
     assertEquals(
       await Deno.stat(firstBootPath(r.dataDir)).catch(() => null),
@@ -1143,6 +1236,13 @@ Deno.test("updates e2e: republishing 1.0.0 with new bytes IS an update", async (
   try {
     // The install is running exactly what prod is serving.
     await publish(r, { version: "1.0.0", channel: "prod" });
+    const manifestPath = join(
+      r.releases,
+      "prod",
+      `${platform.os}-${platform.arch}.json`,
+    );
+    const firstManifest = await Deno.readTextFile(manifestPath);
+    await new Promise((res) => setTimeout(res, 5)); // a later releasedAt
     const first = runtimeFor(r, {});
     assertEquals((await first.check({ dismissed: null })).kind, "current");
     // …and it measured its own artifact once, so it now knows what it runs.
@@ -1182,6 +1282,14 @@ Deno.test("updates e2e: republishing 1.0.0 with new bytes IS an update", async (
       (await runtimeFor(r, {}).check({ dismissed: null })).kind,
       "current",
     );
+    // A CDN edge still caching the FIRST build's manifest (or a replay of it:
+    // its signature is genuine) is an older build — never offered back.
+    await Deno.writeTextFile(manifestPath, firstManifest);
+    const stale = await runtimeFor(r, {}).check({ dismissed: null });
+    assertEquals(stale.kind, "current");
+    if (stale.kind === "current") {
+      assertStringIncludes(stale.reason, "older build");
+    }
   } finally {
     await Deno.remove(r.root, { recursive: true });
   }

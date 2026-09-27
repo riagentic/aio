@@ -532,6 +532,8 @@ export function createProdGraphCheck(opts: {
   shell?: "browser" | "electron";
   uiEntry: string;
   debug?: (msg: string) => void;
+  /** Aborted when the dev server closes: a running evaluation stops. */
+  signal?: AbortSignal;
 }): ProdGraphCheck {
   let last: { hash: string; errors: GraphError[] } | null = null;
   return async (graphHash) => {
@@ -540,7 +542,7 @@ export function createProdGraphCheck(opts: {
     }
     const t0 = performance.now();
     const errors = await prodGraphErrors(opts);
-    last = { hash: graphHash, errors };
+    if (!opts.signal?.aborted) last = { hash: graphHash, errors };
     return { errors, ms: performance.now() - t0, cached: false };
   };
 }
@@ -550,6 +552,7 @@ async function prodGraphErrors(opts: {
   uiEntry: string;
   shell?: "browser" | "electron";
   debug?: (msg: string) => void;
+  signal?: AbortSignal;
 }): Promise<GraphError[]> {
   const { absBaseDir, uiEntry } = opts;
   // ONE decider for "project root" (remote-desktop field report §1): this used to look
@@ -587,7 +590,7 @@ async function prodGraphErrors(opts: {
     root,
     appDir: absBaseDir,
     uiEntry,
-    doAndroid: false,
+    standalone: false,
     imports: (config as { imports?: Record<string, string> }).imports ?? {},
     shares,
     frameworkSrcDir,
@@ -641,7 +644,10 @@ async function prodGraphErrors(opts: {
           "folders above the UI entry (the build runs from that folder).",
       );
   }
-  const verdict = await judgeClientBundle(bundle, root, { shell: opts.shell });
+  const verdict = await judgeClientBundle(bundle, root, {
+    shell: opts.shell,
+    signal: opts.signal,
+  });
   opts.debug?.(
     `graph: prod bundle audited (${verdict.auditMs.toFixed(0)}ms) + ` +
       `evaluated (${verdict.evalMs.toFixed(0)}ms) — ${

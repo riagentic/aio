@@ -2274,7 +2274,17 @@ export function createWsManager(deps: WsDeps): WsManager {
       const actionType = typeof parsed.type === "string" ? parsed.type : "?";
       Promise.resolve(result).then(
         (value) => _sendAck(socket, cid, parsed, actionType, value),
-        (err) => _sendAckErr(socket, cid, err),
+        // A refusal at the shutdown door says when to re-send: the call
+        // never ran (aio-server `closing`).
+        (err) => {
+          const r = (err as { retryAfterMs?: unknown } | null)?.retryAfterMs;
+          _sendAckErr(
+            socket,
+            cid,
+            err,
+            typeof r === "number" ? { retryAfterMs: r } : undefined,
+          );
+        },
       );
     }
   }

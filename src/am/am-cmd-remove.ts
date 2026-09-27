@@ -20,6 +20,7 @@ import {
   appDirs,
   appHome,
   appsRoot,
+  homeOwnerError,
   installedAppParents,
   installedAppPaths,
   installRoot,
@@ -214,8 +215,21 @@ export async function cmdRemove(
         `  If it really is ${name}'s data, delete it by hand after checking ` +
         `what is in it.`
       : null;
-    if (reserved || foreign) {
-      outError(reserved ?? foreign!, mode);
+    // The NAME derives the folder, and two names can derive one folder:
+    // `am remove myapp-dev` and `myapp --profile=dev` both land on
+    // `<apps>/myapp-dev`. The folder's own data/meta.json says whose it is —
+    // deleting another app's (or profile's) data on a name match is the one
+    // unrecoverable mistake this verb can make. `--force` does not override.
+    const owner = hasData
+      ? homeOwnerError(appDirs(name), name, undefined)
+      : null;
+    const notOurs = owner
+      ? `refusing to delete ${dataDir}: ${owner.split("\n")[0]}\n` +
+        `  --force does not override this; remove that owner's data with ` +
+        `its own name (a profile's folder by hand, after checking it).`
+      : null;
+    if (reserved || foreign || notOurs) {
+      outError(reserved ?? foreign ?? notOurs!, mode);
       Deno.exit(1);
     }
   }
@@ -327,6 +341,19 @@ export async function cmdRemove(
     kind: "app data",
     parent: appsRoot(),
   }].filter((f) => !insideParent(f.path, f.parent));
+  // The data home alone outside the root is the USER's choice (`appDir`,
+  // `--home`, another `AIO_APPS_DIR`), not a bug: said as that, with the way.
+  if (escaping.length === 1 && escaping[0]!.path === dataDir) {
+    outError(
+      `refusing to delete ${dataDir}: it is outside the apps root ` +
+        `(${appsRoot()}) — a data home placed by appDir, --home or another ` +
+        `AIO_APPS_DIR is never deleted by am remove. Nothing was removed.\n` +
+        `  fix: am remove ${name}   (the program; keeps the data), then ` +
+        `delete ${dataDir} by hand, after checking what is in it.`,
+      mode,
+    );
+    Deno.exit(1);
+  }
   if (escaping.length > 0) {
     outError(
       `refusing to remove "${name}": ${
@@ -373,12 +400,17 @@ export async function cmdRemove(
   // Profiles are separate data homes (`~/.<name>-dev`) and never deleted
   // here — but they ARE the app's, so they are named, not left to be found.
   const profiles = profileHomesOf(name);
+  // `--data` with no data where am looks: am derives the home from ITS
+  // environment, and an app booted with `appDir`, `--home` or another
+  // `AIO_APPS_DIR` keeps it elsewhere — said, never a silent success.
+  const dataNotFound = flags.data && !dirThere ? dataDir : undefined;
   if (mode === "json") {
     out({
       removed,
       dataRemoved,
       dataKept: dataRemoved ? null : (hasData ? dataDir : null),
       profileHomes: profiles,
+      ...(dataNotFound ? { dataNotFound } : {}),
     }, mode);
     return;
   }
@@ -388,6 +420,12 @@ export async function cmdRemove(
       (hasData && !dataRemoved
         ? `\n\n  KEPT its data: ${dataDir}\n` +
           `  (state, logs, keys, user files — remove with: am remove ${name} --data)`
+        : "") +
+      (dataNotFound
+        ? `\n\n  NO data at ${dataNotFound} — nothing deleted there. An app ` +
+          `booted with appDir, --home or another AIO_APPS_DIR keeps it ` +
+          `elsewhere (am instances shows a running one's home) — delete that ` +
+          `by hand, after checking what is in it.`
         : "") +
       (profiles.length
         ? `\n\n  KEPT its profiles' data (never removed by am remove):\n` +

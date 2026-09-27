@@ -38,7 +38,7 @@ Deno.test("android bundle: the app entry module is not in the APK bundle", async
       root,
       appDir: join(root, "src"),
       uiEntry: "App.tsx",
-      doAndroid: true,
+      standalone: true,
       imports: {},
       shares: [],
       frameworkSrcDir: join(REPO, "src"),
@@ -47,6 +47,40 @@ Deno.test("android bundle: the app entry module is not in the APK bundle", async
     const inputs = Object.keys(b.inputs);
     assert(inputs.some((k) => k.endsWith("src/App.tsx")), inputs.join(","));
     assertEquals(inputs.filter((k) => k.endsWith("src/app.ts")), []);
+  } finally {
+    await dropTempDir(root);
+    await stopEsbuildService(() => esbuild.stop());
+  }
+});
+
+Deno.test("bundleClient: the former `doAndroid` switch still builds the standalone bundle", async () => {
+  // `standalone` replaced it when the web target began sharing the shape; a
+  // build script written against the old name must not get a browser bundle
+  // (ESM, no auto-mount — a blank page) without a word.
+  const root = await tempDir("aio-standalone-alias-");
+  try {
+    await Deno.mkdir(join(root, "src"));
+    await Deno.writeTextFile(
+      join(root, "src", "App.tsx"),
+      `export default function App() { return null; }\n`,
+    );
+    const base = {
+      esbuild,
+      root,
+      appDir: join(root, "src"),
+      uiEntry: "App.tsx",
+      imports: {},
+      shares: [],
+      frameworkSrcDir: join(REPO, "src"),
+    };
+    const legacy = await bundleClient({ ...base, doAndroid: true });
+    assert(legacy.ok, legacy.errors.join("\n"));
+    assertEquals(legacy.format, "iife");
+    assertEquals(
+      (await bundleClient({ ...base, standalone: true })).format,
+      "iife",
+    );
+    assertEquals((await bundleClient(base)).format, "esm");
   } finally {
     await dropTempDir(root);
     await stopEsbuildService(() => esbuild.stop());
@@ -179,4 +213,17 @@ Deno.test("android run options: an aliased aio import is still read", () => {
   );
   // An unrelated `.run(` is still not the call.
   assertEquals(scanRunOptions(`task.run({ persist: false });\n`).found, false);
+});
+
+Deno.test("android/web run options: `assets` is not called server-only — the build packages the deno.json mounts", () => {
+  // The `assets` scaffold declares the mount in aio.run() AND deno.json; the
+  // APK and the web app ship it, yet the warning said "server/desktop only".
+  const src = `await aio.run({ assets: { "/media": "./media" }, port: 9 });`;
+  for (const shell of ["apk", "web"] as const) {
+    const w = androidRunOptionsWarning(src, "src/app.ts", shell);
+    assert(w);
+    assertStringIncludes(w.body, "packages deno.json `assets`");
+    assertStringIncludes(w.body, "port — server/desktop only");
+    assert(!/assets.*server\/desktop only/.test(w.body), w.body);
+  }
 });

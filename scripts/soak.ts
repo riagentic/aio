@@ -19,6 +19,7 @@
 import { aio } from "../mod.ts";
 import { cell } from "../src/state/cell.ts";
 import { enc } from "../src/protocol/envelope.ts";
+import { recordProof, treeStamp } from "./proof.ts";
 
 // LAST wins: `deno task soak --minutes=4320` appends to the task's own
 // `--minutes=10`, and `find` would have taken the task's value and silently
@@ -27,6 +28,9 @@ const minutes = Number(
   Deno.args.filter((a) => a.startsWith("--minutes=")).at(-1)?.slice(10) ?? 10,
 );
 const GROWTH_LIMIT_MB_PER_MIN = 0.5;
+// The tree this run STARTS on — 72 hours is long enough to commit in between,
+// and the proof row must name the code that ran, not the code at the end.
+const started = await treeStamp();
 
 const counter = cell("soak", {
   state: { count: 0, notes: [] as string[] },
@@ -215,11 +219,11 @@ console.log("[soak] PASS: no sustained heap growth");
 // BE that claim: a green 10-minute soak is a useful smoke test and is not
 // evidence of 72 hours, and a ledger that blurs the two is worse than none.
 if (minutes >= 4320) {
-  const { recordProof } = await import("./proof.ts");
   await recordProof(
     "soak",
     "72h",
     `${minutes}min, slope ${slope.toFixed(3)} MB/min`,
+    started,
   );
 }
 Deno.exit(0);

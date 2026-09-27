@@ -25,6 +25,7 @@ import {
   lockDir,
   type LockMeta,
   printable,
+  showRequestPath,
 } from "./single-instance-lock.ts";
 import { resolve } from "@std/path";
 import { appDirs, homeOwnerError, homeRequested } from "./app-dirs.ts";
@@ -595,6 +596,35 @@ export function _alreadyRunningMessage(o: {
     `one database. Rename this one: \`aio.run({ appId: "…" })\`.`;
 }
 
+/** Ask the running window to show itself: write the request, wait for the
+ *  window to take it (it removes the file). True once it has; false — the
+ *  request withdrawn — when nothing answered within `timeoutMs` (a window not
+ *  up yet, an instance on an aio without the watch). */
+export async function askRunningToShow(
+  path: string,
+  timeoutMs = 3000,
+): Promise<boolean> {
+  Deno.writeTextFileSync(path, String(Deno.pid), { mode: 0o600 });
+  const until = Date.now() + timeoutMs;
+  while (Date.now() < until) {
+    await new Promise((r) => setTimeout(r, 50));
+    try {
+      Deno.statSync(path);
+    } catch (e) {
+      if (e instanceof Deno.errors.NotFound) return true;
+      throw e;
+    }
+  }
+  try {
+    Deno.removeSync(path);
+  } catch (e) {
+    // Taken in the last instant: that is an answer too.
+    if (e instanceof Deno.errors.NotFound) return true;
+    throw e;
+  }
+  return false;
+}
+
 export async function acquireSingletonLock(
   appId: string,
   home: string | undefined,
@@ -608,6 +638,22 @@ export async function acquireSingletonLock(
   const result = await appLock.acquire(port, takeover, meta);
   if (!result.ok) {
     const ex = result.existing;
+    // A desktop app launched again: the running one shows its window (from
+    // the tray, a minimize, behind others) and this launch ends quietly —
+    // exit 0, the convention every desktop has. Only when both are desktop
+    // windows, the holder is up, and this process runs nothing else.
+    if (
+      meta.client === "electron" && ex.client === "electron" &&
+      ex.status === "started" && !isHold(ex) && !takeover &&
+      runtimeCount() === 0 &&
+      await askRunningToShow(showRequestPath(appLock.key))
+    ) {
+      log.info(
+        `${appId} is already running (pid ${ex.pid}) — brought its window ` +
+          `to the front`,
+      );
+      Deno.exit(0);
+    }
     const msg = _alreadyRunningMessage({
       appId: ex.appId,
       port: ex.port,

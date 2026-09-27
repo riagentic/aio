@@ -237,7 +237,12 @@ export function iconColors(name: string): {
   };
 }
 
-function hsl(h: number, s: number, l: number): [number, number, number] {
+/** HSL (h in degrees, s and l in 0..1) → 8-bit sRGB. */
+export function hsl(
+  h: number,
+  s: number,
+  l: number,
+): [number, number, number] {
   const a = s * Math.min(l, 1 - l);
   const f = (n: number) => {
     const k = (n + h / 30) % 12;

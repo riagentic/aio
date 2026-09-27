@@ -482,6 +482,10 @@ export type LocalData = {
    *  cannot say what it is running must not be told it is running the wrong
    *  thing. */
   installedSha256?: string;
+  /** The signed `releasedAt` of the release that installed that artifact, when
+   *  known. A same-version manifest released BEFORE it is an older build — a
+   *  stale CDN copy or a replay — never a rebuild to install. */
+  installedReleasedAt?: string;
 };
 
 /** The verdict on whether a release can be installed over this data. */
@@ -810,8 +814,22 @@ export function decide(opts: {
   // accepts it), while a digest measured from the installed file is lowercase
   // — an exact compare offered the running build back as a "rebuild" on
   // every check.
-  const rebuild = cmp === 0 && !!m.sha256 && !!localSha &&
+  const otherBuild = cmp === 0 && !!m.sha256 && !!localSha &&
     localSha.toLowerCase() !== m.sha256.toLowerCase();
+  // …and released no earlier than the one installed: a CDN edge still caching
+  // the manifest of the build that was re-published over (or a replay of it —
+  // its signature is genuine) offered that build back, and the next fresh
+  // edge the newer one: an install flip-flopping between two builds.
+  const olderBuild = otherBuild &&
+    Date.parse(m.releasedAt) < Date.parse(opts.local.installedReleasedAt ?? "");
+  const rebuild = otherBuild && !olderBuild;
+  if (olderBuild) {
+    return {
+      kind: "current",
+      reason: `${current} is the latest (${m.channel} is serving an older ` +
+        `build of it, released ${m.releasedAt} — a stale or replayed manifest)`,
+    };
+  }
 
   if (cmp < 0) {
     // Not an error worth alarming anyone about: it is what a channel switch

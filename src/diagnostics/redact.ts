@@ -180,7 +180,8 @@ const TOKEN_MASK = "…";
  *  and terminal scrollback, so every line that SHOWS a URL shows this instead,
  *  and the URL that is USED (loaded, dialled, passed as argv) stays intact.
  *  The share-link lines at `--expose` boot are the only place a token is
- *  printed on purpose — tests/no-token-in-logs.test.ts holds that list.
+ *  printed on purpose — tests/no-token-in-logs.test.ts holds that list — and
+ *  even those reach only the terminal whole: every log FILE masks them.
  *
  *  @decider */
 export function redactUrlToken(text: string): string {
@@ -193,9 +194,10 @@ export function redactUrlToken(text: string): string {
 const PAIR_CODE = /(pair code:\s*)\d{6}/g;
 
 /** Every credential aio itself writes into a log line on purpose — the
- *  share-link token ({@linkcode redactUrlToken}) and the pair code — masked,
- *  for a copier that takes log lines somewhere ELSE: a problem report tails
- *  app.log and POSTs it to the feedback URL. */
+ *  share-link token ({@linkcode redactUrlToken}) and the pair code — masked.
+ *  Applied by every log-FILE sink (logger-core `_capLine`, client-log) and
+ *  again by a copier that takes log lines somewhere ELSE: a problem report
+ *  tails app.log and POSTs it to the feedback URL. */
 export function redactLogCredentials(text: string): string {
   return redactUrlToken(text).replace(PAIR_CODE, `$1${TOKEN_MASK}`);
 }

@@ -868,7 +868,10 @@ export default function App(): JSX.Element {
             onClick={async () => {
               const el = document.getElementById("asset-body");
               if (!el) return;
-              const res = await fetch("/media/hello.txt");
+              // RELATIVE: the page's own directory is the app's root on
+              // every target — "/" in a browser, "/assets/" in an APK,
+              // "/repo/" on a sub-path host. "/media/…" left all but the first.
+              const res = await fetch("media/hello.txt");
               el.textContent = res.ok
                 ? await res.text()
                 : \`\${res.status} — is the media/ directory there?\`;

@@ -4,6 +4,8 @@
 import { devHooks } from "./dev-hooks.ts";
 import { _notifyContained } from "./hook-error.ts";
 import { batch } from "../state/signal.ts";
+import { pendingStarted } from "../protocol/pending-calls.ts";
+import { _afterHandler } from "./control-drift.ts";
 
 // ── Delegated event set ────────────────────────────────────────────
 // Common bubbling events use a single root listener instead of per-element
@@ -253,8 +255,12 @@ export function _wrapHandler(
 ): EventListener {
   return (e: Event) => {
     _handlerDepth++;
+    const started = pendingStarted();
+    let returned: unknown;
     try {
-      batch(() => handler(e));
+      batch(() => {
+        returned = handler(e);
+      });
     } catch (err) {
       console.error(`[aio] event handler error (on${evt}):`, err);
       // A write to state from a handler lands HERE, never on the global
@@ -266,6 +272,8 @@ export function _wrapHandler(
     } finally {
       _handlerDepth--;
     }
+    // Dev: a controlled control left showing text its handler never stored.
+    _afterHandler(e, evt, started, returned);
   };
 }
 

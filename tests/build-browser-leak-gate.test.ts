@@ -193,8 +193,16 @@ Deno.test("bundle refusal: no exit inside the rebuild window skips the discard",
   // bind mount or a watcher holding it survives a rebuild — and this gate is
   // about WHERE the clean happens, never about how it is spelled. Anchoring
   // on the old spelling is how a gate stops being able to fire.
-  const cleaned = before.indexOf("await emptyDir(dist)");
-  const firstExit = before.search(/Deno\.exit\(/);
+  const cleaned = before.indexOf("await emptyDir(dist");
+  // The one exit allowed before the clean: a dist/ the project brought with
+  // it holds none of aio's files (that is what makes it foreign), so no
+  // stale dist/app.js can survive that refusal — and cleaning it is exactly
+  // what it refuses.
+  const foreign = before.replace(
+    /const refusal = await foreignDistRefusal\(dist\);[\s\S]*?Deno\.exit\(1\);\s*\}/,
+    (m) => " ".repeat(m.length),
+  );
+  const firstExit = foreign.search(/Deno\.exit\(/);
   assert(
     cleaned > 0 && (firstExit < 0 || firstExit > cleaned),
     "a refusal before esbuild must come AFTER dist/ is cleaned, or a stale " +

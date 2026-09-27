@@ -447,6 +447,8 @@ stub):
 | `navigate("/x")`, `history.pushState`   | nothing to decide: a same-document navigation, the page stays         |
 | `location.reload()` (or the dev reload) | lets it through — the url is the one on screen, so it is a **reload** |
 | click `<a href="https://…">`            | opens it in the system browser; the window stays on the app           |
+| go to a same-app `/__aio/auth/…` URL    | loads it: the login flow is the server's (the SSO button)             |
+| submit a form on the identity provider  | loads it: a page on another site navigates as in a browser (no IPC)   |
 
 The rule for a same-app URL is **"the url already on screen = a reload; any
 other = a route change"**. It used to be "the root path = a reload", which meant
@@ -611,8 +613,34 @@ Their real use (a camera, a location fix) is a request, and that is logged.
 
 For a wallet, grant `clipboard-sanitized-write`, which is what a copy button
 uses, and never `clipboard-read`: that keeps any page from reading a copied seed
-phrase. `--client=electron` in CONNECT mode has no app config, so it uses the
-default.
+phrase.
+
+Without the key, two things are said in `app.log` so the default is never
+silent. The first `<webview>` an app embeds logs once that the app's own page
+and child windows still hold every permission they ask for. Each permission an
+`openWindow` child window is granted logs once, with its origin:
+`[aio:electron] permission "clipboard-read" GRANTED to openWindow child window …`.
+Both lines name `electron: { permissions }` as the fix. The default itself does
+not change, because that would break apps that rely on it. `--client=electron`
+in CONNECT mode has no app config, so it uses the default.
+
+## Who may use aio's IPC, and where the window may go
+
+aio's main process answers its `__aio:*` IPC channels (the state relay,
+`openWindow`, print, the window controls) only from the **top frame of the app's
+window, showing the app's own origin**. A `<webview>` guest, an `openWindow`
+child window, a subframe, or a foreign page in the window is refused, even when
+its preload calls `ipcRenderer` directly. Each refusal is logged once per
+channel and sender:
+`[aio:electron] IPC "__aio:send" REFUSED from a subframe (…)`. A refused
+`invoke` rejects with the same reason.
+
+A server-side redirect still loads in the window, so an app route that redirects
+to an identity provider keeps working. When a redirect takes the window to
+another site, that site is not treated as the app: it gets no aio IPC and none
+of the app's permissions. This is logged once per site, with the origin only:
+`[aio:electron] a redirect took the app window to https://idp.example — …`.
+Links and `location` changes to another site still open in the system browser.
 
 ## Headless and VM hosts (`AIO_ELECTRON_ARGS`)
 
@@ -802,7 +830,10 @@ generated monogram — so the tray shows the same identity as the taskbar.
 Both Electron shells carry it (the zero-port UDS one and the WebSocket one); the
 browser and Android targets ignore the key, with nothing to configure away.
 Linux needs the desktop's status-notifier support (GNOME: the AppIndicator
-extension); without it the icon is simply absent.
+extension); without it the icon is simply absent — and a `closeToTray` window is
+then minimized instead of hidden (with one warning), since there would be no
+icon to bring it back from. Launching the app again always brings a hidden or
+minimized window back to the front.
 
 ## Window size and persistence
 

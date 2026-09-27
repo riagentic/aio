@@ -108,9 +108,9 @@ export const ESBUILD_JSX = {
  *  died on `Could not resolve "aio/renderer"` before writing a byte, and no
  *  app-side change could fix it. One table, applied by both paths. */
 export function bundleFrameworkEntries(
-  doAndroid: boolean,
+  standalone: boolean,
 ): Record<string, string> {
-  const air = doAndroid ? "src/standalone-air.ts" : "src/browser-air.ts";
+  const air = standalone ? "src/standalone-air.ts" : "src/browser-air.ts";
   return {
     ...AIO_LIBRARY_ENTRIES,
     "aio": air,

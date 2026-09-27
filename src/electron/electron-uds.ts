@@ -16,6 +16,7 @@ import {
   tmplBounds,
   tmplBoundsTracking,
   tmplCrashGuard,
+  tmplIpcGuard,
   tmplKeyboardShortcuts,
   tmplParentWatch,
   tmplPermissionGuard,
@@ -87,7 +88,7 @@ export function electronMainScriptUDS(url: string, socketPath: string, opts: {
     ...shellOverrides,
   };
   return `
-const { app, BrowserWindow, Menu, ipcMain, protocol } = require('electron');
+const { app, BrowserWindow, Menu, protocol } = require('electron');
 const { connect } = require('net');
 const path = require('path');
 const fs = require('fs');
@@ -97,6 +98,7 @@ Menu.setApplicationMenu(null);
 app.name = ${JSON.stringify(slug)};
 ${tmplCrashGuard()}
 ${tmplPermissionGuard(opts.meta?.permissions)}
+${tmplIpcGuard()}
 ${tmplParentWatch()}
 
 // ── Where the page comes from: disk (prod), the app's socket (dev, zero
@@ -224,6 +226,11 @@ app.on('ready', () => {
 ${tmplWindowShape(opts.meta, { preload: "preloadFile" })}
   const win = new BrowserWindow(b);
   if (b.x == null) win.center();
+  // protocol//host on both branches — see tmplWillNavigate for why not .origin.
+  const _appOrigin = USE_PROTOCOL ? 'aio://app': (u => u.protocol + '//' + u.host)(new URL(${
+    JSON.stringify(url)
+  }));
+  __aioIpcBind(win, _appOrigin); // before any handler can run (tmplIpcGuard)
 
   let __aioIcon = null;
   try {
@@ -818,10 +825,6 @@ ${tmplKeyboardShortcuts()}
 
   // AIO-73: aio:/// (no host) fails — use aio://app/ (with host component)
   win.loadURL(USE_PROTOCOL ? 'aio://app/': ${JSON.stringify(url)});
-  // protocol//host on both branches — see tmplWillNavigate for why not .origin.
-  const _appOrigin = USE_PROTOCOL ? 'aio://app': (u => u.protocol + '//' + u.host)(new URL(${
-    JSON.stringify(url)
-  }));
 ${tmplWillNavigate("_appOrigin", "_onInAppNavVetoed")}
 });
 

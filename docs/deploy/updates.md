@@ -530,6 +530,13 @@ are ordinary reactive reads.
 Methods: `check()` · `apply(opts?)` · `dismiss()` · `undismiss()` ·
 `setChannel(name)`.
 
+`check()` and `apply()` have no call ceiling, and while they run the ceiling of
+every other pending call is paused (each gets a fresh window after), so an app
+method that awaits `updates.apply()` is not told "stopped waiting" during a
+multi-minute install. A page's own wait for its call is still the method's
+ceiling: from the UI, call `updates.apply()` directly, or declare the app method
+`long`.
+
 `dismiss()` holds across polls and restarts: the dismissed version is persisted,
 handed to every later check, and only a version **newer** than it is offered
 again. It accepts a **blocked** release as its subject too — a notice with no
@@ -542,7 +549,9 @@ A re-published `1.2.3` with different bytes is a real update, and it is
 detected: the install records the SHA-256 of the artifact it is running (the
 digest verified at the last swap, or measured once from the artifact itself),
 and a manifest whose digest differs at the same version is offered with
-`reason: "same version, new build…"`.
+`reason: "same version, new build…"`. One released (signed `releasedAt`) BEFORE
+the build installed by an update is an older build — a CDN edge still caching
+the previous manifest, or a replay of it — and is not offered.
 
 An install that cannot establish its own digest stays quiet and says so — "never
 offer on ignorance" — rather than re-downloading its own bytes.

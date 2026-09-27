@@ -237,6 +237,19 @@ s.$do(schedule.cron("daily-report", "0 8 * * 1-5", reports.generate.action()));
 | `n-m/s` | `0-59/10`   | Range with step         |
 | `a,b`   | `1,15`      | List                    |
 
+When both day-of-month and day-of-week are restricted, a day matches on
+**either** (`0 0 1,15 * 1` = the 1st, the 15th and every Monday). A day field is
+a restriction when it covers fewer than every day: `*` and an explicit full
+range (`1-31`, `0-6`) are not; a step (`*/2`) is.
+
+Vixie cron decides by the field's TEXT instead — a `*`-led field is
+unrestricted, any other is a restriction — so two shapes read differently there.
+`0 0 */2 * 1` fires on every odd day **and** every Monday in aio, but only on
+odd days that are Mondays in Vixie; `0 0 1-31 * 1` fires on Mondays in aio, but
+every day in Vixie. aio says so once per pattern (dev and prod) when it meets
+one. Write the step as a range (`1-31/2`, `0-6/2`) or the full range as `*` to
+mean the aio reading unambiguously.
+
 > **Note:** cron fires against **UTC time**. `0 9 * * *` = 09:00 UTC. Offset the
 > hour field for local time zones.
 

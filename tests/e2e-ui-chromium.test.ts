@@ -11,6 +11,7 @@ import { assert, assertEquals } from "@std/assert";
 import { testDisplayEnv } from "../src/testing/test-display.ts";
 import { stopChild } from "./stop-child.ts";
 import { childCoverageDir } from "../src/testing/temp-dir.ts";
+import { recordProof, treeStamp } from "../scripts/proof.ts";
 const _childCovDir = childCoverageDir();
 
 const ROOT = new URL("..", import.meta.url).pathname;
@@ -86,6 +87,9 @@ Deno.test({
   // The browser and app are external processes — Deno's sanitizers can't see
   // their lifecycles; both are killed in finally blocks below.
   async fn() {
+    // The tree the run starts on: the proof row below must name the code that
+    // ran, and the end alone cannot see a tree dirtied and reverted mid-run.
+    const started = await treeStamp();
     const port = freePort();
     const base = `http://localhost:${port}`;
     const app = new Deno.Command(Deno.execPath(), {
@@ -200,11 +204,11 @@ Deno.test({
       // The physical-proof row for the web target. Last line, so a partial
       // run cannot claim it — and written by the gate rather than by hand,
       // because a hand-kept matrix is a claim and a generated one is evidence.
-      const { recordProof } = await import("../scripts/proof.ts");
       await recordProof(
         "web",
         "real-browser",
         "chromium: surface → trigger → server state converged",
+        started,
       );
     } finally {
       if (browser) await kill(browser);

@@ -67,6 +67,7 @@ import { getCompactedTs } from "../sync/server-store.ts";
 import { recordStoreGen } from "./store-gen.ts";
 import { inFlightVerdict, opKey, placeOps } from "./op-placement.ts";
 import { takeRejectionFor } from "../state/rejection-tracker.ts";
+import { withShapeGuard } from "../state/declared-shape-guard.ts";
 import { diffState } from "../sync/state-patch.ts";
 import { deepMerge } from "../state/deep-merge.ts";
 import { unpersistedFromBase } from "../state/cell-persist-filter.ts";
@@ -2275,6 +2276,7 @@ async function _runPhases<S, A, E>(
     checkIntegrityOnBoot: config.checkIntegrityOnBoot,
     initialState,
     shouldPersist,
+    harnessShapeGuard: config._harnessShapeGuard === true,
     persistKey,
     persistMode,
     persistDebounceMs: config.persistDebounceMs ?? 100,
@@ -4451,18 +4453,7 @@ async function _runPhases<S, A, E>(
   // write, dev and prod — see declared-shape-guard.ts.
   const _writeGuard = boot.writeGuard;
   const _dispatchCore = setupDispatch<S, A, E>({
-    reduce: _writeGuard
-      ? (s, a) => {
-        const r = reduce(s, a);
-        if (r.state !== s) {
-          _writeGuard(
-            String((a as { type?: unknown }).type ?? ""),
-            (r as { patches?: unknown }).patches,
-          );
-        }
-        return r;
-      }
-      : reduce,
+    reduce: withShapeGuard(reduce, _writeGuard, config._cellBreaker?.count),
     // Effects run inside the effect scope, so everything they dispatch — now,
     // or later from a timer, a promise or an async body they started — is
     // recorded as `cause: "effect"` (see `_effectScope`).
@@ -4734,6 +4725,11 @@ async function _runPhases<S, A, E>(
     // when the reduce refuses the write, and a worker that never learned it
     // answered its callers differently from the cell sitting next to it.
     refusalsReject: config._refusalsReject === true,
+    // …and the dev refusal of a declared-type change, which a worker cell's
+    // reduce must run itself (the owner sees only its committed patches).
+    ...(boot.strictTypeFilter
+      ? { strictTypeFilter: boot.strictTypeFilter }
+      : {}),
     // EVERY worker cell, hosted or not: the pool refuses what a thread
     // boundary cannot honour (selectors, sync, listensTo, a machine) before it
     // decides whether to host. It used to be handed `[]` under libraryMode, so
@@ -5387,6 +5383,7 @@ async function _runPhases<S, A, E>(
     // the method on the main isolate — no isolation at all, and the worker's
     // copy of the slice would drift out of sync with ours.
     dispatch: (action) => appDispatch(action as A),
+    closing: () => dispatch.phase() !== "open",
     app: {
       snapshot: () => app.snapshot!(),
       loadSnapshot: (json, opts) => app.loadSnapshot!(json, opts),

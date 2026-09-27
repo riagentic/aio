@@ -135,15 +135,15 @@ for (const template of TEMPLATES) {
         await Deno.mkdir(dirname(join(dir, rel)), { recursive: true });
         await Deno.writeTextFile(join(dir, rel), text);
       }
-      // The `assets` template's button fetches `/media/hello.txt` from the
+      // The `assets` template's button fetches `media/hello.txt` from the
       // app's own server; testUI has none (tests/testui-relative-fetch). Stand
       // in for it: a relative path gets the scaffolded file, or a 404.
       const realFetch = globalThis.fetch;
       globalThis.fetch = ((input: string | URL | Request, init?: RequestInit) =>
-        typeof input === "string" && input.startsWith("/")
+        typeof input === "string" && !URL.canParse(input)
           ? Promise.resolve(
-            files[input.slice(1)] !== undefined
-              ? new Response(files[input.slice(1)])
+            files[input.replace(/^\//, "")] !== undefined
+              ? new Response(files[input.replace(/^\//, "")])
               : new Response("not found", { status: 404 }),
           )
           : realFetch(input, init)) as typeof fetch;

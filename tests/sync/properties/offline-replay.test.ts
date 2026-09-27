@@ -240,6 +240,21 @@ async function episode(
       await drain();
       await net.handler.flushServerWrites();
       await drain();
+      // An empty network is not a quiet ENGINE: after a burst, the send
+      // pacer (`send-pacer.ts`, a token bucket) holds the next op frame up
+      // to ~17 ms — longer than `drain`'s idle window — so a pending op
+      // could still be on its way. Wait for it, bounded: an op that never
+      // leaves is still caught by `checkConverged`'s pending-ops assertion.
+      for (let i = 0; i < 100; i++) {
+        let pending = 0;
+        for (const c of clients) {
+          pending += (await c.buffer.getUnconfirmed(CELL)).length +
+            (await c.buffer.getUnconfirmed(MIRROR)).length;
+        }
+        if (pending === 0) break;
+        await new Promise((r) => setTimeout(r, 20));
+        await drain();
+      }
     };
 
     /** (a) (b) (d) at a quiescent point. */

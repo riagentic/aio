@@ -269,10 +269,21 @@ export function useForm<T extends Record<string, unknown>>(
      *  superseded by a newer one, and `reset()` clears the memo. */
     let settledFor: { v: unknown; err: string | null } | null = null;
 
+    /** Drop the in-flight (or debounced) async run: its verdict is for a
+     *  value the field no longer holds. Every branch that answers WITHOUT
+     *  starting a run must call it — the sync-error and settled branches did
+     *  not, so the old value's verdict landed afterwards and a `null` cleared
+     *  a live "Required" (the form reported valid, and submitted). */
+    const supersede = () => {
+      asyncVersion++;
+      if (debounceTimer) clearTimeout(debounceTimer);
+    };
+
     const runAsyncValidation = (v: unknown) => {
       if (asyncRules.length === 0) return;
       const syncErr = validate(v);
       if (syncErr) {
+        supersede();
         settledFor = null;
         validatingSig.set(false);
         return;
@@ -283,6 +294,7 @@ export function useForm<T extends Record<string, unknown>>(
       // async — so an early return here would have cleared a real async error
       // and reported the form valid.
       if (settledFor && Object.is(settledFor.v, v)) {
+        supersede();
         errorSig.set(settledFor.err);
         validatingSig.set(false);
         return;
@@ -357,8 +369,7 @@ export function useForm<T extends Record<string, unknown>>(
         touchedSig.set(false);
         validatingSig.set(false);
         settledFor = null;
-        asyncVersion++;
-        if (debounceTimer) clearTimeout(debounceTimer);
+        supersede();
       },
       _setError(err: string) {
         errorSig.set(err);

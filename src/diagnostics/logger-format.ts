@@ -3,6 +3,26 @@
 import type { LogEntry } from "./logger-types.ts";
 import { colorEnabled as USE_COLOR, paint } from "./color.ts";
 import { describeThrown, kv, style } from "./fmt.ts";
+import { redactLogCredentials } from "./redact.ts";
+
+/** The env var `am start` sets on a child whose stdout is a log file. */
+export const STDOUT_IS_LOG_ENV = "AIO_STDOUT_IS_LOG";
+
+/** Set by `am start`, whose detached launch sends this process's stdout into
+ *  `logs/stdout.log`: then the console IS a log file, and a credential printed
+ *  to it is one on disk. Read once; no env access (a browser, or no
+ *  `--allow-env`) means a terminal. */
+let _stdoutIsLog: boolean | undefined;
+function stdoutIsLog(): boolean {
+  if (_stdoutIsLog === undefined) {
+    try {
+      _stdoutIsLog = globalThis.Deno?.env.get(STDOUT_IS_LOG_ENV) === "1";
+    } catch {
+      _stdoutIsLog = false;
+    }
+  }
+  return _stdoutIsLog;
+}
 
 // ── Untrusted text: ONE decider for every sink ────────────────────────
 //
@@ -195,6 +215,9 @@ function colorizeMsg(msg: string, lvl: string): string {
 const INLINE_FIELDS = 4;
 
 export function printConsole(e: LogEntry): void {
+  // Same rule as every log file (logger-core `_capLine`): the share link's
+  // token and the pair code never reach disk.
+  if (stdoutIsLog()) e = { ...e, msg: redactLogCredentials(e.msg) };
   const lvlStr = (typeof e.lvl === "string" ? e.lvl : "debug").toUpperCase()
     .padEnd(5);
   const color = LEVEL_COLOR[e.lvl] ?? C.gray;

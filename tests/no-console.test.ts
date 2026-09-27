@@ -13,6 +13,9 @@ import {
 } from "../src/server/no-console.ts";
 import {
   _swapSpec,
+  CLOSE_FDS_EXEC,
+  CLOSE_FDS_EXEC_ALL,
+  CLOSE_FDS_EXEC_BASH,
   relaunchOptions,
   spawnSwapHelper,
   swapHelperOptions,
@@ -111,7 +114,10 @@ Deno.test("swap helper (windows): started windowless, else through cmd.exe — n
   const lines: [string, Record<string, string>, string | undefined][] = [];
   spawnSwapHelper("powershell", args, extra, {
     os: "windows",
-    windowless: (l, env, cwd) => (lines.push([l, env, cwd]), 4242),
+    // Each fake helper claims its start file, as the real script does first.
+    windowless: (l, env, cwd) => (
+      Deno.removeSync(env.AIO_SWAP_GO!), lines.push([l, env, cwd]), 4242
+    ),
     spawn: (c, o) => void spawned.push([c, o]),
   });
   assertEquals(spawned, [], "windowless started it: nothing else runs");
@@ -139,7 +145,9 @@ Deno.test("swap helper (windows): started windowless, else through cmd.exe — n
   spawnSwapHelper(spec.cmd, spec.args, { env: spec.env, cwd: spec.cwd }, {
     os: "windows",
     windowless: () => "no --allow-ffi",
-    spawn: (c, o) => void spawned.push([c, o]),
+    spawn: (c, o) => (
+      Deno.removeSync(o.env!.AIO_SWAP_GO!), void spawned.push([c, o])
+    ),
   });
   assertEquals(spawned.length, 1);
   const [cmd, o] = spawned[0]!;
@@ -165,6 +173,100 @@ Deno.test("swap helper (windows): started windowless, else through cmd.exe — n
   );
 });
 
+// AppLocker refuses PowerShell: CreateProcessW fails (1260). The cmd.exe
+// fallback started, was refused the same PowerShell, and exited in silence —
+// the app quit and nothing restarted it. The refusal is thrown, so the caller
+// keeps (and restarts) the running version and logs "was NOT installed".
+Deno.test("swap helper (windows): a PowerShell CreateProcessW refused is thrown, never retried through cmd.exe", () => {
+  const spawned: string[] = [];
+  assertThrows(
+    () =>
+      spawnSwapHelper("powershell", ["-EncodedCommand", "QQBCAA=="], {}, {
+        os: "windows",
+        windowless: () => "CreateProcessW failed (1260, then 1260)",
+        spawn: (c) => void spawned.push(c),
+      }),
+    Error,
+    "CreateProcessW failed (1260",
+  );
+  assertEquals(spawned, []);
+});
+
+// Started through cmd.exe (no --allow-ffi), a PowerShell that policy refuses
+// (AppLocker, a script-block rule) exits in silence: the app quit and nothing
+// swapped or restarted it. The helper's first act is to claim a start file;
+// unclaimed within the bound, the start is thrown — the caller then keeps this
+// version running and says so, as for a refused CreateProcessW.
+Deno.test("swap helper (windows): a helper that never claims its start file is thrown, and a late one finds nothing to claim", () => {
+  const claim = (env?: Record<string, string>) =>
+    Deno.removeSync(env!.AIO_SWAP_GO!);
+  let go = "";
+  for (
+    const windowless of [() => "no --allow-ffi" as const, () => 4242]
+  ) {
+    const e = assertThrows(
+      () =>
+        spawnSwapHelper("powershell", ["-EncodedCommand", "QQBCAA=="], {}, {
+          os: "windows",
+          windowless,
+          spawn: (_c, o) => void (go = o.env!.AIO_SWAP_GO!),
+          claimWaitMs: 150,
+        }),
+      Error,
+    );
+    assert(
+      /PowerShell/.test(e.message) && /AppLocker/.test(e.message),
+      e.message,
+    );
+  }
+  assert(go !== "", "the helper was handed a start file");
+  let gone = false;
+  try {
+    Deno.statSync(go);
+  } catch {
+    gone = true;
+  }
+  assert(gone, "an unclaimed start file is removed, so a late helper exits");
+  // Claimed: started, whichever door.
+  spawnSwapHelper("powershell", ["-EncodedCommand", "QQBCAA=="], {}, {
+    os: "windows",
+    windowless: () => "no --allow-ffi",
+    spawn: (_c, o) => claim(o.env as Record<string, string>),
+    claimWaitMs: 5_000,
+  });
+  spawnSwapHelper("powershell", ["-EncodedCommand", "QQBCAA=="], {}, {
+    os: "windows",
+    windowless: (_l, env) => (claim(env), 4242),
+    spawn: () => {
+      throw new Error("not reached");
+    },
+    claimWaitMs: 5_000,
+  });
+  // The script claims it FIRST — before it waits for this process to exit.
+  const spec = _swapSpec("windows", {
+    pid: 1,
+    current: "C:\\App",
+    previous: "C:\\App.old-1",
+    staged: "C:\\App.staged",
+    launcher: "C:\\App\\run.bat",
+    mark: "m",
+    token: "t",
+    failed: "f",
+    waitS: 120,
+    args: [],
+  }, "");
+  const ps1 = new TextDecoder("utf-16le").decode(
+    Uint8Array.from(
+      atob(spec.args[spec.args.indexOf("-EncodedCommand") + 1]!),
+      (c) => c.charCodeAt(0),
+    ),
+  );
+  const claimAt = ps1.indexOf("[IO.File]::Move($go");
+  assert(claimAt > 0, "the script claims its start file");
+  assert(claimAt < ps1.indexOf("Get-Process -Id $p"), "before the pid wait");
+  assert(ps1.includes("catch { exit 0 }"), "an unclaimable file ends it");
+});
+
 Deno.test("swap helper (posix): the plain spawn, never through a Windows launcher", () => {
   const spawned: [string, Deno.CommandOptions][] = [];
   spawnSwapHelper("/bin/sh", ["x.sh", "1"], undefined, {
@@ -177,6 +279,28 @@ Deno.test("swap helper (posix): the plain spawn, never through a Windows launche
   assertEquals(spawned.map(([c, o]) => [c, o.args, o.detached]), [
     ["/bin/sh", ["x.sh", "1"], undefined],
   ]);
+});
+
+// The directory swap helper outlives this process and starts the new version:
+// on Linux it drops every inherited descriptor first, exactly as the relaunch
+// does (tests/relaunch-closes-inherited-fds.test.ts proves each shell closes
+// them), so neither it nor the version it starts holds a pipe or mount alive.
+Deno.test("swap helper (linux): started through the descriptor-closing shell, the helper as $0", () => {
+  if (Deno.build.os !== "linux") return;
+  const spawned: [string, Deno.CommandOptions][] = [];
+  spawnSwapHelper("/bin/sh", ["x.sh", "1"], undefined, {
+    os: "linux",
+    spawn: (c, o) => void spawned.push([c, o]),
+  });
+  assertEquals(spawned.length, 1);
+  const args = spawned[0]![1].args!;
+  const script = args[args.indexOf("-c") + 1]!;
+  assert(
+    [CLOSE_FDS_EXEC, CLOSE_FDS_EXEC_ALL, CLOSE_FDS_EXEC_BASH].includes(script),
+    `not the fd-closing exec: ${args.join(" ")}`,
+  );
+  assertEquals(args.slice(-3), ["/bin/sh", "x.sh", "1"]);
+  assertEquals(spawned[0]![1].stdin, "null");
 });
 
 Deno.test("windowsCommandLine: MSVC quoting — spaces, quotes and trailing backslashes survive", () => {

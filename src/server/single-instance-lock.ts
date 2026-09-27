@@ -753,7 +753,8 @@ export function pruneDeadLockDirsTagged(tag: string): number {
  *  - a `.sock` / `.http.sock` nobody is bound to (Linux: absent from
  *    `/proc/net/unix`; elsewhere unknown, so it stays) — a `singleton: false`
  *    app holds no lock, and its socket is the only sign it is alive;
- *  - a legacy `<appId>.launch.json` with no lock of that app beside it.
+ *  - a legacy `<appId>.launch.json`, or a second launch's `<key>.show`
+ *    request, with no lock of that app beside it.
  *  Anything else keeps the dir. For a throwaway apps root whose processes are
  *  done — a test's temp dir, where a SIGKILLed child app leaves exactly these
  *  behind and no creator is alive to prune them — and the suite's end gate.
@@ -810,7 +811,7 @@ export function pruneDeadLockDirAt(dir: string, rootGone = false): boolean {
   // A pre-alpha38 `<appId>.launch.json` (nothing writes one there now; it is
   // only read) goes once no lock of that app is left beside it.
   for (const n of names) {
-    const m = /^(.+)\.launch\.json$/.exec(n);
+    const m = /^(.+)\.(?:launch\.json|show)$/.exec(n);
     if (m && !_exists(join(dir, `${m[1]}.lock`))) {
       try {
         Deno.removeSync(join(dir, n));
@@ -1241,6 +1242,21 @@ export function heldLockKey(appId: string): string {
 /** Full path to the lock file for a given lock key (see {@linkcode lockKey}) */
 export function lockPath(key: string): string {
   return join(lockDir(), `${key}.lock`);
+}
+
+/** Where a second launch asks the running window of the instance under lock
+ *  `key` to come to the front — beside the lock, in the 0700 lock dir. The
+ *  window watches it (`AioMeta.showFile`); see `askRunningToShow` (aio-run-helpers.ts). */
+export function showRequestPath(key: string): string {
+  return join(lockDir(), `${key}.show`);
+}
+
+/** The show-request file of the lock this process holds for `appId`, or
+ *  undefined when it holds none (`singleton: false`, `libraryMode`): with no
+ *  lock there is no "second launch" to answer. */
+export function heldShowRequestPath(appId: string): string | undefined {
+  const l = AppLock.live().find((l) => l.appId === appId);
+  return l ? showRequestPath(l.key) : undefined;
 }
 
 // ── Launch-info sidecar (am restart flag preservation) ───────
@@ -2814,15 +2830,36 @@ export function claimHome(
   if (!locked) {
     f.close();
     let holder:
-      | { pid?: number; appId?: string; lockDir?: string; lock?: string }
+      | {
+        pid?: number;
+        appId?: string;
+        lockDir?: string;
+        lock?: string;
+        machine?: string;
+        ns?: number;
+      }
       | undefined;
     try {
       holder = JSON.parse(Deno.readTextFileSync(info));
     } catch { /* aio-ok: no text — refused, named without it */ }
-    // Only the EXACT lock this acquire just judged — same dir, same name —
-    // stands; anything else holding the home is another process on it.
+    // Only the EXACT lock this acquire just judged — same dir, same name,
+    // and the same MACHINE and pid namespace: on a shared volume (NFS, two
+    // containers) the other side's lock dir sits at the same path but is not
+    // ours, so its lock was never judged here — anything else holding the
+    // home is another process on it. (A holder text without `machine`/`ns`
+    // is from an older aio, or a system with no machine id: the path alone
+    // decides, as it did.) Never the HOSTNAME: macOS renames the machine with
+    // the network, and its own lock after a rename is still its own. A DEAD
+    // holder never reaches here — the OS lock dies with its process.
     const mine = who.key !== undefined ? lockPath(who.key) : undefined;
-    if (mine !== undefined && holder?.lock === mine) return none;
+    if (
+      mine !== undefined && holder?.lock === mine &&
+      // An id unknown on EITHER side cannot tell: only two known, different
+      // ids refuse (a process denied /etc/machine-id is still this machine).
+      (holder.machine === undefined || machineId() === undefined ||
+        holder.machine === machineId()) &&
+      (holder.ns === undefined || holder.ns === ownPidNs())
+    ) return none;
     return { ok: false, holder };
   }
   try {
@@ -2833,11 +2870,33 @@ export function claimHome(
         appId: who.appId,
         lockDir: lockDir(),
         ...(who.key !== undefined ? { lock: lockPath(who.key) } : {}),
+        ...(machineId() !== undefined ? { machine: machineId() } : {}),
+        ...(ownPidNs() !== undefined ? { ns: ownPidNs() } : {}),
       }),
       { mode: 0o600 },
     );
   } catch { /* aio-ok: the OS lock is what guards; the text only names it */ }
   return { ok: true, close: () => f.close() };
+}
+
+/** This machine's STABLE identity for the home claim: systemd's
+ *  `/etc/machine-id` (fixed at install, unlike a hostname). Undefined where
+ *  there is none (macOS, Windows) or it may not be read without a prompt —
+ *  the claim then names no machine, and the path decides as before. */
+let _machineId: string | undefined | null = null;
+function machineId(): string | undefined {
+  if (_machineId !== null) return _machineId;
+  _machineId = undefined;
+  for (const path of ["/etc/machine-id", "/var/lib/dbus/machine-id"]) {
+    try {
+      if (
+        Deno.permissions.querySync({ name: "read", path }).state !== "granted"
+      ) continue;
+      const id = Deno.readTextFileSync(path).trim();
+      if (/^[0-9a-f]{32}$/.test(id)) return (_machineId = id);
+    } catch { /* aio-ok: absent or unreadable — try the next, else none */ }
+  }
+  return _machineId;
 }
 
 // ── instances() — Scan Running Apps ──────────────────────────

@@ -1027,7 +1027,7 @@ export function attributeRound(
     for (const cell of named) {
       let bytes = 0;
       try {
-        bytes = JSON.stringify(ui?.[cell] ?? null)?.length ?? 0;
+        bytes = utf8Size(JSON.stringify(ui?.[cell] ?? null) ?? "");
       } catch {
         /* unserializable — 0 rather than a throw in a hot path */
       }
@@ -1040,7 +1040,7 @@ export function attributeRound(
         const key = (op.path?.[0] as string | undefined) ?? "*";
         let bytes = 0;
         try {
-          bytes = JSON.stringify(op.value ?? null)?.length ?? 0;
+          bytes = utf8Size(JSON.stringify(op.value ?? null) ?? "");
         } catch { /* as above */ }
         costMeter.recordAttribution(entry.cell, String(key), bytes, round);
       }

@@ -231,6 +231,10 @@ const TOP_LOSS: Record<string, string> = {
   perfBudget: "the APK uses the default budgets",
   effectTimeoutMs: "the APK uses the default effect timeout",
   cells: "only the cells App.tsx imports are in the APK",
+  // Not server-only: the build packages the deno.json `assets` mounts at the
+  // same paths (`_packAssetMounts`) — the `assets` scaffold declares both.
+  assets: "the APK packages deno.json `assets` instead — declare the mount " +
+    "there (relative fetches keep working)",
 };
 
 /** The warning for a local APK built from an app whose entry is `src`
@@ -238,6 +242,7 @@ const TOP_LOSS: Record<string, string> = {
 export function androidRunOptionsWarning(
   src: string,
   entryRel: string,
+  shell: "apk" | "web" = "apk",
 ): { headline: string; body: string; fix: string } | null {
   const scan = scanRunOptions(src);
   if (!scan.found) return null;
@@ -260,6 +265,16 @@ export function androidRunOptionsWarning(
     lost.push(
       "  · (some options are computed or spread — none of them reach it either)",
     );
+  }
+  if (shell === "web") {
+    return {
+      headline: `the standalone web app never runs ${entryRel} — ` +
+        `aio.run() options it sets do not reach the page`,
+      body: lost.join("\n").replaceAll("APK", "web app"),
+      fix: "the web build bundles only the UI component and what it " +
+        "imports; or build the `browser` target (a binary that serves the " +
+        `page and runs ${entryRel})`,
+    };
   }
   return {
     headline: `the local APK never runs ${entryRel} — ` +

@@ -1080,6 +1080,28 @@ const _nativeStorage: Record<string, AnyDoc> | undefined = (() => {
   );
 })();
 
+/** Deno's own alert/confirm/prompt, taken at import — before any test can
+ *  answer one. Anything else found there is a test's answer. */
+const _nativeDialogs: Record<string, unknown> = Object.fromEntries(
+  ["alert", "confirm", "prompt"].map((n) => [n, (globalThis as AnyDoc)[n]]),
+);
+
+/** One refusal per dialog, shared by every mount (see `_dialogHolds`). */
+const _refuseDialog: Record<string, (message?: unknown) => never> = Object
+  .fromEntries(
+    ["alert", "confirm", "prompt"].map((name) => [name, (message?: unknown) => {
+      throw new Error(
+        `testUI: ${name}(${
+          JSON.stringify(String(message ?? ""))
+        }) — a native dialog, and a test has no one to answer it. Answer ` +
+          `it for this test: \`globalThis.${name} = () => ${
+            name === "confirm" ? "true" : name === "prompt" ? '"…"' : "{}"
+          }\`.`,
+      );
+    }]),
+  );
+let _dialogHolds = 0;
+
 function _installLocalStorage(): () => void {
   const top = () => _lsStack[_lsStack.length - 1] ?? new Map<string, string>();
   const shim: Record<string, (...a: AnyDoc[]) => unknown> = {
@@ -1836,6 +1858,36 @@ async function _buildTestUI(
     });
   }
 
+  // A native dialog has no one to answer it under testUI. happy-dom has none,
+  // so a component's `confirm("Delete?")` reached Deno's own: with no terminal
+  // it answers false without a word (the click silently did nothing), on a
+  // terminal it blocks the test on a y/N prompt — one test, hung at a desk and
+  // a no-op in CI. It throws instead; a test that answers it
+  // (`globalThis.confirm = () => true`) — before the mount or after —
+  // gets its answer. `window.confirm` is the same dialog: the owned window
+  // has none, so it defers to the global (the refusal or the test's answer).
+  const dialogs = globalThis as unknown as Record<string, unknown>;
+  for (const name of ["alert", "confirm", "prompt"] as const) {
+    if (ownedWindow && typeof ownedWindow[name] !== "function") {
+      ownedWindow[name] = (message?: unknown) =>
+        (dialogs[name] as (m?: unknown) => unknown)(message);
+    }
+    if (dialogs[name] === _nativeDialogs[name]) {
+      dialogs[name] = _refuseDialog[name];
+    }
+  }
+  // Held per mount: an overlapping testUI's dispose must not hand the one
+  // still mounted back to Deno's dialogs, nor leave the refusal behind the last.
+  _dialogHolds++;
+  _restoreGlobals.push(() => {
+    if (--_dialogHolds > 0) return;
+    for (const name of ["alert", "confirm", "prompt"] as const) {
+      if (dialogs[name] === _refuseDialog[name]) {
+        dialogs[name] = _nativeDialogs[name];
+      }
+    }
+  });
+
   // A UI listener registered on the DENO GLOBAL never fires under testUI.
   //
   // `globalThis.addEventListener("keydown", …)` is the natural thing to write
@@ -2068,6 +2120,8 @@ async function _buildTestUI(
       // localStorage (see _persistRunKey).
       // Under the harness-only symbol: the runtime ignores an app's
       // `persistKey` (a server option) by design.
+      // The declared-type write guard a dev server runs, dev-strict.
+      [standalone._HARNESS_SHAPE_GUARD]: true,
       [standalone._HARNESS_PERSIST_KEY]: opts.persist
         ? _persistRunKey()
         : `testui:${crypto.randomUUID().slice(0, 8)}`,

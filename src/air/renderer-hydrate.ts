@@ -7,7 +7,7 @@ import {
   isSignal,
 } from "./signal-binding.ts";
 import { _propAttr, _RESERVED_PROPS, _writeProp } from "./prop-write.ts";
-import { attrNameOf as _attrName } from "./ssr-utils.ts";
+import { attrNameOf as _attrName, TEXT_CONTENT_ELEMENTS } from "./ssr-utils.ts";
 import { _DOM_PROPS } from "./vdom-types.ts";
 import type { ComponentFn, RenderCtx, VNode } from "./vdom.ts";
 import {
@@ -44,6 +44,7 @@ import { _fallbackSlot } from "./vdom-render.ts";
 import { _cleanupChildren, _removeDomCleanup } from "./vdom-remove.ts";
 import { _cleanupActions } from "./vdom-helpers.ts";
 import { applyChildDependentProps } from "./vdom-props.ts";
+import { _recordControlled } from "./control-drift.ts";
 import { _devWarn, _hasRawHtml } from "./vdom-types.ts";
 import { isDevMode } from "../state/dev-flag.ts";
 import type { Signal } from "../state/signal.ts";
@@ -335,7 +336,14 @@ function _hydrateNodeInner(
 
   // Null placeholder — consume 1 comment node (AIO-107)
   if (vnode.tag === Symbol.for("aio.Null") as typeof vnode.tag) {
-    _dropSplitTail(parent, childIndex); // see `_dropSplitTail`
+    // Inside a <textarea>/<title>/<script>/<style> SSR writes no marker (the
+    // parser would read it as text — `TEXT_CONTENT_ELEMENTS`): the slot is
+    // made here, before whatever follows, and a split-off text remainder is
+    // the NEXT text child's, not stale.
+    const textContent = TEXT_CONTENT_ELEMENTS.has(
+      parent.nodeName.toLowerCase(),
+    );
+    if (!textContent) _dropSplitTail(parent, childIndex); // see `_dropSplitTail`
     const domNode = parent.childNodes[childIndex];
     if (domNode && domNode.nodeType === 8) {
       vnode._dom = domNode;
@@ -350,9 +358,9 @@ function _hydrateNodeInner(
     // right page instead of a silently wrong one.
     // The one legitimate absence is the END of the parent: `createDom` gives a
     // null child a comment even when SSR wrote nothing after it.
-    if (domNode) return _miss(parent, vnode, ctx, isSvg);
+    if (domNode && !textContent) return _miss(parent, vnode, ctx, isSvg);
     const comment = (parent.ownerDocument ?? document).createComment("");
-    parent.appendChild(comment);
+    parent.insertBefore(comment, domNode ?? null);
     _undoable(() => comment.remove());
     vnode._dom = comment;
     return 1;
@@ -410,6 +418,7 @@ function _hydrateNodeInner(
   // SSR'd app never appeared, and nothing said why.
   if (vnode.tag === Portal) {
     createDom(vnode, ctx, isSvg, parent);
+    if (vnode._anchor) _portalAnchors.add(vnode._anchor as Node);
     return 0;
   }
 
@@ -514,7 +523,11 @@ function _hydrateNodeInner(
       // (AIO-195) — createDom makes one and the SSR writers emit one, so
       // hydration must claim it. Without a `_dom` the container has no position,
       // and the next diff anchored its whole region at the parent's first child.
-      _dropSplitTail(parent, childIndex); // see `_dropSplitTail`
+      // Inside a text-content element SSR wrote no anchor, so a split-off
+      // remainder is the NEXT text child's — as for a null slot above.
+      if (!TEXT_CONTENT_ELEMENTS.has(parent.nodeName.toLowerCase())) {
+        _dropSplitTail(parent, childIndex); // see `_dropSplitTail`
+      }
       const domNode = parent.childNodes[childIndex];
       if (domNode && domNode.nodeType === 8) {
         vnode._dom = domNode;
@@ -550,6 +563,9 @@ function _hydrateNodeInner(
   }
 
   vnode._dom = el;
+  // The server's last child, taken before anything client-side (an action,
+  // a portal) can append to the element — see `_dropSurplus`.
+  const serverLast = el.lastChild;
   _write(() => _hydrateProps(el, vnode.props));
 
   const tagName = el.tagName.toLowerCase();
@@ -569,7 +585,7 @@ function _hydrateNodeInner(
       if (consumed < 0) return -1;
       childIdx += consumed;
     }
-    _dropSplitTail(el, childIdx);
+    _dropSurplus(el, childIdx, serverLast);
   }
 
   // `<select value>` selects an <option>, so it can only be written once the
@@ -654,6 +670,63 @@ function _dropSplitTail(parent: Node, idx: number): void {
     parent.removeChild(tail);
     _undoable(() => parent.insertBefore(tail, next));
   }
+}
+
+/** The anchors of portal regions this hydration CREATED. A target inside the
+ *  page that is claimed after its portal already holds that region at its
+ *  end — client content, not server surplus. */
+const _portalAnchors = new WeakSet<Node>();
+
+/** Remove what the server wrote after an element's last claimed child.
+ *
+ *  Every child was claimed and the markup still goes on: the server rendered
+ *  more than the client does (a list that lost its tail, a text or a region
+ *  the client leaves out). The walk ended at the client's last child, so the
+ *  rest was owned by no vnode and invisible to every diff — the server's
+ *  stale rows sat on the hydrated page for its whole life. Removed, as a
+ *  diverging attribute is repaired, and said in dev. A portal region that
+ *  hydration itself appended (see `_portalAnchors`) ends the surplus. A
+ *  `<textarea>`'s text is its value, which SSR writes as a child. */
+function _dropSurplus(
+  el: Element,
+  idx: number,
+  serverLast: Node | null,
+): void {
+  _dropSplitTail(el, idx);
+  if (el.tagName === "TEXTAREA") return;
+  // Only up to the server's last node: past it is what an action appended
+  // while the props were hydrated. A portal region ends it too.
+  const surplus: Node[] = [];
+  let n: Node | null = el.childNodes[idx] ?? null;
+  for (; n && !_portalAnchors.has(n); n = n.nextSibling) {
+    surplus.push(n);
+    if (n === serverLast) break;
+  }
+  // Ran off the end: the server's last node was claimed, none of this is its.
+  if (n === null || surplus.length === 0) return;
+  // All of it goes, elements included. Inside an element the component
+  // rendered, every node is aio's — the same ownership `mount()` (which
+  // empties its container) and the mismatch fallback (which re-renders the
+  // whole root) already take. Keeping surplus ELEMENTS in case a script or
+  // extension added them left a deleted list row visible, and dead, on the
+  // page for its whole life. What the page and its extensions
+  // own is the ROOT container itself: nodes past the root's last child are
+  // never swept (see `hydrate`).
+  const next = surplus[surplus.length - 1]!.nextSibling;
+  for (const n of surplus) el.removeChild(n);
+  _undoable(() => {
+    for (const n of surplus) el.insertBefore(n, next);
+  });
+  // Said once the claim commits: an attempt that falls back undoes it.
+  _write(() =>
+    _devWarn(
+      `hydrate-surplus-${el.tagName}`,
+      `hydrate() found ${surplus.length} server node(s) in <${el.tagName.toLowerCase()}> ` +
+        `past the component's last child — removed. Server and client rendered ` +
+        `different children (Date/random/window in render, or state that ` +
+        `changed between the server render and hydrate).`,
+    )
+  );
 }
 
 /** Claim the text node at `childIndex` for a child whose text is `want`.
@@ -891,6 +964,7 @@ function _hydrateProps(el: HTMLElement, props: Record<string, unknown>): void {
     }
   }
   bindSignalProps(el, props);
+  _recordControlled(el, props);
   if (props.ref) _attachRef(props.ref, el, el.tagName?.toLowerCase());
   // AIO-89: apply action directives
   if (props.use) _applyActions(el, props.use);

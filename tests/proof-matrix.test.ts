@@ -6,10 +6,11 @@
 // and nothing recorded whether any had ever run: "we tested Windows" was a
 // memory. This release keeps finding remembered things to be wrong, so the
 // rows are written by the gates themselves, on success, at the last line.
-import { assertEquals, assertStringIncludes } from "@std/assert";
+import { assert, assertEquals, assertStringIncludes } from "@std/assert";
 import {
   CLAIMS,
   commitExists,
+  proofRefusal,
   rowStatus,
   STALE_DAYS,
   uncommittedChanges,
@@ -144,4 +145,24 @@ Deno.test("proof: a gate run on uncommitted code records nothing — HEAD is not
     ),
     [" M src/server/aio.ts", "M  deno.json", "?? src/server/new.ts"],
   );
+});
+
+// The end-of-run check alone had more doors: a tree DIRTY when the gate
+// started and clean at the end (changes reverted or stashed, same HEAD), a
+// HEAD that moved during the run (a commit made mid-soak — 72 h), and a
+// status query that FAILED, which read as a clean tree. Each named code that
+// never ran.
+Deno.test("proof: a row is refused when the tree was dirty at the start, HEAD moved, or git could not say", () => {
+  const clean = { head: "abc1234", dirty: [] as string[] };
+  assertEquals(proofRefusal(clean, clean), null);
+  assertEquals(proofRefusal(clean), null); // no start stamp: the end check alone
+  assert(proofRefusal(clean, { head: "abc1234", dirty: [" M a.ts"] }));
+  assert(proofRefusal({ head: "def5678", dirty: [] }, clean));
+  assert(proofRefusal({ head: "abc1234", dirty: [" M a.ts"] }, clean));
+  assert(proofRefusal({ head: "abc1234", dirty: null }, clean));
+  assert(proofRefusal(clean, { head: "abc1234", dirty: null }));
+  // No git at all (a tarball): nothing to compare — the row says "unknown",
+  // which the matrix prints as stale.
+  const none = { head: "unknown", dirty: null };
+  assertEquals(proofRefusal(none, none), null);
 });

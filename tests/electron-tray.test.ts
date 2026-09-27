@@ -65,7 +65,7 @@ Deno.test("tray: close-to-tray hides; a real quit still passes; the UDS close ha
   const s = uds(tray);
   assertStringIncludes(
     s,
-    "__aioHiding = true; e.preventDefault(); win.hide();",
+    "__aioHiding = true; e.preventDefault();\n        if (__aioTrayHost !== false) { win.hide(); return; }",
   );
   assertStringIncludes(s, "if (__aioHiding) { __aioHiding = false; return; }");
   assertStringIncludes(s, "__aioQuitting = true; app.quit();");

@@ -340,11 +340,16 @@ What was measured, in order:
 - **`<button form="other-form">` click behaviour cannot be tested in
   happy-dom**, so `am surface` gets `form="id"` wrong in BOTH directions and the
   fix cannot be proven in-process. Needs the real-browser lane.
-- **Android: no directory `fsync` after `renameTo`.** The file contents are
-  durable; the directory entry is not, so a power cut in the window can lose the
-  rename. Needs a JNI or `FileChannel` path.
-- **Android: a failed native read at boot can still overwrite good state** in
-  paths the `has(key)` fix does not cover.
+- ~~**Android: no directory `fsync` after `renameTo`.**~~ Closed: `syncDir()`
+  fsyncs the store directory through `Os.open`/`Os.fsync` after every rename
+  (tests/android-native-store-dir-fsync.test.ts); a filesystem that refuses a
+  directory fsync is logged once — nothing more can be done from the app.
+- ~~**Android: a failed native read at boot can still overwrite good state** in
+  paths the `has(key)` fix does not cover.~~ Closed: `exists` answers from
+  `Os.stat` (only ENOENT is "absent" — `File.isFile` said no on a failed stat
+  too), and a `has`-less bridge (an activity copied from 1.0.7) reads twice and
+  warns before a null counts as "never saved". The has-less window itself cannot
+  close from the page; the build already tells that app to re-copy.
 - **Write-burst cost, measured:** at 1.08 MB of state, the per-dispatch fsync
   path costs 0.710 ms/key and wrote 211 MB over 200 dispatches — 35.9× the
   debounced path. The `persist` filter fix removes it for excluded slices; it
@@ -2031,6 +2036,15 @@ thirteen findings that had been read and not written down (see the audit note in
   same day. Says plainly not to stub `getContext`: a test against a fake GL is a
   test about the fake, and it goes green on exactly the changes that break the
   real thing.
+
+#### Move the controlled-input drift warning into the dev-only chunk
+
+`air/control-drift.ts` (5.4 KB raw) is observe-only and runs only when
+`isDevMode()`, yet it ships in every production page because the render path
+imports it statically (`vdom-props`, `vdom-events`, `renderer-hydrate`,
+`aio-renderer`). Route its three entry points through `devHooks` like the other
+dev audits, keep `tests/controlled-drift-warns.test.ts` green, and lower the
+`air` bundle ceiling 83 → 82 and `app` 86 → 85 (raised for 1.0.14-beta).
 
 #### ~~11 · The dev audits ship to production~~ — DONE (dev-only chunk, `tests/bundle-dev-chunk.test.ts`)
 

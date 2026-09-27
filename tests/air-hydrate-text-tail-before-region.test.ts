@@ -47,7 +47,23 @@ Deno.test("hydrate: a shorter client text before an empty region leaves no dupli
     const host = doc.createElement("div");
     doc.body.appendChild(host);
     host.innerHTML = html;
-    const handle = hydrate(host, App as ComponentFn);
+    // Claimed, not repaired: the remainder is dropped where the region
+    // claims its anchor, so no server node is left over for the surplus
+    // clean-up to remove (and to warn about).
+    const warned: unknown[][] = [];
+    const warn = console.warn;
+    console.warn = (...a: unknown[]) => void warned.push(a);
+    const g = globalThis as Record<string, unknown>;
+    const dev = g.__aioDev;
+    g.__aioDev = true; // the surplus clean-up says what it removed in dev
+    let handle;
+    try {
+      handle = hydrate(host, App as ComponentFn);
+    } finally {
+      console.warn = warn;
+      g.__aioDev = dev;
+    }
+    assertEquals(warned, [], "hydrate repaired server leftovers");
     assertEquals(host.innerHTML, want);
     assertEquals(host.textContent, "z");
     rows.set(["r"]);

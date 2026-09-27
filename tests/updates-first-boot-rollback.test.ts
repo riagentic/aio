@@ -336,9 +336,21 @@ Deno.test("first-boot rollback: a missing token still launches the new version",
 // `exit 1` with nothing running and the marker left behind. It now starts the
 // version that is in place and leaves the failed record, with why.
 const fewRetries = (s: string) => {
-  const r = '[ "$i" -lt 50 ] || return 1';
+  const r = '[ "$i" -lt 50 ] || return "$r"';
   assert(s.includes(r), "the retry bound moved");
-  return s.replace(r, '[ "$i" -lt 2 ] || return 1');
+  return s.replace(r, '[ "$i" -lt 2 ] || return "$r"');
+};
+
+/** Every `mv` the helper runs goes through a function that refuses the moves
+ *  `cond` (sh, over `$src` and `$dst`) names — the rest reach the real one. */
+const refuseMv = (cond: string) => (s: string) => {
+  const head = "swap_in() {";
+  assert(s.includes(head), "swap_in moved");
+  return fewRetries(s.replace(
+    head,
+    () =>
+      `mv() {\n  for dst; do :; done\n  for src; do case "$src" in -*) ;; *) break ;; esac; done\n  ${cond} && return 1\n  command mv "$@"\n}\n${head}`,
+  ));
 };
 
 Deno.test("swap failure: the new version cannot be moved into place — the old one is started, and the record says why", async () => {
@@ -422,15 +434,15 @@ async function openAll(dir: string): Promise<void> {
 // version: no app running, and a record saying "rolled back". It now starts
 // the version still in place, and the record says the rollback failed.
 for (
-  const [step, from, why] of [
+  const [step, refuse, why] of [
     [
       "the new version cannot be moved out",
-      'try_mv "$cur" "$new" ||',
+      '[ "$src" = "$cur" ]',
       "the new version could not be moved out of the way",
     ],
     [
       "the old version cannot be moved back",
-      'if ! try_mv "$prev" "$cur"; then',
+      '[ "$src" = "$prev" ] && [ "$dst" = "$cur" ]',
       "the old version could not be moved back into place",
     ],
   ] as const
@@ -444,13 +456,7 @@ for (
         () => "exit 1",
         1,
         {
-          seam: (s) => {
-            assert(s.includes(from), "the move moved");
-            return s.replace(
-              from,
-              from.startsWith("if") ? "if ! false; then" : "false ||",
-            );
-          },
+          seam: refuseMv(`[ -e "$failed" ] && ${refuse}`),
         },
       );
       assertEquals(await version(current), "2.0.0");
@@ -508,16 +514,10 @@ for (const how of ["cmp fails to run", "the marker cannot be read"] as const) {
 // Neither move could put an install back in place: the helper used to
 // `exit 1` — no app running, and a record saying "rolled back". It records
 // that FIRST, then starts the copy that is left (the old one first).
-const stuckAtCur = (phase: "swap" | "rollback") => (s: string) => {
-  const head = "try_mv() {\n  i=0";
-  assert(s.includes(head), "try_mv moved");
-  return s.replace(
-    head,
-    `try_mv() {\n  [ "$2" = "$cur" ] ${
-      phase === "rollback" ? '&& [ -e "$failed" ] ' : ""
-    }&& return 1\n  i=0`,
+const stuckAtCur = (phase: "swap" | "rollback") =>
+  refuseMv(
+    `[ "$dst" = "$cur" ]${phase === "rollback" ? ' && [ -e "$failed" ]' : ""}`,
   );
-};
 
 Deno.test("first-boot rollback: neither version can be moved back — the record says so, and the old one is started where it is", async () => {
   if (Deno.build.os === "windows") return;
@@ -819,3 +819,134 @@ Deno.test(
   "first-boot rollback: a dismissal that fails keeps the rolled-back record — the next boot dismisses it again",
   () => nextBoot(true),
 );
+
+// The install's name held NOTHING while a move was retried: the running
+// version went aside, the new one would not go in, and for up to 10 s of
+// retries a SIGKILL (logout, power loss) left no app at all — nothing inside
+// the install can start to repair it. A `mv` in front of the real one fails
+// the move INTO the install once (the flag), then freezes the next move OUT
+// of it; the helper is killed there. The install must be in place.
+Deno.test("swap: a SIGKILL while a move into place is retried leaves the running version at the install's name", async () => {
+  if (Deno.build.os === "windows") return;
+  const dir = await tempDir("aio-swap-kill-");
+  const bin = join(dir, "bin");
+  const flag = join(dir, "flag");
+  const pidf = join(dir, "helper.pid");
+  const current = join(dir, "My App");
+  try {
+    await Deno.mkdir(bin);
+    await Deno.writeTextFile(
+      join(bin, "mv"),
+      `#!/bin/sh
+for a; do :; done; dst=$a
+for a; do case $a in -*) ;; *) src=$a; break ;; esac; done
+if [ -e "$FLAG" ] && [ "$src" = "$CUR" ]; then echo $$ > "$FLAG.frozen"; exec sleep 60; fi
+if [ "$dst" = "$CUR" ] && [ "$src" = "$NEW" ]; then : > "$FLAG"; exit 1; fi
+exec ${await realMv()} "$@"
+`,
+    );
+    await Deno.chmod(join(bin, "mv"), 0o755);
+    const helper = swapWith(dir, () => "exit 0", 60, {
+      env: {
+        PATH: `${bin}:${Deno.env.get("PATH")}`,
+        CUR: current,
+        NEW: join(dir, "My App.staged-2.0.0"),
+        FLAG: flag,
+      },
+      seam: (s) =>
+        s.replace('rm -f "$0"', () => `echo $$ >'${pidf}'; rm -f "$0"`),
+    });
+    const until = async (what: string, p: () => Promise<boolean>) => {
+      for (let i = 0; i < 100 && !(await p()); i++) {
+        await new Promise((r) => setTimeout(r, 30));
+      }
+      return what;
+    };
+    await until("the failed move in", () => exists(flag));
+    assert(await exists(flag), "the move into place never failed");
+    await until("the install back", () => exists(current));
+    // A pid of 0 would signal this test's whole process group.
+    const pidOf = async (f: string) => {
+      const pid = Number((await Deno.readTextFile(f)).trim());
+      assert(pid > 1, `no pid in ${f}`);
+      return pid;
+    };
+    Deno.kill(await pidOf(pidf), "SIGKILL");
+    if (await exists(`${flag}.frozen`)) {
+      Deno.kill(await pidOf(`${flag}.frozen`), "SIGKILL");
+    }
+    await helper;
+    assert(await exists(current), "no install at its name after the kill");
+    assertEquals(await version(current), "1.0.0");
+  } finally {
+    await dropTempDir(dir);
+  }
+});
+
+async function realMv(): Promise<string> {
+  for (const p of ["/usr/bin/mv", "/bin/mv"]) {
+    if (await exists(p)) return p;
+  }
+  throw new Error("no mv");
+}
+
+// Where `mv` can exchange two names (GNU coreutils >= 9.5, renameat2
+// RENAME_EXCHANGE), the install's name holds an install at EVERY instant of a
+// swap and of the rollback — nothing a kill can land between. A `mv` in front
+// of the real one notes each time the name is empty around a move; the same
+// swap through a `mv` that cannot exchange is the instrument's positive
+// control: it must see the name empty.
+Deno.test("swap: an mv that can exchange keeps an install at the install's name through the swap and the rollback", async () => {
+  if (Deno.build.os !== "linux") return; // renameat2 is Linux's
+  if (!(await exists("/usr/bin/python3"))) return; // the exchanging mv's syscall
+  for (const exchange of [true, false]) {
+    const dir = await tempDir("aio-swap-exchange-");
+    const bin = join(dir, "bin");
+    const log = join(dir, "empty.log");
+    try {
+      await Deno.mkdir(bin);
+      await Deno.writeTextFile(
+        join(bin, "mv"),
+        `#!/bin/sh
+[ -e "$CUR" ] || echo "before: $*" >> "$LOG"
+if [ "$1" = "-T" ] && [ "$2" = "--exchange" ]; then
+  ${
+          exchange
+            ? `python3 -c 'import ctypes, os, sys
+r = ctypes.CDLL(None).renameat2(-100, os.fsencode(sys.argv[1]), -100, os.fsencode(sys.argv[2]), 2)
+sys.exit(0 if r == 0 else 1)' "$3" "$4"`
+            : "false"
+        }
+else
+  ${await realMv()} "$@"
+fi
+s=$?
+[ -e "$CUR" ] || echo "after: $*" >> "$LOG"
+exit $s
+`,
+      );
+      await Deno.chmod(join(bin, "mv"), 0o755);
+      const { current, ran } = await swapWith(dir, () => "exit 1", 1, {
+        env: {
+          PATH: `${bin}:${Deno.env.get("PATH")}`,
+          CUR: join(dir, "My App"),
+          LOG: log,
+        },
+      });
+      assertEquals(await version(current), "1.0.0", "rolled back");
+      assertEquals(
+        (await Deno.readTextFile(ran)).trim().split("\n"),
+        ["2.0.0", "1.0.0"],
+      );
+      assertEquals(await exists(join(dir, "My App.old-1.0.0")), false);
+      assertEquals(await exists(join(dir, "My App.staged-2.0.0")), false);
+      if (exchange) {
+        assertEquals(await exists(log), false, "the install's name was empty");
+      } else {
+        assert(await exists(log), "the instrument never saw the name empty");
+      }
+    } finally {
+      await dropTempDir(dir);
+    }
+  }
+});

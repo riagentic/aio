@@ -201,6 +201,20 @@ Deno.test("build: --client + --android rejects with error", async () => {
   assertEquals(stderr.includes("conflicting flags"), true);
 });
 
+Deno.test("build: --web + --android rejects with error", async () => {
+  const { code, stderr } = await runBuild(["--web", "--android"]);
+  assertEquals(code, 1);
+  assertEquals(stderr.includes("conflicting flags"), true);
+});
+
+Deno.test("build: --web refuses a flag it would ignore (--remote, --compile), by name", async () => {
+  for (const f of ["--remote", "--compile"]) {
+    const { code, stderr } = await runBuild(["--web", f]);
+    assertEquals(code, 1, f);
+    assert(stderr.includes(`${f} would do nothing`), stderr);
+  }
+});
+
 Deno.test("build: single flag does not reject", async () => {
   // --cli without src/app.ts will fail later, but NOT from flag validation
   const { stderr } = await runBuild(["--cli"]);

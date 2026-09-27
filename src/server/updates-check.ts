@@ -68,6 +68,9 @@ export type TrustStore = {
    *  be read as "different", or every old install would be offered its own
    *  build back. */
   installedSha256?: string;
+  /** The signed `releasedAt` of the release `installedSha256` came from —
+   *  what tells an older build of the same version from a newer one. */
+  installedReleasedAt?: string;
 };
 
 const TRUST_FILE = "update-trust.json";
@@ -160,8 +163,17 @@ export function writeTrust(dataDir: string, patch: Partial<TrustStore>): void {
  *  Called with the digest that was VERIFIED during the swap, never one re-read
  *  from the installed file: re-hashing after the fact would happily record
  *  whatever ended up there. */
-export function recordInstalledSha256(dataDir: string, sha256: string): void {
-  writeTrust(dataDir, { installedSha256: sha256 });
+export function recordInstalledSha256(
+  dataDir: string,
+  sha256: string,
+  /** The verified manifest's `releasedAt`; absent (a digest measured from
+   *  disk) clears any earlier one, which described another artifact. */
+  releasedAt?: string,
+): void {
+  writeTrust(dataDir, {
+    installedSha256: sha256,
+    installedReleasedAt: releasedAt,
+  });
 }
 
 /** Does this URL's transport authenticate the HOST it came from?

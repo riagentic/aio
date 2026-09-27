@@ -508,6 +508,9 @@ export function androidLocalHTML(
     themeName?: string;
     lang?: string;
     dir?: UiDir;
+    /** The web target's app id — its standalone store is `aio:<appId>`. The
+     *  APK passes none: its store stays `aio:app`, where shipped APKs saved. */
+    appId?: string;
   },
 ): string {
   const head = headContent(
@@ -529,7 +532,7 @@ export function androidLocalHTML(
     // Only when the build could not be told: an explicit ui.theme in the build
     // (not possible today) would make the deferred copy dead weight.
     shell?.theme === undefined,
-    undefined, // appId — the android shell has no offline sync queue to scope
+    shell?.appId,
     shell?.layout,
   );
   return `<!DOCTYPE html>

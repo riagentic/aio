@@ -42,3 +42,38 @@ Deno.test("lww-per-key: an own __proto__ key is kept as data, not turned into th
     } else delete (Object.prototype as { __proto__?: unknown }).__proto__;
   }
 });
+
+// The equality check every strategy uses (`stableJSONStringify`) rebuilt each
+// record with `sorted[key] =` — so under the browser's accessor an own
+// "__proto__" key became the rebuilt record's prototype and vanished from the
+// JSON. Two records differing ONLY there compared equal: `lww` answered "no
+// conflict, keep local" on both peers, and each peer kept its own value —
+// divergence, reported as agreement.
+Deno.test("lww: records differing only in an own __proto__ key are a conflict, resolved by HLC", () => {
+  const original = Object.getOwnPropertyDescriptor(
+    Object.prototype,
+    "__proto__",
+  );
+  Object.defineProperty(Object.prototype, "__proto__", {
+    configurable: true,
+    get(this: object) {
+      return Object.getPrototypeOf(this);
+    },
+    set(this: object, v: unknown) {
+      if (typeof v === "object" || typeof v === "function") {
+        Object.setPrototypeOf(this, v as object | null);
+      }
+    },
+  });
+  try {
+    const local = JSON.parse('{"__proto__":{"v":1}}');
+    const remote = JSON.parse('{"__proto__":{"v":2}}');
+    const r = mergeField("lww", local, older, remote, newer);
+    assertEquals(r.conflict, true);
+    assert(r.value === remote, "the newer side must win");
+  } finally {
+    if (original) {
+      Object.defineProperty(Object.prototype, "__proto__", original);
+    } else delete (Object.prototype as { __proto__?: unknown }).__proto__;
+  }
+});

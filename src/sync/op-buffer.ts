@@ -360,12 +360,19 @@ export function createOpBuffer(
         // Buffer still full — evict stale unconfirmed ops based on _clientTs TTL.
         // This prevents backpressure deadlock where a throttled client's pending
         // queue grows indefinitely while acks can't flow through fast enough.
-        const staleOps = await storage.loadOps(op.cell);
+        // Oldest first, and only as many as the incoming op needs: a stale op
+        // is not a refused one — the server still applies anything inside its
+        // tombstone window (24h at least, see `refuseIfStale`), so evicting
+        // EVERY op past retention to make room for one threw away hundreds of
+        // changes the server would have taken.
         const cutoff = Date.now() - staleAfterOf(op.cell);
+        const staleOps = (await storage.loadOps(op.cell))
+          .filter((o) => !o.confirmed && o._clientTs && o._clientTs <= cutoff)
+          .sort((a, b) => a._clientTs! - b._clientTs!);
         let evictedCount = 0;
 
         for (const staleOp of staleOps) {
-          if (!staleOp._clientTs || staleOp._clientTs > cutoff) continue;
+          if (newCount - evictedCount < cap) break;
           // Evict this stale op by removing it from storage.
           //
           // These are UNCONFIRMED ops: mutations the user made that never

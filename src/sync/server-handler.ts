@@ -456,8 +456,8 @@ export function createServerSyncHandler(
    *  the origin is always told. `sync-err`, not `op-rejected`: the failure is
    *  the server's, not the op's — the client keeps the op and its re-request
    *  carries it again. Not deduped per socket like `sayHeld`: a persist that
-   *  failed is news every time, and the client's one retry timer absorbs a
-   *  burst. The error itself (SQLite/disk text: paths, schema) stays in the
+   *  failed is news every time — but said once per `sync-req`, however many
+   *  of its pending ops failed (see `persistFailSaid`). The error itself (SQLite/disk text: paths, schema) stays in the
    *  server log both callers write — the client gets a generic reason. */
   function sayPersistFailed(
     socket: WebSocket,
@@ -1647,6 +1647,13 @@ export function createServerSyncHandler(
          *  rest of the request — its later ops, its response — waits for the
          *  client's resend. */
         let heldMid = false;
+        /** A pending op's persist failed and `sync-err` went out: ONE per
+         *  request. One frame already makes the client re-send the whole
+         *  queue; one per op made a client built before its single retry
+         *  timer (≤1.0.9) run a retry loop per frame, each re-sending the
+         *  queue and failing per op again — P loops, then P², while the disk
+         *  stayed full. Each failure is still in the server log. */
+        let persistFailSaid = false;
         // Persist pending ops under per-cell lock (prevents compact race)
         for (const pending of sync.pendingOps ?? []) {
           if (heldMid) return;
@@ -1749,7 +1756,10 @@ export function createServerSyncHandler(
               // Don't ack — the client keeps it pending, and the `sync-err`
               // is what makes it retry. The rest of the request goes on: the
               // catch-up it asked for is still owed.
-              sayPersistFailed(socket, pending.id, pending.cell);
+              if (!persistFailSaid) {
+                persistFailSaid = true;
+                sayPersistFailed(socket, pending.id, pending.cell);
+              }
               return;
             }
             if (foreign && serverTs !== null) noteForeign(pending.id);

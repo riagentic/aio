@@ -375,7 +375,7 @@ Deno.test("failed record: the words match what happened, and the OS", async () =
             attempts: 0,
             swapFailed: "the new version could not be moved into place",
           },
-          /could not be installed: the new version could not be moved into place, so the update helper started 1\.0\.0 again/,
+          /could not be installed: the new version could not be moved into place, so 1\.0\.0 was started again/,
         ],
       ] as const
     ) {

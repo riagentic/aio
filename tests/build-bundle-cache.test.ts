@@ -34,6 +34,7 @@ const cfgFor = (root: string, appDir = root): BuildConfig =>
     dist: join(root, "dist"),
     doForce: false,
     doAndroid: false,
+    standalone: false,
     isRemote: false,
     frameworkSrcDir: "",
   }) as unknown as BuildConfig;

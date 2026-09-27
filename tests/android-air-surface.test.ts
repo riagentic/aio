@@ -1,8 +1,8 @@
 // `aio/air` must mean the same thing on every target.
 //
 // The android build remaps the public specifier to a different module:
-//   src/build/build-bundle.ts  → const fwEntry = doAndroid
-//                                  ? "standalone-air.ts" : "browser-air.ts"
+//   src/build/esbuild-shared.ts → const air = standalone
+//                                  ? "src/standalone-air.ts" : "src/browser-air.ts"
 //                                … imports: { "aio": aioEntry, "aio/air": aioEntry }
 // so on android `import { … } from "aio/air"` resolves to src/standalone-air.ts.
 // That module carried its OWN `useLocal`, narrower than the one every other

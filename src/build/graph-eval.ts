@@ -118,7 +118,7 @@ export type EvalResult =
   | {
     ok: false;
     ms: number;
-    /** `ReferenceError` / `TypeError` / … / `timeout` */
+    /** `ReferenceError` / `TypeError` / … / `timeout` / `aborted` */
     name: string;
     message: string;
     /** For `X is not defined`: the identifier. */
@@ -140,16 +140,29 @@ export async function evaluateBundle(
   code: string,
   format: "esm" | "iife",
   timeoutMs = 10_000,
-  opts: { userAgent?: string } = {},
+  opts: { userAgent?: string; signal?: AbortSignal } = {},
 ): Promise<EvalResult> {
   const t0 = performance.now();
   const url = URL.createObjectURL(
     new Blob([WORKER_SRC], { type: "application/javascript" }),
   );
   const worker = new Worker(url, { type: "module", name: "aio-graph-eval" });
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  let onAbort: (() => void) | undefined;
   try {
     const verdict = await new Promise<EvalResult>((resolve) => {
-      const timer = setTimeout(() => {
+      // The dev server stops a check still running when it closes: the worker
+      // and this timer must not outlive the server that started them.
+      onAbort = () =>
+        resolve({
+          ok: false,
+          ms: performance.now() - t0,
+          name: "aborted",
+          message: "the evaluation was stopped before it finished",
+        });
+      if (opts.signal?.aborted) return onAbort();
+      opts.signal?.addEventListener("abort", onAbort, { once: true });
+      timer = setTimeout(() => {
         resolve({
           ok: false,
           ms: performance.now() - t0,
@@ -189,6 +202,8 @@ export async function evaluateBundle(
     });
     return verdict;
   } finally {
+    clearTimeout(timer);
+    if (onAbort) opts.signal?.removeEventListener("abort", onAbort);
     worker.terminate();
     URL.revokeObjectURL(url);
   }

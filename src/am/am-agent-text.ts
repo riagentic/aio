@@ -1249,13 +1249,14 @@ const SHIP = `## SHIP — build targets, versions, releases
 - **targets** (deno.json build.targets; am build --list) browser: binary serving the page ·
   electron: AppImage (Linux) / zip (win, mac) · server: headless binary + systemd unit ·
   server-app: server + its UI + unit · cli: headless binary · android: APK (ANDROID_HOME + Java 17 +
-  gradle) · cli-client / electron-client / android-client / ios-client: thin clients →
+  gradle) · web: static PWA directory, the standalone shape (https host; iPhone: Add to Home
+  Screen) · cli-client / electron-client / android-client / ios-client: thin clients →
   build.server "host:port"
 - **platforms** "host" (default) linux linux-arm64 windows macos macos-arm64 — server/browser/cli
   cross-compile; electron/android package on their own OS (skipped with a reason)
 - **commands** deno task compile (the default "client" target) · deno task build [--targets=a,b]
   [--platforms=linux,windows] [--release] [--list] · am build electron android
-- **standalone APK** (android) = the bundle of App.tsx + the cells it imports — NO Deno, NO server:
+- **standalone APK** (android; web too) = the bundle of App.tsx + the cells it imports — NO Deno, NO server:
   nothing given to aio.run reaches it, *.server.ts is refused · content → deno.json "assets"
   ({ "/text": "./text" }) + a RELATIVE fetch("text/a.md") (desktop: the mount; APK: packaged under
   the page) · persistence → cells (AioNativeStore, survives a kill) · Back → onBackButton(() => bool)

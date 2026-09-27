@@ -77,6 +77,30 @@ Deno.test("cost: a full send over UDS is attributed as the whole slice", () => {
   );
 });
 
+Deno.test("cost: attributed bytes are UTF-8 bytes, not UTF-16 code units", () => {
+  // `JSON.stringify(v).length` counts code units: "€" is 1 of them and 3
+  // bytes on the wire, so a cell of non-ASCII text read up to 3× lighter in
+  // `am cost` than it was.
+  const seen: number[] = [];
+  const meter = {
+    beginRound: () => 1,
+    recordAttribution: (_c: string, _k: string, b: number) => void seen.push(b),
+  };
+  const text = "€".repeat(100);
+  const wire = new TextEncoder().encode(JSON.stringify(text)).length;
+  attributeRound(meter, {
+    anyPatchSend: true,
+    anyFullSend: true,
+    force: false,
+    patchesToSend: [{
+      cell: "notes",
+      ops: [{ op: "replace", path: ["t"], value: text } as never],
+    }],
+    getUIState: () => ({ notes: text }),
+  });
+  assertEquals(seen, [wire, wire]);
+});
+
 Deno.test("cost: the client count includes UDS clients", () => {
   // The number `bytesPerSecPerClient` divides by. Zero clients made the whole
   // per-client column meaningless on the desktop target.

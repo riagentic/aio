@@ -130,6 +130,33 @@ function inAppScope<T>(scope: AppScope | undefined, fn: () => T): T {
  *  takes the filter itself (`_cellVisible` / `_cellPersist`) through
  *  `applyCellFieldFilter` — the walker the wire, the patch path, the client
  *  read seam and the persistence read-back all share. */
+/** Await the app's `onStop` until the shutdown cuts its share (`signal`).
+ *  Cut, it is left running and said so — the bridge's own teardown after it
+ *  (the "stopped" line, the logger flush) must still happen. A throw before
+ *  the cut propagates as before. */
+async function untilCut(
+  hook: void | Promise<void>,
+  signal: AbortSignal | undefined,
+): Promise<void> {
+  if (!signal || !(hook instanceof Promise)) return await hook;
+  hook.catch(() => {
+    // aio-ok: marks it handled only — a rejection BEFORE the cut still
+    // propagates through the race below; one after it lands once the log it
+    // could be written to is closed, and must not crash the exit.
+  });
+  const cut = new Promise<"cut">((res) =>
+    signal.aborted
+      ? res("cut")
+      : signal.addEventListener("abort", () => res("cut"), { once: true })
+  );
+  if (await Promise.race([hook, cut]) === "cut") {
+    log.warn(
+      `onStop did not finish inside its share of the shutdown budget — ` +
+        `left running; the app's log, lock and databases close without it`,
+    );
+  }
+}
+
 function fieldIncluded(
   key: string,
   filter: CellFieldFilter | undefined,
@@ -496,7 +523,7 @@ export function buildLegacyConfig(
     // after-the-fact work and stays in `onStop`. This is the app quiescing
     // its own producers, so it is a straight pass-through.
     onStopping: fc.onStopping,
-    onStop: () =>
+    onStop: (signal?: AbortSignal) =>
       inAppScope(scope, async () => {
         // THE APP'S HOOK RUNS BEFORE THE LOGGER IS TORN DOWN.
         //
@@ -529,7 +556,7 @@ export function buildLegacyConfig(
           } else composed.destroyAll(stopApp);
         }
         try {
-          if (fc.onStop) await fc.onStop();
+          if (fc.onStop) await untilCut(fc.onStop(), signal);
         } finally {
           // ALWAYS — a hook that throws (a dispatch from `onStop` is refused,
           // and an app that awaits it throws) used to skip everything below:

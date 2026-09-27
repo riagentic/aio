@@ -18,6 +18,7 @@ import { appIconLabel, appIconPng } from "./app-icon.ts";
 import { _writeConnectPage, androidVersion } from "./build-android.ts";
 import { misplacedIconHint, resolveAppIcon } from "./build-helpers.ts";
 import { HEY, NO, NOTE, OK } from "../diagnostics/fmt.ts";
+import { emptyDir, foreignArtifactRefusal } from "./dist-staging.ts";
 
 /** The reverse-DNS bundle id: `ios.bundleId` from deno.json when declared,
  *  else `app.aio.<label>` — one decider, like `androidApplicationId`. */
@@ -109,6 +110,12 @@ export function iosProjectDir(
   return join(cfg.root, iosArtifactName(cfg.binaryName));
 }
 
+/** The line every generated `App/ViewController.swift` carries — how the next
+ *  build knows the project directory is its own before replacing it. */
+export const IOS_SIGN = "/// The aio iOS client";
+/** The file that carries {@linkcode IOS_SIGN}. */
+const IOS_MARK = "App/ViewController.swift";
+
 /** The artifact's name — the one spelling the builder writes and the fleet
  *  recognises. */
 export function iosArtifactName(binaryName: string): string {
@@ -144,9 +151,16 @@ export async function buildIos(cfg: BuildConfig): Promise<void> {
   }
   const appName = appTitle ?? binaryName;
   const dir = iosProjectDir(cfg);
-  try {
-    await Deno.remove(dir, { recursive: true });
-  } catch { /* aio-ok: a first build has nothing to remove */ }
+  // Never a user folder that shares the artifact's name: only a project an
+  // aio build generated is replaced.
+  const refusal = await foreignArtifactRefusal(dir, IOS_MARK, IOS_SIGN);
+  if (refusal) {
+    console.error(`${NO} ${refusal}`);
+    Deno.exit(1);
+  }
+  // The mark goes last and comes back first: an interrupted build never
+  // leaves a project the next one refuses as a user's folder.
+  await emptyDir(dir, [IOS_MARK]);
   const files = renderIosTemplate({
     appName,
     bundleId,
@@ -154,7 +168,10 @@ export async function buildIos(cfg: BuildConfig): Promise<void> {
     versionCode: version.code,
     allowArbitraryLoads: !(cfg.bakedServer?.startsWith("https://") ?? false),
   });
-  for (const [rel, content] of Object.entries(files)) {
+  const marked = Object.entries(files).sort(([a], [b]) =>
+    Number(b === IOS_MARK) - Number(a === IOS_MARK)
+  );
+  for (const [rel, content] of marked) {
     const dest = join(dir, rel);
     await Deno.mkdir(dirname(dest), { recursive: true });
     await Deno.writeTextFile(dest, content);

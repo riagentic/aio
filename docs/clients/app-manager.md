@@ -1242,12 +1242,17 @@ deno task am shot --video=demo.mp4 --duration=20   # stops by itself (SIGTERM st
 
 While recording, the window's own screencast sends a JPEG each time it paints,
 saved to a temp folder — nothing is encoded yet, so the app runs at its real
-speed. After it stops, the window's built-in encoder turns them into the file
-(no ffmpeg). So a window that is hidden or never changes gives a one-picture
-video, and says so in a `warning`. If the window closes while recording, nothing
-is written and the frames' folder is named. `--full`, `--selector`, `--check`,
-`--update`, `--threshold`, `--max-diff` and `--out` shape one picture and are
-refused with `--video`. To record a UI **test** instead, see
+speed. After it stops, `ffmpeg` on your PATH encodes them (libx264 / libvpx,
+several times faster); without one, the window's built-in encoder does. Both
+write the same frames at the same times into the same container, and the result
+names the encoder and its speed (`encoder`, `encodeSeconds`). An `ffmpeg` that
+is present but fails is not a silent bad file: the window encodes instead and
+the reason is printed (`encoderFallback`). So a window that is hidden or never
+changes gives a one-picture video, and says so in a `warning`. If the window
+closes while recording, nothing is written and the frames' folder is named.
+`--full`, `--selector`, `--check`, `--update`, `--threshold`, `--max-diff` and
+`--out` shape one picture and are refused with `--video`. To record a UI
+**test** instead, see
 [A video of the test](../testing/ui-testing.md#a-video-of-the-test---video).
 
 ### Evaluate in the live window (`am eval`)

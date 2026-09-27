@@ -16,6 +16,7 @@ import { _hasRawHtml } from "./vdom-types.ts";
 import { _notANode } from "./vdom-create.ts";
 import { _assertTagName } from "./prop-write.ts";
 import {
+  dropSlotMarkers,
   escapeHtml as _escapeHtml,
   keepLeadingNewline,
   RAW_TEXT_ELEMENTS,
@@ -23,6 +24,7 @@ import {
   ssrCloseSelect,
   ssrOpenSelect,
   ssrOptionProps,
+  TEXT_CONTENT_ELEMENTS,
   VOID_ELEMENTS,
 } from "./ssr-utils.ts";
 import { isDevMode } from "../state/dev-flag.ts";
@@ -167,12 +169,14 @@ function _renderSync(
       for (const child of vnode.children) {
         html += typeof child === "string" || typeof child === "number"
           ? (inner.n++, rawTextContent(tag, String(child), isDevMode()))
-          : _renderSync(child, inner, scope);
+          : dropSlotMarkers(_renderSync(child, inner, scope));
       }
     } else {
       const inner: SsrNodes = { n: 0 };
+      const text = TEXT_CONTENT_ELEMENTS.has(tag);
       for (const child of vnode.children) {
-        html += _renderSync(child, inner, scope);
+        const out = _renderSync(child, inner, scope);
+        html += text ? dropSlotMarkers(out) : out;
       }
     }
   } finally {
@@ -566,10 +570,16 @@ async function* _stream(
       for (const child of vnode.children) {
         if (typeof child === "string" || typeof child === "number") {
           yield rawTextContent(tag, String(child), isDevMode());
-        } else yield* _stream(child, scope);
+        } else {
+          for await (const c of _stream(child, scope)) yield dropSlotMarkers(c);
+        }
       }
     } else if (tag === "pre" || tag === "listing" || tag === "textarea") {
       yield* _keepLeadingNewline(tag, vnode.children, scope);
+    } else if (tag === "title") {
+      for (const child of vnode.children) {
+        for await (const c of _stream(child, scope)) yield dropSlotMarkers(c);
+      }
     } else for (const child of vnode.children) yield* _stream(child, scope);
   } finally {
     ssrCloseSelect(render, inSelect);
@@ -586,8 +596,10 @@ async function* _keepLeadingNewline(
   scope: SsrContexts,
 ): AsyncGenerator<string, void, unknown> {
   let first = true;
+  const text = TEXT_CONTENT_ELEMENTS.has(tag);
   for (const child of children) {
-    for await (const chunk of _stream(child, scope)) {
+    for await (const c of _stream(child, scope)) {
+      const chunk = text ? dropSlotMarkers(c) : c;
       if (first && chunk !== "") {
         first = false;
         yield keepLeadingNewline(tag, chunk);

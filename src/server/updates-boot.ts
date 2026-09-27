@@ -92,8 +92,19 @@ export async function judgePendingUpdate(
     exe?: string;
   } = {},
 ): Promise<boolean> {
-  const pending = readPending(dataDir);
+  let pending = readPending(dataDir);
   if (!pending) return false;
+  // Said once: what the previous process could not log after its shutdown.
+  if (pending.handoverError) {
+    log.error(
+      "updates",
+      `during the handover ${pending.from} → ${pending.to}: ` +
+        pending.handoverError,
+    );
+    const { handoverError: _, ...rest } = pending;
+    pending = rest;
+    writePending(dataDir, pending);
+  }
   // The very file the update was meant to REPLACE is running. A marker
   // without the old file's identity (staged by an older build) is never
   // judged so.
@@ -663,8 +674,7 @@ export function startUpdates(deps: StartUpdatesDeps): StartedUpdates {
           } by hand (stop the app first).`
         : failed.swapFailed
         ? `update ${failed.from} → ${failed.to} could not be installed: ` +
-          `${failed.swapFailed}, so the update helper started ` +
-          `${failed.from} again`
+          `${failed.swapFailed}, so ${failed.from} was started again`
         : `update ${failed.from} → ${failed.to} was rolled back: ${
           failed.attempts === 0
             ? `it never started (no first boot within ${FIRST_BOOT_WAIT_S} ` +

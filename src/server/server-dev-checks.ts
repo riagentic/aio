@@ -86,6 +86,9 @@ export interface GraphValidationHandle {
    *  re-runs validation through the SAME one so an unchanged graph costs
    *  nothing on reload. */
   prodGraph?: ProdGraphCheck;
+  /** Stop a prod-bundle evaluation still running (server close): its worker
+   *  and timeout must not outlive the server. */
+  stop: () => void;
 }
 
 /** Start async graph validation. Returns handle to await completion and read result. */
@@ -108,11 +111,19 @@ export function startGraphValidation(
       getResult: () => graphResult,
       setResult: set,
       settled: true,
+      stop: () => {},
     };
   }
 
   const graphTranspile = (s: string, f: string) => transpile(s, f);
-  const prodGraph = createProdGraphCheck({ absBaseDir, uiEntry, shell, debug });
+  const stopper = new AbortController();
+  const prodGraph = createProdGraphCheck({
+    absBaseDir,
+    uiEntry,
+    shell,
+    debug,
+    signal: stopper.signal,
+  });
   const done = validateGraph(
     entrypoint,
     importMapObj,
@@ -237,6 +248,7 @@ export function startGraphValidation(
     getResult: () => graphResult,
     setResult,
     prodGraph,
+    stop: () => stopper.abort(),
     get settled() {
       return settled;
     },

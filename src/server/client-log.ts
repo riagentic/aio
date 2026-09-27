@@ -6,6 +6,7 @@ import type { ClientLogEntry } from "../air/dom-inspector-types.ts";
 import { getLogDir, log } from "../diagnostics/logger-api.ts";
 import { remapClientText } from "../diagnostics/stack-remap.ts";
 import { _diagScopeNow } from "../diagnostics/diagnostic-bus.ts";
+import { redactLogCredentials } from "../diagnostics/redact.ts";
 
 const MAX_RATE = 100; // messages per second per client
 const MAX_CLIENT_MSG = 8192; // max msg length from client
@@ -195,7 +196,13 @@ function _append(line: string): void {
   // permissions of a file was started in this test, but never completed"), and
   // the same detachment means a process exiting between the write and the
   // chmod leaves the file at the mode this code exists to correct.
-  const done = Deno.writeTextFile(path, line, { append: true, mode: 0o600 })
+  // A renderer logs its own URL, and under a key that URL carries `?token=`:
+  // masked on its way to disk, like every framework log line (logger-core
+  // `_capLine`).
+  const done = Deno.writeTextFile(path, redactLogCredentials(line), {
+    append: true,
+    mode: 0o600,
+  })
     .then(() => {
       _writeErrors = 0; // reset on success
       if (!_modeFixed.has(path)) {

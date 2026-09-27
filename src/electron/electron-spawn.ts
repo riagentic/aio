@@ -7,7 +7,7 @@ import { electronClientScript } from "./electron-client-script.ts";
 import { electronMainScriptUDS } from "./electron-uds.ts";
 import { log } from "../diagnostics/logger-api.ts";
 import { classifyElectronLine } from "./electron-renderer-log.ts";
-import { isCompiled } from "../server/paths.ts";
+import { appImageOwner, isCompiled } from "../server/paths.ts";
 import { DENO_JSON_NAMES, parseDenoJson } from "../server/deno-json.ts";
 import { HEY } from "../diagnostics/fmt.ts";
 import { redactUrlToken } from "../diagnostics/redact.ts";
@@ -96,7 +96,25 @@ export async function findElectronBin(
   opts: FindElectronOpts = {},
 ): Promise<string | null> {
   // 1. ELECTRON_PATH env var (AppImage / custom deployment)
-  const envPath = Deno.env.get("ELECTRON_PATH");
+  let envPath = Deno.env.get("ELECTRON_PATH");
+  // An Electron AppImage's AppRun exports it into its own mount, and every
+  // child inherits it: an app started from that AppImage's terminal would run
+  // the HOST's Electron, from a mount that vanishes when the host exits.
+  const appDir = Deno.env.get("APPDIR");
+  if (
+    envPath && appDir && envPath.startsWith(appDir + "/") &&
+    appImageOwner(
+        opts.execPath ?? Deno.execPath(),
+        Deno.env.get("APPIMAGE"),
+        appDir,
+      ) === "foreign"
+  ) {
+    log.error(
+      `$ELECTRON_PATH (${envPath}) is inherited from the AppImage that ` +
+        `started this app (${appDir}) — ignored`,
+    );
+    envPath = undefined;
+  }
   if (envPath) {
     try {
       await Deno.stat(envPath);

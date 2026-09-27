@@ -113,3 +113,25 @@ Deno.test("home stores: the shard runner pins every store per shard, beside (not
   }
   assertEquals(new Set(VARS.map((k) => env[k])).size, VARS.length);
 });
+
+// The same hole, one variable over: `AIO_APPS_DIR` was pinned ONCE per process,
+// so a test that handed it back by `Deno.env.delete` (69 test files have that
+// restore shape) left every later harness in the process resolving
+// `appDirs(appId)` to the developer's REAL `~/.<appId>`.
+Deno.test("home stores: a restore that DELETES AIO_APPS_DIR is re-pinned at the next arm, never the real home", () => {
+  const prev = Deno.env.get("AIO_APPS_DIR");
+  Deno.env.delete("AIO_APPS_DIR"); // as a single-file `deno test` starts
+  try {
+    _armTestStrict();
+    const first = Deno.env.get("AIO_APPS_DIR");
+    assert(first, "the harness did not pin AIO_APPS_DIR");
+    Deno.env.delete("AIO_APPS_DIR");
+    _armTestStrict();
+    const again = Deno.env.get("AIO_APPS_DIR");
+    assert(again, "AIO_APPS_DIR stayed unset: appDirs() is the real home");
+    assertSandboxed(again, "AIO_APPS_DIR");
+  } finally {
+    if (prev === undefined) Deno.env.delete("AIO_APPS_DIR");
+    else Deno.env.set("AIO_APPS_DIR", prev);
+  }
+});

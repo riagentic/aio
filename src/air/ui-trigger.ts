@@ -228,6 +228,23 @@ export function assertOperable(
         `  assert it instead: ${how}disabled === true (or enable it first)`,
     );
   }
+  // Disabled or inert by an ANCESTOR: `.disabled` stays false on the control
+  // itself (in a browser too), yet a browser delivers it no event — the
+  // harness used to fire them and report success.
+  if (inDisabledFieldset(el)) {
+    throw new Error(
+      `${p}cannot ${verb} ${who} — the ${tag} is inside a <fieldset disabled>, ` +
+        `which disables it\n  enable the fieldset first, or assert on the ` +
+        `state that disables it`,
+    );
+  }
+  if (el?.closest?.("[inert]")) {
+    throw new Error(
+      `${p}cannot ${verb} ${who} — the ${tag} is inside an \`inert\` subtree\n` +
+        `  a browser delivers no event to it; remove \`inert\` first, or assert ` +
+        `on the state that sets it`,
+    );
+  }
   if (opts.write && el?.readOnly === true) {
     throw new Error(
       `${p}cannot ${verb} ${who} — the ${tag} is readonly\n` +
@@ -797,10 +814,28 @@ function barredFromValidation(el: AnyEl): boolean {
   if (el?.willValidate === false) return true;
   if (el?.disabled === true || el?.readOnly === true) return true;
   if (tagOf(el) === "input" && inputTypeOf(el) === "hidden") return true;
+  return inDisabledFieldset(el);
+}
+
+/** The form controls a `<fieldset disabled>` disables — any other element
+ *  inside it (a `<div onClick>`) still takes events. */
+const FIELDSET_DISABLES = new Set([
+  "button",
+  "input",
+  "select",
+  "textarea",
+  "fieldset",
+]);
+
+/** Is `el` a form control disabled by an ancestor `<fieldset disabled>`? A
+ *  descendant of that fieldset's first `<legend>` CHILD is not. */
+function inDisabledFieldset(el: AnyEl): boolean {
+  if (!FIELDSET_DISABLES.has(tagOf(el))) return false;
   let fs = el?.parentElement?.closest?.("fieldset[disabled]");
   while (fs) {
-    // The first <legend> of a disabled fieldset is NOT disabled.
-    const legend = fs.querySelector?.("legend");
+    const legend = [...(fs.children ?? [])].find((c: AnyEl) =>
+      tagOf(c) === "legend"
+    );
     if (!legend || !legend.contains?.(el)) return true;
     fs = fs.parentElement?.closest?.("fieldset[disabled]");
   }

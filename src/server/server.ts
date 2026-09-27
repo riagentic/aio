@@ -11,11 +11,11 @@ import {
 import { isPipePath, listenLocal } from "./local-listen.ts";
 import { serveHttpOverLocal } from "./http-over-conn.ts";
 import { enc } from "../protocol/envelope.ts";
-import { dirname, fromFileUrl, join, resolve } from "@std/path";
+import { fromFileUrl, join, resolve, toFileUrl } from "@std/path";
 import { AsyncLocalStorage } from "node:async_hooks";
 import { WS_BUFFER_HIGH_WATER } from "./write-backlog.ts";
 import { resolveShare } from "./app-dirs.ts";
-import { readDenoJsonSync } from "./deno-json.ts";
+import { locateDenoJsonAbove } from "./deno-json.ts";
 import { DEFAULT_SYNC_INTERVAL_MS } from "./aio.ts";
 import {
   _diagEventScope,
@@ -88,6 +88,9 @@ import {
   sessionCookieNameFor,
   TROJAN_PREFIX,
   trojanDenialForUserMode,
+  WEAK_TOKEN_MIN_BITS,
+  WEAK_TOKEN_MIN_CHARS,
+  weakStaticTokenUsers,
 } from "./server-auth.ts";
 import { handleAuthFlow } from "./auth-flows.ts";
 import { stopEsbuild } from "./server-transpile.ts";
@@ -418,6 +421,23 @@ export function createServer(config: ServerConfig): ServerHandle {
   // then fall through to users/resolveUser. Sessions alone activate per-user
   // auth mode — an app with only `sessions: true` is a per-user app.
   const _baseResolver = _buildUserResolver(config);
+  // Dev AND prod: a weak static token is a config smell wherever it runs, and
+  // the failure budget cannot save it (a valid token is served over budget).
+  const _weak = config.users && !config.resolveUser
+    ? weakStaticTokenUsers(config.users)
+    : [];
+  if (_weak.length > 0) {
+    log.warn(
+      "auth",
+      `security: weak static \`users:\` token for ${
+        _weak.map((id) => JSON.stringify(id)).join(", ")
+      } — under ${WEAK_TOKEN_MIN_CHARS} chars or ~${WEAK_TOKEN_MIN_BITS} ` +
+        "bits, it is guessable at network speed (the failure budget slows a " +
+        "guesser, a valid token is still served). Generate one with " +
+        "`openssl rand -base64 24` or `crypto.randomUUID()`, and load it from " +
+        "the environment.",
+    );
+  }
   // The local control plane: mint an owner-only, per-boot credential so `am`
   // and amui can reach /__aio/trojan/* on an auth-enabled app. Without it the
   // trojan's (correct) admin gate locks the developer out of inspecting their
@@ -1358,7 +1378,7 @@ export function createServer(config: ServerConfig): ServerHandle {
         url.searchParams.has("token");
       const credUrl = urlTokenInert ? new URL(url) : url;
       if (urlTokenInert) credUrl.searchParams.delete("token");
-      const { token, fromUrl, source, legacyCookie } = _extractTokenWithSource(
+      let { token, fromUrl, source, legacyCookie } = _extractTokenWithSource(
         credUrl,
         req,
         sessionCookieName,
@@ -1383,18 +1403,48 @@ export function createServer(config: ServerConfig): ServerHandle {
       // and cost the one thing that makes the budget exemption below safe:
       // a short static token would otherwise be guessable through an
       // unmetered channel.
-      const user = token
-        ? (source === "cookie"
-          ? (_sessionResolver?.(token) ?? null)
-          : await _userResolver(token, fromUrl && pathname !== "/ws"))
-        : null;
+      const resolve = async (tok: string, src: typeof source, inUrl: boolean) =>
+        src === "cookie"
+          ? (_sessionResolver?.(tok) ?? null)
+          : await _userResolver(tok, inUrl && pathname !== "/ws");
+      // Where the URL IS a credential channel (`/ws`, and every path once
+      // `users:`/`resolveUser` is set), a `?token=` may still be the app's
+      // own parameter (an invite link — the browser client even builds its
+      // socket URL from the PAGE's). Read first, it masked the session
+      // cookie or Bearer: a signed-in user's handshake answered 401, and on
+      // an `auth: true` + `users:` app so did every app route such a link
+      // reached. A URL token that resolves to nobody gives way to the next
+      // credential the request carries. It is still CHARGED — else an
+      // attacker's own valid Bearer made the URL an unmetered oracle for
+      // other users' tokens. Like every credential, a VALID URL token is
+      // honored over budget ("the budget throttles failed authentication,
+      // never service").
+      const urlTok = source === "url";
+      let charged = false;
+      let user = token ? await resolve(token, source, fromUrl) : null;
+      if (!user && urlTok) {
+        if (token) {
+          recordAuthFail(clientKey, "invalid token (per-user mode)");
+          charged = true;
+        }
+        const bare = new URL(url);
+        bare.searchParams.delete("token");
+        const next = _extractTokenWithSource(bare, req, sessionCookieName);
+        const nextUser = next.token
+          ? await resolve(next.token, next.source, false)
+          : null;
+        if (nextUser) {
+          ({ token, fromUrl, source, legacyCookie } = next);
+          user = nextUser;
+        }
+      }
       if (!user) {
         // Only a DELIBERATELY presented credential is an attack signal. An
         // ambient cookie is attached by the browser to every subresource, so
         // charging it to the budget meant one reload after a session expired
         // locked the legitimate user out of /login for 5 minutes.
         const presented = !!token && _isPresented(source);
-        if (presented) {
+        if (presented && !charged) {
           recordAuthFail(clientKey, "invalid token (per-user mode)");
         }
         // Fail LOUD rather than silently forever: tell the browser to drop the
@@ -1507,7 +1557,7 @@ export function createServer(config: ServerConfig): ServerHandle {
         if (extra) anonResp.headers.set("Set-Cookie", extra["Set-Cookie"]);
         return anonResp;
       }
-      if (credUrl.searchParams.get("token")) _warnTokenInUrl();
+      if (fromUrl) _warnTokenInUrl();
       if (pathname === "/ws") {
         // Sockets outlive the credential that opened them, so the socket keeps
         // the session token and re-validates it (see `revalidateSession`).
@@ -1996,15 +2046,19 @@ export function createServer(config: ServerConfig): ServerHandle {
         // METERED, like the main listener. This one verified credentials
         // and never called `recordAuthFail`, so it was an unmetered
         // guessing oracle for any local process — the one gate the whole
-        // budget exists to be.
-        recordAuthFail(peerKeyOf(info), "invalid token (control listener)");
-        // …and REFUSED once over budget, like the main listener. Recording
-        // a failure that nothing ever reads is a meter with no breaker:
-        // the budget filled and the guessing carried on at full speed.
-        if (authFailBudgetExceeded(peerKeyOf(info))) {
-          return harden(
-            new Response("Too Many Requests", { status: 429 }),
-          );
+        // budget exists to be. Only a PRESENTED-and-wrong token is charged,
+        // as there: a tokenless local call filled the 127.0.0.1 bucket and
+        // 429'd the operator's own `/__aio/pair`.
+        if (qToken !== null || hToken !== null) {
+          recordAuthFail(peerKeyOf(info), "invalid token (control listener)");
+          // …and REFUSED once over budget, like the main listener. Recording
+          // a failure that nothing ever reads is a meter with no breaker:
+          // the budget filled and the guessing carried on at full speed.
+          if (authFailBudgetExceeded(peerKeyOf(info))) {
+            return harden(
+              new Response("Too Many Requests", { status: 429 }),
+            );
+          }
         }
         return harden(new Response("Unauthorized", { status: 401 }));
       }
@@ -2146,7 +2200,10 @@ export function createServer(config: ServerConfig): ServerHandle {
       _unsubRevoke?.();
       _unsubDiag?.();
       wsMgr.shutdown();
-      if (graphValidation) await graphValidation.done.catch(() => {});
+      if (graphValidation) {
+        graphValidation.stop();
+        await graphValidation.done.catch(() => {});
+      }
       // The boot CSS run, if the app declared one — a subprocess and two
       // directory reads that must not outlive the server that started them.
       if (_cssBootRun) await _cssBootRun;
@@ -2167,14 +2224,18 @@ export function createServer(config: ServerConfig): ServerHandle {
 
 /** The share roots deno.json declares for the app whose UI lives under
  *  `absBaseDir` — resolved by THE decider (`resolveShare`), which throws on a
- *  path outside the repo, a missing dir or a basename collision. */
-function _shareRoots(absBaseDir: string) {
-  const dj = readDenoJsonSync(absBaseDir) ??
-    readDenoJsonSync(resolve(absBaseDir, ".."));
+ *  path outside the repo, a missing dir or a basename collision.
+ *
+ *  The deno.json is found by THE walk (`locateDenoJsonAbove`), the one the
+ *  build's project root comes from. It looked one folder up only, so an entry
+ *  two folders deep (`src/agent/app.ts`) had no share in dev while its bundle
+ *  resolved one. @internal */
+export function _shareRoots(absBaseDir: string) {
+  const dj = locateDenoJsonAbove(toFileUrl(join(resolve(absBaseDir), "/")));
   if (!dj) return undefined;
   const raw = (dj.config as { share?: unknown }).share;
   if (raw === undefined) return undefined;
-  return resolveShare(dirname(dj.path), raw);
+  return resolveShare(fromFileUrl(dj.dir), raw);
 }
 
 /** Per `assets` prefix, the directories a compiled binary falls back to when

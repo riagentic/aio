@@ -25,7 +25,7 @@ import {
   wipeOnStart,
 } from "./logger-rotate.ts";
 import { observeAction } from "./logger-observe.ts";
-import { noRedaction } from "./redact.ts";
+import { noRedaction, redactLogCredentials } from "./redact.ts";
 import type { Redactor } from "./redact.ts";
 import { logPerf, logVitals, logVitalsSummary } from "./logger-vitals.ts";
 import { count } from "./fmt.ts";
@@ -432,6 +432,12 @@ export class AioLogger {
   /** Truncate loudly: the tail is gone either way, and a line that stops
    *  mid-JSON with no marker reads as corruption rather than as a cap. */
   private _capLine(line: string): string {
+    // NO CREDENTIAL ON DISK. The `--expose` banner prints the share link
+    // (`?token=<the app key>`) and the pair code for the operator to copy —
+    // the terminal gets them whole; a log FILE, which outlives the session
+    // and is copied into bug reports and backups, gets them masked. Here,
+    // because every line bound for a file passes through this one function.
+    line = redactLogCredentials(line);
     if (line.length <= AioLogger.MAX_LINE) return line;
     const dropped = line.length - AioLogger.MAX_LINE;
     return line.slice(0, AioLogger.MAX_LINE) +
@@ -517,11 +523,11 @@ export class AioLogger {
    *  (or under a loose umask) would stay world-readable forever. Both halves,
    *  once each, exactly as `action-log.ts` does it.
    *
-   *  This is not hygiene, it is a live secret: the boot banner writes the
-   *  share link — `share: https://host:port/?token=<the app key>` — through
-   *  this sink, and an app log at 0664 handed every local account the app's
-   *  credential. Best-effort: Windows and mode-less filesystems have nothing
-   *  to set, and losing the app's voice over a chmod would be worse. */
+   *  This is not hygiene: an app log at 0664 once handed every local account
+   *  the app's credential (the share link, now masked on its way to disk —
+   *  see `_capLine`), and it still holds whatever the app logs. Best-effort:
+   *  Windows and mode-less filesystems have nothing to set, and losing the
+   *  app's voice over a chmod would be worse. */
   private _tighten(path: string): void {
     // The published shape (a snapshot-frozen member): fire-and-TRACK. The
     // write paths below use `tightenOnce` directly and return it from the

@@ -72,7 +72,11 @@ export function lazy<P extends Record<string, unknown>>(
   function startLoad(): void {
     if (resolved || loading || error) return;
     loading = true;
-    loader().then((mod) => {
+    // A loader that throws SYNCHRONOUSLY (a plain function, not `async`) is a
+    // failed load like a rejected import. It used to throw out of here with
+    // `loading` still set: every later render returned early and the
+    // fallback spun forever, with no retry.
+    new Promise<{ default: ComponentFn }>((r) => r(loader())).then((mod) => {
       // A module that RESOLVED but has no component in it is not a success.
       //
       // `resolved` would be `undefined`, so `LazyWrapper` falls through to

@@ -28,7 +28,11 @@ import { cdpPort, cliLine, VERSION } from "./aio-cli.ts";
 import { type BootExtras, bootLines, buildFacts } from "./boot-facts.ts";
 import { diagEmit } from "../diagnostics/diagnostic-bus.ts";
 import { discoverySupported, startDiscoveryResponder } from "./discovery.ts";
-import { instances, isProcessAlive } from "./single-instance-lock.ts";
+import {
+  heldShowRequestPath,
+  instances,
+  isProcessAlive,
+} from "./single-instance-lock.ts";
 import {
   hasProcessListener,
   installProcessListener,
@@ -760,12 +764,11 @@ export function startLifecycle<S, A>(deps: LifecycleDeps<S, A>): void {
   // the key is equally readable in `app.key`.
   //
   // What was actually broken is where this line LANDS. The banner goes to the
-  // terminal AND to `<logs>/app.log`, and that file was created at the umask
-  // (0664 on a stock distro, in a 0775 directory) — so a live, forever
-  // credential sat in a world-readable file. The fix belongs at the sink, and
-  // it is there: the log dir is 0700 (app-dirs.ts) and every log file is 0600
-  // (logger-core.ts), which is exactly the protection `app.key` itself has.
-  // The share link is no more exposed than the key file it names.
+  // terminal AND to `<logs>/app.log`, a file that outlives the session and is
+  // copied into bug reports and backups. The fix belongs at the sink, and it
+  // is there: every log FILE gets the token and the pair code masked
+  // (logger-core `_capLine`), and is 0600 in a 0700 dir besides. The terminal
+  // — the one place the operator copies from — gets them whole.
   //
   // The warning below also used to claim `--expose … origin checks disabled`.
   // That was never true: the WebSocket Origin check runs on EVERY upgrade,
@@ -941,6 +944,8 @@ export function startLifecycle<S, A>(deps: LifecycleDeps<S, A>): void {
         appDirs(appId).home,
         registeredProfile(appId),
       ),
+      // A second launch of this app shows THIS window (acquireSingletonLock).
+      showFile: heldShowRequestPath(appId),
     };
     const electronUrl = token ? `${localUrl}?token=${token}` : localUrl;
     // NOT distDir — that can be the binary's embedded VFS copy, which this

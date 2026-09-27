@@ -13,7 +13,7 @@
 // dismissal across restarts. An app author learns no new concept — the update
 // state is state, and it is read like all other state.
 import { cell } from "./cell.ts";
-import type { MethodDraftMeta } from "./cell-impl.ts";
+import { type MethodDraftMeta, pauseCallDeadlines } from "./cell-impl.ts";
 import type { CellDef } from "./cell-types.ts";
 
 /** A release the app could move to. */
@@ -364,6 +364,20 @@ export function createUpdatesCell(): UpdatesCell {
   return _process.cell ??= buildUpdatesCell(_process);
 }
 
+/** `long` lifts only the updates method's own ceiling: a caller awaiting it —
+ *  an app method, a network call — kept its 30 s one, and was told "stopped
+ *  waiting" while a multi-minute install went on. The install (and a
+ *  repository check's clone) is the slow primitive, so it pauses every
+ *  pending deadline, as a file picker does; each resumes with a fresh window. */
+async function unbounded<T>(run: () => Promise<T>): Promise<T> {
+  const resume = pauseCallDeadlines();
+  try {
+    return await run();
+  } finally {
+    resume();
+  }
+}
+
 /** The cell itself, reading `slot.runtime` — see `UpdatesSlot`. */
 function buildUpdatesCell(slot: UpdatesSlot): UpdatesCell {
   return cell("updates", {
@@ -526,7 +540,8 @@ function buildUpdatesCell(slot: UpdatesSlot): UpdatesCell {
           // `s.dismissed` is read from the snapshot: the version the user said
           // No to, persisted across restarts, and the only input the runtime
           // cannot know on its own.
-          r = await slot.runtime.check({ dismissed: s.dismissed });
+          const rt = slot.runtime;
+          r = await unbounded(() => rt.check({ dismissed: s.dismissed }));
         } catch (e) {
           const error = e instanceof Error ? e.message : String(e);
           s.status = "error";
@@ -625,10 +640,13 @@ function buildUpdatesCell(slot: UpdatesSlot): UpdatesCell {
         // zero, and a successful one never showed a bar at all.
         s.$commit();
         try {
-          await slot.runtime.apply(
-            retire
-              ? { acceptDataLoss: accept, retireData: true }
-              : { acceptDataLoss: accept },
+          const rt = slot.runtime;
+          await unbounded(() =>
+            rt.apply(
+              retire
+                ? { acceptDataLoss: accept, retireData: true }
+                : { acceptDataLoss: accept },
+            )
           );
           // Reached only when the swap is done and the handover is scheduled
           // but has not happened yet: the artifact is staged, the process is

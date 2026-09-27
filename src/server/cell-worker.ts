@@ -12,6 +12,7 @@
 // cell's own actions keep their FIFO guarantee. Across cells there was never an
 // ordering guarantee for async methods, and there still isn't.
 
+import type { CellFieldFilter } from "../state/cell-types.ts";
 import { noteScheduleOwner } from "../state/schedule.ts";
 import type { WirePatch as Patch } from "../protocol/patch-ops.ts";
 import type { CellDef, Msg } from "../state/cell-types.ts";
@@ -56,6 +57,8 @@ export type CellWorkerDeps = {
    *  what an in-process `await cell.method()` sees for a REFUSED write the
    *  same way a main-isolate cell does. See `ToWorker.init`. */
   refusalsReject: boolean;
+  /** See `ToWorker.init.strictTypes`. */
+  strictTypes?: CellFieldFilter;
   /** The owner's resolved appId, handed to the worker (see cellWorkerName). */
   appId?: string;
   /** The owner's cell-error sink (`onError` + log) — a worker's composition
@@ -381,8 +384,10 @@ export function createCellWorker(
         // A thrown non-Error arrives as itself, as it does in-process.
         const err: unknown = msg.thrown ? msg.thrown.value : e;
         // A throw out of the worker's reduce — a sync method that threw. The
-        // owner's composed reduce counts the same throw for a local cell.
-        if (msg.code === "REDUCE_ERROR") deps.countError?.();
+        // owner's composed reduce counts the same throw for a local cell. An
+        // ASYNC call (`callId`) whose write-set the reduce refused is counted
+        // once already, by its EFFECT_ASYNC_ERROR `cell-error`.
+        if (msg.code === "REDUCE_ERROR" && !entry?.callId) deps.countError?.();
         if (entry?.callId) {
           // The awaiter sees the rejection via the registry; the transport
           // promise resolves so the fire-and-forget dispatch inside the bound
@@ -448,6 +453,7 @@ export function createCellWorker(
       dev: devFlag(),
       refusalsReject: deps.refusalsReject,
       gen,
+      ...(deps.strictTypes ? { strictTypes: deps.strictTypes } : {}),
     });
   seed(deps.initialState());
 

@@ -224,6 +224,27 @@ function _warnSwallowedRefusal(actionType: string, reason: string): void {
   );
 }
 
+/** Said once per action+listener: a refused CALL still ran a `listensTo`
+ *  listener. Kept (frozen since 1.0.9, docs/state/composition.md) — but a
+ *  tally counting refused adds should be found in dev, not in the data. */
+function _warnRefusedListenerRan(
+  actionType: string,
+  listener: CellDef,
+  reason: string,
+): void {
+  const key = `listener|${actionType}|${listener.__aio.id}`;
+  if (_swallowedRefusals.has(key)) return;
+  _swallowedRefusals.add(key);
+  log.warn(
+    "cell",
+    `${actionType} was REFUSED (${reason}), and its listensTo listener ` +
+      `"${listener.__aio.id}" still ran — a refused call's listeners run, as ` +
+      `they always have (a refused sync op's do not). If "${listener.__aio.id}" ` +
+      `must react only to accepted actions, check the source cell's state in ` +
+      `the handler. Said once per action and listener.`,
+  );
+}
+
 /** THE validate refusal — one path, because there were two.
  *
  *  Both reduce shapes (methods-form and machine/reduce-form) ran their own
@@ -913,6 +934,11 @@ export function buildRootReducer(
       for (const listener of listeners) {
         if (disabledCells.has(listener.__aio.id)) continue;
         const result = reduceCell(listener, currentState, action, ctx);
+        // Only a listener that KEPT something reacted to the refused action;
+        // one that checked and changed nothing is doing what the warning asks.
+        const id = listener.__aio.id;
+        const reacted = result.state[id] !== currentState[id] ||
+          result.effects.length > 0;
         currentState = result.state;
         allEffects.push(...result.effects);
         if (result.patches) {
@@ -923,6 +949,9 @@ export function buildRootReducer(
           type: action.type,
           at: Date.now(),
         });
+        if (ownerRefusal !== undefined && reacted && isDevMode()) {
+          _warnRefusedListenerRan(action.type, listener, ownerRefusal);
+        }
       }
     }
     const tListeners = _perfCheck ? performance.now() - lt0 : 0;

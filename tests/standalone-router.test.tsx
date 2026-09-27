@@ -303,12 +303,60 @@ Deno.test("standalone router: /assets/index.html (the android asset loader) is a
   }
 });
 
+Deno.test("standalone router: the auto-mount boot (ensureConnected, not aio.run) adopts the shell path", () => {
+  // The bundle an APK or a web build ships mounts through ensureConnected;
+  // only aio.run adopted the shell, so the APK's "/" never matched.
+  const restore = stubLocation(
+    "https://appassets.androidplatform.net/assets/index.html",
+  );
+  try {
+    standalone.ensureConnected();
+    assertEquals(_getRouteBase(), "/assets");
+    assertEquals(coreRoutePath.value, "/");
+  } finally {
+    // ensureConnected booted this file's cells: tear that runtime down, or its
+    // timers outlive the test (a leak the sanitizer caught under load).
+    standalone._resetState();
+    _setRouteBase("");
+    restore();
+  }
+});
+
 Deno.test("standalone router: a document served from a directory is left alone", () => {
   const restore = stubLocation("http://localhost:3000/app/");
   try {
     _adoptShellPath();
     assertEquals(_getRouteBase(), "");
     assertEquals(location.pathname, "/app/");
+  } finally {
+    _setRouteBase("");
+    restore();
+  }
+});
+
+Deno.test("standalone router: a web build under a sub-path (GitHub Pages /repo/) routes relative to the bundle's directory", () => {
+  const restore = stubLocation("https://me.github.io/repo/settings/general");
+  try {
+    _adoptShellPath("https://me.github.io/repo/app.js");
+    assertEquals(_getRouteBase(), "/repo");
+    assertEquals(location.pathname, "/repo/settings/general", "no rewrite");
+    assertEquals(coreRoutePath.value, "/settings/general");
+    coreNavigate("/");
+    assertEquals(location.pathname, "/repo/");
+    assertEquals(coreRoutePath.value, "/", "<Route path='/'> matches");
+  } finally {
+    _setRouteBase("");
+    restore();
+  }
+});
+
+Deno.test("standalone router: a root-hosted web build keeps plain routing", () => {
+  const restore = stubLocation("https://app.example/about/");
+  try {
+    _adoptShellPath("https://app.example/app.js");
+    assertEquals(_getRouteBase(), "");
+    _adoptShellPath(undefined);
+    assertEquals(_getRouteBase(), "");
   } finally {
     _setRouteBase("");
     restore();

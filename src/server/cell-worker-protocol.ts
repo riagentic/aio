@@ -7,6 +7,7 @@
 //
 // Everything here must be structured-cloneable — it crosses a real thread.
 
+import type { CellFieldFilter } from "../state/cell-types.ts";
 import type { WirePatch as Patch } from "../protocol/patch-ops.ts";
 import type { Msg } from "../state/cell-types.ts";
 
@@ -131,6 +132,12 @@ export type ToWorker =
      *  stamps it on each `patches` batch, and the owner drops a batch from an
      *  older generation — see `gen` on FromWorker["patches"]. */
     gen: number;
+    /** Present when the owner REFUSES a write that changes a persisted
+     *  field's declared type (dev, a persisting boot — declared-shape-guard.ts):
+     *  the cell's persist filter. The worker runs the same guard in its own
+     *  reduce, so a `worker: true` method throws exactly where a main-isolate
+     *  one does; the owner only sees committed patches, too late to refuse. */
+    strictTypes?: CellFieldFilter;
   }
   /** The main isolate is wired (server, broadcast, time travel) and is running
    *  its own cells' `onInit` — run THIS cell's, once per boot.

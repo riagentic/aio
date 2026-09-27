@@ -101,11 +101,21 @@ Deno.test({
         `#!/bin/sh\necho '{"schema":1,"cells":{}}'\n`,
       );
       await Deno.chmod(old, 0o755);
+      const warned: string[] = [];
+      const warn = console.warn;
+      console.warn = (m: string) => void warned.push(m);
       const m = await inProject(
         dir,
         () => shipApp({ binaryPath: old, version: "1.0.0" }),
-      );
+      ).finally(() => (console.warn = warn));
       assertEquals(m.name, "x-wallet");
+      // …and says the name went out unchecked.
+      assertEquals(
+        warned.filter((w) => w.includes("reports no app id")).length,
+        1,
+        warned.join("\n"),
+      );
+      assertStringIncludes(warned.join("\n"), '"x-wallet" unchecked');
     } finally {
       await dropTempDir(dir);
     }

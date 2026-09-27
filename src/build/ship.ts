@@ -1378,6 +1378,13 @@ export async function shipRelease(
     const probed = await probeArtifact(opts.binaryPath);
     data = probed.contract;
     runsAs = probed.appId;
+    if (!runsAs) {
+      console.warn(
+        `${HEY} ${fileName} reports no app id (built by aio 1.0.12 or older) ` +
+          `— the release is signed for "${name}" unchecked; an install that ` +
+          `runs as another id refuses it.`,
+      );
+    }
   }
   const bad = runsAs &&
     identityMismatch(name, runsAs, opts.name !== undefined);

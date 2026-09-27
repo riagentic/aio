@@ -270,8 +270,11 @@ function stableJSONStringify(val: unknown): string {
   return JSON.stringify(val, (_key, value) => {
     if (value && typeof value === "object" && !Array.isArray(value)) {
       const sorted: Record<string, unknown> = {};
+      // `setOwn`: an own "__proto__" key (JSON.parse makes one) must stay in
+      // the output; `sorted[key] =` made it the prototype in a browser, so two
+      // records differing only there compared equal.
       for (const key of Object.keys(value as Record<string, unknown>).sort()) {
-        sorted[key] = (value as Record<string, unknown>)[key];
+        setOwn(sorted, key, (value as Record<string, unknown>)[key]);
       }
       return sorted;
     }

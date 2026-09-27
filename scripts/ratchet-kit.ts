@@ -54,6 +54,45 @@ export async function walkTs(root: string): Promise<string[]> {
   return out.sort();
 }
 
+/** The `k` hits most likely to be the NEW ones — those in the most recently
+ *  modified files (ties: later in the file first). Pure over `mtimeOf`.
+ *
+ *  A ceiling only knows HOW MANY hits there are, not which ones are new, and
+ *  every gate used to name the last `k` in walk order — alphabetically last,
+ *  not newest. One planted violation in `src/am/` was reported as
+ *  `src/testing/ui-test.ts:3632`, and the fix the message asks for (an
+ *  `aio-ok` marker "in place") put on THAT line turns the gate green with the
+ *  new hit still there. */
+export function likelyNew<T extends { file: string }>(
+  hits: readonly T[],
+  k: number,
+  mtimeOf: (file: string) => number,
+): T[] {
+  if (k <= 0) return [];
+  return hits.map((h, i) => ({ h, i, t: mtimeOf(h.file) }))
+    .sort((a, b) => b.t - a.t || b.i - a.i)
+    .slice(0, k)
+    .map((o) => o.h);
+}
+
+/** `mtimeOf` for files named relative to `root` — memoised; 0 if unreadable. */
+export function mtimeUnder(root: string): (file: string) => number {
+  const seen = new Map<string, number>();
+  return (file) => {
+    let t = seen.get(file);
+    if (t === undefined) {
+      try {
+        t = Deno.statSync(root + file).mtime?.getTime() ?? 0;
+      } catch (e) {
+        if (!(e instanceof Deno.errors.NotFound)) throw e;
+        t = 0;
+      }
+      seen.set(file, t);
+    }
+    return t;
+  };
+}
+
 /** The scanned root: `src/` of this checkout, or `--root=<dir>` — so a rule
  *  can be replayed against an older tree to prove it would have fired there
  *  (the report is then informational: no ceiling applies to a foreign tree). */
@@ -116,9 +155,9 @@ export function holdBudget(o: {
     console.error(
       `✗ ${n} ${o.what} in src/ (ceiling ${o.ceiling}).\n` + o.fix +
         `  Run with --list to see all of them. Recently added, most likely:\n` +
-        o.hits.slice(-(n - o.ceiling)).map((h) =>
-          `      ${o.prefix}${h.file}:${h.line}`
-        ).join("\n"),
+        likelyNew(o.hits, n - o.ceiling, mtimeUnder(scanRoot().root)).map((
+          h,
+        ) => `      ${o.prefix}${h.file}:${h.line}`).join("\n"),
     );
     return false;
   }

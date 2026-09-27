@@ -16,6 +16,7 @@
 // @ts-ignore node:sqlite types unavailable when an old @types/node shadows
 // them (same workaround as db-worker.ts B-1) — the specifier resolves fine.
 import { DatabaseSync } from "node:sqlite";
+import { DbFileGoneError, guardDeletedDbFile } from "./sqlite-file-guard.ts";
 import { createHash } from "node:crypto";
 import type { AioUser } from "./aio-types.ts";
 import { log } from "../diagnostics/logger-api.ts";
@@ -167,6 +168,7 @@ export function openSessionStore(
   // life of the process — a config validated only when it fires.
   expiryFor(defaultTtlMs, "open", Date.now());
   const db = new DatabaseSync(path);
+  guardDeletedDbFile(db, path, "auth.db (sessions)");
   // auth.db has TWO writer processes by design — the app and `am auth …`.
   // SQLite's default busy timeout is ZERO, so a write that met the other
   // process's write threw "database is locked" at once (measured: a quarter
@@ -241,7 +243,15 @@ export function openSessionStore(
         | undefined;
       if (!row) return null;
       if (row.expires_at <= Date.now()) {
-        del.run(hash(token)); // expired — remove on read
+        // Expired — remove on read. Only hygiene: with auth.db deleted the
+        // delete is refused, and the answer (no session) stands without it —
+        // thrown, it escaped the WS sweep's timer and crashed the app. The
+        // refusal is said on the next real write.
+        try {
+          del.run(hash(token));
+        } catch (e) {
+          if (!(e instanceof DbFileGoneError)) throw e;
+        }
         return null;
       }
       // The stored role is a CACHE of what the account had when it logged in;

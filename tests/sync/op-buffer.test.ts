@@ -204,14 +204,23 @@ Deno.test("op-buffer: an evicted stale op is REPORTED, not silently dropped", as
   });
 
   const old = Date.now() - 60_000; // well past the 1s TTL
-  assertEquals(await buffer.add(op("a", old)), true);
+  assertEquals(await buffer.add(op("a", old - 1)), true);
   assertEquals(await buffer.add(op("b", old)), true);
 
-  // Buffer is at cap; adding forces eviction of the two stale ops.
+  // Buffer is at cap; adding forces eviction of stale ops — only as many as
+  // the new op needs, oldest first. A stale op is still one the server takes
+  // (inside its 24h tombstone window), so evicting every stale op to make
+  // room for one threw away changes that were not lost.
   assertEquals(await buffer.add(op("c", Date.now())), true);
+  assertEquals(dropped.map((d) => d.id), ["a"], "one out, the oldest");
+  assertEquals(
+    (await buffer.getUnconfirmed("notes")).map((o) => o.id),
+    ["b", "c"],
+  );
+  assertEquals(await buffer.add(op("d", Date.now())), true);
 
   assertEquals(
-    dropped.map((d) => d.id).sort(),
+    dropped.map((d) => d.id),
     ["a", "b"],
     "every evicted mutation is reported",
   );
@@ -295,7 +304,7 @@ Deno.test("op-buffer: each cell evicts on ITS OWN retention", async () => {
   assertEquals(await buffer.add(op("chatty", "c3", Date.now())), true);
   assertEquals(
     dropped.filter((d) => d.startsWith("chatty")).sort(),
-    ["chatty:c1:stale-evicted", "chatty:c2:stale-evicted"],
+    ["chatty:c1:stale-evicted"],
     "a cell that asked for nothing keeps the shared default",
   );
 });

@@ -812,11 +812,11 @@ export function foreignAppHomeError(
  *  assume the worst file in the tree.
  *
  *  `logs/` gets the same treatment, and so does `home` above them, because
- *  "the worst file in the tree" applies there too: the boot banner writes the
- *  share link (`share: …?token=<app key>`) into the app log, an app log carries
- *  whatever an app chose to log, and both directories were left at the umask —
- *  0775 on a stock Ubuntu, i.e. every local account could read a live
- *  credential. The mode of a directory is decided by what it can ever hold,
+ *  "the worst file in the tree" applies there too: an app log carries
+ *  whatever an app chose to log (the boot banner's share link once landed
+ *  there whole — it is masked on disk now), and both directories were left at
+ *  the umask — 0775 on a stock Ubuntu, i.e. every local account could read
+ *  it. The mode of a directory is decided by what it can ever hold,
  *  never by what today's file happens to be. */
 export function ensureAppDirs(dirs: AppDirs): void {
   Deno.mkdirSync(dirs.home, { recursive: true });

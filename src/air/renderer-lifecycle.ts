@@ -194,8 +194,26 @@ export function onUnmount(fn: () => void): void {
   // named here, at the call that did it.
   const slot = useRef<unknown>(_EMPTY_SLOT);
   const held = slot.current;
+  // Dev: the CALLER's frame names the call site. Conditional onUnmounts that
+  // trade places with the same total (`if (a) onUnmount(A); else
+  // onUnmount(B)`) move no hook count, so the hook-order tripwire is quiet —
+  // and B re-points A's box: A's hold is never released. The slot data
+  // cannot tell; only the site can.
+  // Observe-only: prod behaves identically.
+  const site = isDevMode() ? _callerFrame(new Error().stack) : undefined;
   if (held !== _EMPTY_SLOT) {
     if (_isUnmountBox(held)) {
+      if (site !== undefined && held.site !== undefined && held.site !== site) {
+        console.error(
+          `[aio-dev] onUnmount() took another onUnmount()'s slot: the one ` +
+            `at ${site.trim()} now runs in place of the one at ` +
+            `${held.site.trim()}, whose hold is never released. Slots are ` +
+            `matched by CALL ORDER, so an onUnmount() behind an \`if\` moves ` +
+            `onto its neighbour's. Call onUnmount() unconditionally at the top ` +
+            `of the body and put the condition inside the callback.`,
+        );
+      }
+      held.site = site;
       held.fn = fn;
       return;
     }
@@ -216,7 +234,7 @@ export function onUnmount(fn: () => void): void {
         `of the body and put the condition inside the callback.`,
     );
   }
-  const box: _UnmountBox = { [_UNMOUNT_BOX]: true, fn };
+  const box: _UnmountBox = { [_UNMOUNT_BOX]: true, fn, site };
   slot.current = box;
   _onUnmount(() => box.fn());
 }
@@ -227,11 +245,28 @@ const _EMPTY_SLOT: unique symbol = Symbol("aio.onUnmountEmpty");
 /** The brand on {@linkcode onUnmount}'s box: a slot holding one is a slot this
  *  call site already owns, and any other value is somebody else's. */
 const _UNMOUNT_BOX: unique symbol = Symbol("aio.onUnmountBox");
-type _UnmountBox = { [_UNMOUNT_BOX]: true; fn: () => void };
+type _UnmountBox = {
+  [_UNMOUNT_BOX]: true;
+  fn: () => void;
+  /** Dev only: the caller's stack frame that last claimed this slot. */
+  site?: string;
+};
 
 function _isUnmountBox(v: unknown): v is _UnmountBox {
   return typeof v === "object" && v !== null &&
     (v as Record<symbol, unknown>)[_UNMOUNT_BOX] === true;
+}
+
+/** onUnmount's caller frame, from a stack taken inside onUnmount. V8 opens
+ *  with an `Error` header line; SpiderMonkey/JavaScriptCore do not. Frame 0
+ *  is onUnmount itself, frame 1 its caller. A shape this does not recognise
+ *  (no `:line` on the frame) yields undefined: the detector stays silent
+ *  rather than raise a false alarm. */
+function _callerFrame(stack: string | undefined): string | undefined {
+  const lines = (stack ?? "").split("\n");
+  if (lines[0] === "Error") lines.shift();
+  const frame = lines[1];
+  return frame !== undefined && /:\d+/.test(frame) ? frame : undefined;
 }
 
 /** @internal Run `fn` when the component rendering right now goes away for

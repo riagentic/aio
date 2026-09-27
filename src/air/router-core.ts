@@ -233,8 +233,12 @@ export function _installRouterListeners(): void {
   // Store ref for cleanup in _reset() (AIO-141)
   _navigateHandler = ((e: CustomEvent<{ url: string }>) => {
     try {
-      const url = new URL(e.detail.url);
-      navigate(url.pathname + url.search + url.hash);
+      // The WHOLE url, never its path: a same-app `http://host//evil.com/x`
+      // rebuilt from `//evil.com/x` reads as scheme-relative — another site
+      // (measured on Electron 44: handed to the system browser). The shell
+      // relays only this app's own urls; anything else is not a route.
+      const url = new URL(e.detail.url, location.href);
+      if (url.origin === location.origin) navigate(url.href);
     } catch { /* invalid URL — ignore */ }
   }) as EventListener;
   addEventListener("aio:navigate", _navigateHandler);

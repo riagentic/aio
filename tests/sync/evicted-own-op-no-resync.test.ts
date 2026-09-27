@@ -48,8 +48,8 @@ Deno.test("sync eviction: an op the buffer evicted does not cost a re-sync", asy
     for (let i = 1; i <= 3; i++) {
       await engine.handleLocalAction("todos", "add", { n: i });
     }
-    // The third op made room by evicting the first two.
-    assertEquals(drops.length, 2, drops.join(", "));
+    // The third op made room by evicting the oldest — one, all it needed.
+    assertEquals(drops.length, 1, drops.join(", "));
     assert(
       drops.every((d) => d.endsWith(":stale-evicted")),
       drops.join(", "),

@@ -119,7 +119,7 @@ export default function App() {
         root: dir,
         appDir: `${dir}/src`,
         uiEntry: "App.tsx",
-        doAndroid: false,
+        standalone: false,
         imports,
         shares: [],
         frameworkSrcDir: `${ROOT}src`,

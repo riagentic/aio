@@ -691,11 +691,20 @@ export const LEDGER: readonly Mutation[] = [
     what:
       "an async onStop (a flush, a child to wait for) is abandoned the moment it starts and the process exits milliseconds later",
     file: "src/server/shutdown.ts",
-    find: '      await phase(log, "hook onStop", tLeft, () => refs.onStop!());',
-    replace:
-      '      void phase(log, "hook onStop", tLeft, () => refs.onStop!());',
+    find: '        await phase(\n          log,\n          "hook onStop",',
+    replace: '        void phase(\n          log,\n          "hook onStop",',
     test: "tests/onstop-awaited.test.ts",
     filter: "onStop: an async hook finishes before app.close() resolves",
+  },
+  {
+    what:
+      "a hung onStop spends the whole teardown budget — the server and SQLite close get 1ms and the app's stopped line is never written",
+    file: "src/server/shutdown.ts",
+    find: "          () => refs.onStop!(share.signal),",
+    replace: "          () => refs.onStop!(new AbortController().signal),",
+    test: "tests/shutdown-hung-onstop.test.ts",
+    filter:
+      "shutdown: a hung onStop still leaves the closes and the stopped line their time",
   },
   {
     what:
@@ -1192,8 +1201,8 @@ export const LEDGER: readonly Mutation[] = [
     what:
       "the home claim stops refusing a DIFFERENT lock on the same folder — a profile by path and one by name, or two lock keys deriving one home, both open one state.db",
     file: "src/server/single-instance-lock.ts",
-    find: "    if (mine !== undefined && holder?.lock === mine) return none;",
-    replace: "    if (mine !== undefined) return none;",
+    find: "      mine !== undefined && holder?.lock === mine &&",
+    replace: "      mine !== undefined && holder != null &&",
     test: "tests/profile-home-identity.test.ts",
     filter: "claimHome: only the EXACT lock just judged may share the home",
   },
@@ -2585,7 +2594,7 @@ export const LEDGER: readonly Mutation[] = [
       "no shutdown path closes the worker cells — worker calls keep starting new work during the drain",
     file: "src/server/shutdown.ts",
     find:
-      '    if (refs.closeWorkers) {\n      await phase(log, "close worker cells", gate, () => refs.closeWorkers!());\n    }\n',
+      '    if (refs.closeWorkers) {\n      await drainPhase("close worker cells", () => refs.closeWorkers!());\n    }\n',
     replace: "",
     test: "tests/shutdown-worker-order.test.ts",
     filter:
@@ -2596,12 +2605,22 @@ export const LEDGER: readonly Mutation[] = [
       "the worker pool closes before onStopping — the documented way to stop a worker's producers is refused",
     file: "src/server/shutdown.ts",
     find:
-      '    if (refs.onStopping) {\n      await phase(log, "hook onStopping", gate, () => refs.onStopping!());\n    }\n    if (refs.closeWorkers) {\n      await phase(log, "close worker cells", gate, () => refs.closeWorkers!());\n    }',
+      '    if (refs.onStopping) {\n      await drainPhase("hook onStopping", () => refs.onStopping!());\n    }\n    if (refs.closeWorkers) {\n      await drainPhase("close worker cells", () => refs.closeWorkers!());\n    }',
     replace:
-      '    if (refs.closeWorkers) {\n      await phase(log, "close worker cells", gate, () => refs.closeWorkers!());\n    }\n    if (refs.onStopping) {\n      await phase(log, "hook onStopping", gate, () => refs.onStopping!());\n    }',
+      '    if (refs.closeWorkers) {\n      await drainPhase("close worker cells", () => refs.closeWorkers!());\n    }\n    if (refs.onStopping) {\n      await drainPhase("hook onStopping", () => refs.onStopping!());\n    }',
     test: "tests/shutdown-worker-order.test.ts",
     filter:
       "shutdown: onStopping may call a worker cell — the documented way to stop its producers works",
+  },
+  {
+    what:
+      "onStopping and the worker close each get a full drain budget of their own — the final persist lands past SHUTDOWN_BUDGET_MS",
+    file: "src/server/shutdown.ts",
+    find: "    const gate = left;\n",
+    replace: "    const gate = () => DRAIN_TIMEOUT_MS;\n",
+    test: "tests/shutdown-orchestrator.test.ts",
+    filter:
+      "shutdown: onStopping, worker close and the drain share ONE drain budget — the persist is not pushed past it",
   },
   {
     what:
@@ -3529,6 +3548,16 @@ export const LEDGER: readonly Mutation[] = [
   },
   {
     what:
+      "a test that restores AIO_APPS_DIR by deleting it leaves every later harness on the real ~/.<appId>",
+    file: "src/testing/test-strict.ts",
+    find: '      Deno.env.set("AIO_APPS_DIR", _appsDir);\n',
+    replace: "",
+    test: "tests/test-harness-sandboxes-home-stores.test.ts",
+    filter:
+      "home stores: a restore that DELETES AIO_APPS_DIR is re-pinned at the next arm, never the real home",
+  },
+  {
+    what:
       "only the version store is sandboxed while the feedback dir, install root and AIO_HOME stay real",
     file: "src/testing/test-strict.ts",
     find: "    for (const k of missing) Deno.env.set(k, env[k]!);",
@@ -3652,6 +3681,37 @@ export const LEDGER: readonly Mutation[] = [
     test: "tests/proof-matrix.test.ts",
     filter:
       "proof: a gate run on uncommitted code records nothing — HEAD is not the code that ran",
+  },
+  {
+    what:
+      "a project's own dist/ is emptied by its first deno task build under a green summary",
+    file: "src/build-all.ts",
+    find: "  if (distRefusal) {",
+    replace: "  if (distRefusal && Date.now() < 0) {",
+    test: "tests/build-foreign-dist-refused.test.ts",
+    filter:
+      "dist: a fleet build into a project's own dist/ refuses and deletes nothing",
+  },
+  {
+    what:
+      "a 72-hour soak that saw a commit land mid-run records the new HEAD as the code that ran",
+    file: "scripts/proof.ts",
+    find: "  if (start && start.head !== end.head) {",
+    replace: '  if (start && start.head !== end.head && start.head === "") {',
+    test: "tests/proof-matrix.test.ts",
+    filter:
+      "proof: a row is refused when the tree was dirty at the start, HEAD moved, or git could not say",
+  },
+  {
+    what:
+      "a tree dirty when the gate started and reverted before it ended records a row for code that never ran",
+    file: "scripts/proof.ts",
+    find:
+      '  const stamps = [[end, "now"], [start, "when the gate started"]] as const;',
+    replace: '  const stamps = [[end, "now"]] as const;',
+    test: "tests/proof-matrix.test.ts",
+    filter:
+      "proof: a row is refused when the tree was dirty at the start, HEAD moved, or git could not say",
   },
   {
     what:
@@ -3970,8 +4030,8 @@ export const LEDGER: readonly Mutation[] = [
     what:
       "hydrating a signal whose value shrank since SSR leaves the split-off server text on the page, owned by no vnode",
     file: "src/air/renderer-hydrate.ts",
-    find: "    _dropSplitTail(el, childIdx);",
-    replace: "    void childIdx;",
+    find: "  _dropSplitTail(el, idx);",
+    replace: "  void idx;",
     test: "tests/air-reconciler-position-and-reuse.test.ts",
     filter:
       "hydrate: a signal that changed since SSR leaves no stale server text behind",
@@ -5108,6 +5168,25 @@ export const LEDGER: readonly Mutation[] = [
     test: "tests/amui-log-tail-fragment.test.ts",
     filter:
       "amui readLogs: a seeked tail starts at a whole line, never a fragment",
+  },
+  {
+    what:
+      "amui's cpu chart plots ps's lifetime-average %cpu, not the cpu used since the previous sample",
+    file: "amui/src/server/proc.server.ts",
+    find: "      lastCpu.set(pid, { cpuSec, at });\n",
+    replace: "",
+    test: "tests/amui-cpu-is-current.test.ts",
+    filter: "amui psStats: a process that turns busy after idling reads busy",
+  },
+  {
+    what:
+      "testUI leaves confirm()/alert()/prompt() to Deno — a click asking one is a silent no-op in CI and a y/N prompt on a terminal",
+    file: "src/testing/ui-test.ts",
+    find: "      dialogs[name] = _refuseDialog[name];\n",
+    replace: "",
+    test: "tests/testui-native-dialog.test.tsx",
+    filter:
+      "testUI: a confirm() in a click handler fails loud — never a silent no-op, never a terminal prompt",
   },
   {
     what:
@@ -6703,9 +6782,8 @@ export const LEDGER: readonly Mutation[] = [
   {
     what: "password change refunds its work unit on success",
     file: "src/server/auth-flows.ts",
-    find:
-      "      refundAuthWork(clientKey);\n      try {\n        await cfg.users.setPassword",
-    replace: "      try {\n        await cfg.users.setPassword",
+    find: "      refundAuthWork(clientKey);\n      let changed: boolean;",
+    replace: "      let changed: boolean;",
     test: "tests/auth-successful-steps-refund-work.test.ts",
     filter: "auth work meter: a successful password change refunds its unit",
   },
@@ -7035,9 +7113,10 @@ export const LEDGER: readonly Mutation[] = [
     what:
       "a real worker cell's sync method throw is not counted toward the app circuit breaker",
     file: "src/server/cell-worker.ts",
-    find: '        if (msg.code === "REDUCE_ERROR") deps.countError?.();',
+    find:
+      '        if (msg.code === "REDUCE_ERROR" && !entry?.callId) deps.countError?.();',
     replace:
-      '        if (msg.code === "REDUCE_ERROR_MUTANT") deps.countError?.();',
+      '        if (msg.code === "REDUCE_ERROR_MUTANT" && !entry?.callId) deps.countError?.();',
     test: "tests/worker-circuit-breaker.test.ts",
     filter:
       "worker circuitBreaker: a real worker cell trips like the in-isolate one",
@@ -7958,8 +8037,8 @@ export const LEDGER: readonly Mutation[] = [
       "an empty region hydrating over an unclaimed server text remainder inserts a second anchor and leaves orphans, duplicating the following text",
     file: "src/air/renderer-hydrate.ts",
     find:
-      "      _dropSplitTail(parent, childIndex); // see `_dropSplitTail`\n      const domNode = parent.childNodes[childIndex];",
-    replace: "      const domNode = parent.childNodes[childIndex];",
+      "        _dropSplitTail(parent, childIndex); // see `_dropSplitTail`\n      }\n      const domNode = parent.childNodes[childIndex];",
+    replace: "      }\n      const domNode = parent.childNodes[childIndex];",
     test: "tests/air-hydrate-text-tail-before-region.test.ts",
     filter:
       "hydrate: a shorter client text before an empty region leaves no duplicate",
@@ -8936,7 +9015,7 @@ export const LEDGER: readonly Mutation[] = [
       "a foreign-origin or data: frame inside the app window gets the app page's permissions",
     file: "src/electron/electron-shared.ts",
     find:
-      "  return !requesting || __aioOrigin(requesting) === __aioOrigin(wc.getURL());",
+      "  return !requesting || __aioOrigin(requesting) === __aioOrigin(cur);",
     replace: "  return true;",
     test: "tests/electron-permission-guard.test.ts",
     filter:
@@ -9567,8 +9646,8 @@ export const LEDGER: readonly Mutation[] = [
       "swap failure: a move that fails leaves NO app running and the marker behind",
     file: "src/server/updates-apply.ts",
     find:
-      '    note "the new version could not be moved into place"\n    rm -rf "$new"\n    exec "$launch" "$@"',
-    replace: "    exit 1",
+      '  3) note "the new version could not be moved into place"\n     rm -rf "$new"\n     exec "$launch" "$@" ;;',
+    replace: "  3) exit 1 ;;",
     test: "tests/updates-first-boot-rollback.test.ts",
     filter:
       "swap failure: the new version cannot be moved into place — the old one is started, and the record says why",
@@ -9577,8 +9656,8 @@ export const LEDGER: readonly Mutation[] = [
     what:
       "swap failure: a leftover copy that cannot be removed gets the running version moved INSIDE it",
     file: "src/server/updates-apply.ts",
-    find: 'if [ -e "$prev" ] || ! try_mv "$cur" "$prev"; then',
-    replace: 'if ! try_mv "$cur" "$prev"; then',
+    find: '[ -e "$prev" ] || { swap_in "$cur" "$new" "$prev"; r=$?; }',
+    replace: '{ swap_in "$cur" "$new" "$prev"; r=$?; }',
     test: "tests/updates-first-boot-rollback.test.ts",
     filter:
       "swap failure: an earlier copy that cannot be removed — nothing moves, the old one is started",
@@ -9843,8 +9922,8 @@ export const LEDGER: readonly Mutation[] = [
     what:
       "swap helper (unix): when neither version can be moved into place, the helper exits and leaves no app running",
     file: "src/server/updates-apply.ts",
-    find: 'nor the old one back"\n  start "$@"',
-    replace: 'nor the old one back"\n  exit 1',
+    find: 'nor the old one back"\n     start "$@" ;;',
+    replace: 'nor the old one back"\n     exit 1 ;;',
     test: "tests/updates-first-boot-rollback.test.ts",
     filter:
       "swap failure: neither version can be moved into place — the record says why, and the old one is started where it is",
@@ -9894,8 +9973,8 @@ export const LEDGER: readonly Mutation[] = [
       "swap-rollback: a move back that fails ends the helper with no app running, and the record says rolled back",
     file: "src/server/updates-apply.ts",
     find:
-      '  unrolled "the old version could not be moved back into place" "$@"\n',
-    replace: "  exit 1\n",
+      '  3) unrolled "the old version could not be moved back into place" "$@" ;;',
+    replace: "  3) exit 1 ;;",
     test: "tests/updates-first-boot-rollback.test.ts",
     filter:
       "first-boot rollback: the old version cannot be moved back — the version in place is started, and the record says the rollback failed",
@@ -9905,8 +9984,8 @@ export const LEDGER: readonly Mutation[] = [
       "swap helper (windows): a move back that fails ends the helper with no app running",
     file: "src/server/updates-apply.ts",
     find:
-      "if (-not (Move-Dir $cur $new)) { Set-Unrolled 'the new version could not be moved out of the way'; exit 1 }",
-    replace: "if (-not (Move-Dir $cur $new)) { exit 1 }",
+      "if ($r -eq 1) { Set-Unrolled 'the new version could not be moved out of the way'; exit 1 }",
+    replace: "if ($r -eq 1) { exit 1 }",
     test: "tests/updates-swap-windows.test.ts",
     filter:
       "swap spec (windows): the first-boot watchdog and the swap-failure path, in order",
@@ -9995,7 +10074,10 @@ export const LEDGER: readonly Mutation[] = [
       "swap helper (windows): a windowless start is followed by a second helper — two swaps race over one install",
     file: "src/server/updates-apply.ts",
     find: '  if (typeof started === "number") return;',
-    replace: "  void started;",
+    // A second helper after the windowless one — and it type-checks (a bare
+    // fall-through reads `started.startsWith` on a number).
+    replace:
+      '  if (typeof started === "number") return start("cmd.exe", { args: [] });',
     test: "tests/no-console.test.ts",
     filter:
       "swap helper (windows): started windowless, else through cmd.exe — never a detached PowerShell",
@@ -10190,11 +10272,14 @@ export const LEDGER: readonly Mutation[] = [
     what:
       "updates:apply keeps the 30 s call ceiling — a slow install is reported as failed while it goes on and restarts the app",
     file: "src/state/updates-cell.ts",
-    find: '    long: ["check", "apply"],',
-    replace: '    long: ["check"],',
-    test: "tests/updates-cell.test.ts",
+    // THE enforcing line is the pause in `unbounded()`: it lifts every
+    // pending deadline, the method's own included, so `long: ["check",
+    // "apply"]` is belt and braces — mutating it leaves the suite green.
+    find: "  const resume = pauseCallDeadlines();",
+    replace: "  const resume = () => {};",
+    test: "tests/updates-apply-from-method.test.ts",
     filter:
-      "apply and check outlive the call ceiling — an install is never 'stopped waiting'",
+      "updates: an app method awaiting a slow check and install is not 'stopped waiting'",
   },
   {
     what:
@@ -10346,8 +10431,8 @@ export const LEDGER: readonly Mutation[] = [
     what:
       'a page that only queries a permission (navigator.permissions.query) is refused in silence — the dev never learns why it reads "denied"',
     file: "src/electron/electron-shared.ts",
-    find: "      __aioPermDenied(wc, permission, requestingOrigin);",
-    replace: "",
+    find: "      if (!ok) __aioPermDenied(wc, permission, requestingOrigin);",
+    replace: "      if (!ok) void 0;",
     test: "tests/electron-permission-guard.test.ts",
     filter:
       "permissions: a denied CHECK is said once per origin and permission; an allowed one stays quiet",

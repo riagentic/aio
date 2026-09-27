@@ -83,6 +83,8 @@ const AUTH_ERROR_TEXT: Record<string, string> = {
     "This account's email address has not been verified yet. Check your inbox for the verification link.",
   login_required: "You are not signed in.",
   signup_disabled: "This app does not accept new sign-ups.",
+  auth_unavailable:
+    "Sign-in is unavailable right now — the server could not reach its account store. Try again shortly.",
   external_identity:
     "This account signs in through an external provider — use that provider's button rather than a password.",
   // Input the caller can fix

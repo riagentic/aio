@@ -53,6 +53,78 @@ Deno.test("auth: a ?token= app parameter does not mask a valid session cookie", 
       assertEquals(r.status, 200, `request ${i}: ${text.slice(0, 120)}`);
       assertEquals(text, "alice", `request ${i}`);
     }
+    // Not charged either: after twelve invite links the address still has
+    // its whole failed-auth budget, so one wrong password is a 401, not 429.
+    const wrong = await fetch(`${base}/__aio/auth/login`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ id: "alice", password: "wrong-password" }),
+    });
+    await wrong.body?.cancel();
+    assertEquals(
+      wrong.status,
+      401,
+      "the invite links were charged as failed logins",
+    );
+  } finally {
+    _resetAuthFails();
+    await app.close();
+    await dropTempDir(dir);
+  }
+});
+
+// Same rule where the URL IS a credential channel on every path: with
+// `users:`/`resolveUser` set, a `?token=` that resolves to nobody still masked
+// the session cookie and the Bearer — only `/ws` fell through to them.
+Deno.test("auth: a ?token= app parameter does not mask a session cookie or Bearer on an auth + users: app", async () => {
+  _resetAuthFails();
+  const { cell, aio } = await import("../mod.ts");
+  const port = freePort();
+  const dir = await tempDir("aio-auth-urltok-users-");
+  const app = await aio.run({
+    cells: [cell("urltokusers", { state: { x: 0 }, methods: {} })],
+    appId: `test-auth-urltok-users-${Deno.pid}-${port}`,
+    client: "server-only",
+    persist: false,
+    libraryMode: true,
+    auth: true,
+    users: { "machine-key-0123456789": { id: "ci", role: "user" } },
+    port,
+    baseDir: dir,
+    routes: {
+      "/api/accept": (_req: Request, m?: RouteMatch) =>
+        new Response(m?.user?.id ?? "anonymous"),
+    },
+  });
+  const base = `http://127.0.0.1:${port}`;
+  try {
+    await app.auth!.create("alice", "password123");
+    const li = await fetch(`${base}/__aio/auth/login`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ id: "alice", password: "password123" }),
+    });
+    assertEquals(li.status, 200);
+    const cookie = (li.headers.get("set-cookie") ?? "").split(";")[0]!;
+    await li.body?.cancel();
+
+    const callers: [Record<string, string>, string][] = [
+      [{ cookie }, "alice"],
+      [{ authorization: "Bearer machine-key-0123456789" }, "ci"],
+    ];
+    for (let i = 0; i < 12; i++) {
+      for (const [headers, who] of callers) {
+        const r = await fetch(`${base}/api/accept?token=invite-${i}`, {
+          headers,
+        });
+        const text = await r.text();
+        assertEquals(r.status, 200, `request ${i}: ${text.slice(0, 120)}`);
+        assertEquals(text, who, `request ${i}`);
+      }
+    }
+    // A VALID URL token still authenticates on its own.
+    const own = await fetch(`${base}/api/accept?token=machine-key-0123456789`);
+    assertEquals(await own.text(), "ci");
   } finally {
     _resetAuthFails();
     await app.close();

@@ -682,6 +682,12 @@ export type AioConfig<S, A, E> = {
    *  because under `libraryMode` the main module is the TEST file and spawning
    *  a worker on it would re-run the test in another thread. */
   _workerEntry?: string;
+  /** Internal (test harness): run the declared-shape write guard — dev
+   *  refuses a write that changes a persisted field's declared type — even
+   *  though the harness does not persist. Set by `testServer`; a dev app
+   *  persists by default, so a non-persisting harness must not be more
+   *  lenient than it. */
+  _harnessShapeGuard?: boolean;
   /** Internal: the composition's circuit breaker, for `worker: true` cells —
    *  their failures happen in another isolate (see cell-worker-pool.ts). */
   _cellBreaker?: {
@@ -1233,6 +1239,12 @@ export type CellsConfig = {
    *  instead of `Deno.mainModule`. Set by `testServer({ workers: "real" })`;
    *  never set it by hand — an app's worker entry is its own entry. */
   _workerEntry?: string;
+  /** Internal (test harness): run the declared-shape write guard — dev
+   *  refuses a write that changes a persisted field's declared type — even
+   *  though the harness does not persist. Set by `testServer`; a dev app
+   *  persists by default, so a non-persisting harness must not be more
+   *  lenient than it. */
+  _harnessShapeGuard?: boolean;
   /** Push state to clients at most once per N ms (default 50; 0 = batch
    *  only within the current tick). */
   syncIntervalMs?: number;

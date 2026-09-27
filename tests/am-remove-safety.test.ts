@@ -15,10 +15,12 @@ import {
   installedFootprint,
 } from "../src/am/am-cmd-remove.ts";
 import {
+  _resetAppDirs,
   appDirs,
   installedAppParents,
   installedAppPaths,
   installRoot,
+  registerAppDirs,
 } from "../src/server/app-dirs.ts";
 import type { GlobalFlags } from "../src/am/am-types.ts";
 
@@ -204,6 +206,89 @@ Deno.test("am remove --data --force: said twice, so it happens", async () => {
     );
     const j = JSON.parse(r.logs.join("\n")) as { dataRemoved: boolean };
     assertEquals(j.dataRemoved, true);
+  });
+});
+
+Deno.test("am remove --data --force: no data where am looks is SAID, not a silent success", async () => {
+  // `am` derives the data home from ITS environment (`$AIO_APPS_DIR`,
+  // `$HOME`); an app booted with `appDir`, `--home` or another
+  // `AIO_APPS_DIR` keeps it elsewhere. `--data` then deleted nothing and
+  // answered exactly like a removal with no data to take: the one verb whose
+  // point is "and the data too" left all of it behind, unsaid.
+  await withHomes(async () => {
+    const { dataDir } = await install("elsewhere", { program: true });
+    const r = await run(["elsewhere"], { data: true, force: true });
+    assertEquals(r.code, null, said(r));
+    const j = JSON.parse(r.logs.join("\n")) as {
+      dataRemoved: boolean;
+      dataNotFound?: string;
+    };
+    assertEquals(j.dataRemoved, false);
+    assertEquals(j.dataNotFound, dataDir, said(r));
+  });
+});
+
+Deno.test("am remove --data: a data home outside the apps root is named as the user's, not as a bug in aio", async () => {
+  // `--home` / `appDir` put an app's data anywhere. The containment guard
+  // refuses to delete outside the apps root — rightly — but called that
+  // folder "a bug in aio" and asked for a report, for a folder the user
+  // chose on purpose.
+  await withHomes(async (env) => {
+    const outside = join(env.home, "elsewhere-data");
+    await Deno.mkdir(join(outside, "data"), { recursive: true });
+    await Deno.writeTextFile(join(outside, "data", "state.db"), "x");
+    registerAppDirs("outhome", appDirs("outhome", outside));
+    try {
+      await install("outhome", { program: true });
+      const r = await run(["outhome"], { data: true, force: true });
+      assertEquals(r.code, 1, said(r));
+      assert(!said(r).includes("bug in aio"), said(r));
+      assertStringIncludes(said(r), outside);
+      assertStringIncludes(said(r), "by hand");
+      assert(await there(join(outside, "data", "state.db")), "deleted");
+    } finally {
+      _resetAppDirs();
+    }
+  });
+});
+
+Deno.test("am remove --data: the outside-the-root refusal is reached through the real CLI (`am --home=`)", async () => {
+  // Not a seam-only branch: `am --home=<dir>` registers that home for the
+  // app (`targetHome`), so `appDirs(name).home` is the user's directory.
+  await withHomes(async (env) => {
+    const outside = join(env.home, "elsewhere-data");
+    await Deno.mkdir(join(outside, "data"), { recursive: true });
+    await Deno.writeTextFile(join(outside, "data", "state.db"), "x");
+    await install("outhome", { program: true });
+    const out = await new Deno.Command(Deno.execPath(), {
+      args: [
+        "run",
+        "-A",
+        `--config=${new URL("../deno.json", import.meta.url).pathname}`,
+        new URL("../src/am.ts", import.meta.url).pathname,
+        "remove",
+        "outhome",
+        "--data",
+        "--force",
+        "--app=outhome",
+        `--home=${outside}`,
+      ],
+      cwd: env.home,
+      env: {
+        AIO_INSTALL_ROOT: env.installRoot,
+        AIO_APPS_DIR: env.appsDir,
+        HOME: env.home,
+        NO_COLOR: "1",
+      },
+      stdout: "piped",
+      stderr: "piped",
+    }).output();
+    const dec = new TextDecoder();
+    const text = dec.decode(out.stdout) + dec.decode(out.stderr);
+    assertEquals(out.code, 1, text);
+    assertStringIncludes(text, "outside the apps root");
+    assertStringIncludes(text, "by hand");
+    assert(await there(join(outside, "data", "state.db")), "deleted");
   });
 });
 

@@ -31,7 +31,11 @@ import {
   SEPARATOR,
 } from "@std/path";
 import { slugify } from "./build/build-helpers.ts";
-import { emptyDir, moveDirContents } from "./build/dist-staging.ts";
+import {
+  emptyDir,
+  foreignDistRefusal,
+  moveDirContents,
+} from "./build/dist-staging.ts";
 import {
   flagVocabulary,
   FLEET_BOOL_FLAGS,
@@ -138,6 +142,12 @@ export const TARGETS: Record<string, TargetSpec> = {
     flags: ["--android"],
     role: "app",
     desc: "Android APK (bundled assets)",
+  },
+  web: {
+    flags: ["--web"],
+    role: "app",
+    desc:
+      "standalone web app / PWA (static directory: no server, offline service worker)",
   },
   cli: {
     flags: ["--compile", "--cli"],
@@ -295,6 +305,7 @@ import {
   foreignOutEntries,
 } from "./build/build-shape.ts";
 import { iosArtifactName } from "./build/build-ios.ts";
+import { webArtifactName } from "./build/build-web.ts";
 import {
   artifactVersion,
   BUILD_VERSION_ENV,
@@ -405,6 +416,7 @@ export function isArtifactName(name: string, binaryName: string): boolean {
     if (
       name === binaryName || name === `${binaryName}-client` ||
       name === iosArtifactName(binaryName) ||
+      name === webArtifactName(binaryName) ||
       name.startsWith("aio-client-")
     ) return true;
     // Cross-compiled artifacts carry their platform and, on every OS but
@@ -482,6 +494,7 @@ const ARTIFACT_SHAPE: Readonly<Record<string, string>> = {
   cli: "<bin>",
   electron: "<bin>-<arch>.AppImage",
   android: "<bin>.apk",
+  web: "<bin>-web",
   "android-client": "<bin>-client.apk",
   "cli-client": "<bin>-client",
   "ios-client": "<bin>-ios-client",
@@ -1195,6 +1208,13 @@ export async function buildAll(): Promise<number> {
       return 1;
     }
   }
+  // …and dist/, exempt above as aio's own, must BE aio's: every per-target
+  // build empties it, whatever `out` is.
+  const distRefusal = await foreignDistRefusal(resolve(join(root, DIST_DIR)));
+  if (distRefusal) {
+    console.error(`${C.red}✗ ${distRefusal}${C.r}`);
+    return 1;
+  }
   const release = Deno.args.includes("--release");
   const force = Deno.args.includes("--force");
   // THE app version, resolved ONCE for the whole fleet and handed to every
@@ -1254,7 +1274,8 @@ export async function buildAll(): Promise<number> {
     for await (const e of Deno.readDir(root)) {
       // Files by name; the one DIRECTORY artifact (an iOS Xcode project) by
       // its exact name.
-      const isDirArtifact = e.isDirectory && e.name === iosArtifactName(bin);
+      const isDirArtifact = e.isDirectory &&
+        (e.name === iosArtifactName(bin) || e.name === webArtifactName(bin));
       if (!isDirArtifact && (!e.isFile || !isArtifactName(e.name, bin))) {
         continue;
       }
@@ -1450,7 +1471,9 @@ export async function buildAll(): Promise<number> {
             `${C.red}✗ ${label} — ${why}${C.r}\n  ${C.dim}looked for: ` +
               `${targetBin}, ${targetBin}-client, ${targetBin}-<platform>, ` +
               `${targetBin}*.{AppImage,apk,zip,dmg,app.tar.gz,exe,service}, aio-client-*, ` +
-              `the ${iosArtifactName(targetBin)}/ directory — new since the ` +
+              `the ${iosArtifactName(targetBin)}/ or ${
+                webArtifactName(targetBin)
+              }/ directory — new since the ` +
               `build began.\n  fix: the single-target build wrote elsewhere ` +
               `or under another name. A per-target "name" in build.targets ` +
               `must match what the builder printed above; an --out on the ` +
@@ -1492,7 +1515,7 @@ export async function buildAll(): Promise<number> {
       // have been scribbling in `out` (that is why it was moved aside), so the
       // directory standing there now is intermediate rubbish, not a release.
       if (preserved) {
-        await emptyDir(outDir);
+        await emptyDir(outDir, ["manifest.json"]);
         await moveDirContents(preservedOut, outDir);
       }
       // Distinguish "everything was refused" from "everything failed" — a
@@ -1532,7 +1555,7 @@ export async function buildAll(): Promise<number> {
     const previousTargets = preserved
       ? await manifestTargetNames(join(preservedOut, "manifest.json"))
       : [];
-    await emptyDir(outDir);
+    await emptyDir(outDir, ["manifest.json"]);
     await Deno.mkdir(outDir, { recursive: true });
     // Same rule the build itself used for `targetBin` — a per-target `name`,
     // else the project's title.

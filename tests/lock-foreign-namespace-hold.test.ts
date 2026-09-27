@@ -69,6 +69,15 @@ async function lockableElsewhere(path: string): Promise<boolean> {
   return new TextDecoder().decode(out.stdout).trim() === "true";
 }
 
+/** Remove a lock record this test wrote (already gone is fine). */
+function dropRecord(path: string): void {
+  try {
+    Deno.removeSync(path);
+  } catch (e) {
+    if (!(e instanceof Deno.errors.NotFound)) throw e;
+  }
+}
+
 const exists = (p: string) => {
   try {
     Deno.lstatSync(p);
@@ -210,6 +219,11 @@ Deno.test({
         ns: ownPidNs()! + 1,
       };
       writeLock(rec);
+      // A record naming a foreign-namespace owner reads LIVE: left behind, the
+      // shard's runtime-dir sweep reports it as a process that outlived us.
+      using _drop = {
+        [Symbol.dispose]: () => dropRecord(lockPath(lockKey("nscas", home))),
+      };
       assert(
         !replaceLockIf({ ...rec, ns: ownPidNs() }, (n) => ({
           ...n,
@@ -268,6 +282,8 @@ Deno.test({
         lock.release();
         owner.kill("SIGKILL");
         await owner.status;
+        // The container's record written last (see the CAS test's note).
+        dropRecord(path);
       }
     });
   },

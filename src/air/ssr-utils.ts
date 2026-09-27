@@ -42,6 +42,25 @@ export function keepLeadingNewline(tag: string, content: string): string {
  *  closing tag and decodes no entities at all. */
 export const RAW_TEXT_ELEMENTS = new Set(["script", "style"]);
 
+/** The elements whose content the parser reads as TEXT (raw text, and the
+ *  RCDATA `<textarea>`/`<title>`): a comment written there is not a comment.
+ *  The `<!---->` a null slot or an empty region holds its place with became
+ *  the literal text `<!---->` — a `<textarea>{draft ?? null}</textarea>`
+ *  opened showing it, and a `<title>` said it in the tab. Hydration makes
+ *  the missing anchors itself (`renderer-hydrate.ts`). */
+export const TEXT_CONTENT_ELEMENTS = new Set([
+  ...RAW_TEXT_ELEMENTS,
+  "textarea",
+  "title",
+]);
+
+/** A child's markup inside a {@link TEXT_CONTENT_ELEMENTS} element, without
+ *  the slot markers. Only ever applied to a NON-raw child's markup, whose
+ *  text is escaped — so `<!---->` in it can only be a marker. */
+export function dropSlotMarkers(html: string): string {
+  return html.replaceAll("<!---->", "");
+}
+
 /** The text to emit inside a raw-text element.
  *
  *  SSR escaped it like any other child, so a server-rendered

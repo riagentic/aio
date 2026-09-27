@@ -100,6 +100,47 @@ Deno.test("sync handleOp: a persist failure is answered with sync-err, not silen
   }
 });
 
+// ONE `sync-err` per request, however many of its pending ops failed. One
+// frame already makes the client re-send the whole queue; a frame PER op made
+// a client built before its single retry timer (≤1.0.9, a cached bundle) run
+// one retry loop per frame — each loop re-sending the queue, each resend
+// failing per op again: P loops, then P², for as long as the disk stayed full.
+// The `sayHeld` door was closed for this; the persist-failure door was not.
+Deno.test("sync-req pendingOps: several persist failures in one request are answered with ONE sync-err", async () => {
+  const { handler, socket, frames, errors, close } = setup();
+  try {
+    handler.handleSync(
+      {
+        clientId: "c1",
+        session: "s1",
+        cells: { [CELL]: { lastHlc: null } },
+        pendingOps: [1, 2, 3].map((i) => ({
+          id: `c1-s1-${i}.abcdef12345${i}`,
+          cell: CELL,
+          action: "add",
+          payload: { args: [`x${i}`] },
+          hlc: [Date.now(), i, "c1"],
+        })),
+      },
+      { id: "c1" },
+      socket,
+    );
+    await new Promise((r) => setTimeout(r, 50));
+    assertEquals(
+      errors.filter((e) => e.includes("failed to persist pending op")).length,
+      3,
+      "each failure stays in the server log",
+    );
+    assertEquals(
+      frames.filter((f) => f.t === "sync-err").length,
+      1,
+      `one frame per request — frames: ${JSON.stringify(frames)}`,
+    );
+  } finally {
+    close();
+  }
+});
+
 Deno.test("sync-req pendingOps: a persist failure is answered with sync-err, not silence", async () => {
   const { handler, socket, frames, errors, dispatched, close } = setup();
   try {

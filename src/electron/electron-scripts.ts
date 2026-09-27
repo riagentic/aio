@@ -6,6 +6,7 @@ import {
   tmplBounds,
   tmplBoundsTracking,
   tmplCrashGuard,
+  tmplIpcGuard,
   tmplKeyboardShortcuts,
   tmplParentWatch,
   tmplPermissionGuard,
@@ -39,7 +40,7 @@ export function electronMainScript(url: string, meta?: AioMeta): string {
       })())}); if (!r.ok) return null; ` +
     `return nativeImage.createFromBuffer(Buffer.from(await r.arrayBuffer())); })()`;
   return `
-const { app, BrowserWindow, Menu, ipcMain } = require('electron');
+const { app, BrowserWindow, Menu } = require('electron');
 const path = require('path');
 const fs = require('fs');
 Menu.setApplicationMenu(null);
@@ -49,6 +50,7 @@ ${tmplPreloadWrite(JSON.stringify(shellBridgePreload({ standalone: true })))}
 app.name = ${JSON.stringify(slug)};
 ${tmplCrashGuard()}
 ${tmplPermissionGuard(meta?.permissions)}
+${tmplIpcGuard()}
 ${tmplParentWatch()}
 
 // ── Window state persistence ──
@@ -59,11 +61,12 @@ app.on('ready', () => {
 ${tmplWindowShape(meta, { preload: "preloadFile" })}
   const win = new BrowserWindow(b);
   if (b.x == null) win.center();
+  const _appOrigin = new URL(${JSON.stringify(url)}).origin;
+  __aioIpcBind(win, _appOrigin); // before any handler can run (tmplIpcGuard)
 ${tmplBoundsTracking()}
 ${tmplRendererDiagnostics(false)}
 ${tmplTray(meta, trayIcon, meta?.title)}
   win.loadURL(${JSON.stringify(url)});
-  const _appOrigin = new URL(${JSON.stringify(url)}).origin;
 ${tmplWillNavigate("_appOrigin")}
   // Accept the self-signed cert aio --expose generates for THIS app's own
   // origin — and nothing else. The check must read the URL that FAILED (arg 3);

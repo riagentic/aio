@@ -305,8 +305,13 @@ function merge(
       // persisted array can't replace schema object → keep initial
     } else if (Array.isArray(iv) && isPlainObject(pv)) {
       // persisted object can't replace schema array → keep initial (AIO-144)
-    } else if (typeof iv === typeof pv || iv === null || pv === null) {
-      setOwn(result, key, pv); // same type → use persisted
+    } else if (
+      typeof iv === typeof pv || iv === null || iv === undefined || pv === null
+    ) {
+      // same type → use persisted. A declared `null`/`undefined` has no type
+      // to enforce (`x: undefined as T | undefined`), so the stored value
+      // stands — keeping the default there dropped it on every restart.
+      setOwn(result, key, pv);
     }
     // type mismatch → keep initial (schema wins)
   }

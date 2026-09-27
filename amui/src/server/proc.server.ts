@@ -670,19 +670,57 @@ export async function createApp(
 }
 
 /** CPU% + RSS(MB) for a pid (server-side `ps`). Null on failure. */
+/** The last cumulative cpu reading per pid — what makes the NEXT sample of that
+ *  pid a rate over the interval between them. */
+const lastCpu = new Map<number, { cpuSec: number; at: number }>();
+
+/** Cumulative cpu seconds of `pid`: `/proc/<pid>/stat` utime+stime (USER_HZ is
+ *  100 in the Linux ABI) where it exists, else `ps -o time=` (`[dd-][hh:]mm:ss.cc`
+ *  on macOS/BSD). NaN when neither answers to the centisecond. */
+async function cpuSeconds(pid: number, psTime: string): Promise<number> {
+  try {
+    const stat = await Deno.readTextFile(`/proc/${pid}/stat`);
+    // Fields after the parenthesised comm (which may itself hold spaces):
+    // [0] is field 3 (state), so utime/stime (fields 14/15) are [11]/[12].
+    const f = stat.slice(stat.lastIndexOf(")") + 2).split(" ");
+    return (Number(f[11]) + Number(f[12])) / 100;
+  } catch { /* no procfs — the ps field below */ }
+  const m = /^(?:(\d+)-)?(?:(\d+):)?(\d+):(\d+\.\d+)$/.exec(psTime);
+  if (!m) return NaN; // whole seconds only (procps) — too coarse for a 1 s rate
+  return Number(m[1] ?? 0) * 86400 + Number(m[2] ?? 0) * 3600 +
+    Number(m[3]) * 60 + Number(m[4]);
+}
+
+/** cpu% and RSS of `pid`. The cpu% is the rate SINCE THE PREVIOUS SAMPLE of the
+ *  same pid — `ps -o %cpu` is the lifetime average (cpu time / elapsed), so a
+ *  chart of it could not show what the app is doing now: idle after a busy
+ *  boot read ~66%, pegged after an idle stretch read a fraction. The first
+ *  sample of a pid has no interval yet and reports that lifetime average. */
 export async function psStats(
   pid: number,
 ): Promise<{ cpuPct: number; memMb: number } | null> {
   try {
     const out = await new Deno.Command("ps", {
-      args: ["-o", "%cpu=,rss=", "-p", String(pid)],
+      args: ["-o", "%cpu=,rss=,time=", "-p", String(pid)],
       stdout: "piped",
       stderr: "null",
     }).output();
+    const at = performance.now();
     const line = new TextDecoder().decode(out.stdout).trim();
-    const [cpu, rss] = line.split(/\s+/);
-    const cpuPct = Number(cpu);
+    const [cpu, rss, time] = line.split(/\s+/);
+    let cpuPct = Number(cpu);
     const rssKb = Number(rss);
+    const cpuSec = line ? await cpuSeconds(pid, time ?? "") : NaN;
+    const prev = lastCpu.get(pid);
+    if (Number.isFinite(cpuSec)) {
+      lastCpu.set(pid, { cpuSec, at });
+      // A counter that went BACKWARDS is a reused pid — its first sample.
+      if (prev && cpuSec >= prev.cpuSec && at > prev.at) {
+        cpuPct = Math.round(
+          (cpuSec - prev.cpuSec) / ((at - prev.at) / 1000) * 1000,
+        ) / 10;
+      }
+    } else lastCpu.delete(pid);
     // Reject non-finite samples — a NaN would poison the chart history
     // (peak/ceil → NaN → the whole area path blanks + "NaN %" in the header).
     if (!Number.isFinite(cpuPct) || !Number.isFinite(rssKb)) return null;

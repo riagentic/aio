@@ -1,7 +1,7 @@
 // `aio/air` must mean the same thing on every target — the BROWSER half.
 //
 // The browser build remaps the public specifiers to the raw browser entry:
-//   src/build/esbuild-shared.ts → const air = doAndroid
+//   src/build/esbuild-shared.ts → const air = standalone
 //                                   ? "src/standalone-air.ts" : "src/browser-air.ts"
 //                                 … { "aio": air, "aio/air": air }
 // so in a shipped browser bundle `import { … } from "aio/air"` resolves to

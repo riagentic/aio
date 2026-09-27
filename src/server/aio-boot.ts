@@ -36,7 +36,10 @@ import {
   type TableDef,
 } from "./sql.ts";
 import { deepMerge } from "../state/deep-merge.ts";
-import { createDeclaredShapeGuard } from "./declared-shape-guard.ts";
+import {
+  createDeclaredShapeGuard,
+  shapeDriftDeciders,
+} from "../state/declared-shape-guard.ts";
 // The migration/restore pass is ONE implementation for every runtime (the
 // standalone/Android one runs it too) — re-exported so this module's importers
 // are unchanged.
@@ -1242,6 +1245,8 @@ export interface BootConfig<S> {
   listenedTypes?: readonly string[];
   initialState: S;
   shouldPersist: boolean;
+  /** Run the write guard although nothing persists (`_harnessShapeGuard`). */
+  harnessShapeGuard?: boolean;
   persistKey: string;
   persistMode: "single" | "multi";
   persistDebounceMs: number;
@@ -1346,6 +1351,11 @@ export interface BootResult<S> {
    *  — warns (dev and prod) about writes the next boot will undo. Absent when
    *  nothing persists. See declared-shape-guard.ts. */
   writeGuard?: (actionType: string, patches: unknown) => void;
+  /** The cell's persist filter when the write guard REFUSES a type change in
+   *  it (dev, persisting, not exempt) — a `worker: true` cell's reduce runs
+   *  it in its own isolate, so it throws there as a main-isolate cell's does.
+   *  `undefined` ⇒ no refusal for that cell. */
+  strictTypeFilter?: (cell: string) => CellFieldFilter | undefined;
   /** The store held a saved state at boot — it has saved at least once. */
   storeHeldState?: boolean;
 }
@@ -3098,20 +3108,28 @@ export async function bootStorage<S>(
   // Said once per `cell.path`, whichever of the two write-time checks gets
   // there first (the guard names the method; the watcher sees every write).
   const _shapeSaid = new Set<string>();
-  const writeGuard = shouldPersist
+  const _guardSkip = new Set([
+    ...syncCellIds,
+    ...(migrations?.report ?? []).map((r) => r.cell),
+  ]);
+  // A harness guards as the app it stands in for does: a dev app persists.
+  const guarded = shouldPersist || cfg.harnessShapeGuard === true;
+  const strictTypeFilter = guarded && isDevBoot()
+    ? (cell: string): CellFieldFilter | undefined =>
+      _guardSkip.has(cell) || shapedCells.has(cell)
+        ? undefined
+        : cfg.cellPersist?.[cell] ?? "all"
+    : undefined;
+  const writeGuard = guarded
     ? createDeclaredShapeGuard({
       template: initialState as Record<string, unknown>,
       persist: cfg.cellPersist,
-      skip: new Set([
-        ...syncCellIds,
-        ...(migrations?.report ?? []).map((r) => r.cell),
-      ]),
-      unknownKeys: (declared, written) =>
-        detectShapeDrift({ c: declared }, { c: written })
-          .filter((d) =>
-            d.issue === "unknown-field" && d.storedType !== "undefined"
-          )
-          .map((d) => d.path),
+      skip: _guardSkip,
+      // The boot restore's own rules, at the write: an unknown key is said;
+      // a type change is refused in dev, said in prod (category b).
+      ...shapeDriftDeciders,
+      shaped: shapedCells,
+      strict: isDevBoot(),
       said: _shapeSaid,
       warn: (msg) => log.warn(msg),
     })
@@ -3246,6 +3264,7 @@ export async function bootStorage<S>(
     syncBroadcastRef,
     syncDispatchRef,
     ...(writeGuard ? { writeGuard } : {}),
+    ...(strictTypeFilter ? { strictTypeFilter } : {}),
     storeHeldState: hadPersistedState,
     strayJournal,
     storeSavedElsewhere,

@@ -56,6 +56,7 @@ import {
   artifactPath,
   clearPending,
   detectTarget,
+  failedUpdatePath,
   firstBootPath,
   installableTargets,
   installDir,
@@ -66,6 +67,7 @@ import {
   type PendingMark,
   pruneKeepingNewest,
   pruneOld,
+  readPending,
   relaunch,
   replacedExeIdentity,
   smokeTestArtifact,
@@ -74,6 +76,8 @@ import {
   unpackAppTarball,
   unpackArchive,
   verifyMacBundle,
+  writePending,
+  writeRecordAtomic,
   zipLauncher,
 } from "./updates-apply.ts";
 import { dataCompatibility, followsPrereleases } from "./updates-core.ts";
@@ -192,8 +196,16 @@ export function createUpdatesRuntime(deps: UpdatesRuntimeDeps): UpdatesRuntime {
    *
    *  Measured only for single-file targets: an unpacked directory has no digest
    *  the manifest could be compared against (the manifest hashes the archive it
-   *  came in). Unknown stays unknown, and unknown is never an offer. */
+   *  came in). Unknown stays unknown, and unknown is never an offer.
+   *
+   *  A SOURCE run has no artifact of its own: `artifactPath()` is the `deno`
+   *  executable, whose digest never matches a manifest — so every check offered
+   *  the version already running, and recorded deno's digest as the install's.
+   *  Its digest is unknown, and a record an older aio left is not read. */
   async function installedDigest(m: ShipManifest): Promise<string | undefined> {
+    if (deps.artifact === undefined && installedTarget() === "source") {
+      return undefined;
+    }
     const known = readTrust(deps.dataDir).installedSha256;
     if (known) return known;
     if (!m.sha256) return undefined;
@@ -316,7 +328,12 @@ export function createUpdatesRuntime(deps: UpdatesRuntimeDeps): UpdatesRuntime {
       // The digest of what is INSTALLED rides in beside the persisted cell
       // versions: it is the same kind of fact (what this machine is holding
       // right now) and it is what makes a same-version rebuild detectable.
-      local: { ...deps.local, installedSha256: await installedDigest(m) },
+      local: {
+        ...deps.local,
+        installedSha256: await installedDigest(m),
+        // Read after the digest: measuring one records it without a date.
+        installedReleasedAt: readTrust(deps.dataDir).installedReleasedAt,
+      },
       canInstall: canInstall(),
       // What this install IS — so a refusal it cannot act on can still name
       // the thing the user should do instead (a macOS bundle is replaced by
@@ -656,7 +673,7 @@ export function createUpdatesRuntime(deps: UpdatesRuntimeDeps): UpdatesRuntime {
         "updates",
         `installed ${deps.appVersion} → ${m.version}; restarting`,
       );
-      recordInstalledSha256(deps.dataDir, m.sha256);
+      recordInstalledSha256(deps.dataDir, m.sha256, m.releasedAt);
       deferHandOver(
         () => {
           try {
@@ -679,6 +696,32 @@ export function createUpdatesRuntime(deps: UpdatesRuntimeDeps): UpdatesRuntime {
             // The helper never started (a policy such as AppLocker refused
             // it): NOTHING was swapped. Undo what was written for the swap,
             // say so, and start this version again.
+            //
+            // Said in the FAILED record, not only the log: this runs after
+            // `shutdown()`, whose logger is gone — a line logged here reached
+            // no file (VM-measured, Windows under Constrained Language), and
+            // the relaunched app showed no trace of the update it refused.
+            // The record is what the next boot names and dismisses, as for
+            // every other update put back.
+            const why = `the update helper could not start (${e})`;
+            try {
+              writeRecordAtomic(failedUpdatePath(deps.dataDir), {
+                ...(readPending(deps.dataDir) ?? {
+                  from: deps.appVersion,
+                  to: m.version,
+                  previous: "",
+                  artifact: current,
+                  attempts: 0,
+                  startedAt: new Date().toISOString(),
+                }),
+                swapFailed: why,
+              });
+            } catch (w) {
+              log.error(
+                "updates",
+                `could not keep the failed-update record: ${w}`,
+              );
+            }
             clearPending(deps.dataDir);
             for (
               const [path, recursive] of [
@@ -693,8 +736,8 @@ export function createUpdatesRuntime(deps: UpdatesRuntimeDeps): UpdatesRuntime {
             writeTrust(deps.dataDir, { installedSha256: undefined });
             log.error(
               "updates",
-              `${m.version} was NOT installed: the update helper could not ` +
-                `start (${e}). ${deps.appVersion} is starting again.`,
+              `${m.version} was NOT installed: ${why}. ${deps.appVersion} ` +
+                `is starting again.`,
             );
             if (!isServiceSupervised()) {
               (deps.relaunch ?? relaunch)({
@@ -725,7 +768,7 @@ export function createUpdatesRuntime(deps: UpdatesRuntimeDeps): UpdatesRuntime {
     // What is installed now, by digest. This is the fact that makes the NEXT
     // "same version, re-published" detectable, and it is the digest that was
     // verified above — never one re-read from the file that was just written.
-    recordInstalledSha256(deps.dataDir, m.sha256);
+    recordInstalledSha256(deps.dataDir, m.sha256, m.releasedAt);
 
     log.info(
       "updates",
@@ -891,13 +934,15 @@ export function createUpdatesRuntime(deps: UpdatesRuntimeDeps): UpdatesRuntime {
   function startHandOver(artifact: string, retire = false): void {
     // ONE decider for "under a service manager", shared with aio.restart().
     const supervised = isServiceSupervised();
+    // Said NOW: inside the handover the logger is already shut down.
+    if (supervised) {
+      log.info(
+        "updates",
+        "under a supervisor — exiting so it starts the new version",
+      );
+    }
     deferHandOver(() => {
-      if (supervised) {
-        log.info(
-          "updates",
-          "under a supervisor — exiting so it starts the new version",
-        );
-      } else {
+      if (!supervised) {
         (deps.relaunch ?? relaunch)({ artifact, args: deps.argv });
       }
     }, retire);
@@ -936,7 +981,7 @@ export function createUpdatesRuntime(deps: UpdatesRuntimeDeps): UpdatesRuntime {
                   log,
                 });
               } catch (e) {
-                log.error(
+                lateError(
                   `${e instanceof Error ? e.message : e}. The app restarts ` +
                     `against the previous data; retire it by hand (stop the ` +
                     `app, move <data> aside) or try again.`,
@@ -947,7 +992,7 @@ export function createUpdatesRuntime(deps: UpdatesRuntimeDeps): UpdatesRuntime {
           } catch (e) {
             // Nothing is left to catch this: the method that started the
             // update has long since returned.
-            log.error(
+            lateError(
               `update handover FAILED (${e}) — the new version is installed ` +
                 `but this process could not hand over to it. Restart the app ` +
                 `by hand; the update is already in place.`,
@@ -959,6 +1004,24 @@ export function createUpdatesRuntime(deps: UpdatesRuntimeDeps): UpdatesRuntime {
         })();
       }, 0);
     });
+  }
+
+  /** An error AFTER `shutdown()`: logged (reaching a console at most — the
+   *  logger is gone), and carried on the pending marker, which the next boot
+   *  judges and says it from (`PendingUpdate.handoverError`). */
+  function lateError(msg: string): void {
+    log.error("updates", msg);
+    try {
+      const p = readPending(deps.dataDir);
+      if (p) {
+        writePending(deps.dataDir, {
+          ...p,
+          handoverError: p.handoverError ? `${p.handoverError}\n${msg}` : msg,
+        });
+      }
+    } catch (e) {
+      log.error("updates", `could not keep that on the update marker: ${e}`);
+    }
   }
 
   /** Ask the app whether NOW is a moment it can be restarted.

@@ -145,7 +145,7 @@ const configEntry = "src/app.ts";
 await runBundle({
   root, dist: root + "/dist", out: root + "/dist/app.js",
   frameworkSrcDir: ${JSON.stringify(ROOT + "src")},
-  isRemote: false, doAndroid: false, doForce: true,
+  isRemote: false, doAndroid: false, standalone: false, doForce: true,
   configEntry, appDir: resolveAppDir(root, configEntry), uiEntry: "App.tsx",
   // deno-lint-ignore no-explicit-any
 } as any, mainConfig);

@@ -17,6 +17,7 @@ import {
   assertThrows,
 } from "@std/assert";
 import { dropTempDir, tempDir } from "../src/testing/temp-dir.ts";
+import { recordProof, treeStamp } from "../scripts/proof.ts";
 import {
   adbBootArgv,
   adbInstallArgv,
@@ -1844,6 +1845,7 @@ Deno.test({
   sanitizeOps: false,
   sanitizeResources: false, // aio-ok: see above
   fn: async () => {
+    const started = await treeStamp(); // the proof row names the code that ran
     // Costs tens of minutes and tens of GB on a cold cache — never in
     // `deno task test`.
     const r = await am(["lab", "windows", "--json"], {});
@@ -1858,7 +1860,6 @@ Deno.test({
     assertEquals(j.shareUrl, SHARE_URL);
     // Records the beta gate's "real Windows pass". Last line, so a partial
     // run cannot claim it.
-    const { recordProof } = await import("../scripts/proof.ts");
     // `lab-vm`, not `real`: what this proved is that the LAB boots and
     // serves. An app running on Windows is a different claim, and the
     // matrix now carries it separately, with no gate and saying so.
@@ -1866,6 +1867,7 @@ Deno.test({
       "windows",
       "lab-vm",
       "am lab windows: viewer + share live",
+      started,
     );
   },
 });
@@ -1881,6 +1883,7 @@ Deno.test({
   sanitizeOps: false,
   sanitizeResources: false, // aio-ok: see above
   fn: async () => {
+    const started = await treeStamp(); // the proof row names the code that ran
     const start = await am(["lab", "macos", "--json"], {});
     assert(start.code === 0, start.err);
     const j = JSON.parse(start.out);
@@ -1892,8 +1895,12 @@ Deno.test({
     assertEquals(s.share.serving, true);
     assertEquals(s.share.url, SHARE_URL);
     // The beta gate's "real macOS pass", as far as a machine can check it.
-    const { recordProof } = await import("../scripts/proof.ts");
-    await recordProof("macos", "lab-vm", "am lab macos: share serving");
+    await recordProof(
+      "macos",
+      "lab-vm",
+      "am lab macos: share serving",
+      started,
+    );
   },
 });
 

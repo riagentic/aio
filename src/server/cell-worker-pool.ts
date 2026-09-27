@@ -8,6 +8,7 @@
 // internal WORKER_PATCH_ACTION), so persistence, broadcast and time-travel are
 // driven by the same path as a local cell.
 
+import type { CellFieldFilter } from "../state/cell-types.ts";
 import type { WirePatch as Patch } from "../protocol/patch-ops.ts";
 import type { CellDef, Msg } from "../state/cell-types.ts";
 import { WORKER_PATCH_ACTION } from "../state/cell-compose-reduce.ts";
@@ -133,6 +134,8 @@ export function createCellWorkerPool(opts: {
    *  an in-process caller sees for a REFUSED write, and a worker that never
    *  learned it answered differently from the cell beside it. */
   refusalsReject: boolean;
+  /** The boot's dev type refusal, per cell (see `ToWorker.init.strictTypes`). */
+  strictTypeFilter?: (cell: string) => CellFieldFilter | undefined;
   /** Read a cell's authoritative slice (post-restore) to seed its worker. */
   getSlice: (cell: string) => Record<string, unknown>;
   /** The RAW dispatch — worker patches are applied through it. */
@@ -214,6 +217,7 @@ export function createCellWorkerPool(opts: {
         prod,
         freezeState,
         refusalsReject,
+        strictTypes: opts.strictTypeFilter?.(name),
         // `""` (app unknown) is no identity to hand over — the worker then
         // resolves as it always did.
         ...(appId ? { appId } : {}),

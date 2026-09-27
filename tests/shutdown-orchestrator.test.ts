@@ -20,6 +20,10 @@ import {
   createShutdownOrchestrator,
   type ShutdownRefs,
 } from "../src/server/shutdown.ts";
+import {
+  DRAIN_TIMEOUT_MS,
+  SHUTDOWN_BUDGET_MS,
+} from "../src/server/shutdown-budget.ts";
 
 const never = () => new Promise<void>(() => {});
 
@@ -371,4 +375,69 @@ Deno.test("shutdown: a throwing onStopping does not abandon the shutdown", async
   for (const step of TAIL) {
     assert(done.includes(step), `'${step}' must still run — got ${done}`);
   }
+});
+
+Deno.test("shutdown: onStopping, worker close and the drain share ONE drain budget — the persist is not pushed past it", async () => {
+  // Each used to get its own DRAIN_TIMEOUT_MS: a hung onStopping plus a hung
+  // worker close plus a hung drain put the final persist 9s in, and the whole
+  // stop past SHUTDOWN_BUDGET_MS — the number a supervisor is told to wait
+  // before SIGKILL, and the one the exit watchdog is sized from.
+  const t0 = Date.now();
+  let persistAt = -1;
+  const { refs, warns } = stubRefs({
+    onStopping: never,
+    closeWorkers: never,
+    // A drain that is still busy when its timeout arrives.
+    dispatch: {
+      close: () => {},
+      drain: (ms = 0) => new Promise<void>((r) => setTimeout(r, ms)),
+    },
+    flushPersist: async () => {
+      persistAt = Date.now() - t0;
+    },
+    onStop: never,
+  });
+  const { shutdown } = createShutdownOrchestrator(refs);
+  assertEquals(await within(shutdown(), BOUND_MS), undefined);
+  const total = Date.now() - t0;
+  assert(
+    persistAt >= 0 && persistAt < DRAIN_TIMEOUT_MS + 500,
+    `persist must start within the ${DRAIN_TIMEOUT_MS}ms drain budget — started at ${persistAt}ms`,
+  );
+  assert(
+    total < SHUTDOWN_BUDGET_MS + 500,
+    `the whole stop must fit SHUTDOWN_BUDGET_MS (${SHUTDOWN_BUDGET_MS}ms) — took ${total}ms`,
+  );
+  // The line names the budget that actually ran out.
+  assert(
+    warns.some((w) =>
+      w.includes("onStopping") && w.includes(`${DRAIN_TIMEOUT_MS}ms drain`)
+    ),
+    `onStopping's timeout names the drain budget — got ${warns}`,
+  );
+});
+
+Deno.test("shutdown: a hung onStop that ignores its cut still leaves the closes their time", async () => {
+  // The hook used to be handed ALL of what was left of the teardown budget, so
+  // the server and SQLite closes after it each got the 1ms floor and "did not
+  // finish". A close that needs a moment must still get one.
+  const { refs, warns, done } = stubRefs({
+    onStop: never,
+    asyncDb: {
+      close: () =>
+        new Promise<void>((r) =>
+          setTimeout(() => {
+            done.push("sqlite");
+            r();
+          }, 200)
+        ),
+    },
+  });
+  const { shutdown } = createShutdownOrchestrator(refs);
+  assertEquals(await within(shutdown(), BOUND_MS), undefined);
+  assert(done.includes("sqlite"), `sqlite close was cut short — ${warns}`);
+  assert(
+    !warns.some((w) => w.includes("sqlite did not finish")),
+    `sqlite starved by the hung hook — ${warns}`,
+  );
 });

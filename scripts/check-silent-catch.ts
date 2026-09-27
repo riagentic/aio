@@ -22,6 +22,7 @@
 // ceiling rots.
 import { codeText } from "../src/diagnostics/code-mask.ts";
 import { justified as okMarker } from "../src/diagnostics/ok-marker.ts";
+import { likelyNew, mtimeUnder } from "./ratchet-kit.ts";
 
 /** The number of UNJUSTIFIED silent catches allowed in `src/`.
  *
@@ -193,7 +194,9 @@ function report(
       `✗ ${n} unjustified ${what} in src/ (ceiling ${ceiling}).\n` +
         fix +
         `  Run with --list to see all of them. Recently added, most likely:\n` +
-        hits.slice(-(n - ceiling)).map((h) => `      src/${h.file}:${h.line}`)
+        likelyNew(hits, n - ceiling, mtimeUnder(ROOT)).map((h) =>
+          `      src/${h.file}:${h.line}`
+        )
           .join("\n"),
     );
     return false;

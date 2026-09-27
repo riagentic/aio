@@ -118,6 +118,40 @@ Deno.test('standalone persist: a `persist: "none"` cell is never RESTORED either
   );
 });
 
+Deno.test('standalone persist: an older build\'s `persist: "none"` slice is scrubbed from the store AT BOOT', async () => {
+  // Not restoring it is half: the bytes stayed in the store until the app's
+  // first change — and an APK is killed, not closed, so one that is opened
+  // and swiped away keeps the secret on disk for good. The server scrubs at
+  // boot; this runtime now does too.
+  storage.clear();
+  storage.set(
+    "aio:spf2b",
+    JSON.stringify({
+      spfsession2b: { token: "FROM-AN-OLDER-BUILD" },
+      spfkept2b: { n: 3 },
+    }),
+  );
+  const session = cell("spfsession2b", {
+    state: { token: "" },
+    persist: "none",
+    methods: { noop(_s: { token: string }) {} },
+  });
+  const kept = cell("spfkept2b", {
+    state: { n: 0 },
+    methods: { noop(_s: { n: number }) {} },
+  });
+  const onDisk = await withApp(
+    "spf2b",
+    [session, kept],
+    () => storage.get("aio:spf2b"),
+  );
+  assert(
+    !onDisk?.includes("FROM-AN-OLDER-BUILD"),
+    `the stale slice is still in the store after boot: ${onDisk}`,
+  );
+  assert(onDisk?.includes('"n":3'), `the kept cell was lost: ${onDisk}`);
+});
+
 Deno.test("standalone persist: `exclude` drops the fields, keeps the rest", async () => {
   storage.clear();
   const c = cell("spfdoc", {
@@ -218,4 +252,50 @@ Deno.test("standalone persist: a throwing `onPersist` is LOUD, not a note", asyn
       JSON.stringify(said),
   );
   assertEquals(storage.get("aio:spf6"), undefined);
+});
+
+Deno.test('standalone persist: the pre-upgrade localStorage copy an APK keeps loses its `persist: "none"` slice too', async () => {
+  // An APK that moved to the native store leaves the old localStorage copy in
+  // place (a downgrade's fallback). A cell that is `persist: "none"` now kept
+  // its secret there for good: nothing ever wrote that copy again.
+  storage.clear();
+  storage.set(
+    "aio:spf2c",
+    JSON.stringify({
+      spfsession2c: { token: "IN-THE-OLD-COPY" },
+      spfkept2c: { n: 1 },
+    }),
+  );
+  const files = new Map([
+    ["aio:spf2c", JSON.stringify({ spfkept2c: { n: 2 } })],
+  ]);
+  const g = globalThis as Record<string, unknown>;
+  g.AioNativeStore = {
+    get: (k: string) => files.get(k) ?? null,
+    set: (k: string, v: string) => (files.set(k, v), true),
+    has: (k: string) => files.has(k),
+    describe: () => "/fake",
+  };
+  try {
+    const session = cell("spfsession2c", {
+      state: { token: "" },
+      persist: "none",
+      methods: { noop(_s: { token: string }) {} },
+    });
+    const kept = cell("spfkept2c", {
+      state: { n: 0 },
+      methods: { noop(_s: { n: number }) {} },
+    });
+    const n = await withApp(
+      "spf2c",
+      [session, kept],
+      (app) => (app.getState() as { spfkept2c: { n: number } }).spfkept2c.n,
+    );
+    assertEquals(n, 2, "the native store is the one read");
+  } finally {
+    delete g.AioNativeStore;
+  }
+  const old = storage.get("aio:spf2c");
+  assert(!old?.includes("IN-THE-OLD-COPY"), `still in the old copy: ${old}`);
+  assert(old?.includes('"n":1'), `the old copy lost its kept cell: ${old}`);
 });

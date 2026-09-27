@@ -31,7 +31,7 @@ export default function App() { return null; }
       root,
       appDir: root,
       uiEntry: "App.tsx",
-      doAndroid: true,
+      standalone: true,
       imports: {},
       shares: [],
       frameworkSrcDir: join(REPO, "src"),

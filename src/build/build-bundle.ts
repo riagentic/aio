@@ -16,8 +16,8 @@ import { DENO_JSON_NAMES } from "../server/deno-json.ts";
 import { resolveShare, type ShareRoot } from "../server/app-dirs.ts";
 import { basename, dirname, join, relative, resolve } from "@std/path";
 import { serverOnlyDynamic } from "./esbuild-plugin.ts";
-import { emptyDir } from "./dist-staging.ts";
-import type { BuildConfig } from "./build-config.ts";
+import { DIST_STAGED, emptyDir, foreignDistRefusal } from "./dist-staging.ts";
+import { type BuildConfig, isStandalone } from "./build-config.ts";
 import { VERSION } from "../server/aio-cli.ts";
 import { VERSION_STAMP } from "../protocol/protocol-version.ts";
 import { bundleClient, judgeClientBundle } from "./client-bundle.ts";
@@ -188,13 +188,14 @@ async function readBundleInputs(
  *  No record → NOT fresh. A guess about what the bundle depends on is what
  *  shipped stale code; the absence of the honest answer means rebuild. */
 export async function isBundleFresh(cfg: BuildConfig): Promise<boolean> {
-  const { out, doForce, doAndroid, root, appDir } = cfg;
+  const { out, doForce, root, appDir } = cfg;
+  const standalone = isStandalone(cfg);
   if (doForce) return false;
   // Framework identity + target shape beat every mtime heuristic: a bundle
   // built by another aio version — or for the OTHER target, since all targets
   // share dist/app.js — is stale no matter how new it looks (remote/JSR builds
   // pin the version, so the stamp is checked there too).
-  if (!await bundleMatchesFramework(out, doAndroid, cfg.uiEntry ?? UI_ENTRY)) {
+  if (!await bundleMatchesFramework(out, standalone, cfg.uiEntry ?? UI_ENTRY)) {
     return false;
   }
   try {
@@ -255,9 +256,11 @@ export function versionStamp(version: string): string {
  *  artifact for the freshness check to tell them apart; without it, building
  *  `--android` after a browser build would happily reuse a bundle that cannot
  *  boot in a WebView. */
-function targetStamp(doAndroid: boolean, uiEntry: string): string {
+function targetStamp(standalone: boolean, uiEntry: string): string {
+  // "android" names the standalone SHAPE (IIFE, auto-mounts) — the web target
+  // builds the same one; the stamp's text stays what every reader matches.
   return `globalThis.__aioBundleTarget = ${
-    JSON.stringify(doAndroid ? "android" : "browser")
+    JSON.stringify(standalone ? "android" : "browser")
   };\nglobalThis.__aioBundleUi = ${JSON.stringify(uiEntry)};\n`;
 }
 
@@ -307,12 +310,12 @@ export async function readBundleStamps(
  *  keeps speaking the old wire protocol against a new server. */
 async function bundleMatchesFramework(
   out: string,
-  doAndroid: boolean,
+  standalone: boolean,
   uiEntry: string,
 ): Promise<boolean> {
   const s = await readBundleStamps(out);
   return !!s && s.version === VERSION &&
-    s.target === (doAndroid ? "android" : "browser") &&
+    s.target === (standalone ? "android" : "browser") &&
     // A bundle built from a DIFFERENT UI entry is not this app's bundle —
     // reuse here is exactly the dev≠prod divergence `--ui`/`build.ui` closes.
     (s.ui ?? UI_ENTRY) === uiEntry;
@@ -417,7 +420,7 @@ export async function ensureEmbeddedBundle(
   } catch { /* no UI source here */ }
   const verdict = embedVerdict({
     stamps: await readBundleStamps(cfg.out),
-    want: cfg.doAndroid ? "android" : "browser",
+    want: isStandalone(cfg) ? "android" : "browser",
     version: VERSION,
     fresh: await isBundleFresh({ ...cfg, doForce: false }),
     canRebuild,
@@ -444,11 +447,11 @@ export async function runBundle(
     root,
     isRemote,
     frameworkSrcDir,
-    doAndroid,
     appDir,
     appTitle,
     binaryName,
   } = cfg;
+  const standalone = isStandalone(cfg);
 
   // The decider must have RUN. `join(undefined, "App.tsx")` returns "." —
   // a directory that always stats fine — so a config built without `appDir`
@@ -491,8 +494,14 @@ export async function runBundle(
   } else {
     // Clean dist/ and rebuild — EMPTIED, never replaced: a bind mount, a
     // watcher or an open shell holds the directory's inode, and swapping it
-    // strands every one of them silently (see `emptyDir`).
-    await emptyDir(dist);
+    // strands every one of them silently (see `emptyDir`). Never a dist/ the
+    // project brought with it (`foreignDist`).
+    const refusal = await foreignDistRefusal(dist);
+    if (refusal) {
+      console.error(`${NO} ${refusal}`);
+      Deno.exit(1);
+    }
+    await emptyDir(dist, [...DIST_STAGED, "manifest.json"]);
     await Deno.mkdir(dist, { recursive: true });
 
     // The workspace share — the SAME declaration the dev server serves from
@@ -521,7 +530,7 @@ export async function runBundle(
       root,
       appDir,
       uiEntry: cfg.uiEntry ?? UI_ENTRY,
-      doAndroid,
+      standalone,
       imports: (mainConfig.imports as Record<string, string>) ?? {},
       shares,
       frameworkSrcDir: isRemote ? "" : frameworkSrcDir,
@@ -547,7 +556,7 @@ export async function runBundle(
         // Prepended verbatim after minification: the version and shape stamps
         // keep their exact text (readers match it) and still run first.
         banner: versionStamp(VERSION) +
-          targetStamp(doAndroid, cfg.uiEntry ?? UI_ENTRY),
+          targetStamp(standalone, cfg.uiEntry ?? UI_ENTRY),
       },
     });
     // esbuild wrote `<out>.map`; move it to the dot-prefixed name that
@@ -646,17 +655,30 @@ export async function runBundle(
     //
     // `--remote` is exempt: that APK is a CLIENT of a server running
     // elsewhere, which is where its server code lives and runs.
-    if (doAndroid && !cfg.doRemote && !cfg.allowServerOnly) {
+    if (standalone && !cfg.doRemote && !cfg.allowServerOnly) {
       const reach = Object.entries(serverOnlyDynamic);
       if (reach.length > 0) {
+        const shell = cfg.doWeb ? "web app" : "APK";
         console.error(
           "\u2717 this app reaches server-only code, and a standalone " +
-            "APK has no Deno runtime to run it:",
+            `${shell} has no Deno runtime to run it:`,
         );
         for (const [spec, importers] of reach) {
           for (const imp of importers) {
             console.error(`         ${relative(root, imp) || imp} → ${spec}`);
           }
+        }
+        if (cfg.doWeb) {
+          console.error(
+            "       A standalone web app is a page and this bundle: no " +
+              "subprocesses, no FFI, no node:/@std. The build would SUCCEED " +
+              "and ship an app whose UI renders and whose buttons do nothing.\n" +
+              "       fix: build the `browser` target (a binary that serves " +
+              "the page and runs its server code), split the client half " +
+              "into its own UI (build.targets.web.ui), or pass " +
+              "--allow-server-only if those paths are guarded and never taken.",
+          );
+          await refuseBundle(root, out);
         }
         console.error(
           "       An APK is a WebView and this bundle: no subprocesses, no " +

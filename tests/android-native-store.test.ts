@@ -491,5 +491,41 @@ Deno.test("native store: the APK half of has() exists and does not read the file
   // all, and `isFile` (a stat) is what makes it able to answer when the read
   // could not.
   assertStringIncludes(KOTLIN, "fun exists(k: String, key: String): Boolean");
-  assertStringIncludes(KOTLIN, "fileFor(key).isFile");
+  const at = KOTLIN.indexOf("fun exists(k: String, key: String)");
+  const fn = KOTLIN.slice(at, KOTLIN.indexOf("\n    }\n", at));
+  // `File.isFile` answers false for a stat that FAILED (EACCES, EIO) too — so
+  // "no" had the same two meanings `read`'s null has, and the page wrote over
+  // the file it could not see. Only ENOENT may answer "not there".
+  assertStringIncludes(fn, "android.system.Os.stat(fileFor(key).absolutePath)");
+  assertStringIncludes(fn, "e.errno == android.system.OsConstants.ENOENT");
+  assert(!fn.includes(".isFile"), "exists() still answers from File.isFile");
+});
+
+Deno.test("native store: a bridge with no has() reads twice before a null counts, and says so", () => {
+  // An activity copied from 1.0.7 has no `has`: a read that failed once and
+  // answered null used to boot the app empty, and its first change replaced
+  // the file on disk.
+  const n = fakeNative();
+  n.files.set("aio:app", '{"count":4000}');
+  let calls = 0;
+  const bridge = {
+    ...n.bridge,
+    get: (k: string) => ++calls === 1 ? null : n.bridge.get(k),
+  };
+  const store = _pickPersistStore({ AioNativeStore: bridge });
+  assertEquals(store.restore("aio:app"), { raw: '{"count":4000}' });
+
+  const said: string[] = [];
+  const realWarn = console.warn;
+  console.warn = (...a: unknown[]) => void said.push(a.join(" "));
+  try {
+    const empty = _pickPersistStore({ AioNativeStore: fakeNative().bridge });
+    assertEquals(empty.restore("aio:app"), { raw: null });
+  } finally {
+    console.warn = realWarn;
+  }
+  assert(
+    said.some((m) => m.includes("has no exists()")),
+    `a has-less null was silent: ${JSON.stringify(said)}`,
+  );
 });

@@ -1,8 +1,20 @@
 import { assert, assertEquals, assertStringIncludes } from "@std/assert";
 import { deepMerge } from "../src/state/deep-merge.ts";
+import { detectShapeDrift } from "../src/state/cell-migrate.ts";
 import { aio } from "../src/server/aio.ts";
 import { cell } from "../src/state/cell-create.ts";
 import { _resetAioRuntime } from "../src/state/runtime-reset.ts";
+
+Deno.test("deepMerge: a field declared undefined restores its stored value (and is not drift)", () => {
+  const initial = { token: undefined, n: 0 } as Record<string, unknown>;
+  const stored = { token: "abc", n: 1 };
+  assertEquals(deepMerge(initial, stored), { token: "abc", n: 1 });
+  assertEquals(
+    deepMerge({ nested: { t: undefined } }, { nested: { t: { a: 1 } } }),
+    { nested: { t: { a: 1 } } },
+  );
+  assertEquals(detectShapeDrift({ c: initial }, { c: stored }), []);
+});
 
 Deno.test("deepMerge: persisted overrides matching types", () => {
   const initial = { count: 0, name: "default" };

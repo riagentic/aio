@@ -69,6 +69,11 @@ function fakeMain(allow: ElectronPermissions | null = null) {
     mkSession,
     created: (s: unknown) => on["session-created"]!(s),
     ready: () => on["ready"]!(),
+    webContentsCreated: (wc: unknown) =>
+      (on["web-contents-created"] as (e: unknown, wc: unknown) => void)(
+        null,
+        wc,
+      ),
     markChild: markChild as (wc: unknown) => void,
     warnings,
   };
@@ -138,6 +143,48 @@ Deno.test("permissions: the app's own page keeps them; a foreign or data: frame 
   assertEquals(s.check!(own, "clipboard-read", "data:text/html,x"), false);
   // No webContents at all (a cross-origin subframe check) is not the app.
   assertEquals(s.check!(null, "clipboard-read", APP), false);
+});
+
+// Review 1.0.13 #54: without electron.permissions an openWindow child window
+// keeps its own origin's permissions (1.0.12, frozen) — clipboard-read
+// included. Kept, but never silently: each grant is said once, with the fix.
+Deno.test("permissions: a grant to an openWindow child window without electron.permissions is said once, naming the fix", async () => {
+  const m = fakeMain();
+  await m.ready();
+  const s = m.defaultSession;
+  const dapp = win("https://dapp.example/");
+  m.markChild(dapp);
+  assertEquals(ask(s, dapp, "clipboard-read", "https://dapp.example/"), true);
+  assertEquals(s.check!(dapp, "clipboard-read", "https://dapp.example"), true);
+  assertEquals(ask(s, dapp, "fullscreen", "https://dapp.example/"), true);
+  // The app's own page is not a child window: quiet.
+  assertEquals(ask(s, win(), "clipboard-read", APP + "/"), true);
+  assertEquals(m.warnings.length, 1, m.warnings.join("\n"));
+  assertStringIncludes(
+    m.warnings[0]!,
+    'permission "clipboard-read" GRANTED to openWindow child window https://dapp.example',
+  );
+  assertStringIncludes(m.warnings[0]!, "electron: { permissions }");
+});
+
+// Review 1.0.13 #53: default-deny for an app without electron.permissions
+// would break it (frozen surface). An app that embeds a <webview> with no
+// list is told once, at the first guest, what its own page still holds.
+Deno.test("permissions: the first <webview> of an app without electron.permissions says so once; with the list, nothing", async () => {
+  const m = fakeMain();
+  await m.ready();
+  m.webContentsCreated(win());
+  assertEquals(m.warnings.length, 0);
+  m.webContentsCreated(guest);
+  m.webContentsCreated(guest);
+  assertEquals(m.warnings.length, 1, m.warnings.join("\n"));
+  assertStringIncludes(m.warnings[0]!, "embeds a <webview>");
+  assertStringIncludes(m.warnings[0]!, "clipboard-read");
+  assertStringIncludes(m.warnings[0]!, "docs/clients/electron.md#permissions");
+  const listed = fakeMain({ "clipboard-sanitized-write": ["app"] });
+  await listed.ready();
+  listed.webContentsCreated(guest);
+  assertEquals(listed.warnings.length, 0);
 });
 
 // A page that only QUERIES (navigator.permissions.query, Notification.permission)

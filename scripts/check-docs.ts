@@ -771,7 +771,7 @@ export async function loadSurface(): Promise<Map<string, Set<string>>> {
  *  than allowlisted by hand, so it cannot drift. */
 export async function loadAndroidAlias(): Promise<Set<string>> {
   const shared = await Deno.readTextFile(SRC("src/build/esbuild-shared.ts"));
-  const m = /doAndroid\s*\?\s*"([^"]+)"/.exec(shared);
+  const m = /standalone\s*\?\s*"([^"]+)"/.exec(shared);
   if (!m) {
     throw new Error(
       "check-docs: could not find the android `aio` alias in " +

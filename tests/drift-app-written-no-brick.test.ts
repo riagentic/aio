@@ -63,9 +63,16 @@ Deno.test("shape drift the app itself wrote does not brick the next dev boot", a
       }),
     };
   };
-  devMode();
+  // Boot A runs in PROD: dev now refuses a type-changing write at the commit
+  // (declared-type-write-guard.test.ts), production keeps it and says so.
+  Object.defineProperty(Deno, "args", {
+    value: ["--prod"],
+    configurable: true,
+    enumerable: true,
+  });
+  _resetParsedCli();
   try {
-    // Boot A (dev): the app writes a string into its number field.
+    // Boot A (prod): the app writes a string into its number field.
     {
       const { counter, app } = boot({ count: 0 });
       const a = await app;
@@ -76,6 +83,7 @@ Deno.test("shape drift the app itself wrote does not brick the next dev boot", a
       await new Promise((r) => setTimeout(r, 300));
       await a.close();
     }
+    devMode();
     // Boot B (dev), SAME declaration: boots, says so by name, and restores
     // the declared default.
     {

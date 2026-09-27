@@ -119,6 +119,7 @@ const ERROR_TEXT: Record<string, string> = {
   user_exists: "That id is already taken.",
   password_too_short: "Password must be at least 8 characters.",
   signup_disabled: "Signup is disabled — ask an administrator for an account.",
+  auth_unavailable: "Sign-in is unavailable right now — try again shortly.",
   email_required: "An email address is required.",
   email_unverified: "Check your inbox — the account email is not verified yet.",
   invalid_code: "Wrong code — sign in again.",

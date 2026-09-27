@@ -92,7 +92,8 @@ export function Defer(props: DeferProps): VNode | null {
     renderSig.set(renderSig.peek() + 1);
 
     const loadStart = Date.now();
-    loadRef.current().then(
+    // A synchronous throw is a failed load — see `lazy`'s `startLoad`.
+    new Promise<{ default: ComponentFn }>((r) => r(loadRef.current())).then(
       (mod) => {
         // unmounted, or already resolved
         if (disposedRef.current || stateRef.current.state !== "loading") return;

@@ -21,6 +21,10 @@ type S = { rows: string[] };
 type H = { add(r: string): Promise<void>; arm(): Promise<void> };
 const ARM_MS = 60;
 let armed = false;
+// The timers fire only once the NEXT mount is up and its errors are captured:
+// a fixed delay raced the dispose + reboot under load. Each re-arms from its
+// own callback (same line, same fence) until released.
+let released = false;
 const refused: unknown[] = [];
 const caught = (p: Promise<unknown>) => void p.catch((e) => refused.push(e));
 
@@ -31,7 +35,9 @@ const c = cell("tfence", {
       s.rows.push(row);
     },
     arm(_s: S) {
-      setTimeout(() => caught(h.add("method timer")), ARM_MS); // METHOD-ARM
+      const t = () =>
+        released ? caught(h.add("method timer")) : setTimeout(t, 5); // METHOD-ARM
+      setTimeout(t, ARM_MS); // METHOD-ARM
     },
   },
 });
@@ -39,14 +45,18 @@ const h = c as unknown as H;
 const C = c as unknown as S;
 const App = () => {
   onMount(() => {
-    if (armed) setTimeout(() => caught(h.add("component timer")), ARM_MS); // COMP-ARM
+    const t = () =>
+      released ? caught(h.add("component timer")) : setTimeout(t, 5); // COMP-ARM
+    if (armed) setTimeout(t, ARM_MS); // COMP-ARM
   });
   return <div>{String(C.rows.length)}</div>;
 };
 
-const line = (tag: string): number =>
+// A timer re-arms until released, so the one that fires was armed on either
+// line carrying the tag.
+const lines = (tag: string): number[] =>
   Deno.readTextFileSync(new URL(import.meta.url)).split("\n")
-    .findIndex((l) => l.includes(`// ${tag}`)) + 1;
+    .flatMap((l, i) => l.includes(`// ${tag}`) ? [i + 1] : []);
 
 Deno.test("testUI: a timer a disposed mount armed never writes into the next mount, and its refusal names where it was armed", async () => {
   // Mount A arms both timers and is disposed before either fires.
@@ -64,7 +74,10 @@ Deno.test("testUI: a timer a disposed mount armed never writes into the next mou
   try {
     await using ui = await testUI(App as never);
     await h.add("live");
-    await new Promise((r) => setTimeout(r, ARM_MS * 3));
+    released = true;
+    for (let i = 0; refused.length < 2 && i < 400; i++) {
+      await new Promise((r) => setTimeout(r, 10));
+    }
     await ui.settle();
     assertEquals(
       C.rows,
@@ -78,7 +91,7 @@ Deno.test("testUI: a timer a disposed mount armed never writes into the next mou
   const refusal = (tag: string) =>
     errors.find((e) =>
       e.includes("torn-down runtime") &&
-      e.includes(`testui-timer-fence.test.tsx:${line(tag)}:`)
+      lines(tag).some((n) => e.includes(`testui-timer-fence.test.tsx:${n}:`))
     );
   const comp = refusal("COMP-ARM");
   assert(comp, `component timer: no refusal naming its arm site: ${errors}`);

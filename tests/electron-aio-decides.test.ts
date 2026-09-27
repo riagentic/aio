@@ -118,6 +118,46 @@ Deno.test("dev launcher: the tested Electron installed → no install, no noise"
   });
 });
 
+// An Electron AppImage's AppRun exports $ELECTRON_PATH into its own mount, and
+// an app started from that AppImage's terminal inherited it: it ran the HOST's
+// Electron, from a mount that vanishes when the host exits.
+Deno.test("findElectronBin: a host AppImage's inherited $ELECTRON_PATH is ignored, said once", async () => {
+  await inTmp(async (tmp) => {
+    await fakeRuntime(tmp, DEFAULT_ELECTRON_VERSION);
+    const host = join(tmp, "host-mount");
+    await Deno.mkdir(host);
+    await Deno.writeTextFile(join(host, "electron"), "");
+    const saved = ["APPIMAGE", "APPDIR"].map((k) => [k, Deno.env.get(k)]);
+    const find = async () => {
+      const errors: string[] = [];
+      const bin = await findElectronBin(
+        { info: () => {}, error: (m) => errors.push(m) },
+        { compiled: false, denoInstall: () => Promise.resolve(false) },
+      );
+      return { bin, errors };
+    };
+    try {
+      Deno.env.set("ELECTRON_PATH", join(host, "electron"));
+      Deno.env.set("APPIMAGE", join(tmp, "host.AppImage"));
+      Deno.env.set("APPDIR", host);
+      const inherited = await find();
+      assertEquals(inherited.bin, "node_modules/.bin/electron");
+      assertEquals(inherited.errors.length, 1);
+      assertStringIncludes(inherited.errors[0]!, "inherited from the AppImage");
+      // Set by hand, outside any AppImage: used as before.
+      Deno.env.delete("APPIMAGE");
+      Deno.env.delete("APPDIR");
+      assertEquals((await find()).bin, join(host, "electron"));
+    } finally {
+      Deno.env.delete("ELECTRON_PATH");
+      for (const [k, v] of saved) {
+        if (v === undefined) Deno.env.delete(k!);
+        else Deno.env.set(k!, v);
+      }
+    }
+  });
+});
+
 Deno.test("testedElectronOf: read from the PINNED aio's source; null when it does not say", async () => {
   const tmp = await tempDir("electron-decides-");
   try {

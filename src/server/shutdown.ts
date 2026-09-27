@@ -41,6 +41,19 @@ import { count } from "../diagnostics/fmt.ts";
  *  that `am` and the lock's takeover path can wait at least that long before
  *  they SIGKILL — they used to retype shorter ones. */
 
+/** How Phase 0/1's shared budget is named in a "did not finish" line. */
+const DRAIN_BUDGET = `${DRAIN_TIMEOUT_MS}ms drain`;
+
+/** The part of TEARDOWN_TIMEOUT_MS the user's `onStop` can never take.
+ *
+ *  The hook used to be handed whatever was left: one that never resolved spent
+ *  all of it, and the lock, the server, the SQLite writer and the auth stores
+ *  each got the 1ms floor — every one of them "did not finish", and the app's
+ *  "stopped" line (written after the hook) was never logged. The hook's share
+ *  ends here; the first half of the reserve is the bridge's (stop waiting,
+ *  log, flush the logger), the second half the closes after it. */
+const STOP_HOOK_RESERVE_MS = 500;
+
 /** Distinguishes "the phase timed out" from any value it could return. */
 const TIMED_OUT = Symbol("shutdown-phase-timeout");
 
@@ -57,6 +70,7 @@ async function phase(
   name: string,
   left: () => number,
   fn: () => unknown,
+  budget = `${TEARDOWN_TIMEOUT_MS}ms teardown`,
 ): Promise<void> {
   let r: unknown;
   try {
@@ -80,8 +94,8 @@ async function phase(
     ]);
     if (out === TIMED_OUT) {
       log.warn(
-        `shutdown: ${name} did not finish inside the ${TEARDOWN_TIMEOUT_MS}ms ` +
-          `teardown budget — continuing without it (whatever it still had to ` +
+        `shutdown: ${name} did not finish inside the ${budget} ` +
+          `budget — continuing without it (whatever it still had to ` +
           `write or release is lost)`,
       );
     }
@@ -358,7 +372,10 @@ export interface ShutdownRefs {
    *  straight to its thread (`route` bypasses the closed main loop) and start
    *  new work for the whole drain. */
   closeWorkers?: () => Promise<void>;
-  onStop: (() => void | Promise<void>) | undefined;
+  /** Phase 5. `signal` aborts when the hook's share of the teardown runs out
+   *  (see `STOP_HOOK_RESERVE_MS`): the cells bridge stops waiting for the
+   *  app's own hook then, and still writes and flushes its "stopped" line. */
+  onStop: ((signal: AbortSignal) => void | Promise<void>) | undefined;
   appLock: { release: () => void } | null;
   /** This app's hold on the process-wide SIGXFSZ guard (`holdFileSizeGuard`).
    *  Refcounted, so releasing it here cannot un-protect a sibling app (D2)
@@ -423,7 +440,20 @@ export function createShutdownOrchestrator(
     // Both gate steps are synchronous, so the budget below is never consulted —
     // they go through `phase` for its OTHER guarantee: a throw here used to
     // abandon the whole rest of the shutdown, lock and databases included.
-    const gate = () => DRAIN_TIMEOUT_MS;
+    //
+    // ONE deadline for all of Phase 0 and Phase 1 — `onStopping`, closing the
+    // worker cells, and both drain waits. Each used to get its own full
+    // DRAIN_TIMEOUT_MS, so a stuck `onStopping` plus a stuck method put the
+    // final persist 6s in, not 3s: measured, a SIGTERM'd app with a hung
+    // `onStopping`, a hung method and a hung `onStop` was ended by the exit
+    // watchdog at 10s (exit 75), and a supervisor sized from
+    // SHUTDOWN_BUDGET_MS — which the docs tell operators to do — SIGKILLs
+    // inside the teardown, with the persist it protects not yet done.
+    const deadline = Date.now() + DRAIN_TIMEOUT_MS;
+    const left = () => Math.max(1, deadline - Date.now());
+    const gate = left;
+    const drainPhase = (name: string, fn: () => unknown) =>
+      phase(log, name, gate, fn, DRAIN_BUDGET);
     // Phase 0: the app stops its OWN producers, while dispatch still accepts
     // input. Everything below refuses new dispatches, so this is the only
     // moment an app can quiesce a raw timer, an RPC queue or a promise
@@ -434,10 +464,10 @@ export function createShutdownOrchestrator(
     // budget, and error-guarded like every other hook: a shutdown must not
     // depend on app code finishing.
     if (refs.onStopping) {
-      await phase(log, "hook onStopping", gate, () => refs.onStopping!());
+      await drainPhase("hook onStopping", () => refs.onStopping!());
     }
     if (refs.closeWorkers) {
-      await phase(log, "close worker cells", gate, () => refs.closeWorkers!());
+      await drainPhase("close worker cells", () => refs.closeWorkers!());
     }
     await phase(log, "mark shutting down", gate, () => refs.setShuttingDown());
     await phase(log, "close dispatch", gate, () => refs.dispatch.close());
@@ -453,11 +483,9 @@ export function createShutdownOrchestrator(
       log.debug(`shutdown: aborted ${aborted} in-flight call(s)`);
     }
     try {
-      // ONE deadline for the whole phase, shared by both waits — two
-      // independent 3s budgets would make the documented bound a 6s hang, and
-      // the number people feel is the time the window takes to disappear.
-      const deadline = Date.now() + DRAIN_TIMEOUT_MS;
-      const left = () => Math.max(1, deadline - Date.now());
+      // The Phase 0/1 deadline above, shared by both waits — two independent
+      // 3s budgets would make the documented bound a 6s hang, and the number
+      // people feel is the time the window takes to disappear.
       // Async cell methods first: a cell's `execute` runs the method and
       // returns nothing, so the dispatch loop has never known they exist and
       // `drain()` alone sails straight past a streaming reply.
@@ -523,9 +551,20 @@ export function createShutdownOrchestrator(
       // sentence that explains it: onStop runs after the final persist, so a
       // write from here could not be saved even if it were admitted.
       _setUserStopHookActive(true);
+      const share = new AbortController();
+      const cut = setTimeout(
+        () => share.abort(),
+        Math.max(1, tLeft() - STOP_HOOK_RESERVE_MS),
+      );
       try {
-        await phase(log, "hook onStop", tLeft, () => refs.onStop!());
+        await phase(
+          log,
+          "hook onStop",
+          () => Math.max(1, tLeft() - STOP_HOOK_RESERVE_MS / 2),
+          () => refs.onStop!(share.signal),
+        );
       } finally {
+        clearTimeout(cut);
         _setUserStopHookActive(false);
       }
     }

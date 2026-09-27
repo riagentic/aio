@@ -172,7 +172,7 @@ h("ul", null, items.map((i) => h("li", { key: i.id }, i.name)));
 | `Portal`         | `h(Portal, { target: node }, …)`        | External DOM node          |
 | `Suspense`       | `h(Suspense, { fallback: node }, …)`    | Loading fallback for lazy  |
 | `Show`           | `<Show when={val} fallback={...}>`      | Conditional render         |
-| `lazy`           | `lazy(loader): ComponentFn`             | Code-split component       |
+| `lazy`           | `lazy(loader): ComponentFn`             | Deferred-eval component    |
 | `Defer`          | `<Defer trigger="viewport" load={fn}>`  | Trigger-based lazy loading |
 | `renderToString` | `renderToString(vnode): string`         | Sync SSR                   |
 | `renderToStream` | `renderToStream(vnode, key?): AsyncGen` | Streaming SSR              |

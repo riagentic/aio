@@ -162,6 +162,9 @@ const CORPUS = [
   "0 0 * * 0", // Sundays
   "0 0 29,30,31 2,4 *", // partly impossible, partly fine
   "30 12 28-31 2 *",
+  "0 0 1-31 * 1", // a full dom range is no restriction ⇒ AND ⇒ Mondays
+  "0 0 13 * 0-6", // a full dow range likewise ⇒ the 13th
+  "0 0 */2 * 1", // a `*/n` step restricts ⇒ OR
 ];
 
 const EPOCHS = [
@@ -237,4 +240,20 @@ Deno.test("fuzz: the search window covers the widest real leap gap (2096→2104)
   const f = parseCron("0 0 29 2 *");
   const next = nextCronTime(f, new Date(Date.UTC(2096, 2, 1)));
   assertEquals(next.toISOString(), "2104-02-29T00:00:00.000Z");
+});
+
+Deno.test("cron: a full day range keeps its shipped reading — no restriction, so AND", () => {
+  // 2026-01-06 is a Tuesday. `1-31` covers every day, so it restricts
+  // nothing and the day must match day-of-week: the next Monday. (Vixie
+  // reads the text and would fire tomorrow; moving an existing schedule
+  // silently is refused — the difference is said, cron-vixie-diff-said.)
+  const after = new Date(Date.UTC(2026, 0, 6, 12, 0));
+  assertEquals(
+    nextCronTime(parseCron("0 0 1-31 * 1"), after).toISOString(),
+    "2026-01-12T00:00:00.000Z",
+  );
+  assertEquals(
+    nextCronTime(parseCron("0 0 13 * 0-6"), after).toISOString(),
+    "2026-01-13T00:00:00.000Z",
+  );
 });

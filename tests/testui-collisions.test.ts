@@ -164,6 +164,51 @@ Deno.test("shadow: ui.X acts as the element when a component shadows it", async 
 
 // ── 2. disabled elements ──────────────────────────────────
 
+Deno.test("disabled by an ancestor (<fieldset disabled>, inert): interactions fail loud, the first legend stays live", async () => {
+  const hits: string[] = [];
+  function Fs() {
+    return h(
+      "div",
+      null,
+      h(
+        "fieldset",
+        { disabled: true },
+        h(
+          "legend",
+          null,
+          h(
+            "button",
+            { type: "button", onClick: () => hits.push("leg") },
+            "Leg",
+          ),
+        ),
+        h("button", { type: "button", onClick: () => hits.push("fs") }, "Save"),
+        h("input", { "aria-label": "Title", onInput: () => hits.push("type") }),
+      ),
+      h(
+        "div",
+        { inert: true },
+        h(
+          "button",
+          { type: "button", onClick: () => hits.push("inert") },
+          "Go",
+        ),
+      ),
+    );
+  }
+  const ui = await testUI(Fs as ComponentFn);
+  try {
+    const save = await assertRejects(() => ui.Fs.SaveButton.click(), Error);
+    assert(save.message.includes("<fieldset disabled>"), save.message);
+    await assertRejects(() => ui.Fs.TitleInput.type("x"), Error, "fieldset");
+    await assertRejects(() => ui.Fs.GoButton.click(), Error, "inert");
+    await ui.Fs.LegButton.click();
+    assertEquals(hits, ["leg"], "a browser delivers none of the others");
+  } finally {
+    await ui.dispose();
+  }
+});
+
 Deno.test("disabled: resolvable + assertable, interactions fail loud", async () => {
   let saved = 0;
   function Formy() {

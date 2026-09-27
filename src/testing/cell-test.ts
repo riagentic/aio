@@ -47,7 +47,11 @@ import { attachMeta } from "../state/cell-catalog.ts";
 import { runWithUser } from "../server/auth-context.ts";
 import type { AioUser } from "../server/aio-types.ts";
 import type { Catalog, CellDef, Creators, Msg } from "../state/cell-types.ts";
-import { composeCells } from "../state/cell-compose.ts";
+import { _countCellError, composeCells } from "../state/cell-compose.ts";
+import {
+  composedShapeGuard,
+  withShapeGuard,
+} from "../state/declared-shape-guard.ts";
 import { frameworkEffectInWrongRuntime } from "../state/cell-compose-execute.ts";
 import { AioError, createAioError } from "../diagnostics/error.ts";
 import { log } from "../diagnostics/logger-api.ts";
@@ -459,6 +463,17 @@ export function testCell(
     // write rejects the method that made it, as over the wire (pitfalls.md).
     // aio-ok(persist-decider): testCell is in-memory — its state lives in a local variable and never reaches a store.
     const composed = composeCells([f], { refusalsReject: true });
+    // The declared-type write guard a dev server runs on every persisting
+    // boot, dev-strict: a write that changes a persisted field's declared
+    // type throws here as it does there, though testCell persists nothing.
+    const guardedReduce = withShapeGuard(
+      composed.reduce,
+      composedShapeGuard(composed, {
+        strict: true,
+        warn: (m) => log.warn("test", m),
+      }),
+      (cell) => _countCellError(composed, cell),
+    );
     const machine = f.__aio.machine;
 
     let state = { ...composed.initialState };
@@ -583,7 +598,17 @@ export function testCell(
     const asyncMethods: Set<string> = f.__aio.asyncMethods ?? new Set();
 
     const app = {
-      dispatch,
+      // The store's contract, as production's dispatch loop keeps it: a
+      // reduce that throws REJECTS the returned promise — an async method's
+      // batcher awaits it and rejects the call. A synchronous throw here
+      // escaped the batcher's microtask as an uncaught error instead.
+      dispatch: (a: Msg): unknown => {
+        try {
+          return dispatch(a);
+        } catch (e) {
+          return Promise.reject(e);
+        }
+      },
       getState: () => state,
     };
 
@@ -671,7 +696,7 @@ export function testCell(
       const queuedBefore = queuedCalls.length;
       let result: ReturnType<typeof composed.reduce>;
       try {
-        result = composed.reduce(state, action);
+        result = guardedReduce(state, action);
       } catch (e) {
         // A self-call queued by the method that just threw still runs (the
         // production loop does the same: the caller's write is rolled back,
@@ -1262,6 +1287,9 @@ export async function bootCells(
     // deno-lint-ignore no-explicit-any
     cells: cells as any,
     persist: false,
+    // The declared-type write guard a dev server runs, dev-strict — though
+    // nothing persists here (see _HARNESS_SHAPE_GUARD).
+    [standalone._HARNESS_SHAPE_GUARD]: true,
     cellDefaults: opts.cellDefaults,
     localFirst: opts.localFirst,
     // The harness is the STRICTEST environment (pitfalls.md): a refused

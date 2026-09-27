@@ -2,8 +2,8 @@
 // asserted from any OS. The live behavior (hostile install path swapped and
 // relaunched with exact argv) was measured on a real Windows 11 VM.
 
-import { assert, assertEquals } from "@std/assert";
-import { _swapSpec } from "../src/server/updates-apply.ts";
+import { assert, assertEquals, assertThrows } from "@std/assert";
+import { _swapSpec, spawnSwapHelper } from "../src/server/updates-apply.ts";
 import { _winLauncherBat } from "../src/build/build-electron.ts";
 
 const HOSTILE = "C:\\apps\\A&md,pwned&x%PATH%!x![1]";
@@ -111,17 +111,16 @@ Deno.test("swap spec (windows): the first-boot watchdog and the swap-failure pat
     pid,
   );
   const aside = at(
-    "if ((Test-Path -LiteralPath $prev) -or -not (Move-Dir $cur $prev)) {",
+    "if (-not (Test-Path -LiteralPath $prev)) { $r = Swap-In $cur $new $prev }",
     drain,
   );
   at(
-    "Write-Failed 'the running version could not be moved aside'; Start-App; exit 1",
+    "if ($r -eq 1) { Write-Failed 'the running version could not be moved aside'; Start-App; exit 1 }",
     aside,
   );
-  const into = at("if (-not (Move-Dir $new $cur)) {", aside);
-  at(
-    "Write-Failed 'the new version could not be moved into place'; Remove-Dir $new; Start-App; exit 1",
-    into,
+  const into = at(
+    "if ($r -eq 3) { Write-Failed 'the new version could not be moved into place'; Remove-Dir $new; Start-App; exit 1 }",
+    aside,
   );
   // The watchdog: start, wait for the token to go, claim it, stop, swap back.
   const start = at("Start-App", into);
@@ -137,12 +136,12 @@ Deno.test("swap spec (windows): the first-boot watchdog and the swap-failure pat
   );
   // A move back that fails starts the version still in place, and says so.
   const back = at(
-    "if (-not (Move-Dir $cur $new)) { Set-Unrolled 'the new version could not be moved out of the way'; exit 1 }",
-    stop,
+    "if ($r -eq 1) { Set-Unrolled 'the new version could not be moved out of the way'; exit 1 }",
+    at("$r = Swap-In $cur $prev $new", stop),
   );
   at(
-    "if (Move-Dir $new $cur) { Set-Unrolled 'the old version could not be moved back into place' }",
-    at("if (-not (Move-Dir $prev $cur)) {", back),
+    "if ($r -eq 3) { Set-Unrolled 'the old version could not be moved back into place'; exit 1 }",
+    back,
   );
   assert(
     /function Set-Unrolled\(\$why\) \{[\s\S]*?"rollbackFailed"[\s\S]*?Start-Any\n\}/
@@ -279,20 +278,33 @@ Deno.test("swap spec (windows): no move back still starts a copy, and every read
   // The swap: the record first, then whichever copy is left.
   assert(
     lines.includes(
-      "Write-Failed 'the new version could not be moved into place, nor the old one back'; Start-Any; exit 1",
+      "if ($r -eq 2) { Write-Failed 'the new version could not be moved into place, nor the old one back'; Start-Any; exit 1 }",
     ),
     script,
   );
   // The rollback: both moves back failed is said, and a copy is started.
-  const back = lines.indexOf("if (-not (Move-Dir $prev $cur)) {");
-  assertEquals(
-    lines.slice(back + 1, back + 4),
-    [
-      "if (Move-Dir $new $cur) { Set-Unrolled 'the old version could not be moved back into place' }",
-      "else { Set-Unrolled 'the old version could not be moved back into place, nor the new one' }",
-      "exit 1",
-    ],
+  assert(
+    lines.includes(
+      "if ($r -eq 2) { Set-Unrolled 'the old version could not be moved back into place, nor the new one'; exit 1 }",
+    ),
+    script,
   );
+  // A failed move INTO the name is undone at once, before any retry: the
+  // name was empty for up to 10 s of retries, and a kill there left no app.
+  const swapIn = lines.indexOf("function Swap-In($a, $b, $c) {");
+  assert(swapIn >= 0, script);
+  assertEquals(lines.slice(swapIn + 1, swapIn + 11), [
+    "$r = 1",
+    "for ($i = 0; $i -lt 50; $i++) {",
+    "if ($i -gt 0) { Start-Sleep -Milliseconds 200 }",
+    "try { [IO.Directory]::Move($a, $c) } catch { continue }",
+    "$r = 3",
+    "try { [IO.Directory]::Move($b, $a); return 0 } catch {}",
+    "if (-not (Move-Dir $c $a)) { return 2 }",
+    "}",
+    "return $r",
+    "}",
+  ]);
   // Start-Any aims the launcher at the copy it found, the old one first.
   assert(
     script.includes("foreach ($d in @($cur, $prev, $new)) {") &&
@@ -301,4 +313,58 @@ Deno.test("swap spec (windows): no move back still starts a copy, and every read
       ),
     script,
   );
+});
+
+// The claim is the Move alone: a Delete that throws after the Move succeeded
+// (antivirus, a held handle) used to share its `catch { exit 0 }` — the
+// updater saw "claimed" and exited, and nothing swapped.
+Deno.test("swap spec (windows): the start-file claim is the Move alone; a failed cleanup Delete never ends the swap", () => {
+  const spec = _swapSpec("windows", {
+    pid: 1,
+    current: "C:\\a\\App",
+    previous: "C:\\a\\App.old-1",
+    staged: "C:\\a\\App.staged",
+    launcher: "C:\\a\\App\\run.bat",
+    mark: "m",
+    token: "t",
+    failed: "f",
+    waitS: 120,
+    args: [],
+  }, "");
+  const script = decode(spec.args[spec.args.indexOf("-EncodedCommand") + 1]!);
+  assert(
+    script.includes(
+      "if ($go) { try { [IO.File]::Move($go, $go + '.run') } catch { exit 0 }; " +
+        "try { [IO.File]::Delete($go + '.run') } catch {} }",
+    ),
+    script.split("\n").find((l) => l.includes("$go)")),
+  );
+});
+
+// At the bound only a start file that is GONE means the helper claimed it; a
+// removal that fails for any other reason proves nothing, and counting it as
+// "claimed" quit the app with no helper running.
+Deno.test("swap handoff (windows): an unremovable start file at the bound is NOT a claim", () => {
+  let go = "";
+  try {
+    assertThrows(
+      () =>
+        spawnSwapHelper("powershell.exe", [], {}, {
+          os: "windows",
+          claimWaitMs: 100,
+          windowless: (_line, env) => {
+            // The file stays, and cannot be removed (a non-empty directory).
+            go = env.AIO_SWAP_GO!;
+            Deno.removeSync(go);
+            Deno.mkdirSync(go);
+            Deno.writeTextFileSync(`${go}/x`, "");
+            return 1;
+          },
+        }),
+      Error,
+      "never ran the update helper",
+    );
+  } finally {
+    if (go) Deno.removeSync(go, { recursive: true });
+  }
 });

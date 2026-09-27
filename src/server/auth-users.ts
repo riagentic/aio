@@ -14,6 +14,7 @@
 // @ts-ignore node:sqlite types unavailable when an old @types/node shadows
 // them (same workaround as db-worker.ts B-1) — the specifier resolves fine.
 import { DatabaseSync } from "node:sqlite";
+import { guardDeletedDbFile } from "./sqlite-file-guard.ts";
 import { createHash } from "node:crypto";
 import { _timingSafeEqual } from "./server-auth.ts";
 import type { SessionStore } from "./sessions.ts";
@@ -419,6 +420,7 @@ export function openUserStore(
   opts?: UserStoreOptions,
 ): UserStore {
   const db = new DatabaseSync(path);
+  guardDeletedDbFile(db, path, "auth.db (users)");
   // Wait for the other auth.db writer (the app vs `am auth`) — see sessions.ts.
   db.exec("PRAGMA busy_timeout = 1000");
   db.exec("PRAGMA journal_mode=WAL");

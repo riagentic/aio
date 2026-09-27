@@ -777,6 +777,67 @@ Deno.test("am publish: the human summary names a skipped file loudly", async () 
   }
 });
 
+// The `web` target's artifact is a DIRECTORY (a static site). fileFormat read
+// it as a file, and a manifest cannot name a directory anyway: it is deployed
+// as it is and updates through its own service worker — said, never signed.
+Deno.test("am publish: a web build's directory is set aside by name, never released", async () => {
+  const orig = Deno.cwd();
+  const dir = await project([{ target: "browser", file: "notes" }]);
+  const real = Deno.stdout.isTerminal;
+  try {
+    await Deno.mkdir(join(dir, "dist", "notes-2.1.0-web"));
+    await Deno.writeTextFile(
+      join(dir, "dist", "notes-2.1.0-web", "index.html"),
+      "<!doctype html>",
+    );
+    const bm = JSON.parse(
+      await Deno.readTextFile(join(dir, "dist", "manifest.json")),
+    );
+    bm.targets.push({
+      target: "web",
+      ok: true,
+      host: false,
+      platform: "linux",
+      artifacts: [{ file: "notes-2.1.0-web" }],
+    });
+    await Deno.writeTextFile(
+      join(dir, "dist", "manifest.json"),
+      JSON.stringify(bm),
+    );
+    Deno.chdir(dir);
+    const lines = await withHome(() =>
+      capture(async () => {
+        await captureErr(() =>
+          cmdPublish(["--no-build", "--no-data", "--dir=release"], {
+            json: true,
+          })
+        );
+      })
+    );
+    const doc = JSON.parse(lines.at(-1)!) as {
+      directories: string[];
+      releases: { artifact: string }[];
+    };
+    assertEquals(doc.directories, ["notes-2.1.0-web"]);
+    assertEquals(doc.releases.map((r) => r.artifact), ["prod/notes"]);
+    // …and the human summary says what to do with it.
+    Deno.stdout.isTerminal = () => true;
+    const human = await withHome(() =>
+      capture(async () => {
+        await captureErr(() =>
+          cmdPublish(["--no-build", "--no-data", "--dir=release2"], {})
+        );
+      })
+    );
+    assertStringIncludes(human.join("\n"), "deploy it as it is");
+    assertStringIncludes(human.join("\n"), "notes-2.1.0-web");
+  } finally {
+    Deno.stdout.isTerminal = real;
+    Deno.chdir(orig);
+    await Deno.remove(dir, { recursive: true });
+  }
+});
+
 // The Windows Electron target builds TWO programs for one platform — the
 // self-contained `.exe` and the `.zip`. The guard claimed the platform per
 // ARTIFACT, read them as two rival targets, and refused every multi-platform
